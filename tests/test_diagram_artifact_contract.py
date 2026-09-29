@@ -50,7 +50,6 @@ _REQUIRED_HIGH_VALUE_TARGETS = {
         "scripts/live_release_validation/ownership/stacks.py",
         "_adopt_run_tagged_stacks",
     ),
-    ("scripts/live_release_validation/actions/destroy.py", "destroy_deployment"),
     ("scripts/upgrade_validation/actions.py", "action_upgrade"),
 }
 

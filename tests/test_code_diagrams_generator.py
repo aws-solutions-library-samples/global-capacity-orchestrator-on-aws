@@ -42,6 +42,7 @@ import builtins
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -172,6 +173,35 @@ class TestTargetsCatalogue:
                     break
                 nodes = match.body if isinstance(match, ast.ClassDef) else []
         assert not missing, f"diagram selectors do not resolve: {missing}"
+
+    def test_every_chart_is_parseable_by_flowchart_js(self) -> None:
+        """No label line may read as flowchart.js syntax, or the chart never renders.
+
+        pyflowchart folds a multi-statement ``try`` body into one symbol whose
+        label spans several lines. flowchart.js reads a continuation line that
+        contains ``->``, ``=>``, or ``@>`` as a new flow or symbol and stops
+        drawing, so no SVG (and no PNG) is produced and the canonical run fails
+        after rendering everything else. A nested ``def ... -> None:`` inside
+        such a body is the usual cause.
+        """
+        from pyflowchart import Flowchart
+
+        symbol = re.compile(
+            r"^\w+=>(start|end|operation|inputoutput|subroutine|condition|parallel)(: |$)"
+        )
+        flow = re.compile(r"^\w+(\([\w, ]+\))?->\w+$")
+        offenders: list[str] = []
+        for target in TARGETS:
+            source = (ROOT / target.source).read_text(encoding="utf-8")
+            dsl = Flowchart.from_code(source, field=target.function, inner=target.inner).flowchart()
+            for line in dsl.splitlines():
+                if symbol.match(line) or flow.match(line):
+                    continue
+                if any(token in line for token in ("->", "=>", "@>")):
+                    offenders.append(f"{target.source}:{target.function}: {line.strip()[:80]}")
+        assert not offenders, "chart labels flowchart.js would parse as syntax:\n  " + "\n  ".join(
+            offenders
+        )
 
     def test_every_charted_source_lies_under_a_marker_root(self) -> None:
         """Pruning and the contract only walk the marker roots.

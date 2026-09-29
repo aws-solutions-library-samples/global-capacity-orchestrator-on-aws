@@ -473,9 +473,11 @@ TARGETS: list[Target] = [
     # ``gco upgrade`` destroys and recreates the regional tier; the strict
     # change-set path is the identity fence every exact-owned deploy and
     # teardown passes through; the live release and upgrade harnesses decide
-    # which stacks a run may adopt, replace, and delete. The proxy forwarder
-    # and the MCP local-data resolver are trust boundaries with real
-    # branching that had no chart yet.
+    # which stacks a run may adopt and replace. The proxy forwarder and the
+    # MCP local-data resolver are trust boundaries with real branching that
+    # had no chart yet. ``destroy_deployment`` is deliberately absent:
+    # pyflowchart folds its retry-loop body into one label, and the nested
+    # ``def ... -> None:`` in it is syntax flowchart.js cannot parse.
     Target(
         source="cli/upgrade.py",
         function="run_stack_cycle",
@@ -500,11 +502,6 @@ TARGETS: list[Target] = [
         source="scripts/live_release_validation/ownership/stacks.py",
         function="_adopt_run_tagged_stacks",
         title="Run-tag stack adoption (exact tag, creation window, replaceable workload generations)",
-    ),
-    Target(
-        source="scripts/live_release_validation/actions/destroy.py",
-        function="destroy_deployment",
-        title="Live-validation teardown (resume reconciliation, retried exact-owned destroy, absence proofs)",
     ),
     Target(
         source="scripts/upgrade_validation/actions.py",
