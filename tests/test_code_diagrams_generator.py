@@ -663,6 +663,8 @@ class TestStripMarkers:
             tmp_path / "tests" / "helper.py",
             f'"""doc."""\n# <{SENTINEL}> BEGIN\n# <{SENTINEL}> END\n\ndef f():\n    pass\n',
         )
+        # A directory whose name matches ``*.py`` is not a source.
+        (tmp_path / "gco" / "odd.py").mkdir()
 
         modified = strip_all_markers(tmp_path)
 
