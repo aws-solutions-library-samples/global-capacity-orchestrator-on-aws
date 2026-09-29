@@ -4,8 +4,8 @@
         <meta charset="utf-8">
         <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
         <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
-        <meta name="gco-flow-digest" content="03d76cfd60adcffe">
-        <title>gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)</title>
+        <meta name="gco-flow-digest" content="e3b56fbdd3dc9d34">
+        <title>gco upgrade stack cycle (asset gate, retried teardown, control-plane update + regional recreate)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
         </style>
@@ -208,32 +208,74 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1195=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op1197=>operation: from . import _image_mirror as image_mirror
-op1199=>operation: cfg = image_mirror.read_mirror_config()
-cond1202=>condition: if not cfg['enabled']
-e1207=>end: end function return
-op1213=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond1216=>condition: for region in regions
-sub1220=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub1225=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True, repository_tags=repository_tags, on_repository_created=on_repository_created)
-cond1222=>condition: exception raised?
-cond1227=>condition: except Exception as exc
-sub1231=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op1240=>operation: "Scale the workload tier to zero, then deploy-all from the new release.\n\n    The checkout's deployable sources are checked first\n    (:meth:`cli.stacks.StackManager.ensure_asset_sources_readable`): the\n    redeploy refuses owner-only sources, so a checkout it could not deploy —\n    for example one whose files the upgrade's own ``git checkout`` wrote under\n    a restrictive umask — must stop the upgrade before the teardown, not\n    after it. The teardown's monitoring detach would catch it too, but only\n    when the monitoring stack is deployed.\n\n    The teardown uses the same retry loop as ``gco stacks destroy-all``: a\n    failed attempt clears the orphaned network interfaces that typically block\n    VPC deletion, waits, and tries again. The redeploy is a single\n    ``deploy_orchestrated`` pass — global and API Gateway stacks update in\n    place, regional stacks and their bridges are recreated, monitoring is\n    updated back to the full topology.\n\n    Raises:\n        cli.stacks.AssetPermissionError: before any stack is touched, when a\n            deployable source is owner-only.\n    "
+op1242=>operation: import time
+op1244=>operation: wait = sleep or time.sleep
+op1246=>operation: result = StackCycleResult()
+sub1248=>subroutine: manager.ensure_asset_sources_readable()
+sub1250=>subroutine: log('Phase 1/2: scaling the workload tier to zero (control plane stays)...')
+op1252=>operation: ok = False
+op1254=>operation: failed: list[str] = []
+cond1257=>condition: for attempt in range(1, max_attempts + 1)
+op1261=>operation: result.teardown_attempts = attempt
+cond1264=>condition: if attempt > 1
+sub1268=>subroutine: log('Clearing orphaned network interfaces that can block VPC deletion...')
+sub1270=>subroutine: manager.cleanup_orphaned_network_interfaces()
+sub1272=>subroutine: log(f'Teardown attempt {attempt}/{max_attempts} in {retry_wait_seconds:.0f}s...')
+sub1274=>subroutine: wait(retry_wait_seconds)
+op1279=>operation: ok, destroyed, failed = manager.destroy_orchestrated(force=True, keep_control_plane=True, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
+cond1282=>condition: for stack in destroyed
+cond1287=>operation: result.destroyed.append(stack) if  stack not in result.destroyed
+cond1300=>operation: break if  ok
+cond1313=>condition: if not ok
+op1317=>operation: result.failed = list(failed)
+op1319=>operation: result.phase_failed = 'teardown'
+io1324=>inputoutput: output: result
+e1322=>end: end function return
+sub1330=>subroutine: log('Phase 2/2: updating the control plane in place and recreating the regional stacks...')
+op1332=>operation: ok, deployed, failed = manager.deploy_orchestrated(require_approval=False, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
+op1334=>operation: result.deployed = list(deployed)
+cond1337=>condition: if not ok
+op1341=>operation: result.failed = list(failed)
+op1343=>operation: result.phase_failed = 'deploy'
+io1351=>inputoutput: output: result
+e1349=>end: end function return
 
-op1195->op1197
-op1197->op1199
-op1199->cond1202
-cond1202(yes)->e1207
-cond1202(no)->op1213
-op1213->cond1216
-cond1216(yes)->sub1220
-sub1220->sub1225
-sub1225->cond1222
-cond1222(yes)->cond1227
-cond1227(yes)->sub1231
-cond1227(no)->cond1216
-cond1222(no)->cond1216
+op1240->op1242
+op1242->op1244
+op1244->op1246
+op1246->sub1248
+sub1248->sub1250
+sub1250->op1252
+op1252->op1254
+op1254->cond1257
+cond1257(yes)->op1261
+op1261->cond1264
+cond1264(yes)->sub1268
+sub1268->sub1270
+sub1270->sub1272
+sub1272->sub1274
+sub1274->op1279
+op1279->cond1282
+cond1282(yes)->cond1287
+cond1287->cond1282
+cond1282(no)->cond1300
+cond1300->cond1257
+cond1264(no)->op1279
+cond1257(no)->cond1313
+cond1313(yes)->op1317
+op1317->op1319
+op1319->io1324
+io1324->e1322
+cond1313(no)->sub1330
+sub1330->op1332
+op1332->op1334
+op1334->cond1337
+cond1337(yes)->op1341
+op1341->op1343
+op1343->io1351
+io1351->e1349
+cond1337(no)->io1351
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -253,7 +295,7 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
             Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>03d76cfd60adcffe</code>
+            Flow content SHA-256: <code>e3b56fbdd3dc9d34</code>
           </p>
           <div id="canvas"></div>
         </div>

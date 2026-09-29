@@ -67,6 +67,16 @@ from .workspace import (
     write_run_context,
 )
 
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-09-29T11:35:23Z
+# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
+# Flowchart(s) generated from this file:
+#   * ``action_upgrade`` -> ``diagrams/code_diagrams/scripts/upgrade_validation/actions.action_upgrade.html``
+#     (PNG: ``diagrams/code_diagrams/scripts/upgrade_validation/actions.action_upgrade.png``)
+# Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
+# <pyflowchart-code-diagram> END
+
+
 #: ``checkpoint.state`` key for everything this harness records.
 STATE_KEY = "upgrade_validation"
 #: Wall-clock cap for each preparation step and for ``gco upgrade --check``.

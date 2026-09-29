@@ -51,6 +51,16 @@ from typing import Any
 from . import __version__
 from ._container_runtime import container_runtime_error_message, detect_container_runtime
 
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-09-29T11:35:23Z
+# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
+# Flowchart(s) generated from this file:
+#   * ``run_stack_cycle`` -> ``diagrams/code_diagrams/cli/upgrade.run_stack_cycle.html``
+#     (PNG: ``diagrams/code_diagrams/cli/upgrade.run_stack_cycle.png``)
+# Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
+# <pyflowchart-code-diagram> END
+
+
 #: Release tags are the immutable ``vMAJOR.MINOR.PATCH`` tags release-publish.yml creates.
 RELEASE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 

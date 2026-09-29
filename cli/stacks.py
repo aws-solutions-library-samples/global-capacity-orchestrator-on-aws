@@ -74,8 +74,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-28T16:13:31Z
-# Generated from Git commit: b6b7fa90d82ebed9308fbba2dc596c2d2d57a1ba
+# Generated at (UTC): 2026-09-29T11:35:23Z
+# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -83,6 +83,8 @@ from .output import confirm, interactive_echo
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_destroy_orchestrated.png``)
 #   * ``StackManager._mirror_images_if_enabled`` -> ``diagrams/code_diagrams/cli/stacks.StackManager__mirror_images_if_enabled.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager__mirror_images_if_enabled.png``)
+#   * ``StackManager._execute_prepared_change_set`` -> ``diagrams/code_diagrams/cli/stacks.StackManager__execute_prepared_change_set.html``
+#     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager__execute_prepared_change_set.png``)
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
 # <pyflowchart-code-diagram> END
 

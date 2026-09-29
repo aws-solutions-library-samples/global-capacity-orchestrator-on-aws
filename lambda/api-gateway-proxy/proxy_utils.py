@@ -17,11 +17,13 @@ import urllib3
 from backend_tls import get_backend_http_pool
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-09-29T11:35:23Z
+# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
 # Flowchart(s) generated from this file:
 #   * ``build_signed_headers`` -> ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.png``)
+#   * ``forward_request`` -> ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.forward_request.html``
+#     (PNG: ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.forward_request.png``)
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
 # <pyflowchart-code-diagram> END
 

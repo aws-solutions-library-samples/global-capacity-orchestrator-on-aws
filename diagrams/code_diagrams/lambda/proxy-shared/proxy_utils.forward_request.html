@@ -4,8 +4,8 @@
         <meta charset="utf-8">
         <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
         <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
-        <meta name="gco-flow-digest" content="03d76cfd60adcffe">
-        <title>gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)</title>
+        <meta name="gco-flow-digest" content="8df7c30a08ad4aeb">
+        <title>Proxy upstream forwarding (HTTPS-only target, one deadline, safe-method retries, TLS fail-closed)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
         </style>
@@ -208,32 +208,136 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1195=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op1197=>operation: from . import _image_mirror as image_mirror
-op1199=>operation: cfg = image_mirror.read_mirror_config()
-cond1202=>condition: if not cfg['enabled']
-e1207=>end: end function return
-op1213=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond1216=>condition: for region in regions
-sub1220=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub1225=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True, repository_tags=repository_tags, on_repository_created=on_repository_created)
-cond1222=>condition: exception raised?
-cond1227=>condition: except Exception as exc
-sub1231=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op1800=>operation: 'Forward over authenticated TLS within one deadline.\n\n    Retries are limited to safe, read-only methods. Plaintext, non-443, and\n    credential-bearing targets are rejected before any network request.\n    '
+op1802=>operation: parsed_target = urlsplit(target_url)
+op1807=>operation: target_port = parsed_target.port
+cond1804=>condition: exception raised?
+cond1809=>condition: except ValueError as exc
+sub1813=>subroutine: raise ValueError('Backend proxy target has an invalid port') from exc
+cond1819=>operation: raise ValueError('Backend proxy targets must use HTTPS on port 443') if  parsed_target.scheme.lower() != 'https' or not parsed_target.hostname or parsed_target.username is not None or (parsed_target.password is not None) or (target_port not in {None, 443})
+op1829=>operation: deadline = time.monotonic() + max(timeout, 0.0)
+op1834=>operation: transport = _http or get_backend_http_pool()
+cond1831=>condition: exception raised?
+cond1836=>condition: except RuntimeError
+sub1840=>subroutine: logger.exception('Backend TLS trust is unavailable')
+io1845=>inputoutput: output: {'statusCode': 503, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Backend trust is temporarily unavailable'})}
+e1843=>end: end function return
+op1851=>operation: method = http_method.upper()
+op1853=>operation: encoded_body = body.encode('utf-8') if body else None
+op1855=>operation: max_attempts = _MAX_RETRIES if method in _RETRYABLE_METHODS else 1
+op1857=>operation: last_exception: Exception | None = None
+op1859=>operation: last_response: urllib3.BaseHTTPResponse | None = None
+op1861=>operation: attempts_made = 0
+cond1864=>condition: for attempt in range(max_attempts)
+op1868=>operation: remaining = deadline - time.monotonic()
+cond1871=>operation: break if  remaining <= 0
+op1881=>operation: attempts_made = attempt + 1
+op1884=>operation: response = transport.request(method, target_url, headers=_outbound_headers(headers), body=encoded_body, timeout=urllib3.Timeout(total=remaining))
+if response.status not in _RETRYABLE_STATUS_CODES:
+    return _build_success_response(response)
+last_response = response
+logger.warning('Retryable upstream status %d on attempt %d/%d for %s', response.status, attempt + 1, max_attempts, method)
+if attempt == max_attempts - 1:
+    return _build_success_response(response)
+response.release_conn()
+cond1883=>condition: exception raised?
+cond1886=>condition: except urllib3.exceptions.SSLError
+sub1890=>subroutine: logger.exception('Backend TLS verification failed')
+io1895=>inputoutput: output: _tls_failure_response()
+e1893=>end: end function return
+cond1898=>condition: except urllib3.exceptions.MaxRetryError as error
+cond1903=>condition: if isinstance(getattr(error, 'reason', None), urllib3.exceptions.SSLError)
+sub1907=>subroutine: logger.exception('Backend TLS verification failed')
+io1912=>inputoutput: output: _tls_failure_response()
+e1910=>end: end function return
+op1918=>operation: last_exception = error
+sub1920=>subroutine: logger.warning('Upstream %s failed on attempt %d/%d', method, attempt + 1, max_attempts)
+cond1946=>condition: if attempt < max_attempts - 1
+op1950=>operation: remaining = deadline - time.monotonic()
+op1952=>operation: backoff = _RETRY_BACKOFF_BASE * 2 ** attempt
+cond1955=>operation: break if  remaining <= backoff
+sub1965=>subroutine: time.sleep(backoff)
+cond1922=>condition: except urllib3.exceptions.TimeoutError as error
+op1926=>operation: last_exception = error
+sub1928=>subroutine: logger.warning('Upstream %s failed on attempt %d/%d', method, attempt + 1, max_attempts)
+cond1930=>condition: except Exception
+sub1934=>subroutine: logger.exception('Unexpected proxy forwarding failure')
+io1939=>inputoutput: output: {'statusCode': 500, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Internal server error'})}
+e1937=>end: end function return
+cond1973=>condition: if last_response is not None
+io1980=>inputoutput: output: _build_success_response(last_response)
+e1978=>end: end function return
+cond1987=>condition: if last_exception is not None
+op1991=>operation: status_code = 503 if isinstance(last_exception, urllib3.exceptions.MaxRetryError) else 504
+io1996=>inputoutput: output: {'statusCode': status_code, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Service unavailable' if status_code == 503 else 'Gateway timeout', 'message': f'Upstream failed after {attempts_made} attempt(s)'})}
+e1994=>end: end function return
+io2005=>inputoutput: output: {'statusCode': 504, 'headers': {'Content-Type': 'application/json'}, 'body': json.dumps({'error': 'Gateway timeout'})}
+e2003=>end: end function return
 
-op1195->op1197
-op1197->op1199
-op1199->cond1202
-cond1202(yes)->e1207
-cond1202(no)->op1213
-op1213->cond1216
-cond1216(yes)->sub1220
-sub1220->sub1225
-sub1225->cond1222
-cond1222(yes)->cond1227
-cond1227(yes)->sub1231
-cond1227(no)->cond1216
-cond1222(no)->cond1216
+op1800->op1802
+op1802->op1807
+op1807->cond1804
+cond1804(yes)->cond1809
+cond1809(yes)->sub1813
+cond1809(no)->cond1819
+cond1819->op1829
+op1829->op1834
+op1834->cond1831
+cond1831(yes)->cond1836
+cond1836(yes)->sub1840
+sub1840->io1845
+io1845->e1843
+cond1836(no)->op1851
+op1851->op1853
+op1853->op1855
+op1855->op1857
+op1857->op1859
+op1859->op1861
+op1861->cond1864
+cond1864(yes)->op1868
+op1868->cond1871
+cond1871->op1881
+op1881->op1884
+op1884->cond1883
+cond1883(yes)->cond1886
+cond1886(yes)->sub1890
+sub1890->io1895
+io1895->e1893
+cond1886(no)->cond1898
+cond1898(yes)->cond1903
+cond1903(yes)->sub1907
+sub1907->io1912
+io1912->e1910
+cond1903(no)->op1918
+op1918->sub1920
+sub1920->cond1946
+cond1946(yes)->op1950
+op1950->op1952
+op1952->cond1955
+cond1955->sub1965
+sub1965->cond1864
+cond1946(no)->cond1864
+cond1898(no)->cond1922
+cond1922(yes)->op1926
+op1926->sub1928
+sub1928->cond1946
+cond1922(no)->cond1930
+cond1930(yes)->sub1934
+sub1934->io1939
+io1939->e1937
+cond1930(no)->cond1946
+cond1883(no)->cond1946
+cond1864(no)->cond1973
+cond1973(yes)->io1980
+io1980->e1978
+cond1973(no)->cond1987
+cond1987(yes)->op1991
+op1991->io1996
+io1996->e1994
+cond1987(no)->io2005
+io2005->e2003
+cond1831(no)->op1851
+cond1804(no)->cond1819
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -253,7 +357,7 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
             Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>03d76cfd60adcffe</code>
+            Flow content SHA-256: <code>8df7c30a08ad4aeb</code>
           </p>
           <div id="canvas"></div>
         </div>

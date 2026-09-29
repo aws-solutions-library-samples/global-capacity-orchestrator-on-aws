@@ -4,8 +4,8 @@
         <meta charset="utf-8">
         <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
         <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
-        <meta name="gco-flow-digest" content="03d76cfd60adcffe">
-        <title>gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)</title>
+        <meta name="gco-flow-digest" content="375ebcae5a8d29d0">
+        <title>Run-tag stack adoption (exact tag, creation window, replaceable workload generations)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
         </style>
@@ -208,32 +208,94 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1195=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op1197=>operation: from . import _image_mirror as image_mirror
-op1199=>operation: cfg = image_mirror.read_mirror_config()
-cond1202=>condition: if not cfg['enabled']
-e1207=>end: end function return
-op1213=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond1216=>condition: for region in regions
-sub1220=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub1225=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True, repository_tags=repository_tags, on_repository_created=on_repository_created)
-cond1222=>condition: exception raised?
-cond1227=>condition: except Exception as exc
-sub1231=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op2196=>operation: "Adopt the target stacks a ``gco`` subprocess created or replaced for this run.\n\n    The deliberate relaxation of prepared-change-set authority, open only to a\n    harness whose settings opt in. A live target stack is adopted when it\n    carries this run's exact tag and CloudFormation reports it created no\n    earlier than ``window_started_at``, the server time checkpointed before\n    the phase's command started. A stack this run already owns under the same\n    ID is left as it is. One owned under a different ID is a replacement,\n    accepted only for a ``replaceable`` name: the previous generation must be\n    deleted, and it is kept in ``replaced_generations`` so what it retained\n    (its EKS key, its log groups) stays attributable to the run. Anything else\n    (a missing tag, an earlier creation time, a replaced control-plane stack)\n    fails closed and adopts nothing further.\n    "
+cond2199=>operation: raise RuntimeError('Run-tag stack adoption is not enabled for this harness') if  not _run_tag_adoption_allowed(ctx)
+cond2210=>operation: raise ValueError('The adoption window must start at a timezone-aware time') if  window_started_at.tzinfo is None
+op2220=>operation: target_regions = ctx.checkpoint.state.get('target_stack_regions')
+cond2223=>operation: raise RuntimeError('Checkpoint lacks target stack Regions for run-tag adoption') if  not isinstance(target_regions, dict) or not target_regions
+op2233=>operation: unknown = sorted(set(replaceable) - set(target_regions))
+cond2236=>operation: raise RuntimeError('Replaceable stacks are not targets: ' + ', '.join(unknown)) if  unknown
+op2246=>operation: window = window_started_at.astimezone(UTC)
+op2248=>operation: evidence: dict[str, Any] = {'phase': phase, 'window_started_at': window.isoformat(), 'adopted': [], 'replaced': [], 'unchanged': [], 'absent': []}
+cond2251=>condition: for stack_name, raw_region in sorted(target_regions.items())
+op2255=>operation: region = str(raw_region)
+op2257=>operation: record = _owned_stack_record(ctx, region, stack_name)
+op2259=>operation: live = describe_stack(ctx.session, region, stack_name)
+cond2262=>condition: if live is None or live.get('status') == 'DELETE_COMPLETE'
+sub2266=>subroutine: evidence['absent'].append({'name': stack_name, 'region': region, 'owned_stack_id': (record or {}).get('stack_id')})
+sub2268=>subroutine: continue
+op2273=>operation: partition = ctx.session.get_partition_for_region(region)
+cond2276=>operation: raise RuntimeError(f'Could not resolve AWS partition for {region}') if  not partition
+op2286=>operation: stack_id = str(live.get('stack_id') or '')
+op2288=>operation: prefix = f'arn:{partition}:cloudformation:{region}:{ctx.settings.expected_account}:stack/{stack_name}/'
+cond2291=>operation: raise RuntimeError(f'CloudFormation returned an invalid identity for {region}:{stack_name}') if  live.get('name') != stack_name or not stack_id.startswith(prefix)
+cond2302=>operation: raise RuntimeError(f'Stack {region}:{stack_name} is not tagged for run {ctx.settings.run_id!r}; refusing adoption') if  (live.get('tags') or {}).get(_RUN_STACK_TAG) != ctx.settings.run_id
+op2312=>operation: summary = {'name': stack_name, 'region': region, 'stack_id': stack_id}
+cond2315=>condition: if record is not None and record.get('stack_id') == stack_id
+sub2319=>subroutine: _require_stack_authority(ctx, record, region=region, stack_name=stack_name)
+sub2321=>subroutine: evidence['unchanged'].append({**summary, 'status': live.get('status')})
+sub2323=>subroutine: continue
+cond2329=>operation: raise RuntimeError(f'Stack {region}:{stack_name} changed identity during {phase}, which may not replace it; refusing adoption') if  record is not None and stack_name not in replaceable
+op2339=>operation: created = _stack_creation_time(ctx, region, stack_id)
+cond2342=>operation: raise RuntimeError(f'Stack {region}:{stack_name} was created at {created.isoformat()}, before {phase} started at {window.isoformat()}; refusing adoption') if  created + _ADOPTION_CLOCK_RESOLUTION < window
+op2352=>operation: generations: list[dict[str, Any]] = []
+cond2355=>condition: if record is not None
+sub2359=>subroutine: _require_stack_authority(ctx, record, region=region, stack_name=stack_name)
+op2361=>operation: previous_id = str(record.get('stack_id') or '')
+op2363=>operation: previous = describe_stack(ctx.session, region, previous_id)
+cond2366=>operation: raise RuntimeError(f'Stack {region}:{stack_name} has two live generations; refusing adoption') if  previous is not None and previous.get('status') != 'DELETE_COMPLETE'
+op2376=>operation: generations = [*copy.deepcopy(record.get('replaced_generations') or []), {'stack_id': previous_id, 'authority': record.get('authority'), 'adoption': copy.deepcopy(record.get('adoption')), 'replaced_by': stack_id, 'replaced_during': phase, 'observed_status': (previous or {}).get('status', 'absent')}]
+op2381=>operation: with ctx.state_lock:
+    _owned_stacks(ctx).setdefault(region, {})[stack_name] = {**summary, 'run_tag': ctx.settings.run_id, 'authority': _RUN_TAG_ADOPTION_AUTHORITY, 'adoption': {'phase': phase, 'window_started_at': window.isoformat(), 'creation_time': created.isoformat(), 'adopted_at': utc_now(), 'status': live.get('status')}, 'replaced_generations': generations}
+    ctx.persist_callback(ctx.checkpoint)
+op2383=>operation: key = 'replaced' if record is not None else 'adopted'
+sub2385=>subroutine: evidence[key].append({**summary, 'created_at': created.isoformat()})
+io2392=>inputoutput: output: evidence
+e2390=>end: end function return
 
-op1195->op1197
-op1197->op1199
-op1199->cond1202
-cond1202(yes)->e1207
-cond1202(no)->op1213
-op1213->cond1216
-cond1216(yes)->sub1220
-sub1220->sub1225
-sub1225->cond1222
-cond1222(yes)->cond1227
-cond1227(yes)->sub1231
-cond1227(no)->cond1216
-cond1222(no)->cond1216
+op2196->cond2199
+cond2199->cond2210
+cond2210->op2220
+op2220->cond2223
+cond2223->op2233
+op2233->cond2236
+cond2236->op2246
+op2246->op2248
+op2248->cond2251
+cond2251(yes)->op2255
+op2255->op2257
+op2257->op2259
+op2259->cond2262
+cond2262(yes)->sub2266
+sub2266->sub2268
+cond2262(no)->op2273
+op2273->cond2276
+cond2276->op2286
+op2286->op2288
+op2288->cond2291
+cond2291->cond2302
+cond2302->op2312
+op2312->cond2315
+cond2315(yes)->sub2319
+sub2319->sub2321
+sub2321->sub2323
+cond2315(no)->cond2329
+cond2329->op2339
+op2339->cond2342
+cond2342->op2352
+op2352->cond2355
+cond2355(yes)->sub2359
+sub2359->op2361
+op2361->op2363
+op2363->cond2366
+cond2366->op2376
+op2376->op2381
+op2381->op2383
+op2383->sub2385
+sub2385(left)->cond2251
+cond2355(no)->op2381
+cond2251(no)->io2392
+io2392->e2390
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -253,7 +315,7 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
             Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>03d76cfd60adcffe</code>
+            Flow content SHA-256: <code>375ebcae5a8d29d0</code>
           </p>
           <div id="canvas"></div>
         </div>

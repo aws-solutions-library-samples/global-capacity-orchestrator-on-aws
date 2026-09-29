@@ -4,8 +4,8 @@
         <meta charset="utf-8">
         <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
         <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
-        <meta name="gco-flow-digest" content="03d76cfd60adcffe">
-        <title>gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)</title>
+        <meta name="gco-flow-digest" content="ce77fee0ed98a096">
+        <title>Upgrade-validation upgrade phase (plan check, adoption window, settle, resume)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
         </style>
@@ -208,32 +208,52 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1195=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op1197=>operation: from . import _image_mirror as image_mirror
-op1199=>operation: cfg = image_mirror.read_mirror_config()
-cond1202=>condition: if not cfg['enabled']
-e1207=>end: end function return
-op1213=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond1216=>condition: for region in regions
-sub1220=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub1225=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True, repository_tags=repository_tags, on_repository_created=on_repository_created)
-cond1222=>condition: exception raised?
-cond1227=>condition: except Exception as exc
-sub1231=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op2397=>operation: "Run the base release's gco upgrade to this commit and adopt the recreated stacks."
+op2399=>operation: settings = _settings(ctx)
+op2401=>operation: workspace = _workspace(ctx)
+op2403=>operation: phase = _phases(ctx).get('upgrade')
+cond2406=>condition: if phase is None
+op2410=>operation: prepared = _require_prepared_workspace(ctx)
+op2412=>operation: tag = tag_candidate(workspace, tag=str(prepared['synthetic_tag']), candidate_sha=settings.expected_sha)
+op2414=>operation: check = _run_step(ctx, 'upgrade check', [str(workspace.gco), '-o', 'json', 'upgrade', '--check', '--ref', tag['tag']], cwd=workspace.clone, timeout_seconds=STEP_TIMEOUT_SECONDS)
+op2416=>operation: plan = _validated_plan(ctx, check, tag['tag'])
+sub2418=>subroutine: _reconcile_stack_ownership(ctx)
+sub2420=>subroutine: _checkpoint_retained_kms_keys(ctx)
+op2422=>operation: phase = _begin_phase(ctx, 'upgrade', tag=tag, check=check.to_dict(), plan=plan, before=_stack_generations(ctx))
+op2425=>operation: result = _run_step(ctx, 'upgrade', [str(workspace.gco), '-o', 'json', 'upgrade', '--yes', '--ref', tag['tag'], '--skip-container'], cwd=workspace.clone, timeout_seconds=settings.upgrade_timeout_seconds, phase='upgrade')
+phase['command'] = result.to_dict()
+phase['document'] = gco_result_document(result.stdout)
+cond2424=>condition: exception raised?
+sub2431=>subroutine: _settle_phase(ctx, 'upgrade')
+sub2438=>subroutine: _phase_outcome(phase, action='upgrade', command=f"{settings.base_ref}'s gco upgrade")
+op2440=>operation: document = phase.get('document') or {}
+cond2443=>operation: raise ActionFailure(f"gco upgrade reported {document.get('status')!r}, not 'ok'", {'phase': copy.deepcopy(phase)}) if  document.get('status') != 'ok'
+io2456=>inputoutput: output: {'phase': copy.deepcopy(phase)}
+e2454=>end: end function return
+sub2435=>subroutine: _reconcile_stack_ownership(ctx)
 
-op1195->op1197
-op1197->op1199
-op1199->cond1202
-cond1202(yes)->e1207
-cond1202(no)->op1213
-op1213->cond1216
-cond1216(yes)->sub1220
-sub1220->sub1225
-sub1225->cond1222
-cond1222(yes)->cond1227
-cond1227(yes)->sub1231
-cond1227(no)->cond1216
-cond1222(no)->cond1216
+op2397->op2399
+op2399->op2401
+op2401->op2403
+op2403->cond2406
+cond2406(yes)->op2410
+op2410->op2412
+op2412->op2414
+op2414->op2416
+op2416->sub2418
+sub2418->sub2420
+sub2420->op2422
+op2422->op2425
+op2425->cond2424
+cond2424(yes)->sub2431
+sub2431->sub2438
+sub2438->op2440
+op2440->cond2443
+cond2443->io2456
+io2456->e2454
+cond2424(no)->sub2431
+cond2406(no)->sub2435
+sub2435->sub2438
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -253,7 +273,7 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
             Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>03d76cfd60adcffe</code>
+            Flow content SHA-256: <code>ce77fee0ed98a096</code>
           </p>
           <div id="canvas"></div>
         </div>

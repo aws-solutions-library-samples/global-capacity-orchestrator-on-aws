@@ -4,8 +4,8 @@
         <meta charset="utf-8">
         <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
         <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
-        <meta name="gco-flow-digest" content="03d76cfd60adcffe">
-        <title>gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)</title>
+        <meta name="gco-flow-digest" content="3da1ee489a505075">
+        <title>Strict change-set execution (identity, type, and tag fencing; no-op and resume authority)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
         </style>
@@ -208,32 +208,188 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1195=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op1197=>operation: from . import _image_mirror as image_mirror
-op1199=>operation: cfg = image_mirror.read_mirror_config()
-cond1202=>condition: if not cfg['enabled']
-e1207=>end: end function return
-op1213=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond1216=>condition: for region in regions
-sub1220=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub1225=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True, repository_tags=repository_tags, on_repository_created=on_repository_created)
-cond1222=>condition: exception raised?
-cond1227=>condition: except Exception as exc
-sub1231=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op1356=>operation: 'Validate, checkpoint, and execute only the deterministic CDK change set.'
+op1358=>operation: import boto3
+op1360=>operation: region = self._get_deploy_region(stack_name)
+cond1363=>operation: raise RuntimeError(f'Could not resolve deploy Region for {stack_name}') if  not region
+op1373=>operation: cfn = boto3.client('cloudformation', region_name=region)
+op1375=>operation: change_set: dict[str, Any] = {}
+op1377=>operation: inspection_attempts = _STRICT_CHANGE_SET_INSPECTION_ATTEMPTS if expected_stack_id is None and (not prepared_change_sets) else 1
+op1379=>operation: inspection_attempt = 0
+cond1382=>condition: while True
+op1387=>operation: change_set = cfn.describe_change_set(ChangeSetName=change_set_name, StackName=stack_name)
+break
+cond1386=>condition: exception raised?
+cond1389=>condition: except ClientError as exc
+op1393=>operation: fresh_create_not_visible = bool(expected_stack_id is None and (not prepared_change_sets) and (self._change_set_missing(exc) or self._stack_missing(exc)))
+cond1396=>condition: if fresh_create_not_visible and inspection_attempt + 1 < inspection_attempts
+cond1401=>operation: raise RuntimeError('Strict change-set inspection cancelled before ownership checkpoint') from exc if  self._cdk_cancel_event.is_set()
+sub1411=>subroutine: time.sleep(_STRICT_CHANGE_SET_INSPECTION_RETRY_SECONDS)
+op1413=>operation: inspection_attempt += 1
+sub1415=>subroutine: continue
+cond1421=>operation: raise RuntimeError(f'Could not inspect strict change set {change_set_name} for {stack_name}') from exc if  not self._change_set_missing(exc) and (not fresh_create_not_visible)
+cond1432=>condition: if allow_noop and expected_stack_id
+op1436=>operation: target = self._describe_stack_target(stack_name, expected_stack_id=expected_stack_id, require_expected_identity=True)
+cond1439=>condition: if target is not None
+op1443=>operation: stack = target[2]
+op1445=>operation: status = str(stack.get('StackStatus') or '')
+cond1448=>condition: if status in _BOOTSTRAP_HEALTHY_STATUSES
+cond1453=>operation: raise RuntimeError(f'Strict no-op for {stack_name} lacks exact authorization') from exc if  authorize_stack is None
+sub1463=>subroutine: authorize_stack(stack_name, region, expected_stack_id)
+io1468=>inputoutput: output: True
+e1466=>end: end function return
+sub1480=>subroutine: raise RuntimeError(f'CDK did not create the strict change set {change_set_name} for {stack_name}') from exc
+op1487=>operation: change_set_id = str(change_set.get('ChangeSetId') or '')
+op1489=>operation: observed_change_set_name = str(change_set.get('ChangeSetName') or '')
+op1491=>operation: stack_id = str(change_set.get('StackId') or '')
+op1493=>operation: status = str(change_set.get('Status') or '')
+op1495=>operation: execution_status = str(change_set.get('ExecutionStatus') or '')
+cond1498=>operation: raise RuntimeError(f'Strict change set {change_set_name} omitted immutable identities') if  not change_set_id or not stack_id
+cond1509=>operation: raise RuntimeError(f"Strict change set identity changed from {change_set_name} to {observed_change_set_name or 'unknown'}") if  observed_change_set_name != change_set_name
+sub1519=>subroutine: self._validate_strict_change_set_arns(stack_name=stack_name, change_set_name=change_set_name, stack_id=stack_id, change_set_id=change_set_id, region=region)
+op1521=>operation: prepared_record = prepared_change_sets.get(change_set_id)
+cond1524=>condition: if prepared_record is None
+op1528=>operation: change_set_type = 'CREATE' if expected_stack_id is None else 'UPDATE'
+cond1562=>operation: raise RuntimeError(f'Strict change set for absent {stack_name} unexpectedly performs UPDATE') if  change_set_type == 'UPDATE' and expected_stack_id is None
+cond1573=>operation: raise RuntimeError(f'Strict change set targets replacement {stack_id}; expected {expected_stack_id}') if  expected_stack_id is not None and stack_id != expected_stack_id
+op1583=>operation: observed_tags = {str(tag.get('Key')): str(tag.get('Value')) for tag in change_set.get('Tags', []) if tag.get('Key') is not None}
+cond1586=>condition: for key, value in (expected_tags or {}).items()
+cond1591=>operation: raise RuntimeError(f'Strict change set {change_set_id} omitted required tag {key}') if  observed_tags.get(str(key)) != str(value)
+op1603=>operation: status_reason = ' '.join(str(change_set.get('StatusReason') or '').split()).lower()
+op1605=>operation: empty_change_set = "submitted information didn't contain changes" in status_reason or 'no updates are to be performed' in status_reason
+cond1608=>condition: if status == 'FAILED' and empty_change_set and (allow_noop or prepared_record is not None) and expected_stack_id
+op1612=>operation: target = self._describe_stack_target(stack_name, expected_stack_id=expected_stack_id, require_expected_identity=True)
+cond1615=>operation: raise RuntimeError(f'Empty strict change set {change_set_id} has no healthy exact stack') if  target is None or str(target[2].get('StackStatus') or '') not in _BOOTSTRAP_HEALTHY_STATUSES
+cond1626=>operation: raise RuntimeError(f'Strict no-op for {stack_name} lacks exact authorization') if  authorize_stack is None
+sub1636=>subroutine: authorize_stack(stack_name, region, expected_stack_id)
+sub1638=>subroutine: on_change_set_prepared(stack_name, region, stack_id, change_set_id, change_set_type)
+io1643=>inputoutput: output: True
+e1641=>end: end function return
+cond1650=>operation: raise RuntimeError(f'Strict change set {change_set_id} is {status}/{execution_status}, not usable') if  status != 'CREATE_COMPLETE' or execution_status not in {'AVAILABLE', 'EXECUTE_COMPLETE'}
+cond1661=>operation: raise RuntimeError(f'Strict change set {change_set_id} was not produced by this preparation') if  execution_status == 'AVAILABLE' and (prepared_record is None and (not preparation_succeeded))
+cond1672=>operation: raise RuntimeError(f'Executed strict change set {change_set_id} lacks prior checkpoint authority') if  execution_status == 'EXECUTE_COMPLETE' and (prepared_record is None or expected_stack_id is None)
+cond1683=>condition: if expected_stack_id is not None
+cond1688=>operation: raise RuntimeError(f'Strict change set for {stack_name} lacks exact authorization') if  authorize_stack is None
+sub1698=>subroutine: authorize_stack(stack_name, region, stack_id)
+cond1704=>condition: if execution_status == 'EXECUTE_COMPLETE'
+op1708=>operation: target = self._describe_stack_target(stack_name, expected_stack_id=stack_id, require_expected_identity=True)
+cond1711=>operation: raise RuntimeError(f'Executed strict change set {change_set_id} has no healthy exact stack') if  target is None or str(target[2].get('StackStatus') or '') not in _BOOTSTRAP_HEALTHY_STATUSES
+sub1745=>subroutine: on_change_set_prepared(stack_name, region, stack_id, change_set_id, change_set_type)
+cond1748=>condition: if execution_status == 'EXECUTE_COMPLETE'
+io1755=>inputoutput: output: True
+e1753=>end: end function return
+cond1762=>operation: raise RuntimeError(f'Strict change set {change_set_id} was checkpointed but execution was cancelled') if  self._cdk_cancel_event.is_set()
+sub1772=>subroutine: cfn.execute_change_set(ChangeSetName=change_set_id)
+op1774=>operation: settled = self._wait_for_stack_settle(stack_name, timeout=timeout, stack_identifier=stack_id)
+cond1777=>condition: if settled not in _BOOTSTRAP_HEALTHY_STATUSES
+sub1781=>subroutine: logger.error('Strict change set %s for %s settled as %s', change_set_id, stack_name, settled or 'unknown')
+io1786=>inputoutput: output: False
+e1784=>end: end function return
+io1795=>inputoutput: output: True
+e1793=>end: end function return
+cond1724=>condition: if change_set_type == 'CREATE'
+op1728=>operation: target = self._describe_stack_target(stack_name, expected_stack_id=stack_id, require_expected_identity=True)
+cond1731=>operation: raise RuntimeError(f'Prepared CREATE change set {change_set_id} has no exact review stack') if  target is None or str(target[2].get('StackStatus') or '') != 'REVIEW_IN_PROGRESS'
+op1532=>operation: recorded_change_set_id = str(prepared_record.get('change_set_id') or '')
+op1534=>operation: recorded_stack_id = str(prepared_record.get('stack_id') or '')
+op1536=>operation: change_set_type = str(prepared_record.get('change_set_type') or '')
+cond1539=>operation: raise RuntimeError(f'Persisted strict change-set authority changed for {stack_name}') if  recorded_change_set_id != change_set_id or recorded_stack_id != stack_id
+cond1550=>operation: raise RuntimeError(f"Persisted strict change set for {stack_name} has invalid type {change_set_type or 'unknown'}") if  change_set_type not in {'CREATE', 'UPDATE'}
 
-op1195->op1197
-op1197->op1199
-op1199->cond1202
-cond1202(yes)->e1207
-cond1202(no)->op1213
-op1213->cond1216
-cond1216(yes)->sub1220
-sub1220->sub1225
-sub1225->cond1222
-cond1222(yes)->cond1227
-cond1227(yes)->sub1231
-cond1227(no)->cond1216
-cond1222(no)->cond1216
+op1356->op1358
+op1358->op1360
+op1360->cond1363
+cond1363->op1373
+op1373->op1375
+op1375->op1377
+op1377->op1379
+op1379->cond1382
+cond1382(yes)->op1387
+op1387->cond1386
+cond1386(yes)->cond1389
+cond1389(yes)->op1393
+op1393->cond1396
+cond1396(yes)->cond1401
+cond1401->sub1411
+sub1411->op1413
+op1413->sub1415
+cond1396(no)->cond1421
+cond1421->cond1432
+cond1432(yes)->op1436
+op1436->cond1439
+cond1439(yes)->op1443
+op1443->op1445
+op1445->cond1448
+cond1448(yes)->cond1453
+cond1453->sub1463
+sub1463->io1468
+io1468->e1466
+cond1448(no)->sub1480
+cond1439(no)->sub1480
+cond1432(no)->sub1480
+cond1389(no)->cond1382
+cond1386(no)->cond1382
+cond1382(no)->op1487
+op1487->op1489
+op1489->op1491
+op1491->op1493
+op1493->op1495
+op1495->cond1498
+cond1498->cond1509
+cond1509->sub1519
+sub1519->op1521
+op1521->cond1524
+cond1524(yes)->op1528
+op1528->cond1562
+cond1562->cond1573
+cond1573->op1583
+op1583->cond1586
+cond1586(yes)->cond1591
+cond1591->cond1586
+cond1586(no)->op1603
+op1603->op1605
+op1605->cond1608
+cond1608(yes)->op1612
+op1612->cond1615
+cond1615->cond1626
+cond1626->sub1636
+sub1636->sub1638
+sub1638->io1643
+io1643->e1641
+cond1608(no)->cond1650
+cond1650->cond1661
+cond1661->cond1672
+cond1672->cond1683
+cond1683(yes)->cond1688
+cond1688->sub1698
+sub1698->cond1704
+cond1704(yes)->op1708
+op1708->cond1711
+cond1711->sub1745
+sub1745->cond1748
+cond1748(yes)->io1755
+io1755->e1753
+cond1748(no)->cond1762
+cond1762->sub1772
+sub1772->op1774
+op1774->cond1777
+cond1777(yes)->sub1781
+sub1781->io1786
+io1786->e1784
+cond1777(no)->io1795
+io1795->e1793
+cond1704(no)->cond1724
+cond1724(yes)->op1728
+op1728->cond1731
+cond1731->sub1745
+cond1724(no)->sub1745
+cond1683(no)->cond1704
+cond1524(no)->op1532
+op1532->op1534
+op1534->op1536
+op1536->cond1539
+cond1539->cond1550
+cond1550->cond1562
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -253,7 +409,7 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
             Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>03d76cfd60adcffe</code>
+            Flow content SHA-256: <code>3da1ee489a505075</code>
           </p>
           <div id="canvas"></div>
         </div>

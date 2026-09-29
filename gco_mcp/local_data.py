@@ -12,6 +12,16 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-09-29T11:35:23Z
+# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
+# Flowchart(s) generated from this file:
+#   * ``resolve_local_path`` -> ``diagrams/code_diagrams/gco_mcp/local_data.resolve_local_path.html``
+#     (PNG: ``diagrams/code_diagrams/gco_mcp/local_data.resolve_local_path.png``)
+# Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
+# <pyflowchart-code-diagram> END
+
+
 _LOCAL_ROOT_ENV = "GCO_STORAGE_LOCAL_ROOT"
 _UPLOAD_STAGE_PREFIX = ".gco-mcp-upload-"
 

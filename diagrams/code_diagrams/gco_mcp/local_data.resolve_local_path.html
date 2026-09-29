@@ -4,8 +4,8 @@
         <meta charset="utf-8">
         <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
         <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
-        <meta name="gco-flow-digest" content="03d76cfd60adcffe">
-        <title>gco stacks deploy — pre-deploy image mirror gate (regional-only, #139)</title>
+        <meta name="gco-flow-digest" content="351eeb42d9565cc3">
+        <title>MCP local-data path boundary (pinned root, traversal and symlink-escape rejection)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
         </style>
@@ -208,32 +208,96 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1195=>operation: "Mirror third-party images into ECR before a regional stack deploys.\n\n        No-op unless ``volcano_image_mirror.enabled`` is set in cdk.json. Mirrors\n        every relevant regional region (see :meth:`_mirror_target_regions`); the\n        copy is idempotent and skips images already present, so a fresh deploy\n        seeds the mirror automatically and repeat deploys cost only a few ECR\n        describe calls. Raises **before** any CDK call if an enabled mirror fails,\n        so a deploy never points a consumer (e.g. Volcano's ``image_registry``)\n        at images that aren't in ECR yet.\n        "
-op1197=>operation: from . import _image_mirror as image_mirror
-op1199=>operation: cfg = image_mirror.read_mirror_config()
-cond1202=>condition: if not cfg['enabled']
-e1207=>end: end function return
-op1213=>operation: regions = self._mirror_target_regions(stack_name, all_stacks)
-cond1216=>condition: for region in regions
-sub1220=>subroutine: print(f'Mirroring third-party images into ECR for {region} ...')
-sub1225=>subroutine: image_mirror.mirror_images(region, ecr_namespace=cfg['ecr_namespace'], skip_existing=True, repository_tags=repository_tags, on_repository_created=on_repository_created)
-cond1222=>condition: exception raised?
-cond1227=>condition: except Exception as exc
-sub1231=>subroutine: raise RuntimeError(f"Image mirror failed for region {region}: {exc}\nvolcano_image_mirror is enabled but the images could not be mirrored into ECR. Fix the cause (container runtime / network / credentials) or run 'gco images mirror --region {region}' manually, then retry. Aborting before CDK so the deploy never points a consumer at images that aren't in ECR.") from exc
+        <div><textarea id="code" style="width: 100%;" rows="11">op2010=>operation: "Resolve ``local_path`` beneath the configured local-data root.\n\n    Relative paths (including short forms such as ``weights`` and\n    ``./weights``) resolve beneath ``GCO_STORAGE_LOCAL_ROOT`` rather than the\n    server process's working directory. Lexical traversal and realpath symlink\n    escapes are rejected. Existing source identity is captured so short upload\n    tools can verify it again while building a private no-follow snapshot.\n    "
+op2012=>operation: configured_root = os.environ.get(_LOCAL_ROOT_ENV, '').strip()
+cond2015=>operation: raise ValueError(f'{_LOCAL_ROOT_ENV} must be set before enabling local data access') if  not configured_root
+cond2026=>operation: raise ValueError('Local data access requires descriptor-relative no-follow filesystem support') if  os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or (not hasattr(os, 'O_DIRECTORY'))
+op2039=>operation: root = Path(configured_root).expanduser().resolve(strict=True)
+cond2036=>condition: exception raised?
+cond2041=>condition: except OSError as exc
+cond2046=>operation: raise if  exc.errno != errno.ELOOP
+sub2056=>subroutine: raise ValueError(f'{_LOCAL_ROOT_ENV} could not be resolved safely') from exc
+cond2058=>condition: except RuntimeError as exc
+sub2062=>subroutine: raise ValueError(f'{_LOCAL_ROOT_ENV} could not be resolved safely') from exc
+op2067=>operation: root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
+op2069=>operation: root_fd = os.open(root, root_flags)
+op2074=>operation: root_stat = os.fstat(root_fd)
+cond2071=>condition: exception raised?
+sub2080=>subroutine: os.close(root_fd)
+op2082=>operation: supplied = Path(local_path).expanduser()
+op2084=>operation: candidate = supplied if supplied.is_absolute() else root / supplied
+op2086=>operation: lexical = Path(os.path.abspath(candidate))
+op2091=>operation: relative = lexical.relative_to(root)
+cond2088=>condition: exception raised?
+cond2093=>condition: except ValueError as exc
+sub2097=>subroutine: raise ValueError(f'{purpose} path must stay within {_LOCAL_ROOT_ENV}: {local_path}') from exc
+op2105=>operation: resolved = lexical.resolve(strict=require_exists)
+cond2102=>condition: exception raised?
+cond2107=>condition: except FileNotFoundError as exc
+sub2111=>subroutine: raise ValueError(f'{purpose} source does not exist: {local_path}') from exc
+cond2113=>condition: except OSError as exc
+cond2118=>operation: raise if  exc.errno != errno.ELOOP
+sub2128=>subroutine: raise ValueError(f'{purpose} path could not be resolved safely: {local_path}') from exc
+cond2130=>condition: except RuntimeError as exc
+sub2134=>subroutine: raise ValueError(f'{purpose} path could not be resolved safely: {local_path}') from exc
+cond2140=>operation: raise ValueError(f'{purpose} path must stay within {_LOCAL_ROOT_ENV}: {local_path}') if  not resolved.is_relative_to(root)
+op2150=>operation: source_stat: os.stat_result | None
+op2155=>operation: source_stat = os.stat(resolved, follow_symlinks=False)
+cond2152=>condition: exception raised?
+cond2157=>condition: except FileNotFoundError
+cond2162=>operation: raise ValueError(f'{purpose} source does not exist: {local_path}') from None if  require_exists
+op2172=>operation: source_stat = None
+cond2178=>operation: raise ValueError(f'{purpose} source must be a regular file or directory: {local_path}') if  source_stat is not None and (not (stat.S_ISREG(source_stat.st_mode) or stat.S_ISDIR(source_stat.st_mode)))
+io2191=>inputoutput: output: LocalPathContract(local_argument=str(relative) if relative.parts else '.', resolved_path=resolved, root=root, device=root_stat.st_dev, inode=root_stat.st_ino, source_device=source_stat.st_dev if source_stat is not None else None, source_inode=source_stat.st_ino if source_stat is not None else None, source_mode=source_stat.st_mode if source_stat is not None else None)
+e2189=>end: end function return
 
-op1195->op1197
-op1197->op1199
-op1199->cond1202
-cond1202(yes)->e1207
-cond1202(no)->op1213
-op1213->cond1216
-cond1216(yes)->sub1220
-sub1220->sub1225
-sub1225->cond1222
-cond1222(yes)->cond1227
-cond1227(yes)->sub1231
-cond1227(no)->cond1216
-cond1222(no)->cond1216
+op2010->op2012
+op2012->cond2015
+cond2015->cond2026
+cond2026->op2039
+op2039->cond2036
+cond2036(yes)->cond2041
+cond2041(yes)->cond2046
+cond2046->sub2056
+cond2041(no)->cond2058
+cond2058(yes)->sub2062
+cond2058(no)->op2067
+op2067->op2069
+op2069->op2074
+op2074->cond2071
+cond2071(yes)->sub2080
+sub2080->op2082
+op2082->op2084
+op2084->op2086
+op2086->op2091
+op2091->cond2088
+cond2088(yes)->cond2093
+cond2093(yes)->sub2097
+cond2093(no)->op2105
+op2105->cond2102
+cond2102(yes)->cond2107
+cond2107(yes)->sub2111
+cond2107(no)->cond2113
+cond2113(yes)->cond2118
+cond2118->sub2128
+cond2113(no)->cond2130
+cond2130(yes)->sub2134
+cond2130(no)->cond2140
+cond2140->op2150
+op2150->op2155
+op2155->cond2152
+cond2152(yes)->cond2157
+cond2157(yes)->cond2162
+cond2162->op2172
+op2172->cond2178
+cond2178->io2191
+io2191->e2189
+cond2157(no)->cond2178
+cond2152(no)->cond2178
+cond2102(no)->cond2140
+cond2088(no)->op2105
+cond2071(no)->sub2080
+cond2036(no)->op2067
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -253,7 +317,7 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
             Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>03d76cfd60adcffe</code>
+            Flow content SHA-256: <code>351eeb42d9565cc3</code>
           </p>
           <div id="canvas"></div>
         </div>

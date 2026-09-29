@@ -28,6 +28,16 @@ from ..inventory import (
 )
 from ..models import RunContext, utc_now
 
+# <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
+# Generated at (UTC): 2026-09-29T11:35:23Z
+# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
+# Flowchart(s) generated from this file:
+#   * ``_adopt_run_tagged_stacks`` -> ``diagrams/code_diagrams/scripts/live_release_validation/ownership/stacks._adopt_run_tagged_stacks.html``
+#     (PNG: ``diagrams/code_diagrams/scripts/live_release_validation/ownership/stacks._adopt_run_tagged_stacks.png``)
+# Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
+# <pyflowchart-code-diagram> END
+
+
 #: ``authority`` of a stack record adopted by run tag rather than prepared here.
 _RUN_TAG_ADOPTION_AUTHORITY = "run-tag-adoption"
 
