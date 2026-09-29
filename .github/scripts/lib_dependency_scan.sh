@@ -1523,22 +1523,55 @@ extract_workflow_env_pin() {
     | sort -u
 }
 
-# extract_crossplane_function_pin <manifest> <function-name>
+# extract_crossplane_function_packages <manifest> <function-name>
 #
-# Prints the tag of every Crossplane package reference
-# ``package: <registry>/<org>/<function-name>:<tag>`` in <manifest>, one per
-# line, de-duplicated and sorted (post-helm-crossplane.yaml pins
-# function-go-templating this way). The reference is an xpkg OCI package,
-# not a container ``image:``, so neither the manifest image sweep nor
-# Dependabot sees it. More than one line means two tags drifted apart.
-# Empty output when the manifest is absent or names no such package.
-extract_crossplane_function_pin() {
+# Prints every Crossplane package reference (``spec.package``) in <manifest>
+# whose repository is ``<registry>/<org>/<function-name>``, exactly as written,
+# one per line, de-duplicated and sorted. post-helm-crossplane.yaml pins
+# function-go-templating as ``<repo>:<tag>@sha256:<index digest>``. The
+# reference is an xpkg OCI package, not a container ``image:``, so neither the
+# manifest image sweep nor Dependabot sees it. The manifest is parsed as YAML,
+# not grepped, because the digest-pinned reference is too long for the
+# ``package:`` line and sits on the next one. GCO's ``{{TOKEN}}`` placeholders
+# are neutralised first, so an unrendered template still parses. Empty output
+# when the manifest is absent or unparseable, the name is blank, or no such
+# package is named.
+extract_crossplane_function_packages() {
   local manifest="$1" name="$2"
   [ -n "$name" ] || return 0
   [ -f "$manifest" ] || return 0
-  grep -hoE "^[[:space:]]*package:[[:space:]]*\"?[A-Za-z0-9._/-]+/${name}:[A-Za-z0-9._+-]+" \
-    "$manifest" 2>/dev/null \
-    | sed -E 's/.*:([A-Za-z0-9._+-]+)$/\1/' \
+  python3 -c "
+import re, sys, yaml
+try:
+    with open(sys.argv[1], encoding='utf-8') as f:
+        text = re.sub(r'\{\{[A-Za-z0-9_]+\}\}', 'placeholder', f.read())
+    documents = list(yaml.safe_load_all(text))
+except Exception:
+    sys.exit(0)
+found = set()
+for document in documents:
+    spec = document.get('spec') if isinstance(document, dict) else None
+    package = spec.get('package') if isinstance(spec, dict) else None
+    if not isinstance(package, str):
+        continue
+    last = package.strip().split('@', 1)[0].rsplit('/', 1)[-1]
+    if last.split(':', 1)[0] == sys.argv[2]:
+        found.add(package.strip())
+for package in sorted(found):
+    print(package)
+" "$manifest" "$name" 2>/dev/null
+}
+
+# extract_crossplane_function_pin <manifest> <function-name>
+#
+# Prints the release tag of every package reference
+# extract_crossplane_function_packages finds, one per line, de-duplicated and
+# sorted. The ``@sha256:`` digest is dropped, and a digest-only reference has
+# no tag, so it prints nothing. More than one line means two tags drifted
+# apart. Empty output under the same conditions as the package extractor.
+extract_crossplane_function_pin() {
+  extract_crossplane_function_packages "$1" "$2" \
+    | sed -nE 's/@sha256:[0-9a-f]{64}$//; s#^.*/[^/:@]+:([A-Za-z0-9._+-]+)$#\1#p' \
     | sort -u
 }
 

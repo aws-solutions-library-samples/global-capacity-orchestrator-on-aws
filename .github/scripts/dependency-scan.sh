@@ -491,15 +491,18 @@ fi
 echo "Checking AWS CLI runtime image (gco/services/inference_monitor.py)..."
 AWS_CLI_RUNTIME_IMAGE="$(extract_python_string_constant \
   AWS_CLI_IMAGE gco/services/inference_monitor.py)"
-# check_pinned_digest <repo:tag@sha256:digest> <origin label>
+# check_pinned_digest <repo:tag@sha256:digest> <origin label> [sweep]
 #
 # Shared digest-freshness check for every digest-pinned image the repository
 # commits: verify the tag's currently published manifest-list digest still
 # equals the committed one. A moved digest is a drift row (the tag was
 # re-pushed upstream — the pin is stale); an unreachable registry or an
-# implausible response marks the scan incomplete.
+# implausible response marks the scan incomplete. The tag also joins the
+# image sweep below unless <sweep> is ``no``, for a pin whose release drift
+# another section already reports (the Crossplane Function package's GitHub
+# release check), so the same release is not reported twice.
 check_pinned_digest() {
-  local pinned_ref="$1" origin="$2" parts repository tag committed published
+  local pinned_ref="$1" origin="$2" sweep="${3:-yes}" parts repository tag committed published
   if ! parts="$(split_pinned_image_ref "$pinned_ref")"; then
     mark_scan_incomplete "Could not parse an immutable image reference from ${origin}."
     return
@@ -507,7 +510,9 @@ check_pinned_digest() {
   repository="$(echo "$parts" | cut -d'|' -f1)"
   tag="$(echo "$parts" | cut -d'|' -f2)"
   committed="$(echo "$parts" | cut -d'|' -f3)"
-  printf '%s:%s\n' "$repository" "$tag" >> "$ALL_IMAGES"
+  if [ "$sweep" != "no" ]; then
+    printf '%s:%s\n' "$repository" "$tag" >> "$ALL_IMAGES"
+  fi
 
   if ! published="$(published_manifest_digest "${repository}:${tag}")"; then
     mark_scan_incomplete "Container manifest lookup failed for ${repository}:${tag}."
@@ -541,6 +546,22 @@ else
     [ -z "$pinned_ref" ] && continue
     check_pinned_digest "$pinned_ref" "live-validation smoke manifest"
   done <<< "$SMOKE_PINNED_REFS"
+fi
+
+# The Crossplane Function package post-helm-crossplane.yaml installs is pinned
+# by release tag AND image-index digest, because Crossplane re-resolves a bare
+# tag against the registry on every reconcile. Its release drift is the GitHub
+# release check's (CI tooling, below), so it stays out of the tag sweep; this
+# pass keeps the digest bound to the tag it names.
+echo "Checking the Crossplane function package digest (post-helm-crossplane.yaml)..."
+FUNCTION_PACKAGE_REFS="$(extract_crossplane_function_packages \
+  lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating)"
+if [ -z "$FUNCTION_PACKAGE_REFS" ]; then
+  mark_scan_incomplete "Could not parse the Crossplane function-go-templating package from post-helm-crossplane.yaml."
+else
+  while read -r package_ref; do
+    check_pinned_digest "$package_ref" "lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml" no
+  done <<< "$FUNCTION_PACKAGE_REFS"
 fi
 
 sort -u "$ALL_IMAGES" | while read -r img; do

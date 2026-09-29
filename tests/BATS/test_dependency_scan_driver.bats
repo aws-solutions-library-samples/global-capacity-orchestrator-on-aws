@@ -504,6 +504,7 @@ PY
             {
                 extract_python_string_constant AWS_CLI_IMAGE gco/services/inference_monitor.py
                 grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" scripts/live_release_validation/manifests/ 2>/dev/null | sed 's/^image: //'
+                extract_crossplane_function_packages lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating
             } | sort -u | while IFS= read -r ref; do
                 case "$ref" in *@sha256:*) echo "digest|${ref%@sha256:*}|${ref##*@sha256:}" ;; esac
             done
@@ -685,7 +686,7 @@ charts:
     use_oci: true
 YAML
     printf 'kind: Pod\nspec:\n  containers:\n    - image: busybox:1.38.0\n    - image: gco/api:1.0.0\n' > "$root/lambda/kubectl-applier-simple/manifests/10-probe.yaml"
-    printf 'kind: Function\nspec:\n  package: xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5\n' > "$root/lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml"
+    printf 'kind: Function\nspec:\n  package:\n    xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5@sha256:%s\n' "$DIGEST_B" > "$root/lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml"
     printf 'kind: Job\nspec:\n  containers:\n    - image: rayproject/ray:2.58.0\n    - image: busybox:latest\n' > "$root/examples/ray-job.yaml"
     printf 'kind: Pod\nspec:\n  containers:\n    - image: public.ecr.aws/docker/library/busybox:1.38.0@sha256:%s\n' "$DIGEST_B" > "$root/scripts/live_release_validation/manifests/smoke.yaml"
     cat > "$root/.pre-commit-config.yaml" <<'YAML'
@@ -760,6 +761,11 @@ report_path() {
     grep -q '^curl https://dl.k8s.io/release/stable-1.36.txt' "$CALLS"
     grep -q '^skopeo list-tags --retry-times 3 docker://docker.io/library/busybox' "$CALLS"
     grep -q '^skopeo inspect --raw docker://public.ecr.aws/aws-cli/aws-cli:2.36.41' "$CALLS"
+    # The Crossplane Function package's digest is bound to its tag, but the
+    # package stays out of the image sweep: its release drift is the GitHub
+    # release check's, and the sweep would report the same release twice.
+    grep -q '^skopeo inspect --raw docker://xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5' "$CALLS"
+    ! grep -q '^skopeo list-tags .*function-go-templating' "$CALLS"
     grep -q '^helm repo add keda https://kedacore.github.io/charts --force-update' "$CALLS"
     grep -q '^helm show chart oci://registry.k8s.io/kueue/charts/kueue' "$CALLS"
     grep -q '^aws eks describe-addon-versions --addon-name metrics-server --kubernetes-version 1.36' "$CALLS"
@@ -780,6 +786,7 @@ report_path() {
     [[ "$output" == *"  - .: aws-cdk 2.1140.0 -> 3.1140.0"* ]]
     [[ "$output" == *"  - busybox:1.38.0 -> 2.38.0"* ]]
     [[ "$output" == *"  - public.ecr.aws/aws-cli/aws-cli:2.36.41: committed digest does not match the tag"* ]]
+    [[ "$output" == *"  - xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5: committed digest does not match the tag (lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml)"* ]]
     [[ "$output" == *"  - keda (keda): 2.20.2 -> 3.20.2"* ]]
     [[ "$output" == *"  - kueue (kueue): 0.19.2 -> 1.19.2"* ]]
     [[ "$output" == *"  - metrics-server: v0.9.0-eksbuild.7 -> v1.9.0-eksbuild.7"* ]]
@@ -893,6 +900,7 @@ report_path() {
     [[ "$output" == *"INCOMPLETE: npm registry lookup failed or returned an invalid version for aws-cdk."* ]]
     [[ "$output" == *"INCOMPLETE: Container registry tag lookup failed for docker.io/library/busybox."* ]]
     [[ "$output" == *"INCOMPLETE: Container manifest lookup failed for public.ecr.aws/aws-cli/aws-cli:2.36.41."* ]]
+    [[ "$output" == *"INCOMPLETE: Container manifest lookup failed for xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5."* ]]
     [[ "$output" == *"INCOMPLETE: Helm repository refresh failed for keda (https://kedacore.github.io/charts)."* ]]
     [[ "$output" == *"INCOMPLETE: Helm OCI lookup failed for oci://registry.k8s.io/kueue/charts/kueue."* ]]
     [[ "$output" == *"EKS add-on lookup failed or returned an invalid version for eks-pod-identity-agent."* ]]
@@ -1169,6 +1177,7 @@ YAML
     [[ "$output" == *"INCOMPLETE: Could not parse the Mooncake default image from cli/images.py."* ]]
     [[ "$output" == *"INCOMPLETE: Could not parse an immutable AWS_CLI_IMAGE from gco/services/inference_monitor.py."* ]]
     [[ "$output" == *"INCOMPLETE: No digest-pinned smoke images found under scripts/live_release_validation/manifests/."* ]]
+    [[ "$output" == *"INCOMPLETE: Could not parse the Crossplane function-go-templating package from post-helm-crossplane.yaml."* ]]
     [[ "$output" == *"INCOMPLETE: lambda/helm-installer/charts.yaml is missing."* ]]
     [[ "$output" == *"Could not read EKS add-on pins from gco/stacks/regional_stack.py."* ]]
     [[ "$output" == *"Could not read AURORA_POSTGRES_VERSION from gco/stacks/constants.py."* ]]

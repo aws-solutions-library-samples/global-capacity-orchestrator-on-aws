@@ -1358,6 +1358,15 @@ def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
     assert "FUNCTION_GO_TEMPLATING_PIN=" in scanner
     assert "extract_crossplane_function_pin" in scanner
     assert '"crossplane-contrib/function-go-templating"' in scanner
+    # The package is also pinned by digest. The digest gets the same
+    # committed-vs-published check as every other digest pin, and ``no`` keeps
+    # the package out of the image sweep, which would report the GitHub
+    # release check's drift a second time.
+    assert "extract_crossplane_function_packages" in scanner
+    assert (
+        'check_pinned_digest "$package_ref" '
+        '"lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml" no'
+    ) in scanner
     assert "ARGOCD_PIN" not in scanner
     assert "extract_python_string_constant" in scanner
     assert "AWS_CLI_IMAGE gco/services/inference_monitor.py" in scanner
