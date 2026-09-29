@@ -297,9 +297,9 @@
       "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
     },
     "scripts/upgrade_validation/actions.py": {
-      "digest": "9b3205d46b4f18cd29912b322066633e036ae96feb293c6005c5cb6a9d26e72b",
-      "generated_at": "2026-09-29T11:35:23Z",
-      "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
+      "digest": "7b738682d6059da8ab997fc8827953267ebae6eacfd926bd5e280aac5e5a851d",
+      "generated_at": "2026-09-29T17:48:38Z",
+      "source_commit": "5ac48df61b8643924926baf6528255f8b55604a3"
     }
   }
 }
