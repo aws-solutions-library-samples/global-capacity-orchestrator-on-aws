@@ -26,7 +26,7 @@ WORKDIR /app
 # this remains the mechanism that ships fresh glibc/OpenSSL fixes.
 #
 # No OS packages are installed beyond the patched base.
-ARG APT_SECURITY_EPOCH=2026-09-12
+ARG APT_SECURITY_EPOCH=2026-09-30
 RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
     && apt-get update \
     && apt-get upgrade -y \

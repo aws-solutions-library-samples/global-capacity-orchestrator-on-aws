@@ -156,6 +156,48 @@ CVE-2026-69192 exp:2026-10-22
 # Advisory: https://avd.aquasec.com/nvd/cve-2026-73566
 CVE-2026-73566 exp:2026-11-14
 
+# CVE-2026-102276 (GHSA-6j4f-fj2g-mc7p) and CVE-2026-102278
+# (GHSA-qhr7-859c-m2p7): brace-expansion denial of service by stack
+# exhaustion, through recursion in parseCommaParts() and on nested brace
+# groups. Fixed upstream in brace-expansion 5.0.10 and 5.0.11. Same vendored
+# copy as CVE-2026-14257 and CVE-2026-69152 above: npm ships brace-expansion
+# 5.0.7 inside its own node_modules in the dev image, surfaced by
+# security:trivy:container-scan on Dockerfile.dev.
+#
+# CVE-2026-19534 (GHSA-rfgv-xxqx-mfg5): the undici WebSocket client throws an
+# uncaught TypeError, ending the process, when a server's 101 response names
+# a subprotocol the client never requested. Fixed upstream in undici 6.28.1.
+# Present only as undici 6.27.0 vendored inside npm's own node_modules for
+# node-gyp, which uses undici's fetch to download Node headers and never opens
+# a WebSocket.
+#
+# Not introduced by any change of ours: all three were published on
+# 2026-09-29. The Security workflow was green on PR #429's head (3335db58) at
+# 2026-09-30T01:56Z and red on its squash merge 50d86cd2, an identical tree,
+# at 09:24Z. The advisories reached the Trivy DB in between.
+#
+# Not clearable by a pin bump: checked 2026-09-30, npm 12.1.0 (the latest
+# release) vendors brace-expansion 5.0.9 and undici 6.28.0, so bumping ARG
+# NPM_VERSION from 12.0.2 clears none of the three. The root npm graph's
+# separate brace-expansion copy, bundled by aws-cdk-lib, is suppressed in
+# .npm-audit-ignore.
+#
+# Low runtime risk: the brace expansion runs on contributor/CI-authored globs
+# in npm's own CLI handling, not untrusted remote input, and the undici path
+# needs a WebSocket connection npm never makes. The dev image is a
+# contributor/CI tool that is never deployed to a cluster.
+#
+# Clears when npm ships a release that re-vendors brace-expansion >= 5.0.11
+# and undici >= 6.28.1: bump ARG NPM_VERSION in Dockerfile.dev (plus the
+# packageManager pins the consistency check holds in lockstep) and drop these
+# entries.
+# Advisories: https://avd.aquasec.com/nvd/cve-2026-102276
+#             https://avd.aquasec.com/nvd/cve-2026-102278
+#             https://avd.aquasec.com/nvd/cve-2026-19534
+CVE-2026-102276 exp:2026-10-22
+CVE-2026-102278 exp:2026-10-22
+CVE-2026-19534 exp:2026-10-22
+
 # CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
 # (msgpack 1.1.2, fixed 1.2.1) — reported by security:trivy:container-scan
 # against the built dev image, under its python-pkg target.
