@@ -20,4 +20,34 @@
 #   package-dir|package|advisory|node-path|exp:YYYY-MM-DD
 # =============================================================================
 
-# (no active suppressions)
+# GHSA-6j4f-fj2g-mc7p (CVE-2026-102276, high), GHSA-qhr7-859c-m2p7
+# (CVE-2026-102278, high) and GHSA-q2hr-2g5m-vwhr (CVE-2026-102277, moderate):
+# three brace-expansion denial-of-service advisories published 2026-09-29.
+# Two exhaust the stack through recursion (in parseCommaParts() and on nested
+# brace groups); the third makes `{a},b}`-shaped input expand in quadratic
+# time. On the 5.x line they are fixed in 5.0.10, 5.0.11 and 5.0.12.
+#
+# The one reported copy is brace-expansion 5.0.9, which aws-cdk-lib bundles
+# (minimatch 10.2.5 -> brace-expansion) inside its published tarball. The root
+# graph reaches aws-cdk-lib only through cdk-dia, the infrastructure diagram
+# generator. A bundled copy is out of reach of `npm audit fix` and `overrides`,
+# and Dependabot's security update fails on it for the same reason.
+#
+# Not clearable by a pin bump: checked 2026-09-30, aws-cdk-lib 2.271.0 (the
+# latest release) still bundles brace-expansion 5.0.9. The upstream fix is
+# https://github.com/aws/aws-cdk/pull/38929.
+#
+# Low risk: cdk-dia's runtime code never loads aws-cdk-lib. It matches the
+# construct names in the synthesized cdk.out/tree.json as strings, and its only
+# import of the library is a TypeScript type declaration. Diagram generation is
+# contributor/CI tooling that never runs in a deployed service, and the impact
+# of all three advisories is availability only.
+#
+# Remove these entries and refresh package-lock.json as soon as an aws-cdk-lib
+# release bundles brace-expansion >= 5.0.12.
+# Advisories: https://github.com/advisories/GHSA-6j4f-fj2g-mc7p
+#             https://github.com/advisories/GHSA-qhr7-859c-m2p7
+#             https://github.com/advisories/GHSA-q2hr-2g5m-vwhr
+.|brace-expansion|GHSA-6j4f-fj2g-mc7p|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-10-30
+.|brace-expansion|GHSA-q2hr-2g5m-vwhr|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-10-30
+.|brace-expansion|GHSA-qhr7-859c-m2p7|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-10-30
