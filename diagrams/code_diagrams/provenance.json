@@ -43,8 +43,13 @@
     },
     "cli/stacks.py": {
       "digest": "d32fc76a52084bb90d9520d7490c2619cba6fe936045223fffcdd2792e2dc383",
-      "generated_at": "2026-09-28T16:13:31Z",
-      "source_commit": "b6b7fa90d82ebed9308fbba2dc596c2d2d57a1ba"
+      "generated_at": "2026-09-29T11:35:23Z",
+      "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
+    },
+    "cli/upgrade.py": {
+      "digest": "250666b92297af33ca69a20ac036804aad5c06234d609bce2a3044b0da689f3c",
+      "generated_at": "2026-09-29T11:35:23Z",
+      "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
     },
     "gco/services/api_routes/inference_proxy.py": {
       "digest": "15a888305d84b0f156bf210ae5fe7c13641783c7d08d6e254dd65e24b7b55213",
@@ -145,6 +150,11 @@
       "digest": "c085762d44c367b22fdf200ee1764c38d26056111aa7f7fa87429b810695b689",
       "generated_at": "2026-09-18T02:11:36Z",
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+    },
+    "gco_mcp/local_data.py": {
+      "digest": "ed73278b984714962fbeee97a03d56c1b5e0b8fcc34613b841e2279b42fe3a5f",
+      "generated_at": "2026-09-29T11:35:23Z",
+      "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
     },
     "gco_mcp/mission/_engine_factory.py": {
       "digest": "59e558835b0d01951c99f515317f371297dfa5ecb02d2bd1dcd16fd8d7948a1e",
@@ -248,8 +258,8 @@
     },
     "lambda/proxy-shared/proxy_utils.py": {
       "digest": "f14c1b41e97d99ae95193ea4b3988cdf61c09c0d6ee20abd5694756eb4f75686",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "generated_at": "2026-09-29T11:35:23Z",
+      "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
     },
     "lambda/regional-api-proxy/handler.py": {
       "digest": "bb228885aa82fa5931607f0e5155e97a927bbe4652e6dee2d632bc727aea0c27",
@@ -280,6 +290,16 @@
       "digest": "05d91cb1897ed7adbda92ab784bbcc7ac15561811aef012d07eea01a24509138",
       "generated_at": "2026-09-18T02:11:36Z",
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+    },
+    "scripts/live_release_validation/ownership/stacks.py": {
+      "digest": "00f2384569fbe08fef2f0276c97f7f6a3d6075598125ee87d4bc100719bfb3ef",
+      "generated_at": "2026-09-29T11:35:23Z",
+      "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
+    },
+    "scripts/upgrade_validation/actions.py": {
+      "digest": "7b738682d6059da8ab997fc8827953267ebae6eacfd926bd5e280aac5e5a851d",
+      "generated_at": "2026-09-29T17:48:38Z",
+      "source_commit": "5ac48df61b8643924926baf6528255f8b55604a3"
     }
   }
 }

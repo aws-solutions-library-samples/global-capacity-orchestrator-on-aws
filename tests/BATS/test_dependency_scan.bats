@@ -2794,6 +2794,91 @@ YAML
     [ "$(printf '%s\n' "$output" | tail -1)" = "v0.13.0" ]
     rm -rf "$tmpdir"
 }
+@test "extract_crossplane_function_pin: the tag of a digest-pinned reference, nothing for a digest-only one" {
+    local digest
+    digest="$(printf 'a%.0s' {1..64})"
+    tmpdir="$(mktemp -d)"
+    printf 'spec:\n  package:\n    xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5@sha256:%s\n' \
+        "$digest" > "$tmpdir/pinned.yaml"
+    run extract_crossplane_function_pin "$tmpdir/pinned.yaml" function-go-templating
+    [ "$status" -eq 0 ]
+    [ "$output" = "v0.12.5" ]
+    printf 'spec:\n  package: xpkg.crossplane.io/crossplane-contrib/function-go-templating@sha256:%s\n' \
+        "$digest" > "$tmpdir/digest-only.yaml"
+    run extract_crossplane_function_pin "$tmpdir/digest-only.yaml" function-go-templating
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+# ── extract_crossplane_function_packages ────────────────────────────────────
+@test "extract_crossplane_function_packages: reads the shipped reference, pinned by tag and digest" {
+    run extract_crossplane_function_packages \
+        lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^xpkg\.crossplane\.io/crossplane-contrib/function-go-templating:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]]
+    # The shape the scan's digest-freshness check takes apart.
+    run split_pinned_image_ref "$output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "xpkg.crossplane.io/crossplane-contrib/function-go-templating|v"* ]]
+}
+@test "extract_crossplane_function_packages: empty for a missing manifest, a blank name, bad YAML or another package" {
+    run extract_crossplane_function_packages /nonexistent/post-helm-crossplane.yaml function-go-templating
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_crossplane_function_packages \
+        lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    tmpdir="$(mktemp -d)"
+    printf 'spec:\n  package: [unterminated\n' > "$tmpdir/broken.yaml"
+    run extract_crossplane_function_packages "$tmpdir/broken.yaml" function-go-templating
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # A function whose name merely ends in the one asked for is another package.
+    printf 'spec:\n  package: xpkg.crossplane.io/crossplane-contrib/my-function-go-templating:v1.0.0\n' \
+        > "$tmpdir/other.yaml"
+    run extract_crossplane_function_packages "$tmpdir/other.yaml" function-go-templating
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+@test "extract_crossplane_function_packages: any YAML layout, placeholders, non-package documents and dedup" {
+    local digest
+    digest="$(printf 'b%.0s' {1..64})"
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/functions.yaml" <<YAML
+kind: Function
+metadata:
+  labels:
+    gco.io/crossplane-enabled: {{CROSSPLANE_ENABLED}}
+spec:
+  package:
+    xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5@sha256:${digest}
+---
+kind: Function
+spec:
+  package: "xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5@\\
+    sha256:${digest}"
+---
+kind: Function
+spec:
+  package: xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.13.0
+---
+kind: ClusterRole
+rules: []
+---
+- not a mapping
+---
+kind: Function
+spec:
+  package: 7
+YAML
+    run extract_crossplane_function_packages "$tmpdir/functions.yaml" function-go-templating
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ]
+    [ "$(printf '%s\n' "$output" | head -1)" = "xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5@sha256:${digest}" ]
+    [ "$(printf '%s\n' "$output" | tail -1)" = "xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.13.0" ]
+    rm -rf "$tmpdir"
+}
 # ── extract_kind_pins ───────────────────────────────────────────────────────
 
 @test "extract_kind_pins: reads kind + node image from integration-tests.yml" {

@@ -52,7 +52,7 @@ def test_top_level_docs_index_is_exact() -> None:
     indexed = {
         target for target in re.findall(r"\]\(([A-Z][A-Z0-9_]+\.md)\)", index) if "/" not in target
     }
-    assert len(actual) == 35
+    assert len(actual) == 36
     assert indexed == actual, (
         f"docs/README.md drifted; missing={sorted(actual - indexed)!r}, "
         f"stale={sorted(indexed - actual)!r}"

@@ -533,10 +533,15 @@ def test_kind_examples_prefetches_charts_but_keeps_mutations_fail_fast() -> None
 def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> None:
     """The platform add-ons job installs the pinned charts from local archives.
 
-    Registry pulls retry; installs and every assertion stay single-shot. The
-    chart values and post-Helm manifests come from the helpers the regional
-    stack calls, Argo CD syncs this commit, and both dashboards are captured
-    by the CLI's own screenshot code and uploaded even when a later step fails.
+    Registry pulls retry; installs and every assertion stay single-shot. Every
+    image a chart runs is preloaded into the node, with retry, before that
+    chart's install: each preload renders the chart with the install's exact
+    values and loads into the job's own cluster, so ``helm install --wait``
+    never waits on a kubelet pull (ECR Public's anonymous throttle kept failing
+    Argo CD's Redis that way). The chart values and post-Helm manifests come
+    from the helpers the regional stack calls, Argo CD syncs this commit, and
+    both dashboards are captured by the CLI's own screenshot code and uploaded
+    even when a later step fails.
     """
     workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
     job = workflow["jobs"]["integration-kind-platform-addons"]
@@ -616,6 +621,50 @@ def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> 
         < order.index("Check and capture the Crossview dashboard with the gco crossplane code")
         < order.index("Tear Crossplane down the way the stack does")
         < order.index("Upload the dashboard captures")
+    )
+
+    kind_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("helm/kind-action")
+    )
+    cluster = kind_step["with"]["cluster_name"]
+    assert cluster == "gco-platform-addons"
+    render_name = "Render the Argo CD chart values and post-Helm manifests like the stack"
+    argocd_preload = "Preload the images the argo-cd chart runs into kind (with retry)"
+    # The argo-cd preload renders with the stack's override, so it follows that render.
+    assert order.index(render_name) < order.index(argocd_preload)
+    values_flags = re.compile(r'--values "[^"]+"')
+    for preload_name, install_name, template in (
+        (
+            argocd_preload,
+            "Install the pinned argo-cd chart with the shipped values",
+            'helm template argocd "${ARGOCD_CHART_ARCHIVE}"',
+        ),
+        (
+            "Preload the images the crossplane and crossview charts run into kind (with retry)",
+            "Install the pinned crossplane and crossview charts with the shipped values",
+            'helm template "${chart}" "${!archive_var}"',
+        ),
+    ):
+        preload_run = by_name[preload_name]["run"]
+        install_run = by_name[install_name]["run"]
+        assert steps.index(kind_step) < order.index(preload_name) < order.index(install_name)
+        assert template in preload_run, preload_name
+        # The render is the install's: the same values files, in the same order.
+        assert values_flags.findall(preload_run) == values_flags.findall(install_run), preload_name
+        assert values_flags.findall(install_run), install_name
+        assert (
+            f"python3 .github/scripts/preload_kind_images.py --cluster {cluster}" in preload_run
+        ), preload_name
+        assert not re.search(r"\bhelm (?:install|upgrade)\b", preload_run), preload_name
+        # The retry lives in the preload; the install it precedes stays single-shot.
+        assert len(re.findall(r"^\s*helm install\b", install_run, re.MULTILINE)) == 1, install_name
+        assert "retry" not in install_run.lower(), install_name
+        assert "helm upgrade" not in install_run, install_name
+    assert (
+        "for chart in crossplane crossview; do"
+        in by_name[
+            "Preload the images the crossplane and crossview charts run into kind (with retry)"
+        ]["run"]
     )
 
 
@@ -1118,6 +1167,7 @@ def test_kind_examples_smoke_serves_mlflow_over_verified_https() -> None:
     install = "Install pinned trust-manager with shipped values"
     upgrade = "Re-run the trust-manager install as an upgrade (idempotency contract)"
     mlflow = "Install pinned mlflow chart with shipped values"
+    stage = "Stage the TLS sidecar's pinned interpreter under a local tag (with retry)"
     publish = "Publish the MLflow CA bundle and serve MLflow over verified HTTPS"
     example = "Run the REAL mlflow tracking example over verified HTTPS as the processor SA"
     assert (
@@ -1126,6 +1176,7 @@ def test_kind_examples_smoke_serves_mlflow_over_verified_https() -> None:
         < order.index(upgrade)
         < order.index("Issue the shipped internal PKI with the pinned cert-manager")
         < order.index("Prove the tenant write fence in the real API server")
+        < order.index(stage)
         < order.index(mlflow)
         < order.index("Apply the post-Helm mlflow network policies")
         < order.index("Probe mlflow host validation (allowed 200 / arbitrary 403 / health exempt)")
@@ -1158,8 +1209,25 @@ def test_kind_examples_smoke_serves_mlflow_over_verified_https() -> None:
     assert 'manifest_processor_image=SimpleNamespace(image_uri="manifest-processor:ci")' in run
     assert 'sidecar["name"] == "mlflow-tls-proxy"' in run
     # The CI substitution is the carrier only: the pinned interpreter image the
-    # inference monitor uses, running the shipped program from a ConfigMap.
-    assert "from gco.services.inference_monitor import ENDPOINT_TLS_PROXY_IMAGE" in run
+    # inference monitor uses, running the shipped program from a ConfigMap. It
+    # is staged on the node by digest under a local tag and never pulled, so an
+    # ECR Public limit cannot fail the rollout.
+    kind_step = next(
+        step for step in steps if str(step.get("uses", "")).startswith("helm/kind-action")
+    )
+    cluster = kind_step["with"]["cluster_name"]
+    assert steps.index(kind_step) < order.index(stage)
+    local_image = workflow["jobs"]["integration-kind-examples-smoke"]["env"][
+        "CI_TLS_PROXY_LOCAL_IMAGE"
+    ]
+    assert re.fullmatch(r"[a-z0-9-]+:[a-z0-9.-]+", local_image), local_image
+    staged = by_name[stage]["run"]
+    assert "from gco.services.inference_monitor import ENDPOINT_TLS_PROXY_IMAGE" in staged
+    assert f"python3 .github/scripts/preload_kind_images.py --cluster {cluster}" in staged
+    assert '--pinned "${image}=${CI_TLS_PROXY_LOCAL_IMAGE}"' in staged
+    assert 'sidecar["image"] = os.environ["CI_TLS_PROXY_LOCAL_IMAGE"]' in run
+    assert 'sidecar["imagePullPolicy"] = "Never"' in run
+    assert "ENDPOINT_TLS_PROXY_IMAGE" not in run
     assert "--from-file=tls_proxy.py=gco/services/tls_proxy.py" in run
     assert 'sidecar["command"] = ["python3", "/etc/gco-tls-proxy/tls_proxy.py"]' in run
     assert '"nodeSelector": values["nodeSelector"]' in run
@@ -1290,6 +1358,15 @@ def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
     assert "FUNCTION_GO_TEMPLATING_PIN=" in scanner
     assert "extract_crossplane_function_pin" in scanner
     assert '"crossplane-contrib/function-go-templating"' in scanner
+    # The package is also pinned by digest. The digest gets the same
+    # committed-vs-published check as every other digest pin, and ``no`` keeps
+    # the package out of the image sweep, which would report the GitHub
+    # release check's drift a second time.
+    assert "extract_crossplane_function_packages" in scanner
+    assert (
+        'check_pinned_digest "$package_ref" '
+        '"lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml" no'
+    ) in scanner
     assert "ARGOCD_PIN" not in scanner
     assert "extract_python_string_constant" in scanner
     assert "AWS_CLI_IMAGE gco/services/inference_monitor.py" in scanner

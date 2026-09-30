@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 
 from .artifact_io import (
     REPORT_FILENAMES as _REPORT_FILENAMES,
@@ -107,6 +107,12 @@ def atomic_write_json(path: Path, value: Any) -> None:
 @dataclass(frozen=True)
 class RunSettings:
     """Immutable operator inputs for one live validation run."""
+
+    #: Whether this harness may record and honor run-tag adoption authority
+    #: for stacks (``ownership/stacks.py``). Only the upgrade harness, whose
+    #: stacks are deployed by a ``gco`` subprocess rather than change sets the
+    #: harness prepares, opts in; a class attribute, so no flag can enable it.
+    allows_run_tag_adoption: ClassVar[bool] = False
 
     run_id: str
     repo_root: Path

@@ -1,9 +1,9 @@
 # GCO Code Flowcharts
 
-<!-- Generated at (UTC): 2026-09-28T16:13:31Z -->
-<!-- Generated from Git commit: b6b7fa90d82ebed9308fbba2dc596c2d2d57a1ba -->
-*Generated at (UTC): `2026-09-28T16:13:31Z`.*
-*Generated from Git commit: `b6b7fa90d82ebed9308fbba2dc596c2d2d57a1ba`.*
+<!-- Generated at (UTC): 2026-09-29T17:48:38Z -->
+<!-- Generated from Git commit: 5ac48df61b8643924926baf6528255f8b55604a3 -->
+*Generated at (UTC): `2026-09-29T17:48:38Z`.*
+*Generated from Git commit: `5ac48df61b8643924926baf6528255f8b55604a3`.*
 
 This directory holds auto-generated control-flow diagrams for the
 Python source files listed below. Each target produces an interactive
@@ -115,6 +115,8 @@ has multiple charted entry points.
   - Image mirror into project-scoped ECR (plan, strategy, auth, per-image copy, #139) &mdash; `cli/_image_mirror.py::mirror_images` &mdash; [HTML](./cli/_image_mirror.mirror_images.html) · [PNG](./cli/_image_mirror.mirror_images.png)
   - gco stacks deploy — pre-deploy image mirror gate (regional-only, #139) &mdash; `cli/stacks.py::StackManager._mirror_images_if_enabled` &mdash; [HTML](./cli/stacks.StackManager__mirror_images_if_enabled.html) · [PNG](./cli/stacks.StackManager__mirror_images_if_enabled.png)
   - gco jobs logs — TrainJob rank resolution and CloudWatch fallback chain &mdash; `cli/jobs.py::JobManager.get_job_logs` &mdash; [HTML](./cli/jobs.JobManager_get_job_logs.html) · [PNG](./cli/jobs.JobManager_get_job_logs.png)
+  - gco upgrade stack cycle (asset gate, retried teardown, control-plane update + regional recreate) &mdash; `cli/upgrade.py::run_stack_cycle` &mdash; [HTML](./cli/upgrade.run_stack_cycle.html) · [PNG](./cli/upgrade.run_stack_cycle.png)
+  - Strict change-set execution (identity, type, and tag fencing; no-op and resume authority) &mdash; `cli/stacks.py::StackManager._execute_prepared_change_set` &mdash; [HTML](./cli/stacks.StackManager__execute_prepared_change_set.html) · [PNG](./cli/stacks.StackManager__execute_prepared_change_set.png)
 
 - **`cli/commands/`**
   - Autopilot launch planner (engine, model, MCP, imports, resume) &mdash; `cli/commands/autopilot_cmd.py::_plan` &mdash; [HTML](./cli/commands/autopilot_cmd._plan.html) · [PNG](./cli/commands/autopilot_cmd._plan.png)
@@ -158,6 +160,7 @@ has multiple charted entry points.
 
 - **`gco_mcp/`**
   - MCP audit_logged decorator (sync + async dispatch, Context capture) &mdash; `gco_mcp/audit.py::audit_logged` &mdash; [HTML](./gco_mcp/audit.audit_logged.html) · [PNG](./gco_mcp/audit.audit_logged.png)
+  - MCP local-data path boundary (pinned root, traversal and symlink-escape rejection) &mdash; `gco_mcp/local_data.py::resolve_local_path` &mdash; [HTML](./gco_mcp/local_data.resolve_local_path.html) · [PNG](./gco_mcp/local_data.resolve_local_path.png)
 
 - **`gco_mcp/mission/`**
   - Mission iteration loop (propose -> execute -> observe -> evaluate -> decide) &mdash; `gco_mcp/mission/engine.py::MissionEngine.run_iteration` &mdash; [HTML](./gco_mcp/mission/engine.MissionEngine_run_iteration.html) · [PNG](./gco_mcp/mission/engine.MissionEngine_run_iteration.png)
@@ -212,6 +215,7 @@ has multiple charted entry points.
 
 - **`lambda/proxy-shared/`**
   - Proxy request-bound HMAC envelope construction &mdash; `lambda/proxy-shared/proxy_utils.py::build_signed_headers` &mdash; [HTML](./lambda/proxy-shared/proxy_utils.build_signed_headers.html) · [PNG](./lambda/proxy-shared/proxy_utils.build_signed_headers.png)
+  - Proxy upstream forwarding (HTTPS-only target, one deadline, safe-method retries, TLS fail-closed) &mdash; `lambda/proxy-shared/proxy_utils.py::forward_request` &mdash; [HTML](./lambda/proxy-shared/proxy_utils.forward_request.html) · [PNG](./lambda/proxy-shared/proxy_utils.forward_request.png)
 
 - **`lambda/regional-api-proxy/`**
   - Regional API Gateway Proxy Lambda &mdash; `lambda/regional-api-proxy/handler.py::lambda_handler` &mdash; [HTML](./lambda/regional-api-proxy/handler.lambda_handler.html) · [PNG](./lambda/regional-api-proxy/handler.lambda_handler.png)
@@ -230,3 +234,11 @@ has multiple charted entry points.
 
 - **`lambda/vector-ingest/`**
   - Vector-store corpus ingest (S3 notification -> chunk, embed, write items) &mdash; `lambda/vector-ingest/handler.py::lambda_handler` &mdash; [HTML](./lambda/vector-ingest/handler.lambda_handler.html) · [PNG](./lambda/vector-ingest/handler.lambda_handler.png)
+
+### `scripts/`
+
+- **`scripts/live_release_validation/ownership/`**
+  - Run-tag stack adoption (exact tag, creation window, replaceable workload generations) &mdash; `scripts/live_release_validation/ownership/stacks.py::_adopt_run_tagged_stacks` &mdash; [HTML](./scripts/live_release_validation/ownership/stacks._adopt_run_tagged_stacks.html) · [PNG](./scripts/live_release_validation/ownership/stacks._adopt_run_tagged_stacks.png)
+
+- **`scripts/upgrade_validation/`**
+  - Upgrade-validation upgrade phase (plan check, adoption window, settle, resume) &mdash; `scripts/upgrade_validation/actions.py::action_upgrade` &mdash; [HTML](./scripts/upgrade_validation/actions.action_upgrade.html) · [PNG](./scripts/upgrade_validation/actions.action_upgrade.png)

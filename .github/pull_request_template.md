@@ -34,6 +34,7 @@ the label; no label needs applying by hand. -->
 - [ ] New tests added for new behavior
 - [ ] Ran the change against a real AWS account (describe below)
 - [ ] If `examples/` changed: `gco examples validate --static-only` passes, and a live `gco examples validate --examples <changed>` run backs any behavior change (sanitized summary below; see docs/EXAMPLE_VALIDATION.md)
+- [ ] If the change can affect upgrading from the previous release: a `gco release validate-upgrade` run for this SHA backs it (sanitized summary below; see docs/UPGRADE_VALIDATION.md)
 
 <!-- If deployed to a real account, note what was verified. -->
 

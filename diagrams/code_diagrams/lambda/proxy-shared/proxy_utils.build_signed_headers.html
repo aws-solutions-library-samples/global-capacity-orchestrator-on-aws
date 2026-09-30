@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="67425b8ccd4d2b61">
+        <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
+        <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
+        <meta name="gco-flow-digest" content="7d8233288f43ab01">
         <title>Proxy request-bound HMAC envelope construction</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,22 +208,22 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3272=>operation: 'Build short-lived request authentication without transmitting the signing key.'
-op3274=>operation: timestamp = str(int(time.time()))
-op3276=>operation: nonce = secrets.token_hex(16)
-op3278=>operation: content_hash = hashlib.sha256((body or '').encode('utf-8')).hexdigest()
-op3280=>operation: canonical = '\n'.join(['v1', timestamp, nonce, http_method.upper(), _request_target(target_url), content_hash])
-op3282=>operation: signature = hmac.new(signing_key.encode('utf-8'), canonical.encode('utf-8'), hashlib.sha256).hexdigest()
-io3287=>inputoutput: output: {'x-gco-signature-version': 'v1', 'x-gco-signature': signature, 'x-gco-timestamp': timestamp, 'x-gco-nonce': nonce, 'x-gco-content-sha256': content_hash}
-e3285=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1175=>operation: 'Build short-lived request authentication without transmitting the signing key.'
+op1177=>operation: timestamp = str(int(time.time()))
+op1179=>operation: nonce = secrets.token_hex(16)
+op1181=>operation: content_hash = hashlib.sha256((body or '').encode('utf-8')).hexdigest()
+op1183=>operation: canonical = '\n'.join(['v1', timestamp, nonce, http_method.upper(), _request_target(target_url), content_hash])
+op1185=>operation: signature = hmac.new(signing_key.encode('utf-8'), canonical.encode('utf-8'), hashlib.sha256).hexdigest()
+io1190=>inputoutput: output: {'x-gco-signature-version': 'v1', 'x-gco-signature': signature, 'x-gco-timestamp': timestamp, 'x-gco-nonce': nonce, 'x-gco-content-sha256': content_hash}
+e1188=>end: end function return
 
-op3272->op3274
-op3274->op3276
-op3276->op3278
-op3278->op3280
-op3280->op3282
-op3282->io3287
-io3287->e3285
+op1175->op1177
+op1177->op1179
+op1179->op1181
+op1181->op1183
+op1183->op1185
+op1185->io1190
+io1190->e1188
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -233,17 +233,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-09-29T11:35:23Z -->
+        <!-- Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-09-29T11:35:23Z">2026-09-29T11:35:23Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>67425b8ccd4d2b61</code>
+            Flow content SHA-256: <code>7d8233288f43ab01</code>
           </p>
           <div id="canvas"></div>
         </div>

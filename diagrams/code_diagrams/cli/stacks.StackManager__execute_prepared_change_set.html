@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
+        <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
+        <meta name="gco-flow-digest" content="3da1ee489a505075">
+        <title>Strict change-set execution (identity, type, and tag fencing; no-op and resume authority)</title>
+        <style type="text/css">
+          .end-element { fill : #FFCCFF; }
+        </style>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/raphael/2.3.0/raphael.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/flowchart/1.17.1/flowchart.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.1/js/bootstrap.bundle.min.js"></script>
+        <!-- <script src="../release/flowchart.min.js"></script> -->
+        <script>
+
+            window.onload = function () {
+                var btn = document.getElementById("run"),
+                    cd = document.getElementById("code"),
+                    chart;
+
+                (btn.onclick = function () {
+                    var code = cd.value;
+
+                    if (chart) {
+                      chart.clean();
+                    }
+
+                    chart = flowchart.parse(code);
+                    chart.drawSVG('canvas', {
+                      'x': 0,
+                      'y': 0,
+                      'line-width': 3,
+                      //'maxWidth': 15,//ensures the flowcharts fits within a certain width
+                      'line-length': 50,
+                      'text-margin': 10,
+                      'font-size': 14,
+                      'font': 'normal',
+                      'font-family': 'Helvetica',
+                      'font-weight': 'normal',
+                      'font-color': 'black',
+                      'line-color': 'black',
+                      'element-color': 'black',
+                      'fill': 'white',
+                      'yes-text': 'yes',
+                      'no-text': 'no',
+                      'arrow-end': 'block',
+                      'scale': 1,
+                      'symbols': {
+                        'start': {
+                          'font-size': 14,
+                          'font-color': 'yellow',
+                          'element-color': 'blue',
+                          'fill': 'green',
+                          'class': 'start-element'
+                        },
+                        'inputoutput': {
+                          'font-color': 'black',
+                          'element-color': 'black',
+                          'fill': 'bisque'
+                        },
+                        'operation': {
+                          'font-color': 'black',
+                          'element-color': 'black',
+                          'fill': 'linen'
+                        },
+                        'subroutine': {
+                          'font-color': 'black',
+                          'element-color': 'blue',
+                          'fill': 'lightgreen'
+                        },
+                        'condition': {
+                          'font-color': 'red',
+                          'element-color': 'black',
+                          'fill': 'yellow'
+                        },
+                        'end':{
+                          'font-size': 20,
+                          'class': 'end-element'
+                        }
+                      },
+                      'flowstate' : {
+                        //'past' : { 'fill' : '#CCCCCC', 'font-size' : 12},
+                        //'current' : {'fill' : 'yellow', 'font-color' : 'red', 'font-weight' : 'bold'},
+                        //'future' : { 'fill' : '#FFFF99'},
+                        'request' : { 'fill' : 'blue'},
+                        'invalid': {'fill' : '#444444'},
+                        'approved' : { 'fill' : '#58C4A3', 'font-size' : 12, 'yes-text' : 'APPROVED', 'no-text' : 'n/a' },
+                        'rejected' : { 'fill' : '#C45879', 'font-size' : 12, 'yes-text' : 'n/a', 'no-text' : 'REJECTED' }
+                      }
+                    });
+                    //create base64 encoding of SVG to generate download link for title(without html or htm).SVG
+                    var currentCanvasDIV = document.getElementById('canvas')
+                    var currentDrawSVG = currentCanvasDIV.innerHTML.replaceAll('ë','e');
+
+                    const OUTsvgBASE64 = btoa(currentDrawSVG)
+                    doctitle = document.title.replace('.html','');
+                    doctitle = doctitle.replace('.htm','');
+
+
+                    var currentCanvasDIV = document.getElementById('canvas')
+                    var currentDrawSVG = currentCanvasDIV.innerHTML.replaceAll('ë','e');
+                    svgSource = currentDrawSVG
+                    svgXML = currentDrawSVG;
+                    // Use SVG Height and Width from the SVG XML to set canvas size
+                    svgXMLsubstringHeight = svgXML.substring(svgXML.indexOf('height='), svgXML.indexOf('version='));
+                    svgXMLsubstringWidth = svgXML.substring(svgXML.indexOf('width='), svgXML.indexOf('xmlns='));
+                    HeightValue = svgXMLsubstringHeight.substring(svgXMLsubstringHeight.indexOf('"')+1,svgXMLsubstringHeight.lastIndexOf('"'));
+                    WidthValue = svgXMLsubstringWidth.substring(svgXMLsubstringWidth.indexOf('"')+1,svgXMLsubstringWidth.lastIndexOf('"'));
+                    HeightValueInt = Math.round(HeightValue)
+                    WidthValueInt = Math.round(WidthValue)
+                    // setup input for base64SvgToBase64Png
+                    let svgSrc = "data:image/svg+xml;base64,"+OUTsvgBASE64;
+                    var pngBase
+                    imageUtil.base64SvgToBase64Png(svgSrc, WidthValueInt, HeightValueInt).then(pngSrc => {
+                    pngBase = pngSrc
+                    // output download link for base64 PNG converted on download from base64
+                    var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
+                    document.getElementById("pngbase64").innerHTML=pngOutHtml;
+                    });
+                    // output download link for base64 SVG converted on download from base64
+                    var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
+                        document.getElementById("svgbase64").innerHTML=svgOutHtml;
+                    })();
+
+                            };
+
+
+// derived from https://stackoverflow.com/a/64800570
+// we need to use web browser canvas to generate a image. In this case png
+let imageUtil = {};
+/**
+ * converts a base64 encoded data url SVG image to a PNG image
+ * @param originalBase64 data url of svg image
+ * @param width target width in pixel of PNG image
+ * @param secondTry used internally to prevent endless recursion
+ * @return {Promise<unknown>} resolves to png data url of the image
+ */
+imageUtil.base64SvgToBase64Png = function (originalBase64, width, height, secondTry) {
+    return new Promise(resolve => {
+        let img = document.createElement('img');
+        img.onload = function () {
+            if (!secondTry && (img.naturalWidth === 0 || img.naturalHeight === 0)) {
+                let svgDoc = base64ToSvgDocument(originalBase64);
+                let fixedDoc = fixSvgDocumentFF(svgDoc);
+                return imageUtil.base64SvgToBase64Png(svgDocumentToBase64(fixedDoc), width, height, true).then(result => {
+                    resolve(result);
+                });
+            }
+            //document.body.appendChild(img);
+            let canvas2 = document.createElement("canvas");
+            //document.body.removeChild(img);
+            canvas2.width = width;
+            canvas2.height = height;
+            let ctx = canvas2.getContext("2d");
+            ctx.drawImage(img, 0, 0, canvas2.width, canvas2.height);
+            try {
+                let data = canvas2.toDataURL('image/png');
+                resolve(data);
+            } catch (e) {
+                resolve(null);
+            }
+        };
+        img.src = originalBase64;
+    });
+}
+
+//needed because Firefox doesn't correctly handle SVG with size = 0, see https://bugzilla.mozilla.org/show_bug.cgi?id=700533
+function fixSvgDocumentFF(svgDocument) {
+    try {
+        let widthInt = parseInt(svgDocument.documentElement.width.baseVal.value) || 500;
+        let heightInt = parseInt(svgDocument.documentElement.height.baseVal.value) || 500;
+        svgDocument.documentElement.width.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_PX, widthInt);
+        svgDocument.documentElement.height.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_PX, heightInt);
+        return svgDocument;
+    } catch (e) {
+        return svgDocument;
+    }
+}
+
+function svgDocumentToBase64(svgDocument) {
+    try {
+        let base64EncodedSVG = btoa(new XMLSerializer().serializeToString(svgDocument));
+        return 'data:image/svg+xml;base64,' + base64EncodedSVG;
+    } catch (e) {
+        return null;
+    }
+}
+
+function base64ToSvgDocument(base64) {
+    let svg = atob(base64.substring(base64.indexOf('base64,') + 7));
+    svg = svg.substring(svg.indexOf('<svg'));
+    let parser = new DOMParser();
+    return parser.parseFromString(svg, "image/svg+xml");
+}
+        </script>
+
+        <script>
+            function HelpText() {
+              var x = document.getElementById("HelpTextBlock");
+              if (x.style.display === "none") {
+                x.style.display = "block";
+              } else {
+                x.style.display = "none";
+              }
+            }
+        </script>
+    </head>
+    <body>
+        <div><textarea id="code" style="width: 100%;" rows="11">op1356=>operation: 'Validate, checkpoint, and execute only the deterministic CDK change set.'
+op1358=>operation: import boto3
+op1360=>operation: region = self._get_deploy_region(stack_name)
+cond1363=>operation: raise RuntimeError(f'Could not resolve deploy Region for {stack_name}') if  not region
+op1373=>operation: cfn = boto3.client('cloudformation', region_name=region)
+op1375=>operation: change_set: dict[str, Any] = {}
+op1377=>operation: inspection_attempts = _STRICT_CHANGE_SET_INSPECTION_ATTEMPTS if expected_stack_id is None and (not prepared_change_sets) else 1
+op1379=>operation: inspection_attempt = 0
+cond1382=>condition: while True
+op1387=>operation: change_set = cfn.describe_change_set(ChangeSetName=change_set_name, StackName=stack_name)
+break
+cond1386=>condition: exception raised?
+cond1389=>condition: except ClientError as exc
+op1393=>operation: fresh_create_not_visible = bool(expected_stack_id is None and (not prepared_change_sets) and (self._change_set_missing(exc) or self._stack_missing(exc)))
+cond1396=>condition: if fresh_create_not_visible and inspection_attempt + 1 < inspection_attempts
+cond1401=>operation: raise RuntimeError('Strict change-set inspection cancelled before ownership checkpoint') from exc if  self._cdk_cancel_event.is_set()
+sub1411=>subroutine: time.sleep(_STRICT_CHANGE_SET_INSPECTION_RETRY_SECONDS)
+op1413=>operation: inspection_attempt += 1
+sub1415=>subroutine: continue
+cond1421=>operation: raise RuntimeError(f'Could not inspect strict change set {change_set_name} for {stack_name}') from exc if  not self._change_set_missing(exc) and (not fresh_create_not_visible)
+cond1432=>condition: if allow_noop and expected_stack_id
+op1436=>operation: target = self._describe_stack_target(stack_name, expected_stack_id=expected_stack_id, require_expected_identity=True)
+cond1439=>condition: if target is not None
+op1443=>operation: stack = target[2]
+op1445=>operation: status = str(stack.get('StackStatus') or '')
+cond1448=>condition: if status in _BOOTSTRAP_HEALTHY_STATUSES
+cond1453=>operation: raise RuntimeError(f'Strict no-op for {stack_name} lacks exact authorization') from exc if  authorize_stack is None
+sub1463=>subroutine: authorize_stack(stack_name, region, expected_stack_id)
+io1468=>inputoutput: output: True
+e1466=>end: end function return
+sub1480=>subroutine: raise RuntimeError(f'CDK did not create the strict change set {change_set_name} for {stack_name}') from exc
+op1487=>operation: change_set_id = str(change_set.get('ChangeSetId') or '')
+op1489=>operation: observed_change_set_name = str(change_set.get('ChangeSetName') or '')
+op1491=>operation: stack_id = str(change_set.get('StackId') or '')
+op1493=>operation: status = str(change_set.get('Status') or '')
+op1495=>operation: execution_status = str(change_set.get('ExecutionStatus') or '')
+cond1498=>operation: raise RuntimeError(f'Strict change set {change_set_name} omitted immutable identities') if  not change_set_id or not stack_id
+cond1509=>operation: raise RuntimeError(f"Strict change set identity changed from {change_set_name} to {observed_change_set_name or 'unknown'}") if  observed_change_set_name != change_set_name
+sub1519=>subroutine: self._validate_strict_change_set_arns(stack_name=stack_name, change_set_name=change_set_name, stack_id=stack_id, change_set_id=change_set_id, region=region)
+op1521=>operation: prepared_record = prepared_change_sets.get(change_set_id)
+cond1524=>condition: if prepared_record is None
+op1528=>operation: change_set_type = 'CREATE' if expected_stack_id is None else 'UPDATE'
+cond1562=>operation: raise RuntimeError(f'Strict change set for absent {stack_name} unexpectedly performs UPDATE') if  change_set_type == 'UPDATE' and expected_stack_id is None
+cond1573=>operation: raise RuntimeError(f'Strict change set targets replacement {stack_id}; expected {expected_stack_id}') if  expected_stack_id is not None and stack_id != expected_stack_id
+op1583=>operation: observed_tags = {str(tag.get('Key')): str(tag.get('Value')) for tag in change_set.get('Tags', []) if tag.get('Key') is not None}
+cond1586=>condition: for key, value in (expected_tags or {}).items()
+cond1591=>operation: raise RuntimeError(f'Strict change set {change_set_id} omitted required tag {key}') if  observed_tags.get(str(key)) != str(value)
+op1603=>operation: status_reason = ' '.join(str(change_set.get('StatusReason') or '').split()).lower()
+op1605=>operation: empty_change_set = "submitted information didn't contain changes" in status_reason or 'no updates are to be performed' in status_reason
+cond1608=>condition: if status == 'FAILED' and empty_change_set and (allow_noop or prepared_record is not None) and expected_stack_id
+op1612=>operation: target = self._describe_stack_target(stack_name, expected_stack_id=expected_stack_id, require_expected_identity=True)
+cond1615=>operation: raise RuntimeError(f'Empty strict change set {change_set_id} has no healthy exact stack') if  target is None or str(target[2].get('StackStatus') or '') not in _BOOTSTRAP_HEALTHY_STATUSES
+cond1626=>operation: raise RuntimeError(f'Strict no-op for {stack_name} lacks exact authorization') if  authorize_stack is None
+sub1636=>subroutine: authorize_stack(stack_name, region, expected_stack_id)
+sub1638=>subroutine: on_change_set_prepared(stack_name, region, stack_id, change_set_id, change_set_type)
+io1643=>inputoutput: output: True
+e1641=>end: end function return
+cond1650=>operation: raise RuntimeError(f'Strict change set {change_set_id} is {status}/{execution_status}, not usable') if  status != 'CREATE_COMPLETE' or execution_status not in {'AVAILABLE', 'EXECUTE_COMPLETE'}
+cond1661=>operation: raise RuntimeError(f'Strict change set {change_set_id} was not produced by this preparation') if  execution_status == 'AVAILABLE' and (prepared_record is None and (not preparation_succeeded))
+cond1672=>operation: raise RuntimeError(f'Executed strict change set {change_set_id} lacks prior checkpoint authority') if  execution_status == 'EXECUTE_COMPLETE' and (prepared_record is None or expected_stack_id is None)
+cond1683=>condition: if expected_stack_id is not None
+cond1688=>operation: raise RuntimeError(f'Strict change set for {stack_name} lacks exact authorization') if  authorize_stack is None
+sub1698=>subroutine: authorize_stack(stack_name, region, stack_id)
+cond1704=>condition: if execution_status == 'EXECUTE_COMPLETE'
+op1708=>operation: target = self._describe_stack_target(stack_name, expected_stack_id=stack_id, require_expected_identity=True)
+cond1711=>operation: raise RuntimeError(f'Executed strict change set {change_set_id} has no healthy exact stack') if  target is None or str(target[2].get('StackStatus') or '') not in _BOOTSTRAP_HEALTHY_STATUSES
+sub1745=>subroutine: on_change_set_prepared(stack_name, region, stack_id, change_set_id, change_set_type)
+cond1748=>condition: if execution_status == 'EXECUTE_COMPLETE'
+io1755=>inputoutput: output: True
+e1753=>end: end function return
+cond1762=>operation: raise RuntimeError(f'Strict change set {change_set_id} was checkpointed but execution was cancelled') if  self._cdk_cancel_event.is_set()
+sub1772=>subroutine: cfn.execute_change_set(ChangeSetName=change_set_id)
+op1774=>operation: settled = self._wait_for_stack_settle(stack_name, timeout=timeout, stack_identifier=stack_id)
+cond1777=>condition: if settled not in _BOOTSTRAP_HEALTHY_STATUSES
+sub1781=>subroutine: logger.error('Strict change set %s for %s settled as %s', change_set_id, stack_name, settled or 'unknown')
+io1786=>inputoutput: output: False
+e1784=>end: end function return
+io1795=>inputoutput: output: True
+e1793=>end: end function return
+cond1724=>condition: if change_set_type == 'CREATE'
+op1728=>operation: target = self._describe_stack_target(stack_name, expected_stack_id=stack_id, require_expected_identity=True)
+cond1731=>operation: raise RuntimeError(f'Prepared CREATE change set {change_set_id} has no exact review stack') if  target is None or str(target[2].get('StackStatus') or '') != 'REVIEW_IN_PROGRESS'
+op1532=>operation: recorded_change_set_id = str(prepared_record.get('change_set_id') or '')
+op1534=>operation: recorded_stack_id = str(prepared_record.get('stack_id') or '')
+op1536=>operation: change_set_type = str(prepared_record.get('change_set_type') or '')
+cond1539=>operation: raise RuntimeError(f'Persisted strict change-set authority changed for {stack_name}') if  recorded_change_set_id != change_set_id or recorded_stack_id != stack_id
+cond1550=>operation: raise RuntimeError(f"Persisted strict change set for {stack_name} has invalid type {change_set_type or 'unknown'}") if  change_set_type not in {'CREATE', 'UPDATE'}
+
+op1356->op1358
+op1358->op1360
+op1360->cond1363
+cond1363->op1373
+op1373->op1375
+op1375->op1377
+op1377->op1379
+op1379->cond1382
+cond1382(yes)->op1387
+op1387->cond1386
+cond1386(yes)->cond1389
+cond1389(yes)->op1393
+op1393->cond1396
+cond1396(yes)->cond1401
+cond1401->sub1411
+sub1411->op1413
+op1413->sub1415
+cond1396(no)->cond1421
+cond1421->cond1432
+cond1432(yes)->op1436
+op1436->cond1439
+cond1439(yes)->op1443
+op1443->op1445
+op1445->cond1448
+cond1448(yes)->cond1453
+cond1453->sub1463
+sub1463->io1468
+io1468->e1466
+cond1448(no)->sub1480
+cond1439(no)->sub1480
+cond1432(no)->sub1480
+cond1389(no)->cond1382
+cond1386(no)->cond1382
+cond1382(no)->op1487
+op1487->op1489
+op1489->op1491
+op1491->op1493
+op1493->op1495
+op1495->cond1498
+cond1498->cond1509
+cond1509->sub1519
+sub1519->op1521
+op1521->cond1524
+cond1524(yes)->op1528
+op1528->cond1562
+cond1562->cond1573
+cond1573->op1583
+op1583->cond1586
+cond1586(yes)->cond1591
+cond1591->cond1586
+cond1586(no)->op1603
+op1603->op1605
+op1605->cond1608
+cond1608(yes)->op1612
+op1612->cond1615
+cond1615->cond1626
+cond1626->sub1636
+sub1636->sub1638
+sub1638->io1643
+io1643->e1641
+cond1608(no)->cond1650
+cond1650->cond1661
+cond1661->cond1672
+cond1672->cond1683
+cond1683(yes)->cond1688
+cond1688->sub1698
+sub1698->cond1704
+cond1704(yes)->op1708
+op1708->cond1711
+cond1711->sub1745
+sub1745->cond1748
+cond1748(yes)->io1755
+io1755->e1753
+cond1748(no)->cond1762
+cond1762->sub1772
+sub1772->op1774
+op1774->cond1777
+cond1777(yes)->sub1781
+sub1781->io1786
+io1786->e1784
+cond1777(no)->io1795
+io1795->e1793
+cond1704(no)->cond1724
+cond1724(yes)->op1728
+op1728->cond1731
+cond1731->sub1745
+cond1724(no)->sub1745
+cond1683(no)->cond1704
+cond1524(no)->op1532
+op1532->op1534
+op1534->op1536
+op1536->cond1539
+cond1539->cond1550
+cond1550->cond1562
+</textarea></div>
+        <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
+        <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
+... and the other symbols too... like sub1(right)<br/>
+You can also tweak the <b>diagram.drawSVG('diagram', {});</b> script in this file for more changes<br/>
+This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on github</a> and <a href="http://flowchart.js.org">http://flowchart.js.org</a> more documentation can be found over there.
+</div><br/><div id="svgbase64"></div>
+        <div id="pngbase64"></div>
+
+        <!-- Generated at (UTC): 2026-09-29T11:35:23Z -->
+        <!-- Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657 -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-09-29T11:35:23Z">2026-09-29T11:35:23Z</time>
+          </p>
+          <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
+            Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
+          </p>
+          <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
+            Flow content SHA-256: <code>3da1ee489a505075</code>
+          </p>
+          <div id="canvas"></div>
+        </div>
+    </body>
+</html>

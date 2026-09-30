@@ -15,7 +15,7 @@ stay out of each other's way:
 | Catalogue | What it shows | Canonical generator |
 |-----------|---------------|---------------------|
 | [`infra_diagrams/`](infra_diagrams/README.md) | Per-stack and whole-architecture [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) topologies synthesised from the [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app ([cdk-dia](https://github.com/pistazie/cdk-dia)). PNG outputs for embedding in READMEs. | `python diagrams/generate.py --infra-only` |
-| [`code_diagrams/`](code_diagrams/README.md) | Per-function control-flow charts for [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) handlers, CLI entry points, and CDK stack constructors (pyflowchart + Playwright). Interactive HTML + rasterised PNG. | `SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only` |
+| [`code_diagrams/`](code_diagrams/README.md) | Per-function control-flow charts for [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) handlers, CLI entry points, CDK stack constructors, backend services, and the release-validation harnesses (pyflowchart + Playwright). Interactive HTML + rasterised PNG. | `SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only` |
 | [`api_specs/`](api_specs/README.md) | One API spec sheet per HTTP surface — the two AWS API Gateways (read out of the synthesized CDK stacks), the in-cluster Gateway (composed from its HTTPRoute) and the four FastAPI services (their own `app.openapi()` exports) — with the endpoint table, every operation's parameters, request body and responses, every component schema, and for the gateways the servers, deployment, routing and backend hops; plus `api-topology.svg`, the interaction diagram drawn from the same documents (`docs/openapi/*.json`). Markdown for GitHub and the wiki; the generator also builds a Swagger UI console per document for the project site. | `python diagrams/generate.py --api-only` |
 
 Use `SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py` to reconcile
@@ -76,13 +76,19 @@ python diagrams/code_diagrams/generate.py --strip-markers
 
 Freshness is verified against `code_diagrams/provenance.json`, which records
 each charted source's marker-stripped SHA-256 digest alongside the timestamp
-and commit that produced its artifacts. Two consequences worth knowing:
+and commit that produced its artifacts. Consequences worth knowing:
 
 - The contract never resolves a recorded commit through Git, so a
   squash-merged (and deleted) branch commit stays a valid provenance label.
 - The catalogue is legitimately a mix of vintages. Each source's marker and
   artifacts must match *that source's* recorded stamp; the index header
   reports the most recent generation.
+- A source is the unit of regeneration. Charting another function from an
+  already-charted source re-renders and restamps every chart of that source.
+- Charted sources must live under `app.py`, `cli/`, `gco/`, `gco_mcp/`,
+  `lambda/`, or `scripts/` (`MARKER_SOURCE_ROOTS` in
+  `code_diagrams/_source_marker.py`), the only roots that marker pruning and
+  the contract walk.
 
 ## Prerequisites
 

@@ -19,6 +19,8 @@ REPORT_FILENAMES = frozenset(
         "live-release-validation.md",
         "example-job-validation.json",
         "example-job-validation.md",
+        "upgrade-validation.json",
+        "upgrade-validation.md",
         "kubeconfig",
     }
 )

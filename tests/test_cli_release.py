@@ -328,3 +328,96 @@ class TestRepoRootValidation:
         result = _invoke(*BASE)
         assert result.exit_code != 0
         assert "fatal: not a repo" in result.output
+
+
+def _invoke_upgrade(*args: str):
+    return CliRunner().invoke(release, ["validate-upgrade", *args])
+
+
+UPGRADE_BASE = ("--expected-account", "123456789012", CONSENT, "--confirm-kms-key-deletion")
+
+
+class TestValidateUpgrade:
+    """``gco release validate-upgrade`` wraps ``scripts.upgrade_validation`` the same way."""
+
+    def test_refuses_without_consent_or_with_a_malformed_account(self, fake_processes):
+        result = _invoke_upgrade("--expected-account", "123456789012")
+        assert result.exit_code != 0 and CONSENT in result.output
+        result = _invoke_upgrade("--expected-account", "12345", CONSENT)
+        assert result.exit_code != 0 and "12-digit" in result.output
+        assert fake_processes.harness_calls == []
+
+    def test_every_action_past_prepare_requires_kms_confirmation(self, fake_processes):
+        for actions in ("all", "deploy", "upgrade", "verify-upgrade", "destroy"):
+            result = _invoke_upgrade(
+                "--expected-account", "123456789012", CONSENT, "--actions", actions
+            )
+            assert result.exit_code != 0, actions
+            assert "--confirm-kms-key-deletion" in result.output
+        assert fake_processes.harness_calls == []
+        result = _invoke_upgrade(
+            "--expected-account", "123456789012", CONSENT, "--actions", "preflight,prepare,baseline"
+        )
+        assert result.exit_code == 0, result.output
+        command = fake_processes.harness_calls[0]["command"]
+        assert "--confirm-kms-key-deletion" not in command
+        assert command[command.index("--actions") + 1] == "baseline,preflight,prepare"
+
+    def test_resume_requires_run_id_and_report_dir_and_actions_are_required(self, fake_processes):
+        result = _invoke_upgrade(*UPGRADE_BASE, "--resume")
+        assert result.exit_code != 0 and "--run-id" in result.output
+        result = _invoke_upgrade(*UPGRADE_BASE, "--actions", " , ")
+        assert result.exit_code != 0 and "at least one action" in result.output
+        assert fake_processes.harness_calls == []
+
+    def test_derives_identity_and_composes_the_harness_command(self, fake_processes):
+        result = _invoke_upgrade(*UPGRADE_BASE)
+        assert result.exit_code == 0, result.output
+        call = fake_processes.harness_calls[0]
+        command = call["command"]
+        assert command[1:3] == ["-m", "scripts.upgrade_validation"]
+
+        def value_of(flag: str) -> str:
+            return command[command.index(flag) + 1]
+
+        assert value_of("--expected-sha") == "a" * 40
+        assert value_of("--expected-branch") == "test/floci-integration"
+        assert value_of("--actions") == "all"
+        run_id = value_of("--run-id")
+        report_dir = Path(value_of("--report-dir"))
+        assert report_dir == Path.home() / "gco-upgrade-validation-reports" / run_id
+        assert value_of("--checkpoint") == str(report_dir / "checkpoint.json")
+        assert "--base-ref" not in command and "--resume" not in command
+        assert call["cwd"] == fake_processes.repo_root
+        assert "base:       the newest earlier release" in result.output
+
+    def test_explicit_options_are_forwarded(self, fake_processes, tmp_path):
+        result = _invoke_upgrade(
+            *UPGRADE_BASE,
+            "--base-ref",
+            "v8.7.0",
+            "--run-id",
+            "run-9",
+            "--report-dir",
+            str(tmp_path / "reports"),
+            "--resume",
+            "--protected-stack",
+            "SharedAlarms",
+        )
+        assert result.exit_code == 0, result.output
+        joined = " ".join(fake_processes.harness_calls[0]["command"])
+        for fragment in (
+            "--base-ref v8.7.0",
+            "--run-id run-9",
+            f"--report-dir {tmp_path / 'reports'}",
+            "--resume",
+            "--protected-stack SharedAlarms",
+            "--confirm-kms-key-deletion",
+        ):
+            assert fragment in joined, fragment
+        assert "base:       v8.7.0" in result.output
+
+    def test_harness_exit_code_propagates(self, tmp_path, monkeypatch):
+        fake = FakeProcesses(tmp_path, harness_returncode=4)
+        monkeypatch.setattr("cli.commands.release_cmd.subprocess.run", fake)
+        assert _invoke_upgrade(*UPGRADE_BASE).exit_code == 4

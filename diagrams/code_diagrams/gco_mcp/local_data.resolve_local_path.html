@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
+        <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
+        <meta name="gco-flow-digest" content="351eeb42d9565cc3">
+        <title>MCP local-data path boundary (pinned root, traversal and symlink-escape rejection)</title>
+        <style type="text/css">
+          .end-element { fill : #FFCCFF; }
+        </style>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/raphael/2.3.0/raphael.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/flowchart/1.17.1/flowchart.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.1/js/bootstrap.bundle.min.js"></script>
+        <!-- <script src="../release/flowchart.min.js"></script> -->
+        <script>
+
+            window.onload = function () {
+                var btn = document.getElementById("run"),
+                    cd = document.getElementById("code"),
+                    chart;
+
+                (btn.onclick = function () {
+                    var code = cd.value;
+
+                    if (chart) {
+                      chart.clean();
+                    }
+
+                    chart = flowchart.parse(code);
+                    chart.drawSVG('canvas', {
+                      'x': 0,
+                      'y': 0,
+                      'line-width': 3,
+                      //'maxWidth': 15,//ensures the flowcharts fits within a certain width
+                      'line-length': 50,
+                      'text-margin': 10,
+                      'font-size': 14,
+                      'font': 'normal',
+                      'font-family': 'Helvetica',
+                      'font-weight': 'normal',
+                      'font-color': 'black',
+                      'line-color': 'black',
+                      'element-color': 'black',
+                      'fill': 'white',
+                      'yes-text': 'yes',
+                      'no-text': 'no',
+                      'arrow-end': 'block',
+                      'scale': 1,
+                      'symbols': {
+                        'start': {
+                          'font-size': 14,
+                          'font-color': 'yellow',
+                          'element-color': 'blue',
+                          'fill': 'green',
+                          'class': 'start-element'
+                        },
+                        'inputoutput': {
+                          'font-color': 'black',
+                          'element-color': 'black',
+                          'fill': 'bisque'
+                        },
+                        'operation': {
+                          'font-color': 'black',
+                          'element-color': 'black',
+                          'fill': 'linen'
+                        },
+                        'subroutine': {
+                          'font-color': 'black',
+                          'element-color': 'blue',
+                          'fill': 'lightgreen'
+                        },
+                        'condition': {
+                          'font-color': 'red',
+                          'element-color': 'black',
+                          'fill': 'yellow'
+                        },
+                        'end':{
+                          'font-size': 20,
+                          'class': 'end-element'
+                        }
+                      },
+                      'flowstate' : {
+                        //'past' : { 'fill' : '#CCCCCC', 'font-size' : 12},
+                        //'current' : {'fill' : 'yellow', 'font-color' : 'red', 'font-weight' : 'bold'},
+                        //'future' : { 'fill' : '#FFFF99'},
+                        'request' : { 'fill' : 'blue'},
+                        'invalid': {'fill' : '#444444'},
+                        'approved' : { 'fill' : '#58C4A3', 'font-size' : 12, 'yes-text' : 'APPROVED', 'no-text' : 'n/a' },
+                        'rejected' : { 'fill' : '#C45879', 'font-size' : 12, 'yes-text' : 'n/a', 'no-text' : 'REJECTED' }
+                      }
+                    });
+                    //create base64 encoding of SVG to generate download link for title(without html or htm).SVG
+                    var currentCanvasDIV = document.getElementById('canvas')
+                    var currentDrawSVG = currentCanvasDIV.innerHTML.replaceAll('ë','e');
+
+                    const OUTsvgBASE64 = btoa(currentDrawSVG)
+                    doctitle = document.title.replace('.html','');
+                    doctitle = doctitle.replace('.htm','');
+
+
+                    var currentCanvasDIV = document.getElementById('canvas')
+                    var currentDrawSVG = currentCanvasDIV.innerHTML.replaceAll('ë','e');
+                    svgSource = currentDrawSVG
+                    svgXML = currentDrawSVG;
+                    // Use SVG Height and Width from the SVG XML to set canvas size
+                    svgXMLsubstringHeight = svgXML.substring(svgXML.indexOf('height='), svgXML.indexOf('version='));
+                    svgXMLsubstringWidth = svgXML.substring(svgXML.indexOf('width='), svgXML.indexOf('xmlns='));
+                    HeightValue = svgXMLsubstringHeight.substring(svgXMLsubstringHeight.indexOf('"')+1,svgXMLsubstringHeight.lastIndexOf('"'));
+                    WidthValue = svgXMLsubstringWidth.substring(svgXMLsubstringWidth.indexOf('"')+1,svgXMLsubstringWidth.lastIndexOf('"'));
+                    HeightValueInt = Math.round(HeightValue)
+                    WidthValueInt = Math.round(WidthValue)
+                    // setup input for base64SvgToBase64Png
+                    let svgSrc = "data:image/svg+xml;base64,"+OUTsvgBASE64;
+                    var pngBase
+                    imageUtil.base64SvgToBase64Png(svgSrc, WidthValueInt, HeightValueInt).then(pngSrc => {
+                    pngBase = pngSrc
+                    // output download link for base64 PNG converted on download from base64
+                    var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
+                    document.getElementById("pngbase64").innerHTML=pngOutHtml;
+                    });
+                    // output download link for base64 SVG converted on download from base64
+                    var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
+                        document.getElementById("svgbase64").innerHTML=svgOutHtml;
+                    })();
+
+                            };
+
+
+// derived from https://stackoverflow.com/a/64800570
+// we need to use web browser canvas to generate a image. In this case png
+let imageUtil = {};
+/**
+ * converts a base64 encoded data url SVG image to a PNG image
+ * @param originalBase64 data url of svg image
+ * @param width target width in pixel of PNG image
+ * @param secondTry used internally to prevent endless recursion
+ * @return {Promise<unknown>} resolves to png data url of the image
+ */
+imageUtil.base64SvgToBase64Png = function (originalBase64, width, height, secondTry) {
+    return new Promise(resolve => {
+        let img = document.createElement('img');
+        img.onload = function () {
+            if (!secondTry && (img.naturalWidth === 0 || img.naturalHeight === 0)) {
+                let svgDoc = base64ToSvgDocument(originalBase64);
+                let fixedDoc = fixSvgDocumentFF(svgDoc);
+                return imageUtil.base64SvgToBase64Png(svgDocumentToBase64(fixedDoc), width, height, true).then(result => {
+                    resolve(result);
+                });
+            }
+            //document.body.appendChild(img);
+            let canvas2 = document.createElement("canvas");
+            //document.body.removeChild(img);
+            canvas2.width = width;
+            canvas2.height = height;
+            let ctx = canvas2.getContext("2d");
+            ctx.drawImage(img, 0, 0, canvas2.width, canvas2.height);
+            try {
+                let data = canvas2.toDataURL('image/png');
+                resolve(data);
+            } catch (e) {
+                resolve(null);
+            }
+        };
+        img.src = originalBase64;
+    });
+}
+
+//needed because Firefox doesn't correctly handle SVG with size = 0, see https://bugzilla.mozilla.org/show_bug.cgi?id=700533
+function fixSvgDocumentFF(svgDocument) {
+    try {
+        let widthInt = parseInt(svgDocument.documentElement.width.baseVal.value) || 500;
+        let heightInt = parseInt(svgDocument.documentElement.height.baseVal.value) || 500;
+        svgDocument.documentElement.width.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_PX, widthInt);
+        svgDocument.documentElement.height.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_PX, heightInt);
+        return svgDocument;
+    } catch (e) {
+        return svgDocument;
+    }
+}
+
+function svgDocumentToBase64(svgDocument) {
+    try {
+        let base64EncodedSVG = btoa(new XMLSerializer().serializeToString(svgDocument));
+        return 'data:image/svg+xml;base64,' + base64EncodedSVG;
+    } catch (e) {
+        return null;
+    }
+}
+
+function base64ToSvgDocument(base64) {
+    let svg = atob(base64.substring(base64.indexOf('base64,') + 7));
+    svg = svg.substring(svg.indexOf('<svg'));
+    let parser = new DOMParser();
+    return parser.parseFromString(svg, "image/svg+xml");
+}
+        </script>
+
+        <script>
+            function HelpText() {
+              var x = document.getElementById("HelpTextBlock");
+              if (x.style.display === "none") {
+                x.style.display = "block";
+              } else {
+                x.style.display = "none";
+              }
+            }
+        </script>
+    </head>
+    <body>
+        <div><textarea id="code" style="width: 100%;" rows="11">op2010=>operation: "Resolve ``local_path`` beneath the configured local-data root.\n\n    Relative paths (including short forms such as ``weights`` and\n    ``./weights``) resolve beneath ``GCO_STORAGE_LOCAL_ROOT`` rather than the\n    server process's working directory. Lexical traversal and realpath symlink\n    escapes are rejected. Existing source identity is captured so short upload\n    tools can verify it again while building a private no-follow snapshot.\n    "
+op2012=>operation: configured_root = os.environ.get(_LOCAL_ROOT_ENV, '').strip()
+cond2015=>operation: raise ValueError(f'{_LOCAL_ROOT_ENV} must be set before enabling local data access') if  not configured_root
+cond2026=>operation: raise ValueError('Local data access requires descriptor-relative no-follow filesystem support') if  os.name != 'posix' or not hasattr(os, 'O_NOFOLLOW') or (not hasattr(os, 'O_DIRECTORY'))
+op2039=>operation: root = Path(configured_root).expanduser().resolve(strict=True)
+cond2036=>condition: exception raised?
+cond2041=>condition: except OSError as exc
+cond2046=>operation: raise if  exc.errno != errno.ELOOP
+sub2056=>subroutine: raise ValueError(f'{_LOCAL_ROOT_ENV} could not be resolved safely') from exc
+cond2058=>condition: except RuntimeError as exc
+sub2062=>subroutine: raise ValueError(f'{_LOCAL_ROOT_ENV} could not be resolved safely') from exc
+op2067=>operation: root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
+op2069=>operation: root_fd = os.open(root, root_flags)
+op2074=>operation: root_stat = os.fstat(root_fd)
+cond2071=>condition: exception raised?
+sub2080=>subroutine: os.close(root_fd)
+op2082=>operation: supplied = Path(local_path).expanduser()
+op2084=>operation: candidate = supplied if supplied.is_absolute() else root / supplied
+op2086=>operation: lexical = Path(os.path.abspath(candidate))
+op2091=>operation: relative = lexical.relative_to(root)
+cond2088=>condition: exception raised?
+cond2093=>condition: except ValueError as exc
+sub2097=>subroutine: raise ValueError(f'{purpose} path must stay within {_LOCAL_ROOT_ENV}: {local_path}') from exc
+op2105=>operation: resolved = lexical.resolve(strict=require_exists)
+cond2102=>condition: exception raised?
+cond2107=>condition: except FileNotFoundError as exc
+sub2111=>subroutine: raise ValueError(f'{purpose} source does not exist: {local_path}') from exc
+cond2113=>condition: except OSError as exc
+cond2118=>operation: raise if  exc.errno != errno.ELOOP
+sub2128=>subroutine: raise ValueError(f'{purpose} path could not be resolved safely: {local_path}') from exc
+cond2130=>condition: except RuntimeError as exc
+sub2134=>subroutine: raise ValueError(f'{purpose} path could not be resolved safely: {local_path}') from exc
+cond2140=>operation: raise ValueError(f'{purpose} path must stay within {_LOCAL_ROOT_ENV}: {local_path}') if  not resolved.is_relative_to(root)
+op2150=>operation: source_stat: os.stat_result | None
+op2155=>operation: source_stat = os.stat(resolved, follow_symlinks=False)
+cond2152=>condition: exception raised?
+cond2157=>condition: except FileNotFoundError
+cond2162=>operation: raise ValueError(f'{purpose} source does not exist: {local_path}') from None if  require_exists
+op2172=>operation: source_stat = None
+cond2178=>operation: raise ValueError(f'{purpose} source must be a regular file or directory: {local_path}') if  source_stat is not None and (not (stat.S_ISREG(source_stat.st_mode) or stat.S_ISDIR(source_stat.st_mode)))
+io2191=>inputoutput: output: LocalPathContract(local_argument=str(relative) if relative.parts else '.', resolved_path=resolved, root=root, device=root_stat.st_dev, inode=root_stat.st_ino, source_device=source_stat.st_dev if source_stat is not None else None, source_inode=source_stat.st_ino if source_stat is not None else None, source_mode=source_stat.st_mode if source_stat is not None else None)
+e2189=>end: end function return
+
+op2010->op2012
+op2012->cond2015
+cond2015->cond2026
+cond2026->op2039
+op2039->cond2036
+cond2036(yes)->cond2041
+cond2041(yes)->cond2046
+cond2046->sub2056
+cond2041(no)->cond2058
+cond2058(yes)->sub2062
+cond2058(no)->op2067
+op2067->op2069
+op2069->op2074
+op2074->cond2071
+cond2071(yes)->sub2080
+sub2080->op2082
+op2082->op2084
+op2084->op2086
+op2086->op2091
+op2091->cond2088
+cond2088(yes)->cond2093
+cond2093(yes)->sub2097
+cond2093(no)->op2105
+op2105->cond2102
+cond2102(yes)->cond2107
+cond2107(yes)->sub2111
+cond2107(no)->cond2113
+cond2113(yes)->cond2118
+cond2118->sub2128
+cond2113(no)->cond2130
+cond2130(yes)->sub2134
+cond2130(no)->cond2140
+cond2140->op2150
+op2150->op2155
+op2155->cond2152
+cond2152(yes)->cond2157
+cond2157(yes)->cond2162
+cond2162->op2172
+op2172->cond2178
+cond2178->io2191
+io2191->e2189
+cond2157(no)->cond2178
+cond2152(no)->cond2178
+cond2102(no)->cond2140
+cond2088(no)->op2105
+cond2071(no)->sub2080
+cond2036(no)->op2067
+</textarea></div>
+        <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
+        <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
+... and the other symbols too... like sub1(right)<br/>
+You can also tweak the <b>diagram.drawSVG('diagram', {});</b> script in this file for more changes<br/>
+This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on github</a> and <a href="http://flowchart.js.org">http://flowchart.js.org</a> more documentation can be found over there.
+</div><br/><div id="svgbase64"></div>
+        <div id="pngbase64"></div>
+
+        <!-- Generated at (UTC): 2026-09-29T11:35:23Z -->
+        <!-- Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657 -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-09-29T11:35:23Z">2026-09-29T11:35:23Z</time>
+          </p>
+          <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
+            Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
+          </p>
+          <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
+            Flow content SHA-256: <code>351eeb42d9565cc3</code>
+          </p>
+          <div id="canvas"></div>
+        </div>
+    </body>
+</html>

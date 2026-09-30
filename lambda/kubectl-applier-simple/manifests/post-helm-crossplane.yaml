@@ -8,11 +8,21 @@
 # (_FEATURE_RESOURCE_INVENTORY in ../handler.py).
 #
 #   * crossplane-contrib-function-go-templating (Function): the templated-YAML
-#     composition function the Crossplane v2 docs use, pinned by tag. Crossplane
-#     pulls the package from xpkg.crossplane.io and runs it in
-#     crossplane-system. Compositions reference it by this name. Readiness is
-#     exact existence only; the package pull is Crossplane's to report
-#     (``kubectl get functions``, the Crossview dashboard).
+#     composition function the Crossplane v2 docs use. Crossplane pulls the
+#     package from xpkg.crossplane.io and runs it in crossplane-system.
+#     Compositions reference it by this name. Readiness is exact existence
+#     only; the package pull is Crossplane's to report (``kubectl get
+#     functions``, the Crossview dashboard).
+#     The package is pinned by release tag AND image-index digest. Crossplane
+#     resolves a tag against the registry on every reconcile of the package
+#     and its revision, and when that lookup times out the revision never
+#     reports Healthy again. A digest needs no lookup once the package is in
+#     Crossplane's cache. The reference sits on its own line to stay within
+#     yamllint's line limit. To move to another release, update the tag and
+#     the digest together: the digest is sha256 of
+#     ``skopeo inspect --raw docker://<package>:<tag>``. The monthly
+#     dependency scan reports release drift and a digest that no longer
+#     matches its tag.
 #   * gco-crossplane-read (ClusterRole aggregated into Crossplane's own role
 #     through rbac.crossplane.io/aggregate-to-crossplane): get/list/watch on
 #     the tenant workload kinds cluster-wide, so Crossplane can watch what it
@@ -43,7 +53,8 @@ metadata:
     project: gco
     gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
 spec:
-  package: xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5
+  package:
+    xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5@sha256:064e60c64420832b947fba90f4bc498b9e8894d80d0c1394dbf298a4363ef59b
 
 # ─── Cluster-wide read: Crossplane watches what it composes ─────────
 ---

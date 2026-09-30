@@ -65,8 +65,11 @@ The one toggle installs both charts; an absent block means off.
   applied after the charts:
   - `Function` `crossplane-contrib-function-go-templating` — the
     [templated-YAML function](https://github.com/crossplane-contrib/function-go-templating),
-    pinned by tag, which Crossplane pulls from `xpkg.crossplane.io` and runs
-    in `crossplane-system`;
+    pinned by release tag and image-index digest, which Crossplane pulls from
+    `xpkg.crossplane.io` and runs in `crossplane-system` (a bare tag is
+    re-resolved against the registry on every reconcile, and a timed-out
+    lookup leaves the Function unhealthy; a digest needs no lookup once the
+    package is cached);
   - ClusterRole `gco-crossplane-read`, aggregated into Crossplane's own role
     through `rbac.crossplane.io/aggregate-to-crossplane`: get/list/watch on
     the tenant workload kinds cluster-wide, so Crossplane can watch what it

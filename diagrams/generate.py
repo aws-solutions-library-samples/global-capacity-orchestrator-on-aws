@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from diagrams.api_specs.generate import api_contract_issues  # noqa: E402
 from diagrams.code_diagrams._renderer import _output_stem_for  # noqa: E402
-from diagrams.code_diagrams._source_marker import SENTINEL  # noqa: E402
+from diagrams.code_diagrams._source_marker import MARKER_SOURCE_ROOTS, SENTINEL  # noqa: E402
 from diagrams.code_diagrams._targets import TARGETS  # noqa: E402
 from diagrams.code_diagrams.generate import (  # noqa: E402
     REGENERATION_HINT,
@@ -282,13 +282,7 @@ def _code_artifact_contract(project_root: Path) -> list[str]:
     # Shared with the generator's marker pruning so the two can never disagree
     # about which files may legitimately carry a marker.
     allowed_marker_sources = marker_allowed_sources(TARGETS)
-    marker_roots = [
-        project_root / "app.py",
-        project_root / "cli",
-        project_root / "gco",
-        project_root / "gco_mcp",
-        project_root / "lambda",
-    ]
+    marker_roots = [project_root / root for root in MARKER_SOURCE_ROOTS]
     for marker_root in marker_roots:
         paths = [marker_root] if marker_root.is_file() else marker_root.rglob("*.py")
         for path in paths:

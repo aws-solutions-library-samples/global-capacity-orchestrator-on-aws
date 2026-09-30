@@ -6,6 +6,7 @@ import copy
 import json
 import re
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from ..constants import (
@@ -28,6 +29,14 @@ from ..protected import (
     _matches_protected_physical_identity,
     _tagged_resource_is_protected,
 )
+
+#: Checkpoint key for the image targets of a release the run deployed before
+#: the validated checkout (the upgrade harness's base release).
+PRIOR_RELEASE_ECR_IMAGES_KEY = "prior_release_ecr_images"
+
+#: The chart catalogue the image mirror derives its images from, relative to
+#: a checkout (``cli/_image_mirror.py`` reads its own checkout's copy).
+_CHARTS_YAML = Path("lambda") / "helm-installer" / "charts.yaml"
 
 
 def _strip_baseline_ecr(
@@ -404,10 +413,22 @@ def _merge_expected_ecr_target(
         target["sources"].append(source)
 
 
-def _expected_ecr_images(ctx: RunContext, stack_names: list[str]) -> list[dict[str, Any]]:
-    """Derive exact CDK-asset and configured mirror tags without AWS writes."""
+def _expected_ecr_images(
+    ctx: RunContext,
+    stack_names: list[str],
+    *,
+    root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Derive exact CDK-asset and configured mirror tags without AWS writes.
+
+    ``root`` is the checkout whose ``cdk.out``, ``cdk.json``, and chart
+    catalogue are read; it defaults to the validated checkout. The upgrade
+    harness also passes the private checkout of the release it deploys first,
+    whose mirror copies the images its own charts name.
+    """
+    checkout = ctx.settings.repo_root if root is None else root
     targets: dict[tuple[str, str, str], dict[str, Any]] = {}
-    assembly = ctx.settings.repo_root / "cdk.out"
+    assembly = checkout / "cdk.out"
     for stack_name in stack_names:
         path = assembly / f"{stack_name}.assets.json"
         try:
@@ -434,9 +455,11 @@ def _expected_ecr_images(ctx: RunContext, stack_names: list[str]) -> list[dict[s
 
     from cli import _image_mirror
 
-    mirror_config = _image_mirror.read_mirror_config(ctx.settings.repo_root / "cdk.json")
+    mirror_config = _image_mirror.read_mirror_config(checkout / "cdk.json")
     if mirror_config["enabled"]:
-        source_refs = _image_mirror.collect_source_refs()
+        source_refs = _image_mirror.collect_source_refs(
+            _image_mirror.load_charts_config(checkout / _CHARTS_YAML)
+        )
         for region in ctx.deployment_regions:
             plan = _image_mirror.plan_from_sources(
                 source_refs,
@@ -452,6 +475,37 @@ def _expected_ecr_images(ctx: RunContext, stack_names: list[str]) -> list[dict[s
                     source={"kind": "configured-mirror", "source_ref": item.source_ref},
                 )
 
+    return [
+        {
+            **target,
+            "sources": sorted(target["sources"], key=lambda item: json.dumps(item, sort_keys=True)),
+        }
+        for _key, target in sorted(targets.items())
+    ]
+
+
+def _checkpointed_ecr_image_targets(ctx: RunContext) -> list[dict[str, Any]]:
+    """Every image target this run may publish, from the checkpoint.
+
+    Normally the validated checkout's ``expected_ecr_images``. A run that
+    first deployed a prior release (the upgrade harness) also checkpointed
+    that release's targets; a target both graphs share appears once, with
+    the sources of both.
+    """
+    current = ctx.checkpoint.state.get("expected_ecr_images", [])
+    prior = ctx.checkpoint.state.get(PRIOR_RELEASE_ECR_IMAGES_KEY)
+    if prior is None:
+        return list(current)
+    targets: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in [*current, *prior]:
+        for source in item.get("sources") or [{"kind": "unrecorded"}]:
+            _merge_expected_ecr_target(
+                targets,
+                region=str(item.get("region") or ""),
+                repository=str(item.get("repository") or ""),
+                tag=str(item.get("tag") or ""),
+                source=source,
+            )
     return [
         {
             **target,
@@ -489,7 +543,7 @@ def _record_ecr_repository_creation(
         created_at = str(created_at_raw)
     expected = {
         (str(item["region"]), str(item["repository"]))
-        for item in ctx.checkpoint.state.get("expected_ecr_images", [])
+        for item in _checkpointed_ecr_image_targets(ctx)
     }
     baseline_names = {
         (str(baseline_region), str(item["name"]))
@@ -597,7 +651,7 @@ def _checkpoint_new_ecr_images(ctx: RunContext) -> list[dict[str, Any]]:
     }
 
     deltas: list[dict[str, Any]] = []
-    for expected in ctx.checkpoint.state.get("expected_ecr_images", []):
+    for expected in _checkpointed_ecr_image_targets(ctx):
         key = (
             str(expected["region"]),
             str(expected["repository"]),

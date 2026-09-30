@@ -22,6 +22,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
 - [Variations](#variations)
 - [Rolling back](#rolling-back)
 - [What the command does not do](#what-the-command-does-not-do)
+- [How the upgrade path is tested](#how-the-upgrade-path-is-tested)
 - [Release notes for running deployments](#release-notes-for-running-deployments)
   - [In-cluster TLS and tracing](#in-cluster-tls-and-tracing)
   - [Tenant write fence and MLflow over HTTPS](#tenant-write-fence-and-mlflow-over-https)
@@ -48,8 +49,10 @@ release, while the control plane is updated in place and keeps its state:
    deployment's configuration, not the release's, so its exact bytes are
    snapshotted first and written back afterwards — your project name, Regions and
    feature toggles are what deploys, not the release's defaults.
-3. **Refresh the local install.** `pip install -e .` when the running `gco` is
-   the editable install of this checkout, `npm ci` when the checkout has its own
+3. **Refresh the local install.** `pip install -e '.[cdk,...]'` when the running
+   `gco` is the editable install of this checkout: the `cdk` extra plus every
+   extra that was already installed, so the CDK library the redeploy synthesizes
+   with follows the release's pins. Then `npm ci` when the checkout has its own
    CDK toolchain, and a rebuild of the `gco-dev` image when a container runtime
    and the image are present.
 4. **Scale the workload tier to zero.** First the checkout's deployable sources
@@ -235,6 +238,17 @@ schemas in a way that makes going back unsafe.
 - It does not back up or restore data. Steps 2 and 4 are yours.
 - It is not exposed as an MCP tool: it replaces the checkout the MCP server
   itself runs from.
+
+## How the upgrade path is tested
+
+Releases whose changes can affect this path are validated live with
+`gco release validate-upgrade` ([UPGRADE_VALIDATION.md](UPGRADE_VALIDATION.md)).
+It deploys the previous release with that release's own `gco`, runs its
+`gco upgrade` to the new commit, and requires what this guide promises: the
+control-plane stacks updated in place, the regional stacks recreated, a job
+template written before the upgrade still there afterwards, cdk.json
+unchanged, and a healthy deployment. It then tears everything down and checks
+that nothing was left behind.
 
 ## Release notes for running deployments
 

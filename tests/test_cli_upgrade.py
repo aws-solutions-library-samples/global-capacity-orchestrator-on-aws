@@ -142,7 +142,7 @@ def test_check_prints_the_plan_and_changes_nothing() -> None:
     assert result.exit_code == 0, result.output
     assert "8.0.1 → v8.1.0" in result.output
     assert "git checkout --detach v8.1.0" in result.output
-    assert "pip install -e ." in result.output and "npm ci" in result.output
+    assert "pip install -e '.[cdk,...]'" in result.output and "npm ci" in result.output
     assert "Rebuild the gco-dev container image with docker" in result.output
     assert "gco-regional-api-us-east-1" in result.output
     assert "gco-global, gco-api-gateway, gco-monitoring" in result.output
@@ -173,7 +173,7 @@ def test_check_describes_a_non_editable_cli_and_skip_flags() -> None:
     assert result.exit_code == 0, result.output
     assert "--skip-checkout" in result.output
     assert "--skip-container" in result.output
-    assert "pip install -e ." not in result.output
+    assert "pip install -e" not in result.output
 
 
 def test_check_names_the_non_editable_cli() -> None:

@@ -4567,6 +4567,30 @@ gco release validate --expected-account 123456789012 \
 | `--protected-stack` | Additional non-project CloudFormation stack to preserve exactly (repeatable). |
 | `--emulator-endpoint` | Run the identical harness against a local AWS emulator ([Floci](FLOCI_TESTING.md)) instead of real AWS. The harness proves the endpoint is an emulator before touching anything. |
 
+#### `gco release validate-upgrade`
+
+Run [upgrade validation](UPGRADE_VALIDATION.md): deploy the previous release from a private clone with that release's own `gco`, run its `gco upgrade` to the checked-out commit, verify the upgraded deployment (the topology check, unchanged control-plane stack IDs, recreated workload stacks, a job template written before the upgrade that must read back unchanged), then destroy everything and verify the account against its baseline. Like `gco release validate`, it derives the SHA, branch, run id and report directory, takes consent only as flags, and executes `python -m scripts.upgrade_validation`. The candidate commit is tagged only in a private mirror inside the run's workspace, never in your repository.
+
+```bash
+gco release validate-upgrade --expected-account 123456789012 \
+  --i-understand-this-deploys-and-destroys-infrastructure \
+  --confirm-kms-key-deletion
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--expected-account` | Required. Exact 12-digit AWS account id the run may touch. |
+| `--i-understand-this-deploys-and-destroys-infrastructure` | Required consent flag: the run deploys the previous release, upgrades it, and destroys it afterwards. |
+| `--confirm-kms-key-deletion` | Authorize scheduling this run's retained EKS KMS keys (the base generation's and the upgraded one's) for their 7-day deletion window; required whenever the selected actions reach `deploy`. |
+| `--base-ref` | Release tag to deploy first and upgrade from (default: the newest release tag in the checkout's history other than the checkout itself). |
+| `--actions` | Harness actions to run (default `all`); dependencies are added automatically. A subset run reports `PARTIAL`. |
+| `--run-id` | Stable run id (default: UTC timestamp + commit SHA prefix). |
+| `--report-dir` | Report directory (default: `~/gco-upgrade-validation-reports/<run-id>`); the workspace goes beside it at `<report-dir>.workspace` and is removed once teardown completes. |
+| `--resume` | Resume an interrupted run; requires the original `--run-id` and `--report-dir`. |
+| `--protected-stack` | Additional non-project CloudFormation stack to preserve exactly (repeatable). |
+
 ---
 
 ### Stacks Commands
@@ -5807,9 +5831,11 @@ Runs inside a git checkout of the repository and:
    `cdk.json` — the deployment's own configuration — is snapshotted before the
    checkout and written back byte-for-byte afterwards, whether it was modified
    locally or committed on a fork branch;
-2. refreshes the local install: `pip install -e .` when the running `gco` is the
-   editable install of this checkout (falling back to `uv pip` for interpreters
-   without pip), `npm ci` when the checkout carries its own CDK toolchain
+2. refreshes the local install: `pip install -e '.[cdk,...]'` when the running
+   `gco` is the editable install of this checkout, with the `cdk` extra and
+   every extra already installed so their pins follow the release (falling back
+   to `uv pip` for interpreters without pip), `npm ci` when the checkout carries
+   its own CDK toolchain
    (`node_modules/.bin/cdk`), and a rebuild of the `gco-dev` image when a
    container runtime and the image are both present;
 3. checks that the checkout's deployable sources are readable by every user —

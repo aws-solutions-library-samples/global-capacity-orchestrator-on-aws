@@ -23,6 +23,18 @@ _BLOCK_RE = re.compile(
     rf"(?s)# <{re.escape(SENTINEL)}> BEGIN.*?# <{re.escape(SENTINEL)}> END\n?",
 )
 
+#: Project paths whose Python sources may be charted, and so may carry a
+#: generated marker block. Marker stripping, the generator's retired-marker
+#: pruning, and the repository contract all walk exactly these, so the three
+#: can never disagree about where a marker may live. A source charted outside
+#: them could never have its marker retired or checked.
+MARKER_SOURCE_ROOTS: tuple[str, ...] = ("app.py", "cli", "gco", "gco_mcp", "lambda", "scripts")
+
+
+def is_marker_source(relative: str) -> bool:
+    """Return whether the POSIX project path ``relative`` lies under a marker root."""
+    return any(relative == root or relative.startswith(f"{root}/") for root in MARKER_SOURCE_ROOTS)
+
 
 def upsert_markers(
     results: list[RenderedTarget],
@@ -145,21 +157,18 @@ def strip_markers_from(source: str) -> str:
 def strip_all_markers(project_root: Path) -> int:
     """Remove every marker block under ``project_root``.
 
-    Walks the standard source roots — ``app.py``, ``cli/``, ``gco/``,
-    ``gco_mcp/``, and ``lambda/`` (excluding the kubectl-applier-simple-build
-    and helm-installer-build packaged bundles) — and rewrites any file
-    that actually contains a marker. Files without the sentinel are
-    left untouched (even if they have triple-blank-line runs
+    Walks :data:`MARKER_SOURCE_ROOTS` — ``app.py``, ``cli/``, ``gco/``,
+    ``gco_mcp/``, ``lambda/``, and ``scripts/`` (excluding the
+    kubectl-applier-simple-build and helm-installer-build packaged bundles) —
+    and rewrites any file that actually contains a marker. Files without the
+    sentinel are left untouched (even if they have triple-blank-line runs
     unrelated to this feature). Returns the number of files modified.
     """
     modified = 0
-    search_roots: list[Path] = [
-        project_root / "app.py",
-        *(project_root / "cli").rglob("*.py"),
-        *(project_root / "gco").rglob("*.py"),
-        *(project_root / "gco_mcp").rglob("*.py"),
-        *(project_root / "lambda").rglob("*.py"),
-    ]
+    search_roots: list[Path] = []
+    for root in MARKER_SOURCE_ROOTS:
+        root_path = project_root / root
+        search_roots.extend([root_path] if root_path.is_file() else root_path.rglob("*.py"))
     skip_fragments = ("kubectl-applier-simple-build", "helm-installer-build")
     for source_path in search_roots:
         if not source_path.is_file():

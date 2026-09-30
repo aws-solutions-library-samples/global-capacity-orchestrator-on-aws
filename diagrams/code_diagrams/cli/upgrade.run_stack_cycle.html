@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
+        <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
+        <meta name="gco-flow-digest" content="e3b56fbdd3dc9d34">
+        <title>gco upgrade stack cycle (asset gate, retried teardown, control-plane update + regional recreate)</title>
+        <style type="text/css">
+          .end-element { fill : #FFCCFF; }
+        </style>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/raphael/2.3.0/raphael.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/flowchart/1.17.1/flowchart.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.1/js/bootstrap.bundle.min.js"></script>
+        <!-- <script src="../release/flowchart.min.js"></script> -->
+        <script>
+
+            window.onload = function () {
+                var btn = document.getElementById("run"),
+                    cd = document.getElementById("code"),
+                    chart;
+
+                (btn.onclick = function () {
+                    var code = cd.value;
+
+                    if (chart) {
+                      chart.clean();
+                    }
+
+                    chart = flowchart.parse(code);
+                    chart.drawSVG('canvas', {
+                      'x': 0,
+                      'y': 0,
+                      'line-width': 3,
+                      //'maxWidth': 15,//ensures the flowcharts fits within a certain width
+                      'line-length': 50,
+                      'text-margin': 10,
+                      'font-size': 14,
+                      'font': 'normal',
+                      'font-family': 'Helvetica',
+                      'font-weight': 'normal',
+                      'font-color': 'black',
+                      'line-color': 'black',
+                      'element-color': 'black',
+                      'fill': 'white',
+                      'yes-text': 'yes',
+                      'no-text': 'no',
+                      'arrow-end': 'block',
+                      'scale': 1,
+                      'symbols': {
+                        'start': {
+                          'font-size': 14,
+                          'font-color': 'yellow',
+                          'element-color': 'blue',
+                          'fill': 'green',
+                          'class': 'start-element'
+                        },
+                        'inputoutput': {
+                          'font-color': 'black',
+                          'element-color': 'black',
+                          'fill': 'bisque'
+                        },
+                        'operation': {
+                          'font-color': 'black',
+                          'element-color': 'black',
+                          'fill': 'linen'
+                        },
+                        'subroutine': {
+                          'font-color': 'black',
+                          'element-color': 'blue',
+                          'fill': 'lightgreen'
+                        },
+                        'condition': {
+                          'font-color': 'red',
+                          'element-color': 'black',
+                          'fill': 'yellow'
+                        },
+                        'end':{
+                          'font-size': 20,
+                          'class': 'end-element'
+                        }
+                      },
+                      'flowstate' : {
+                        //'past' : { 'fill' : '#CCCCCC', 'font-size' : 12},
+                        //'current' : {'fill' : 'yellow', 'font-color' : 'red', 'font-weight' : 'bold'},
+                        //'future' : { 'fill' : '#FFFF99'},
+                        'request' : { 'fill' : 'blue'},
+                        'invalid': {'fill' : '#444444'},
+                        'approved' : { 'fill' : '#58C4A3', 'font-size' : 12, 'yes-text' : 'APPROVED', 'no-text' : 'n/a' },
+                        'rejected' : { 'fill' : '#C45879', 'font-size' : 12, 'yes-text' : 'n/a', 'no-text' : 'REJECTED' }
+                      }
+                    });
+                    //create base64 encoding of SVG to generate download link for title(without html or htm).SVG
+                    var currentCanvasDIV = document.getElementById('canvas')
+                    var currentDrawSVG = currentCanvasDIV.innerHTML.replaceAll('ë','e');
+
+                    const OUTsvgBASE64 = btoa(currentDrawSVG)
+                    doctitle = document.title.replace('.html','');
+                    doctitle = doctitle.replace('.htm','');
+
+
+                    var currentCanvasDIV = document.getElementById('canvas')
+                    var currentDrawSVG = currentCanvasDIV.innerHTML.replaceAll('ë','e');
+                    svgSource = currentDrawSVG
+                    svgXML = currentDrawSVG;
+                    // Use SVG Height and Width from the SVG XML to set canvas size
+                    svgXMLsubstringHeight = svgXML.substring(svgXML.indexOf('height='), svgXML.indexOf('version='));
+                    svgXMLsubstringWidth = svgXML.substring(svgXML.indexOf('width='), svgXML.indexOf('xmlns='));
+                    HeightValue = svgXMLsubstringHeight.substring(svgXMLsubstringHeight.indexOf('"')+1,svgXMLsubstringHeight.lastIndexOf('"'));
+                    WidthValue = svgXMLsubstringWidth.substring(svgXMLsubstringWidth.indexOf('"')+1,svgXMLsubstringWidth.lastIndexOf('"'));
+                    HeightValueInt = Math.round(HeightValue)
+                    WidthValueInt = Math.round(WidthValue)
+                    // setup input for base64SvgToBase64Png
+                    let svgSrc = "data:image/svg+xml;base64,"+OUTsvgBASE64;
+                    var pngBase
+                    imageUtil.base64SvgToBase64Png(svgSrc, WidthValueInt, HeightValueInt).then(pngSrc => {
+                    pngBase = pngSrc
+                    // output download link for base64 PNG converted on download from base64
+                    var pngOutHtml = `<a href="${pngBase}" download="${doctitle}.png">PNG - Click here to download current rendered flowchart as ${doctitle}.png</a>`
+                    document.getElementById("pngbase64").innerHTML=pngOutHtml;
+                    });
+                    // output download link for base64 SVG converted on download from base64
+                    var svgOutHtml = `<a href="data:image/svg+xml;base64,${OUTsvgBASE64}" download=${doctitle}.svg>SVG - Click here to download current rendered flowchart as ${doctitle}.svg</a> `
+                        document.getElementById("svgbase64").innerHTML=svgOutHtml;
+                    })();
+
+                            };
+
+
+// derived from https://stackoverflow.com/a/64800570
+// we need to use web browser canvas to generate a image. In this case png
+let imageUtil = {};
+/**
+ * converts a base64 encoded data url SVG image to a PNG image
+ * @param originalBase64 data url of svg image
+ * @param width target width in pixel of PNG image
+ * @param secondTry used internally to prevent endless recursion
+ * @return {Promise<unknown>} resolves to png data url of the image
+ */
+imageUtil.base64SvgToBase64Png = function (originalBase64, width, height, secondTry) {
+    return new Promise(resolve => {
+        let img = document.createElement('img');
+        img.onload = function () {
+            if (!secondTry && (img.naturalWidth === 0 || img.naturalHeight === 0)) {
+                let svgDoc = base64ToSvgDocument(originalBase64);
+                let fixedDoc = fixSvgDocumentFF(svgDoc);
+                return imageUtil.base64SvgToBase64Png(svgDocumentToBase64(fixedDoc), width, height, true).then(result => {
+                    resolve(result);
+                });
+            }
+            //document.body.appendChild(img);
+            let canvas2 = document.createElement("canvas");
+            //document.body.removeChild(img);
+            canvas2.width = width;
+            canvas2.height = height;
+            let ctx = canvas2.getContext("2d");
+            ctx.drawImage(img, 0, 0, canvas2.width, canvas2.height);
+            try {
+                let data = canvas2.toDataURL('image/png');
+                resolve(data);
+            } catch (e) {
+                resolve(null);
+            }
+        };
+        img.src = originalBase64;
+    });
+}
+
+//needed because Firefox doesn't correctly handle SVG with size = 0, see https://bugzilla.mozilla.org/show_bug.cgi?id=700533
+function fixSvgDocumentFF(svgDocument) {
+    try {
+        let widthInt = parseInt(svgDocument.documentElement.width.baseVal.value) || 500;
+        let heightInt = parseInt(svgDocument.documentElement.height.baseVal.value) || 500;
+        svgDocument.documentElement.width.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_PX, widthInt);
+        svgDocument.documentElement.height.baseVal.newValueSpecifiedUnits(SVGLength.SVG_LENGTHTYPE_PX, heightInt);
+        return svgDocument;
+    } catch (e) {
+        return svgDocument;
+    }
+}
+
+function svgDocumentToBase64(svgDocument) {
+    try {
+        let base64EncodedSVG = btoa(new XMLSerializer().serializeToString(svgDocument));
+        return 'data:image/svg+xml;base64,' + base64EncodedSVG;
+    } catch (e) {
+        return null;
+    }
+}
+
+function base64ToSvgDocument(base64) {
+    let svg = atob(base64.substring(base64.indexOf('base64,') + 7));
+    svg = svg.substring(svg.indexOf('<svg'));
+    let parser = new DOMParser();
+    return parser.parseFromString(svg, "image/svg+xml");
+}
+        </script>
+
+        <script>
+            function HelpText() {
+              var x = document.getElementById("HelpTextBlock");
+              if (x.style.display === "none") {
+                x.style.display = "block";
+              } else {
+                x.style.display = "none";
+              }
+            }
+        </script>
+    </head>
+    <body>
+        <div><textarea id="code" style="width: 100%;" rows="11">op1240=>operation: "Scale the workload tier to zero, then deploy-all from the new release.\n\n    The checkout's deployable sources are checked first\n    (:meth:`cli.stacks.StackManager.ensure_asset_sources_readable`): the\n    redeploy refuses owner-only sources, so a checkout it could not deploy —\n    for example one whose files the upgrade's own ``git checkout`` wrote under\n    a restrictive umask — must stop the upgrade before the teardown, not\n    after it. The teardown's monitoring detach would catch it too, but only\n    when the monitoring stack is deployed.\n\n    The teardown uses the same retry loop as ``gco stacks destroy-all``: a\n    failed attempt clears the orphaned network interfaces that typically block\n    VPC deletion, waits, and tries again. The redeploy is a single\n    ``deploy_orchestrated`` pass — global and API Gateway stacks update in\n    place, regional stacks and their bridges are recreated, monitoring is\n    updated back to the full topology.\n\n    Raises:\n        cli.stacks.AssetPermissionError: before any stack is touched, when a\n            deployable source is owner-only.\n    "
+op1242=>operation: import time
+op1244=>operation: wait = sleep or time.sleep
+op1246=>operation: result = StackCycleResult()
+sub1248=>subroutine: manager.ensure_asset_sources_readable()
+sub1250=>subroutine: log('Phase 1/2: scaling the workload tier to zero (control plane stays)...')
+op1252=>operation: ok = False
+op1254=>operation: failed: list[str] = []
+cond1257=>condition: for attempt in range(1, max_attempts + 1)
+op1261=>operation: result.teardown_attempts = attempt
+cond1264=>condition: if attempt > 1
+sub1268=>subroutine: log('Clearing orphaned network interfaces that can block VPC deletion...')
+sub1270=>subroutine: manager.cleanup_orphaned_network_interfaces()
+sub1272=>subroutine: log(f'Teardown attempt {attempt}/{max_attempts} in {retry_wait_seconds:.0f}s...')
+sub1274=>subroutine: wait(retry_wait_seconds)
+op1279=>operation: ok, destroyed, failed = manager.destroy_orchestrated(force=True, keep_control_plane=True, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
+cond1282=>condition: for stack in destroyed
+cond1287=>operation: result.destroyed.append(stack) if  stack not in result.destroyed
+cond1300=>operation: break if  ok
+cond1313=>condition: if not ok
+op1317=>operation: result.failed = list(failed)
+op1319=>operation: result.phase_failed = 'teardown'
+io1324=>inputoutput: output: result
+e1322=>end: end function return
+sub1330=>subroutine: log('Phase 2/2: updating the control plane in place and recreating the regional stacks...')
+op1332=>operation: ok, deployed, failed = manager.deploy_orchestrated(require_approval=False, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
+op1334=>operation: result.deployed = list(deployed)
+cond1337=>condition: if not ok
+op1341=>operation: result.failed = list(failed)
+op1343=>operation: result.phase_failed = 'deploy'
+io1351=>inputoutput: output: result
+e1349=>end: end function return
+
+op1240->op1242
+op1242->op1244
+op1244->op1246
+op1246->sub1248
+sub1248->sub1250
+sub1250->op1252
+op1252->op1254
+op1254->cond1257
+cond1257(yes)->op1261
+op1261->cond1264
+cond1264(yes)->sub1268
+sub1268->sub1270
+sub1270->sub1272
+sub1272->sub1274
+sub1274->op1279
+op1279->cond1282
+cond1282(yes)->cond1287
+cond1287->cond1282
+cond1282(no)->cond1300
+cond1300->cond1257
+cond1264(no)->op1279
+cond1257(no)->cond1313
+cond1313(yes)->op1317
+op1317->op1319
+op1319->io1324
+io1324->e1322
+cond1313(no)->sub1330
+sub1330->op1332
+op1332->op1334
+op1334->cond1337
+cond1337(yes)->op1341
+op1341->op1343
+op1343->io1351
+io1351->e1349
+cond1337(no)->io1351
+</textarea></div>
+        <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
+        <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
+... and the other symbols too... like sub1(right)<br/>
+You can also tweak the <b>diagram.drawSVG('diagram', {});</b> script in this file for more changes<br/>
+This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on github</a> and <a href="http://flowchart.js.org">http://flowchart.js.org</a> more documentation can be found over there.
+</div><br/><div id="svgbase64"></div>
+        <div id="pngbase64"></div>
+
+        <!-- Generated at (UTC): 2026-09-29T11:35:23Z -->
+        <!-- Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657 -->
+        <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
+          <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
+            Generated at (UTC): <time datetime="2026-09-29T11:35:23Z">2026-09-29T11:35:23Z</time>
+          </p>
+          <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
+            Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
+          </p>
+          <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
+            Flow content SHA-256: <code>e3b56fbdd3dc9d34</code>
+          </p>
+          <div id="canvas"></div>
+        </div>
+    </body>
+</html>

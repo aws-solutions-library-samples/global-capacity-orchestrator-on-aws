@@ -414,6 +414,8 @@ These are risk categories, not blanket path exemptions. A CLI command that mutat
 
 When required, obtain explicit account and KMS-deletion authorization, run `python -m scripts.live_release_validation --actions all` only on a developer's local machine, and post a sanitized summary comment (run ID, exact SHA, overall status, per-action statuses) on the pull request. The full reports enumerate the validation account's ID, ARNs, and endpoint URLs: keep them local alongside `checkpoint.json`, and share a full report only through a private maintainer channel. Never invoke the harness from GitHub Actions. See the [Live Release Validation runbook](docs/LIVE_RELEASE_VALIDATION.md) for the safety gates and complete command.
 
+A change that can affect upgrading a running deployment from the previous release (stack names or what they retain, how the control plane stores its state, the teardown and deploy orchestration, the upgrade engine) also needs `gco release validate-upgrade`, under the same authorization and reporting rules. It deploys the previous release with that release's own `gco` and runs its `gco upgrade` to the change. See the [Upgrade Validation runbook](docs/UPGRADE_VALIDATION.md).
+
 ### Example Manifest Validation
 
 Changes under `examples/` carry their own validation bar, enforced by the same risk framing:

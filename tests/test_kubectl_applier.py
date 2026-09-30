@@ -3695,7 +3695,14 @@ class TestPlatformAddOnManifests:
         function = next(doc for doc in documents if doc["kind"] == "Function")
         assert function["metadata"]["name"] == "crossplane-contrib-function-go-templating"
         package = function["spec"]["package"]
-        assert package.startswith("xpkg.crossplane.io/crossplane-contrib/function-go-templating:v")
+        # Pinned by release tag and image-index digest: Crossplane re-resolves
+        # a bare tag against the registry on every reconcile, and a timed-out
+        # lookup left the Function unhealthy.
+        assert re.fullmatch(
+            r"xpkg\.crossplane\.io/crossplane-contrib/function-go-templating"
+            r":v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}",
+            package,
+        ), package
         # Only the read role aggregates into Crossplane's cluster-wide role; the
         # write grant reaches the crossplane ServiceAccount through namespaced
         # RoleBindings in the tenant namespaces.

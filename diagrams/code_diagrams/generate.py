@@ -54,6 +54,7 @@ from diagrams.code_diagrams._renderer import (
 )
 from diagrams.code_diagrams._source_marker import (
     SENTINEL,
+    is_marker_source,
     strip_all_markers,
     strip_markers_from,
     upsert_markers,
@@ -227,11 +228,16 @@ def select_stale_targets(
 ) -> list[Target]:
     """Return the targets an incremental run must re-render.
 
-    A target is stale when its source's marker-stripped bytes no longer match
-    the recorded digest (a substantive code change), when the source has no
-    recorded provenance at all (newly charted), or when either committed
-    artifact is missing. Everything else is already current and is left byte-
-    for-byte alone.
+    A source is stale when its marker-stripped bytes no longer match the
+    recorded digest (a substantive code change), when it has no recorded
+    provenance at all (newly charted), or when either committed artifact of
+    any of its targets is missing (for example, a function newly charted from
+    an already-charted source). Every target of a stale source is selected:
+    the source's marker lists all of its charted functions and one provenance
+    stamp covers all of their artifacts, so re-rendering only some of them
+    would drop the rest from the marker and restamp the source past their
+    artifacts. Everything else is already current and is left byte-for-byte
+    alone.
     """
     try:
         manifest = load_provenance_manifest(project_root)
@@ -239,26 +245,28 @@ def select_stale_targets(
         return list(targets)
 
     digest_cache: dict[str, str] = {}
-    stale: list[Target] = []
+    stale_sources: set[str] = set()
     for target in targets:
+        if target.source in stale_sources:
+            continue
         entry = manifest.get(target.source)
         if entry is None:
-            stale.append(target)
+            stale_sources.add(target.source)
             continue
         if target.source not in digest_cache:
             digest_cache[target.source] = source_content_digest(
                 (project_root / target.source).read_bytes()
             )
         if digest_cache[target.source] != entry["digest"]:
-            stale.append(target)
+            stale_sources.add(target.source)
             continue
         stem = _output_stem_for(target, output_dir=output_dir)
         if (
             not stem.with_name(f"{stem.name}.html").is_file()
             or not stem.with_name(f"{stem.name}.png").is_file()
         ):
-            stale.append(target)
-    return stale
+            stale_sources.add(target.source)
+    return [target for target in targets if target.source in stale_sources]
 
 
 def _verify_targets_match_source_commit(
@@ -553,7 +561,7 @@ def prune_retired_markers(project_root: Path, *, charted: set[str]) -> int:
         relative = source_path.relative_to(project_root).as_posix()
         if relative in charted or "-build" in relative:
             continue
-        if not relative.startswith(("app.py", "cli/", "gco/", "gco_mcp/", "lambda/")):
+        if not is_marker_source(relative):
             continue
         original = source_path.read_text(encoding="utf-8")
         if SENTINEL not in original:
