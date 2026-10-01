@@ -91,6 +91,18 @@ def test_every_ubuntu_job_exports_tmpdir_first(path: Path) -> None:
         assert first == TMPDIR_STEP, (
             f"{path.name} / {job_id}: the first step must be {TMPDIR_STEP}, got {steps[0]}"
         )
+        # A job-wide default working directory is a checkout product and does
+        # not exist yet when this step runs, so exactly those jobs point the
+        # step at the workspace, which the runner creates before any step.
+        default_directory = ((job.get("defaults") or {}).get("run") or {}).get("working-directory")
+        expected_directory = "${{ github.workspace }}" if default_directory else None
+        assert steps[0].get("working-directory") == expected_directory, (
+            f"{path.name} / {job_id}: the TMPDIR step's working-directory must be "
+            f"{expected_directory!r} (default run directory: {default_directory!r})"
+        )
+        assert set(steps[0]) <= {"name", "run", "working-directory"}, (
+            f"{path.name} / {job_id}: the TMPDIR step carries unexpected keys {sorted(steps[0])}"
+        )
         assert [step for step in steps if step.get("name") == TMPDIR_STEP["name"]] == [steps[0]], (
             f"{path.name} / {job_id}: the TMPDIR step appears more than once"
         )
