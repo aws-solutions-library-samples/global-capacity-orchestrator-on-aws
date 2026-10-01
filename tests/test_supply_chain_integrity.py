@@ -454,7 +454,10 @@ def test_kind_node_and_probe_images_are_prepulled_before_use() -> None:
         if step.get("name") == "Verify NetworkPolicy enforcement (allowed and denied paths)"
     )
     assert kind_index < load_index < probe_index
-    assert "kind load docker-image busybox:1.38.0 --name gco-ci" in cluster_steps[load_index]["run"]
+    assert (
+        "preload_kind_images.py --cluster gco-ci --image busybox:1.38.0"
+        in cluster_steps[load_index]["run"]
+    )
     # The enforcement step launches its targets and probe clients through two
     # helper functions (one `kubectl run` each); the governance step runs one
     # dry-run pod. Every launch must use the pre-pulled pinned image.
@@ -466,6 +469,46 @@ def test_kind_node_and_probe_images_are_prepulled_before_use() -> None:
         run = next(step["run"] for step in cluster_steps if step.get("name") == step_name)
         assert run.count("--image=busybox:1.38.0") == expected_count, step_name
         assert len(re.findall(r"kubectl (?:-n \S+ )?run ", run)) == expected_count, step_name
+
+
+def test_every_kind_image_load_goes_through_the_preload_script() -> None:
+    """No workflow calls ``kind load`` itself; ``preload_kind_images.py`` is the one loader.
+
+    ``kind load docker-image`` imports a ``docker save`` archive with ``ctr
+    images import --all-platforms``. On Docker 29 (Ubuntu 26.04 runners) the
+    containerd image store records a built or pulled image under its
+    multi-platform index with content for the daemon's platform only, so that
+    import fails with ``content digest ... not found`` (kubernetes-sigs/kind#4224).
+    The script saves the daemon's platform alone and loads the archive. A raw
+    ``kind load`` in a workflow brings the failure back, so none may exist, and
+    every job that loads an image must install the project (PyYAML) first.
+    """
+    loaders: list[str] = []
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        direct = [
+            line.strip()
+            for line in text.splitlines()
+            if "kind load" in line and not line.strip().startswith("#")
+        ]
+        assert not direct, f"{path.name} runs kind load directly; use preload_kind_images.py"
+        workflow = yaml.safe_load(text)
+        for job_id, job in workflow["jobs"].items():
+            steps = job.get("steps") or []
+            installs = [
+                index
+                for index, step in enumerate(steps)
+                if re.search(r"pip install -e [\"']?\.", step.get("run") or "")
+            ]
+            for index, step in enumerate(steps):
+                run = step.get("run") or ""
+                if "preload_kind_images.py" not in run:
+                    continue
+                loaders.append(f"{path.name}:{job_id}:{step.get('name')}")
+                assert installs and installs[0] < index, (
+                    f"{job_id}/{step.get('name')} loads images before pip install -e ."
+                )
+    assert len(loaders) >= 9, loaders
 
 
 def test_kind_examples_prefetches_charts_but_keeps_mutations_fail_fast() -> None:

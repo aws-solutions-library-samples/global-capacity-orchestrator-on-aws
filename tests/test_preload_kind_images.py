@@ -558,14 +558,88 @@ def test_a_failed_local_tag_fails_the_pinned_stage() -> None:
         preload.stage_pinned_image(PYTHON_PINNED, LOCAL, run=run, sleep=pytest.fail)
 
 
-def test_kind_loads_every_staged_image_in_one_call() -> None:
+def _capture(platform: str = "linux/amd64\n") -> Callable[[Sequence[str]], str]:
+    def capture(argv: Sequence[str]) -> str:
+        assert list(argv) == list(preload.DAEMON_PLATFORM_ARGV)
+        return platform
+
+    return capture
+
+
+def _loads(calls: list[list[str]], cluster: str) -> list[tuple[str, str, str]]:
+    """``(image, platform, archive)`` for each save/load pair, checking the pairing."""
+    pairs: list[tuple[str, str, str]] = []
+    for save, load in zip(calls[0::2], calls[1::2], strict=True):
+        assert save[:3] == ["docker", "save", "--platform"] and save[4] == "--output"
+        assert load == ["kind", "load", "image-archive", "--name", cluster, save[5]]
+        assert save[5].endswith("/image.tar") and "kind-image-" in save[5]
+        pairs.append((save[6], save[3], save[5]))
+    return pairs
+
+
+def test_each_staged_image_is_saved_for_the_daemon_platform_and_loaded_as_an_archive() -> None:
     run = _Recorder()
-    preload.load_into_kind([], "gco", run=run)
+    preload.load_into_kind([], "gco", run=run, capture=pytest.fail)
     assert run.calls == []
-    preload.load_into_kind([ARGOCD, REDIS], "gco", run=run)
-    assert run.calls == [["kind", "load", "docker-image", "--name", "gco", ARGOCD, REDIS]]
-    with pytest.raises(preload.PreloadError, match="kind load"):
-        preload.load_into_kind([ARGOCD], "gco", run=_Recorder({"kind load": [1]}))
+    preload.load_into_kind([ARGOCD, REDIS], "gco", run=run, capture=_capture("linux/arm64\n"))
+    loads = _loads(run.calls, "gco")
+    assert [(image, platform) for image, platform, _ in loads] == [
+        (ARGOCD, "linux/arm64"),
+        (REDIS, "linux/arm64"),
+    ]
+    # One archive at a time: each is gone before the next is written.
+    archives = [Path(archive) for _, _, archive in loads]
+    assert len({archive.parent for archive in archives}) == 2
+    assert not any(archive.parent.exists() for archive in archives)
+
+
+def test_the_archive_is_written_under_tmpdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    # tempfile caches the directory it picked; make it look at TMPDIR again.
+    monkeypatch.setattr(preload.tempfile, "tempdir", None)
+    run = _Recorder()
+    preload.load_into_kind([ARGOCD], "gco", run=run, capture=_capture())
+    ((_image, _platform, archive),) = _loads(run.calls, "gco")
+    assert Path(archive).parent.parent == tmp_path.resolve()
+
+
+def test_a_failed_save_or_load_names_the_image() -> None:
+    with pytest.raises(
+        preload.PreloadError, match=re.escape(f"save --platform linux/amd64 {ARGOCD}")
+    ):
+        preload.load_into_kind(
+            [ARGOCD], "gco", run=_Recorder({"docker save": [1]}), capture=_capture()
+        )
+    run = _Recorder({"kind load": [1]})
+    with pytest.raises(preload.PreloadError, match=re.escape(f"of {ARGOCD} into gco failed")):
+        preload.load_into_kind([ARGOCD], "gco", run=run, capture=_capture())
+    assert len(run.calls) == 2
+
+
+@pytest.mark.parametrize("reported", ["", "linux\n", "windows/amd64/v8", "error: no daemon"])
+def test_an_unusable_daemon_platform_fails_before_any_save(reported: str) -> None:
+    run = _Recorder()
+    with pytest.raises(preload.PreloadError, match="no usable daemon platform"):
+        preload.load_into_kind([ARGOCD], "gco", run=run, capture=lambda _argv: reported)
+    assert run.calls == []
+
+
+def test_the_default_capturer_returns_stdout_only_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers = iter([(0, "linux/amd64\n"), (1, "garbage\n")])
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert kwargs == {"check": False, "capture_output": True, "text": True}
+        code, out = next(answers)
+        return subprocess.CompletedProcess(argv, code, stdout=out)
+
+    monkeypatch.setattr(preload.subprocess, "run", fake_run)
+    assert preload._capture(preload.DAEMON_PLATFORM_ARGV) == "linux/amd64\n"
+    assert preload._capture(preload.DAEMON_PLATFORM_ARGV) == ""
+    assert preload.daemon_platform(capture=lambda _argv: " linux/amd64 \n") == "linux/amd64"
 
 
 # ─── The command ───────────────────────────────────────────────────
@@ -586,16 +660,12 @@ def test_main_stages_and_loads_what_the_render_runs(
     code = preload.main(
         ["--cluster", "gco-platform-addons", *files],
         run=run,
+        capture=_capture(),
         sleep=pytest.fail,
         resolve=lambda _r: DIGEST,
     )
     assert code == 0
-    assert run.calls[-1] == [
-        "kind",
-        "load",
-        "docker-image",
-        "--name",
-        "gco-platform-addons",
+    assert [image for image, _, _ in _loads(run.calls[-4:], "gco-platform-addons")] == [
         ARGOCD,
         REDIS,
     ]
@@ -618,10 +688,14 @@ def test_main_reports_a_preload_failure_as_an_annotation(
     render = _manifest(tmp_path, "a.yaml", ARGOCD_RENDER)
     run = _Recorder({"kind load": [1]})
     code = preload.main(
-        ["--cluster", "c", render], run=run, sleep=pytest.fail, resolve=lambda _r: DIGEST
+        ["--cluster", "c", render],
+        run=run,
+        capture=_capture(),
+        sleep=pytest.fail,
+        resolve=lambda _r: DIGEST,
     )
     assert code == 1
-    assert "::error::kind load docker-image into c failed" in capsys.readouterr().out
+    assert f"::error::kind load image-archive of {ARGOCD} into c failed" in capsys.readouterr().out
 
 
 def test_main_stages_a_pinned_image_under_its_local_tag(
@@ -631,32 +705,69 @@ def test_main_stages_a_pinned_image_under_its_local_tag(
     code = preload.main(
         ["--cluster", "gco-examples-smoke", "--pinned", f"{PYTHON_PINNED}={LOCAL}"],
         run=run,
+        capture=_capture(),
         sleep=pytest.fail,
         resolve=pytest.fail,
     )
     assert code == 0
-    assert run.calls[-1] == ["kind", "load", "docker-image", "--name", "gco-examples-smoke", LOCAL]
+    assert [image for image, _, _ in _loads(run.calls[-2:], "gco-examples-smoke")] == [LOCAL]
     out = capsys.readouterr().out
     assert "loaded 1 pinned image(s) under local tags into kind cluster gco-examples-smoke" in out
     assert "preloaded" not in out
 
 
-def test_main_loads_rendered_and_pinned_images_in_one_call(
+def test_main_loads_rendered_pinned_and_local_images_in_order(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     render = _manifest(tmp_path, "a.yaml", ARGOCD_RENDER)
     run = _Recorder()
     code = preload.main(
-        ["--cluster", "c", "--pinned", f" {PYTHON_PINNED} = {LOCAL} ", render],
+        [
+            "--cluster",
+            "c",
+            "--pinned",
+            f" {PYTHON_PINNED} = {LOCAL} ",
+            "--image",
+            " cost-monitor:ci ",
+            render,
+            "--image",
+            "busybox:1.38.0",
+        ],
         run=run,
+        capture=_capture(),
         sleep=pytest.fail,
         resolve=lambda _r: DIGEST,
     )
     assert code == 0
-    assert run.calls[-1] == ["kind", "load", "docker-image", "--name", "c", ARGOCD, REDIS, LOCAL]
+    assert [image for image, _, _ in _loads(run.calls[-10:], "c")] == [
+        ARGOCD,
+        REDIS,
+        LOCAL,
+        "cost-monitor:ci",
+        "busybox:1.38.0",
+    ]
+    # A --image is already in Docker: nothing is pulled or tagged for it.
+    assert not [call for call in run.calls if call[:2] == ["docker", "pull"] and "ci" in call[2]]
     out = capsys.readouterr().out
     assert "preloaded 2 of 2 image(s) into kind cluster c" in out
     assert "loaded 1 pinned image(s) under local tags into kind cluster c" in out
+    assert "loaded 2 local image(s) into kind cluster c" in out
+
+
+def test_main_loads_only_local_images_without_a_pull(capsys: pytest.CaptureFixture[str]) -> None:
+    run = _Recorder()
+    code = preload.main(
+        ["--cluster", "gco-ci", "--image", "health-monitor:ci"],
+        run=run,
+        capture=_capture(),
+        sleep=pytest.fail,
+        resolve=pytest.fail,
+    )
+    assert code == 0
+    assert [image for image, _, _ in _loads(run.calls, "gco-ci")] == ["health-monitor:ci"]
+    out = capsys.readouterr().out
+    assert "loaded 1 local image(s) into kind cluster gco-ci" in out
+    assert "preloaded" not in out and "pinned" not in out
 
 
 def test_main_reports_a_pinned_failure_as_an_annotation(
@@ -675,19 +786,32 @@ def test_main_reports_a_pinned_failure_as_an_annotation(
 
 
 @pytest.mark.parametrize(
-    "extra",
+    ("extra", "message"),
     [
-        [],
-        ["--pinned", "no-separator"],
-        ["--pinned", f"={LOCAL}"],
-        ["--pinned", f"{PYTHON_PINNED}= "],
+        ([], "IMAGE=LOCAL, --image NAME"),
+        (["--pinned", "no-separator"], "IMAGE=LOCAL"),
+        (["--pinned", f"={LOCAL}"], "IMAGE=LOCAL"),
+        (["--pinned", f"{PYTHON_PINNED}= "], "IMAGE=LOCAL"),
+        (["--image", " "], "cannot parse the image reference"),
+        (["--image", "redis:"], "cannot parse the image reference"),
+        (["--image", PYTHON_PINNED], "pinned by digest, which kind cannot address"),
     ],
-    ids=["nothing to stage", "no separator", "no image", "no local tag"],
+    ids=[
+        "nothing to stage",
+        "no separator",
+        "no image",
+        "no local tag",
+        "blank image",
+        "malformed image",
+        "digest image",
+    ],
 )
-def test_main_refuses_nothing_to_stage_or_a_malformed_pin(
-    extra: list[str], capsys: pytest.CaptureFixture[str]
+def test_main_refuses_nothing_to_stage_or_a_malformed_argument(
+    extra: list[str], message: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     with pytest.raises(SystemExit) as excinfo:
-        preload.main(["--cluster", "c", *extra], run=_Recorder(), resolve=pytest.fail)
+        preload.main(
+            ["--cluster", "c", *extra], run=_Recorder(), capture=pytest.fail, resolve=pytest.fail
+        )
     assert excinfo.value.code == 2
-    assert "IMAGE=LOCAL" in capsys.readouterr().err
+    assert message in capsys.readouterr().err

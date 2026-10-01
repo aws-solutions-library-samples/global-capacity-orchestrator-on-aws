@@ -1552,7 +1552,10 @@ jobs:
           # installs Calico and waits for Ready via `kubectl rollout status`.
           wait: "0s"
       - name: Load pinned probe image into Kind
-        run: kind load docker-image busybox:1.38.0 --name gco-ci
+        # Every load into a kind node goes through preload_kind_images.py: it
+        # saves the daemon's platform only and loads the archive, which is
+        # what Docker 29's containerd image store needs (kind#4224).
+        run: python3 .github/scripts/preload_kind_images.py --cluster gco-ci --image busybox:1.38.0
       - name: Install Calico for NetworkPolicy enforcement
         # kind's default kindnet does not enforce NetworkPolicy. Calico does,
         # so 03-network-policies.yaml is actually exercised here.
@@ -1698,18 +1701,20 @@ jobs:
           cache-from: type=gha,scope=queue-processor
           cache-to: type=gha,mode=max,scope=queue-processor,ignore-error=true
       - name: Load images into kind
+        # The service images were built into the runner's Docker above. The
+        # emulator was pre-pulled by digest, which kind cannot address, so
+        # --pinned retags it locally for the Deployment's imagePullPolicy:
+        # Never (the pull is a cache hit).
         run: |
           set -euo pipefail
-          kind load docker-image health-monitor:ci --name gco-ci
-          kind load docker-image cost-monitor:ci --name gco-ci
-          kind load docker-image manifest-processor:ci --name gco-ci
-          kind load docker-image inference-monitor:ci --name gco-ci
-          kind load docker-image inference-proxy:ci --name gco-ci
-          kind load docker-image queue-processor:ci --name gco-ci
-          # The emulator was pulled by digest; retag so `kind load` can address
-          # it and the in-cluster Deployment can pull it with policy Never.
-          docker tag "${CI_SQS_EMULATOR_IMAGE}" "${CI_SQS_LOCAL_IMAGE}"
-          kind load docker-image "${CI_SQS_LOCAL_IMAGE}" --name gco-ci
+          python3 .github/scripts/preload_kind_images.py --cluster gco-ci \
+            --image health-monitor:ci \
+            --image cost-monitor:ci \
+            --image manifest-processor:ci \
+            --image inference-monitor:ci \
+            --image inference-proxy:ci \
+            --image queue-processor:ci \
+            --pinned "${CI_SQS_EMULATOR_IMAGE}=${CI_SQS_LOCAL_IMAGE}"
       - name: Apply namespaces + RBAC
         # 05-priority-classes.yaml must land before the deployments: pod
         # admission rejects an unresolvable priorityClassName, and every
@@ -3303,10 +3308,12 @@ jobs:
           # installs Calico and waits via rollout status.
           wait: "0s"
       - name: Load the S3 emulator into Kind
+        # Pre-pulled by digest above; --pinned retags it under the local tag
+        # the Deployment runs with imagePullPolicy: Never and loads it.
         run: |
           set -euo pipefail
-          docker tag "${CI_S3_EMULATOR_IMAGE}" "${CI_S3_LOCAL_IMAGE}"
-          kind load docker-image "${CI_S3_LOCAL_IMAGE}" --name gco-cost-pipeline
+          python3 .github/scripts/preload_kind_images.py --cluster gco-cost-pipeline \
+            --pinned "${CI_S3_EMULATOR_IMAGE}=${CI_S3_LOCAL_IMAGE}"
       - name: Install Calico for NetworkPolicy enforcement
         # Mirrors the proven step in integration:kind:cluster-e2e, including
         # the retry loop: calico-node readiness is a known CI flake because
@@ -3362,7 +3369,9 @@ jobs:
           cache-from: type=gha,scope=cost-monitor
           cache-to: type=gha,mode=max,scope=cost-monitor,ignore-error=true
       - name: Load the cost-monitor image into kind
-        run: kind load docker-image cost-monitor:ci --name gco-cost-pipeline
+        run: >-
+          python3 .github/scripts/preload_kind_images.py --cluster gco-cost-pipeline
+          --image cost-monitor:ci
       - name: Apply platform namespaces + RBAC + priority classes
         # 01-serviceaccounts / 02-rbac carry {{...ROLE_ARN}} IRSA annotation
         # tokens; annotations are opaque strings to the apiserver, so the
@@ -5527,11 +5536,13 @@ jobs:
         with:
           images: ${{ steps.mlflow-example-image.outputs.image }}
       - name: Load the mlflow example's image into kind
+        env:
+          EXAMPLE_IMAGE: ${{ steps.mlflow-example-image.outputs.image }}
         run: |
           set -euo pipefail
-          kind load docker-image "${{ steps.mlflow-example-image.outputs.image }}" \
-            --name gco-examples-smoke
-          docker image rm "${{ steps.mlflow-example-image.outputs.image }}"
+          python3 .github/scripts/preload_kind_images.py --cluster gco-examples-smoke \
+            --image "${EXAMPLE_IMAGE}"
+          docker image rm "${EXAMPLE_IMAGE}"
       - name: Run the REAL mlflow tracking example over verified HTTPS as the processor SA
         # The exact file users submit, applied with the production identity:
         # it installs the MLflow client, logs a run to
@@ -5620,11 +5631,13 @@ jobs:
         with:
           images: ${{ steps.trainjob-image.outputs.image }}
       - name: Load training image into kind and drop the runner-side copy
+        env:
+          TRAINJOB_IMAGE: ${{ steps.trainjob-image.outputs.image }}
         run: |
           set -euo pipefail
-          kind load docker-image "${{ steps.trainjob-image.outputs.image }}" \
-            --name gco-examples-smoke
-          docker image rm "${{ steps.trainjob-image.outputs.image }}"
+          python3 .github/scripts/preload_kind_images.py --cluster gco-examples-smoke \
+            --image "${TRAINJOB_IMAGE}"
+          docker image rm "${TRAINJOB_IMAGE}"
           df -h / | tail -1
       - name: Run the REAL TrainJob example as the processor SA
         # The exact file users submit, applied with the exact production
