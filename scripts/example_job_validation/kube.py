@@ -622,9 +622,13 @@ def cluster_session(
 ) -> Iterator[KubectlRunner]:
     """Access entry plus tunnel for one region; optionally isolate kubeconfig.
 
-    ``bastion_ttl_minutes`` sizes the ephemeral bastion's self-termination
-    backstop (the bastion's default otherwise); ``tunnel_events`` collects
-    every tunnel reopen the session's keeper attempted.
+    The session tunnels through an ephemeral bastion whenever the cluster has
+    private endpoint access (``PUBLIC_AND_PRIVATE`` included, so a public
+    endpoint behind a CIDR allowlist never decides the run), and uses a
+    public-only endpoint directly. ``bastion_ttl_minutes`` sizes the ephemeral
+    bastion's self-termination backstop (the bastion's default otherwise);
+    ``tunnel_events`` collects every tunnel reopen the session's keeper
+    attempted.
     """
     from cli import cluster_tunnel
 
@@ -642,6 +646,7 @@ def cluster_session(
         via_ssm=cluster_tunnel.AUTO_BASTION,
         assume_yes=True,
         bastion_ttl_minutes=bastion_ttl_minutes,
+        allow_public_fallback=True,
     ) as session:
         if session.active and session.server and session.tls_server_name:
             update_and_point_kubeconfig_at_tunnel(

@@ -119,14 +119,20 @@ def gitops_open(
                 server=session.server,
                 tls_server_name=session.tls_server_name,
             )
-            formatter.print_success(
-                f"Forwarding Argo CD → http://localhost:{bind_port} (Ctrl-C to stop)"
-            )
             formatter.print_info(
-                "Sign in as admin; 'gco gitops password' prints the generated password."
+                f"Starting kubectl port-forward for Argo CD on localhost:{bind_port}..."
             )
+
+            def _announce() -> None:
+                formatter.print_success(
+                    f"Forwarding Argo CD → http://localhost:{bind_port} (Ctrl-C to stop)"
+                )
+                formatter.print_info(
+                    "Sign in as admin; 'gco gitops password' prints the generated password."
+                )
+
             try:
-                cluster_ui.exec_port_forward(cmd)
+                cluster_ui.exec_port_forward(cmd, bind_port, on_ready=_announce)
             except KeyboardInterrupt:  # pragma: no cover - interactive Ctrl-C
                 return
     except (RuntimeError, ValueError) as exc:

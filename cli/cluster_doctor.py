@@ -304,17 +304,26 @@ def _diagnose_missing_cluster(probe: ClusterProbe) -> list[DoctorCheck]:
 def _diagnose_reachability(probe: ClusterProbe) -> DoctorCheck:
     if probe.public:
         if probe.public_cidrs and "0.0.0.0/0" not in probe.public_cidrs:
+            remedy = (
+                "If kubectl times out from this machine, confirm your egress IP is "
+                "inside the allowlist; adjust with gco stacks eks endpoint set "
+                "PUBLIC_AND_PRIVATE --cidr <your-ip>/32 and redeploy."
+            )
+            if probe.private:
+                # A rotating egress pool can't be allowlisted; the private
+                # endpoint needs no allowlist at all.
+                remedy += (
+                    " Or bypass the allowlist: private access is on too, so "
+                    "--via-ssm reaches the private endpoint "
+                    "(gco cluster tunnel --via-ssm auto)."
+                )
             return DoctorCheck(
                 layer="reachability",
                 status="ok",
                 finding=(
                     f"public endpoint restricted to CIDR allowlist: {', '.join(probe.public_cidrs)}"
                 ),
-                remedy=(
-                    "If kubectl times out from this machine, confirm your egress IP is "
-                    "inside the allowlist; adjust with gco stacks eks endpoint set "
-                    "PUBLIC_AND_PRIVATE --cidr <your-ip>/32 and redeploy."
-                ),
+                remedy=remedy,
             )
         return DoctorCheck(
             layer="reachability",

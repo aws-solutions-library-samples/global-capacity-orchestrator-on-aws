@@ -119,7 +119,10 @@ enablement, capacity gates, timeouts, and any disclosed mutations.
 | `kubectl apply` (platform add-ons) | argocd-gitops-job, crossplane-batch-job, kro-batch-job (+ their companion API files), ack-sqs-queue | Application Synced + Healthy at the pinned commit with its Git Jobs complete / the composed Job completes / `ACK.ResourceSynced` and the queue resolves in SQS |
 
 `kubectl` reaches the PRIVATE EKS endpoint through the CLI's own
-SSM-tunnel machinery (`gco cluster tunnel --via-ssm auto` internals): the
+SSM-tunnel machinery (`gco cluster tunnel --via-ssm auto` internals). A
+`PUBLIC_AND_PRIVATE` cluster takes the same private route, so a public
+endpoint behind a CIDR allowlist never decides a run, and only a public-only
+endpoint is used directly. The
 harness provisions the ephemeral bastion, points the run's own kubeconfig
 at the tunnel (`tls-server-name` pinned to the real endpoint host), and
 tears the bastion down with the session. That kubeconfig lives in the

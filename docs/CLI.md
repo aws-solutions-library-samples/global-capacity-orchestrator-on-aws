@@ -1192,7 +1192,7 @@ gco cluster tunnel [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
-| `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included (see [Route selection](#route-selection)). |
 | `--local-port` | Local port to bind for the API tunnel (default `8443`). |
 | `--print` | Print the tunnel + `kubectl` connection plan instead of opening the tunnel. |
 | `--bastion-ttl-minutes` | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`). |
@@ -1206,6 +1206,27 @@ outbound-only), requires IMDSv2, self-terminates after `--bastion-ttl-minutes`,
 and is tagged `gco:ephemeral=true`. It is torn down automatically when the tunnel
 closes; if teardown ever fails, the command prints the exact orphan-check
 command.
+
+##### Route selection
+
+Every command that reaches the API server (`cluster tunnel`, `monitoring open`,
+`costs dashboard`, `gitops open|password|screenshot`, `crossplane
+open|screenshot`) picks its route the same way, and prints a `Route:` line
+naming it:
+
+| Endpoint access | No `--via-ssm` | `--via-ssm INSTANCE_ID` or `auto` |
+|---|---|---|
+| `PRIVATE` (default) | Prints the tunnel options and tries the kubeconfig endpoint directly, for callers already inside the VPC | SSM tunnel to the private endpoint |
+| `PUBLIC_AND_PRIVATE` | The public endpoint, directly | SSM tunnel to the private endpoint |
+| Public only (not a mode GCO deploys) | The public endpoint, directly | Fails: there is no private endpoint to reach |
+
+`--via-ssm` takes precedence over a public endpoint because a CIDR-restricted
+public endpoint can work or time out depending on which egress IP a network
+picks (a rotating corporate NAT pool, for example), while the private endpoint
+needs no allowlist. An explicit `--via-ssm` also fails, before any bastion is
+launched, when the cluster's access mode cannot be read. `auto` keeps its
+confirmation prompt, TTL backstop, and teardown on every route. `--print`
+follows the same table.
 
 **Example:**
 
@@ -1758,7 +1779,7 @@ gco costs dashboard [OPTIONS]
 | `--service` | | `grafana` (default) or `opencost` |
 | `--region` | | Cluster region (defaults to the first cdk.json regional entry) |
 | `--local-port` | | Local port to bind (defaults per-service) |
-| `--via-ssm` | | Tunnel through an SSM-managed instance: an instance id, or `auto` |
+| `--via-ssm` | | Tunnel through an SSM-managed instance: an instance id, or `auto`. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | | Self-terminate backstop for an `auto` bastion (default: 120) |
 | `--yes` | `-y` | Skip the confirmation prompt when provisioning an `auto` bastion |
 
@@ -1821,7 +1842,7 @@ gco crossplane open [OPTIONS]
 |--------|-------------|
 | `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
 | `--local-port` | Local port to bind (default `3001`, the port the dashboard's CORS origin names). |
-| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
 | `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
 
@@ -2219,7 +2240,7 @@ gco gitops open [OPTIONS]
 |--------|-------------|
 | `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
 | `--local-port` | Local port to bind (default `8080`). |
-| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
 | `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
 
@@ -4208,6 +4229,13 @@ gco monitoring disable [-y]
 Port-forward a monitoring component over the private EKS API endpoint. Runs in
 the foreground; press Ctrl-C to stop.
 
+The command prints the [route](#route-selection) it took, then the local URL
+only once kubectl reports its listener (`Forwarding from 127.0.0.1:<port>`).
+If kubectl exits first, for example because the API server is unreachable on
+that route, the command exits non-zero without printing a URL and tears down
+any tunnel and bastion. `costs dashboard`, `gitops open` and `crossplane open`
+behave the same way.
+
 ```bash
 gco monitoring open [OPTIONS]
 ```
@@ -4219,7 +4247,7 @@ gco monitoring open [OPTIONS]
 | `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), `alertmanager` (`:9093`), `opencost` (the OpenCost UI, `:9091`), `opencost-api` (the OpenCost allocation API, `:9003`), or `mlflow` (the MLflow tracking UI, `:5000`). The OpenCost targets exist when `cost_monitoring.enabled` is on — see [docs/COST_MONITORING.md](COST_MONITORING.md); the MLflow target when `cluster_observability.mlflow.enabled` is on — see [docs/MONITORING.md](MONITORING.md#mlflow-experiment-tracking). |
 | `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
 | `--local-port` | Override the local bind port. |
-| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
 | `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
 
@@ -4231,6 +4259,9 @@ gco monitoring open --region us-east-1
 
 # From a laptop, tunnelling through an SSM-managed instance:
 gco monitoring open --region us-east-1 --via-ssm i-0123456789abcdef0
+
+# PUBLIC_AND_PRIVATE cluster whose public endpoint this network can't reach:
+gco monitoring open --service mlflow --region us-east-1 --via-ssm auto -y
 ```
 
 #### `gco monitoring users`

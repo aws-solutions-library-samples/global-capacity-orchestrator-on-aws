@@ -34,10 +34,14 @@ async def cluster_tunnel_command(
     Args:
         region: AWS region of the target cluster (e.g. us-east-1). When omitted,
             resolves to the first cdk.json regional entry.
-        instance_id: Optional SSM-managed instance id to tunnel through. When
-            omitted, the plan includes a command template with an <INSTANCE_ID>
-            placeholder — use `gco cluster tunnel --via-ssm auto` in the CLI to
-            auto-provision a self-terminating ephemeral bastion instead.
+        instance_id: Optional SSM-managed instance id to tunnel through. It is
+            used whenever the cluster has private endpoint access,
+            PUBLIC_AND_PRIVATE included, and the plan fails when private
+            access is off. When omitted, a cluster with a public endpoint
+            gets the direct plan; a private-only one gets a command template
+            with an <INSTANCE_ID> placeholder — use `gco cluster tunnel
+            --via-ssm auto` in the CLI to auto-provision a self-terminating
+            ephemeral bastion instead.
         local_port: Local port to bind for the API tunnel (default 8443).
     """
     args = ["cluster", "tunnel", "--print", "--local-port", str(local_port)]

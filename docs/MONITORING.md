@@ -184,6 +184,16 @@ SSM/VPN/bastion options and still attempts the forward in case you already have
 connectivity. To allow direct kubectl from outside the VPC instead, set
 `eks_cluster.endpoint_access` to `PUBLIC_AND_PRIVATE` and redeploy (less secure).
 
+On a `PUBLIC_AND_PRIVATE` cluster, `open` uses the public endpoint unless you
+pass `--via-ssm`. With `--via-ssm <id>` or `--via-ssm auto` it tunnels to the
+private endpoint instead. Use that when the public endpoint's CIDR allowlist
+does not cover every egress IP your network uses, so kubectl works on some
+attempts and times out on others. `open` prints a `Route:` line naming the path
+it took, and prints the local URL only after kubectl reports its listener. If
+kubectl gives up first, `open` exits non-zero and tears down the tunnel and any
+bastion. The same rules apply to every command that takes `--via-ssm`; see
+[Route selection](CLI.md#route-selection).
+
 ## Managing Grafana users
 
 Grafana uses its own user database, so users are managed through Grafana's admin

@@ -817,6 +817,8 @@ class TestClusterSessionKeeper:
         assert lifecycle == [("start", keeper), ("close", keeper)]
         assert opened["bastion_ttl_minutes"] == 600
         assert opened["via_ssm"] == cluster_tunnel.AUTO_BASTION
+        # Tunnel whenever private access is on; a public-only endpoint is used directly.
+        assert opened["allow_public_fallback"] is True
 
     def test_the_keeper_is_closed_when_the_body_fails(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

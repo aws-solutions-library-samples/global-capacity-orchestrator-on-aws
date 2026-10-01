@@ -814,7 +814,8 @@ def costs_report_status(config: Any, region: Any) -> None:
     help=(
         "Tunnel to the private API endpoint through an SSM-managed instance. "
         "Pass an instance id to use an existing one, or 'auto' to provision a "
-        "self-terminating ephemeral bastion and tear it down when the forward stops."
+        "self-terminating ephemeral bastion and tear it down when the forward stops. "
+        "Used whenever private endpoint access is on, PUBLIC_AND_PRIVATE included."
     ),
 )
 @click.option(
@@ -853,8 +854,7 @@ def costs_dashboard(
         gco costs dashboard --service opencost --region us-east-1
         gco costs dashboard --via-ssm auto -y
     """
-    import subprocess
-
+    from .. import cluster_ui
     from ..cluster_tunnel import open_api_server_tunnel, resolve_region
     from ..kubectl_helpers import build_port_forward_command, update_kubeconfig
     from .monitoring_cmd import _MONITORING_NAMESPACE, _SERVICES
@@ -888,20 +888,24 @@ def costs_dashboard(
                 server=session.server,
                 tls_server_name=session.tls_server_name,
             )
-            if service == "grafana":
-                url = f"http://localhost:{bind_port}/d/gco-cost/gco-cost-opencost"
-                formatter.print_success(f"GCO Cost dashboard → {url} (Ctrl-C to stop)")
-                formatter.print_info(
-                    "Log in with the Grafana admin credential from the "
-                    "kube-prometheus-stack-grafana Secret (monitoring namespace)."
-                )
-            else:
-                url = f"http://localhost:{bind_port}"
-                formatter.print_success(f"OpenCost UI → {url} (Ctrl-C to stop)")
+            formatter.print_info(
+                f"Starting kubectl port-forward for {service} on localhost:{bind_port}..."
+            )
+
+            def _announce() -> None:
+                if service == "grafana":
+                    url = f"http://localhost:{bind_port}/d/gco-cost/gco-cost-opencost"
+                    formatter.print_success(f"GCO Cost dashboard → {url} (Ctrl-C to stop)")
+                    formatter.print_info(
+                        "Log in with the Grafana admin credential from the "
+                        "kube-prometheus-stack-grafana Secret (monitoring namespace)."
+                    )
+                else:
+                    url = f"http://localhost:{bind_port}"
+                    formatter.print_success(f"OpenCost UI → {url} (Ctrl-C to stop)")
+
             try:
-                subprocess.run(
-                    cmd, check=False
-                )  # nosemgrep: dangerous-subprocess-use-audit - argv built by build_port_forward_command; list form, no shell=True
+                cluster_ui.exec_port_forward(cmd, bind_port, on_ready=_announce)
             except KeyboardInterrupt:  # pragma: no cover - interactive Ctrl-C
                 return
     except (RuntimeError, ValueError) as exc:

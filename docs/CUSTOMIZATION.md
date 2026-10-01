@@ -402,7 +402,12 @@ GCO supports two EKS API endpoint access modes:
 | Mode | Security | kubectl Access | Job Submission |
 |------|----------|----------------|----------------|
 | `PRIVATE` (default) | Most secure | Requires VPN/bastion/SSM | Via API Gateway or SQS |
-| `PUBLIC_AND_PRIVATE` | Less secure | Direct from internet | All methods |
+| `PUBLIC_AND_PRIVATE` | Less secure | Direct from allowlisted IPs, or SSM with `--via-ssm` | All methods |
+
+On a `PUBLIC_AND_PRIVATE` cluster an explicit `--via-ssm <instance-id>` or
+`--via-ssm auto` still tunnels to the private endpoint, so a network whose
+egress IPs rotate outside `public_access_cidrs` does not need a wider allowlist.
+See [Route selection](CLI.md#route-selection).
 
 **Recommendation:** Use `PRIVATE` for production environments. Job submission works seamlessly via the API Gateway or SQS queues, which are the recommended patterns anyway.
 
