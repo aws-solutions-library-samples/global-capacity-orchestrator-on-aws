@@ -71,6 +71,17 @@ Two things follow from this, and both are easy to undo by accident:
 combination podman rejects, so a future simplification fails locally instead of
 in CI.
 
+The job also pins `XDG_RUNTIME_DIR` to `/run/user/<uid>`, the directory podman
+assumes when the variable is unset, and creates it (owner and mode `0700`, as
+systemd would) when the runner has no logind session for the user. Rootless
+podman's network backend, pasta, runs confined by Ubuntu's AppArmor profile
+(passt's `abstractions/pasta`), which opens the container's network namespace
+only under `@{run}/user/@{uid}/**` or `/tmp/**` and may only write, never read,
+under `$HOME`. A runtime dir under `$RUNNER_TEMP` (`/home/runner/work/_temp`)
+therefore failed every `podman run` on Ubuntu 26.04 with `pasta failed with exit
+code 1: Couldn't open network namespace ...: Permission denied`, under both OCI
+runtime configurations.
+
 ## Testing
 
 Shell scripts are tested by BATS:

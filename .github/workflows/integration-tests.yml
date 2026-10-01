@@ -6665,12 +6665,27 @@ jobs:
           set -euo pipefail
           # The emitted podman function bind-mounts the rootless API socket
           # ($XDG_RUNTIME_DIR/podman/podman.sock) onto /var/run/docker.sock.
-          # Pin XDG_RUNTIME_DIR to a writable dir and start the API service so
-          # the bind-mount source exists (the test image never uses it, but
-          # `podman run` needs the source path present).
-          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"
+          # Pin XDG_RUNTIME_DIR and start the API service so the bind-mount
+          # source exists (the test image never uses it, but `podman run`
+          # needs the source path present).
+          #
+          # The runtime dir must be /run/user/<uid>, the one podman assumes
+          # when the variable is unset. Rootless podman's network backend,
+          # pasta, runs confined by Ubuntu's AppArmor profile (passt's
+          # abstractions/pasta), which opens the container's network namespace
+          # only under @{run}/user/@{uid}/** (rw) or /tmp/** and may only
+          # write, never read, under $HOME; a runtime dir under $RUNNER_TEMP
+          # (/home/runner/work/_temp) therefore fails every `podman run` with
+          # "pasta failed with exit code 1: Couldn't open network namespace
+          # ...: Permission denied". A runner with no logind session for this
+          # user has no /run/user/<uid>, so create it with the owner and mode
+          # systemd would give it.
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+            sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$XDG_RUNTIME_DIR"
+          fi
           mkdir -p "$XDG_RUNTIME_DIR/podman"
-          chmod 700 "$XDG_RUNTIME_DIR"
           nohup podman system service --time=0 \
             "unix://$XDG_RUNTIME_DIR/podman/podman.sock" >"$RUNNER_TEMP/podman-api.log" 2>&1 &
           for _ in $(seq 1 15); do
