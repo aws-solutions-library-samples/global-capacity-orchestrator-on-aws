@@ -1741,8 +1741,8 @@ def test_dev_container_matrix_keeps_native_amd64_and_arm64_coverage() -> None:
     }
 
     assert architecture_contract == {
-        "amd64": ("ubuntu-latest", "x86_64", "0x3E"),
-        "arm64": ("ubuntu-24.04-arm", "aarch64", "0xB7"),
+        "amd64": ("ubuntu-26.04", "x86_64", "0x3E"),
+        "arm64": ("ubuntu-26.04-arm", "aarch64", "0xB7"),
     }
 
 

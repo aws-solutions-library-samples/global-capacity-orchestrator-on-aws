@@ -1,0 +1,17 @@
+# actionlint settings for lint:actionlint:workflows (.github/workflows/lint.yml),
+# which passes this file explicitly with -config-file.
+#
+# actionlint checks every runs-on label against a table built into each release.
+# The pinned release (ACTIONLINT_VERSION 1.7.12, also the newest published) was
+# cut before GitHub made the Ubuntu 26.04 runner images generally available, so
+# it reports their labels as unknown. Both are standard GitHub-hosted labels.
+# Declaring them here only teaches actionlint their names: the workflows' own
+# runner allowlist (tests/test_workflow_security_contract.py) still rejects any
+# self-hosted label.
+#
+# Remove both entries once an actionlint release knows these labels and
+# ACTIONLINT_VERSION moves to it (the monthly dependency scan tracks it).
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm

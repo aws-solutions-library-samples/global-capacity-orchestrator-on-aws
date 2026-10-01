@@ -873,7 +873,7 @@ pytest tests/test_cdk_synthesis_matrix.py
 bandit -r . -c pyproject.toml --severity-level low
 
 # Validate workflow files (matches lint:actionlint:workflows)
-actionlint
+actionlint -config-file .github/config/.actionlint.yaml
 ```
 
 See [`CONTRIBUTING.md`](../CONTRIBUTING.md) for the full contributor setup and dependency management workflow.

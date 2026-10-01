@@ -56,7 +56,7 @@ permissions:
 jobs:
   apply:
     name: "pr:type-label"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Forks cannot be labelled from a `pull_request` run: the token is
     # read-only. Skipping is quieter than a job that always fails.
     if: github.event.pull_request.head.repo.fork == false

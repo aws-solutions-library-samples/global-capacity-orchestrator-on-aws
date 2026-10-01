@@ -10,7 +10,7 @@ each other:
   generally available, so CI silently runs on an ageing platform — and
   eventually on one upstream has marked deprecated, which is a removal notice
   with a date attached.
-* **Chasing a preview.** A brand-new image (``ubuntu-26.04`` today) appears in
+* **Chasing a preview.** A brand-new image (as ``ubuntu-26.04`` was) appears in
   the catalog months before it is GA. Moving to it early trades a stable CI
   platform for an unannounced one, so a preview must never be reported as
   something to act on.

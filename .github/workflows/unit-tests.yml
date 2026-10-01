@@ -68,7 +68,7 @@ jobs:
   # --------------------------------------------------------------------------
   changes:
     name: "changes"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     outputs:
@@ -112,7 +112,7 @@ jobs:
   # --------------------------------------------------------------------------
   unit-pytest-core-shard:
     name: "unit:pytest:core (shard ${{ matrix.shard }}/${{ strategy.job-total }})"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
@@ -278,7 +278,7 @@ jobs:
     # re-runs this workflow with the clause true. So every mergeable state still
     # gets a real aggregate result — never a skipped one standing in for a pass.
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Require every core test shard to pass
@@ -353,7 +353,7 @@ jobs:
 
   unit-bats-shell:
     name: "unit:bats:shell"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # The suite runs twice below — once plain, once under bashcov — and the
     # traced pass costs about twice the plain one (bashcov follows xtrace, so
     # every executed line is a write down a pipe). The job grew from 9 to 15
@@ -380,7 +380,7 @@ jobs:
       # project pins, so the version comes from .ruby-version — the same
       # single-source-of-truth treatment .python-version gets.
       - name: Set up Ruby
-        uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073  # v1.324.0
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8  # v1.327.0
         with:
           ruby-version: ".ruby-version"
       - name: Install the committed gem lock
@@ -479,7 +479,7 @@ jobs:
 
   unit-cli-smoke:
     name: "unit:cli:smoke"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -554,7 +554,7 @@ jobs:
   # every lazy runtime pin is installable.
   unit-cli-autopilot:
     name: "unit:cli:autopilot"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -739,7 +739,7 @@ jobs:
 
   unit-cdk-synth:
     name: "unit:cdk:synth"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -794,7 +794,7 @@ jobs:
 
   unit-cdk-config-matrix:
     name: "unit:cdk:config-matrix"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -850,7 +850,7 @@ jobs:
     #       name.
     # It also checks ``ConfigLoader`` rejects malformed ``project_name`` up
     # front, so a bad value fails at synth rather than mid-deploy.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -895,7 +895,7 @@ jobs:
     # names in YAML) keeps the workflow in lockstep with
     # ``tests/_cdk_config_matrix.NAG_CONFIGS`` — add an entry there and
     # the matrix automatically picks it up on the next run.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     outputs:
@@ -930,7 +930,7 @@ jobs:
     # 800-53 R5, PCI DSS 3.2.1, and Serverless rule packs in the same
     # process that ``app.py`` uses for real deploys.
     needs: unit-cdk-nag-compliance-matrix
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
@@ -977,7 +977,7 @@ jobs:
 
   unit-lockfile-freshness:
     name: "unit:lockfile:freshness"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     # Skip on PRs that don't touch pyproject.toml or the lockfile, and on draft
     # PRs regardless. The `needs: changes` only applies on pull_request (where
@@ -1047,7 +1047,7 @@ jobs:
 
   unit-fresh-install:
     name: "unit:fresh-install"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     # Same path-filter and draft gate as unit:lockfile:freshness — the fresh
     # install verifies a cold `pip install -e ".[cdk]"` succeeds and imports the
@@ -1083,7 +1083,7 @@ jobs:
 
   unit-workload-imports:
     name: "unit:workload:imports"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -1145,7 +1145,7 @@ jobs:
   # ----------------------------------------------------------------------
   unit-mcp-install:
     name: "unit:mcp:install"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -1242,7 +1242,7 @@ jobs:
       - unit-recorder-macos-bash32
       - unit-workload-imports
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

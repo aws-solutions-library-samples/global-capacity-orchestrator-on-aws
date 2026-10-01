@@ -9,6 +9,7 @@ every consumer now points at them explicitly — each section below says where.
 
 ## Table of Contents
 
+- [`.actionlint.yaml`](#actionlintyaml)
 - [`.checkov.yaml`](#checkovyaml)
 - [`.gitleaks.toml`](#gitleakstoml)
 - [`.kics.yaml`](#kicsyaml)
@@ -19,6 +20,15 @@ every consumer now points at them explicitly — each section below says where.
 - [`.yamllint.yml`](#yamllintyml)
 - [`semgrep-excluded-rules.txt`](#semgrep-excluded-rulestxt)
 - [Why `.semgrepignore` is not here](#why-semgrepignore-is-not-here)
+
+## `.actionlint.yaml`
+
+actionlint settings. It declares the `ubuntu-26.04` and `ubuntu-26.04-arm`
+runner labels, which the pinned actionlint release predates. Remove the entries
+once a release knows them.
+
+- **Used by:** `lint:actionlint:workflows` in `.github/workflows/lint.yml`
+  via `actionlint -config-file .github/config/.actionlint.yaml`.
 
 ## `.checkov.yaml`
 

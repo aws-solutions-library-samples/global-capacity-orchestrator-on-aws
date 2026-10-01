@@ -56,7 +56,7 @@ permissions:
 jobs:
   lint-actionlint-workflows:
     name: "lint:actionlint:workflows"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -82,11 +82,11 @@ jobs:
           rmdir "${install_dir}"
           ./actionlint -version
       - name: Run actionlint
-        run: ./actionlint -color
+        run: ./actionlint -color -config-file .github/config/.actionlint.yaml
 
   lint-actions-pinning:
     name: "lint:actions:pinning"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -112,7 +112,7 @@ jobs:
 
   lint-yamllint-yaml:
     name: "lint:yamllint:yaml"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -129,7 +129,7 @@ jobs:
 
   lint-ruff-python:
     name: "lint:ruff:python"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -166,7 +166,7 @@ jobs:
 
   lint-markdownlint-md:
     name: "lint:markdownlint:md"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -197,7 +197,7 @@ jobs:
   # promotes every validation warning to an error either way.
   lint-zensical-strict:
     name: "lint:zensical:strict"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -214,7 +214,7 @@ jobs:
 
   lint-hadolint-dockerfile:
     name: "lint:hadolint:dockerfile"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -254,7 +254,7 @@ jobs:
 
   lint-shellcheck-shell:
     name: "lint:shellcheck:shell"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -293,7 +293,7 @@ jobs:
 
   lint-mypy-strict:
     name: "lint:mypy:strict"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -325,7 +325,7 @@ jobs:
 
   lint-mypy-stacks:
     name: "lint:mypy:stacks"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -355,7 +355,7 @@ jobs:
 
   lint-mypy-lambda:
     name: "lint:mypy:lambda"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -427,7 +427,7 @@ jobs:
       - lint-yamllint-yaml
       - lint-zensical-strict
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

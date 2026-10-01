@@ -82,7 +82,7 @@ jobs:
     # manifests (`helm template`) with the values charts.yaml ships — no
     # cluster required. Every entry is checked, including enabled: false charts
     # (those are toggled on via cdk.json, so their pins must be valid too).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -131,7 +131,7 @@ jobs:
 
   integration-k8s-manifest-schema:
     name: "integration:k8s:manifest-schema"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -295,7 +295,7 @@ jobs:
 
   integration-lambda-imports:
     name: "integration:lambda:imports"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # Several Lambda modules (notably lambda/api-gateway-proxy/proxy_utils.py)
@@ -320,7 +320,7 @@ jobs:
 
   integration-pytest-cross-module:
     name: "integration:pytest:cross-module"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # tests/test_integration.py imports every Lambda handler, including
@@ -358,7 +358,7 @@ jobs:
 
   integration-mcp-server:
     name: "integration:mcp:server"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -405,7 +405,7 @@ jobs:
 
   integration-autopilot-claude-code-boot:
     name: "integration:autopilot:claude-code-boot"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -454,7 +454,7 @@ jobs:
 
   integration-autopilot-codex-boot:
     name: "integration:autopilot:codex-boot"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -506,7 +506,7 @@ jobs:
 
   integration-autopilot-opencode-boot:
     name: "integration:autopilot:opencode-boot"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -546,7 +546,7 @@ jobs:
 
   integration-docker-cost-monitor:
     name: "integration:docker:cost-monitor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -603,7 +603,7 @@ jobs:
 
   integration-docker-health-monitor:
     name: "integration:docker:health-monitor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -703,7 +703,7 @@ jobs:
 
   integration-docker-manifest-processor:
     name: "integration:docker:manifest-processor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -782,7 +782,7 @@ jobs:
 
   integration-docker-inference-monitor:
     name: "integration:docker:inference-monitor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -850,7 +850,7 @@ jobs:
 
   integration-docker-inference-proxy:
     name: "integration:docker:inference-proxy"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -904,7 +904,7 @@ jobs:
 
   integration-docker-queue-processor:
     name: "integration:docker:queue-processor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
@@ -1119,7 +1119,7 @@ jobs:
 
   integration-docker-helm-installer:
     name: "integration:docker:helm-installer"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -1176,7 +1176,7 @@ jobs:
 
   integration-docker-tls-certificate-manager:
     name: "integration:docker:tls-certificate-manager"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -1218,7 +1218,7 @@ jobs:
     name: "integration:docker:dev-container (${{ matrix.arch }})"
     # Matrix over the two supported Dockerfile.dev target architectures.
     # Each runner builds natively for its own arch — no QEMU emulation.
-    # GitHub provides ubuntu-24.04-arm as a standard public runner, so
+    # GitHub provides ubuntu-26.04-arm as a standard public runner, so
     # both paths run on native kernels instead of translating every RUN
     # step through binfmt.
     runs-on: ${{ matrix.runner }}
@@ -1229,7 +1229,7 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
             expected-uname: x86_64
             # AWS CLI v2 build identifier contains the GNU arch tag —
             # grepping for it proves we downloaded the right tarball, not
@@ -1239,7 +1239,7 @@ jobs:
             # 0x3E = EM_X86_64, 0xB7 = EM_AARCH64.
             elf-e-machine: "0x3E"
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             expected-uname: aarch64
             awscli-arch-grep: "aarch64"
             elf-e-machine: "0xB7"
@@ -1489,7 +1489,7 @@ jobs:
 
   integration-kind-cluster-e2e:
     name: "integration:kind:cluster-e2e"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -3156,7 +3156,7 @@ jobs:
     # are called out where they are set. Kept out of
     # cluster-e2e on purpose: that job's single node has no CPU to spare
     # for Prometheus, and its rollouts are the ones that must not flake.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -4362,7 +4362,7 @@ jobs:
     # the real chart/probe/TrainJob workload enough outer headroom even if a
     # public registry needs every retry; deterministic failures still fail at
     # their own bounded gate.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -5720,7 +5720,7 @@ jobs:
   # --------------------------------------------------------------------------
   integration-kind-platform-addons:
     name: "integration:kind:platform-addons"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -6537,7 +6537,7 @@ jobs:
 
   integration-dev-alias-docker:
     name: "integration:dev-alias:docker"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -6555,7 +6555,7 @@ jobs:
 
   integration-dev-alias-podman:
     name: "integration:dev-alias:podman"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -6623,7 +6623,7 @@ jobs:
 
   integration-dev-alias-finch:
     name: "integration:dev-alias:finch"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -6659,6 +6659,8 @@ jobs:
             --output /usr/share/keyrings/runfinch-finch-archive-keyring.gpg \
             "${finch_key}"
           rm -f "${finch_key}"
+          # Finch publishes a noble (24.04) suite only; its package installs
+          # on the ubuntu-26.04 runner as well.
           echo "deb [signed-by=/usr/share/keyrings/runfinch-finch-archive-keyring.gpg arch=amd64] https://artifact.runfinch.com/deb noble main" \
             | sudo tee /etc/apt/sources.list.d/runfinch-finch.list
       - name: Install the latest Finch (with retry)
@@ -6698,7 +6700,7 @@ jobs:
 
   integration-dev-alias-none:
     name: "integration:dev-alias:none"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -6754,7 +6756,7 @@ jobs:
       - integration-mcp-server
       - integration-pytest-cross-module
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

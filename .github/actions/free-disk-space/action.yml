@@ -27,7 +27,7 @@ runs:
       run: |
         echo "Disk usage before cleanup:"
         df -h /
-        # Largest reclaimable toolchains on the ubuntu-latest image. None of
+        # Largest reclaimable toolchains on the Ubuntu runner image. None of
         # these are used by the Python/CDK/Node build. /opt/hostedtoolcache
         # is intentionally NOT touched — setup-python's interpreter lives
         # there (e.g. /opt/hostedtoolcache/Python/3.14.x).

@@ -65,7 +65,7 @@ jobs:
     # Releases always cut from main. A dispatch that selected a tag or any
     # other branch is fail-closed.
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

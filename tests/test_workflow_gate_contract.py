@@ -256,7 +256,7 @@ def test_the_gate_runs_under_always_with_the_draft_clause(path: Path) -> None:
 def test_the_gate_is_small_and_bounded(path: Path) -> None:
     """The gate is a checkout and one stdlib script; it must never become a place to run work."""
     gate = _gate(path)
-    assert gate.get("runs-on") == "ubuntu-latest"
+    assert gate.get("runs-on") == "ubuntu-26.04"
     assert gate.get("timeout-minutes") == 5
     assert "strategy" not in gate and "continue-on-error" not in gate and "outputs" not in gate
     steps = gate.get("steps", [])
