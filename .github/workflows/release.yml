@@ -65,9 +65,12 @@ jobs:
     # Releases always cut from main. A dispatch that selected a tag or any
     # other branch is fail-closed.
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Full history + tags so the bump commit sits on the real branch

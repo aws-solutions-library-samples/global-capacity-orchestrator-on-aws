@@ -21,13 +21,19 @@ permissions:
 jobs:
   unit-node-inference-streaming-proxy:
     name: "unit:node:inference-streaming-proxy"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     defaults:
       run:
         working-directory: lambda/inference-streaming-proxy
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        # The job's default working directory is created by checkout, which
+        # runs next; the workspace itself exists from the start.
+        working-directory: ${{ github.workspace }}
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
@@ -55,6 +61,17 @@ jobs:
         run: |
           set -o pipefail
           npm test 2>&1 | tee node-coverage.txt
+      # V8 names closures by their variable, so two functions in index.mjs
+      # share the name onAbort. lcov 2.4's genhtml refuses a tracefile that
+      # repeats a function name inside one source ("duplicate function
+      # 'onAbort' starts on line 974 but previous definition started on 897").
+      # Rename only the repeated functions to <name>@L<line> in both the FN
+      # and FNDA records, so each keeps its own line and hit count, instead
+      # of --ignore-errors inconsistent, which would merge them and silence
+      # the next real inconsistency. Runs after the floor is checked, so the
+      # tracefile the test measured is the one node-coverage.txt describes.
+      - name: Give same-named functions distinct names in the tracefile
+        run: python3 ../../.github/scripts/disambiguate_lcov_functions.py lcov.info
       # Rendered here, where the sources the tracefile names are checked out,
       # so the artifact is complete on its own and pages.yml only copies it.
       # Branch data is left out of the HTML: lcov 2.0's genhtml does not read
@@ -94,7 +111,7 @@ jobs:
     needs:
       - unit-node-inference-streaming-proxy
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

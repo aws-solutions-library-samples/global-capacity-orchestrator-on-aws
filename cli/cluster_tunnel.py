@@ -20,6 +20,12 @@ share this module:
 * :func:`open_api_server_tunnel` — a context manager that ties it together and
   guarantees teardown (including when setup fails before yielding).
 
+The route rule is the same everywhere: an explicit ``--via-ssm`` (an instance
+id, or ``auto``) means an SSM tunnel to the private endpoint whenever private
+access is enabled, ``PUBLIC_AND_PRIVATE`` included, and an explicit request the
+cluster cannot honor fails with an explanation. Without ``--via-ssm`` a public
+endpoint is used directly.
+
 ``describe_cluster_access`` and ``start_api_tunnel`` are reached via their
 modules (not ``from ... import``) so tests can monkeypatch them at the source.
 """
@@ -41,6 +47,14 @@ AUTO_BASTION = "auto"
 
 # Local port kubectl uses to reach the API server through the SSM tunnel.
 DEFAULT_API_LOCAL_PORT = 8443
+
+# The routes open_api_server_tunnel selects (TunnelSession.route). The first two
+# match TunnelPlan.as_dict()'s "reachable" values.
+ROUTE_SSM = "ssm-tunnel"  # an SSM tunnel to the private endpoint
+ROUTE_DIRECT = "direct"  # the public endpoint, directly
+# kubectl's own kubeconfig server, untried: a private-only endpoint without
+# --via-ssm, or an endpoint whose access mode could not be read.
+ROUTE_UNVERIFIED = "unverified"
 
 # A syntactically valid placeholder instance id, used only to render a copy-paste
 # command *template* when the caller hasn't supplied a real instance id.
@@ -70,6 +84,22 @@ class TunnelPlan:
         except ValueError:
             return ""
 
+    @property
+    def access_mode(self) -> str:
+        """The access mode in cdk.json's vocabulary, plus ``PUBLIC`` for a public-only one.
+
+        EKS never turns both modes off, so an endpoint without public access is
+        private even when the lookup did not report the private flag.
+        """
+        if not self.public:
+            return "PRIVATE"
+        return "PUBLIC_AND_PRIVATE" if self.private else "PUBLIC"
+
+    @property
+    def private_access(self) -> bool:
+        """Whether the private endpoint, the one an SSM tunnel reaches, is enabled."""
+        return self.access_mode != "PUBLIC"
+
     def ssm_command(self, instance_id: str) -> list[str]:
         """The ``aws ssm start-session`` argv that tunnels to the API endpoint."""
         return ssm_tunnel.build_remote_host_port_forward_command(
@@ -97,29 +127,46 @@ class TunnelPlan:
             self.region,
         ]
 
-    def as_dict(self, instance_id: str | None = None) -> dict[str, Any]:
-        """A JSON-friendly connection plan (what ``--print`` / the MCP tool emit)."""
+    def as_dict(self, via_ssm: str | None = None) -> dict[str, Any]:
+        """A JSON-friendly connection plan (what ``--print`` / the MCP tool emit).
+
+        ``via_ssm`` is the ``--via-ssm`` value (an instance id, or ``auto``). It
+        selects the SSM tunnel whenever private access is enabled, as
+        :func:`open_api_server_tunnel` does; without it a public endpoint is
+        reached directly. Callers reject an explicit ``via_ssm`` for an endpoint
+        without private access first (:func:`require_private_access`).
+        """
         data: dict[str, Any] = {
             "cluster": self.cluster,
             "region": self.region,
             "endpoint": self.endpoint,
             "endpoint_host": self.endpoint_host,
+            "access_mode": self.access_mode,
             "public": self.public,
             "private": self.private,
             "local_port": self.local_port,
             "update_kubeconfig": self.update_kubeconfig_command(),
         }
-        if not self.private:
-            data["reachable"] = "direct"
-            data["note"] = (
+        if not self.private_access or (self.public and not via_ssm):
+            data["reachable"] = ROUTE_DIRECT
+            note = (
                 "The API endpoint is publicly reachable — run `aws eks update-kubeconfig` "
                 "then use kubectl directly; no SSM tunnel is required."
             )
+            if self.private_access:
+                note += (
+                    " Private access is also enabled: if the public endpoint times out from "
+                    "your network (for example, an egress IP outside its CIDR allowlist), "
+                    "pass `--via-ssm <instance-id>` or `--via-ssm auto` to tunnel to the "
+                    "private endpoint instead."
+                )
+            data["note"] = note
             return data
 
-        data["reachable"] = "ssm-tunnel"
+        data["reachable"] = ROUTE_SSM
         data["kubectl_flags"] = self.kubectl_flags()
         data["kubectl_example"] = "kubectl " + " ".join(self.kubectl_flags()) + " get nodes"
+        instance_id = via_ssm if via_ssm != AUTO_BASTION else None
         if instance_id:
             cmd = self.ssm_command(instance_id)
             data["ssm_command"] = cmd
@@ -154,6 +201,20 @@ def resolve_tunnel_plan(
         public=bool(access.get("public")),
         private=bool(access.get("private")),
         local_port=local_port,
+    )
+
+
+def require_private_access(plan: TunnelPlan, via_ssm: str) -> None:
+    """Raise ``RuntimeError`` when an explicit ``--via-ssm`` has no private endpoint to reach."""
+    if plan.private_access:
+        return
+    raise RuntimeError(
+        f"--via-ssm {via_ssm} tunnels to the private API endpoint, but {plan.cluster} "
+        "reports private endpoint access disabled (endpointPrivateAccess=false), so there "
+        "is no private endpoint to reach. Re-run without --via-ssm to use its public "
+        "endpoint directly, or turn private access back on: GCO deploys PRIVATE or "
+        f"PUBLIC_AND_PRIVATE, and `gco stacks deploy {plan.cluster} -y` restores the "
+        "mode configured in cdk.json."
     )
 
 
@@ -193,6 +254,30 @@ def private_endpoint_guidance(cluster: str, region: str) -> str:
         f"  - set eks_cluster.endpoint_access to PUBLIC_AND_PRIVATE and redeploy {region}.\n"
         "Attempting to continue in case you already have VPC connectivity."
     )
+
+
+def _ssm_route_message(plan: TunnelPlan, instance_id: str) -> str:
+    """The route announcement for an SSM tunnel through ``instance_id``."""
+    precedence = " (--via-ssm takes precedence over its public endpoint)" if plan.public else ""
+    return (
+        f"Route: SSM tunnel via {instance_id} to {plan.cluster}'s private API endpoint"
+        f"{precedence}; opening it on {ssm_tunnel.LOCAL_TUNNEL_HOST}:{plan.local_port}..."
+    )
+
+
+def _direct_route_message(plan: TunnelPlan, via_ssm: str | None) -> str:
+    """The route announcement for the public endpoint, reached directly."""
+    message = f"Route: {plan.cluster}'s public API endpoint, directly"
+    if via_ssm:
+        # Only with allow_public_fallback: the explicit request had nowhere to go.
+        return f"{message} (it has no private endpoint for --via-ssm {via_ssm} to reach)."
+    if plan.private_access:
+        return (
+            f"{message}. Its private endpoint is also enabled: if the public one times out "
+            "from this network (for example, an egress IP outside its CIDR allowlist), "
+            "re-run with --via-ssm <instance-id> or --via-ssm auto."
+        )
+    return f"{message}."
 
 
 def provision_bastion(
@@ -270,6 +355,8 @@ class TunnelSession:
     # --via-ssm auto), so a long-lived caller can reopen a stalled tunnel on
     # the same local port through the same instance. None without a tunnel.
     instance_id: str | None = None
+    # The route selected for kubectl: ROUTE_SSM, ROUTE_DIRECT or ROUTE_UNVERIFIED.
+    route: str = ROUTE_UNVERIFIED
 
 
 @contextmanager
@@ -282,12 +369,25 @@ def open_api_server_tunnel(
     local_port: int = DEFAULT_API_LOCAL_PORT,
     bastion_ttl_minutes: int | None = None,
     assume_yes: bool = False,
+    allow_public_fallback: bool = False,
 ) -> Iterator[TunnelSession]:
-    """Resolve endpoint posture and, when private + ``via_ssm``, open an SSM tunnel.
+    """Select the route to ``cluster``'s API endpoint and open it for the ``with`` body.
 
-    Yields a :class:`TunnelSession`. Manages the ephemeral-bastion (``--via-ssm
-    auto``) and tunnel lifecycle and tears both down on exit — including when
-    setup fails before the ``yield`` (so a failed tunnel never leaks a bastion).
+    ``via_ssm`` (an SSM-managed instance id, or ``auto`` to provision an ephemeral
+    bastion) selects an SSM tunnel to the private endpoint whenever private access
+    is enabled, ``PUBLIC_AND_PRIVATE`` included: a CIDR-restricted public endpoint
+    can be unreachable from the caller's egress IP while the private one works.
+    When the endpoint has no private access, or its access mode cannot be read, an
+    explicit ``via_ssm`` fails with an explanation before anything is provisioned.
+    ``allow_public_fallback`` uses the public endpoint instead (the validation
+    harness, which always passes ``auto``). Without ``via_ssm`` a public endpoint
+    is used directly, and a private-only one gets guidance plus a direct attempt
+    for callers already inside the VPC.
+
+    Every route is announced through ``formatter``. Yields a
+    :class:`TunnelSession`, and tears the tunnel and any bastion it provisioned
+    down on exit — including when setup fails before the ``yield`` (so a failed
+    tunnel never leaks a bastion).
     """
     if bastion_ttl_minutes is None:
         bastion_ttl_minutes = ephemeral_bastion.DEFAULT_TTL_MINUTES
@@ -295,11 +395,21 @@ def open_api_server_tunnel(
     # recovered from the cluster name (which is f"{project_name}-{region}").
     project_name = _project_name_from_cluster(cluster, region)
 
+    posture_known = True
     try:
         plan = resolve_tunnel_plan(cluster, region, local_port=local_port)
     except (RuntimeError, ValueError) as exc:
+        if via_ssm and not allow_public_fallback:
+            raise RuntimeError(
+                f"--via-ssm {via_ssm} needs {cluster}'s API endpoint, but its access mode "
+                f"could not be read: {exc}"
+            ) from exc
         # Endpoint posture unknown — fall back to a direct attempt.
-        formatter.print_warning(f"Could not determine endpoint access mode: {exc}")
+        formatter.print_warning(
+            f"Could not determine endpoint access mode: {exc}. Trying the endpoint in "
+            "your kubeconfig directly."
+        )
+        posture_known = False
         plan = TunnelPlan(
             cluster=cluster,
             region=region,
@@ -308,14 +418,22 @@ def open_api_server_tunnel(
             private=False,
             local_port=local_port,
         )
+    if via_ssm and not allow_public_fallback:
+        require_private_access(plan, via_ssm)
 
     server: str | None = None
     tls_server_name: str | None = None
     tunnel = None
     tunnel_target: str | None = None
     created_bastion: str | None = None
+    route = ROUTE_UNVERIFIED
     try:
-        if not plan.public:
+        if via_ssm and plan.private_access:
+            if not plan.endpoint_host:
+                raise RuntimeError(
+                    f"EKS reported no usable API endpoint for {cluster} ({plan.endpoint!r}), "
+                    "so there is nothing for an SSM tunnel to reach."
+                )
             instance_id = via_ssm
             if via_ssm == AUTO_BASTION:
                 created_bastion = provision_bastion(
@@ -323,16 +441,19 @@ def open_api_server_tunnel(
                 )
                 instance_id = created_bastion
 
-            if instance_id:
-                formatter.print_info(
-                    f"Opening SSM tunnel to the private API endpoint via {instance_id}..."
-                )
-                tunnel = ssm_tunnel.start_api_tunnel(instance_id, plan.endpoint, local_port, region)
-                tunnel_target = instance_id
-                server = f"https://{ssm_tunnel.LOCAL_TUNNEL_HOST}:{local_port}"
-                tls_server_name = plan.endpoint_host
-            else:
-                formatter.print_warning(private_endpoint_guidance(cluster, region))
+            formatter.print_info(_ssm_route_message(plan, instance_id))
+            tunnel = ssm_tunnel.start_api_tunnel(instance_id, plan.endpoint, local_port, region)
+            tunnel_target = instance_id
+            server = f"https://{ssm_tunnel.LOCAL_TUNNEL_HOST}:{local_port}"
+            tls_server_name = plan.endpoint_host
+            route = ROUTE_SSM
+        elif not posture_known:
+            pass  # the warning above already named the direct attempt
+        elif plan.public:
+            formatter.print_info(_direct_route_message(plan, via_ssm))
+            route = ROUTE_DIRECT
+        else:
+            formatter.print_warning(private_endpoint_guidance(cluster, region))
 
         yield TunnelSession(
             server=server,
@@ -341,6 +462,7 @@ def open_api_server_tunnel(
             active=tunnel is not None,
             process=tunnel,
             instance_id=tunnel_target,
+            route=route,
         )
     finally:
         try:

@@ -135,6 +135,19 @@ class TestDiagnoseReachability:
         assert "203.0.113.0/24" in check.finding
         assert "egress IP" in (check.remedy or "")
 
+    def test_restricted_public_and_private_offers_the_private_route(self) -> None:
+        # An egress IP that rotates can't be allowlisted; --via-ssm needs no allowlist.
+        check = _by_layer(diagnose(_probe(public_cidrs=["203.0.113.0/24"], private=True)))[
+            "reachability"
+        ]
+        assert "gco cluster tunnel --via-ssm auto" in (check.remedy or "")
+
+    def test_restricted_public_only_endpoint_has_no_private_route(self) -> None:
+        check = _by_layer(diagnose(_probe(public_cidrs=["203.0.113.0/24"], private=False)))[
+            "reachability"
+        ]
+        assert "--via-ssm" not in (check.remedy or "")
+
     def test_public_unrestricted_suggests_narrowing(self) -> None:
         check = _by_layer(diagnose(_probe(public_cidrs=[])))["reachability"]
         assert check.status == "ok"

@@ -50,13 +50,16 @@ permissions:
 jobs:
   mooncake-image-contract:
     name: "integration:docker:mooncake-image"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
       # Opt the suite in (it is skipped everywhere else, e.g. the unit job).
       GCO_MOONCAKE_IMAGE_TEST: "1"
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       # The ~9GB vLLM image needs headroom on the runner's ~14GB root volume.
       - uses: ./.github/actions/free-disk-space
@@ -123,7 +126,7 @@ jobs:
     needs:
       - mooncake-image-contract
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

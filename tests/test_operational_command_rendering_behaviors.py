@@ -599,6 +599,7 @@ def test_private_cluster_plan_without_note_renders_commands(
     payload = {
         "cluster": "test-gco-us-east-1",
         "region": "us-east-1",
+        "access_mode": "PRIVATE",
         "reachable": "private",
         "update_kubeconfig": ["aws", "eks", "update-kubeconfig"],
         "ssm_command_str": "aws ssm start-session",

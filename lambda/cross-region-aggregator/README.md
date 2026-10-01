@@ -86,6 +86,6 @@ The execution role receives only:
 ## Dependencies
 
 - `boto3==1.43.93`
-- `urllib3==2.7.0`
+- `urllib3==2.8.0`
 
 See `requirements.txt` for the deployable package pins.

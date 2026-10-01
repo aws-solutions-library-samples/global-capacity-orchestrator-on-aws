@@ -296,6 +296,17 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+def _forward_into(forwarded: list[list[str]]) -> Any:
+    """Stand-in for cluster_ui.exec_port_forward: record the argv, then report ready."""
+
+    def forward(cmd: list[str], local_port: int, *, on_ready: Any = None, **_: Any) -> None:
+        forwarded.append(list(cmd))
+        if on_ready is not None:
+            on_ready()
+
+    return forward
+
+
 @pytest.fixture
 def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Fake tunnel + kubeconfig; records what the command asked for."""
@@ -370,7 +381,7 @@ class TestOpenCommand:
         self, runner: CliRunner, cluster: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         forwarded: list[list[str]] = []
-        monkeypatch.setattr(cluster_ui, "exec_port_forward", forwarded.append)
+        monkeypatch.setattr(cluster_ui, "exec_port_forward", _forward_into(forwarded))
         result = runner.invoke(
             cli,
             [
@@ -418,7 +429,7 @@ class TestOpenCommand:
     ) -> None:
         cluster["session"] = (None, None)
         forwarded: list[list[str]] = []
-        monkeypatch.setattr(cluster_ui, "exec_port_forward", forwarded.append)
+        monkeypatch.setattr(cluster_ui, "exec_port_forward", _forward_into(forwarded))
         result = runner.invoke(cli, ["gitops", "open", "-r", "us-east-1"])
         assert result.exit_code == 0, result.output
         assert forwarded[0][-1] == "8080:80"

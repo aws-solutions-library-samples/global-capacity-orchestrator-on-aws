@@ -370,10 +370,14 @@ class TestCostsDashboardCommand:
             "cli.kubectl_helpers.describe_cluster_access",
             lambda c, r: {"public": public, "endpoint": "https://x.eks.amazonaws.com"},
         )
-        monkeypatch.setattr(
-            "subprocess.run",
-            lambda cmd, check=False: captured.__setitem__("cmd", cmd),
-        )
+
+        def forward(cmd, local_port, *, on_ready=None, **_):
+            captured["cmd"] = cmd
+            captured["port"] = local_port
+            if on_ready is not None:
+                on_ready()
+
+        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", forward)
         runner = CliRunner()
         outcome = runner.invoke(costs, args)
         return outcome, captured

@@ -82,10 +82,13 @@ jobs:
     # manifests (`helm template`) with the values charts.yaml ships — no
     # cluster required. Every entry is checked, including enabled: false charts
     # (those are toggled on via cdk.json, so their pins must be valid too).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -131,7 +134,7 @@ jobs:
 
   integration-k8s-manifest-schema:
     name: "integration:k8s:manifest-schema"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -143,6 +146,9 @@ jobs:
       KUBECONFORM_VERSION: "v0.8.0"
       KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -295,7 +301,7 @@ jobs:
 
   integration-lambda-imports:
     name: "integration:lambda:imports"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # Several Lambda modules (notably lambda/api-gateway-proxy/proxy_utils.py)
@@ -306,6 +312,9 @@ jobs:
       AWS_DEFAULT_REGION: us-east-1
       AWS_REGION: us-east-1
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -320,7 +329,7 @@ jobs:
 
   integration-pytest-cross-module:
     name: "integration:pytest:cross-module"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # tests/test_integration.py imports every Lambda handler, including
@@ -330,6 +339,9 @@ jobs:
       AWS_DEFAULT_REGION: us-east-1
       AWS_REGION: us-east-1
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
@@ -358,10 +370,13 @@ jobs:
 
   integration-mcp-server:
     name: "integration:mcp:server"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
@@ -405,10 +420,13 @@ jobs:
 
   integration-autopilot-claude-code-boot:
     name: "integration:autopilot:claude-code-boot"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
@@ -454,10 +472,13 @@ jobs:
 
   integration-autopilot-codex-boot:
     name: "integration:autopilot:codex-boot"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
@@ -506,10 +527,13 @@ jobs:
 
   integration-autopilot-opencode-boot:
     name: "integration:autopilot:opencode-boot"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
@@ -546,10 +570,13 @@ jobs:
 
   integration-docker-cost-monitor:
     name: "integration:docker:cost-monitor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
@@ -603,10 +630,13 @@ jobs:
 
   integration-docker-health-monitor:
     name: "integration:docker:health-monitor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
@@ -703,10 +733,13 @@ jobs:
 
   integration-docker-manifest-processor:
     name: "integration:docker:manifest-processor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
@@ -782,10 +815,13 @@ jobs:
 
   integration-docker-inference-monitor:
     name: "integration:docker:inference-monitor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
@@ -850,10 +886,13 @@ jobs:
 
   integration-docker-inference-proxy:
     name: "integration:docker:inference-proxy"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
@@ -904,7 +943,7 @@ jobs:
 
   integration-docker-queue-processor:
     name: "integration:docker:queue-processor"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
@@ -929,6 +968,9 @@ jobs:
       AWS_SECRET_ACCESS_KEY: testing
       AWS_REGION: us-east-1
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
@@ -1119,10 +1161,13 @@ jobs:
 
   integration-docker-helm-installer:
     name: "integration:docker:helm-installer"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
@@ -1176,10 +1221,13 @@ jobs:
 
   integration-docker-tls-certificate-manager:
     name: "integration:docker:tls-certificate-manager"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Build image
@@ -1218,7 +1266,7 @@ jobs:
     name: "integration:docker:dev-container (${{ matrix.arch }})"
     # Matrix over the two supported Dockerfile.dev target architectures.
     # Each runner builds natively for its own arch — no QEMU emulation.
-    # GitHub provides ubuntu-24.04-arm as a standard public runner, so
+    # GitHub provides ubuntu-26.04-arm as a standard public runner, so
     # both paths run on native kernels instead of translating every RUN
     # step through binfmt.
     runs-on: ${{ matrix.runner }}
@@ -1229,7 +1277,7 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
             expected-uname: x86_64
             # AWS CLI v2 build identifier contains the GNU arch tag —
             # grepping for it proves we downloaded the right tarball, not
@@ -1239,11 +1287,14 @@ jobs:
             # 0x3E = EM_X86_64, 0xB7 = EM_AARCH64.
             elf-e-machine: "0x3E"
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             expected-uname: aarch64
             awscli-arch-grep: "aarch64"
             elf-e-machine: "0xB7"
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Build dev container
         # Native build on the matching host arch — no --platform or QEMU.
@@ -1489,7 +1540,7 @@ jobs:
 
   integration-kind-cluster-e2e:
     name: "integration:kind:cluster-e2e"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -1512,6 +1563,9 @@ jobs:
       # Deployment pulls with imagePullPolicy: Never.
       CI_SQS_LOCAL_IMAGE: "gco-ci-sqs-emulator:local"
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -1552,7 +1606,10 @@ jobs:
           # installs Calico and waits for Ready via `kubectl rollout status`.
           wait: "0s"
       - name: Load pinned probe image into Kind
-        run: kind load docker-image busybox:1.38.0 --name gco-ci
+        # Every load into a kind node goes through preload_kind_images.py: it
+        # saves the daemon's platform only and loads the archive, which is
+        # what Docker 29's containerd image store needs (kind#4224).
+        run: python3 .github/scripts/preload_kind_images.py --cluster gco-ci --image busybox:1.38.0
       - name: Install Calico for NetworkPolicy enforcement
         # kind's default kindnet does not enforce NetworkPolicy. Calico does,
         # so 03-network-policies.yaml is actually exercised here.
@@ -1698,18 +1755,20 @@ jobs:
           cache-from: type=gha,scope=queue-processor
           cache-to: type=gha,mode=max,scope=queue-processor,ignore-error=true
       - name: Load images into kind
+        # The service images were built into the runner's Docker above. The
+        # emulator was pre-pulled by digest, which kind cannot address, so
+        # --pinned retags it locally for the Deployment's imagePullPolicy:
+        # Never (the pull is a cache hit).
         run: |
           set -euo pipefail
-          kind load docker-image health-monitor:ci --name gco-ci
-          kind load docker-image cost-monitor:ci --name gco-ci
-          kind load docker-image manifest-processor:ci --name gco-ci
-          kind load docker-image inference-monitor:ci --name gco-ci
-          kind load docker-image inference-proxy:ci --name gco-ci
-          kind load docker-image queue-processor:ci --name gco-ci
-          # The emulator was pulled by digest; retag so `kind load` can address
-          # it and the in-cluster Deployment can pull it with policy Never.
-          docker tag "${CI_SQS_EMULATOR_IMAGE}" "${CI_SQS_LOCAL_IMAGE}"
-          kind load docker-image "${CI_SQS_LOCAL_IMAGE}" --name gco-ci
+          python3 .github/scripts/preload_kind_images.py --cluster gco-ci \
+            --image health-monitor:ci \
+            --image cost-monitor:ci \
+            --image manifest-processor:ci \
+            --image inference-monitor:ci \
+            --image inference-proxy:ci \
+            --image queue-processor:ci \
+            --pinned "${CI_SQS_EMULATOR_IMAGE}=${CI_SQS_LOCAL_IMAGE}"
       - name: Apply namespaces + RBAC
         # 05-priority-classes.yaml must land before the deployments: pod
         # admission rejects an unresolvable priorityClassName, and every
@@ -3156,7 +3215,7 @@ jobs:
     # are called out where they are set. Kept out of
     # cluster-e2e on purpose: that job's single node has no CPU to spare
     # for Prometheus, and its rollouts are the ones that must not flake.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -3178,6 +3237,9 @@ jobs:
       # The kind and Calico pins shared with the other kind jobs live in the
       # workflow-level env block at the top of this file — one declaration.
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Reclaim runner disk space before Kind image builds
         uses: ./.github/actions/free-disk-space
@@ -3303,10 +3365,12 @@ jobs:
           # installs Calico and waits via rollout status.
           wait: "0s"
       - name: Load the S3 emulator into Kind
+        # Pre-pulled by digest above; --pinned retags it under the local tag
+        # the Deployment runs with imagePullPolicy: Never and loads it.
         run: |
           set -euo pipefail
-          docker tag "${CI_S3_EMULATOR_IMAGE}" "${CI_S3_LOCAL_IMAGE}"
-          kind load docker-image "${CI_S3_LOCAL_IMAGE}" --name gco-cost-pipeline
+          python3 .github/scripts/preload_kind_images.py --cluster gco-cost-pipeline \
+            --pinned "${CI_S3_EMULATOR_IMAGE}=${CI_S3_LOCAL_IMAGE}"
       - name: Install Calico for NetworkPolicy enforcement
         # Mirrors the proven step in integration:kind:cluster-e2e, including
         # the retry loop: calico-node readiness is a known CI flake because
@@ -3362,7 +3426,9 @@ jobs:
           cache-from: type=gha,scope=cost-monitor
           cache-to: type=gha,mode=max,scope=cost-monitor,ignore-error=true
       - name: Load the cost-monitor image into kind
-        run: kind load docker-image cost-monitor:ci --name gco-cost-pipeline
+        run: >-
+          python3 .github/scripts/preload_kind_images.py --cluster gco-cost-pipeline
+          --image cost-monitor:ci
       - name: Apply platform namespaces + RBAC + priority classes
         # 01-serviceaccounts / 02-rbac carry {{...ROLE_ARN}} IRSA annotation
         # tokens; annotations are opaque strings to the apiserver, so the
@@ -4362,7 +4428,7 @@ jobs:
     # the real chart/probe/TrainJob workload enough outer headroom even if a
     # public registry needs every retry; deterministic failures still fail at
     # their own bounded gate.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -4381,6 +4447,9 @@ jobs:
       # The kind and Calico pins shared with cluster-e2e live in the
       # workflow-level env block at the top of this file — one declaration.
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Reclaim runner disk space before large image pulls
         uses: ./.github/actions/free-disk-space
@@ -5527,11 +5596,13 @@ jobs:
         with:
           images: ${{ steps.mlflow-example-image.outputs.image }}
       - name: Load the mlflow example's image into kind
+        env:
+          EXAMPLE_IMAGE: ${{ steps.mlflow-example-image.outputs.image }}
         run: |
           set -euo pipefail
-          kind load docker-image "${{ steps.mlflow-example-image.outputs.image }}" \
-            --name gco-examples-smoke
-          docker image rm "${{ steps.mlflow-example-image.outputs.image }}"
+          python3 .github/scripts/preload_kind_images.py --cluster gco-examples-smoke \
+            --image "${EXAMPLE_IMAGE}"
+          docker image rm "${EXAMPLE_IMAGE}"
       - name: Run the REAL mlflow tracking example over verified HTTPS as the processor SA
         # The exact file users submit, applied with the production identity:
         # it installs the MLflow client, logs a run to
@@ -5620,11 +5691,13 @@ jobs:
         with:
           images: ${{ steps.trainjob-image.outputs.image }}
       - name: Load training image into kind and drop the runner-side copy
+        env:
+          TRAINJOB_IMAGE: ${{ steps.trainjob-image.outputs.image }}
         run: |
           set -euo pipefail
-          kind load docker-image "${{ steps.trainjob-image.outputs.image }}" \
-            --name gco-examples-smoke
-          docker image rm "${{ steps.trainjob-image.outputs.image }}"
+          python3 .github/scripts/preload_kind_images.py --cluster gco-examples-smoke \
+            --image "${TRAINJOB_IMAGE}"
+          docker image rm "${TRAINJOB_IMAGE}"
           df -h / | tail -1
       - name: Run the REAL TrainJob example as the processor SA
         # The exact file users submit, applied with the exact production
@@ -5720,7 +5793,7 @@ jobs:
   # --------------------------------------------------------------------------
   integration-kind-platform-addons:
     name: "integration:kind:platform-addons"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
@@ -5729,6 +5802,9 @@ jobs:
       GITOPS_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || format('{0}/{1}.git', github.server_url, github.repository) }}
       GITOPS_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Pre-pull Kind node image with retry
         uses: ./.github/actions/docker-pull-with-retry
@@ -6537,10 +6613,13 @@ jobs:
 
   integration-dev-alias-docker:
     name: "integration:dev-alias:docker"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Verify the preinstalled Docker runtime
         # GitHub-hosted runners include Docker. Verify that trusted runner
@@ -6555,10 +6634,13 @@ jobs:
 
   integration-dev-alias-podman:
     name: "integration:dev-alias:podman"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install the latest Podman (with retry)
         uses: ./.github/actions/apt-install-with-retry
@@ -6583,12 +6665,27 @@ jobs:
           set -euo pipefail
           # The emitted podman function bind-mounts the rootless API socket
           # ($XDG_RUNTIME_DIR/podman/podman.sock) onto /var/run/docker.sock.
-          # Pin XDG_RUNTIME_DIR to a writable dir and start the API service so
-          # the bind-mount source exists (the test image never uses it, but
-          # `podman run` needs the source path present).
-          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"
+          # Pin XDG_RUNTIME_DIR and start the API service so the bind-mount
+          # source exists (the test image never uses it, but `podman run`
+          # needs the source path present).
+          #
+          # The runtime dir must be /run/user/<uid>, the one podman assumes
+          # when the variable is unset. Rootless podman's network backend,
+          # pasta, runs confined by Ubuntu's AppArmor profile (passt's
+          # abstractions/pasta), which opens the container's network namespace
+          # only under @{run}/user/@{uid}/** (rw) or /tmp/** and may only
+          # write, never read, under $HOME; a runtime dir under $RUNNER_TEMP
+          # (/home/runner/work/_temp) therefore fails every `podman run` with
+          # "pasta failed with exit code 1: Couldn't open network namespace
+          # ...: Permission denied". A runner with no logind session for this
+          # user has no /run/user/<uid>, so create it with the owner and mode
+          # systemd would give it.
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+            sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$XDG_RUNTIME_DIR"
+          fi
           mkdir -p "$XDG_RUNTIME_DIR/podman"
-          chmod 700 "$XDG_RUNTIME_DIR"
           nohup podman system service --time=0 \
             "unix://$XDG_RUNTIME_DIR/podman/podman.sock" >"$RUNNER_TEMP/podman-api.log" 2>&1 &
           for _ in $(seq 1 15); do
@@ -6623,10 +6720,13 @@ jobs:
 
   integration-dev-alias-finch:
     name: "integration:dev-alias:finch"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Prepare the runfinch APT repo
         run: |
@@ -6659,6 +6759,8 @@ jobs:
             --output /usr/share/keyrings/runfinch-finch-archive-keyring.gpg \
             "${finch_key}"
           rm -f "${finch_key}"
+          # Finch publishes a noble (24.04) suite only; its package installs
+          # on the ubuntu-26.04 runner as well.
           echo "deb [signed-by=/usr/share/keyrings/runfinch-finch-archive-keyring.gpg arch=amd64] https://artifact.runfinch.com/deb noble main" \
             | sudo tee /etc/apt/sources.list.d/runfinch-finch.list
       - name: Install the latest Finch (with retry)
@@ -6698,10 +6800,13 @@ jobs:
 
   integration-dev-alias-none:
     name: "integration:dev-alias:none"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Prove setup-dev-alias.sh refuses when no runtime answers
         # Docker is preinstalled on the runner, so the script masks all three
@@ -6754,7 +6859,7 @@ jobs:
       - integration-mcp-server
       - integration-pytest-cross-module
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

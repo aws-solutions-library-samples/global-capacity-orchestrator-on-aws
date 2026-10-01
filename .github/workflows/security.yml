@@ -60,10 +60,13 @@ permissions:
 jobs:
   security-bandit-sast:
     name: "security:bandit:sast"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -111,10 +114,13 @@ jobs:
 
   security-pip-audit-deps:
     name: "security:pip-audit:deps"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -172,10 +178,13 @@ jobs:
 
   security-bundler-audit-deps:
     name: "security:bundler-audit:deps"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       # The RubyGems half of the dependency graph: bashcov + bundler-audit
       # itself, pinned in Gemfile and resolved in Gemfile.lock. Ruby is CI-only
@@ -183,7 +192,7 @@ jobs:
       # dependency is still a dependency, so its graph is audited on the same
       # schedule as requirements-lock.txt and the npm lockfiles.
       - name: Set up Ruby
-        uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073  # v1.324.0
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8  # v1.327.0
         with:
           ruby-version: ".ruby-version"
       - name: Install the committed gem lock
@@ -203,10 +212,13 @@ jobs:
 
   security-npm-audit:
     name: "security:npm-audit:all-packages"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
@@ -299,10 +311,13 @@ jobs:
 
   security-trivy-filesystem:
     name: "security:trivy:filesystem"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install pinned Trivy
         # The Trivy pin lives in the composite action's `version` default —
@@ -341,7 +356,7 @@ jobs:
 
   security-discover-images:
     name: "security:discover:images"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # The container-scan matrix below is derived from the tree instead of
@@ -355,6 +370,9 @@ jobs:
     outputs:
       matrix: ${{ steps.discover.outputs.matrix }}
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Discover buildable images
         id: discover
@@ -368,7 +386,7 @@ jobs:
 
   security-trivy-container-scan:
     name: "security:trivy:container-scan"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     needs: security-discover-images
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
@@ -380,6 +398,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.security-discover-images.outputs.matrix) }}
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/setup-buildx-with-retry
       - name: Install pinned Trivy
@@ -440,10 +461,13 @@ jobs:
 
   security-trufflehog-secrets:
     name: "security:trufflehog:secrets"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Pre-pull TruffleHog image (with retry)
         # A plain `docker run` pulls implicitly with no retry; pre-pulling
@@ -501,10 +525,13 @@ jobs:
 
   security-gitleaks-secrets:
     name: "security:gitleaks:secrets"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Pre-pull Gitleaks image (with retry)
         uses: ./.github/actions/docker-pull-with-retry
@@ -527,12 +554,15 @@ jobs:
 
   security-semgrep-sast:
     name: "security:semgrep:sast"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     container:
       image: semgrep/semgrep:1.177.0
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Run semgrep
         # Suppressed rules live in .github/config/semgrep-excluded-rules.txt;
@@ -550,10 +580,13 @@ jobs:
 
   security-checkov-iac:
     name: "security:checkov:iac"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Pre-pull Checkov image (with retry)
         uses: ./.github/actions/docker-pull-with-retry
@@ -574,10 +607,13 @@ jobs:
 
   security-kics-iac:
     name: "security:kics:iac"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
@@ -635,7 +671,7 @@ jobs:
     # To swap back to Default Setup: disable this job (comment it out)
     # and re-enable Default Setup in Settings → Code security → CodeQL.
     # The config file has no effect under Default Setup.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     permissions:
@@ -649,9 +685,12 @@ jobs:
       matrix:
         language: [python]
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63  # v4.38.0
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           languages: ${{ matrix.language }}
           # Pins paths, paths-ignore, and query-filters used by the scan.
@@ -662,7 +701,7 @@ jobs:
       # (``NotADirectoryError`` on single-file ``paths:`` entries) so
       # we avoid invoking it.
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63  # v4.38.0
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           category: "/language:${{ matrix.language }}"
 
@@ -672,7 +711,7 @@ jobs:
     # addition to the repository-wide Semgrep scan. JavaScript extraction is
     # buildless, so the committed source is analyzed without npm lifecycle
     # scripts or synthesized assets.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     permissions:
@@ -680,14 +719,17 @@ jobs:
       contents: read
       actions: read
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63  # v4.38.0
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           languages: javascript-typescript
           config-file: ./.github/codeql/codeql-config.yml
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63  # v4.38.0
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           category: "/language:javascript-typescript"
 
@@ -725,7 +767,7 @@ jobs:
       - security-trivy-filesystem
       - security-trufflehog-secrets
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

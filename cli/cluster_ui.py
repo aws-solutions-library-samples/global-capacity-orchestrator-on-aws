@@ -7,6 +7,9 @@ on the same three steps ``gco monitoring open`` takes for Grafana — reach the
 or a headless Playwright page at it — plus two reads they need around it: a
 key out of a Kubernetes Secret (the Argo CD admin password) and the pinned
 chart entry from ``lambda/helm-installer/charts.yaml`` (for ``status``).
+:func:`exec_port_forward` is the foreground forward all four ``open``-style
+commands (``monitoring open``, ``costs dashboard``, ``gitops open``,
+``crossplane open``) share, so none announces a URL before kubectl listens.
 
 Everything here is list-form subprocess calls and pure helpers, so the command
 modules stay thin and the tests can drive them with fakes. Playwright is
@@ -20,11 +23,12 @@ import json
 import re
 import socket
 import subprocess
+import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import IO, Any, cast
 
 import click
 import yaml
@@ -39,6 +43,21 @@ RENDER_WAIT_MS = 5000
 
 #: How long a background port-forward may take to accept connections.
 PORT_FORWARD_READY_TIMEOUT_SECONDS = 30.0
+
+#: How long a foreground port-forward may take to report its listener. kubectl
+#: gives up on an unreachable API server by itself well inside this.
+FOREGROUND_PORT_FORWARD_READY_TIMEOUT_SECONDS = 120.0
+
+#: kubectl prints one of these per local address it binds, once the API server
+#: has accepted the port-forward (client-go tools/portforward).
+_FORWARDING_LINE = re.compile(r"^Forwarding from \S+:(?P<port>\d+) -> \d+")
+
+#: How often the foreground readiness wait re-checks kubectl (it stays
+#: responsive to Ctrl-C between checks).
+_READY_POLL_SECONDS = 0.2
+
+#: How long the output relay may take to drain once kubectl has exited.
+_RELAY_DRAIN_SECONDS = 2.0
 
 #: Default self-terminate backstop for an ``--via-ssm auto`` bastion (mirrors
 #: ``cli.ephemeral_bastion.DEFAULT_TTL_MINUTES``; kept literal so importing
@@ -234,13 +253,18 @@ def background_port_forward(
         wait_for_local_port(local_port, process, timeout=timeout)
         yield process
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+        _stop_process(process)
+
+
+def _stop_process(process: subprocess.Popen[bytes]) -> None:
+    """Terminate ``process`` if it still runs, killing it after a short grace period."""
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def capture_page(
@@ -305,7 +329,8 @@ def tunnel_options(func: Any) -> Any:
         help=(
             "Tunnel to the private API endpoint through an SSM-managed instance. "
             "Pass an instance id to use an existing one, or 'auto' to provision a "
-            "self-terminating ephemeral bastion and tear it down afterwards."
+            "self-terminating ephemeral bastion and tear it down afterwards. Used "
+            "whenever private endpoint access is on, PUBLIC_AND_PRIVATE included."
         ),
     )(func)
     func = click.option(
@@ -314,8 +339,70 @@ def tunnel_options(func: Any) -> Any:
     return func
 
 
-def exec_port_forward(cmd: Sequence[str]) -> None:
-    """Run the (validated) kubectl port-forward argv in the foreground."""
-    subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - argv built by build_port_forward_command; list form, no shell=True
-        list(cmd), check=False
+def _relay_port_forward_output(
+    stream: Iterable[bytes], local_port: int, ready: threading.Event
+) -> None:
+    """Echo kubectl's stdout lines, setting ``ready`` at its listener on ``local_port``."""
+    for raw in stream:
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        click.echo(line)
+        match = _FORWARDING_LINE.match(line)
+        if match is not None and int(match.group("port")) == local_port:
+            ready.set()
+
+
+def exec_port_forward(
+    cmd: Sequence[str],
+    local_port: int,
+    *,
+    on_ready: Callable[[], object] | None = None,
+    ready_timeout: float = FOREGROUND_PORT_FORWARD_READY_TIMEOUT_SECONDS,
+) -> None:
+    """Run the (validated) kubectl port-forward argv in the foreground until it exits.
+
+    kubectl's output is relayed line by line, and ``on_ready`` runs once kubectl
+    reports a listener on ``local_port`` (``Forwarding from 127.0.0.1:PORT ->
+    ...``). kubectl prints that only after the API server accepted the forward,
+    so a caller's "forwarding" message never precedes a working forward.
+
+    Raises ``RuntimeError`` when kubectl exits, or ``ready_timeout`` passes,
+    before that line, and when kubectl exits non-zero after it. kubectl's own
+    error reaches the terminal on its inherited stderr. The process is stopped
+    on the way out, Ctrl-C included.
+    """
+    process = subprocess.Popen(  # nosemgrep: dangerous-subprocess-use-audit - argv built by build_port_forward_command; list form, no shell=True
+        list(cmd), stdout=subprocess.PIPE
     )
+    ready = threading.Event()
+    relay = threading.Thread(
+        target=_relay_port_forward_output,
+        args=(cast(IO[bytes], process.stdout), local_port, ready),
+        name="kubectl-port-forward-output",
+        daemon=True,
+    )
+    relay.start()
+    try:
+        deadline = time.monotonic() + ready_timeout
+        while not ready.wait(_READY_POLL_SECONDS):
+            if process.poll() is not None:
+                # The listener line may still be in flight from the relay.
+                relay.join(_RELAY_DRAIN_SECONDS)
+                if ready.is_set():
+                    break
+                raise RuntimeError(
+                    f"kubectl port-forward exited with code {process.returncode} before "
+                    f"localhost:{local_port} was listening; its error is above."
+                )
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"kubectl port-forward did not open localhost:{local_port} within "
+                    f"{ready_timeout:g}s."
+                )
+        if on_ready is not None:
+            on_ready()
+        returncode = process.wait()
+        if returncode != 0:
+            raise RuntimeError(f"kubectl port-forward exited with code {returncode}.")
+    finally:
+        _stop_process(process)
+        relay.join(_RELAY_DRAIN_SECONDS)

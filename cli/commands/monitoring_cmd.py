@@ -17,13 +17,13 @@ through the private API endpoint — there is no public Grafana ingress.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from typing import Any
 
 import click
 import requests
 
+from .. import cluster_ui
 from ..config import GCOConfig
 from ..output import confirm, emit_structured_document, get_output_formatter
 
@@ -192,7 +192,8 @@ def monitoring_disable(config: Any, yes: bool) -> None:
     help=(
         "Tunnel to the private API endpoint through an SSM-managed instance. "
         "Pass an instance id to use an existing one, or 'auto' to provision a "
-        "self-terminating ephemeral bastion and tear it down when the forward stops."
+        "self-terminating ephemeral bastion and tear it down when the forward stops. "
+        "Used whenever private endpoint access is on, PUBLIC_AND_PRIVATE included."
     ),
 )
 @click.option(
@@ -225,7 +226,8 @@ def monitoring_open(
     (the default) pass ``--via-ssm <instance-id>`` to tunnel through an existing
     SSM-managed instance, or ``--via-ssm auto`` to have the CLI provision a
     minimal, self-terminating ephemeral bastion for the session and tear it down
-    on exit.
+    on exit. ``--via-ssm`` is honored on a PUBLIC_AND_PRIVATE cluster too. The
+    local URL is printed once kubectl's listener is up, not before.
     """
     from ..cluster_tunnel import open_api_server_tunnel, resolve_region
     from ..kubectl_helpers import build_port_forward_command, update_kubeconfig
@@ -263,26 +265,25 @@ def monitoring_open(
                 tls_server_name=session.tls_server_name,
             )
             url = f"http://localhost:{bind_port}"
-            formatter.print_success(f"Forwarding {service} → {url} (Ctrl-C to stop)")
-            if service == "grafana":
-                formatter.print_info(
-                    "Log in with the Grafana admin credential from the "
-                    f"{_GRAFANA_SECRET} Secret (monitoring namespace)."
-                )
+            formatter.print_info(
+                f"Starting kubectl port-forward for {service} on localhost:{bind_port}..."
+            )
+
+            def _announce() -> None:
+                formatter.print_success(f"Forwarding {service} → {url} (Ctrl-C to stop)")
+                if service == "grafana":
+                    formatter.print_info(
+                        "Log in with the Grafana admin credential from the "
+                        f"{_GRAFANA_SECRET} Secret (monitoring namespace)."
+                    )
+
             try:
-                _exec_port_forward(cmd)
+                cluster_ui.exec_port_forward(cmd, bind_port, on_ready=_announce)
             except KeyboardInterrupt:  # pragma: no cover - interactive Ctrl-C
                 return
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
         sys.exit(1)
-
-
-def _exec_port_forward(cmd: list[str]) -> None:
-    """Run the (validated) kubectl port-forward argv in the foreground."""
-    subprocess.run(
-        cmd, check=False
-    )  # nosemgrep: dangerous-subprocess-use-audit - argv built by build_port_forward_command; list form, no shell=True
 
 
 # ---------------------------------------------------------------------------

@@ -21,9 +21,10 @@ from typing import Any
 import click
 
 from ..cluster_tunnel import (
-    AUTO_BASTION,
     DEFAULT_API_LOCAL_PORT,
+    ROUTE_DIRECT,
     open_api_server_tunnel,
+    require_private_access,
     resolve_region,
     resolve_tunnel_plan,
 )
@@ -48,7 +49,8 @@ def cluster(config: Any) -> None:
     metavar="INSTANCE_ID|auto",
     help=(
         "Tunnel through an SSM-managed instance id, or 'auto' to provision a "
-        "self-terminating ephemeral bastion and tear it down on exit."
+        "self-terminating ephemeral bastion and tear it down on exit. Used whenever "
+        "private endpoint access is on, PUBLIC_AND_PRIVATE included."
     ),
 )
 @click.option(
@@ -91,10 +93,12 @@ def tunnel_cmd(
     """Open (or ``--print``) an SSM tunnel to a cluster's private EKS API endpoint.
 
     Interactive mode holds the tunnel open in the foreground (Ctrl-C to stop) and
-    prints the ``kubectl`` flags to use in another shell. On a private-endpoint
-    cluster pass ``--via-ssm <instance-id>`` to tunnel through an existing
-    SSM-managed instance, or ``--via-ssm auto`` to provision a minimal,
-    self-terminating ephemeral bastion for the session.
+    prints the ``kubectl`` flags to use in another shell. Pass ``--via-ssm
+    <instance-id>`` to tunnel through an existing SSM-managed instance, or
+    ``--via-ssm auto`` to provision a minimal, self-terminating ephemeral bastion
+    for the session. Either is honored whenever private endpoint access is on,
+    including a PUBLIC_AND_PRIVATE cluster whose public endpoint this network
+    cannot reach. Without ``--via-ssm``, a public endpoint is used directly.
     """
     formatter = get_output_formatter(config)
     target_region = resolve_region(config, region)
@@ -132,13 +136,14 @@ def tunnel_cmd(
                     + " get nodes"
                 )
                 _block_until_interrupt()
-            elif session.plan.public:
+            elif session.route == ROUTE_DIRECT:
                 formatter.print_success(
                     f"{cluster_name} has a PUBLIC API endpoint — kubectl reaches it directly "
                     "(after `aws eks update-kubeconfig`); no tunnel needed."
                 )
-            # A private endpoint with no --via-ssm was already explained by the
-            # context manager (private_endpoint_guidance); nothing to hold open.
+            # A private endpoint with no --via-ssm, or one whose access mode could
+            # not be read, was already explained by the context manager; there is
+            # nothing to hold open.
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
         sys.exit(1)
@@ -152,11 +157,16 @@ def _print_connection_plan(
     via_ssm: str | None,
     local_port: int,
 ) -> None:
-    """Resolve and emit the connection plan (JSON under -o json, else commands)."""
-    instance_id = via_ssm if (via_ssm and via_ssm != AUTO_BASTION) else None
+    """Resolve and emit the connection plan (JSON under -o json, else commands).
+
+    The plan follows the interactive route rule: ``--via-ssm`` selects the SSM
+    tunnel whenever private access is on, and is rejected when it is off.
+    """
     try:
         plan = resolve_tunnel_plan(cluster_name, region, local_port=local_port)
-        payload = plan.as_dict(instance_id)
+        if via_ssm:
+            require_private_access(plan, via_ssm)
+        payload = plan.as_dict(via_ssm)
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(f"Failed to resolve tunnel plan: {exc}")
         sys.exit(1)
@@ -170,13 +180,14 @@ def _print_connection_plan(
 def _echo_plan_human(payload: dict[str, Any]) -> None:
     """Print the connection plan as copy-paste shell commands."""
     header = f"# {payload['cluster']} ({payload['region']})"
+    mode = payload["access_mode"]
     lines: list[str] = []
     if payload.get("reachable") == "direct":
-        lines.append(f"{header}: PUBLIC endpoint — kubectl reaches it directly.")
+        lines.append(f"{header}: {mode} endpoint — kubectl reaches the public endpoint directly.")
         lines.append("# " + payload["note"])
         lines.append(" ".join(payload["update_kubeconfig"]))
     else:
-        lines.append(f"{header}: PRIVATE endpoint — reach it over an SSM tunnel.")
+        lines.append(f"{header}: {mode} endpoint — reach the private endpoint over an SSM tunnel.")
         lines.append("# 1) Ensure a kubeconfig context exists:")
         lines.append(" ".join(payload["update_kubeconfig"]))
         lines.append("# 2) Open the tunnel in one shell (keep it running):")

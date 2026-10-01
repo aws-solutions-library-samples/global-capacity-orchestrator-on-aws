@@ -39,10 +39,28 @@ Official Image on ECR Public, then ECR Public), tagged ``LOCAL`` and loaded. The
 pod names ``LOCAL`` with ``imagePullPolicy: Never``, so it never reaches a
 registry.
 
+``--image NAME`` loads an image a previous step already put in the runner's
+Docker (a service image built with ``load: true``, or an example's image pulled
+with retry) without pulling anything.
+
+Every load goes through one path. ``kind load docker-image`` runs ``docker
+save`` for the whole image and imports the archive with ``ctr images import
+--all-platforms``. Docker 29 (the Ubuntu 26.04 runner image) stores images in
+containerd, where a pulled or built image is recorded under its multi-platform
+index while only the daemon's own platform has content, so that import fails
+with ``content digest sha256:...: not found`` (kubernetes-sigs/kind#4224). This
+script instead saves each image with ``docker save --platform`` for the
+daemon's platform (``docker version`` reports it), so the archive carries one
+manifest and the blobs behind it, and loads that archive with ``kind load
+image-archive``. One archive at a time keeps the runner's disk peak at one
+image. The archive lives under ``TMPDIR``, which the workflows point at the
+runner's work disk.
+
 Usage::
 
     python3 .github/scripts/preload_kind_images.py --cluster NAME RENDERED.yaml [...]
     python3 .github/scripts/preload_kind_images.py --cluster NAME --pinned IMAGE@DIGEST=LOCAL:TAG
+    python3 .github/scripts/preload_kind_images.py --cluster NAME --image NAME:TAG [--image ...]
 """
 
 from __future__ import annotations
@@ -52,6 +70,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -81,6 +100,10 @@ MANIFEST_ACCEPT = ", ".join(
     )
 )
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+#: ``os/arch`` as ``docker version`` prints it (``linux/amd64``, ``linux/arm64``).
+PLATFORM_RE = re.compile(r"^[a-z0-9]+/[a-z0-9]+$")
+#: The daemon's own platform, the one an image it built or pulled has content for.
+DAEMON_PLATFORM_ARGV = ("docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
 
 #: Pod-spec keys whose entries carry an ``image``.
 CONTAINER_KEYS = ("initContainers", "containers", "ephemeralContainers")
@@ -99,6 +122,8 @@ ECR_PUBLIC_PULL_ATTEMPTS = 12
 ECR_PUBLIC_PULL_DELAY_SECONDS = 5.0
 
 Runner = Callable[[Sequence[str]], int]
+#: Runs a command and returns its stdout; an empty string when it fails.
+Capturer = Callable[[Sequence[str]], str]
 Opener = Callable[[urllib.request.Request, float], Any]
 Sleeper = Callable[[float], None]
 
@@ -191,6 +216,13 @@ def _run(argv: Sequence[str]) -> int:
     return subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - fixed docker/kind argv, no shell=True
         list(argv), check=False
     ).returncode
+
+
+def _capture(argv: Sequence[str]) -> str:
+    completed = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - fixed docker argv, no shell=True
+        list(argv), check=False, capture_output=True, text=True
+    )
+    return completed.stdout if completed.returncode == 0 else ""
 
 
 def _registry_request(
@@ -402,16 +434,61 @@ def _pinned_argument(value: str) -> tuple[str, str]:
     return image.strip(), local.strip()
 
 
-def load_into_kind(images: Sequence[str], cluster: str, *, run: Runner = _run) -> None:
-    """``kind load docker-image`` every staged image in one call."""
-    if images and run(["kind", "load", "docker-image", "--name", cluster, *images]) != 0:
-        raise PreloadError(f"kind load docker-image into {cluster} failed")
+def daemon_platform(*, capture: Capturer = _capture) -> str:
+    """The Docker daemon's ``os/arch``: the one platform its images have content for."""
+    platform = capture(DAEMON_PLATFORM_ARGV).strip()
+    if not PLATFORM_RE.match(platform):
+        raise PreloadError(f"docker version reported no usable daemon platform ({platform!r})")
+    return platform
+
+
+def load_into_kind(
+    images: Sequence[str],
+    cluster: str,
+    *,
+    run: Runner = _run,
+    capture: Capturer = _capture,
+) -> None:
+    """Load every staged image into the kind node, one single-platform archive at a time.
+
+    ``docker save --platform`` writes only the daemon's platform, so the
+    archive is complete and ``kind load image-archive`` (``ctr images import
+    --all-platforms``) accepts it from Docker's containerd image store, where a
+    plain ``kind load docker-image`` fails on the other platforms' missing
+    content. Each archive is removed before the next is written.
+    """
+    if not images:
+        return
+    platform = daemon_platform(capture=capture)
+    for image in images:
+        with tempfile.TemporaryDirectory(prefix="kind-image-") as directory:
+            archive = str(Path(directory) / "image.tar")
+            if run(["docker", "save", "--platform", platform, "--output", archive, image]) != 0:
+                raise PreloadError(f"docker save --platform {platform} {image} failed")
+            if run(["kind", "load", "image-archive", "--name", cluster, archive]) != 0:
+                raise PreloadError(f"kind load image-archive of {image} into {cluster} failed")
+        print(f"loaded {image} ({platform}) into kind cluster {cluster}", flush=True)
+
+
+def _image_argument(value: str) -> str:
+    """Parse ``--image NAME``: a tag reference already in the runner's Docker."""
+    image = value.strip()
+    try:
+        reference = ImageReference.parse(image)
+    except PreloadError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if reference.digest is not None:
+        raise argparse.ArgumentTypeError(
+            f"{image} is pinned by digest, which kind cannot address; give the tag it carries"
+        )
+    return image
 
 
 def main(
     argv: Sequence[str] | None = None,
     *,
     run: Runner = _run,
+    capture: Capturer = _capture,
     sleep: Sleeper = time.sleep,
     resolve: Callable[[ImageReference], str] = ecr_public_digest,
 ) -> int:
@@ -430,10 +507,21 @@ def main(
             "that runs it with imagePullPolicy: Never (repeatable)"
         ),
     )
+    parser.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        type=_image_argument,
+        metavar="NAME",
+        help=(
+            "also load NAME, an image a previous step built or pulled into the runner's "
+            "Docker, without pulling it (repeatable)"
+        ),
+    )
     parser.add_argument("manifests", nargs="*", type=Path, help="rendered manifest files")
     args = parser.parse_args(argv)
-    if not args.manifests and not args.pinned:
-        parser.error("give rendered manifests, --pinned IMAGE=LOCAL, or both")
+    if not args.manifests and not args.pinned and not args.image:
+        parser.error("give rendered manifests, --pinned IMAGE=LOCAL, --image NAME, or a mix")
 
     images = collect_images(path.read_text(encoding="utf-8") for path in args.manifests)
     if args.manifests and not images:
@@ -445,7 +533,12 @@ def main(
         ]
         for image, local in args.pinned:
             stage_pinned_image(image, local, run=run, sleep=sleep)
-        load_into_kind([*staged, *(local for _, local in args.pinned)], args.cluster, run=run)
+        load_into_kind(
+            [*staged, *(local for _, local in args.pinned), *args.image],
+            args.cluster,
+            run=run,
+            capture=capture,
+        )
     except PreloadError as exc:
         print(f"::error::{exc}", flush=True)
         return 1
@@ -456,6 +549,8 @@ def main(
             f"loaded {len(args.pinned)} pinned image(s) under local tags into kind cluster "
             f"{args.cluster}"
         )
+    if args.image:
+        print(f"loaded {len(args.image)} local image(s) into kind cluster {args.cluster}")
     return 0
 
 

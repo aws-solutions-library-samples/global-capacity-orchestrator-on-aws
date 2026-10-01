@@ -50,8 +50,8 @@ CREDENTIAL_PERSISTING_WORKFLOWS = {"release.yml", "release-publish.yml"}
 #: mean untrusted PR code executing on a persistent machine with whatever
 #: credentials and state that host carries.
 ALLOWED_RUNNER_LABELS = {
-    "ubuntu-latest",
-    "ubuntu-24.04-arm",
+    "ubuntu-26.04",
+    "ubuntu-26.04-arm",
     "macos-26",
     "windows-latest",
 }

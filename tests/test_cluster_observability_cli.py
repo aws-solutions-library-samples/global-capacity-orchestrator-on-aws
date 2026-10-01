@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 import pytest
 from click.testing import CliRunner
@@ -220,10 +221,7 @@ class TestToggleCommands:
 class TestOpenCommand:
     def _patch_common(self, monkeypatch: pytest.MonkeyPatch, captured: dict[str, object]) -> None:
         monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
-        monkeypatch.setattr(
-            "cli.commands.monitoring_cmd._exec_port_forward",
-            lambda cmd: captured.__setitem__("cmd", cmd),
-        )
+        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _recording_forward(captured))
 
     def test_open_public_endpoint_direct_forward(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -705,10 +703,7 @@ class TestOpenErrorPaths:
     ) -> None:
         captured: dict[str, object] = {}
         monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
-        monkeypatch.setattr(
-            "cli.commands.monitoring_cmd._exec_port_forward",
-            lambda cmd: captured.__setitem__("cmd", cmd),
-        )
+        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _recording_forward(captured))
 
         def _boom(cluster: str, region: str) -> dict[str, object]:
             raise RuntimeError("describe failed")
@@ -782,13 +777,40 @@ class TestToggleErrorPaths:
         assert captured == {"enabled": True}
 
 
-def test_exec_port_forward_invokes_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
-    import cli.commands.monitoring_cmd as m
+def _recording_forward(captured: dict[str, object]) -> Any:
+    """Stand-in for cli.cluster_ui.exec_port_forward: record, then report kubectl ready."""
 
-    called: dict[str, object] = {}
-    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: called.setdefault("cmd", a[0]))
-    m._exec_port_forward(["kubectl", "port-forward"])
-    assert called["cmd"] == ["kubectl", "port-forward"]
+    def forward(cmd: list[str], local_port: int, *, on_ready: Any = None, **_: Any) -> None:
+        captured["cmd"] = cmd
+        captured["port"] = local_port
+        if on_ready is not None:
+            on_ready()
+
+    return forward
+
+
+def test_open_announces_the_url_only_once_kubectl_listens(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forwarding line comes from on_ready, so a forward that fails never prints it."""
+    monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
+    monkeypatch.setattr(
+        "cli.kubectl_helpers.describe_cluster_access",
+        lambda c, r: {"public": True, "private": False, "endpoint": "https://x.eks.amazonaws.com"},
+    )
+
+    def never_listens(cmd: list[str], local_port: int, **_: Any) -> None:
+        raise RuntimeError(
+            f"kubectl port-forward exited with code 1 before localhost:{local_port} was listening"
+        )
+
+    monkeypatch.setattr("cli.cluster_ui.exec_port_forward", never_listens)
+    result = runner.invoke(cli, ["monitoring", "open", "--region", "us-east-1"])
+    assert result.exit_code == 1
+    assert "Starting kubectl port-forward for grafana on localhost:3000" in result.output
+    assert "before localhost:3000 was listening" in result.output
+    assert "Forwarding grafana" not in result.output
+    assert "Log in with the Grafana admin credential" not in result.output
 
 
 def test_open_resolves_region_from_cdk_json(
@@ -803,10 +825,7 @@ def test_open_resolves_region_from_cdk_json(
         "cli.kubectl_helpers.describe_cluster_access",
         lambda c, r: {"public": True, "endpoint": ""},
     )
-    monkeypatch.setattr(
-        "cli.commands.monitoring_cmd._exec_port_forward",
-        lambda cmd: captured.__setitem__("cmd", cmd),
-    )
+    monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _recording_forward(captured))
     monkeypatch.setattr("cli.config._load_cdk_json", lambda: {"regional": ["us-west-2"]})
     result = runner.invoke(cli, ["monitoring", "open", "--service", "prometheus"])
     assert result.exit_code == 0, result.output

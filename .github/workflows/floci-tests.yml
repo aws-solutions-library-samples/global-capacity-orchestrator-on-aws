@@ -63,7 +63,7 @@ env:
 jobs:
   floci-integration:
     name: "floci:integration"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
@@ -82,6 +82,9 @@ jobs:
           # docs/FLOCI_TESTING.md gap 4). Runner-local socket, pinned image.
           - /var/run/docker.sock:/var/run/docker.sock
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -151,7 +154,7 @@ jobs:
 
   floci-e2e-release-validate:
     name: "floci:e2e:release-validate"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
@@ -169,6 +172,9 @@ jobs:
       # verified to change nothing about synthesis output.
       CDK_NO_PERF_BUILTINS: "1"
     steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Give the checkout a branch identity
         # actions/checkout leaves a detached HEAD; the harness preflight and
@@ -263,7 +269,7 @@ jobs:
       - floci-e2e-release-validate
       - floci-integration
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

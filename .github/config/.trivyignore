@@ -254,6 +254,47 @@ CVE-2025-47273 exp:2026-11-14
 GHSA-6v7p-g79w-8964 exp:2026-11-14
 
 # -----------------------------------------------------------------------------
+# CVE-2026-97687 (traffic interception via an HTTPS proxy TLS configuration
+# override) and CVE-2026-97689 (denial of service through unbounded memory
+# allocation in the chunked-transfer parser) — urllib3 2.7.0, fixed in 2.8.0.
+# Reported by security:trivy:container-scan against the dev image
+# (Dockerfile.dev) and the two Lambda images built on
+# public.ecr.aws/lambda/python:3.14 (helm-installer, tls-certificate-manager),
+# under the pathless "Python (python-pkg)" target.
+#
+# Provenance, established 2026-10-01: the same mechanism as the entry above.
+# pip 26.2.1 vendors urllib3 and records it in
+# pip/_vendor/vendor.txt as `urllib3==2.7.0`; Trivy parses that manifest, so
+# the finding has no dist-info of its own. Reproduced on the unmodified base
+# images: `pip --version` reports 26.2.1 in both python:3.14.7-slim
+# (/usr/local/lib/python3.14/site-packages) and public.ecr.aws/lambda/python:3.14
+# (/var/lang/lib/python3.14/site-packages), and both vendor.txt files pin
+# urllib3==2.7.0. The images that keep no pip in their final stage do not
+# report it. Our own urllib3 is 2.8.0 everywhere Trivy can see it:
+# requirements-lock.txt, every lambda/*/requirements.txt, and each image's
+# urllib3-2.8.0.dist-info scans clean in the same reports.
+#
+# Not clearable by any pin we control — checked 2026-10-01: pip 26.2.1
+# (2026-08-04) is the newest pip on PyPI, and pip's main branch still vendors
+# urllib3 2.7.0, so no fixed pip exists to upgrade to. A base-image bump cannot
+# help until pip re-vendors, and APT_SECURITY_EPOCH only refreshes .deb packages.
+#
+# Low runtime risk: pip's vendored urllib3 runs only while pip itself talks to
+# a package index, which the Lambda images never do after build and which the
+# dev image does only while a contributor installs packages. Neither CVE is
+# reachable through the application code, which imports the fixed 2.8.0.
+#
+# Clears when pip re-vendors urllib3 >= 2.8.0: pull a base image carrying that
+# pip, confirm with `trivy image` on the base alone, then drop both ids. Expires
+# together with the sibling pip vendor.txt entry above so the two are
+# re-evaluated in one pass.
+#
+# Advisories: https://nvd.nist.gov/vuln/detail/CVE-2026-97687
+#             https://nvd.nist.gov/vuln/detail/CVE-2026-97689
+CVE-2026-97687 exp:2026-11-14
+CVE-2026-97689 exp:2026-11-14
+
+# -----------------------------------------------------------------------------
 # CVE-2026-33818 (encoding/asn1 DoS), CVE-2026-56853 (net/http unencrypted
 # HTTP/2), CVE-2026-56858 (html/template XSS), CVE-2026-56859 (encoding/xml
 # DoS), CVE-2026-56860 (net/url DoS), CVE-2026-56862 (crypto/tls DoS),

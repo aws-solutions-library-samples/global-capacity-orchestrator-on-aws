@@ -14,7 +14,9 @@ import json
 import socket
 import subprocess
 import sys
+import time
 import types
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -277,11 +279,120 @@ class TestReadSecretKey:
 
 
 class TestExecPortForward:
-    def test_runs_the_argv_in_the_foreground(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls: list[tuple[list[str], dict[str, Any]]] = []
-        monkeypatch.setattr(cluster_ui.subprocess, "run", lambda cmd, **kw: calls.append((cmd, kw)))
-        cluster_ui.exec_port_forward(("kubectl", "port-forward"))
-        assert calls == [(["kubectl", "port-forward"], {"check": False})]
+    """The foreground forward announces nothing until kubectl's listener is up.
+
+    The stand-in kubectl is this interpreter running a script, so the pipe,
+    the output relay and process cleanup are all real.
+    """
+
+    PORT = 18080
+
+    @staticmethod
+    def _stand_in(script: str) -> list[str]:
+        return [sys.executable, "-c", script]
+
+    @staticmethod
+    def _record_popen(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen[bytes]]:
+        started: list[subprocess.Popen[bytes]] = []
+        real_popen = subprocess.Popen
+
+        def popen(cmd: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+            process = real_popen(cmd, **kwargs)
+            started.append(process)
+            return process
+
+        monkeypatch.setattr(cluster_ui.subprocess, "Popen", popen)
+        return started
+
+    def test_announces_once_kubectl_reports_the_listener(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        script = (
+            "import time\n"
+            f"print('Forwarding from 127.0.0.1:{self.PORT} -> 80', flush=True)\n"
+            f"print('Forwarding from [::1]:{self.PORT} -> 80', flush=True)\n"
+            "time.sleep(0.2)\n"
+            f"print('Handling connection for {self.PORT}', flush=True)\n"
+        )
+        ready: list[str] = []
+        cluster_ui.exec_port_forward(
+            self._stand_in(script), self.PORT, on_ready=lambda: ready.append("ready")
+        )
+        assert ready == ["ready"]
+        out = capsys.readouterr().out
+        # kubectl's own lines still reach the terminal.
+        assert f"Forwarding from 127.0.0.1:{self.PORT} -> 80" in out
+        assert f"Handling connection for {self.PORT}" in out
+
+    def test_an_exit_before_the_listener_fails_without_announcing(self) -> None:
+        script = "import sys\nsys.stderr.write('dial tcp: i/o timeout\\n')\nsys.exit(1)\n"
+        ready: list[str] = []
+        with pytest.raises(
+            RuntimeError, match=rf"exited with code 1 before localhost:{self.PORT} was listening"
+        ):
+            cluster_ui.exec_port_forward(
+                self._stand_in(script), self.PORT, on_ready=lambda: ready.append("ready")
+            )
+        assert ready == []
+
+    def test_a_listener_on_another_port_does_not_count(self) -> None:
+        script = "print('Forwarding from 127.0.0.1:9999 -> 80', flush=True)\n"
+        with pytest.raises(RuntimeError, match="exited with code 0 before"):
+            cluster_ui.exec_port_forward(self._stand_in(script), self.PORT)
+
+    def test_a_failure_after_the_listener_is_reported(self) -> None:
+        script = (
+            "import sys, time\n"
+            f"print('Forwarding from 127.0.0.1:{self.PORT} -> 80', flush=True)\n"
+            "time.sleep(0.3)\n"
+            "sys.exit(3)\n"
+        )
+        ready: list[str] = []
+        with pytest.raises(RuntimeError, match=r"exited with code 3\."):
+            cluster_ui.exec_port_forward(
+                self._stand_in(script), self.PORT, on_ready=lambda: ready.append("ready")
+            )
+        assert ready == ["ready"]
+
+    def test_the_deadline_stops_a_silent_kubectl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started = self._record_popen(monkeypatch)
+        with pytest.raises(RuntimeError, match=rf"did not open localhost:{self.PORT} within 0.3s"):
+            cluster_ui.exec_port_forward(
+                self._stand_in("import time\ntime.sleep(30)\n"), self.PORT, ready_timeout=0.3
+            )
+        assert started[0].poll() is not None
+
+    def test_ctrl_c_stops_kubectl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started = self._record_popen(monkeypatch)
+        script = (
+            "import time\n"
+            f"print('Forwarding from 127.0.0.1:{self.PORT} -> 80', flush=True)\n"
+            "time.sleep(30)\n"
+        )
+
+        def interrupt() -> None:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            cluster_ui.exec_port_forward(self._stand_in(script), self.PORT, on_ready=interrupt)
+        assert started[0].poll() is not None
+
+    def test_a_listener_line_still_in_the_pipe_at_exit_counts(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """kubectl's exit is seen first; the relay then delivers its listener line."""
+
+        def delayed_output() -> Iterator[bytes]:
+            time.sleep(0.3)
+            yield f"Forwarding from 127.0.0.1:{self.PORT} -> 80\r\n".encode()
+
+        process = _FakeProcess(exited=0)
+        process.stdout = delayed_output()  # type: ignore[attr-defined]
+        monkeypatch.setattr(cluster_ui, "_READY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(cluster_ui.subprocess, "Popen", lambda cmd, **kw: process)
+        cluster_ui.exec_port_forward(["kubectl", "port-forward"], self.PORT)
+        assert process.events == ["wait:None"]
+        assert capsys.readouterr().out == f"Forwarding from 127.0.0.1:{self.PORT} -> 80\n"
 
 
 # ─── Port readiness and the background port-forward ──────────────────────────
