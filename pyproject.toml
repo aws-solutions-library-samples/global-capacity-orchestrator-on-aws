@@ -71,7 +71,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi==0.66b0",
     "opentelemetry-instrumentation-httpx==0.66b0",
     "protobuf==7.35.1",
-    "urllib3==2.7.0",
+    "urllib3==2.8.0",
     # FastMCP powers the in-tree MCP server (gco_mcp/run_mcp.py). The ``tasks``
     # extra pulls in ``fastmcp-tasks``, the io.modelcontextprotocol/tasks
     # extension (SEP-2663) used by the long-running stack lifecycle and image

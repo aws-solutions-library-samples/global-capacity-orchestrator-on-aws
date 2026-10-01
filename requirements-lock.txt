@@ -408,7 +408,6 @@ pip-tools==7.6.1
 platformdirs==4.9.6
     # via
     #   fastmcp-slim
-    #   python-discovery
     #   virtualenv
 playwright==1.62.0
     # via
@@ -490,7 +489,7 @@ pygments==2.20.0
     #   pytest
     #   rich
     #   zensical
-pyjwt==2.14.0
+pyjwt==2.15.0
     # via mcp
 pymdown-extensions==11.0.1
     # via zensical
@@ -530,7 +529,7 @@ python-dateutil==2.9.0.post0
     #   jsii
     #   kubernetes
     #   pandas
-python-discovery==1.2.2
+python-discovery==1.6.1
     # via virtualenv
 python-dotenv==1.2.2
     # via
@@ -683,7 +682,7 @@ uncalled-for==0.4.0
     # via
     #   fastmcp-slim
     #   pydocket
-urllib3==2.7.0
+urllib3==2.8.0
     # via
     #   botocore
     #   gco-cli
@@ -702,7 +701,7 @@ uvloop==0.22.1
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-virtualenv==21.3.0
+virtualenv==21.7.13
     # via pre-commit
 watchfiles==1.1.1
     # via fastmcp-slim
