@@ -51,11 +51,13 @@ class _FakeScan:
         scan_complete: bool = True,
         returncode: int = 0,
         report_body: str = "# Dependency Update Report\n\nfake drift\n",
+        findings: str | None = '{"schema": "gco.dependency-scan.findings/1", "surfaces": []}',
     ) -> None:
         self.has_drift = has_drift
         self.scan_complete = scan_complete
         self.returncode = returncode
         self.report_body = report_body
+        self.findings = findings
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
 
@@ -74,6 +76,10 @@ class _FakeScan:
             report_path = output_path.parent / "report.md"
             report_path.write_text(self.report_body, encoding="utf-8")
             lines.append(f"report_path={report_path}")
+        if self.findings is not None:
+            findings_path = output_path.parent / "findings.json"
+            findings_path.write_text(self.findings, encoding="utf-8")
+            lines.append(f"findings_path={findings_path}")
         output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "scan log line\n", "")
 
@@ -123,8 +129,24 @@ class TestFullScan:
         assert payload["has_drift"] is True
         assert payload["scan_complete"] is True
         assert "fake drift" in payload["report_markdown"]
+        # The scanner's findings document rides along, parsed.
+        assert payload["findings"] == {
+            "schema": "gco.dependency-scan.findings/1",
+            "surfaces": [],
+        }
         # JSON mode captures the log instead of streaming it.
         assert payload["log_tail"] == ["scan log line"]
+
+    @pytest.mark.parametrize(
+        "findings",
+        [None, "not json at all"],
+        ids=["no findings_path", "unreadable findings"],
+    )
+    def test_missing_or_malformed_findings_are_null_not_an_error(self, monkeypatch, findings):
+        monkeypatch.setattr(deps_cmd.subprocess, "run", _FakeScan(findings=findings))
+        result = _invoke(["scan"], output_format="json")
+        assert result.exit_code == 0
+        assert json.loads(result.stdout)["findings"] is None
 
     def test_report_option_writes_file(self, monkeypatch, tmp_path):
         monkeypatch.setattr(deps_cmd.subprocess, "run", _FakeScan(has_drift=True))

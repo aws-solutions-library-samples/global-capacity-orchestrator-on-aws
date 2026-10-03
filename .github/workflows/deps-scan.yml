@@ -198,6 +198,18 @@ jobs:
           # queried is public. Nothing else in the scan step uses the token.
           GITHUB_TOKEN: ${{ github.token }}
         run: bash .github/scripts/dependency-scan.sh
+      - name: Upload the machine-readable findings
+        # The same findings as JSON, written on every run. The drift issue
+        # embeds a copy, but an issue body is capped at 64 KiB and the issue
+        # does not exist on a clean run, so the artifact is the durable copy
+        # `gco deps maintain --findings` can read either way.
+        if: always() && steps.scan.outcome == 'success'
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: dependency-scan-findings
+          path: ${{ steps.scan.outputs.findings_path }}
+          retention-days: 90
+          if-no-files-found: error
       - name: Open or refresh the drift issue
         if: steps.scan.outputs.has_drift == 'true'
         env:

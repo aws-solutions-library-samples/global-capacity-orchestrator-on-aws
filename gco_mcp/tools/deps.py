@@ -14,8 +14,10 @@ async def deps_scan(nodepools_only: bool = False) -> str:
 
     Runs `gco deps scan` — the same scanner behind the rolling
     "[Automated] Dependency updates available" GitHub issue — and returns
-    a JSON envelope with `has_drift`, `scan_complete`, and the full
-    Markdown report under `report_markdown`. Surfaces that need AWS
+    a JSON envelope with `has_drift`, `scan_complete`, the full Markdown
+    report under `report_markdown`, and the same rows as structured data
+    under `findings` (one record per surface, each with its urgency, skip
+    reason and findings keyed by column). Surfaces that need AWS
     credentials or missing host tools are skipped and flagged as
     incomplete rather than failing.
 

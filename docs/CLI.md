@@ -2002,7 +2002,8 @@ gco deps scan
 # Just the accelerator/NodePool registry freshness check
 gco deps scan --nodepools-only
 
-# Machine-readable envelope (has_drift, scan_complete, report_markdown) —
+# Machine-readable envelope (has_drift, scan_complete, report_markdown,
+# findings: the same rows as JSON, one record per surface) —
 # the same shape the MCP deps_scan tool returns
 gco -o json deps scan
 

@@ -550,6 +550,102 @@ if m:
     [ "$output" = "emr-7.13.0" ]
 }
 
+# ── Machine-readable findings ───────────────────────────────────────────────
+
+@test "findings_rows: keys the pipe-delimited rows, keeping overflow in the last field" {
+    rows="$(mktemp)"
+    printf 'busybox|1.38.0|1.39.0\nghcr.io/x/y|v1|v2|extra|more\nshort|only\n\n' > "$rows"
+    run findings_rows "image|current|latest" "$rows"
+    [ "$status" -eq 0 ]
+    [ "$(jq -c '.' <<< "$output")" = '[{"image":"busybox","current":"1.38.0","latest":"1.39.0"},{"image":"ghcr.io/x/y","current":"v1","latest":"v2|extra|more"},{"image":"short","current":"only","latest":""}]' ]
+    rm -f "$rows"
+}
+
+@test "findings_rows: an empty, missing or unnamed file is an empty array" {
+    empty="$(mktemp)"
+    [ "$(findings_rows "a|b" "$empty")" = "[]" ]
+    [ "$(findings_rows "a|b" "$BATS_TEST_TMPDIR/does-not-exist")" = "[]" ]
+    [ "$(findings_rows "a|b")" = "[]" ]
+    rm -f "$empty"
+}
+
+@test "findings_surface: records title, urgency, count, skip reason and rows" {
+    export FINDINGS_SURFACES="$BATS_TEST_TMPDIR/surfaces"
+    : > "$FINDINGS_SURFACES"
+    rows="$(mktemp)"
+    printf 'eks-pod-identity-agent|v1.0.0-eksbuild.1|v1.1.0-eksbuild.1\n' > "$rows"
+    findings_surface "EKS Add-ons" "routine" 1 "" "addon|current|latest" "$rows"
+    findings_surface "EKS Kubernetes Version" "act soon" 0 "No AWS credentials" "pin|current|latest|standard_support_ends"
+    [ "$(wc -l < "$FINDINGS_SURFACES" | tr -d ' ')" -eq 2 ]
+    first="$(sed -n 1p "$FINDINGS_SURFACES")"
+    [ "$(jq -r '.surface' <<< "$first")" = "EKS Add-ons" ]
+    [ "$(jq -r '.urgency' <<< "$first")" = "routine" ]
+    [ "$(jq -r '.count' <<< "$first")" = "1" ]
+    [ "$(jq -r '.skipped' <<< "$first")" = "null" ]
+    [ "$(jq -r '.findings[0].addon' <<< "$first")" = "eks-pod-identity-agent" ]
+    second="$(sed -n 2p "$FINDINGS_SURFACES")"
+    [ "$(jq -r '.skipped' <<< "$second")" = "No AWS credentials" ]
+    [ "$(jq -c '.findings' <<< "$second")" = "[]" ]
+    rm -f "$rows"
+}
+
+@test "findings_surface_json: takes ready findings and merges extra fields" {
+    export FINDINGS_SURFACES="$BATS_TEST_TMPDIR/surfaces"
+    : > "$FINDINGS_SURFACES"
+    findings_surface_json "Python Packages" "routine" 1 "" '[{"name":"urllib3","current":"2.7.0","latest":"2.8.0"}]'
+    findings_surface_json "Accelerator Catalog and NodePools" "act soon" 2 "" "[]" '{"offline_report_markdown":"### drift"}'
+    [ "$(jq -r '.findings[0].name' <<< "$(sed -n 1p "$FINDINGS_SURFACES")")" = "urllib3" ]
+    second="$(sed -n 2p "$FINDINGS_SURFACES")"
+    [ "$(jq -r '.offline_report_markdown' <<< "$second")" = "### drift" ]
+    [ "$(jq -r '.count' <<< "$second")" = "2" ]
+}
+
+@test "write_findings_document: assembles the schema envelope with sorted unique reasons" {
+    export FINDINGS_SURFACES="$BATS_TEST_TMPDIR/surfaces"
+    : > "$FINDINGS_SURFACES"
+    findings_surface "Docker Images" "routine" 0 "" "image|current|latest"
+    reasons="$BATS_TEST_TMPDIR/reasons"
+    printf 'b failed\na failed\nb failed\n' > "$reasons"
+    out="$BATS_TEST_TMPDIR/findings.json"
+    write_findings_document "$out" false true "$reasons"
+    [ "$(jq -r '.schema' "$out")" = "$FINDINGS_SCHEMA" ]
+    [ "$(jq -r '.scan_complete' "$out")" = "false" ]
+    [ "$(jq -r '.has_drift' "$out")" = "true" ]
+    [ "$(jq -c '.incomplete_reasons' "$out")" = '["a failed","b failed"]' ]
+    [ "$(jq -r '.surfaces | length' "$out")" = "1" ]
+    [[ "$(jq -r '.generated_at' "$out")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+    # No incomplete reasons at all: an empty array, and the document is still valid.
+    : > "$reasons"
+    write_findings_document "$out" true false "$reasons"
+    [ "$(jq -c '.incomplete_reasons' "$out")" = "[]" ]
+    [ "$(jq -r '.has_drift' "$out")" = "false" ]
+}
+
+@test "write_findings_document: a corrupt surface record fails the write" {
+    export FINDINGS_SURFACES="$BATS_TEST_TMPDIR/surfaces"
+    echo '{"surface": "broken"' > "$FINDINGS_SURFACES"
+    reasons="$BATS_TEST_TMPDIR/reasons"
+    : > "$reasons"
+    run write_findings_document "$BATS_TEST_TMPDIR/findings.json" true false "$reasons"
+    [ "$status" -ne 0 ]
+}
+
+@test "emit_findings_embed: wraps the document in markers, or points at the artifact when too large" {
+    doc="$BATS_TEST_TMPDIR/findings.json"
+    printf '{"schema": "%s", "surfaces": []}\n' "$FINDINGS_SCHEMA" > "$doc"
+    run emit_findings_embed "$doc"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"<details>"* ]]
+    [[ "$output" == *"gco deps maintain"* ]]
+    [[ "$output" == *"$FINDINGS_BEGIN_MARKER"$'\n''```json'$'\n''{"schema": "'"$FINDINGS_SCHEMA"'", "surfaces": []}'$'\n''```'$'\n'"$FINDINGS_END_MARKER"* ]]
+    [[ "$output" == *"</details>"* ]]
+    FINDINGS_EMBED_MAX_BYTES=10 run emit_findings_embed "$doc"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"too large to embed here"* ]]
+    [[ "$output" == *"dependency-scan-findings"* ]]
+    [[ "$output" != *"$FINDINGS_BEGIN_MARKER"* ]]
+}
+
 # ── extract_eks_addons ───────────────────────────────────────────────────────
 
 @test "extract_eks_addons: finds at least one addon in regional_stack.py" {

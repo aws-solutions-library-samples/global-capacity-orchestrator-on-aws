@@ -87,6 +87,11 @@ set -uo pipefail
 
 WORKFLOWS_DIR="${WORKFLOWS_DIR:-.github/workflows}"
 REPORT_FILE="$(mktemp -t dep-scan-XXXXXX.md 2>/dev/null || mktemp --suffix=.md)"
+# The same findings as JSON, for ``gco deps maintain`` (see the "Machine-
+# readable findings" helpers in lib_dependency_scan.sh). Written on every
+# run, drift or not, next to the Markdown report.
+FINDINGS_FILE="${REPORT_FILE%.md}.json"
+FINDINGS_SURFACES="$(mktemp)"
 INCOMPLETE_REASONS_FILE="$(mktemp -t dep-scan-incomplete-XXXXXX 2>/dev/null || mktemp)"
 
 # Persist incomplete reasons to a file because many checks run in pipeline
@@ -2276,6 +2281,38 @@ if ! dependency_scan_is_complete \
   SCAN_COMPLETE=false
 fi
 
+# ----- Machine-readable findings -----
+# One record per surface, in the order of the summary table below, with the
+# columns named the way the Markdown tables label them. Rows are the same
+# pipe-delimited results the tables render; the Python surface is already
+# JSON and the accelerator surface carries its two Markdown reports.
+PYTHON_FINDINGS="$(printf '%s' "${PYTHON_OUTDATED:-[]}" \
+  | jq '[.[] | {name: .name, current: .version, latest: .latest_version}]')"
+findings_surface_json "Python Packages" "routine" "$PYTHON_COUNT" "" "$PYTHON_FINDINGS"
+findings_surface "npm Packages"             "routine" "$NPM_COUNT"            ""                           "graph|package|current|latest" "$NPM_RESULTS"
+findings_surface "Docker Images"            "routine" "$DOCKER_COUNT"         ""                           "image|current|latest" "$DOCKER_RESULTS"
+findings_surface "Helm Charts"              "routine" "$HELM_COUNT"           ""                           "chart|name|current|latest" "$HELM_RESULTS"
+findings_surface "EKS Add-ons"              "routine" "$ADDON_COUNT"          "$ADDON_SKIP_REASON"         "addon|current|latest" "$ADDON_RESULTS"
+findings_surface "EKS Kubernetes Version"   "act soon" "$EKS_K8S_COUNT"       "$EKS_K8S_SKIP_REASON"       "pin|current|latest|standard_support_ends" "$EKS_K8S_RESULTS"
+findings_surface "Aurora PostgreSQL Engine" "routine" "$AURORA_COUNT"         "$AURORA_SKIP_REASON"        "engine|current|latest" "$AURORA_RESULTS"
+findings_surface "EMR Serverless"           "routine" "$EMR_COUNT"            "$EMR_SKIP_REASON"           "release|current|latest" "$EMR_RESULTS"
+findings_surface "Bedrock Default Model"    "routine" "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "key|current|latest" "$BEDROCK_MODEL_RESULTS"
+ACCELERATOR_EXTRA="$(jq -n --rawfile offline "$ACCELERATOR_OFFLINE_REPORT" --rawfile online "$ACCELERATOR_ONLINE_REPORT" \
+  '{offline_report_markdown: $offline, online_report_markdown: $online}')"
+findings_surface_json "Accelerator Catalog and NodePools" "act soon" "$ACCELERATOR_COUNT" "$ACCELERATOR_SUMMARY_SKIP_REASON" "[]" "$ACCELERATOR_EXTRA"
+findings_surface "Dockerfile.dev Pins"      "routine" "$DOCKERFILE_COUNT"     ""                           "pin|current|latest" "$DOCKERFILE_RESULTS"
+findings_surface "GCO Autopilot Pins"       "act soon" "$AUTOPILOT_COUNT"     "$AUTOPILOT_SKIP_REASON"     "surface|current|latest|url" "$AUTOPILOT_RESULTS"
+findings_surface "Pre-commit Hooks"         "routine" "$PRECOMMIT_COUNT"      ""                           "repo|current|latest" "$PRECOMMIT_RESULTS"
+findings_surface "CDK Enum Constants"       "routine" "$CDK_ENUM_COUNT"       "$CDK_ENUM_SKIP_REASON"      "constant|enum_class|current|latest" "$CDK_ENUM_RESULTS"
+findings_surface "Python Release"           "informational" "$PYTHON_RELEASE_COUNT" "$PYTHON_RELEASE_SKIP_REASON" "surface|current|latest" "$PYTHON_RELEASE_RESULTS"
+findings_surface "Ruby Release"             "informational" "$RUBY_RELEASE_COUNT" "$RUBY_RELEASE_SKIP_REASON" "surface|current|latest" "$RUBY_RELEASE_RESULTS"
+findings_surface "Runner Images"            "act soon" "$RUNNER_IMAGE_COUNT"  "$RUNNER_IMAGE_SKIP_REASON"  "label|current|latest" "$RUNNER_IMAGE_RESULTS"
+findings_surface "CI Tooling"               "act soon" "$CI_TOOLING_COUNT"    ""                           "tool|current|latest|url" "$CI_TOOLING_RESULTS"
+findings_surface "Version Consistency"      "routine" "$CONSISTENCY_COUNT"    ""                           "what|pinned_values" "$CONSISTENCY_RESULTS"
+findings_surface "Base-image Security Epochs" "act soon" "$EPOCH_COUNT"       ""                           "dockerfile|arg|epoch|age_days" "$EPOCH_RESULTS"
+findings_surface "Suppression Expiries"     "act soon" "$SUPPRESSION_COUNT"   ""                           "file|id|expires|days_left" "$SUPPRESSION_RESULTS"
+findings_surface "Lockfile Freshness"       "routine" "$LOCKFILE_COUNT"       ""                           "dependency|expected|locked" "$LOCKFILE_RESULTS"
+
 if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 0 ] \
    && [ "$HELM_COUNT" -eq 0 ] && [ "$ADDON_COUNT" -eq 0 ] \
    && [ "$EKS_K8S_COUNT" -eq 0 ] \
@@ -2349,6 +2386,8 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     STATUS_MESSAGE="All dependencies are up to date."
   fi
   echo "$STATUS_MESSAGE"
+  write_findings_document "$FINDINGS_FILE" "$SCAN_COMPLETE" false "$INCOMPLETE_REASONS_FILE"
+  rm -f "$FINDINGS_SURFACES"
   rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
@@ -2365,8 +2404,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     {
       echo "has_drift=false"
       echo "scan_complete=$SCAN_COMPLETE"
+      echo "findings_path=$FINDINGS_FILE"
     } >> "$GITHUB_OUTPUT"
   fi
+  echo "Wrote findings to $FINDINGS_FILE"
   exit 0
 fi
 
@@ -2392,6 +2433,9 @@ summary_row() {
   fi
   echo "| ${title} | ${label} | ${urgency} |"
 }
+
+write_findings_document "$FINDINGS_FILE" "$SCAN_COMPLETE" true "$INCOMPLETE_REASONS_FILE"
+rm -f "$FINDINGS_SURFACES"
 
 {
   echo "# Dependency Update Report"
@@ -2801,6 +2845,13 @@ summary_row() {
   echo "5. Reconcile any **Version Consistency** rows so every copy of a pin agrees"
   echo "6. Run tests locally to verify compatibility, then open a PR"
   echo ""
+  echo "Or hand the mechanical and semantic rows to an agent: \`gco deps maintain\`"
+  echo "reads the findings below, opens a worktree and starts a Claude Code"
+  echo "session that applies them and reports what to test (see"
+  echo "\`docs/MAINTENANCE.md\`, \"Agent-assisted maintenance\")."
+  echo ""
+  emit_findings_embed "$FINDINGS_FILE"
+  echo ""
   echo "---"
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
@@ -2812,6 +2863,7 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "has_drift=true"
     echo "scan_complete=$SCAN_COMPLETE"
     echo "report_path=$REPORT_FILE"
+    echo "findings_path=$FINDINGS_FILE"
   } >> "$GITHUB_OUTPUT"
 fi
 
@@ -2824,3 +2876,4 @@ fi
 
 echo ""
 echo "Wrote report to $REPORT_FILE"
+echo "Wrote findings to $FINDINGS_FILE"
