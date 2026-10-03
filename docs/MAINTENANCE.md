@@ -247,11 +247,18 @@ shipping a skew.
    `RUN` line is the single source: workflows derive `HELM_VERSION` /
    `HELM_SHA256` from it exactly as with kubectl, guarded by the same test.
 7. `.github/workflows/integration-tests.yml` — bump the workflow-level
-   `KIND_NODE_IMAGE` env (`kindest/node:v<minor>.<patch>`) so CI exercises the
-   new control plane; every kind-based job reads it from there. Use an image
-   the pinned `KIND_VERSION` release lists in its release notes (kind builds
-   node images per kind release; a tag that exists on Docker Hub is not
-   necessarily built for the pinned kind). Move `CALICO_VERSION` and
+   `KIND_NODE_IMAGE` env so CI exercises the new control plane; every
+   kind-based job reads it from there. Copy the full
+   `kindest/node:v<minor>.<patch>@sha256:<digest>` reference from the release
+   notes of the pinned `KIND_VERSION`: kind builds node images per kind
+   release and re-pushes the same version tag each time, so a tag that
+   exists on Docker Hub is not necessarily built for the pinned kind, and a
+   tag-only pin names a different image after every kind release.
+   `test_kind_examples_smoke_issues_the_shipped_internal_pki` requires the digest form;
+   the monthly scan checks the digest still matches the tag (**Docker
+   Images**), the tag for a newer patch in the same minor (**CI tooling**),
+   and reports a pin that lost its digest (**Version consistency**). Move
+   `CALICO_VERSION` and
    `CALICO_SHA256` alongside it to a Calico release whose requirements page
    lists the new minor as tested; the checksum is `sha256sum` over
    `https://raw.githubusercontent.com/projectcalico/calico/<tag>/manifests/calico.yaml`.
@@ -795,9 +802,10 @@ There is no auto-retry wrapper — a flake is treated as a bug, not hidden.
   and therefore need no external SHA. Hand-installed CI tools — Trivy (the
   `install-trivy` action's `version` default), Helm and kubectl (derived at
   runtime from the `lambda/helm-installer/Dockerfile` pins), and the kind node
-  image (`KIND_NODE_IMAGE` in `integration-tests.yml`) — are tracked by the
-  scan's **CI tooling** and **Version consistency** rows, so a pin that must
-  move in lockstep across files is caught there.
+  image (`KIND_NODE_IMAGE` in `integration-tests.yml`, pinned by tag and
+  digest) — are tracked by the scan's **CI tooling** and **Version
+  consistency** rows (and, for the node image's digest, **Docker Images**), so
+  a pin that must move in lockstep across files is caught there.
 - On an EKS bump the kind `node_image` moves too — see
   [Upgrading the EKS Kubernetes version](#upgrading-the-eks-kubernetes-version).
 

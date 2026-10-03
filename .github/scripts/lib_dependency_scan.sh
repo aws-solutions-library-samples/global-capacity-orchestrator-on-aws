@@ -1664,13 +1664,18 @@ if value:
 #
 # Prints the kind pins configured on the ``helm/kind-action`` step:
 #   kind|<version>        e.g. kind|v0.32.0        (the kind binary)
-#   kind-node|<image:tag> e.g. kind-node|kindest/node:v1.37.0
+#   kind-node|<image ref> e.g. kind-node|kindest/node:v1.37.0@sha256:<64 hex>
+#
+# The node image is passed through exactly as written. The committed pin is
+# tag AND digest (the form kind's release notes publish); callers split it
+# with split_pinned_image_ref and treat a tag-only value as a finding.
 #
 # These live in the action's ``with:`` block, not a top-level ``image:`` or
 # a Dockerfile ``FROM``, so neither the workflow image sweep nor Dependabot's
 # docker ecosystem sees them. The caller checks the kind binary against
-# kubernetes-sigs/kind releases and the node image against its own registry
-# tags within the pinned K8s minor.
+# kubernetes-sigs/kind releases, the node image's tag against its own
+# registry tags within the pinned K8s minor, and its digest against what the
+# tag currently resolves to.
 #
 # Empty output if the file or the kind-action step is absent.
 extract_kind_pins() {

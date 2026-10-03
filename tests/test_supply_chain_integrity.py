@@ -1102,7 +1102,11 @@ def test_kind_examples_smoke_issues_the_shipped_internal_pki() -> None:
     assert positions == sorted(positions)
     assert run.index('done 3< "${pki}/leaves.txt"') < positions[0]
     assert 'denied="the ClusterIssuer gco-internal-ca signs only the GCO platform leaves"' in run
-    node_image = re.fullmatch(r"kindest/node:v1\.(\d+)\.\d+", workflow["env"]["KIND_NODE_IMAGE"])
+    # Tag AND digest: kind re-pushes the same version tag for every kind
+    # release, so a tag-only pin names a different image after each one.
+    node_image = re.fullmatch(
+        r"kindest/node:v1\.(\d+)\.\d+@sha256:[0-9a-f]{64}", workflow["env"]["KIND_NODE_IMAGE"]
+    )
     assert node_image is not None and int(node_image.group(1)) >= 30
     for wait in (
         "kubectl wait --for=condition=Ready clusterissuer/gco-internal-ca-bootstrap",

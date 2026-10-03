@@ -3164,7 +3164,32 @@ YAML
     run extract_kind_pins ".github/workflows/integration-tests.yml"
     [ "$status" -eq 0 ]
     [[ "$output" == *"kind|v"* ]]
-    [[ "$output" == *"kind-node|kindest/node:"* ]]
+    # The committed node image is pinned by tag AND digest (kind re-pushes
+    # the same version tag for every kind release); split_pinned_image_ref
+    # is what the scan derives the tag from.
+    node="$(printf '%s\n' "$output" | awk -F'|' '$1=="kind-node"{print $2}')"
+    [[ "$node" =~ ^kindest/node:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]]
+    [ "$(split_pinned_image_ref "$node" | cut -d'|' -f1)" = "kindest/node" ]
+    [[ "$(split_pinned_image_ref "$node" | cut -d'|' -f2)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+@test "extract_kind_pins: a digest-pinned node image passes through unchanged" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+env:
+  KIND_NODE_IMAGE: "kindest/node:v1.40.0@sha256:7777777777777777777777777777777777777777777777777777777777777777"
+jobs:
+  e2e:
+    steps:
+      - uses: helm/kind-action@v1.14.0
+        with:
+          version: "v0.98.0"
+          node_image: "${{ env.KIND_NODE_IMAGE }}"
+EOF
+    run extract_kind_pins "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kind-node|kindest/node:v1.40.0@sha256:7777777777777777777777777777777777777777777777777777777777777777"* ]]
+    rm -f "$tmpfile"
 }
 
 @test "extract_kind_pins: empty for a missing file" {

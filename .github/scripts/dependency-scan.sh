@@ -569,6 +569,18 @@ else
   done <<< "$FUNCTION_PACKAGE_REFS"
 fi
 
+# The kind node image CI boots its clusters from is pinned by tag AND digest:
+# kind rebuilds and re-pushes the same version tag for every kind release, so
+# the tag alone names a different image after each one. A newer patch within
+# the pinned minor is the CI tooling check's (below), which also reports a
+# pin that carries no digest; this pass keeps the digest bound to the tag it
+# names, out of the tag sweep for the same reason as the Function package.
+echo "Checking the kind node image digest (integration-tests.yml)..."
+KIND_NODE_IMAGE_REF="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}' | head -1)"
+if split_pinned_image_ref "$KIND_NODE_IMAGE_REF" >/dev/null; then
+  check_pinned_digest "$KIND_NODE_IMAGE_REF" ".github/workflows/integration-tests.yml KIND_NODE_IMAGE" no
+fi
+
 sort -u "$ALL_IMAGES" | while read -r img; do
   [ -z "$img" ] && continue
   image="$(echo "$img" | cut -d':' -f1)"
@@ -1709,10 +1721,21 @@ fi
 
 # kind node image (kindest/node) — report a newer PATCH within the pinned K8s
 # minor only. Jumping minors is governed by the kind release, not free drift,
-# so scoping to the same minor avoids false "upgrade" noise.
+# so scoping to the same minor avoids false "upgrade" noise. The pin is tag
+# AND digest (the digest half is checked in the Docker section above), so the
+# tag is taken from the split reference, never from the text after the last
+# colon, which for a digest-pinned image is the digest.
 KIND_NODE_PIN="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}' | head -1)"
 if [ -n "$KIND_NODE_PIN" ]; then
-  node_tag="${KIND_NODE_PIN##*:}"
+  if kind_node_parts="$(split_pinned_image_ref "$KIND_NODE_PIN")"; then
+    node_tag="$(echo "$kind_node_parts" | cut -d'|' -f2)"
+  else
+    # Tag only: still check the tag for a newer patch, and say that the pin
+    # names a different image after every kind release until a digest binds it.
+    node_tag="${KIND_NODE_PIN##*:}"
+    echo "  - kind node image (integration-tests.yml): ${KIND_NODE_PIN} is not pinned by digest"
+    echo "kind node image (integration-tests.yml)|${KIND_NODE_PIN} is not pinned by digest; use the kindest/node:<tag>@sha256:<digest> reference from the kind release notes" >> "$CONSISTENCY_RESULTS"
+  fi
   node_minor="$(echo "${node_tag#v}" | cut -d. -f1-2)"
   if ! node_latest="$(skopeo list-tags "docker://docker.io/kindest/node" 2>/dev/null \
     | jq -r '.Tags[]' 2>/dev/null \

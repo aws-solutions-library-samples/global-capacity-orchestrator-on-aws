@@ -490,7 +490,10 @@ PY
             echo "github-release|crossplane-contrib/function-go-templating|$(extract_crossplane_function_pin lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating | head -1)"
             echo "github-release|kubernetes-sigs/kind|$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}' | head -1)"
             kind_node="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}' | head -1)"
-            [ -n "$kind_node" ] && echo "image|docker.io/${kind_node%%:*}|${kind_node##*:}"
+            # Tag and digest: the tag half is a registry tag like any other image's;
+            # the digest half is recorded below with the other committed digests.
+            kind_node_tagged="${kind_node%%@sha256:*}"
+            [ -n "$kind_node_tagged" ] && echo "image|docker.io/${kind_node_tagged%%:*}|${kind_node_tagged##*:}"
             extract_precommit_hooks .pre-commit-config.yaml | while IFS='|' read -r repo rev; do
                 repo="${repo%.git}"; repo="${repo%/}"
                 echo "github-tags|${repo#https://github.com/}|$rev"
@@ -519,6 +522,7 @@ PY
                 extract_python_string_constant AWS_CLI_IMAGE gco/services/inference_monitor.py
                 grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" scripts/live_release_validation/manifests/ 2>/dev/null | sed 's/^image: //'
                 extract_crossplane_function_packages lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating
+                extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}'
             } | sort -u | while IFS= read -r ref; do
                 case "$ref" in *@sha256:*) echo "digest|${ref%@sha256:*}|${ref##*@sha256:}" ;; esac
             done
@@ -617,7 +621,7 @@ jobs:
       - uses: helm/kind-action@0000000000000000000000000000000000000000
         with:
           version: "v0.33.0"
-          node_image: "kindest/node:v1.37.0"
+          node_image: "kindest/node:v1.37.0@sha256:6666666666666666666666666666666666666666666666666666666666666666"
       - run: docker run --rm alpine:3.24.1 true
 YAML
     cat > "$root/.github/actions/install-trivy/action.yml" <<'YAML'
@@ -795,6 +799,12 @@ findings_path() {
     # release check's, and the sweep would report the same release twice.
     grep -q '^skopeo inspect --raw docker://xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5' "$CALLS"
     ! grep -q '^skopeo list-tags .*function-go-templating' "$CALLS"
+    # The kind node image likewise: its digest is bound to its tag, the tag's
+    # patch drift is the CI tooling check's own list-tags call (no --retry-times),
+    # and it stays out of the generic image sweep.
+    grep -q '^skopeo inspect --raw docker://kindest/node:v1.37.0' "$CALLS"
+    grep -q '^skopeo list-tags docker://docker.io/kindest/node' "$CALLS"
+    ! grep -q '^skopeo list-tags --retry-times 3 docker://docker.io/kindest/node' "$CALLS"
     grep -q '^helm repo add keda https://kedacore.github.io/charts --force-update' "$CALLS"
     grep -q '^helm show chart oci://registry.k8s.io/kueue/charts/kueue' "$CALLS"
     grep -q '^aws eks describe-addon-versions --addon-name metrics-server --kubernetes-version 1.37' "$CALLS"
@@ -816,6 +826,7 @@ findings_path() {
     [[ "$output" == *"  - busybox:1.38.0 -> 2.38.0"* ]]
     [[ "$output" == *"  - public.ecr.aws/aws-cli/aws-cli:2.36.41: committed digest does not match the tag"* ]]
     [[ "$output" == *"  - xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5: committed digest does not match the tag (lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml)"* ]]
+    [[ "$output" == *"  - kindest/node:v1.37.0: committed digest does not match the tag (.github/workflows/integration-tests.yml KIND_NODE_IMAGE)"* ]]
     [[ "$output" == *"  - keda (keda): 2.20.2 -> 3.20.2"* ]]
     [[ "$output" == *"  - kueue (kueue): 0.19.2 -> 1.19.2"* ]]
     [[ "$output" == *"  - metrics-server: v0.9.0-eksbuild.7 -> v1.9.0-eksbuild.7"* ]]
@@ -1195,6 +1206,29 @@ YAML
     grep -qF -- "## Version Consistency" "$(report_path)"
 }
 
+@test "a kind node image pinned by tag alone is a consistency finding, and its tag is still checked" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    sed -i.bak 's|node_image: "kindest/node:v1.37.0@sha256:[0-9a-f]*"|node_image: "kindest/node:v1.37.0"|' "$root/.github/workflows/integration-tests.yml"
+    rm -f "$root/.github/workflows/integration-tests.yml.bak"
+    grep -q 'node_image: "kindest/node:v1.37.0"$' "$root/.github/workflows/integration-tests.yml"
+    build_catalog "$root"
+    run_scan "$root" FAKE_DRIFT=1
+
+    [ "$status" -eq 0 ]
+    # The tag half still rides the same-minor patch check, from the tag itself
+    # rather than from the text after the last colon.
+    [[ "$output" == *"  - kind node image (kindest/node): v1.37.0 -> v1.37.1"* ]]
+    [[ "$output" != *"INCOMPLETE: Container registry lookup failed for kindest/node"* ]]
+    # No digest to bind, so no manifest lookup, and no false digest row.
+    ! grep -q '^skopeo inspect --raw docker://kindest/node' "$CALLS"
+    [[ "$output" != *"kindest/node:v1.37.0: committed digest does not match"* ]]
+    # The missing digest is the finding.
+    [[ "$output" == *"  - kind node image (integration-tests.yml): kindest/node:v1.37.0 is not pinned by digest"* ]]
+    grep -qF -- "| kind node image (integration-tests.yml) | kindest/node:v1.37.0 is not pinned by digest; use the kindest/node:<tag>@sha256:<digest> reference from the kind release notes |" "$(report_path)"
+    grep -qx 'has_drift=true' "$GITHUB_OUTPUT"
+}
+
 @test "stale security epochs, expiring suppressions and a stale lockfile are reported with their numbers" {
     local root="$BATS_TEST_TMPDIR/checkout"
     make_consistent_checkout "$root"
@@ -1398,7 +1432,7 @@ YAML
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"  - kind pins disagree across kind-action steps: v0.33.0,v0.32.0"* ]]
-    [[ "$output" == *"  - kind-node pins disagree across kind-action steps: kindest/node:v1.37.0,kindest/node:v1.35.0"* ]]
+    [[ "$output" == *"  - kind-node pins disagree across kind-action steps: kindest/node:v1.37.0@sha256:6666666666666666666666666666666666666666666666666666666666666666,kindest/node:v1.35.0"* ]]
     [[ "$output" == *"  - python-version pins: 3.13,3.14 (project runtime: 3.14)"* ]]
     grep -qF -- "| kind (across kind-action steps) | v0.33.0,v0.32.0 |" "$(report_path)"
     grep -qF -- "| python-version (CI vs runtime) | CI: 3.13,3.14; runtime: 3.14 |" "$(report_path)"
