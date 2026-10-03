@@ -496,14 +496,18 @@ Set via environment variables:
 
 #### Outputs
 
-The script writes a Markdown report to a temp file and, when invoked from a workflow, emits two keys on `$GITHUB_OUTPUT` for the caller:
+The script writes a Markdown report and a JSON findings document to temp files and, when invoked from a workflow, emits these keys on `$GITHUB_OUTPUT` for the caller:
 
 | Output | Value |
 |--------|-------|
 | `has_drift` | `true` when any scanned surface reported drift, else `false` |
+| `scan_complete` | `true` only when no check was skipped and no lookup failed |
 | `report_path` | Path to the Markdown report (only set when `has_drift=true`) |
+| `findings_path` | Path to the JSON findings document (set on every run) |
 
 The report opens with a summary table (every surface, its status, and an urgency hint) linking to per-surface detail sections; skipped checks collapse into a single `<details>` block. When run in CI the script also mirrors the report — or an "up to date" line — into `$GITHUB_STEP_SUMMARY`, so results show on the workflow run page even when no issue is opened.
+
+The findings document (`schema: gco.dependency-scan.findings/1`) is the same report for machines: one record per summary-table surface, in order, with its urgency, row count, skip reason and the table rows keyed by column (`image|current|latest`, `pin|current|latest|standard_support_ends`, ...); the Python surface from its own JSON, the accelerator surface carrying its two Markdown reports. The scan emits facts only. The workflow uploads it as the `dependency-scan-findings` artifact (90 days) and the drift report embeds a copy in a collapsed **Machine-readable findings** block between `<!-- gco-deps-findings:begin -->` and `<!-- gco-deps-findings:end -->`, unless it exceeds 40 KB (an issue body is capped at 64 KB), in which case the report points at the artifact. `gco deps scan -o json` returns it under `findings`, and [`gco deps maintain`](../docs/MAINTENANCE.md#agent-assisted-maintenance) reads it from the issue, the artifact or a live scan to start an agent session; the tiering policy (`cli/maintenance.py`) is the launcher's, not the scan's. The helpers are the "Machine-readable findings" block of `lib_dependency_scan.sh`, covered by `tests/BATS/test_dependency_scan.bats`; the driver suite asserts the document the clean and drift scans produce.
 
 Exit code is `0` whether the report is current or contains drift — drift is a
 signal, not a scheduled-workflow failure. Deterministic policy findings, live

@@ -13,6 +13,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | File | Description |
 |------|-------------|
 | `main.py` | CLI entry point and top-level command group registration |
+| `maintenance.py` | The policy behind `gco deps maintain`: the dependency scan's findings document parsed and validated (schema and markers kept in lockstep with `lib_dependency_scan.sh`), every finding sorted into a tier (`mechanical`, `semantic`, `judgment`; a major-version jump promotes one tier; an unknown surface is judgment), the prompt the Claude Code session starts with, and the session's permission rules (`acceptEdits`, the allow-list of maintenance commands, the deny-list of moves the repository never wants an agent to make). `docs/MAINTENANCE.md` "Agent-assisted maintenance" is the human copy of the same table |
 | `autopilot.py` | Autopilot launch-plan logic: per-engine Bedrock model resolution, session MCP config generation (Claude Code JSON, Codex TOML, OpenCode JSON), pinned [Claude Code](https://code.claude.com/docs/en/overview) / Codex / OpenCode installs ([docs](../docs/AUTOPILOT.md)) |
 | `aws_client.py` | AWS SDK client wrapper with region discovery and credential handling |
 | `config.py` | CLI configuration loader (cdk.json, env vars, user config) |
@@ -63,7 +64,7 @@ Click command definitions that wire CLI flags to the business logic above.
 | `costs_cmd.py` | `gco costs ...` |
 | `crossplane_cmd.py` | `gco crossplane status`, `open`, `screenshot` |
 | `dag_cmd.py` | `gco dag ...` |
-| `deps_cmd.py` | `gco deps scan` |
+| `deps_cmd.py` | `gco deps scan`, `maintain` |
 | `examples_cmd.py` | `gco examples ...` |
 | `files_cmd.py` | `gco files ...` |
 | `gitops_cmd.py` | `gco gitops status`, `open`, `password`, `screenshot` |

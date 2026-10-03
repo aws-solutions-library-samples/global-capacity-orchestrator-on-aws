@@ -33,7 +33,7 @@ registered groups; this table only says what each module owns.
 | `costs_cmd.py` | `gco costs ...` | View cost breakdowns and estimates for GCO resources. | [reference](../../docs/CLI.md#costs-commands) |
 | `crossplane_cmd.py` | `gco crossplane ...` | Self-managed Crossplane (cdk.json helm.crossplane) and its Crossview dashboard. | [reference](../../docs/CLI.md#crossplane-commands) |
 | `dag_cmd.py` | `gco dag ...` | Run multi-step job pipelines with dependencies. | [reference](../../docs/CLI.md#dag-commands) |
-| `deps_cmd.py` | `gco deps ...` | Dependency maintenance (update scans, NodePool registry freshness). | [reference](../../docs/CLI.md#deps-commands) |
+| `deps_cmd.py` | `gco deps ...` | Dependency maintenance (update scans, NodePool registry freshness, and `maintain`: hand the scan's findings to a Claude Code session that applies them and opens a draft PR). | [reference](../../docs/CLI.md#deps-commands) |
 | `examples_cmd.py` | `gco examples ...` | Validate the shipped example manifests. | [reference](../../docs/CLI.md#examples-commands) |
 | `files_cmd.py` | `gco files ...` | Manage file systems (EFS/FSx). | [reference](../../docs/CLI.md#files-commands) |
 | `gitops_cmd.py` | `gco gitops ...` | Self-managed Argo CD (cdk.json helm.argocd): GitOps into the tenant namespaces. | [reference](../../docs/CLI.md#gitops-commands) |

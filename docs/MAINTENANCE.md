@@ -24,6 +24,7 @@ decisions.
 - [Refreshing base-image security patches](#refreshing-base-image-security-patches)
 - [Renewing CVE suppressions](#renewing-cve-suppressions)
 - [Routine dependency bumps](#routine-dependency-bumps)
+- [Agent-assisted maintenance](#agent-assisted-maintenance)
 - [Refreshing the Bedrock default model](#refreshing-the-bedrock-default-model)
 - [Maintaining the MCP server](#maintaining-the-mcp-server)
   - [Repository inventory symmetry](#repository-inventory-symmetry)
@@ -39,6 +40,7 @@ decisions.
 | Cadence | Task | Trigger |
 |---------|------|---------|
 | Monthly | Review the dependency-scan issue, including accelerator catalog and NodePool findings | Automated `deps-scan` issue |
+| Monthly, after reviewing the issue | Hand the mechanical and semantic rows to an agent with `gco deps maintain`, then review its draft PR | The issue's **Machine-readable findings** block |
 | When EC2 accelerator drift appears | Review family policy, refresh the catalog, and update eligible NodePools/watch lists together | `deps-scan` **Accelerator Catalog and NodePools** row or AWS launch announcement |
 | When the scan flags EKS standard-support ending (or ~yearly) | Upgrade the EKS Kubernetes minor | `deps-scan` **EKS Kubernetes Version** row |
 | When the scan flags an epoch older than 45 days (or [Trivy](https://trivy.dev/) finds an OS CVE) | Bump the base-image security epoch | `deps-scan` **Base-image Security Epochs** row |
@@ -351,6 +353,64 @@ pinned through `requirements-lock.txt` with `pip-compile` and reviewed
 deliberately. GitHub Actions, Docker base images, and both repository-owned npm
 graphs *are* tracked by Dependabot; see
 [Dependabot](../.github/CI.md#dependabot) for the split.
+
+## Agent-assisted maintenance
+
+The scan reports facts; the steps above are the same every month. [`gco deps
+maintain`](CLI.md#gco-deps-maintain) hands them to a Claude Code session: it
+reads the machine-readable findings the issue embeds (the collapsed
+**Machine-readable findings** block; also the `dependency-scan-findings`
+workflow artifact, or a fresh `gco deps scan` with `--scan`), sorts every
+finding into a tier, creates a worktree on a new branch from `origin/main`,
+and starts the session there with a prompt that names each finding's
+procedure section in this document. The session ends by pushing the branch
+and opening a **draft** pull request whose body has a "Next steps for the
+maintainer" section: one line per surface saying which CI job or local run
+proves it, and what still needs a live environment. A maintainer reviews and
+merges; the session never does.
+
+The policy lives in `cli/maintenance.py` (`SURFACE_POLICIES`) and
+`tests/test_maintenance.py` keeps it in lockstep with the scan's surfaces and
+with the headings here. Three tiers, by blast radius:
+
+| Tier | What it covers | What the session does | Default surfaces |
+|------|----------------|-----------------------|------------------|
+| `mechanical` | A pin with lockstep copies and a test that proves the copies agree | Applies it; CI is sufficient proof | Python Packages, npm Packages, Docker Images, Dockerfile.dev Pins, GCO Autopilot Pins, Pre-commit Hooks, CI Tooling, Version Consistency, Base-image Security Epochs, Suppression Expiries, Lockfile Freshness |
+| `semantic` | A change only a running system can prove | Applies it; the kind jobs and your review decide | Helm Charts, EKS Add-ons, Aurora PostgreSQL Engine, EMR Serverless, Bedrock Default Model, Accelerator Catalog and NodePools, CDK Enum Constants, Runner Images |
+| `judgment` | A decision, not a bump | Writes the analysis and a test plan into the PR; changes nothing | EKS Kubernetes Version, Python Release, Ruby Release |
+
+A finding whose version jumps a **major** is promoted one tier: a mechanical
+pin becomes semantic (an `aws-cdk-lib` 2.x → 3.x is applied but flagged), a
+semantic one becomes judgment (an `emr-7.x` → `emr-spark-8.x` is a Spark 3 to
+Spark 4 move and is analysed, not applied). Surfaces whose values are not
+versions (model ids, runner labels, dates) never promote. A surface the table
+does not know yet is treated as judgment, so a new scan section is reported
+until someone decides its tier.
+
+`--act-on` narrows what the session may change (`--act-on mechanical` for a
+cautious month); the default is mechanical and semantic. `--dry-run` prints
+the plan and the prompt path without creating anything.
+
+The session runs Claude Code with `--permission-mode acceptEdits`, an
+allow-list of the shell commands maintenance needs (git, gh, pytest, ruff,
+bats, the container tools for the lock), read access to the documentation
+hosts changelogs live on, and deny rules for the moves this repository never
+wants an agent to make: force pushes, merges, anything on `main`, `aws`,
+`cdk deploy`, `kubectl`, `helm install`, `rm -rf`. Deny rules win over allow
+rules in Claude Code, so a broader passthrough (`gco deps maintain -- ...`)
+cannot lift them. The prompt itself carries the rules the tests cannot
+enforce: regenerate the lock only in the documented container, never edit a
+test expectation except the one pinning the bumped version (and list each
+such edit), record a wrong-looking finding as a suspected scan inaccuracy
+rather than changing the scanner, stop after the same approach fails twice,
+and keep anything non-public out of commits and the PR.
+
+Run it from a terminal (the session is interactive; `--print` runs it
+headless to completion) on a machine with AWS credentials for Bedrock, `gh`
+authenticated for the repository, and the tools the changed surfaces need
+locally (a container runtime for the lock, `bats` for shell, `npm` for the
+npm graphs). The prompt, the findings copy, the MCP config and the plan are
+kept under `~/.gco/autopilot/maintenance/<branch>/` for reading back.
 
 ## Refreshing the Bedrock default model
 

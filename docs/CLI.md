@@ -1959,13 +1959,14 @@ Use shared EFS storage (`/mnt/shared`) to pass data between steps.
 ### Deps Commands
 
 Dependency maintenance: reproduce the monthly `deps-scan` workflow's update
-list on demand.
+list on demand, and hand it to an agent.
 
 <details>
-<summary>All <code>gco deps</code> commands (1) — click to expand</summary>
+<summary>All <code>gco deps</code> commands (2) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
+| [`gco deps maintain`](#gco-deps-maintain) | Hand the dependency scan's findings to a Claude Code session that applies them and opens a draft PR. |
 | [`gco deps scan`](#gco-deps-scan) | Generate the dependency update list the monthly deps-scan produces. |
 
 </details>
@@ -2009,6 +2010,72 @@ gco -o json deps scan
 
 # Save the report for a PR description
 gco deps scan --report /tmp/dependency-report.md
+```
+
+#### `gco deps maintain`
+
+Hand the dependency scan's findings to a Claude Code session. Reads the
+machine-readable findings the monthly `deps-scan` embeds in the rolling
+"[Automated] Dependency updates available" issue (or a `--findings` file, the
+`dependency-scan-findings` workflow artifact; or a fresh `--scan`), sorts
+every finding into a tier — `mechanical`, `semantic`, `judgment`; see
+[Agent-assisted maintenance](MAINTENANCE.md#agent-assisted-maintenance) —
+creates a worktree on a new branch from `origin/main`, and starts Claude Code
+there with a prompt that applies the `--act-on` tiers, verifies with the
+repository's own gates, and opens a **draft** pull request whose body has a
+"Next steps for the maintainer" section. Judgment findings (new majors,
+Kubernetes and engine releases) are analysed in the pull request, never
+changed. A maintainer reviews and merges; the session never does.
+
+The session runs with `--permission-mode acceptEdits`, an allow-list of the
+shell commands maintenance needs, read access to the documentation hosts
+changelogs live on, and deny rules for force pushes, merges, anything on
+`main`, `aws`, `cdk deploy`, `kubectl` and `helm install` (deny rules win in
+Claude Code, so a passthrough cannot lift them). Arguments after `--` go to
+`claude` unchanged. Needs `gh` authenticated for the repository (for the
+issue path), AWS credentials with Bedrock access, and Claude Code (offered
+for install at its pinned version when absent, as `gco autopilot` does). The
+prompt, the findings copy, the MCP config and the plan are kept under
+`~/.gco/autopilot/maintenance/<branch>/`.
+
+```bash
+gco deps maintain [OPTIONS] [-- CLAUDE_ARGS...]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--issue N` | Read the findings embedded in issue `N`. Default: the open rolling issue, found by its exact title and the `dependencies` + `automated` labels. |
+| `--findings FILE` | Read the findings document from `FILE` (the `dependency-scan-findings` artifact, or the `findings` of `gco -o json deps scan`). |
+| `--scan` | Run `gco deps scan` first and use its findings (several minutes; needs the scan's tools). |
+| `--act-on TIER` | Tiers the agent may change; repeatable. Default: `mechanical` and `semantic`. Everything else is reported only. |
+| `--branch NAME` | Branch name (default: `maint/deps-<today>`). |
+| `--worktree PATH` | Worktree path (default: `<main checkout>/.worktrees/<branch>`). |
+| `--engine ENGINE` | Agent engine; only `claude-code` is supported by this command today. |
+| `-m, --model MODEL` | Bedrock model id override (same resolution as `gco autopilot`). |
+| `--companions / --no-companions` | Also start the autopilot companion MCP servers (documentation and search). Default: off; the session uses `--strict-mcp-config`, so nothing from `~/.claude` leaks in. |
+| `--print` | Headless: run the session to completion without a TUI and exit (`claude -p`). |
+| `--dry-run` | Show the plan (findings by tier, worktree, permissions, prompt path); create and launch nothing. With `-o json`, the plan plus the prompt. |
+| `-y, --yes` | Do not prompt (install, launch). |
+
+**Examples:**
+
+```bash
+# See what the session would do, and where the prompt would be
+gco deps maintain --dry-run
+
+# The monthly run: worktree, session, draft PR
+gco deps maintain
+
+# A cautious month: only lockstep pins, everything else analysed
+gco deps maintain --act-on mechanical
+
+# From the workflow artifact, headless
+gco deps maintain --findings dependency-scan-findings/dep-scan-abc.json --print
+
+# Pass flags through to claude
+gco deps maintain -- --max-turns 200
 ```
 
 ---
