@@ -70,7 +70,10 @@ additional findings.
 - **Used by:** `security:npm-audit:all-packages` in
   `.github/workflows/security.yml`. `.github/scripts/check_npm_audit.py`
   validates npm's JSON report, rejects expired or stale entries, and fails on
-  every unmatched high or critical vulnerability.
+  every unmatched vulnerability of moderate severity or above. The
+  "depends on vulnerable versions of X" records npm derives when X has no
+  fixed version in range take no entry of their own: they clear once X is
+  suppressed, and are named in the job log when they do.
 
 ## `.pip-audit-ignore`
 

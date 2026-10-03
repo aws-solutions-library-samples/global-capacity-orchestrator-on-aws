@@ -67,10 +67,52 @@ def _finding(
     }
 
 
+def _chain_finding(
+    *,
+    reached: tuple[str, ...],
+    nodes: tuple[str, ...],
+    advisories: tuple[str, ...] = (),
+    severity: str = "high",
+) -> dict[str, object]:
+    """The record npm derives for a dependent of a package with no fixed
+    version in range: ``via`` names the packages it is vulnerable through as
+    bare strings, next to any advisory of its own."""
+    via: list[object] = [
+        {"url": f"https://github.com/advisories/{advisory}"} for advisory in advisories
+    ]
+    via.extend(reached)
+    return {"severity": severity, "via": via, "nodes": list(nodes)}
+
+
 def _report(
     vulnerabilities: dict[str, object] | None = None,
 ) -> dict[str, dict[str, object]]:
     return {"vulnerabilities": vulnerabilities or {}}
+
+
+ROOT_ADVISORY = "GHSA-vfj7-8cjw-p6xm"
+ROOT_SUPPRESSION_KWARGS = {
+    "package": "braces",
+    "advisory": ROOT_ADVISORY,
+    "node_path": "node_modules/braces",
+}
+
+
+def _unfixable_chain() -> dict[str, object]:
+    """The shape npm reports when braces has no fixed release: every dependent
+    up to the direct devDependency is a chain record. Listed top-down so the
+    checker has to clear them in the opposite order."""
+    return {
+        "markdownlint-cli2": _chain_finding(
+            reached=("globby", "micromatch"), nodes=("node_modules/markdownlint-cli2",)
+        ),
+        "globby": _chain_finding(
+            reached=("fast-glob", "micromatch"), nodes=("node_modules/globby",)
+        ),
+        "fast-glob": _chain_finding(reached=("micromatch",), nodes=("node_modules/fast-glob",)),
+        "micromatch": _chain_finding(reached=("braces",), nodes=("node_modules/micromatch",)),
+        "braces": _finding(advisories=(ROOT_ADVISORY,), nodes=("node_modules/braces",)),
+    }
 
 
 class TestLoadSuppressions:
@@ -155,6 +197,18 @@ class TestNpmAuditReportParsing:
 
         assert checker._advisories(via) == {ADVISORY}
         assert checker._advisories("not-a-list") == set()
+
+    def test_extracts_only_the_packages_reached_through(self) -> None:
+        """npm names the packages a chain record is vulnerable through as bare strings."""
+        via = [
+            {"url": f"https://github.com/advisories/{ADVISORY}"},
+            "braces",
+            "micromatch",
+            None,
+        ]
+
+        assert checker._reached_through(via) == {"braces", "micromatch"}
+        assert checker._reached_through("not-a-list") == set()
 
     def test_loads_valid_json_report(self, tmp_path: Path) -> None:
         expected = _report({PACKAGE: _finding()})
@@ -290,6 +344,130 @@ class TestCheckReport:
         assert rc == 0
         assert captured.out.count("::warning::Temporarily suppressing") == 4
         assert captured.err == ""
+
+    def test_chain_records_clear_once_the_package_they_reach_is_suppressed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = checker.check_report(
+            _report(_unfixable_chain()),
+            PACKAGE_DIR,
+            [_suppression(**ROOT_SUPPRESSION_KWARGS)],
+        )
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert captured.err == ""
+        assert captured.out.count("::warning::Temporarily suppressing") == 1
+        accepted = [line for line in captured.out.splitlines() if "::warning::Accepting" in line]
+        # Cleared bottom-up, one link per pass, whatever order npm listed them in.
+        assert accepted == [
+            "::warning::Accepting micromatch at node_modules/micromatch: "
+            "no advisory of its own, vulnerable only through braces",
+            "::warning::Accepting fast-glob at node_modules/fast-glob: "
+            "no advisory of its own, vulnerable only through micromatch",
+            "::warning::Accepting globby at node_modules/globby: "
+            "no advisory of its own, vulnerable only through fast-glob, micromatch",
+            "::warning::Accepting markdownlint-cli2 at node_modules/markdownlint-cli2: "
+            "no advisory of its own, vulnerable only through globby, micromatch",
+        ]
+
+    def test_chain_records_fail_closed_while_the_package_they_reach_is_unsuppressed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = checker.check_report(_report(_unfixable_chain()), PACKAGE_DIR, [])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        errors = captured.err.splitlines()
+        assert errors == [
+            "ERROR: braces: unsuppressed high finding "
+            f"(advisories=['{ROOT_ADVISORY}'], nodes=['node_modules/braces'])",
+            "ERROR: fast-glob: unsuppressed high finding reached through ['micromatch'] "
+            "(nodes=['node_modules/fast-glob'])",
+            "ERROR: globby: unsuppressed high finding reached through "
+            "['fast-glob', 'micromatch'] (nodes=['node_modules/globby'])",
+            "ERROR: markdownlint-cli2: unsuppressed high finding reached through "
+            "['globby', 'micromatch'] (nodes=['node_modules/markdownlint-cli2'])",
+            "ERROR: micromatch: unsuppressed high finding reached through ['braces'] "
+            "(nodes=['node_modules/micromatch'])",
+        ]
+
+    def test_chain_record_through_a_package_absent_from_the_report_fails(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A bare name that matches no cleared record is never taken on trust."""
+        report = _report(
+            {"micromatch": _chain_finding(reached=("braces",), nodes=("node_modules/micromatch",))}
+        )
+
+        rc = checker.check_report(report, PACKAGE_DIR, [])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert "micromatch: unsuppressed high finding reached through ['braces']" in captured.err
+
+    @pytest.mark.parametrize("root_suppressed", [True, False])
+    def test_record_with_its_own_advisory_and_a_chain_needs_both_cleared(
+        self, capsys: pytest.CaptureFixture[str], root_suppressed: bool
+    ) -> None:
+        own_advisory = "GHSA-aaaa-bbbb-cccc"
+        report = _report(
+            {
+                "braces": _finding(advisories=(ROOT_ADVISORY,), nodes=("node_modules/braces",)),
+                "micromatch": _chain_finding(
+                    advisories=(own_advisory,),
+                    reached=("braces",),
+                    nodes=("node_modules/micromatch",),
+                ),
+            }
+        )
+        suppressions = [
+            _suppression(
+                package="micromatch",
+                advisory=own_advisory,
+                node_path="node_modules/micromatch",
+                line=1,
+            )
+        ]
+        if root_suppressed:
+            suppressions.append(_suppression(**ROOT_SUPPRESSION_KWARGS, line=2))
+
+        rc = checker.check_report(report, PACKAGE_DIR, suppressions)
+
+        captured = capsys.readouterr()
+        # Its own suppression is used either way, so it is never reported stale.
+        assert f"Temporarily suppressing {own_advisory}" in captured.out
+        assert "stale suppression" not in captured.err
+        if root_suppressed:
+            assert rc == 0
+            assert "::warning::Accepting micromatch at node_modules/micromatch" in captured.out
+            assert captured.err == ""
+        else:
+            assert rc == 1
+            assert "Accepting" not in captured.out
+            assert "braces: unsuppressed high finding" in captured.err
+            assert "micromatch: unsuppressed high finding reached through ['braces']" in (
+                captured.err
+            )
+
+    def test_chain_record_without_nodes_fails_closed(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        report = _report(
+            {
+                "braces": _finding(advisories=(ROOT_ADVISORY,), nodes=("node_modules/braces",)),
+                "micromatch": _chain_finding(reached=("braces",), nodes=()),
+            }
+        )
+
+        rc = checker.check_report(report, PACKAGE_DIR, [_suppression(**ROOT_SUPPRESSION_KWARGS)])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "Accepting" not in captured.out
+        assert "micromatch: unsuppressed high finding (advisories=[], nodes=[])" in captured.err
 
     def test_moderate_finding_fails_the_gate(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = checker.check_report(

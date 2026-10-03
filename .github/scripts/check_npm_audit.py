@@ -8,6 +8,12 @@ Suppression file format (one entry per non-comment line)::
 A finding is suppressed only when all four identity fields match. Suppressions
 expire inclusively and stale entries fail, forcing their removal after the
 upstream dependency is fixed.
+
+When no fixed version of a package exists anywhere in range, npm also reports
+every dependent whose in-range versions all reach it ("depends on vulnerable
+versions of X") as a record of its own, with no advisory, naming the packages
+it reaches through. Such a chain record needs no entry: it clears once every
+package it reaches through has cleared, and fails closed otherwise.
 """
 
 from __future__ import annotations
@@ -99,6 +105,13 @@ def _advisories(via: Any) -> set[str]:
     return advisories
 
 
+def _reached_through(via: Any) -> set[str]:
+    """Packages a record is vulnerable through (npm lists them as bare names)."""
+    if not isinstance(via, list):
+        return set()
+    return {item for item in via if isinstance(item, str)}
+
+
 def _load_report(path: Path) -> dict[str, Any]:
     try:
         report = json.loads(path.read_text(encoding="utf-8"))
@@ -117,15 +130,22 @@ def check_report(report: dict[str, Any], package_dir: str, suppressions: list[Su
     scoped = {item.identity: item for item in suppressions if item.package_dir == package_dir}
     used: set[tuple[str, str, str, str]] = set()
     failures: list[str] = []
+    # Packages whose own advisories are all suppressed. A chain record clears
+    # only once every package it reaches through is in here.
+    cleared: set[str] = set()
+    # Chain records still waiting on the packages they reach through.
+    pending: dict[str, tuple[set[str], str, set[str]]] = {}
 
     for package, finding in report["vulnerabilities"].items():
         if not isinstance(finding, dict):
             failures.append(f"{package}: malformed vulnerability record")
             continue
-        if SEVERITY.get(str(finding.get("severity", "")), -1) < SEVERITY[FAIL_AT]:
+        severity = str(finding.get("severity", ""))
+        if SEVERITY.get(severity, -1) < SEVERITY[FAIL_AT]:
             continue
 
         advisories = _advisories(finding.get("via"))
+        reached = _reached_through(finding.get("via"))
         nodes = set(finding.get("nodes", [])) if isinstance(finding.get("nodes"), list) else set()
         matches = {
             identity
@@ -146,11 +166,40 @@ def check_report(report: dict[str, Any], package_dir: str, suppressions: list[Su
                     f"{suppression.advisory} for {suppression.node_path} "
                     f"until {suppression.expires.isoformat()}"
                 )
-        else:
+        elif advisories or not (reached and nodes):
             failures.append(
-                f"{package}: unsuppressed {finding.get('severity', 'unknown')} finding "
+                f"{package}: unsuppressed {severity} finding "
                 f"(advisories={sorted(advisories)}, nodes={sorted(nodes)})"
             )
+            continue
+        # The record's own advisories, if any, are suppressed; whether it clears
+        # now depends only on the packages it reaches through.
+        if reached:
+            pending[package] = (reached, severity, nodes)
+        else:
+            cleared.add(package)
+
+    # Chain records clear from the bottom up, one link per pass.
+    while pending:
+        resolved = sorted(
+            package for package, (reached, _, _) in pending.items() if reached <= cleared
+        )
+        if not resolved:
+            break
+        for package in resolved:
+            reached, _, nodes = pending.pop(package)
+            print(
+                f"::warning::Accepting {package} at {', '.join(sorted(nodes))}: "
+                "no advisory of its own, vulnerable only through "
+                f"{', '.join(sorted(reached))}"
+            )
+            cleared.add(package)
+
+    for package, (reached, severity, nodes) in sorted(pending.items()):
+        failures.append(
+            f"{package}: unsuppressed {severity} finding reached through "
+            f"{sorted(reached - cleared)} (nodes={sorted(nodes)})"
+        )
 
     stale = set(scoped) - used
     for identity in sorted(stale):
