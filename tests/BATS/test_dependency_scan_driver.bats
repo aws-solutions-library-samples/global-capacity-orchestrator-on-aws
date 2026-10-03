@@ -211,17 +211,31 @@ case "${1:-} ${2:-}" in
         printf '%s\t%s\n' "$(catalog_get aurora current)" "$(answer aurora current 17.0)"
         ;;
     "emr list-release-labels")
+        # Two pages, as the real API answers: the classic emr-N.x.y labels
+        # first, the AWS runtime for Apache Spark labels (emr-spark-N.x.y) on
+        # the last page. A one-page scan never sees the second family.
         current="$(catalog_get emr current)"
-        case "${FAKE_AWS_EMR:-ok}" in
-            empty) exit 0 ;;
-            unparseable) echo "emr-preview" ;;
-            *)
-                labels="$current emr-7.0.0-preview"
-                if [ "${FAKE_DRIFT:-0}" = "1" ]; then
-                    [ "${FAKE_EMR_DRIFT:-patch}" = "patch" ] && labels="$labels $(bump_last "$current")"
-                    labels="$labels $(bump "$current")"
+        token=""
+        while [ "$#" -gt 0 ]; do [ "$1" = "--next-token" ] && token="$2"; shift; done
+        case "${FAKE_AWS_EMR:-ok}:${token}" in
+            empty:*) exit 0 ;;
+            unparseable:) echo '{"ReleaseLabels": ["emr-preview", "emr-spark-8.0-preview"]}' ;;
+            *:)
+                labels="\"$current\", \"emr-7.0.0-preview\""
+                if [ "${FAKE_DRIFT:-0}" = "1" ] && [ "${FAKE_EMR_DRIFT:-patch}" = "patch" ]; then
+                    labels="$labels, \"$(bump_last "$current")\""
                 fi
-                printf '%s\n' "$labels" | tr ' ' '\t'
+                printf '{"ReleaseLabels": [%s], "NextToken": "emr-page-two"}\n' "$labels"
+                ;;
+            *:emr-page-two)
+                # The newer major lives in the Spark-runtime family, after the
+                # classic labels; its version is the pin's with the major bumped.
+                labels="\"emr-5.9.0\""
+                if [ "${FAKE_DRIFT:-0}" = "1" ]; then
+                    bumped="$(bump "$current")"; bumped="${bumped#emr-}"; bumped="${bumped#spark-}"
+                    labels="$labels, \"emr-spark-${bumped}\""
+                fi
+                printf '{"ReleaseLabels": [%s]}\n' "$labels"
                 ;;
         esac
         ;;
@@ -1038,10 +1052,12 @@ report_path() {
     [[ "$output" == *"INCOMPLETE: Offline accelerator catalog validation: The validator reported drift but emitted no parseable actionable findings."* ]]
     grep -qF -- "The validator reported drift but emitted no parseable actionable findings." "$(report_path)"
 
-    # A new EMR major with no newer patch in the pinned line.
+    # A new EMR major with no newer patch in the pinned line. It is listed in
+    # the Spark-runtime family on the second page, so this also proves the scan
+    # pages and ranks across both label families.
     run_scan "$root" FAKE_DRIFT=1 FAKE_EMR_DRIFT=major
     [ "$status" -eq 0 ]
-    [[ "$output" == *"  - emr-serverless: emr-7.14.0 -> emr-8.14.0 (new major available)"* ]]
+    [[ "$output" == *"  - emr-serverless: emr-7.14.0 -> emr-spark-8.14.0 (new major available)"* ]]
 
     # Unhealthy companions are drift; missing ones too.
     run_scan "$root" FAKE_COMPANIONS=unhealthy

@@ -846,6 +846,15 @@ AURORA_COUNT="$(wc -l < "$AURORA_RESULTS" 2>/dev/null | tr -d ' ')"
 # applications. The IAM action is ``elasticmapreduce:ListReleaseLabels``
 # (which is what the OIDC policy grants) and is shared between the two
 # services — the CLI routing is just a surface-level difference.
+#
+# Two label families are in play. The classic line is ``emr-N.x.y``; the
+# current major line is the "AWS runtime for Apache Spark", ``emr-spark-N.x.y``
+# (``emr-spark-8.0.0`` GA, then ``emr-spark-8.1.0``), which the service lists
+# on the *last* page of a paged response. ``list_emr_release_labels`` follows
+# every page and ``newest_emr_label`` ranks by version across both families,
+# so a newer patch in the pinned line and a newer major in either family are
+# both reported (the latter as "new major available"). Both families are
+# valid release labels for the ``type: SPARK`` application GCO creates.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking EMR Serverless release labels ==="
@@ -864,44 +873,37 @@ else
   else
     while read -r current_label; do
       [ -z "$current_label" ] && continue
-      # current_label looks like "emr-7.13.0". Filter labels to ones that
-      # start with "emr-<major>." and take the latest by semver-ish sort.
-      # Skip preview/nightly tags (``-preview``, ``-beta``, ``-rc*``). The
-      # latest release label is what we compare against.
-      major="$(echo "$current_label" | sed -E 's/^emr-([0-9]+)\..*/\1/')"
-      release_labels="$(aws emr list-release-labels \
-        --region us-east-1 \
-        --query 'ReleaseLabels[]' --output text 2>/dev/null)" || release_labels=""
+      # current_label is "emr-7.14.0" or "emr-spark-8.1.0". Within the pinned
+      # major line, the newest GA label is a routine bump; the newest GA label
+      # across both families is the new-major signal. Preview, beta and
+      # release-candidate labels carry a suffix and never qualify.
+      current_version="$(emr_label_version "$current_label")"
+      major="${current_version%%.*}"
+      release_labels="$(list_emr_release_labels us-east-1)" || release_labels=""
 
-      if [ -z "$release_labels" ] || [ "$release_labels" = "None" ]; then
+      if [ -z "$release_labels" ]; then
         EMR_SKIP_REASON="EMR release-label lookup failed or returned an empty response."
         echo "  $EMR_SKIP_REASON"
         break
       fi
 
-      latest="$(echo "$release_labels" \
-        | tr '\t' '\n' \
-        | grep -E "^emr-${major}\.[0-9]+\.[0-9]+$" \
-        | sort -V | tail -1)" || true
-
-      # Also check whether a newer major release line exists.
-      latest_any="$(echo "$release_labels" \
-        | tr '\t' '\n' \
-        | grep -E "^emr-[0-9]+\.[0-9]+\.[0-9]+$" \
-        | sort -V | tail -1)" || true
+      latest="$(newest_emr_label "$major" <<< "$release_labels")"
+      latest_any="$(newest_emr_label <<< "$release_labels")"
 
       if [ -z "$latest_any" ]; then
         EMR_SKIP_REASON="EMR release-label response contained no parseable stable releases."
         echo "  $EMR_SKIP_REASON"
         break
       fi
-      if [ -n "$latest" ] && [ "$current_label" != "$latest" ]; then
+
+      if [ -n "$latest" ] && [ "$current_label" != "$latest" ] \
+         && [ "$(compare_semver "$current_version" "$(emr_label_version "$latest")")" = "newer" ]; then
         echo "  - emr-serverless: ${current_label} -> ${latest}"
         echo "emr-serverless|${current_label}|${latest}" >> "$EMR_RESULTS"
       elif [ "$current_label" != "$latest_any" ] \
-           && [ "$(compare_semver "${current_label#emr-}" "${latest_any#emr-}")" = "newer" ]; then
-        # Same minor — no new release in our pinned major — but a new
-        # major exists.
+           && [ "$(compare_semver "$current_version" "$(emr_label_version "$latest_any")")" = "newer" ]; then
+        # No newer release in the pinned major line, but a newer major exists
+        # (today that is the emr-spark-8.x.y family).
         echo "  - emr-serverless: ${current_label} -> ${latest_any} (new major available)"
         echo "emr-serverless|${current_label}|${latest_any}" >> "$EMR_RESULTS"
       fi

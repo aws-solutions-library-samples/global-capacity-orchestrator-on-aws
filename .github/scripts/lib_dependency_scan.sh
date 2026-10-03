@@ -656,6 +656,69 @@ except ImportError:
 " "$file" 2>/dev/null
 }
 
+# list_emr_release_labels <region>
+#
+# Prints every release label ``emr list-release-labels`` knows in <region>,
+# one per line, following ``NextToken`` through every page. Fails (non-zero,
+# nothing printed) when a page cannot be fetched or parsed.
+#
+# Two things about this API decide the shape of the call. It pages at 100
+# labels and the AWS CLI does not paginate it on its own, so a single call
+# sees the first page only. And EMR Serverless' current major line is not
+# named ``emr-8.x.y``: it is the "AWS runtime for Apache Spark" line,
+# ``emr-spark-8.x.y`` (``emr-spark-8.0.0`` GA, then ``emr-spark-8.1.0``),
+# and the service lists those labels *after* every classic ``emr-N.x.y``
+# label — on the last page. The one-page, ``^emr-N.N.N$`` scan that this
+# replaces therefore reported the ``emr-7.14.0`` pin as up to date while a
+# newer major had been generally available for months. The application GCO
+# creates is ``type: SPARK``, for which both label families are valid.
+list_emr_release_labels() {
+  local region="$1" token="" page
+  while :; do
+    if [ -n "$token" ]; then
+      page="$(aws emr list-release-labels --region "$region" --next-token "$token" \
+        --output json 2>/dev/null)" || return 1
+    else
+      page="$(aws emr list-release-labels --region "$region" --output json 2>/dev/null)" \
+        || return 1
+    fi
+    jq -r '.ReleaseLabels[]?' <<< "$page" 2>/dev/null || return 1
+    token="$(jq -r '.NextToken // empty' <<< "$page" 2>/dev/null)" || return 1
+    [ -n "$token" ] || break
+  done
+}
+
+#: A GA EMR release label in either family: ``emr-7.14.0`` or ``emr-spark-8.1.0``.
+#: Preview, beta and release-candidate labels carry a suffix and do not match.
+EMR_RELEASE_LABEL_RE='^emr-(spark-)?[0-9]+\.[0-9]+\.[0-9]+$'
+
+# emr_label_version <label>
+#
+# The numeric version of a release label in either family:
+# ``emr-7.14.0`` -> ``7.14.0``, ``emr-spark-8.1.0`` -> ``8.1.0``.
+emr_label_version() {
+  local version="${1#emr-}"
+  echo "${version#spark-}"
+}
+
+# newest_emr_label [major]
+#
+# Reads release labels on stdin (one per line) and prints the one with the
+# highest version among the GA labels of both families — restricted to the
+# given major line when <major> is given. Prints nothing when no label
+# qualifies. Ordering is by version, not by label text, so
+# ``emr-spark-8.1.0`` ranks above ``emr-7.14.0`` even though ``sort -V`` on
+# the labels themselves would put every ``emr-spark-`` label first.
+newest_emr_label() {
+  local major="${1:-}" label version
+  while IFS= read -r label; do
+    [[ "$label" =~ $EMR_RELEASE_LABEL_RE ]] || continue
+    version="$(emr_label_version "$label")"
+    [ -z "$major" ] || [ "${version%%.*}" = "$major" ] || continue
+    printf '%s %s\n' "$version" "$label"
+  done | sort -V | tail -1 | cut -d' ' -f2-
+}
+
 # extract_constant_value <name> [constants_path]
 #
 # Reads a single string-valued top-level constant from the constants

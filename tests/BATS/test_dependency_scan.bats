@@ -550,6 +550,102 @@ if m:
     [ "$output" = "emr-7.13.0" ]
 }
 
+# ── EMR release labels: both families, every page ───────────────────────────
+#
+# The real API pages at 100 labels and lists the AWS runtime for Apache Spark
+# family (emr-spark-N.x.y) after every classic emr-N.x.y label, on the last
+# page. A faked `aws` answers two pages and records whether the second was
+# requested with the token the first returned.
+
+_write_emr_aws_stub() {
+    # $1: directory for the stub; $2: mode (pages|first-page-fails|second-page-fails|bad-json)
+    cat > "$1/aws" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${EMR_STUB_CALLS}"
+token=""
+while [ "$#" -gt 0 ]; do [ "$1" = "--next-token" ] && token="$2"; shift; done
+case "${EMR_STUB_MODE}:${token}" in
+    first-page-fails:) exit 254 ;;
+    bad-json:) echo '{"ReleaseLabels": [' ;;
+    second-page-fails:page-two) exit 254 ;;
+    *:) echo '{"ReleaseLabels": ["emr-7.14.0", "emr-7.13.0", "emr-7.0.0-preview"], "NextToken": "page-two"}' ;;
+    *:page-two) echo '{"ReleaseLabels": ["emr-5.9.0", "emr-spark-8.0.0", "emr-spark-8.1.0"]}' ;;
+esac
+STUB
+    chmod +x "$1/aws"
+}
+
+@test "list_emr_release_labels: follows NextToken and prints every page's labels" {
+    tmpdir="$(mktemp -d)"
+    _write_emr_aws_stub "$tmpdir"
+    export EMR_STUB_CALLS="$tmpdir/calls" EMR_STUB_MODE=pages
+    PATH="$tmpdir:$PATH" run list_emr_release_labels us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'emr-7.14.0\nemr-7.13.0\nemr-7.0.0-preview\nemr-5.9.0\nemr-spark-8.0.0\nemr-spark-8.1.0')" ]
+    [ "$(wc -l < "$tmpdir/calls" | tr -d ' ')" -eq 2 ]
+    grep -q -- '--region us-east-1 --output json' "$tmpdir/calls"
+    grep -q -- '--next-token page-two' "$tmpdir/calls"
+    rm -rf "$tmpdir"
+}
+
+@test "list_emr_release_labels: a failed first page is a failure with no output" {
+    tmpdir="$(mktemp -d)"
+    _write_emr_aws_stub "$tmpdir"
+    export EMR_STUB_CALLS="$tmpdir/calls" EMR_STUB_MODE=first-page-fails
+    PATH="$tmpdir:$PATH" run list_emr_release_labels us-east-1
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "list_emr_release_labels: a failed later page fails the whole listing" {
+    tmpdir="$(mktemp -d)"
+    _write_emr_aws_stub "$tmpdir"
+    export EMR_STUB_CALLS="$tmpdir/calls" EMR_STUB_MODE=second-page-fails
+    PATH="$tmpdir:$PATH" run list_emr_release_labels us-east-1
+    [ "$status" -ne 0 ]
+    # The first page was printed before the second failed; the caller's
+    # `|| release_labels=""` discards it, so a partial list never counts.
+    [[ "$output" == *"emr-7.14.0"* ]]
+    [[ "$output" != *"emr-spark"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "list_emr_release_labels: an unparseable page is a failure" {
+    tmpdir="$(mktemp -d)"
+    _write_emr_aws_stub "$tmpdir"
+    export EMR_STUB_CALLS="$tmpdir/calls" EMR_STUB_MODE=bad-json
+    PATH="$tmpdir:$PATH" run list_emr_release_labels us-east-1
+    [ "$status" -ne 0 ]
+    rm -rf "$tmpdir"
+}
+
+@test "emr_label_version: strips either family prefix" {
+    [ "$(emr_label_version emr-7.14.0)" = "7.14.0" ]
+    [ "$(emr_label_version emr-spark-8.1.0)" = "8.1.0" ]
+}
+
+@test "newest_emr_label: ranks by version across both families, skipping previews" {
+    labels="$(printf '%s\n' emr-spark-8.0.0 emr-7.14.0 emr-7.0.0-preview emr-spark-8.1.0 emr-spark-8.0-preview emr-5.9.0 emr-7.13.0)"
+    [ "$(newest_emr_label <<< "$labels")" = "emr-spark-8.1.0" ]
+    [ "$(newest_emr_label 7 <<< "$labels")" = "emr-7.14.0" ]
+    [ "$(newest_emr_label 8 <<< "$labels")" = "emr-spark-8.1.0" ]
+    [ "$(newest_emr_label 5 <<< "$labels")" = "emr-5.9.0" ]
+}
+
+@test "newest_emr_label: a classic label outranks a Spark-runtime label with a lower version" {
+    # Ordering must be numeric, not textual: `sort -V` on the labels themselves
+    # would put every emr-spark- label after every emr- label.
+    [ "$(printf 'emr-spark-8.1.0\nemr-9.0.0\n' | newest_emr_label)" = "emr-9.0.0" ]
+    [ "$(printf 'emr-9.0.0\nemr-spark-8.1.0\n' | newest_emr_label)" = "emr-9.0.0" ]
+}
+
+@test "newest_emr_label: prints nothing when no GA label matches" {
+    [ -z "$(printf 'emr-7.0.0-preview\nemr-spark-8.0-preview\nnot-a-label\n' | newest_emr_label)" ]
+    [ -z "$(printf 'emr-7.14.0\n' | newest_emr_label 8)" ]
+    [ -z "$(printf '' | newest_emr_label)" ]
+}
+
 # ── extract_eks_addons ───────────────────────────────────────────────────────
 
 @test "extract_eks_addons: finds at least one addon in regional_stack.py" {
