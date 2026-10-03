@@ -202,7 +202,7 @@ jobs:
         # The same findings as JSON, written on every run. The drift issue
         # embeds a copy, but an issue body is capped at 64 KiB and the issue
         # does not exist on a clean run, so the artifact is the durable copy
-        # `gco deps maintain --findings` can read either way.
+        # a consumer can read either way.
         if: always() && steps.scan.outcome == 'success'
         uses: ./.github/actions/upload-artifact-with-retry
         with:

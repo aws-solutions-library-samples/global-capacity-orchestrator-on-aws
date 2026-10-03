@@ -87,9 +87,9 @@ set -uo pipefail
 
 WORKFLOWS_DIR="${WORKFLOWS_DIR:-.github/workflows}"
 REPORT_FILE="$(mktemp -t dep-scan-XXXXXX.md 2>/dev/null || mktemp --suffix=.md)"
-# The same findings as JSON, for ``gco deps maintain`` (see the "Machine-
-# readable findings" helpers in lib_dependency_scan.sh). Written on every
-# run, drift or not, next to the Markdown report.
+# The same findings as JSON, for anything that acts on them without parsing
+# prose (see the "Machine-readable findings" helpers in lib_dependency_scan.sh).
+# Written on every run, drift or not, next to the Markdown report.
 FINDINGS_FILE="${REPORT_FILE%.md}.json"
 FINDINGS_SURFACES="$(mktemp)"
 INCOMPLETE_REASONS_FILE="$(mktemp -t dep-scan-incomplete-XXXXXX 2>/dev/null || mktemp)"
@@ -2847,10 +2847,10 @@ rm -f "$FINDINGS_SURFACES"
   echo "5. Reconcile any **Version Consistency** rows so every copy of a pin agrees"
   echo "6. Run tests locally to verify compatibility, then open a PR"
   echo ""
-  echo "Or hand the mechanical and semantic rows to an agent: \`gco deps maintain\`"
-  echo "reads the findings below, opens a worktree and starts a Claude Code"
-  echo "session that applies them and reports what to test (see"
-  echo "\`docs/MAINTENANCE.md\`, \"Agent-assisted maintenance\")."
+  echo "The findings below are the same report as JSON, for a script or an agent"
+  echo "session that acts on them: \`gco deps scan -o json\` returns the document"
+  echo "under \`findings\`, and every run uploads it as the"
+  echo "\`dependency-scan-findings\` artifact."
   echo ""
   emit_findings_embed "$FINDINGS_FILE"
   echo ""

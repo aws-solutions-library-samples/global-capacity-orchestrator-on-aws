@@ -2155,20 +2155,21 @@ if m:
 # ---------------------------------------------------------------------------
 # Machine-readable findings
 #
-# The Markdown report is for people. ``gco deps maintain`` hands the same
-# findings to an agent, which must not parse prose, so every surface is also
-# recorded as JSON: the rows the Markdown tables render, keyed by column
-# name, plus the surface's urgency and skip reason. The scan emits facts
-# only; which findings an agent may act on is the launcher's policy
-# (``cli/maintenance.py``, documented in ``docs/MAINTENANCE.md``).
+# The Markdown report is for people. Anything that acts on the findings (a
+# script, an agent session, ``gco deps scan -o json``) must not parse prose,
+# so every surface is also recorded as JSON: the rows the Markdown tables
+# render, keyed by column name, plus the surface's urgency and skip reason.
+# The scan emits facts only; which findings to act on is the consumer's
+# policy.
 # ---------------------------------------------------------------------------
 
 #: Schema identifier written into every findings document. Bump the suffix
-#: when a field changes meaning; ``cli/maintenance.py`` refuses other values.
+#: when a field changes meaning, so a consumer can refuse a shape it does not
+#: know.
 FINDINGS_SCHEMA="gco.dependency-scan.findings/1"
 
-#: Markers around the findings JSON embedded in the Markdown report, so the
-#: launcher can lift it out of the rolling issue body without parsing the
+#: Markers around the findings JSON embedded in the Markdown report, so a
+#: consumer can lift it out of the rolling issue body without parsing the
 #: rest. Both lines are HTML comments and render as nothing.
 FINDINGS_BEGIN_MARKER="<!-- gco-deps-findings:begin -->"
 FINDINGS_END_MARKER="<!-- gco-deps-findings:end -->"
@@ -2260,7 +2261,7 @@ emit_findings_embed() {
   local file="$1" size
   size="$(wc -c < "$file" | tr -d ' ')"
   echo "<details>"
-  echo "<summary>Machine-readable findings (for <code>gco deps maintain</code>)</summary>"
+  echo "<summary>Machine-readable findings (the same report as JSON)</summary>"
   echo ""
   if [ "$size" -gt "$FINDINGS_EMBED_MAX_BYTES" ]; then
     echo "_The findings document (${size} bytes) is too large to embed here; download the"

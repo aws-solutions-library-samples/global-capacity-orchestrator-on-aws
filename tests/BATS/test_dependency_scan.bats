@@ -644,6 +644,8 @@ STUB
     [ -z "$(printf 'emr-7.0.0-preview\nemr-spark-8.0-preview\nnot-a-label\n' | newest_emr_label)" ]
     [ -z "$(printf 'emr-7.14.0\n' | newest_emr_label 8)" ]
     [ -z "$(printf '' | newest_emr_label)" ]
+}
+
 # ── Machine-readable findings ───────────────────────────────────────────────
 
 @test "findings_rows: keys the pipe-delimited rows, keeping overflow in the last field" {
@@ -730,7 +732,7 @@ STUB
     run emit_findings_embed "$doc"
     [ "$status" -eq 0 ]
     [[ "$output" == *"<details>"* ]]
-    [[ "$output" == *"gco deps maintain"* ]]
+    [[ "$output" == *"the same report as JSON"* ]]
     [[ "$output" == *"$FINDINGS_BEGIN_MARKER"$'\n''```json'$'\n''{"schema": "'"$FINDINGS_SCHEMA"'", "surfaces": []}'$'\n''```'$'\n'"$FINDINGS_END_MARKER"* ]]
     [[ "$output" == *"</details>"* ]]
     FINDINGS_EMBED_MAX_BYTES=10 run emit_findings_embed "$doc"

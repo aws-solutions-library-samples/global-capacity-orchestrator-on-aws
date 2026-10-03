@@ -770,8 +770,8 @@ findings_path() {
     ! grep -q 'report_path=' "$GITHUB_OUTPUT"
     grep -q '^All dependencies are up to date.$' "$GITHUB_STEP_SUMMARY"
     ! grep -q 'Incomplete or skipped' "$GITHUB_STEP_SUMMARY"
-    # The findings document is written even with nothing to report, so
-    # `gco deps maintain` can say so from the same source.
+    # The findings document is written even with nothing to report, so a
+    # consumer can say so from the same source.
     local findings
     findings="$(findings_path)"
     [ -f "$findings" ]
@@ -868,7 +868,7 @@ findings_path() {
     grep -q '^# Dependency Update Report' "$GITHUB_STEP_SUMMARY"
     # The same findings as a document: one record per summary-table surface,
     # in order, with the rows keyed by column, embedded in the report between
-    # the markers `gco deps maintain` lifts them out with.
+    # the markers a consumer lifts them out with.
     local findings
     findings="$(findings_path)"
     [ -f "$findings" ]
@@ -888,7 +888,7 @@ findings_path() {
     [ "$(jq -r '[.surfaces[] | select(.count > 0)] | length' "$findings")" -ge 18 ]
     grep -qF -- '<!-- gco-deps-findings:begin -->' "$report"
     grep -qF -- '<!-- gco-deps-findings:end -->' "$report"
-    grep -qF -- 'gco deps maintain' "$report"
+    grep -qF -- 'gco deps scan -o json' "$report"
     # What is embedded is the document itself.
     sed -n '/<!-- gco-deps-findings:begin -->/,/<!-- gco-deps-findings:end -->/p' "$report" \
         | sed '1d;2d;$d' | sed '$d' > "$BATS_TEST_TMPDIR/embedded.json"

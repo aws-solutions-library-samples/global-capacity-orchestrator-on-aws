@@ -249,8 +249,8 @@ def _run_full_scan(repo_root: Path, *, stream: bool) -> dict[str, object]:
 
         # The scanner writes the same findings as a JSON document next to the
         # report, on every run (``findings_path``). It rides along in the
-        # envelope so ``gco deps maintain --scan`` and the MCP tool get the
-        # rows without parsing the Markdown. Absent or unreadable is ``None``
+        # envelope so ``-o json`` callers and the MCP tool get the rows
+        # without parsing the Markdown. Absent or unreadable is ``None``
         # rather than an error: the report is still the primary output.
         findings: object = None
         findings_path = outputs.get("findings_path", "")
