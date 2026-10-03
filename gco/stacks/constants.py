@@ -392,6 +392,14 @@ EMR_SERVERLESS_RELEASE_LABEL = "emr-7.14.0"
 Pinned to a stable Spark release so analytics workloads get a reproducible
 runtime across deployments. Update alongside the EKS add-ons above when a
 newer EMR release is validated against the studio notebooks.
+
+Two label families are valid for the ``SPARK`` application this pins: the
+classic ``emr-N.x.y`` line and the AWS runtime for Apache Spark line,
+``emr-spark-N.x.y`` (Spark 4; ``emr-spark-8.0.0`` GA, then ``8.1.0``), which
+is the current major. The monthly dependency scan ranks both families by
+version and reports the newer one, so a move to ``emr-spark-8.x`` shows up
+as "new major available"; it is a Spark 3 to Spark 4 change for every
+notebook and example job, not a routine bump.
 """
 
 SAGEMAKER_ROLE_NAME_PREFIX = "AmazonSageMaker"

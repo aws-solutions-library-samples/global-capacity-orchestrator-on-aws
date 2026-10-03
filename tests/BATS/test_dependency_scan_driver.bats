@@ -211,17 +211,31 @@ case "${1:-} ${2:-}" in
         printf '%s\t%s\n' "$(catalog_get aurora current)" "$(answer aurora current 17.0)"
         ;;
     "emr list-release-labels")
+        # Two pages, as the real API answers: the classic emr-N.x.y labels
+        # first, the AWS runtime for Apache Spark labels (emr-spark-N.x.y) on
+        # the last page. A one-page scan never sees the second family.
         current="$(catalog_get emr current)"
-        case "${FAKE_AWS_EMR:-ok}" in
-            empty) exit 0 ;;
-            unparseable) echo "emr-preview" ;;
-            *)
-                labels="$current emr-7.0.0-preview"
-                if [ "${FAKE_DRIFT:-0}" = "1" ]; then
-                    [ "${FAKE_EMR_DRIFT:-patch}" = "patch" ] && labels="$labels $(bump_last "$current")"
-                    labels="$labels $(bump "$current")"
+        token=""
+        while [ "$#" -gt 0 ]; do [ "$1" = "--next-token" ] && token="$2"; shift; done
+        case "${FAKE_AWS_EMR:-ok}:${token}" in
+            empty:*) exit 0 ;;
+            unparseable:) echo '{"ReleaseLabels": ["emr-preview", "emr-spark-8.0-preview"]}' ;;
+            *:)
+                labels="\"$current\", \"emr-7.0.0-preview\""
+                if [ "${FAKE_DRIFT:-0}" = "1" ] && [ "${FAKE_EMR_DRIFT:-patch}" = "patch" ]; then
+                    labels="$labels, \"$(bump_last "$current")\""
                 fi
-                printf '%s\n' "$labels" | tr ' ' '\t'
+                printf '{"ReleaseLabels": [%s], "NextToken": "emr-page-two"}\n' "$labels"
+                ;;
+            *:emr-page-two)
+                # The newer major lives in the Spark-runtime family, after the
+                # classic labels; its version is the pin's with the major bumped.
+                labels="\"emr-5.9.0\""
+                if [ "${FAKE_DRIFT:-0}" = "1" ]; then
+                    bumped="$(bump "$current")"; bumped="${bumped#emr-}"; bumped="${bumped#spark-}"
+                    labels="$labels, \"emr-spark-${bumped}\""
+                fi
+                printf '{"ReleaseLabels": [%s]}\n' "$labels"
                 ;;
         esac
         ;;
@@ -724,6 +738,9 @@ run_scan() {
 report_path() {
     sed -n 's/^report_path=//p' "$GITHUB_OUTPUT"
 }
+findings_path() {
+    sed -n 's/^findings_path=//p' "$GITHUB_OUTPUT"
+}
 
 @test "dependency-scan.sh passes bash -n and shellcheck" {
     bash -n "$SCRIPT"
@@ -753,6 +770,18 @@ report_path() {
     ! grep -q 'report_path=' "$GITHUB_OUTPUT"
     grep -q '^All dependencies are up to date.$' "$GITHUB_STEP_SUMMARY"
     ! grep -q 'Incomplete or skipped' "$GITHUB_STEP_SUMMARY"
+    # The findings document is written even with nothing to report, so a
+    # consumer can say so from the same source.
+    local findings
+    findings="$(findings_path)"
+    [ -f "$findings" ]
+    [[ "$output" == *"Wrote findings to ${findings}"* ]]
+    [ "$(jq -r '.schema' "$findings")" = "gco.dependency-scan.findings/1" ]
+    [ "$(jq -r '.has_drift' "$findings")" = "false" ]
+    [ "$(jq -r '.scan_complete' "$findings")" = "true" ]
+    [ "$(jq -r '.surfaces | length' "$findings")" = "22" ]
+    [ "$(jq -r '[.surfaces[].count] | add' "$findings")" = "0" ]
+    [ "$(jq -r '[.surfaces[] | select(.skipped != null)] | length' "$findings")" = "0" ]
     # Every surface was consulted through the faked tools.
     grep -q '^pip install -e .\[dev\]' "$CALLS"
     grep -q '^curl https://registry.npmjs.org/aws-cdk/latest' "$CALLS"
@@ -837,6 +866,34 @@ report_path() {
     [[ "$output" == *"Wrote report to ${report}"* ]]
     # The report is mirrored into the job summary.
     grep -q '^# Dependency Update Report' "$GITHUB_STEP_SUMMARY"
+    # The same findings as a document: one record per summary-table surface,
+    # in order, with the rows keyed by column, embedded in the report between
+    # the markers a consumer lifts them out with.
+    local findings
+    findings="$(findings_path)"
+    [ -f "$findings" ]
+    [[ "$output" == *"Wrote findings to ${findings}"* ]]
+    [ "$(jq -r '.has_drift' "$findings")" = "true" ]
+    [ "$(jq -r '.scan_complete' "$findings")" = "true" ]
+    [ "$(jq -c '.incomplete_reasons' "$findings")" = "[]" ]
+    [ "$(jq -r '.surfaces[0].surface' "$findings")" = "Python Packages" ]
+    [ "$(jq -r '.surfaces[-1].surface' "$findings")" = "Lockfile Freshness" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "Python Packages") | .count' "$findings")" = "3" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "Python Packages") | .findings[0] | keys | join(",")' "$findings")" = "current,latest,name" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "npm Packages") | .findings[] | select(.package == "aws-cdk") | "\(.graph) \(.current) \(.latest)"' "$findings")" = ". 2.1140.0 3.1140.0" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "EMR Serverless") | .findings[0] | "\(.release) \(.current) \(.latest)"' "$findings")" = "emr-serverless emr-7.14.0 emr-7.14.1" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "EKS Kubernetes Version") | .findings[0].standard_support_ends' "$findings")" = "2027-01-15" ]
+    [[ "$(jq -r '.surfaces[] | select(.surface == "Accelerator Catalog and NodePools") | .offline_report_markdown' "$findings")" == *"Retire p2 from the GPU pool"* ]]
+    [ "$(jq -r '.surfaces[] | select(.surface == "Accelerator Catalog and NodePools") | .count' "$findings")" = "4" ]
+    [ "$(jq -r '[.surfaces[] | select(.count > 0)] | length' "$findings")" -ge 18 ]
+    grep -qF -- '<!-- gco-deps-findings:begin -->' "$report"
+    grep -qF -- '<!-- gco-deps-findings:end -->' "$report"
+    grep -qF -- 'gco deps scan -o json' "$report"
+    # What is embedded is the document itself.
+    sed -n '/<!-- gco-deps-findings:begin -->/,/<!-- gco-deps-findings:end -->/p' "$report" \
+        | sed '1d;2d;$d' | sed '$d' > "$BATS_TEST_TMPDIR/embedded.json"
+    jq -e '.schema == "gco.dependency-scan.findings/1"' "$BATS_TEST_TMPDIR/embedded.json" >/dev/null
+    [ "$(jq -c '.surfaces' "$BATS_TEST_TMPDIR/embedded.json")" = "$(jq -c '.surfaces' "$findings")" ]
 }
 
 @test "without AWS credentials every credential-dependent section is skipped and the scan is incomplete" {
@@ -1038,10 +1095,12 @@ report_path() {
     [[ "$output" == *"INCOMPLETE: Offline accelerator catalog validation: The validator reported drift but emitted no parseable actionable findings."* ]]
     grep -qF -- "The validator reported drift but emitted no parseable actionable findings." "$(report_path)"
 
-    # A new EMR major with no newer patch in the pinned line.
+    # A new EMR major with no newer patch in the pinned line. It is listed in
+    # the Spark-runtime family on the second page, so this also proves the scan
+    # pages and ranks across both label families.
     run_scan "$root" FAKE_DRIFT=1 FAKE_EMR_DRIFT=major
     [ "$status" -eq 0 ]
-    [[ "$output" == *"  - emr-serverless: emr-7.14.0 -> emr-8.14.0 (new major available)"* ]]
+    [[ "$output" == *"  - emr-serverless: emr-7.14.0 -> emr-spark-8.14.0 (new major available)"* ]]
 
     # Unhealthy companions are drift; missing ones too.
     run_scan "$root" FAKE_COMPANIONS=unhealthy

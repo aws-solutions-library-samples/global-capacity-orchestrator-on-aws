@@ -656,6 +656,69 @@ except ImportError:
 " "$file" 2>/dev/null
 }
 
+# list_emr_release_labels <region>
+#
+# Prints every release label ``emr list-release-labels`` knows in <region>,
+# one per line, following ``NextToken`` through every page. Fails (non-zero,
+# nothing printed) when a page cannot be fetched or parsed.
+#
+# Two things about this API decide the shape of the call. It pages at 100
+# labels and the AWS CLI does not paginate it on its own, so a single call
+# sees the first page only. And EMR Serverless' current major line is not
+# named ``emr-8.x.y``: it is the "AWS runtime for Apache Spark" line,
+# ``emr-spark-8.x.y`` (``emr-spark-8.0.0`` GA, then ``emr-spark-8.1.0``),
+# and the service lists those labels *after* every classic ``emr-N.x.y``
+# label — on the last page. The one-page, ``^emr-N.N.N$`` scan that this
+# replaces therefore reported the ``emr-7.14.0`` pin as up to date while a
+# newer major had been generally available for months. The application GCO
+# creates is ``type: SPARK``, for which both label families are valid.
+list_emr_release_labels() {
+  local region="$1" token="" page
+  while :; do
+    if [ -n "$token" ]; then
+      page="$(aws emr list-release-labels --region "$region" --next-token "$token" \
+        --output json 2>/dev/null)" || return 1
+    else
+      page="$(aws emr list-release-labels --region "$region" --output json 2>/dev/null)" \
+        || return 1
+    fi
+    jq -r '.ReleaseLabels[]?' <<< "$page" 2>/dev/null || return 1
+    token="$(jq -r '.NextToken // empty' <<< "$page" 2>/dev/null)" || return 1
+    [ -n "$token" ] || break
+  done
+}
+
+#: A GA EMR release label in either family: ``emr-7.14.0`` or ``emr-spark-8.1.0``.
+#: Preview, beta and release-candidate labels carry a suffix and do not match.
+EMR_RELEASE_LABEL_RE='^emr-(spark-)?[0-9]+\.[0-9]+\.[0-9]+$'
+
+# emr_label_version <label>
+#
+# The numeric version of a release label in either family:
+# ``emr-7.14.0`` -> ``7.14.0``, ``emr-spark-8.1.0`` -> ``8.1.0``.
+emr_label_version() {
+  local version="${1#emr-}"
+  echo "${version#spark-}"
+}
+
+# newest_emr_label [major]
+#
+# Reads release labels on stdin (one per line) and prints the one with the
+# highest version among the GA labels of both families — restricted to the
+# given major line when <major> is given. Prints nothing when no label
+# qualifies. Ordering is by version, not by label text, so
+# ``emr-spark-8.1.0`` ranks above ``emr-7.14.0`` even though ``sort -V`` on
+# the labels themselves would put every ``emr-spark-`` label first.
+newest_emr_label() {
+  local major="${1:-}" label version
+  while IFS= read -r label; do
+    [[ "$label" =~ $EMR_RELEASE_LABEL_RE ]] || continue
+    version="$(emr_label_version "$label")"
+    [ -z "$major" ] || [ "${version%%.*}" = "$major" ] || continue
+    printf '%s %s\n' "$version" "$label"
+  done | sort -V | tail -1 | cut -d' ' -f2-
+}
+
 # extract_constant_value <name> [constants_path]
 #
 # Reads a single string-valued top-level constant from the constants
@@ -2087,6 +2150,131 @@ m = re.search(r'([0-9a-f]{64})\s+/tmp/kubectl', text)
 if m:
     print(f'KUBECTL_SHA256|{m.group(1)}')
 " "$file" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Machine-readable findings
+#
+# The Markdown report is for people. Anything that acts on the findings (a
+# script, an agent session, ``gco deps scan -o json``) must not parse prose,
+# so every surface is also recorded as JSON: the rows the Markdown tables
+# render, keyed by column name, plus the surface's urgency and skip reason.
+# The scan emits facts only; which findings to act on is the consumer's
+# policy.
+# ---------------------------------------------------------------------------
+
+#: Schema identifier written into every findings document. Bump the suffix
+#: when a field changes meaning, so a consumer can refuse a shape it does not
+#: know.
+FINDINGS_SCHEMA="gco.dependency-scan.findings/1"
+
+#: Markers around the findings JSON embedded in the Markdown report, so a
+#: consumer can lift it out of the rolling issue body without parsing the
+#: rest. Both lines are HTML comments and render as nothing.
+FINDINGS_BEGIN_MARKER="<!-- gco-deps-findings:begin -->"
+FINDINGS_END_MARKER="<!-- gco-deps-findings:end -->"
+
+#: An issue body is capped at 65,536 characters. The report itself runs to
+#: about 15,000, so a findings document above this size is left to the
+#: workflow artifact and the report says so instead of risking a failed
+#: ``gh issue edit``.
+FINDINGS_EMBED_MAX_BYTES="${FINDINGS_EMBED_MAX_BYTES:-40000}"
+
+# findings_rows <keys> <results-file>
+#
+# Turns a pipe-delimited results file into a JSON array of objects. <keys>
+# names the columns, pipe-separated, in the order the scan writes them
+# (``image|current|latest``). A row with more cells than keys keeps the
+# overflow in its last field, joined back with ``|``; a row with fewer
+# cells fills the missing fields with "". An empty or missing file is ``[]``.
+findings_rows() {
+  local keys="$1" file="${2:-}"
+  if [ -z "$file" ] || [ ! -s "$file" ]; then
+    echo "[]"
+    return
+  fi
+  jq -R -s --arg keys "$keys" '
+    ($keys | split("|")) as $cols
+    | ($cols | length) as $n
+    | split("\n")
+    | map(select(length > 0))
+    | map(
+        split("|") as $cells
+        | ($cells[0:($n - 1)] + [($cells[($n - 1):] | join("|"))]) as $fitted
+        | [range(0; $n)] | map({key: $cols[.], value: ($fitted[.] // "")}) | from_entries
+      )' "$file"
+}
+
+# findings_surface <title> <urgency> <count> <skip-reason> <keys> [results-file]
+#
+# Appends one surface record to the file named by ``FINDINGS_SURFACES``:
+# the Markdown section title, the urgency the summary table shows, the row
+# count, the skip reason (null when the surface ran) and the rows as
+# objects. Surfaces whose findings are not rows (the Python packages' JSON,
+# the accelerator catalog's Markdown) append their own record with
+# ``findings_surface_json``.
+findings_surface() {
+  local title="$1" urgency="$2" count="$3" skip="$4" keys="$5" file="${6:-}"
+  local rows
+  rows="$(findings_rows "$keys" "$file")"
+  findings_surface_json "$title" "$urgency" "$count" "$skip" "$rows"
+}
+
+# findings_surface_json <title> <urgency> <count> <skip-reason> <findings-json> [extra-json]
+#
+# The general form of ``findings_surface``: <findings-json> is the ready
+# JSON array of findings and the optional <extra-json> object is merged
+# into the record (the accelerator surface carries its reports this way).
+findings_surface_json() {
+  local title="$1" urgency="$2" count="$3" skip="$4" rows="$5" extra="${6:-{\}}"
+  jq -cn --arg title "$title" --arg urgency "$urgency" --argjson count "$count" \
+    --arg skip "$skip" --argjson rows "$rows" --argjson extra "$extra" '
+    {surface: $title, urgency: $urgency, count: $count,
+     skipped: (if $skip == "" then null else $skip end), findings: $rows} + $extra' \
+    >> "$FINDINGS_SURFACES"
+}
+
+# write_findings_document <output-file> <scan-complete> <has-drift> <incomplete-reasons-file>
+#
+# Assembles the findings document from the surface records accumulated in
+# ``FINDINGS_SURFACES`` and writes it to <output-file>. Fails when a record
+# is not valid JSON, so a broken emitter can never publish a half document.
+write_findings_document() {
+  local output="$1" complete="$2" drift="$3" reasons_file="$4"
+  local reasons='[]'
+  if [ -s "$reasons_file" ]; then
+    reasons="$(sort -u "$reasons_file" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  fi
+  jq -s --arg schema "$FINDINGS_SCHEMA" \
+    --arg generated "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --argjson complete "$complete" --argjson drift "$drift" --argjson reasons "$reasons" '
+    {schema: $schema, generated_at: $generated, scan_complete: $complete, has_drift: $drift,
+     incomplete_reasons: $reasons, surfaces: .}' "$FINDINGS_SURFACES" > "$output"
+}
+
+# emit_findings_embed <findings-file>
+#
+# Prints the Markdown that carries the findings document inside the report:
+# a collapsed block between the two markers, or a pointer at the workflow
+# artifact when the document is too large to embed.
+emit_findings_embed() {
+  local file="$1" size
+  size="$(wc -c < "$file" | tr -d ' ')"
+  echo "<details>"
+  echo "<summary>Machine-readable findings (the same report as JSON)</summary>"
+  echo ""
+  if [ "$size" -gt "$FINDINGS_EMBED_MAX_BYTES" ]; then
+    echo "_The findings document (${size} bytes) is too large to embed here; download the"
+    echo "\`dependency-scan-findings\` artifact of the workflow run, or run \`gco deps scan\`._"
+  else
+    echo "$FINDINGS_BEGIN_MARKER"
+    echo '```json'
+    cat "$file"
+    echo '```'
+    echo "$FINDINGS_END_MARKER"
+  fi
+  echo ""
+  echo "</details>"
 }
 
 # dependency_scan_is_complete <incomplete-reasons-file> [skip-reason ...]

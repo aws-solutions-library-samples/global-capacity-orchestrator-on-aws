@@ -550,6 +550,198 @@ if m:
     [ "$output" = "emr-7.13.0" ]
 }
 
+# ── EMR release labels: both families, every page ───────────────────────────
+#
+# The real API pages at 100 labels and lists the AWS runtime for Apache Spark
+# family (emr-spark-N.x.y) after every classic emr-N.x.y label, on the last
+# page. A faked `aws` answers two pages and records whether the second was
+# requested with the token the first returned.
+
+_write_emr_aws_stub() {
+    # $1: directory for the stub; $2: mode (pages|first-page-fails|second-page-fails|bad-json)
+    cat > "$1/aws" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${EMR_STUB_CALLS}"
+token=""
+while [ "$#" -gt 0 ]; do [ "$1" = "--next-token" ] && token="$2"; shift; done
+case "${EMR_STUB_MODE}:${token}" in
+    first-page-fails:) exit 254 ;;
+    bad-json:) echo '{"ReleaseLabels": [' ;;
+    second-page-fails:page-two) exit 254 ;;
+    *:) echo '{"ReleaseLabels": ["emr-7.14.0", "emr-7.13.0", "emr-7.0.0-preview"], "NextToken": "page-two"}' ;;
+    *:page-two) echo '{"ReleaseLabels": ["emr-5.9.0", "emr-spark-8.0.0", "emr-spark-8.1.0"]}' ;;
+esac
+STUB
+    chmod +x "$1/aws"
+}
+
+@test "list_emr_release_labels: follows NextToken and prints every page's labels" {
+    tmpdir="$(mktemp -d)"
+    _write_emr_aws_stub "$tmpdir"
+    export EMR_STUB_CALLS="$tmpdir/calls" EMR_STUB_MODE=pages
+    PATH="$tmpdir:$PATH" run list_emr_release_labels us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'emr-7.14.0\nemr-7.13.0\nemr-7.0.0-preview\nemr-5.9.0\nemr-spark-8.0.0\nemr-spark-8.1.0')" ]
+    [ "$(wc -l < "$tmpdir/calls" | tr -d ' ')" -eq 2 ]
+    grep -q -- '--region us-east-1 --output json' "$tmpdir/calls"
+    grep -q -- '--next-token page-two' "$tmpdir/calls"
+    rm -rf "$tmpdir"
+}
+
+@test "list_emr_release_labels: a failed first page is a failure with no output" {
+    tmpdir="$(mktemp -d)"
+    _write_emr_aws_stub "$tmpdir"
+    export EMR_STUB_CALLS="$tmpdir/calls" EMR_STUB_MODE=first-page-fails
+    PATH="$tmpdir:$PATH" run list_emr_release_labels us-east-1
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "list_emr_release_labels: a failed later page fails the whole listing" {
+    tmpdir="$(mktemp -d)"
+    _write_emr_aws_stub "$tmpdir"
+    export EMR_STUB_CALLS="$tmpdir/calls" EMR_STUB_MODE=second-page-fails
+    PATH="$tmpdir:$PATH" run list_emr_release_labels us-east-1
+    [ "$status" -ne 0 ]
+    # The first page was printed before the second failed; the caller's
+    # `|| release_labels=""` discards it, so a partial list never counts.
+    [[ "$output" == *"emr-7.14.0"* ]]
+    [[ "$output" != *"emr-spark"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "list_emr_release_labels: an unparseable page is a failure" {
+    tmpdir="$(mktemp -d)"
+    _write_emr_aws_stub "$tmpdir"
+    export EMR_STUB_CALLS="$tmpdir/calls" EMR_STUB_MODE=bad-json
+    PATH="$tmpdir:$PATH" run list_emr_release_labels us-east-1
+    [ "$status" -ne 0 ]
+    rm -rf "$tmpdir"
+}
+
+@test "emr_label_version: strips either family prefix" {
+    [ "$(emr_label_version emr-7.14.0)" = "7.14.0" ]
+    [ "$(emr_label_version emr-spark-8.1.0)" = "8.1.0" ]
+}
+
+@test "newest_emr_label: ranks by version across both families, skipping previews" {
+    labels="$(printf '%s\n' emr-spark-8.0.0 emr-7.14.0 emr-7.0.0-preview emr-spark-8.1.0 emr-spark-8.0-preview emr-5.9.0 emr-7.13.0)"
+    [ "$(newest_emr_label <<< "$labels")" = "emr-spark-8.1.0" ]
+    [ "$(newest_emr_label 7 <<< "$labels")" = "emr-7.14.0" ]
+    [ "$(newest_emr_label 8 <<< "$labels")" = "emr-spark-8.1.0" ]
+    [ "$(newest_emr_label 5 <<< "$labels")" = "emr-5.9.0" ]
+}
+
+@test "newest_emr_label: a classic label outranks a Spark-runtime label with a lower version" {
+    # Ordering must be numeric, not textual: `sort -V` on the labels themselves
+    # would put every emr-spark- label after every emr- label.
+    [ "$(printf 'emr-spark-8.1.0\nemr-9.0.0\n' | newest_emr_label)" = "emr-9.0.0" ]
+    [ "$(printf 'emr-9.0.0\nemr-spark-8.1.0\n' | newest_emr_label)" = "emr-9.0.0" ]
+}
+
+@test "newest_emr_label: prints nothing when no GA label matches" {
+    [ -z "$(printf 'emr-7.0.0-preview\nemr-spark-8.0-preview\nnot-a-label\n' | newest_emr_label)" ]
+    [ -z "$(printf 'emr-7.14.0\n' | newest_emr_label 8)" ]
+    [ -z "$(printf '' | newest_emr_label)" ]
+}
+
+# ── Machine-readable findings ───────────────────────────────────────────────
+
+@test "findings_rows: keys the pipe-delimited rows, keeping overflow in the last field" {
+    rows="$(mktemp)"
+    printf 'busybox|1.38.0|1.39.0\nghcr.io/x/y|v1|v2|extra|more\nshort|only\n\n' > "$rows"
+    run findings_rows "image|current|latest" "$rows"
+    [ "$status" -eq 0 ]
+    [ "$(jq -c '.' <<< "$output")" = '[{"image":"busybox","current":"1.38.0","latest":"1.39.0"},{"image":"ghcr.io/x/y","current":"v1","latest":"v2|extra|more"},{"image":"short","current":"only","latest":""}]' ]
+    rm -f "$rows"
+}
+
+@test "findings_rows: an empty, missing or unnamed file is an empty array" {
+    empty="$(mktemp)"
+    [ "$(findings_rows "a|b" "$empty")" = "[]" ]
+    [ "$(findings_rows "a|b" "$BATS_TEST_TMPDIR/does-not-exist")" = "[]" ]
+    [ "$(findings_rows "a|b")" = "[]" ]
+    rm -f "$empty"
+}
+
+@test "findings_surface: records title, urgency, count, skip reason and rows" {
+    export FINDINGS_SURFACES="$BATS_TEST_TMPDIR/surfaces"
+    : > "$FINDINGS_SURFACES"
+    rows="$(mktemp)"
+    printf 'eks-pod-identity-agent|v1.0.0-eksbuild.1|v1.1.0-eksbuild.1\n' > "$rows"
+    findings_surface "EKS Add-ons" "routine" 1 "" "addon|current|latest" "$rows"
+    findings_surface "EKS Kubernetes Version" "act soon" 0 "No AWS credentials" "pin|current|latest|standard_support_ends"
+    [ "$(wc -l < "$FINDINGS_SURFACES" | tr -d ' ')" -eq 2 ]
+    first="$(sed -n 1p "$FINDINGS_SURFACES")"
+    [ "$(jq -r '.surface' <<< "$first")" = "EKS Add-ons" ]
+    [ "$(jq -r '.urgency' <<< "$first")" = "routine" ]
+    [ "$(jq -r '.count' <<< "$first")" = "1" ]
+    [ "$(jq -r '.skipped' <<< "$first")" = "null" ]
+    [ "$(jq -r '.findings[0].addon' <<< "$first")" = "eks-pod-identity-agent" ]
+    second="$(sed -n 2p "$FINDINGS_SURFACES")"
+    [ "$(jq -r '.skipped' <<< "$second")" = "No AWS credentials" ]
+    [ "$(jq -c '.findings' <<< "$second")" = "[]" ]
+    rm -f "$rows"
+}
+
+@test "findings_surface_json: takes ready findings and merges extra fields" {
+    export FINDINGS_SURFACES="$BATS_TEST_TMPDIR/surfaces"
+    : > "$FINDINGS_SURFACES"
+    findings_surface_json "Python Packages" "routine" 1 "" '[{"name":"urllib3","current":"2.7.0","latest":"2.8.0"}]'
+    findings_surface_json "Accelerator Catalog and NodePools" "act soon" 2 "" "[]" '{"offline_report_markdown":"### drift"}'
+    [ "$(jq -r '.findings[0].name' <<< "$(sed -n 1p "$FINDINGS_SURFACES")")" = "urllib3" ]
+    second="$(sed -n 2p "$FINDINGS_SURFACES")"
+    [ "$(jq -r '.offline_report_markdown' <<< "$second")" = "### drift" ]
+    [ "$(jq -r '.count' <<< "$second")" = "2" ]
+}
+
+@test "write_findings_document: assembles the schema envelope with sorted unique reasons" {
+    export FINDINGS_SURFACES="$BATS_TEST_TMPDIR/surfaces"
+    : > "$FINDINGS_SURFACES"
+    findings_surface "Docker Images" "routine" 0 "" "image|current|latest"
+    reasons="$BATS_TEST_TMPDIR/reasons"
+    printf 'b failed\na failed\nb failed\n' > "$reasons"
+    out="$BATS_TEST_TMPDIR/findings.json"
+    write_findings_document "$out" false true "$reasons"
+    [ "$(jq -r '.schema' "$out")" = "$FINDINGS_SCHEMA" ]
+    [ "$(jq -r '.scan_complete' "$out")" = "false" ]
+    [ "$(jq -r '.has_drift' "$out")" = "true" ]
+    [ "$(jq -c '.incomplete_reasons' "$out")" = '["a failed","b failed"]' ]
+    [ "$(jq -r '.surfaces | length' "$out")" = "1" ]
+    [[ "$(jq -r '.generated_at' "$out")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+    # No incomplete reasons at all: an empty array, and the document is still valid.
+    : > "$reasons"
+    write_findings_document "$out" true false "$reasons"
+    [ "$(jq -c '.incomplete_reasons' "$out")" = "[]" ]
+    [ "$(jq -r '.has_drift' "$out")" = "false" ]
+}
+
+@test "write_findings_document: a corrupt surface record fails the write" {
+    export FINDINGS_SURFACES="$BATS_TEST_TMPDIR/surfaces"
+    echo '{"surface": "broken"' > "$FINDINGS_SURFACES"
+    reasons="$BATS_TEST_TMPDIR/reasons"
+    : > "$reasons"
+    run write_findings_document "$BATS_TEST_TMPDIR/findings.json" true false "$reasons"
+    [ "$status" -ne 0 ]
+}
+
+@test "emit_findings_embed: wraps the document in markers, or points at the artifact when too large" {
+    doc="$BATS_TEST_TMPDIR/findings.json"
+    printf '{"schema": "%s", "surfaces": []}\n' "$FINDINGS_SCHEMA" > "$doc"
+    run emit_findings_embed "$doc"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"<details>"* ]]
+    [[ "$output" == *"the same report as JSON"* ]]
+    [[ "$output" == *"$FINDINGS_BEGIN_MARKER"$'\n''```json'$'\n''{"schema": "'"$FINDINGS_SCHEMA"'", "surfaces": []}'$'\n''```'$'\n'"$FINDINGS_END_MARKER"* ]]
+    [[ "$output" == *"</details>"* ]]
+    FINDINGS_EMBED_MAX_BYTES=10 run emit_findings_embed "$doc"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"too large to embed here"* ]]
+    [[ "$output" == *"dependency-scan-findings"* ]]
+    [[ "$output" != *"$FINDINGS_BEGIN_MARKER"* ]]
+}
+
 # ── extract_eks_addons ───────────────────────────────────────────────────────
 
 @test "extract_eks_addons: finds at least one addon in regional_stack.py" {

@@ -247,10 +247,22 @@ def _run_full_scan(repo_root: Path, *, stream: bool) -> dict[str, object]:
                 "scan log for skipped checks.\n"
             )
 
+        # The scanner writes the same findings as a JSON document next to the
+        # report, on every run (``findings_path``). It rides along in the
+        # envelope so ``-o json`` callers and the MCP tool get the rows
+        # without parsing the Markdown. Absent or unreadable is ``None``
+        # rather than an error: the report is still the primary output.
+        findings: object = None
+        findings_path = outputs.get("findings_path", "")
+        if findings_path:
+            with contextlib.suppress(OSError, json.JSONDecodeError):
+                findings = json.loads(Path(findings_path).read_text(encoding="utf-8"))
+
     envelope: dict[str, object] = {
         "has_drift": has_drift,
         "scan_complete": scan_complete,
         "report_markdown": report_markdown,
+        "findings": findings,
     }
     if not stream:
         envelope["log_tail"] = (result.stdout or "").splitlines()[-40:]

@@ -15,6 +15,10 @@
 #      the entry.
 #   4. Remove an entry as soon as the dependency graph no longer reports it.
 #      The checker rejects stale as well as expired suppressions.
+#   5. Do not add entries for the "depends on vulnerable versions of X"
+#      records npm derives when X has no fixed version in range. They carry
+#      no advisory of their own; the checker accepts them once every package
+#      they reach through is suppressed, and names each one in the job log.
 #
 # Format (exactly five pipe-delimited fields):
 #   package-dir|package|advisory|node-path|exp:YYYY-MM-DD
@@ -51,3 +55,33 @@
 .|brace-expansion|GHSA-6j4f-fj2g-mc7p|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-10-30
 .|brace-expansion|GHSA-q2hr-2g5m-vwhr|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-10-30
 .|brace-expansion|GHSA-qhr7-859c-m2p7|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-10-30
+
+# GHSA-vfj7-8cjw-p6xm (CVE-2026-93687, high): braces, the brace-expansion
+# engine behind micromatch, walks a pattern's nested brace groups recursively
+# with no depth limit, so a deeply nested pattern exhausts the stack. Published
+# 2026-09-18 against every release (<= 3.0.3).
+#
+# The one reported copy is braces 3.0.3 at node_modules/braces, reached only
+# through markdownlint-cli2 0.23.3 -> globby 16.2.4 -> fast-glob 3.3.3 ->
+# micromatch 4.0.8 -> braces ^3.0.3. markdownlint-cli2 is the Markdown linter
+# the root graph installs for CI, pre-commit and `npm run lint:markdown`; no
+# other owned graph depends on it.
+#
+# Not clearable by a pin bump: checked 2026-10-03, 3.0.3 (2024-09-18) is still
+# the newest braces release, the advisory lists no patched version, and
+# micromatch 4.0.8 is the newest micromatch, so every dependent up to
+# markdownlint-cli2 is reported as "depends on vulnerable versions" (npm's only
+# fix is downgrading markdownlint-cli2 to 0.0.4). The upstream report is
+# https://github.com/micromatch/braces/issues/70.
+#
+# Low risk: the only patterns braces expands here are the `globs` and
+# `ignores` in .github/config/.markdownlint-cli2.yaml and the file arguments
+# the lint job and pre-commit hook pass, all authored in this repository. The
+# linter is contributor/CI tooling that never runs in a deployed service, and
+# the impact is availability only.
+#
+# Remove this entry and refresh package-lock.json as soon as braces publishes
+# a release the advisory lists as patched (`npm update braces` picks it up
+# through micromatch's ^3.0.3 range).
+# Advisory: https://github.com/advisories/GHSA-vfj7-8cjw-p6xm
+.|braces|GHSA-vfj7-8cjw-p6xm|node_modules/braces|exp:2026-10-30
