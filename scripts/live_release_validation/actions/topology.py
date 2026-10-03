@@ -30,6 +30,20 @@ from ..ownership.stacks import (
 )
 
 
+def _expected_kubernetes_version(ctx: RunContext) -> str:
+    """The ``kubernetes_version`` the run deployed with, from cdk.json's context.
+
+    The runner loads ``cdk.json`` once (``RunContext.cdk_context``); a context
+    without the key, or with a non-string value, is a broken checkout rather
+    than something to default, so it fails the action instead of letting the
+    cluster-version comparison pass vacuously.
+    """
+    version = ctx.cdk_context.get("kubernetes_version")
+    if not isinstance(version, str) or not version.strip():
+        raise RuntimeError("cdk.json context.kubernetes_version is missing or not a string")
+    return version.strip()
+
+
 def action_topology(ctx: RunContext) -> dict[str, Any]:
     """Verify deterministic add-on convergence before stable API and data-plane health."""
     _reconcile_stack_ownership(ctx)
@@ -94,6 +108,7 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
     ctx.persist()
 
     clusters: dict[str, Any] = {}
+    expected_version = _expected_kubernetes_version(ctx)
     for region in ctx.deployment_regions:
         name = f"{ctx.config.project_name}-{region}"
         cluster = ctx.session.client("eks", region_name=region).describe_cluster(name=name)[
@@ -101,6 +116,16 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
         ]
         if cluster.get("status") != "ACTIVE":
             raise RuntimeError(f"EKS cluster {name} is not ACTIVE: {cluster.get('status')}")
+        # The cluster minor is the one thing a Kubernetes upgrade PR changes
+        # that nothing else in this run would notice: every add-on, probe and
+        # Job below passes just as well on the previous minor. Compare it with
+        # cdk.json so the run proves the version it deployed, not just that a
+        # cluster came up.
+        if cluster.get("version") != expected_version:
+            raise RuntimeError(
+                f"EKS cluster {name} runs Kubernetes {cluster.get('version')!r}; "
+                f"cdk.json kubernetes_version is {expected_version!r}"
+            )
         clusters[region] = {
             "name": name,
             "arn": cluster.get("arn"),
