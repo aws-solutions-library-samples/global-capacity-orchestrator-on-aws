@@ -47,7 +47,7 @@ catalog_values() {
 }
 
 # bump <version> — one release newer: the first integer in the string plus
-# one (v1.36.4 -> v2.36.4, 26.08-py3 -> 27.08-py3, claude-opus-5 ->
+# one (v1.37.1 -> v2.37.1, 26.08-py3 -> 27.08-py3, claude-opus-5 ->
 # claude-opus-6, emr-7.14.0 -> emr-8.14.0).
 bump() {
     if [[ "$1" =~ ^([^0-9]*)([0-9]+)(.*)$ ]]; then

@@ -66,7 +66,9 @@ Modification Guide:
     - To add a new service: add dockerfiles/Dockerfile.<service> (discovery picks it up),
       call ``self._service_image_asset`` here, add a manifest in manifests/
     - To add a new optional feature: add a cdk.json context toggle, guard with if/else in this file
-    - To change EKS version: update KUBERNETES_VERSION in constants.py
+    - To change the EKS version: edit ``context.kubernetes_version`` in cdk.json and follow
+      "Upgrading the EKS Kubernetes version" in docs/MAINTENANCE.md (kubectl, kind, Calico,
+      add-on builds and the Python client move with it)
 """
 
 from __future__ import annotations
@@ -1745,19 +1747,21 @@ class GCORegionalStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
         )
 
-        # Get Kubernetes version - use custom version if not available in CDK enum
+        # The cluster minor comes from cdk.json (``context.kubernetes_version``).
+        # aws-cdk-lib's KubernetesVersion enum trails EKS by a release or two;
+        # ``KubernetesVersion.of()`` is the library's supported path for a minor
+        # it does not name yet and renders the same AWS::EKS::Cluster Version.
         k8s_version_str = cluster_config.kubernetes_version
         try:
             k8s_version = getattr(eks.KubernetesVersion, f"V{k8s_version_str.replace('.', '_')}")
         except AttributeError:
-            # Version not in CDK enum yet, use custom version
             k8s_version = eks.KubernetesVersion.of(k8s_version_str)
 
         self.cluster = eks.Cluster(
             self,
             "GCOEksCluster",
             cluster_name=cluster_config.cluster_name,
-            version=k8s_version,  # Use configured version for Auto Mode with DRA support
+            version=k8s_version,
             vpc=self.vpc,
             compute=eks.ComputeConfig(
                 # Enable both built-in node pools - Auto Mode manages these automatically

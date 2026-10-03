@@ -126,7 +126,7 @@ class MockConfigLoader:
         return bool(self.get_cost_monitoring_config()["enabled"])
 
     def get_kubernetes_version(self):
-        return "1.36"
+        return "1.37"
 
     def get_tags(self):
         return {"Environment": "test", "Project": "gco"}
@@ -142,7 +142,7 @@ class MockConfigLoader:
         return ClusterConfig(
             region=region,
             cluster_name=f"gco-test-{region}",
-            kubernetes_version="1.36",
+            kubernetes_version="1.37",
             addons=["metrics-server"],
             resource_thresholds=self.get_resource_thresholds(),
         )
@@ -1066,7 +1066,7 @@ class TestConfigIntegration:
 
         assert config.get_project_name() == "gco-test"
         assert config.get_regions() == ["us-east-1"]
-        assert config.get_kubernetes_version() == "1.36"
+        assert config.get_kubernetes_version() == "1.37"
         assert isinstance(config.get_tags(), dict)
         assert config.get_resource_thresholds() is not None
         assert config.get_cluster_config("us-east-1") is not None

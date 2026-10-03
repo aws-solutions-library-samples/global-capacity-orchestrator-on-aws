@@ -818,7 +818,7 @@ validation still runs offline. To inspect EKS add-ons manually:
 
 ```bash
 # Check latest versions for all addons used by GCO
-K8S_VERSION="1.36"  # Match your configured Kubernetes version
+K8S_VERSION="1.37"  # Match your configured Kubernetes version
 
 for addon in metrics-server aws-efs-csi-driver amazon-cloudwatch-observability aws-fsx-csi-driver; do
   echo "=== $addon ==="

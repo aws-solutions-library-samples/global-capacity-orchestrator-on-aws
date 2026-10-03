@@ -1164,14 +1164,14 @@ EOF
 @test "extract_k8s_version: reads version from cdk.json" {
     run extract_k8s_version "cdk.json"
     [ "$status" -eq 0 ]
-    # Should be a version like 1.36
+    # Should be a version like 1.37
     [[ "$output" =~ ^[0-9]+\.[0-9]+$ ]]
 }
 
-@test "extract_k8s_version: falls back to 1.36 for missing file" {
+@test "extract_k8s_version: falls back to 1.37 for missing file" {
     run extract_k8s_version "/nonexistent/cdk.json"
     [ "$status" -eq 0 ]
-    [ "$output" = "1.36" ]
+    [ "$output" = "1.37" ]
 }
 
 # ── extract_direct_python_deps ──────────────────────────────────────────────
@@ -2868,6 +2868,93 @@ EOF
     [ "$status" -eq 0 ]
     [ "$output" = "HELM_VERSION|v9.9.9" ]
     rm -f "$tmpfile"
+}
+
+# ── extract_kubernetes_client_pin / check_kubernetes_client_skew ─────────────
+#
+# The PR-time guard lets the kubernetes Python client trail cdk.json's minor
+# by one; the Version Consistency row built from these two is what keeps that
+# lag from being forgotten.
+
+@test "extract_kubernetes_client_pin: the committed pin is an exact X.Y.Z whose major is at or one behind the cluster minor" {
+    run extract_kubernetes_client_pin pyproject.toml
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    minor="$(extract_k8s_version cdk.json)"; minor="${minor#*.}"
+    major="${output%%.*}"
+    [ "$major" -eq "$minor" ] || [ "$major" -eq $((minor - 1)) ]
+}
+
+@test "extract_kubernetes_client_pin: reads only the exact pin from [project.dependencies]" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+[project]
+name = "x"
+dependencies = ["boto3==1.40.0", "kubernetes==36.0.3", "pyyaml==6.0.3"]
+
+[project.optional-dependencies]
+dev = ["kubernetes==99.0.0"]
+EOF
+    run extract_kubernetes_client_pin "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "36.0.3" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_kubernetes_client_pin: a range, a missing pin, a missing file or bad TOML prints nothing" {
+    tmpfile="$(mktemp)"
+    printf '[project]\nname = "x"\ndependencies = ["kubernetes>=36,<37"]\n' > "$tmpfile"
+    run extract_kubernetes_client_pin "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    printf '[project]\nname = "x"\ndependencies = ["boto3==1.40.0"]\n' > "$tmpfile"
+    run extract_kubernetes_client_pin "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    printf '[project\nname = \n' > "$tmpfile"
+    run extract_kubernetes_client_pin "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_kubernetes_client_pin /nonexistent/pyproject.toml
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
+@test "check_kubernetes_client_skew: silent when the client major equals the cluster minor" {
+    run check_kubernetes_client_skew 37.0.0 1.37
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "check_kubernetes_client_skew: names the one allowed minor of lag and the bump that clears it" {
+    run check_kubernetes_client_skew 36.0.3 1.37
+    [ "$status" -eq 0 ]
+    [ "$output" = "kubernetes==36.0.3 is one minor behind EKS 1.37; pin kubernetes==37.x once a stable release is on PyPI" ]
+}
+
+@test "check_kubernetes_client_skew: a client ahead of the cluster, or two or more minors behind, is reported too" {
+    run check_kubernetes_client_skew 38.0.0 1.37
+    [ "$status" -eq 0 ]
+    [ "$output" = "kubernetes==38.0.0 is ahead of EKS 1.37; the client must not lead the cluster" ]
+    run check_kubernetes_client_skew 35.0.0 1.37
+    [ "$status" -eq 0 ]
+    [ "$output" = "kubernetes==35.0.0 is 2 minors behind EKS 1.37; outside the one-minor skew the guard test allows" ]
+}
+
+@test "check_kubernetes_client_skew: empty or non-numeric input prints nothing" {
+    run check_kubernetes_client_skew "" 1.37
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run check_kubernetes_client_skew 36.0.3 ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run check_kubernetes_client_skew latest 1.37
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run check_kubernetes_client_skew 36.0.3 1.x
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 @test "extract_workflow_env_pin: HELM_VERSION and KUBECTL_VERSION carry no workflow copies" {

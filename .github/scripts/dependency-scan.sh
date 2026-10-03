@@ -1918,6 +1918,18 @@ if [ -n "$INSTALLER_PINS" ]; then
   done
 fi
 
+# The kubernetes Python client is generated per Kubernetes minor, and the
+# PR-time guard lets it trail cdk.json's minor by one so the cluster can move
+# before upstream ships the matching client. Nothing else would remind anyone
+# to close that gap, so it is a consistency finding until the client catches
+# up (or, should the guard ever be bypassed, when it leads or lags further).
+K8S_CLIENT_PIN="$(extract_kubernetes_client_pin pyproject.toml)"
+K8S_CLIENT_PROBLEM="$(check_kubernetes_client_skew "$K8S_CLIENT_PIN" "$(extract_k8s_version cdk.json)")"
+if [ -n "$K8S_CLIENT_PROBLEM" ]; then
+  echo "  - kubernetes client vs cluster: ${K8S_CLIENT_PROBLEM}"
+  echo "kubernetes Python client (pyproject.toml / cdk.json)|${K8S_CLIENT_PROBLEM}" >> "$CONSISTENCY_RESULTS"
+fi
+
 # Build-backend pins must use the same exact ``==`` shape as every other
 # Python dependency in pyproject.toml, or the version resolved inside
 # pip's build isolation floats with upstream releases. An empty result is

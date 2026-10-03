@@ -193,7 +193,7 @@ maintainer records the scheduling decision.
 ## Upgrading the EKS Kubernetes version
 
 The version lives in one place — `cdk.json` `context.kubernetes_version` (for
-example `1.36`) — and flows through `gco/config/config_loader.py`
+example `1.37`) — and flows through `gco/config/config_loader.py`
 (`get_kubernetes_version()`) into `GCORegionalStack`, which resolves it to
 `eks.KubernetesVersion.V1_<minor>` (falling back to `.of()` if the installed
 `aws-cdk-lib` does not yet expose that enum). Several pinned tools track the
@@ -208,12 +208,24 @@ shipping a skew.
    then regenerate the lock through the container exactly as described in
    [Updating a dependency](#updating-a-dependency) step 3 — don't run
    `pip-compile` against your host Python; the flags and platform differ from
-   what CI's staleness check expects.
+   what CI's staleness check expects. The same pin is restated in
+   `lambda/kubectl-applier-simple/requirements.txt`; move it in the same
+   change (`test_lambda_requirements_match_pyproject` fails otherwise).
+   kubernetes-client/python publishes the new client weeks after the
+   Kubernetes release, so the cluster may move first: the guard allows the
+   client to trail the cluster by one minor (see
+   [Version-skew rules](#version-skew-rules)), and the monthly dependency
+   scan reports that lag under **Version Consistency** until the pin catches
+   up. Do not pin a pre-release to close the gap.
 3. `gco/stacks/constants.py` — update the five `EKS_ADDON_*` constants to builds
    published for the new minor (see [validating add-ons](#validating-add-on-versions)).
-4. Confirm the pinned `aws-cdk-lib` exposes `eks.KubernetesVersion.V1_<minor>`.
-   If it does not, bump `aws-cdk-lib` in `pyproject.toml` and re-lock; otherwise
-   the stack silently uses the `.of()` fallback.
+4. Check whether the pinned `aws-cdk-lib` exposes
+   `eks.KubernetesVersion.V1_<minor>`. The enum usually trails a new EKS minor
+   by a release or two, and that is expected and harmless: `GCORegionalStack`
+   falls back to `eks.KubernetesVersion.of("<minor>")`, which renders the same
+   `AWS::EKS::Cluster` `Version`, and `tests/test_regional_stack.py` asserts
+   the synthesized template carries the `cdk.json` minor either way. Do not
+   bump `aws-cdk-lib` just to get the enum member.
 5. kubectl pins — bump to a patch of the new minor in the two committed spots,
    staying within one minor of the cluster:
    - `lambda/helm-installer/Dockerfile` — the `dl.k8s.io/release/...` URL and
@@ -236,7 +248,13 @@ shipping a skew.
    `HELM_SHA256` from it exactly as with kubectl, guarded by the same test.
 7. `.github/workflows/integration-tests.yml` — bump the workflow-level
    `KIND_NODE_IMAGE` env (`kindest/node:v<minor>.<patch>`) so CI exercises the
-   new control plane; both kind-based jobs read it from there.
+   new control plane; every kind-based job reads it from there. Use an image
+   the pinned `KIND_VERSION` release lists in its release notes (kind builds
+   node images per kind release; a tag that exists on Docker Hub is not
+   necessarily built for the pinned kind). Move `CALICO_VERSION` and
+   `CALICO_SHA256` alongside it to a Calico release whose requirements page
+   lists the new minor as tested; the checksum is `sha256sum` over
+   `https://raw.githubusercontent.com/projectcalico/calico/<tag>/manifests/calico.yaml`.
 8. `.github/config/.trivyignore` — revisit any suppressions tied to the old
    kubectl/helm binaries; several entries clear once the pins move.
 9. `tests/test_config_loader.py` and `tests/test_config_loader_validation.py` —
@@ -268,8 +286,19 @@ done
   skew policy). Enforced by
   `tests/test_integration.py::test_kubectl_versions_follow_eks_skew_policy`.
 - **kubernetes Python client**: its major must equal the cluster minor
-  (`kubernetes==36.x` ↔ EKS `1.36`). Enforced by
-  `tests/test_integration.py::test_kubernetes_python_client_matches_eks_version`.
+  (`kubernetes==37.x` ↔ EKS `1.37`) or trail it by exactly one
+  (`kubernetes==36.x` on EKS `1.37`). kubernetes-client/python documents that
+  a client one version behind the server works for every API the two have in
+  common, and GCO uses only GA core APIs, so the one-minor lag is safe while
+  upstream has no stable release for the new minor. A client ahead of the
+  cluster, or two or more minors behind, fails. Enforced by
+  `tests/test_integration.py::test_kubernetes_python_client_matches_eks_version`;
+  the lag itself is reported by the monthly dependency scan's **Version
+  Consistency** section until the pin is bumped. Closing it is a one-line
+  change in `pyproject.toml` (the `kubernetes==` pin appears in the base
+  dependencies and in the extras that restate it) and
+  `lambda/kubectl-applier-simple/requirements.txt`, plus the container
+  re-lock of `requirements-lock.txt`.
 
 ### Deploy and verify
 

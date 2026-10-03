@@ -70,7 +70,7 @@ Each region contains:
 
 **EKS Auto Mode Cluster**
 
-- Kubernetes 1.36
+- Kubernetes 1.37
 - Managed control plane
 - Private API endpoint by default; public API access is disabled by the stock configuration
 - Control plane logging enabled (API, Audit, Authenticator, Controller Manager, Scheduler)
@@ -85,6 +85,12 @@ Each region contains:
   - `cpu-general-pool`: general CPU workloads with project-specific limits, on
     x86_64 and Graviton (arm64) instances; GCO's amd64-only platform pods pin
     `kubernetes.io/arch: amd64` so they never land on the Graviton nodes
+- Consolidation: the built-in `system` and `general-purpose` pools use Auto
+  Mode's `Balanced` policy from Kubernetes 1.37 (fewer evictions than the
+  earlier `WhenEmptyOrUnderutilized`, and not overridable). Every GCO pool sets
+  `consolidationPolicy: WhenEmpty` explicitly, so a node running a Job or a
+  model server is never consolidated away mid-run; a guard test keeps the
+  field present in every shipped NodePool manifest
 
 **Application Load Balancer**
 
@@ -544,7 +550,7 @@ The base pass applies the policy before Helm installs cert-manager. That order
 matters: a new policy is enforced a moment after it is stored, and cert-manager
 can turn the CA Ready faster than that. Applying the two together would let a
 request filed earlier be signed in the gap. The policy needs Kubernetes 1.30 or
-later; `cdk.json` `kubernetes_version` defaults to 1.36.
+later; `cdk.json` `kubernetes_version` defaults to 1.37.
 
 What the fence does not cover:
 

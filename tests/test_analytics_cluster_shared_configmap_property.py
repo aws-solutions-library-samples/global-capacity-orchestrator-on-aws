@@ -81,7 +81,7 @@ class _RegionalMockConfig(MockConfigLoader):
         return ClusterConfig(
             region=region,
             cluster_name=f"gco-test-{region}",
-            kubernetes_version="1.36",
+            kubernetes_version="1.37",
             addons=["metrics-server"],
             resource_thresholds=self.get_resource_thresholds(),
         )

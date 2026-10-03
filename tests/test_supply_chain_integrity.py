@@ -93,8 +93,8 @@ def test_lockfile_check_uses_its_pinned_resolver_toolchain() -> None:
         ),
         (
             ".github/workflows/integration-tests.yml",
-            "v3.32.2",
-            "a8c828a06a87c629a282ebbc424895b77f3a030251993e41ea400a743675bb02",
+            "v3.33.0",
+            "2de8f47595fb9c41b3f47d7b767a1f8e72ecf84057af834738ff12689a234da5",
         ),
         (
             ".github/workflows/integration-tests.yml",
@@ -108,8 +108,8 @@ def test_lockfile_check_uses_its_pinned_resolver_toolchain() -> None:
         ),
         (
             "lambda/helm-installer/Dockerfile",
-            "v1.36.4",
-            "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a",
+            "v1.37.1",
+            "65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8",
         ),
     ],
 )
@@ -165,8 +165,8 @@ def test_downloaded_release_assets_have_committed_checksums(
         (
             ".github/workflows/integration-tests.yml",
             "Install Calico for NetworkPolicy enforcement",
-            'CALICO_VERSION: "v3.32.2"',
-            'CALICO_SHA256: "a8c828a06a87c629a282ebbc424895b77f3a030251993e41ea400a743675bb02"',
+            'CALICO_VERSION: "v3.33.0"',
+            'CALICO_SHA256: "2de8f47595fb9c41b3f47d7b767a1f8e72ecf84057af834738ff12689a234da5"',
             "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
             'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
         ),
@@ -1739,9 +1739,9 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
     assert (
         "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  /tmp/helm.tar.gz"
     ) in helm_section
-    assert "release/v1.36.4/bin/linux/amd64/kubectl" in kubectl_section
+    assert "release/v1.37.1/bin/linux/amd64/kubectl" in kubectl_section
     assert (
-        "8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a  /tmp/kubectl"
+        "65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8  /tmp/kubectl"
     ) in kubectl_section
 
 

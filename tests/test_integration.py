@@ -1427,7 +1427,17 @@ class TestDependencyVersionConsistency:
         )
 
     def test_kubernetes_python_client_matches_eks_version(self):
-        """kubernetes Python client major version should align with EKS version."""
+        """The kubernetes Python client must be at, or one minor behind, the cluster.
+
+        kubernetes-client/python numbers its major after the Kubernetes minor
+        it was generated from (``kubernetes==36.x`` for 1.36) and documents
+        that a client one version behind the server works for every API the
+        two have in common. GCO uses only GA core APIs, so the client may trail
+        the cluster by exactly one minor while upstream has no stable release
+        for the new minor yet (the monthly dependency scan reports that lag
+        under "Version Consistency" until the client is bumped). A client
+        newer than the cluster, or two or more minors behind, fails.
+        """
         import json
         import tomllib
 
@@ -1447,11 +1457,12 @@ class TestDependencyVersionConsistency:
         assert k8s_version, "kubernetes not found in pyproject.toml dependencies"
 
         # kubernetes Python client major version maps to K8s minor version
-        # e.g., kubernetes==36.0.0 supports K8s 1.36
+        # e.g., kubernetes==37.0.0 is generated from K8s 1.37
         k8s_client_major = int(k8s_version.split(".")[0])
-        assert k8s_client_major == eks_minor, (
+        assert k8s_client_major in {eks_minor, eks_minor - 1}, (
             f"kubernetes Python client {k8s_version} (major={k8s_client_major}) "
-            f"doesn't match EKS version 1.{eks_minor}"
+            f"must be 1.{eks_minor}'s client or the one minor behind it "
+            f"(kubernetes=={eks_minor}.x or {eks_minor - 1}.x) for EKS 1.{eks_minor}"
         )
 
 

@@ -51,7 +51,7 @@ def _base_context() -> dict[str, Any]:
             "monitoring": "us-east-2",
             "regional": ["us-east-1"],
         },
-        "kubernetes_version": "1.36",
+        "kubernetes_version": "1.37",
         "resource_thresholds": {
             "cpu_threshold": 80,
             "memory_threshold": 85,
