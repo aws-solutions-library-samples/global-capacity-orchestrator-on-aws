@@ -47,7 +47,7 @@ class MockConfigLoader:
         return "us-east-2"
 
     def get_kubernetes_version(self):
-        return "1.36"
+        return "1.37"
 
     def get_tags(self):
         return {"Environment": "test", "Project": "gco"}
@@ -63,7 +63,7 @@ class MockConfigLoader:
         return ClusterConfig(
             region=region,
             cluster_name=f"gco-test-{region}",
-            kubernetes_version="1.36",
+            kubernetes_version="1.37",
             addons=["metrics-server"],
             resource_thresholds=self.get_resource_thresholds(),
         )
@@ -606,7 +606,7 @@ class TestConfigLoaderDefaults:
         """Test default Kubernetes version."""
         app = cdk.App()
         config = MockConfigLoader(app)
-        assert config.get_kubernetes_version() == "1.36"
+        assert config.get_kubernetes_version() == "1.37"
 
     def test_get_fsx_lustre_config_disabled(self):
         """Test FSx config when disabled."""
@@ -679,14 +679,14 @@ class TestClusterConfigModel:
         config = ClusterConfig(
             region="us-east-1",
             cluster_name="test-cluster",
-            kubernetes_version="1.36",
+            kubernetes_version="1.37",
             addons=["metrics-server"],
             resource_thresholds=thresholds,
         )
 
         assert config.region == "us-east-1"
         assert config.cluster_name == "test-cluster"
-        assert config.kubernetes_version == "1.36"
+        assert config.kubernetes_version == "1.37"
 
 
 class TestResourceThresholdsModel:
@@ -777,6 +777,53 @@ class TestRegionalStackSynthesis:
                 "AWS::EKS::Addon",
                 {"AddonName": "metrics-server"},
             )
+
+    def test_regional_stack_renders_the_configured_kubernetes_version(self):
+        """The cluster carries cdk.json's minor whether or not aws-cdk-lib names it.
+
+        ``aws_eks_v2.KubernetesVersion`` trails a new EKS minor by a release or
+        two, so ``GCORegionalStack`` falls back to ``KubernetesVersion.of()``
+        when the enum member is missing. Both paths must render the same
+        ``AWS::EKS::Cluster`` ``Version``; this proves it for the committed
+        ``cdk.json`` value instead of assuming it, and keeps the mock config
+        these synthesis tests use on the same minor as the real one.
+        """
+        import json
+
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        cdk_json = json.loads((Path(__file__).resolve().parents[1] / "cdk.json").read_text())
+        expected_version = cdk_json["context"]["kubernetes_version"]
+
+        app = cdk.App()
+        config = MockConfigLoader(app)
+        assert config.get_kubernetes_version() == expected_version
+        assert config.get_cluster_config("us-east-1").kubernetes_version == expected_version
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+
+            stack = GCORegionalStack(
+                app,
+                "test-regional-k8s-version",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+            template = assertions.Template.from_stack(stack)
+            template.resource_count_is("AWS::EKS::Cluster", 1)
+            template.has_resource_properties("AWS::EKS::Cluster", {"Version": expected_version})
 
     def test_regional_stack_ga_deregistration_teardown_guard(self):
         """Issue #130: a delete-time custom resource must deregister the ALB

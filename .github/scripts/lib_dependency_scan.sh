@@ -499,10 +499,10 @@ for name, cfg in (data or {}).get('charts', {}).items():
 
 # extract_k8s_version [cdk_json_path]
 #
-# Reads the kubernetes_version from cdk.json. Falls back to "1.36".
+# Reads the kubernetes_version from cdk.json. Falls back to "1.37".
 extract_k8s_version() {
   local cdk="${1:-cdk.json}"
-  python3 -c "import json; print(json.load(open('$cdk'))['context']['kubernetes_version'])" 2>/dev/null || echo "1.36"
+  python3 -c "import json; print(json.load(open('$cdk'))['context']['kubernetes_version'])" 2>/dev/null || echo "1.37"
 }
 
 # extract_dockerfile_pins <dockerfile>
@@ -522,7 +522,7 @@ extract_k8s_version() {
 #     NODE_VERSION|v24.18.0
 #     NPM_VERSION|11.14.1
 #     CDK_VERSION|2.1120.0
-#     KUBECTL_VERSION|v1.36.1
+#     KUBECTL_VERSION|v1.37.1
 #     AWSCLI_VERSION|2.34.42
 #     DOCKER_VERSION|29.4.2
 #     BUILDX_VERSION|v0.35.0
@@ -1664,13 +1664,18 @@ if value:
 #
 # Prints the kind pins configured on the ``helm/kind-action`` step:
 #   kind|<version>        e.g. kind|v0.32.0        (the kind binary)
-#   kind-node|<image:tag> e.g. kind-node|kindest/node:v1.36.1
+#   kind-node|<image ref> e.g. kind-node|kindest/node:v1.37.0@sha256:<64 hex>
+#
+# The node image is passed through exactly as written. The committed pin is
+# tag AND digest (the form kind's release notes publish); callers split it
+# with split_pinned_image_ref and treat a tag-only value as a finding.
 #
 # These live in the action's ``with:`` block, not a top-level ``image:`` or
 # a Dockerfile ``FROM``, so neither the workflow image sweep nor Dependabot's
 # docker ecosystem sees them. The caller checks the kind binary against
-# kubernetes-sigs/kind releases and the node image against its own registry
-# tags within the pinned K8s minor.
+# kubernetes-sigs/kind releases, the node image's tag against its own
+# registry tags within the pinned K8s minor, and its digest against what the
+# tag currently resolves to.
 #
 # Empty output if the file or the kind-action step is absent.
 extract_kind_pins() {
@@ -2150,6 +2155,68 @@ m = re.search(r'([0-9a-f]{64})\s+/tmp/kubectl', text)
 if m:
     print(f'KUBECTL_SHA256|{m.group(1)}')
 " "$file" 2>/dev/null
+}
+
+# extract_kubernetes_client_pin [pyproject_path]
+#
+# Prints the exact ``kubernetes==X.Y.Z`` version pinned in
+# ``[project.dependencies]`` of pyproject.toml (``36.0.3``), or nothing when
+# the file is missing, unparseable, or carries no exact pin. Callers treat
+# empty output as "skip", matching the other extractors here.
+#
+# kubernetes-client/python numbers its major after the Kubernetes minor it
+# was generated from, so the Version Consistency section compares this major
+# with cdk.json's ``kubernetes_version`` minor (see check_kubernetes_client_skew).
+extract_kubernetes_client_pin() {
+  local pyproject="${1:-pyproject.toml}"
+  [ -f "$pyproject" ] || return 0
+  python3 -c "
+import re, sys, tomllib
+try:
+    with open(sys.argv[1], 'rb') as f:
+        data = tomllib.load(f)
+except Exception:
+    sys.exit(0)
+for spec in (data.get('project', {}) or {}).get('dependencies', []) or []:
+    m = re.fullmatch(r'kubernetes==(\d+\.\d+\.\d+)', str(spec).strip())
+    if m:
+        print(m.group(1))
+        break
+" "$pyproject" 2>/dev/null
+}
+
+# check_kubernetes_client_skew <client-version> <k8s-version>
+#
+# Applies the client/server rule the PR-time guard
+# (tests/test_integration.py::TestDependencyVersionConsistency::
+# test_kubernetes_python_client_matches_eks_version) enforces: the client's
+# major must equal the cluster minor, or trail it by exactly one. Trailing
+# by one is allowed because upstream publishes the new client weeks after
+# the Kubernetes release; this check is the monthly reminder that the one
+# allowed minor of lag is being used, so the report nags until the client is
+# bumped. Prints one ``problem`` line when the client trails the cluster
+# (``kubernetes==36.0.3 is one minor behind EKS 1.37; pin 37.x once
+# released``); prints nothing when they agree. A client *ahead* of the
+# cluster, or two or more minors behind, is also reported — the PR-time
+# guard rejects both, so seeing either here means the guard was bypassed.
+# Empty input prints nothing (the caller already skipped).
+check_kubernetes_client_skew() {
+  local client="$1" k8s="$2"
+  [ -n "$client" ] && [ -n "$k8s" ] || return 0
+  local client_major k8s_minor
+  client_major="${client%%.*}"
+  k8s_minor="${k8s#*.}"
+  k8s_minor="${k8s_minor%%.*}"
+  [[ "$client_major" =~ ^[0-9]+$ && "$k8s_minor" =~ ^[0-9]+$ ]] || return 0
+  if [ "$client_major" -eq "$k8s_minor" ]; then
+    return 0
+  elif [ "$client_major" -eq $((k8s_minor - 1)) ]; then
+    echo "kubernetes==${client} is one minor behind EKS ${k8s}; pin kubernetes==${k8s_minor}.x once a stable release is on PyPI"
+  elif [ "$client_major" -gt "$k8s_minor" ]; then
+    echo "kubernetes==${client} is ahead of EKS ${k8s}; the client must not lead the cluster"
+  else
+    echo "kubernetes==${client} is $((k8s_minor - client_major)) minors behind EKS ${k8s}; outside the one-minor skew the guard test allows"
+  fi
 }
 
 # ---------------------------------------------------------------------------

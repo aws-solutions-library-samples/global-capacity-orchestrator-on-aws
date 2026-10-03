@@ -77,6 +77,56 @@ class TestBuiltInNodePoolContracts:
         assert set(arch_requirement["values"]) == {"amd64", "arm64"}
         assert "arch" not in labels
 
+    @pytest.mark.parametrize(
+        "manifest_path",
+        sorted(MANIFESTS_DIR.glob("4*-nodepool-*.yaml")),
+        ids=lambda path: path.name,
+    )
+    def test_every_shipped_nodepool_states_its_consolidation_policy(
+        self, manifest_path: Path
+    ) -> None:
+        """Every shipped NodePool must write its ``consolidationPolicy`` down.
+
+        On EKS Auto Mode, a NodePool created without the field gets the
+        platform default, and from Kubernetes 1.37 that default is ``Balanced``
+        (it was ``WhenEmptyOrUnderutilized`` before). An unset pool therefore
+        changes behavior on a GitOps recreate, with nothing in Git to show for
+        it. GCO's pools stay ``WhenEmpty`` deliberately — batch and inference
+        pods must not be consolidated mid-run — so the policy has to be
+        explicit, and one of the three values Karpenter accepts.
+        """
+        documents = [
+            document
+            for document in yaml.safe_load_all(manifest_path.read_text(encoding="utf-8"))
+            if document
+        ]
+        nodepools = [
+            document
+            for document in documents
+            if document.get("apiVersion") == "karpenter.sh/v1"
+            and document.get("kind") == "NodePool"
+        ]
+        assert nodepools, f"{manifest_path.name} ships no karpenter.sh/v1 NodePool"
+
+        for nodepool in nodepools:
+            name = nodepool["metadata"]["name"]
+            disruption = nodepool["spec"].get("disruption") or {}
+            policy = disruption.get("consolidationPolicy")
+            assert policy is not None, (
+                f"NodePool {name} in {manifest_path.name} leaves consolidationPolicy unset; "
+                "Auto Mode would default it (Balanced from EKS 1.37), silently changing "
+                "how running pods are evicted. State the policy in the manifest."
+            )
+            assert policy in {"WhenEmpty", "WhenEmptyOrUnderutilized", "Balanced"}, (
+                f"NodePool {name} in {manifest_path.name} has unknown "
+                f"consolidationPolicy {policy!r}"
+            )
+
+    def test_the_shipped_nodepool_count_is_the_expected_seven(self) -> None:
+        """The parametrized guard above runs over the real glob; make sure it
+        cannot pass vacuously because the files moved or were renamed."""
+        assert len(list(MANIFESTS_DIR.glob("4*-nodepool-*.yaml"))) == 7
+
 
 class TestStaticPodTokenBoundaries:
     @staticmethod

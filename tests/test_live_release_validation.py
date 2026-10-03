@@ -105,7 +105,9 @@ def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
             project_name="gco-live",
             global_region="us-east-1",
         ),
-        cdk_context={"api_gateway": {"regional_api_enabled": True}},
+        # The topology action compares every cluster's version with this key;
+        # the EKS fixtures in this module describe their clusters as 1.33.
+        cdk_context={"api_gateway": {"regional_api_enabled": True}, "kubernetes_version": "1.33"},
         session=MagicMock(),
         aws_client=MagicMock(),
         stack_manager=MagicMock(),

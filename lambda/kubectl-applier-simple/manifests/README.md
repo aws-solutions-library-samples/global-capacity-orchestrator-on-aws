@@ -133,6 +133,17 @@ no candidate instance types (see
 | `45-nodepool-cpu-general.yaml` | General CPU pool (c/m/r families) — spot-preferred, no GPUs |
 | `46-nodepool-mooncake-efa.yaml` | Mooncake EFA pool (p5/p5e/p5en, p6-b200/p6-b300/p6e-gb200) — disaggregated/store/both inference over RoCE; excludes A100-40GB p4d |
 
+Every pool states `spec.disruption.consolidationPolicy: WhenEmpty` explicitly,
+and `tests/test_k8s_manifest_validation.py` fails if one leaves it out. On EKS
+Auto Mode a NodePool created without the field gets the platform default, and
+from Kubernetes 1.37 that default is `Balanced` (the built-in `system` and
+`general-purpose` pools use it too, and cannot be changed): nodes are
+consolidated whenever the hourly saving outweighs the disruption cost, which
+would evict running Jobs and model servers for a cheaper bin-packing. GCO's
+pools stay `WhenEmpty` on purpose — a GPU, Neuron, EFA or CPU node is only
+reclaimed once nothing runs on it — so the policy must be visible in Git rather
+than inherited from whatever the platform defaults to at recreate time.
+
 ### GPU Observability (50–59)
 
 | File | Contents |
