@@ -2152,6 +2152,130 @@ if m:
 " "$file" 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# Machine-readable findings
+#
+# The Markdown report is for people. ``gco deps maintain`` hands the same
+# findings to an agent, which must not parse prose, so every surface is also
+# recorded as JSON: the rows the Markdown tables render, keyed by column
+# name, plus the surface's urgency and skip reason. The scan emits facts
+# only; which findings an agent may act on is the launcher's policy
+# (``cli/maintenance.py``, documented in ``docs/MAINTENANCE.md``).
+# ---------------------------------------------------------------------------
+
+#: Schema identifier written into every findings document. Bump the suffix
+#: when a field changes meaning; ``cli/maintenance.py`` refuses other values.
+FINDINGS_SCHEMA="gco.dependency-scan.findings/1"
+
+#: Markers around the findings JSON embedded in the Markdown report, so the
+#: launcher can lift it out of the rolling issue body without parsing the
+#: rest. Both lines are HTML comments and render as nothing.
+FINDINGS_BEGIN_MARKER="<!-- gco-deps-findings:begin -->"
+FINDINGS_END_MARKER="<!-- gco-deps-findings:end -->"
+
+#: An issue body is capped at 65,536 characters. The report itself runs to
+#: about 15,000, so a findings document above this size is left to the
+#: workflow artifact and the report says so instead of risking a failed
+#: ``gh issue edit``.
+FINDINGS_EMBED_MAX_BYTES="${FINDINGS_EMBED_MAX_BYTES:-40000}"
+
+# findings_rows <keys> <results-file>
+#
+# Turns a pipe-delimited results file into a JSON array of objects. <keys>
+# names the columns, pipe-separated, in the order the scan writes them
+# (``image|current|latest``). A row with more cells than keys keeps the
+# overflow in its last field, joined back with ``|``; a row with fewer
+# cells fills the missing fields with "". An empty or missing file is ``[]``.
+findings_rows() {
+  local keys="$1" file="${2:-}"
+  if [ -z "$file" ] || [ ! -s "$file" ]; then
+    echo "[]"
+    return
+  fi
+  jq -R -s --arg keys "$keys" '
+    ($keys | split("|")) as $cols
+    | ($cols | length) as $n
+    | split("\n")
+    | map(select(length > 0))
+    | map(
+        split("|") as $cells
+        | ($cells[0:($n - 1)] + [($cells[($n - 1):] | join("|"))]) as $fitted
+        | [range(0; $n)] | map({key: $cols[.], value: ($fitted[.] // "")}) | from_entries
+      )' "$file"
+}
+
+# findings_surface <title> <urgency> <count> <skip-reason> <keys> [results-file]
+#
+# Appends one surface record to the file named by ``FINDINGS_SURFACES``:
+# the Markdown section title, the urgency the summary table shows, the row
+# count, the skip reason (null when the surface ran) and the rows as
+# objects. Surfaces whose findings are not rows (the Python packages' JSON,
+# the accelerator catalog's Markdown) append their own record with
+# ``findings_surface_json``.
+findings_surface() {
+  local title="$1" urgency="$2" count="$3" skip="$4" keys="$5" file="${6:-}"
+  local rows
+  rows="$(findings_rows "$keys" "$file")"
+  findings_surface_json "$title" "$urgency" "$count" "$skip" "$rows"
+}
+
+# findings_surface_json <title> <urgency> <count> <skip-reason> <findings-json> [extra-json]
+#
+# The general form of ``findings_surface``: <findings-json> is the ready
+# JSON array of findings and the optional <extra-json> object is merged
+# into the record (the accelerator surface carries its reports this way).
+findings_surface_json() {
+  local title="$1" urgency="$2" count="$3" skip="$4" rows="$5" extra="${6:-{\}}"
+  jq -cn --arg title "$title" --arg urgency "$urgency" --argjson count "$count" \
+    --arg skip "$skip" --argjson rows "$rows" --argjson extra "$extra" '
+    {surface: $title, urgency: $urgency, count: $count,
+     skipped: (if $skip == "" then null else $skip end), findings: $rows} + $extra' \
+    >> "$FINDINGS_SURFACES"
+}
+
+# write_findings_document <output-file> <scan-complete> <has-drift> <incomplete-reasons-file>
+#
+# Assembles the findings document from the surface records accumulated in
+# ``FINDINGS_SURFACES`` and writes it to <output-file>. Fails when a record
+# is not valid JSON, so a broken emitter can never publish a half document.
+write_findings_document() {
+  local output="$1" complete="$2" drift="$3" reasons_file="$4"
+  local reasons='[]'
+  if [ -s "$reasons_file" ]; then
+    reasons="$(sort -u "$reasons_file" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  fi
+  jq -s --arg schema "$FINDINGS_SCHEMA" \
+    --arg generated "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --argjson complete "$complete" --argjson drift "$drift" --argjson reasons "$reasons" '
+    {schema: $schema, generated_at: $generated, scan_complete: $complete, has_drift: $drift,
+     incomplete_reasons: $reasons, surfaces: .}' "$FINDINGS_SURFACES" > "$output"
+}
+
+# emit_findings_embed <findings-file>
+#
+# Prints the Markdown that carries the findings document inside the report:
+# a collapsed block between the two markers, or a pointer at the workflow
+# artifact when the document is too large to embed.
+emit_findings_embed() {
+  local file="$1" size
+  size="$(wc -c < "$file" | tr -d ' ')"
+  echo "<details>"
+  echo "<summary>Machine-readable findings (for <code>gco deps maintain</code>)</summary>"
+  echo ""
+  if [ "$size" -gt "$FINDINGS_EMBED_MAX_BYTES" ]; then
+    echo "_The findings document (${size} bytes) is too large to embed here; download the"
+    echo "\`dependency-scan-findings\` artifact of the workflow run, or run \`gco deps scan\`._"
+  else
+    echo "$FINDINGS_BEGIN_MARKER"
+    echo '```json'
+    cat "$file"
+    echo '```'
+    echo "$FINDINGS_END_MARKER"
+  fi
+  echo ""
+  echo "</details>"
+}
+
 # dependency_scan_is_complete <incomplete-reasons-file> [skip-reason ...]
 #
 # Returns success only when the durable incomplete-reason channel exists and

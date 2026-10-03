@@ -738,6 +738,9 @@ run_scan() {
 report_path() {
     sed -n 's/^report_path=//p' "$GITHUB_OUTPUT"
 }
+findings_path() {
+    sed -n 's/^findings_path=//p' "$GITHUB_OUTPUT"
+}
 
 @test "dependency-scan.sh passes bash -n and shellcheck" {
     bash -n "$SCRIPT"
@@ -767,6 +770,18 @@ report_path() {
     ! grep -q 'report_path=' "$GITHUB_OUTPUT"
     grep -q '^All dependencies are up to date.$' "$GITHUB_STEP_SUMMARY"
     ! grep -q 'Incomplete or skipped' "$GITHUB_STEP_SUMMARY"
+    # The findings document is written even with nothing to report, so
+    # `gco deps maintain` can say so from the same source.
+    local findings
+    findings="$(findings_path)"
+    [ -f "$findings" ]
+    [[ "$output" == *"Wrote findings to ${findings}"* ]]
+    [ "$(jq -r '.schema' "$findings")" = "gco.dependency-scan.findings/1" ]
+    [ "$(jq -r '.has_drift' "$findings")" = "false" ]
+    [ "$(jq -r '.scan_complete' "$findings")" = "true" ]
+    [ "$(jq -r '.surfaces | length' "$findings")" = "22" ]
+    [ "$(jq -r '[.surfaces[].count] | add' "$findings")" = "0" ]
+    [ "$(jq -r '[.surfaces[] | select(.skipped != null)] | length' "$findings")" = "0" ]
     # Every surface was consulted through the faked tools.
     grep -q '^pip install -e .\[dev\]' "$CALLS"
     grep -q '^curl https://registry.npmjs.org/aws-cdk/latest' "$CALLS"
@@ -851,6 +866,34 @@ report_path() {
     [[ "$output" == *"Wrote report to ${report}"* ]]
     # The report is mirrored into the job summary.
     grep -q '^# Dependency Update Report' "$GITHUB_STEP_SUMMARY"
+    # The same findings as a document: one record per summary-table surface,
+    # in order, with the rows keyed by column, embedded in the report between
+    # the markers `gco deps maintain` lifts them out with.
+    local findings
+    findings="$(findings_path)"
+    [ -f "$findings" ]
+    [[ "$output" == *"Wrote findings to ${findings}"* ]]
+    [ "$(jq -r '.has_drift' "$findings")" = "true" ]
+    [ "$(jq -r '.scan_complete' "$findings")" = "true" ]
+    [ "$(jq -c '.incomplete_reasons' "$findings")" = "[]" ]
+    [ "$(jq -r '.surfaces[0].surface' "$findings")" = "Python Packages" ]
+    [ "$(jq -r '.surfaces[-1].surface' "$findings")" = "Lockfile Freshness" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "Python Packages") | .count' "$findings")" = "3" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "Python Packages") | .findings[0] | keys | join(",")' "$findings")" = "current,latest,name" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "npm Packages") | .findings[] | select(.package == "aws-cdk") | "\(.graph) \(.current) \(.latest)"' "$findings")" = ". 2.1140.0 3.1140.0" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "EMR Serverless") | .findings[0] | "\(.release) \(.current) \(.latest)"' "$findings")" = "emr-serverless emr-7.14.0 emr-7.14.1" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "EKS Kubernetes Version") | .findings[0].standard_support_ends' "$findings")" = "2027-01-15" ]
+    [[ "$(jq -r '.surfaces[] | select(.surface == "Accelerator Catalog and NodePools") | .offline_report_markdown' "$findings")" == *"Retire p2 from the GPU pool"* ]]
+    [ "$(jq -r '.surfaces[] | select(.surface == "Accelerator Catalog and NodePools") | .count' "$findings")" = "4" ]
+    [ "$(jq -r '[.surfaces[] | select(.count > 0)] | length' "$findings")" -ge 18 ]
+    grep -qF -- '<!-- gco-deps-findings:begin -->' "$report"
+    grep -qF -- '<!-- gco-deps-findings:end -->' "$report"
+    grep -qF -- 'gco deps maintain' "$report"
+    # What is embedded is the document itself.
+    sed -n '/<!-- gco-deps-findings:begin -->/,/<!-- gco-deps-findings:end -->/p' "$report" \
+        | sed '1d;2d;$d' | sed '$d' > "$BATS_TEST_TMPDIR/embedded.json"
+    jq -e '.schema == "gco.dependency-scan.findings/1"' "$BATS_TEST_TMPDIR/embedded.json" >/dev/null
+    [ "$(jq -c '.surfaces' "$BATS_TEST_TMPDIR/embedded.json")" = "$(jq -c '.surfaces' "$findings")" ]
 }
 
 @test "without AWS credentials every credential-dependent section is skipped and the scan is incomplete" {
