@@ -369,6 +369,10 @@ maintainer" section: one line per surface saying which CI job or local run
 proves it, and what still needs a live environment. A maintainer reviews and
 merges; the session never does.
 
+![gco deps maintain --dry-run: findings sorted into tiers, the worktree and permissions the session gets, and the head of its prompt](../demo/deps-maintain.gif)
+
+*A dry run against a sample findings document ([re-record](../demo/record_deps_maintain.sh)).*
+
 The policy lives in `cli/maintenance.py` (`SURFACE_POLICIES`) and
 `tests/test_maintenance.py` keeps it in lockstep with the scan's surfaces and
 with the headings here. Three tiers, by blast radius:

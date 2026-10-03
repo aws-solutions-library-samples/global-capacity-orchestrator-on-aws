@@ -970,6 +970,58 @@ path.write_text(text, encoding="utf-8")
 PYEOF
 }
 
+# rebase_cast_to_marker <cast_file> <marker>
+#
+# Makes the first output event containing <marker> the recording's frame
+# zero. agg renders the cast's first frame from whatever is on screen at
+# t=0, which for a driver that starts with a banner is an empty PTY, and
+# static previews (and validate_demo_gifs.py's first-frame rule) use that
+# frame. For an asciicast v2 the banner's time is subtracted from every
+# event; for a v3 (relative delays) every delay up to and including the
+# banner's is zeroed. A cast without the marker is left as it is.
+#
+# record_autopilot.sh carries the original of this pass inline, fused with
+# its TUI artifact and glyph rewrites; the other recorders use this one.
+rebase_cast_to_marker() {
+    local cast_file="$1"
+    local marker="$2"
+    if [ ! -f "$cast_file" ]; then
+        return
+    fi
+    python3 - "$cast_file" "$marker" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+marker = sys.argv[2]
+documents = []
+for line in path.read_text(encoding="utf-8").splitlines():
+    if line.strip():
+        documents.append(json.loads(line))
+events = [doc for doc in documents if isinstance(doc, list) and len(doc) >= 3]
+banner = next(
+    (event for event in events if event[1] == "o" and marker in str(event[2])),
+    None,
+)
+header = documents[0] if documents and isinstance(documents[0], dict) else {}
+if banner is not None and header.get("version") == 2:
+    banner_time = float(banner[0])
+    for event in events:
+        event[0] = round(max(0.0, float(event[0]) - banner_time), 6)
+elif banner is not None and header.get("version") == 3:
+    for event in events:
+        event[0] = 0
+        if event is banner:
+            break
+path.write_text(
+    "\n".join(json.dumps(doc, ensure_ascii=False, separators=(",", ":")) for doc in documents)
+    + "\n",
+    encoding="utf-8",
+)
+PYEOF
+}
+
 # render_gif <cast_file> <gif_file> <speed> <theme> <cols> <rows>
 #
 # Converts an asciinema .cast file to an animated GIF using agg with the

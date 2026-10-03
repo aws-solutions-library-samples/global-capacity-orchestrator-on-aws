@@ -38,6 +38,8 @@ GIF_POLICIES = {
     Path("demo/autopilot-codex.gif"): GifPolicy(2 * MIB, 1024, 700, 800),
     Path("demo/autopilot-claude-code.gif"): GifPolicy(4 * MIB, 1024, 700, 800),
     Path("demo/autopilot-opencode.gif"): GifPolicy(2 * MIB, 1024, 700, 800),
+    # A credential-free dry run of `gco deps maintain`: a handful of screens.
+    Path("demo/deps-maintain.gif"): GifPolicy(2 * MIB, 1024, 700, 200),
     Path("demo/deploy.gif"): GifPolicy(75 * MIB, 1360, 803, 1000),
     # Raised from 2 MiB / 150 frames after reviewing the full-feature teardown
     # re-recording: it deletes FSx, Valkey, Aurora, the vector-store replica and
@@ -218,6 +220,7 @@ def _validate_gif(relative_path: Path, policy: GifPolicy) -> tuple[int, tuple[in
                 Path("demo/autopilot-codex.gif"),
                 Path("demo/autopilot-claude-code.gif"),
                 Path("demo/autopilot-opencode.gif"),
+                Path("demo/deps-maintain.gif"),
             }:
                 first_frame = image.convert("RGB")
                 colors = first_frame.getcolors(maxcolors=width * height)

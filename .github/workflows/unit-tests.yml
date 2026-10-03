@@ -468,7 +468,8 @@ jobs:
             demo/lib_demo.sh \
             demo/record_deploy.sh \
             demo/record_destroy.sh \
-            demo/record_autopilot.sh
+            demo/record_autopilot.sh \
+            demo/record_deps_maintain.sh
           do
             /bin/bash -n "$script"
           done

@@ -413,6 +413,49 @@ PYEOF
     [ "$status" -ne 0 ]
 }
 
+# ── rebase_cast_to_marker ────────────────────────────────────────────────────
+# agg renders frame zero from what is on screen at t=0, which for a driver
+# that opens with a banner is an empty PTY. The helper makes the first event
+# carrying the marker the recording's origin, for both asciicast versions.
+
+@test "rebase_cast_to_marker subtracts the banner time from every v2 event" {
+    local cast="$TEST_TMPDIR/v2.cast"
+    printf '%s\n' '{"version": 2, "width": 110, "height": 30}' \
+        '[0.5, "o", "\u001b[H"]' '[2.25, "o", "=== GCO Banner ==="]' '[4.0, "o", "later"]' > "$cast"
+
+    rebase_cast_to_marker "$cast" "GCO Banner"
+
+    [ "$(sed -n 2p "$cast")" = '[0.0,"o","\u001b[H"]' ]
+    [ "$(sed -n 3p "$cast")" = '[0.0,"o","=== GCO Banner ==="]' ]
+    [ "$(sed -n 4p "$cast")" = '[1.75,"o","later"]' ]
+    # The header is untouched.
+    grep -q '"version": *2' "$cast"
+}
+
+@test "rebase_cast_to_marker zeroes the v3 delays up to and including the banner" {
+    local cast="$TEST_TMPDIR/v3.cast"
+    printf '%s\n' '{"version": 3, "term": {"cols": 110, "rows": 30}}' \
+        '[0.5, "o", "\u001b[H"]' '[1.5, "o", "=== GCO Banner ==="]' '[0.75, "o", "later"]' '[0.1, "x", "0"]' > "$cast"
+
+    rebase_cast_to_marker "$cast" "GCO Banner"
+
+    [ "$(sed -n 2p "$cast")" = '[0,"o","\u001b[H"]' ]
+    [ "$(sed -n 3p "$cast")" = '[0,"o","=== GCO Banner ==="]' ]
+    [ "$(sed -n 4p "$cast")" = '[0.75,"o","later"]' ]
+    [ "$(sed -n 5p "$cast")" = '[0.1,"x","0"]' ]
+}
+
+@test "rebase_cast_to_marker leaves a cast without the marker, or a missing file, alone" {
+    local cast="$TEST_TMPDIR/plain.cast"
+    printf '%s\n' '{"version": 2, "width": 110, "height": 30}' '[0.5, "o", "no banner here"]' > "$cast"
+
+    rebase_cast_to_marker "$cast" "GCO Banner"
+    [ "$(sed -n 2p "$cast")" = '[0.5,"o","no banner here"]' ]
+
+    rebase_cast_to_marker "$TEST_TMPDIR/does-not-exist.cast" "GCO Banner"
+    [ ! -e "$TEST_TMPDIR/does-not-exist.cast" ]
+}
+
 # ── render_gif ───────────────────────────────────────────────────────────────
 # We can't verify that agg actually produces a valid GIF in CI (the tool isn't
 # necessarily installed, and we don't want to ship test cast files large

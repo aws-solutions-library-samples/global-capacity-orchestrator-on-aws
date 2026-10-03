@@ -266,6 +266,33 @@ def test_parse_findings_classifies_rows_and_carries_skips_and_report_surfaces() 
     assert suppression.verify.startswith("each entry re-checked upstream")
 
 
+def test_a_url_field_is_a_reference_in_the_prompt_not_the_label() -> None:
+    document = parse_findings(
+        {
+            "schema": FINDINGS_SCHEMA,
+            "surfaces": [
+                {
+                    "surface": "GCO Autopilot Pins",
+                    "urgency": "act soon",
+                    "count": 1,
+                    "findings": [
+                        {
+                            "surface": "@anthropic-ai/claude-code (CLAUDE_CODE_VERSION)",
+                            "current": "2.1.270",
+                            "latest": "2.1.284",
+                            "url": "https://www.npmjs.com/package/@anthropic-ai/claude-code",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    (finding,) = document.findings
+    assert finding.label() == "@anthropic-ai/claude-code (CLAUDE_CODE_VERSION): 2.1.270 -> 2.1.284"
+    prompt = compose_prompt(document, act_on=[Tier.MECHANICAL], branch="b", source="s")
+    assert "; ref: https://www.npmjs.com/package/@anthropic-ai/claude-code)" in prompt
+
+
 def test_a_finding_without_a_name_field_is_labelled_by_its_surface() -> None:
     finding = Finding(
         surface="Python Packages",

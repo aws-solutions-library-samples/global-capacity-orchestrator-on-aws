@@ -268,9 +268,11 @@ class Finding:
 
         ``name: current -> latest (key=value ...)`` when the row carries a
         version pair; otherwise every field as ``key=value``. The first field
-        that is not the version pair names the finding.
+        that is not the version pair names the finding. A ``url`` field is
+        left out (the prompt carries it as the finding's reference).
         """
         fields = dict(self.fields)
+        fields.pop("url", None)
         current = fields.pop("current", None)
         latest = fields.pop("latest", None)
         if current is not None and latest is not None:
@@ -568,9 +570,11 @@ def worktree_path_for(repo_root: Path, branch: str) -> Path:
 def _finding_lines(findings: Iterable[Finding]) -> list[str]:
     lines: list[str] = []
     for finding in findings:
+        reference = f"; ref: {finding.fields['url']}" if finding.fields.get("url") else ""
         lines.append(
             f"- [{finding.surface}] {finding.label()}"
-            f"  (urgency: {finding.urgency}; procedure: {MAINTENANCE_DOC}{finding.procedure})"
+            f"  (urgency: {finding.urgency}; procedure: {MAINTENANCE_DOC}{finding.procedure}"
+            f"{reference})"
         )
     return lines
 

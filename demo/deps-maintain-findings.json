@@ -1,0 +1,223 @@
+{
+  "schema": "gco.dependency-scan.findings/1",
+  "generated_at": "2026-10-01T09:04:17Z",
+  "scan_complete": false,
+  "has_drift": true,
+  "incomplete_reasons": [],
+  "surfaces": [
+    {
+      "surface": "Python Packages",
+      "urgency": "routine",
+      "count": 2,
+      "skipped": null,
+      "findings": [
+        {
+          "name": "urllib3",
+          "current": "2.7.0",
+          "latest": "2.8.0"
+        },
+        {
+          "name": "boto3",
+          "current": "1.43.93",
+          "latest": "1.43.107"
+        }
+      ]
+    },
+    {
+      "surface": "npm Packages",
+      "urgency": "routine",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "Docker Images",
+      "urgency": "routine",
+      "count": 1,
+      "skipped": null,
+      "findings": [
+        {
+          "image": "busybox",
+          "current": "1.38.0",
+          "latest": "1.38.1"
+        }
+      ]
+    },
+    {
+      "surface": "Helm Charts",
+      "urgency": "routine",
+      "count": 1,
+      "skipped": null,
+      "findings": [
+        {
+          "chart": "keda",
+          "name": "keda",
+          "current": "2.20.2",
+          "latest": "2.20.3"
+        }
+      ]
+    },
+    {
+      "surface": "EKS Add-ons",
+      "urgency": "routine",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "EKS Kubernetes Version",
+      "urgency": "act soon",
+      "count": 1,
+      "skipped": null,
+      "findings": [
+        {
+          "pin": "kubernetes_version",
+          "current": "1.36",
+          "latest": "1.37",
+          "standard_support_ends": "2027-01-15"
+        }
+      ]
+    },
+    {
+      "surface": "Aurora PostgreSQL Engine",
+      "urgency": "routine",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "EMR Serverless",
+      "urgency": "routine",
+      "count": 1,
+      "skipped": null,
+      "findings": [
+        {
+          "release": "emr-serverless",
+          "current": "emr-7.14.0",
+          "latest": "emr-spark-8.1.0"
+        }
+      ]
+    },
+    {
+      "surface": "Bedrock Default Model",
+      "urgency": "routine",
+      "count": 0,
+      "skipped": "No AWS credentials available (scan needs bedrock:ListInferenceProfiles). Configure OIDC to enable.",
+      "findings": []
+    },
+    {
+      "surface": "Accelerator Catalog and NodePools",
+      "urgency": "act soon",
+      "count": 0,
+      "skipped": null,
+      "findings": [],
+      "offline_report_markdown": "",
+      "online_report_markdown": ""
+    },
+    {
+      "surface": "Dockerfile.dev Pins",
+      "urgency": "routine",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "GCO Autopilot Pins",
+      "urgency": "act soon",
+      "count": 1,
+      "skipped": null,
+      "findings": [
+        {
+          "surface": "@anthropic-ai/claude-code (CLAUDE_CODE_VERSION)",
+          "current": "2.1.270",
+          "latest": "2.1.284",
+          "url": "https://www.npmjs.com/package/@anthropic-ai/claude-code"
+        }
+      ]
+    },
+    {
+      "surface": "Pre-commit Hooks",
+      "urgency": "routine",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "CDK Enum Constants",
+      "urgency": "routine",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "Python Release",
+      "urgency": "informational",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "Ruby Release",
+      "urgency": "informational",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "Runner Images",
+      "urgency": "act soon",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "CI Tooling",
+      "urgency": "act soon",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "Version Consistency",
+      "urgency": "routine",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    },
+    {
+      "surface": "Base-image Security Epochs",
+      "urgency": "act soon",
+      "count": 1,
+      "skipped": null,
+      "findings": [
+        {
+          "dockerfile": "Dockerfile.dev",
+          "arg": "APT_SECURITY_EPOCH",
+          "epoch": "2026-08-14",
+          "age_days": "48"
+        }
+      ]
+    },
+    {
+      "surface": "Suppression Expiries",
+      "urgency": "act soon",
+      "count": 1,
+      "skipped": null,
+      "findings": [
+        {
+          "file": ".trivyignore",
+          "id": "CVE-2026-14257",
+          "expires": "2026-10-22",
+          "days_left": "21"
+        }
+      ]
+    },
+    {
+      "surface": "Lockfile Freshness",
+      "urgency": "routine",
+      "count": 0,
+      "skipped": null,
+      "findings": []
+    }
+  ]
+}
