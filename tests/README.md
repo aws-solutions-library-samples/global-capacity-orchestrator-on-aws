@@ -1151,6 +1151,29 @@ Never set env vars via `os.environ["X"] = "..."` directly in a test body
 without a tear-down — it will leak into unrelated tests that run later
 in the same session.
 
+### No AWS credentials in the test process
+
+`tests/conftest.py` makes every pytest process look like CI before boto3 is
+imported: it drops the credential, profile and role variables, points
+`AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` at a path that does not
+exist, disables the instance-metadata provider, and mirrors the CI job's
+`us-east-1` default Region. An unmocked boto3 call therefore raises
+`NoCredentialsError` on a developer machine exactly as it does in CI, instead
+of reaching whatever account the shell was logged into. Tests that need
+credentials set their own (the Floci plugin installs its throwaway session
+key; `test_addons_cli.py` exports `testing`), which nests over the scrub.
+
+The same file no-ops every teardown sweep `StackManager.destroy_orchestrated`
+runs around the stack deletions (registry preflight, bastion sweep, backup
+vault, SG watchdog, implicit log groups, bastion IAM, traffic-dial parameters,
+EBS volumes) through a per-helper owner map: a class that owns one helper for
+real still gets every other sweep stubbed. Both guards exist because of a live
+incident (2026-10-04): the stacks tests, run from a logged-in shell while a
+validation deployment was up, deleted that deployment's implicit log groups
+and terminated an operator's bastion through a class exempt from the old
+all-or-nothing guard. To let a new test class exercise a sweep for real, add
+it to `_DESTROY_CLEANUP_OWNERS` with exactly the helpers it owns.
+
 ## Common Issues
 
 ### Import Errors
