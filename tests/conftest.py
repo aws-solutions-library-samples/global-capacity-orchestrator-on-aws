@@ -241,9 +241,13 @@ _DESTROY_CLEANUP_STUBS: dict[str, object] = {
     # cluster's Prometheus/Grafana data — the most destructive helper here.
     "_cleanup_cluster_volumes": {"deleted": [], "surviving": [], "errors": []},
 }
-# Class name (or module-level test function name) -> the helpers it owns.
+# Owner -> the helpers it exercises for real. An owner is a test class name,
+# a module-level test function name, or a test module name (its file stem);
+# a test unions the helpers of every key that applies to it.
 _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
     "TestImageRegistryDestroyPreflight": frozenset({"_image_registry_destroy_preflight"}),
+    # Drives destroy() into the real preflight against a cdk.json it writes.
+    "test_stacks_image_registry_destroy": frozenset({"_image_registry_destroy_preflight"}),
     "TestCleanupOrphanedBastions": frozenset({"cleanup_orphaned_bastions"}),
     "test_cleanup_orphaned_bastions_filters_stacks_and_parallelizes": frozenset(
         {"cleanup_orphaned_bastions"}
@@ -309,8 +313,10 @@ def _no_real_stuck_stack_precheck(request):
 
 @pytest.fixture(autouse=True)
 def _no_real_destroy_cleanup_aws_calls(request):
-    owner = request.cls.__name__ if request.cls is not None else request.function.__name__
-    owned = _DESTROY_CLEANUP_OWNERS.get(owner, frozenset())
+    owners = [request.module.__name__.rsplit(".", 1)[-1], request.function.__name__]
+    if request.cls is not None:
+        owners.append(request.cls.__name__)
+    owned = frozenset().union(*(_DESTROY_CLEANUP_OWNERS.get(name, frozenset()) for name in owners))
     from contextlib import ExitStack
 
     from cli import stacks as _stacks

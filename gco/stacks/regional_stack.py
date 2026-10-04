@@ -273,8 +273,11 @@ _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
 #: and the kube-scheduler honors the same expression. Injected by the stack
 #: (not charts.yaml) because the label exists only on EKS Auto Mode nodes;
 #: the kind-based CI installs the same charts with the shipped values and
-#: would otherwise never schedule them.
-_LARGE_MEMORY_NODE_AFFINITY: dict[str, Any] = {
+#: would otherwise never schedule them. A plain literal assignment (no
+#: annotation) on purpose: the kind examples-smoke job lifts this module's
+#: literal constants with ``ast.Assign`` + ``ast.literal_eval`` to run
+#: ``_mlflow_chart_values`` outside CDK.
+_LARGE_MEMORY_NODE_AFFINITY = {
     "nodeAffinity": {
         "requiredDuringSchedulingIgnoredDuringExecution": {
             "nodeSelectorTerms": [
