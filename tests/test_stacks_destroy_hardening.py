@@ -714,6 +714,16 @@ class TestCleanupOrphanedBastions:
             fail_closed=False,
         )
 
+    def test_public_sweep_is_silent_when_nothing_was_terminated(self, capsys):
+        """The usual case: no stray bastion, so no termination line is printed."""
+        from cli.stacks import StackManager
+
+        manager = self._manager()
+        with patch.object(StackManager, "_cleanup_orphaned_bastions", return_value=0) as cleanup:
+            assert manager.cleanup_orphaned_bastions(["gco-global", "gco-us-east-1"]) == 0
+        cleanup.assert_called_once()
+        assert "Requested termination" not in capsys.readouterr().out
+
 
 class TestWaitForBastionNetworkInterfaces:
     """Bastion ENI release waits for EC2 and clears detached leftovers."""
