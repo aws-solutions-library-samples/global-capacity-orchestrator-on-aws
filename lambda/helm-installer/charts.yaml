@@ -665,6 +665,30 @@ charts:
         # therefore costs a brief Grafana restart instead of a stall.
         deploymentStrategy:
           type: Recreate
+        # Scheduling weight for the two stateful singletons the chart ships
+        # with no resource requests (Grafana here, Prometheus below; the
+        # Prometheus Operator already defaults Alertmanager to a 200Mi memory
+        # request). With no requests the scheduler counts them as free and
+        # packs them onto whichever general-purpose node already has the most
+        # pods. Two consecutive EKS 1.37 live release validations failed that
+        # way: the densest 2-vCPU/4 GiB node (19 pods, Grafana in one run and
+        # Prometheus in the other) spent ~1-1.5 cores in kernel time with
+        # ~23k major page faults/s at node level, so Grafana's readiness
+        # probes timed out (context deadline exceeded, sqlite "database is
+        # locked") and Prometheus answered OpenCost with 503s, surfacing as
+        # cost-monitor /api/v1/cost/status 504s. Requests make the scheduler
+        # account for the memory these pods actually use (measured ~0.8 GiB
+        # for Prometheus an hour into a run, ~0.4 GiB for Grafana) and lift
+        # them from BestEffort to Burstable QoS, so they are no longer the
+        # first eviction candidates under node pressure. Requests only, no
+        # limits: Prometheus' heap scales with the series count and a memory
+        # limit would turn a busy scrape set into an OOM crash loop, while a
+        # CPU limit on Grafana would stretch the first-boot migrations the
+        # liveness budget below is sized for.
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
         # First-boot tolerance: Grafana runs its full database migration set
         # (plus the unified-storage search index build) against the fresh PVC
         # before it listens on 3000. A live deployment measured 7+ minutes,
@@ -720,6 +744,11 @@ charts:
               spec:
                 accessModes:
                   - ReadWriteOnce
+          # Scheduling weight; see the grafana.resources comment above.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
           podMetadata:
             annotations:
               karpenter.sh/do-not-disrupt: "true"
@@ -732,6 +761,10 @@ charts:
               spec:
                 accessModes:
                   - ReadWriteOnce
+          # No resources override here: the Prometheus Operator already gives
+          # Alertmanager a 200Mi memory request when none is set (see the
+          # grafana.resources comment above), and the pod's measured working
+          # set is ~25Mi.
           podMetadata:
             annotations:
               karpenter.sh/do-not-disrupt: "true"

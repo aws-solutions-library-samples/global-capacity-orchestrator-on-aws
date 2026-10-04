@@ -505,6 +505,40 @@ def test_grafana_rolls_out_by_recreate_because_its_volume_is_read_write_once(kps
     assert grafana["deploymentStrategy"] == {"type": "Recreate"}
 
 
+def _mebibytes(quantity: str) -> int:
+    units = {"Mi": 1, "Gi": 1024}
+    for suffix, factor in units.items():
+        if quantity.endswith(suffix):
+            return int(quantity[: -len(suffix)]) * factor
+    raise AssertionError(f"unexpected memory quantity {quantity!r}")
+
+
+def test_grafana_and_prometheus_carry_scheduling_requests_but_no_limits(kps_entry) -> None:
+    """Regression: the chart ships Grafana and Prometheus with no requests.
+
+    Two EKS 1.37 live release validations failed because the scheduler, seeing
+    them as free, packed them onto the densest 2-vCPU/4 GiB node, which then
+    thrashed (kernel-time saturation, ~23k major faults/s) until Grafana's
+    readiness and Prometheus' answers to OpenCost timed out. Requests give the
+    scheduler the memory they actually use; limits stay off so a busy scrape
+    set cannot OOM-kill Prometheus and Grafana's first-boot migrations are not
+    CPU-throttled past the liveness budget.
+    """
+    values = kps_entry["values"]
+    grafana_resources = values["grafana"]["resources"]
+    prometheus_resources = values["prometheus"]["prometheusSpec"]["resources"]
+    for resources in (grafana_resources, prometheus_resources):
+        assert set(resources) == {"requests"}, resources
+        assert set(resources["requests"]) == {"cpu", "memory"}, resources
+    assert _mebibytes(grafana_resources["requests"]["memory"]) >= 512
+    assert _mebibytes(prometheus_resources["requests"]["memory"]) >= 1024
+    # The Prometheus Operator already defaults Alertmanager to a 200Mi memory
+    # request; charts.yaml must not override it with something smaller.
+    alertmanager_resources = values["alertmanager"]["alertmanagerSpec"].get("resources")
+    if alertmanager_resources is not None:
+        assert _mebibytes(alertmanager_resources["requests"]["memory"]) >= 200
+
+
 # --- ServiceMonitors for scheduler/operator components -----------------------
 
 _SERVICEMONITORS = (
