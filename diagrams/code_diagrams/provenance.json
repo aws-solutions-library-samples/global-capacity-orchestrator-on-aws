@@ -67,9 +67,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "gco/services/health_monitor.py": {
-      "digest": "d651971b058aa402de7e275ee1c48b97b854747773b42815df810445331fa05f",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "18c3a53188b9de232a184c7da307adad2ffedfd40cec898509a0164c0ecae6ff",
+      "generated_at": "2026-10-04T13:42:40Z",
+      "source_commit": "c8a2c18a0d540e23acd5eda86d3aab9db69e5c41"
     },
     "gco/services/inference_monitor.py": {
       "digest": "3efb9f0bdacdfefbce87e6db20be5c3fd7544f45213a27535700db9d6ded3dcb",
@@ -142,9 +142,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "3836cb82ba59f365446a5a3bf3851378934867f76f8a95079a0b94e8ef7a00f3",
-      "generated_at": "2026-10-03T19:34:01Z",
-      "source_commit": "14e1060ca4e6b4c1dc289ed55958e307d8f709a0"
+      "digest": "7640b8d5c9836c1690c9b73b3d8aafc7b931bc3af053bec7f0797228d2352e1b",
+      "generated_at": "2026-10-04T13:42:40Z",
+      "source_commit": "c8a2c18a0d540e23acd5eda86d3aab9db69e5c41"
     },
     "gco_mcp/audit.py": {
       "digest": "c085762d44c367b22fdf200ee1764c38d26056111aa7f7fa87429b810695b689",

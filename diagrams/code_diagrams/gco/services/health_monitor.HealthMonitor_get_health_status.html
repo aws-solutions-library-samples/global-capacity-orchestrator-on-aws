@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="31f26c20d1342fb6">
+        <meta name="gco-generated-at" content="2026-10-04T13:42:40Z">
+        <meta name="gco-source-commit" content="c8a2c18a0d540e23acd5eda86d3aab9db69e5c41">
+        <meta name="gco-flow-digest" content="478b895a448d7b8a">
         <title>Health status policy (thresholds, violations, collection failure)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,8 +208,8 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op5960=>operation: '\n        Get current health status of the cluster\n        '
-op5963=>operation: resource_utilization, active_jobs, pending_pods, pending_requested = await self.get_cluster_metrics()
+        <div><textarea id="code" style="width: 100%;" rows="11">op156=>operation: '\n        Get current health status of the cluster\n        '
+op159=>operation: resource_utilization, active_jobs, pending_pods, pending_requested = await self.get_cluster_metrics()
 is_healthy = True
 if not self.thresholds.is_disabled('cpu_threshold'):
     is_healthy = is_healthy and resource_utilization.cpu <= self.thresholds.cpu_threshold
@@ -247,18 +247,18 @@ if not is_healthy:
 health_status = HealthStatus(cluster_id=self.cluster_id, region=self.region, timestamp=datetime.now(UTC), status=status, resource_utilization=resource_utilization, thresholds=self.thresholds, active_jobs=active_jobs, pending_pods=pending_pods, pending_requested=pending_requested, message=message)
 logger.info(f"Health status: {status} - {message or 'All thresholds within limits'}")
 return health_status
-cond5962=>condition: exception raised?
-cond5965=>condition: except Exception as e
-sub5969=>subroutine: logger.error(f'Error getting health status: {e}')
-io5974=>inputoutput: output: HealthStatus(cluster_id=self.cluster_id, region=self.region, timestamp=datetime.now(UTC), status='unhealthy', resource_utilization=ResourceUtilization(cpu=0.0, memory=0.0, gpu=0.0), thresholds=self.thresholds, active_jobs=0, pending_pods=0, pending_requested=RequestedResources(cpu_vcpus=0.0, memory_gb=0.0, gpus=0), message=f'Health check error: {e!s}')
-e5972=>end: end function return
+cond158=>condition: exception raised?
+cond161=>condition: except Exception as e
+sub165=>subroutine: logger.error(f'Error getting health status: {e}')
+io170=>inputoutput: output: HealthStatus(cluster_id=self.cluster_id, region=self.region, timestamp=datetime.now(UTC), status='unhealthy', resource_utilization=ResourceUtilization(cpu=0.0, memory=0.0, gpu=0.0), thresholds=self.thresholds, active_jobs=0, pending_pods=0, pending_requested=RequestedResources(cpu_vcpus=0.0, memory_gb=0.0, gpus=0), message=f'Health check error: {e!s}')
+e168=>end: end function return
 
-op5960->op5963
-op5963->cond5962
-cond5962(yes)->cond5965
-cond5965(yes)->sub5969
-sub5969->io5974
-io5974->e5972
+op156->op159
+op159->cond158
+cond158(yes)->cond161
+cond161(yes)->sub165
+sub165->io170
+io170->e168
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -268,17 +268,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-10-04T13:42:40Z -->
+        <!-- Generated from Git commit: c8a2c18a0d540e23acd5eda86d3aab9db69e5c41 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-10-04T13:42:40Z">2026-10-04T13:42:40Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>c8a2c18a0d540e23acd5eda86d3aab9db69e5c41</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>31f26c20d1342fb6</code>
+            Flow content SHA-256: <code>478b895a448d7b8a</code>
           </p>
           <div id="canvas"></div>
         </div>
