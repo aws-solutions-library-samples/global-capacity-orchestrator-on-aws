@@ -23,7 +23,10 @@ own:
     scanned, and `pipeline-dag.yaml` is skipped by name).
 
 Schema resolution: kubeconform's bundled catalog only covers upstream
-Kubernetes. CRDs this repo depends on (Karpenter `NodePool`, the AWS Load
+Kubernetes, and is resolved at the cluster's minor (`-kubernetes-version
+<cdk.json kubernetes_version>.0`, see `kubernetes_schema_version()`) rather
+than kubeconform's floating `master` default, so a field the deployed API
+server does not know yet fails here. CRDs this repo depends on (Karpenter `NodePool`, the AWS Load
 Balancer Controller Gateway API configuration CRDs, Kueue, KEDA) are resolved
 via the community datreeio/CRDs-catalog as a second `-schema-location`. Two CRDs used in
 `examples/` aren't in that catalog yet (KubeRay's `RayCluster`, Volcano's
@@ -124,6 +127,39 @@ SCHEMA_UNAVAILABLE_SKIPS = (
 
 # kubeconform's own default schema catalog (upstream Kubernetes resources).
 DEFAULT_SCHEMA_LOCATION = "default"
+
+# The upstream schemas are validated at the cluster's minor, not kubeconform's
+# floating ``master`` default: ``-kubernetes-version`` is derived from
+# ``context.kubernetes_version`` in cdk.json (the single source for the EKS
+# minor) with patch ``0``. Built-in resource schemas do not change within a
+# minor, every ``vX.Y.0`` is in the catalog kubeconform fetches from
+# (yannh/kubernetes-json-schema) long before EKS ships that minor, and no
+# patch bump elsewhere in the repo can race the catalog. So a manifest that
+# uses a field the cluster's API server does not yet know fails here instead
+# of at deploy time, and nothing changes in this script when the minor moves.
+CDK_JSON_PATH = _REPO_ROOT / "cdk.json"
+_KUBERNETES_MINOR_RE = re.compile(r"^(\d+)\.(\d+)$")
+
+
+def kubernetes_schema_version(cdk_json: Path = CDK_JSON_PATH) -> str:
+    """Return the ``X.Y.0`` kubeconform ``-kubernetes-version`` for the cluster minor.
+
+    Raises ``ValueError`` when cdk.json has no usable
+    ``context.kubernetes_version`` (the gate must not silently fall back to
+    ``master``).
+    """
+    try:
+        context = json.loads(cdk_json.read_text(encoding="utf-8")).get("context", {})
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read {cdk_json}: {exc}") from exc
+    minor = context.get("kubernetes_version")
+    if not isinstance(minor, str) or not _KUBERNETES_MINOR_RE.fullmatch(minor.strip()):
+        raise ValueError(
+            f"{cdk_json}: context.kubernetes_version must be a 'major.minor' string "
+            f"(for example '1.37'), got {minor!r}"
+        )
+    return f"{minor.strip()}.0"
+
 
 # Community-maintained CRD catalog covering Karpenter, EKS Auto Mode, Kueue,
 # KEDA, and hundreds of other CRDs — see https://github.com/datreeio/CRDs-catalog.
@@ -336,19 +372,28 @@ def run_kubeconform(
     strict: bool = True,
     extra_schema_locations: tuple[str, ...] = (CRD_CATALOG_SCHEMA_LOCATION,),
     skip_gvks: tuple[str, ...] = SCHEMA_UNAVAILABLE_SKIPS,
+    kubernetes_version: str | None = None,
 ) -> tuple[int, object]:
     """Run kubeconform against every manifest in ``directory``, JSON output.
+
+    ``kubernetes_version`` is the ``-kubernetes-version`` the upstream schemas
+    are resolved at; ``None`` derives it from cdk.json via
+    :func:`kubernetes_schema_version`.
 
     Returns ``(returncode, parsed_json)``. ``parsed_json`` is ``{}`` if
     kubeconform produced no parseable JSON (e.g. the binary is missing —
     callers should check that separately via ``shutil.which`` before calling).
     """
+    if kubernetes_version is None:
+        kubernetes_version = kubernetes_schema_version()
     cmd = [
         kubeconform_binary,
         "-output",
         "json",
         "-summary",
         "-verbose",
+        "-kubernetes-version",
+        kubernetes_version,
         "-schema-location",
         DEFAULT_SCHEMA_LOCATION,
     ]
@@ -559,6 +604,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: no *.yaml/*.yml files found for {targets}", file=sys.stderr)
         return 2
 
+    try:
+        kubernetes_version = kubernetes_schema_version()
+    except ValueError as exc:
+        _print_input_errors(input_errors)
+        print(f"ERROR: cannot derive the Kubernetes schema version: {exc}", file=sys.stderr)
+        return 2
+
     with tempfile.TemporaryDirectory(prefix="gco-k8s-validate-") as tmp:
         rendered_dir = Path(tmp)
         rendered_paths = render_tree(files, rendered_dir)
@@ -568,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:
             rendered_dir,
             kubeconform_binary=args.kubeconform_binary,
             strict=not args.no_strict,
+            kubernetes_version=kubernetes_version,
         )
 
     output_errors = validate_kubeconform_output(
@@ -618,9 +671,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        f"OK: {summary.get('valid', 0)} manifest(s) are schema-valid "
-        f"({summary.get('skipped', 0)} intentionally skipped: GVKs with no catalog "
-        "schema, listed in SCHEMA_UNAVAILABLE_SKIPS)."
+        f"OK: {summary.get('valid', 0)} manifest(s) are schema-valid against Kubernetes "
+        f"{kubernetes_version} ({summary.get('skipped', 0)} intentionally skipped: GVKs "
+        "with no catalog schema, listed in SCHEMA_UNAVAILABLE_SKIPS)."
     )
     return 0
 
