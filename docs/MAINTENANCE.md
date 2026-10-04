@@ -286,6 +286,16 @@ for addon in eks-pod-identity-agent metrics-server aws-efs-csi-driver \
 done
 ```
 
+When the `metrics-server` pin moves past the `v0.9` line, re-check which
+resource-metrics API versions the new release registers
+(`pkg/api/install.go` in `kubernetes-sigs/metrics-server`): `v0.9.x` serves
+only `metrics.k8s.io/v1beta1`, upstream `master` also registers `v1` (GA in
+Kubernetes 1.37), so a `v0.10.x` build is expected to carry it. The health
+monitor and the Job metrics endpoint read the version from
+`METRICS_API_VERSION` in `gco/k8s_api_versions.py`; flip it to `v1` in that one
+place. `tests/test_k8s_api_versions.py` fails on a `v0.10+` pin while the
+constant still says `v1beta1`, as the reminder.
+
 ### Version-skew rules
 
 - **kubectl** pins in `Dockerfile.dev` and the helm-installer image must match

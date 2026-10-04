@@ -34,6 +34,7 @@ from botocore.exceptions import ClientError
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
+from gco.k8s_api_versions import METRICS_API_GROUP, METRICS_API_VERSION
 from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization
 from gco.services.leader_lease import (
     LEASE_MIN_DURATION_SECONDS,
@@ -199,8 +200,8 @@ class HealthMonitor:
             # Fetch fresh metrics
             node_metrics: dict[str, Any] = await asyncio.to_thread(
                 self.metrics_v1beta1.list_cluster_custom_object,
-                group="metrics.k8s.io",
-                version="v1beta1",
+                group=METRICS_API_GROUP,
+                version=METRICS_API_VERSION,
                 plural="nodes",
                 _request_timeout=self._k8s_timeout,
             )
