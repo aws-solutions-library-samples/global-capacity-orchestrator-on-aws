@@ -103,10 +103,12 @@ Per regional cluster, when enabled:
   replica owns a ReadWriteOnce volume, so a rolling update could never attach
   the volume to a surge pod on another node, and a rollout is a brief restart
   instead. Grafana (100m / 512Mi) and Prometheus (200m / 1Gi) carry resource
-  requests, without limits, that the chart does not set by default: without
-  them the scheduler treats both as free and packs them onto the densest
-  general-purpose node, which EKS Auto Mode's 2-vCPU/4 GiB nodes cannot
-  absorb (see the comment in `lambda/helm-installer/charts.yaml`).
+  requests, without limits, that the chart does not set by default (see the
+  comment in `lambda/helm-installer/charts.yaml`), and the regional stack
+  pins Grafana, Prometheus and MLflow to instances with more than 4 GiB
+  (`eks.amazonaws.com/instance-memory`): EKS Auto Mode's 2-vCPU/4 GiB
+  general-purpose nodes cannot carry one of them next to the host footprint
+  (see `_LARGE_MEMORY_NODE_AFFINITY` in `gco/stacks/regional_stack.py`).
 - A standalone DCGM exporter DaemonSet on GPU nodes for per-GPU metrics.
 - Curated Grafana dashboards (see [below](#curated-dashboards)).
 - A credential-rotation CronJob (see

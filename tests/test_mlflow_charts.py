@@ -30,6 +30,7 @@ import yaml
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.regional_stack import (
+    _LARGE_MEMORY_NODE_AFFINITY,
     _MLFLOW_SERVICE_HOSTS,
     _MLFLOW_TUNNEL_HOSTS,
     _OBSERVABILITY_STORAGE_CLASS,
@@ -393,6 +394,25 @@ class TestRegionalChartWiring:
         assert sidecar["volumeMounts"][0]["name"] == volume["name"]
         # Service images are built for amd64 only.
         assert values["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+
+    def test_overrides_require_an_instance_with_more_than_4gib(self, valid_cdk_context):
+        """The ~1.7 GiB server next to the ~1 GiB host footprint thrashed every
+        2 vCPU / 4 GiB Auto Mode node it landed on during the EKS 1.37 live
+        validations (liveness-killed in a loop); the stack pins it to larger
+        instances through the Auto Mode well-known label. Stack value, not a
+        charts.yaml one: kind nodes carry no such label."""
+        values = RS._helm_chart_value_overrides(_stub(valid_cdk_context))["mlflow"]["values"]
+        assert values["affinity"] == _LARGE_MEMORY_NODE_AFFINITY
+        (expression,) = values["affinity"]["nodeAffinity"][
+            "requiredDuringSchedulingIgnoredDuringExecution"
+        ]["nodeSelectorTerms"][0]["matchExpressions"]
+        assert expression == {
+            "key": "eks.amazonaws.com/instance-memory",
+            "operator": "Gt",
+            "values": ["4096"],
+        }
+        static = yaml.safe_load(_CHARTS_YAML.read_text(encoding="utf-8"))["charts"]["mlflow"]
+        assert "affinity" not in static["values"]
 
     def test_the_example_host_header_is_allowed(self, valid_cdk_context):
         """The sidecar relays the client's Host header unchanged, so the example's

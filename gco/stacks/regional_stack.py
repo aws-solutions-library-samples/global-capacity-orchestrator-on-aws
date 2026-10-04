@@ -253,6 +253,45 @@ def _compute_kubectl_regional_shared_replacements(
 #: validation), so the toggle gate lives in an annotation value instead.
 _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
 
+#: Node affinity for the memory-heavy observability singletons (Prometheus,
+#: Grafana, MLflow): instances with more than 4 GiB, so 8 GiB or larger.
+#: EKS Auto Mode's built-in general-purpose pool bin-packs by requests and
+#: its smallest instances are 2 vCPU / 4 GiB. Three consecutive EKS 1.37
+#: live validations showed those nodes cannot carry one of these pods next
+#: to the ~1 GiB Bottlerocket host footprint (kubelet, containerd and one
+#: shim per pod, CoreDNS, the network-policy and node-monitoring agents, the
+#: EBS CSI node plugin) that the kubelet's 627Mi reservation under-counts:
+#: the node reached ~95% memory, reclaim evicted the host daemons' text
+#: pages (direct reclaim, ~1 GiB of active file pages churning, PSI memory
+#: "full" above 30% over five minutes, ~4k major page faults/s with up to
+#: 1.5 cores of kernel time on a 2-vCPU node), and every probe on the node
+#: timed out: Grafana never became ready, Prometheus answered OpenCost with
+#: 503s, and MLflow was liveness-killed in a loop. Resource requests alone
+#: did not help, because Karpenter kept picking 4 GiB instances for them.
+#: ``eks.amazonaws.com/instance-memory`` (MiB) is an Auto Mode well-known
+#: label, so Karpenter provisions a matching instance from the same pool
+#: and the kube-scheduler honors the same expression. Injected by the stack
+#: (not charts.yaml) because the label exists only on EKS Auto Mode nodes;
+#: the kind-based CI installs the same charts with the shipped values and
+#: would otherwise never schedule them.
+_LARGE_MEMORY_NODE_AFFINITY: dict[str, Any] = {
+    "nodeAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": {
+            "nodeSelectorTerms": [
+                {
+                    "matchExpressions": [
+                        {
+                            "key": "eks.amazonaws.com/instance-memory",
+                            "operator": "Gt",
+                            "values": ["4096"],
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}
+
 
 #: The MLflow server's own port (the chart Service's and the container's), and
 #: its HTTPS front door: the post-Helm Service ``mlflow-tls``
@@ -5318,6 +5357,8 @@ class GCORegionalStack(Stack):
           renders both keys with ``toYaml``, so they are lists.
         - ``nodeSelector``: the service images are amd64 only, so the pod
           is pinned to amd64 nodes.
+        - ``affinity``: ``_LARGE_MEMORY_NODE_AFFINITY``, so the ~1.7 GiB
+          server lands on an instance with more than 4 GiB (see the constant).
         """
         s3_destination = (
             f"s3://{self.cluster_shared_identity.name}/mlflow-artifacts/{self.deployment_region}"
@@ -5353,6 +5394,7 @@ class GCORegionalStack(Stack):
                 "extraContainers": [sidecar],
                 "extraVolumes": [tls_volume],
                 "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                "affinity": _LARGE_MEMORY_NODE_AFFINITY,
             }
         }
 
@@ -5414,7 +5456,9 @@ class GCORegionalStack(Stack):
         from an optional Secret volume. The Grafana subchart renders
         ``extraContainers`` through ``tpl`` as a YAML string, while
         ``extraContainerVolumes`` is a list. The service images are amd64
-        only, so the Grafana pod is pinned to amd64 nodes.
+        only, so the Grafana pod is pinned to amd64 nodes. Grafana and
+        Prometheus also carry ``_LARGE_MEMORY_NODE_AFFINITY`` (instances with
+        more than 4 GiB; see the constant for the live evidence).
         """
         obs = self.config.get_cluster_observability_config()
         storage_class = _OBSERVABILITY_STORAGE_CLASS
@@ -5435,9 +5479,11 @@ class GCORegionalStack(Stack):
                     "extraContainers": _helm_container_list_string([grafana_sidecar]),
                     "extraContainerVolumes": [grafana_tls_volume],
                     "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                    "affinity": _LARGE_MEMORY_NODE_AFFINITY,
                 },
                 "prometheus": {
                     "prometheusSpec": {
+                        "affinity": _LARGE_MEMORY_NODE_AFFINITY,
                         "retention": obs["prometheus"]["retention"],
                         "storageSpec": {
                             "volumeClaimTemplate": {

@@ -441,7 +441,14 @@ three shapes:
 - **The OpenCost, Grafana and MLflow chart pods** get it through Helm values the
   regional stack builds, running from the cost-monitor image (OpenCost) and the
   manifest-processor image (Grafana and MLflow). Those images are amd64-only, so
-  the three pods carry an amd64 node selector. The chart pods start before the
+  the three pods carry an amd64 node selector. The same values pin Grafana,
+  Prometheus and MLflow to instances with more than 4 GiB of memory (a
+  required node affinity on the Auto Mode label
+  `eks.amazonaws.com/instance-memory`): the built-in general-purpose pool
+  bin-packs by requests and otherwise lands them on 2 vCPU / 4 GiB nodes,
+  which cannot carry one of these pods next to the ~1 GiB Bottlerocket host
+  footprint; live EKS 1.37 validation saw such nodes thrash on memory reclaim
+  until every probe on them timed out. The chart pods start before the
   post-Helm Certificates exist, so the
   Secret volume is `optional` (mode 0444, because GCO does not own the chart
   pods' users), the sidecar waits up to 30 minutes for the keypair
