@@ -267,6 +267,13 @@ shipping a skew.
 9. `tests/test_config_loader.py` and `tests/test_config_loader_validation.py` —
    update the hardcoded default minor.
 
+Nothing to change for the manifest schema gate: `integration:k8s:manifest-schema`
+validates against `<kubernetes_version>.0` schemas read from `cdk.json`
+(`kubernetes_schema_version()` in `.github/scripts/validate_k8s_manifests.py`),
+so step 1 moves it. kubeconform fetches those schemas from
+yannh/kubernetes-json-schema, which carries every upstream `vX.Y.0` well
+before EKS offers the minor.
+
 ### Validating add-on versions
 
 The `EKS_ADDON_*` builds are `-eksbuild.N` releases tied to a specific minor.
