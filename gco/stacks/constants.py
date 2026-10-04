@@ -323,7 +323,13 @@ EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.2"
 """EKS Pod Identity Agent — enables IRSA and Pod Identity for service accounts."""
 
 EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.10"
-"""Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``."""
+"""Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``.
+
+The ``v0.9.x`` line registers only ``metrics.k8s.io/v1beta1``; the services
+read that version through ``METRICS_API_VERSION`` in ``gco/k8s_api_versions.py``.
+When this pin moves to a release that also registers ``v1`` (upstream
+``master`` does; expected from ``v0.10.x``), flip that constant.
+"""
 
 EKS_ADDON_EFS_CSI_DRIVER = "v3.4.2-eksbuild.1"
 """Amazon EFS CSI Driver — mounts EFS file systems as Kubernetes persistent volumes."""
