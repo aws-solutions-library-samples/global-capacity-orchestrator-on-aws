@@ -9,6 +9,7 @@ import re
 import secrets
 import threading
 import time
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
@@ -69,6 +70,60 @@ _INTERNAL_SIGNATURE_HEADERS = frozenset(
 )
 _RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 _RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# The one upstream answer a mutating request may be replayed after: the
+# Application Load Balancer's own 503. The load balancer serves it when it has
+# no target to send the request to (no registered or healthy target, or the
+# target optimizer refused the request), which is a decision it makes before
+# selecting a target, so the request provably never reached the backend and a
+# replay cannot duplicate a write. The page below is the fixed one the load
+# balancer serves, captured verbatim from an ALB with an empty target group:
+# ``HTTP/1.1 503 Service Temporarily Unavailable``, ``Server: awselb/2.0``,
+# ``Content-Type: text/html``, ``Content-Length: 162``. A target's 503 (the
+# services answer JSON with their own ``Server`` header) and nginx's page (an
+# extra ``<hr><center>nginx</center>`` line) do not match. 502 and 504 are
+# never in this category: the load balancer produces them after it has handed
+# the request to a target.
+_LOAD_BALANCER_503_PAGE = re.compile(
+    rb"<html>\r?\n"
+    rb"<head><title>503 Service Temporarily Unavailable</title></head>\r?\n"
+    rb"<body>\r?\n"
+    rb"<center><h1>503 Service Temporarily Unavailable</h1></center>\r?\n"
+    rb"</body>\r?\n"
+    rb"</html>(?:\r?\n)?"
+)
+_LOAD_BALANCER_503_MAX_BODY_BYTES = 512
+_LOAD_BALANCER_SERVER_HEADER = "awselb/2.0"
+
+
+def _response_header(response: Any, name: str) -> str | None:
+    """Return one response header by case-insensitive name, or None."""
+    headers = getattr(response, "headers", None)
+    if not isinstance(headers, Mapping):
+        return None
+    wanted = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            return str(value)
+    return None
+
+
+def _is_load_balancer_503(response: Any) -> bool:
+    """True only for the load balancer's own 503 page (see the constants above).
+
+    Fails closed: any 503 that does not carry the load balancer's fixed page,
+    or that names a different server, is treated as a target's answer. The
+    ``Server`` header is a gate rather than the signal because operators can
+    disable it on the listener (``routing.http.response.server.enabled``).
+    """
+    if response.status != 503:
+        return False
+    server = _response_header(response, "server")
+    if server is not None and server.strip().lower() != _LOAD_BALANCER_SERVER_HEADER:
+        return False
+    data = getattr(response, "data", None)
+    if not isinstance(data, bytes | bytearray) or len(data) > _LOAD_BALANCER_503_MAX_BODY_BYTES:
+        return False
+    return _LOAD_BALANCER_503_PAGE.fullmatch(bytes(data)) is not None
 
 
 def _bounded_env_float(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -239,8 +294,12 @@ def forward_request(
 ) -> dict[str, Any]:
     """Forward over authenticated TLS within one deadline.
 
-    Retries are limited to safe, read-only methods. Plaintext, non-443, and
-    credential-bearing targets are rejected before any network request.
+    Read-only methods replay retryable statuses and transport failures.
+    Mutating methods are replayed only after the load balancer's own 503,
+    which it serves before selecting a target (see ``_is_load_balancer_503``);
+    every other answer or failure may have reached a target and is relayed
+    after exactly one attempt. Plaintext, non-443, and credential-bearing
+    targets are rejected before any network request.
     """
     parsed_target = urlsplit(target_url)
     try:
@@ -275,7 +334,14 @@ def forward_request(
 
     method = http_method.upper()
     encoded_body = body.encode("utf-8") if body else None
-    max_attempts = _MAX_RETRIES if method in _RETRYABLE_METHODS else 1
+    # Every method shares one attempt budget; what differs is which upstream
+    # answers may spend it. A read-only request replays any retryable status
+    # or transport failure. A mutating request replays only the load
+    # balancer's own 503, the one answer proven not to have reached a target;
+    # anything else it relays, and after a transport failure it stops, because
+    # the write may already have been applied.
+    read_only = method in _RETRYABLE_METHODS
+    max_attempts = _MAX_RETRIES
     last_exception: Exception | None = None
     last_response: urllib3.BaseHTTPResponse | None = None
     attempts_made = 0
@@ -296,12 +362,20 @@ def forward_request(
             if response.status not in _RETRYABLE_STATUS_CODES:
                 return _build_success_response(response)
             last_response = response
+            if not read_only and not _is_load_balancer_503(response):
+                logger.warning(
+                    "Upstream status %d for %s may have reached a target; relaying it unreplayed",
+                    response.status,
+                    method,
+                )
+                return _build_success_response(response)
             logger.warning(
-                "Retryable upstream status %d on attempt %d/%d for %s",
+                "Retryable upstream status %d on attempt %d/%d for %s%s",
                 response.status,
                 attempt + 1,
                 max_attempts,
                 method,
+                "" if read_only else " (load balancer answered before selecting a target)",
             )
             if attempt == max_attempts - 1:
                 return _build_success_response(response)
@@ -309,19 +383,23 @@ def forward_request(
         except urllib3.exceptions.SSLError:
             logger.exception("Backend TLS verification failed")
             return _tls_failure_response()
-        except urllib3.exceptions.MaxRetryError as error:
+        except (urllib3.exceptions.MaxRetryError, urllib3.exceptions.TimeoutError) as error:
             if isinstance(getattr(error, "reason", None), urllib3.exceptions.SSLError):
                 logger.exception("Backend TLS verification failed")
                 return _tls_failure_response()
             last_exception = error
-            logger.warning(
-                "Upstream %s failed on attempt %d/%d",
-                method,
-                attempt + 1,
-                max_attempts,
-            )
-        except urllib3.exceptions.TimeoutError as error:
-            last_exception = error
+            if not read_only:
+                # The write may have been applied: report this failure
+                # instead of replaying, and instead of relaying an earlier
+                # load balancer 503 that would claim nothing reached the
+                # backend.
+                logger.warning(
+                    "Upstream %s failed on attempt %d; not replaying a mutating request",
+                    method,
+                    attempt + 1,
+                )
+                last_response = None
+                break
             logger.warning(
                 "Upstream %s failed on attempt %d/%d",
                 method,

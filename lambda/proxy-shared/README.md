@@ -41,7 +41,11 @@ Forwards an HTTPS request within one deadline using the strict private-root
 connection pool returned by `backend_tls.get_backend_http_pool()`. Only safe
 read-only methods (`GET`, `HEAD`, `OPTIONS`) retry 429/502/503/504 or transport
 timeouts with bounded exponential backoff; mutating methods are attempted
-exactly once. TLS failures return bounded errors without exposing trust state.
+exactly once, except after the ALB's own `503 Service Temporarily Unavailable`
+page (`_is_load_balancer_503`: exact body, `Server` header absent or
+`awselb/2.0`), which the load balancer serves before selecting a target and
+therefore proves the write never reached the backend. TLS failures return
+bounded errors without exposing trust state.
 
 ### `build_target_url(endpoint, path, query_params)`
 

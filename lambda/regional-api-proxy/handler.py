@@ -14,7 +14,9 @@ Environment variables:
     ALB_ENDPOINT: Optional literal ALB DNS name for compatibility/isolated use.
     REGIONAL_ENDPOINT_CACHE_TTL_SECONDS: Registry cache TTL, bounded to 0-300
         seconds (default: 60; 0 disables caching).
-    PROXY_MAX_RETRIES: Max attempts for safe read-only methods (default: 3).
+    PROXY_MAX_RETRIES: Max attempts per request (default: 3). Read-only
+        methods spend them on any retryable answer; mutating methods only on
+        the ALB's own 503 page, served before a target is selected.
     PROXY_RETRY_BACKOFF_BASE: Base retry backoff in seconds (default: 0.3).
     SECRET_CACHE_TTL_SECONDS: Signing-key cache TTL in seconds (default: 300).
     BACKEND_TLS_SERVER_NAME: Private certificate identity asserted via SNI.
