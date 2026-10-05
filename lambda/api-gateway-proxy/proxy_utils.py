@@ -18,8 +18,8 @@ import urllib3
 from backend_tls import get_backend_http_pool
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-29T11:35:23Z
-# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
+# Generated at (UTC): 2026-10-05T01:20:02Z
+# Generated from Git commit: d0400a273ab7af4345ee9b4ee7c1900474019901
 # Flowchart(s) generated from this file:
 #   * ``build_signed_headers`` -> ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.png``)
