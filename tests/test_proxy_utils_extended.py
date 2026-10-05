@@ -7,7 +7,11 @@ unknown exceptions → 500 without retry, retryable statuses that
 persist through every attempt, hop-by-hop header stripping in
 _build_success_response, and body encoding (None vs string). Also
 exercises get_secret_token's thread-safe caching and the stale-cache
-fallback when Secrets Manager becomes unavailable.
+fallback when Secrets Manager becomes unavailable, and the replay rule
+for mutating methods: replayed only after the ALB's own 503 page
+(LOAD_BALANCER_503_PAGE, captured byte for byte from a real load
+balancer), never after a target's 503, an ALB 502/504, or a transport
+failure.
 """
 
 import json
@@ -75,6 +79,51 @@ def packaged_proxy_module(request):
         yield module
 
 
+# The load balancer's own 503 page, byte for byte as a real Application Load
+# Balancer with an empty target group served it (HTTP/1.1 503 Service
+# Temporarily Unavailable, Server: awselb/2.0, Content-Type: text/html,
+# Content-Length: 162). This is the only upstream answer a mutating request
+# may be replayed after: the load balancer produces it before selecting a
+# target, so the write never reached the backend.
+LOAD_BALANCER_503_PAGE = (
+    b"<html>\r\n"
+    b"<head><title>503 Service Temporarily Unavailable</title></head>\r\n"
+    b"<body>\r\n"
+    b"<center><h1>503 Service Temporarily Unavailable</h1></center>\r\n"
+    b"</body>\r\n"
+    b"</html>\r\n"
+)
+LOAD_BALANCER_503_HEADERS = {
+    "Server": "awselb/2.0",
+    "Date": "Mon, 05 Oct 2026 01:06:47 GMT",
+    "Content-Type": "text/html",
+    "Content-Length": "162",
+    "Connection": "keep-alive",
+}
+# nginx's default 503 page differs from the load balancer's by one line.
+NGINX_503_PAGE = LOAD_BALANCER_503_PAGE.replace(
+    b"</body>", b"<hr><center>nginx</center>\r\n</body>"
+)
+
+
+def _load_balancer_503(headers=None, data=LOAD_BALANCER_503_PAGE):
+    response = MagicMock()
+    response.status = 503
+    response.headers = dict(LOAD_BALANCER_503_HEADERS) if headers is None else headers
+    response.data = data
+    return response
+
+
+def _target_response(status, data, headers=None):
+    response = MagicMock()
+    response.status = status
+    response.headers = {"Server": "uvicorn", "Content-Type": "application/json"}
+    if headers is not None:
+        response.headers = headers
+    response.data = data
+    return response
+
+
 class TestPackagedProxyHelperContract:
     """Keep URL encoding and request-budget behavior aligned in all copies."""
 
@@ -129,6 +178,29 @@ class TestPackagedProxyHelperContract:
     def test_rejects_plaintext_and_non_443_targets(self, packaged_proxy_module, target_url):
         with pytest.raises(ValueError, match="Backend proxy targets must use HTTPS on port 443"):
             packaged_proxy_module.forward_request(target_url, "GET", {}, None)
+
+    def test_mutating_requests_replay_only_the_load_balancers_own_503(self, packaged_proxy_module):
+        """Every packaged copy carries the same narrow exception to the no-replay rule."""
+        module = packaged_proxy_module
+        load_balancer_503 = _load_balancer_503()
+        target_503 = _target_response(503, b'{"detail":"not ready"}')
+        created = _target_response(201, b'{"id":"1"}')
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [load_balancer_503, target_503, created]
+
+        with patch.object(module, "_http", mock_http), patch.object(module.time, "sleep"):
+            # Load balancer 503 → replayed once → the target's 503 is relayed.
+            replayed = module.forward_request("https://example.com/api", "POST", {}, "{}")
+            assert mock_http.request.call_count == 2
+            # A target answered 201 on the only attempt.
+            relayed = module.forward_request("https://example.com/api", "POST", {}, "{}")
+            assert mock_http.request.call_count == 3
+
+        assert replayed["statusCode"] == 503
+        assert replayed["body"] == '{"detail":"not ready"}'
+        load_balancer_503.release_conn.assert_called_once()
+        target_503.release_conn.assert_not_called()
+        assert relayed["statusCode"] == 201
 
 
 class TestForwardRequestTimeout:
@@ -228,7 +300,7 @@ class TestForwardRequestRetryableStatus:
 
     @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
     def test_mutating_methods_never_retry(self, proxy_module, method):
-        """A transient response cannot replay a potentially mutating request."""
+        """A target's transient response cannot replay a potentially mutating request."""
         pu, _ = proxy_module
         response = MagicMock(status=503, headers={}, data=b"unavailable")
         mock_http = MagicMock()
@@ -242,6 +314,244 @@ class TestForwardRequestRetryableStatus:
         assert result["statusCode"] == 503
         assert mock_http.request.call_count == 1
         response.release_conn.assert_not_called()
+
+    @pytest.mark.parametrize("status", [429, 502, 504])
+    def test_mutating_methods_relay_other_retryable_statuses_unreplayed(self, proxy_module, status):
+        """502/504/429 are produced after a target was handed the request."""
+        pu, _ = proxy_module
+        response = MagicMock(
+            status=status, headers={"Server": "awselb/2.0"}, data=b"<html>gateway</html>"
+        )
+        mock_http = MagicMock()
+        mock_http.request.return_value = response
+
+        with patch.object(pu, "_http", mock_http):
+            result = pu.forward_request("https://example.com/api", "POST", {}, "{}")
+
+        assert result["statusCode"] == status
+        assert mock_http.request.call_count == 1
+        response.release_conn.assert_not_called()
+
+
+class TestIsLoadBalancer503:
+    """Only the load balancer's fixed 503 page classifies as load-balancer-generated."""
+
+    def test_real_page_with_load_balancer_server_header(self, proxy_module):
+        pu, _ = proxy_module
+        assert len(LOAD_BALANCER_503_PAGE) == 162
+        assert pu._is_load_balancer_503(_load_balancer_503()) is True
+
+    @pytest.mark.parametrize("server_value", ["awselb/2.0", "AWSELB/2.0", " awselb/2.0 "])
+    def test_server_header_value_is_matched_case_insensitively(self, proxy_module, server_value):
+        pu, _ = proxy_module
+        response = _load_balancer_503(headers={"server": server_value})
+        assert pu._is_load_balancer_503(response) is True
+
+    def test_page_without_server_header_still_classifies(self, proxy_module):
+        """Operators can disable the Server header on the listener."""
+        pu, _ = proxy_module
+        response = _load_balancer_503(headers={"Content-Type": "text/html"})
+        assert pu._is_load_balancer_503(response) is True
+
+    def test_headers_that_are_not_a_mapping_are_ignored(self, proxy_module):
+        pu, _ = proxy_module
+        response = _load_balancer_503(headers=MagicMock())
+        assert pu._is_load_balancer_503(response) is True
+
+    @pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"])
+    @pytest.mark.parametrize("trailing_newline", [True, False])
+    def test_page_line_endings_and_trailing_newline_are_tolerated(
+        self, proxy_module, line_ending, trailing_newline
+    ):
+        pu, _ = proxy_module
+        page = LOAD_BALANCER_503_PAGE.replace(b"\r\n", line_ending)
+        if not trailing_newline:
+            page = page.rstrip(b"\r\n")
+        assert pu._is_load_balancer_503(_load_balancer_503(data=page)) is True
+
+    @pytest.mark.parametrize("server_value", ["uvicorn", "nginx", "awselb/3.0", ""])
+    def test_other_server_headers_fail_closed(self, proxy_module, server_value):
+        pu, _ = proxy_module
+        response = _load_balancer_503(headers={"Server": server_value})
+        assert pu._is_load_balancer_503(response) is False
+
+    def test_target_json_503_is_not_the_load_balancer(self, proxy_module):
+        pu, _ = proxy_module
+        response = _target_response(503, b'{"detail":"Manifest processor not ready"}')
+        assert pu._is_load_balancer_503(response) is False
+
+    def test_target_without_server_header_but_json_body_is_not_the_load_balancer(
+        self, proxy_module
+    ):
+        """A Server: awselb/2.0 header alone never qualifies; the page does."""
+        pu, _ = proxy_module
+        response = _target_response(
+            503, b'{"detail":"not ready"}', headers={"Server": "awselb/2.0"}
+        )
+        assert pu._is_load_balancer_503(response) is False
+
+    def test_nginx_page_is_not_the_load_balancer(self, proxy_module):
+        pu, _ = proxy_module
+        response = _load_balancer_503(headers={}, data=NGINX_503_PAGE)
+        assert pu._is_load_balancer_503(response) is False
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b" " + LOAD_BALANCER_503_PAGE,
+            LOAD_BALANCER_503_PAGE + b"<!-- x -->",
+            LOAD_BALANCER_503_PAGE.replace(b"503", b"502"),
+            b"",
+        ],
+        ids=["prefix", "suffix", "other-status-text", "empty"],
+    )
+    def test_anything_but_the_exact_page_is_not_the_load_balancer(self, proxy_module, data):
+        pu, _ = proxy_module
+        assert pu._is_load_balancer_503(_load_balancer_503(data=data)) is False
+
+    @pytest.mark.parametrize("status", [200, 429, 502, 504])
+    def test_other_statuses_never_classify(self, proxy_module, status):
+        pu, _ = proxy_module
+        response = _load_balancer_503()
+        response.status = status
+        assert pu._is_load_balancer_503(response) is False
+
+    def test_oversized_or_non_bytes_bodies_fail_closed(self, proxy_module):
+        pu, _ = proxy_module
+        padded = LOAD_BALANCER_503_PAGE + b" " * (pu._LOAD_BALANCER_503_MAX_BODY_BYTES + 1)
+        assert pu._is_load_balancer_503(_load_balancer_503(data=padded)) is False
+        assert pu._is_load_balancer_503(_load_balancer_503(data=None)) is False
+        assert (
+            pu._is_load_balancer_503(_load_balancer_503(data=LOAD_BALANCER_503_PAGE.decode()))
+            is False
+        )
+
+    def test_bytearray_body_is_accepted(self, proxy_module):
+        pu, _ = proxy_module
+        response = _load_balancer_503(data=bytearray(LOAD_BALANCER_503_PAGE))
+        assert pu._is_load_balancer_503(response) is True
+
+
+class TestMutatingReplayAfterLoadBalancer503:
+    """A mutating request is replayed only after the load balancer's own 503."""
+
+    @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+    def test_load_balancer_503_is_replayed_then_succeeds(self, proxy_module, method):
+        pu, _ = proxy_module
+        first = _load_balancer_503()
+        created = _target_response(201, b'{"id":"job-1"}')
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [first, created]
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep") as sleep:
+            result = pu.forward_request(
+                "https://example.com/api/v1/manifests", method, {}, '{"manifests":[]}'
+            )
+
+        assert result["statusCode"] == 201
+        assert result["body"] == '{"id":"job-1"}'
+        assert mock_http.request.call_count == 2
+        first.release_conn.assert_called_once()
+        sleep.assert_called_once_with(pytest.approx(pu._RETRY_BACKOFF_BASE))
+        # The replay is byte-identical to the first attempt: same method,
+        # URL, signed headers, and body.
+        assert mock_http.request.call_args_list[0].args == mock_http.request.call_args_list[1].args
+        assert (
+            mock_http.request.call_args_list[0].kwargs["body"]
+            == mock_http.request.call_args_list[1].kwargs["body"]
+            == b'{"manifests":[]}'
+        )
+
+    def test_persistent_load_balancer_503_is_relayed_after_the_attempt_budget(self, proxy_module):
+        pu, _ = proxy_module
+        responses = [_load_balancer_503() for _ in range(pu._MAX_RETRIES)]
+        mock_http = MagicMock()
+        mock_http.request.side_effect = responses
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request("https://example.com/api", "POST", {}, "{}")
+
+        assert result["statusCode"] == 503
+        assert result["body"] == LOAD_BALANCER_503_PAGE.decode()
+        assert result["headers"]["Server"] == "awselb/2.0"
+        assert mock_http.request.call_count == pu._MAX_RETRIES
+        for response in responses[:-1]:
+            response.release_conn.assert_called_once()
+        responses[-1].release_conn.assert_not_called()
+
+    def test_target_503_after_a_load_balancer_503_is_relayed_unreplayed(self, proxy_module):
+        """Once a target has answered, the request is not replayed again."""
+        pu, _ = proxy_module
+        first = _load_balancer_503()
+        second = _target_response(503, b'{"detail":"Manifest processor not ready"}')
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [first, second]
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request("https://example.com/api", "POST", {}, "{}")
+
+        assert result["statusCode"] == 503
+        assert result["body"] == '{"detail":"Manifest processor not ready"}'
+        assert result["headers"]["Server"] == "uvicorn"
+        assert mock_http.request.call_count == 2
+        second.release_conn.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("error", "expected_status", "expected_error"),
+        [
+            (urllib3.exceptions.TimeoutError("read timed out"), 504, "Gateway timeout"),
+            (
+                urllib3.exceptions.MaxRetryError(pool=None, url="https://example.com"),
+                503,
+                "Service unavailable",
+            ),
+        ],
+    )
+    def test_transport_failure_after_a_load_balancer_503_is_reported_not_masked(
+        self, proxy_module, error, expected_status, expected_error
+    ):
+        """The replay may have been applied, so the earlier 503 page is not relayed."""
+        pu, _ = proxy_module
+        first = _load_balancer_503()
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [first, error]
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request("https://example.com/api", "POST", {}, "{}")
+
+        assert result["statusCode"] == expected_status
+        assert json.loads(result["body"]) == {
+            "error": expected_error,
+            "message": "Upstream failed after 2 attempt(s)",
+        }
+        assert mock_http.request.call_count == 2
+
+    def test_transport_failure_on_the_first_attempt_is_not_replayed(self, proxy_module):
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = urllib3.exceptions.TimeoutError("read timed out")
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep") as sleep:
+            result = pu.forward_request("https://example.com/api", "POST", {}, "{}")
+
+        assert result["statusCode"] == 504
+        assert json.loads(result["body"])["message"] == "Upstream failed after 1 attempt(s)"
+        assert mock_http.request.call_count == 1
+        sleep.assert_not_called()
+
+    def test_read_only_requests_keep_replaying_every_retryable_answer(self, proxy_module):
+        """GET does not consult the classifier: a target 503 is still retried."""
+        pu, _ = proxy_module
+        first = _target_response(503, b'{"detail":"not ready"}')
+        ok = _target_response(200, b'{"ok":true}')
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [first, ok]
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
+
+        assert result["statusCode"] == 200
+        assert mock_http.request.call_count == 2
 
     def test_429_retries_then_succeeds(self, proxy_module):
         """429 should retry and succeed if next attempt returns 200."""

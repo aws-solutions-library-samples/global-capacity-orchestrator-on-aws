@@ -207,9 +207,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "lambda/api-gateway-proxy/handler.py": {
-      "digest": "cc9ad33fc04e077bdb7fb704f5809f2ef00c77e1286501b1672fdb9b4d4a89c2",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "8390959dedda1306cfb15e0f581520382e5aecdcd3faf2041481cc5c2adfbe2a",
+      "generated_at": "2026-10-05T01:20:02Z",
+      "source_commit": "d0400a273ab7af4345ee9b4ee7c1900474019901"
     },
     "lambda/capacity-poller/handler.py": {
       "digest": "ef57d25bfd9baf34db568742553756ae99fb79de50ca844af4ed777e561c96db",
@@ -257,14 +257,14 @@
       "source_commit": "95213a3dfe214f41ea8e3977b79711b1be061ac0"
     },
     "lambda/proxy-shared/proxy_utils.py": {
-      "digest": "f14c1b41e97d99ae95193ea4b3988cdf61c09c0d6ee20abd5694756eb4f75686",
-      "generated_at": "2026-09-29T11:35:23Z",
-      "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
+      "digest": "3fffa97959087ea62029067750bf7fae8d1c2dd181e6b829de70ccfeaeed1b16",
+      "generated_at": "2026-10-05T01:20:02Z",
+      "source_commit": "d0400a273ab7af4345ee9b4ee7c1900474019901"
     },
     "lambda/regional-api-proxy/handler.py": {
-      "digest": "bb228885aa82fa5931607f0e5155e97a927bbe4652e6dee2d632bc727aea0c27",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "c2bfee02f3509616210686438e8a75518787f229ca8e694c9d28fd6be055edbe",
+      "generated_at": "2026-10-05T01:20:02Z",
+      "source_commit": "d0400a273ab7af4345ee9b4ee7c1900474019901"
     },
     "lambda/secret-rotation/handler.py": {
       "digest": "ae97df80b16c6a581ad15b3b9436f03e36c1d1a235dbc456d95e18e1f2e3d4c1",

@@ -34,7 +34,14 @@ API Gateway (proxy integration) — all routes are forwarded through this Lambda
 
 Only safe read-only methods (`GET`, `HEAD`, `OPTIONS`) use bounded exponential
 backoff for 429/502/503/504 or transport timeouts. Mutating methods are attempted
-once so the proxy cannot duplicate a successful write whose response was lost.
+once so the proxy cannot duplicate a successful write whose response was lost,
+with one narrow exception: the ALB's own `503 Service Temporarily Unavailable`
+page, which the load balancer serves before selecting a target when it has none
+to hand the request to. That write provably never reached the backend, so the
+proxy replays it within the same attempt budget. The page is recognized by its
+exact body, and any `Server` header must be `awselb/2.0`; a target's 503, an ALB
+502/504 (produced after a target was selected), and transport failures are still
+never replayed.
 
 ## Input
 
@@ -50,7 +57,7 @@ API Gateway proxy response (statusCode, headers, body).
 |----------|----------|-------------|
 | `GLOBAL_ACCELERATOR_ENDPOINT` | Yes | DNS name of the Global Accelerator |
 | `SECRET_ARN` | Yes | ARN of the Secrets Manager secret containing the backend HMAC signing key |
-| `PROXY_MAX_RETRIES` | No | Max attempts for safe read-only methods (default: 3) |
+| `PROXY_MAX_RETRIES` | No | Max attempts per request (default: 3); read-only methods spend them on any retryable answer, mutating methods only on the ALB's own 503 page |
 | `PROXY_RETRY_BACKOFF_BASE` | No | Base backoff in seconds (default: 0.3) |
 | `SECRET_CACHE_TTL_SECONDS` | No | Normal signing-key cache TTL in seconds (default: 300) |
 | `SECRET_CACHE_MAX_STALE_SECONDS` | No | Maximum bounded stale-key age during refresh failures (default: 900) |

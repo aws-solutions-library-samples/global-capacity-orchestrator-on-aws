@@ -156,7 +156,7 @@ rendered as spec sheets and as the interaction diagram in
 - Never transmits the reusable signing key
 - Uses strict private-root TLS through Global Accelerator with explicit SNI/hostname assertion when the deployment partition is `aws`
 - Is not created outside `aws`; regional VPC proxies provide the equivalent HMAC and private-root TLS hop
-- Retries only safe read-only methods
+- Retries only safe read-only methods, plus one proven-safe case for mutating methods: the ALB's own 503 page, which the load balancer serves before selecting a target
 
 **Cross-Region Aggregator**
 

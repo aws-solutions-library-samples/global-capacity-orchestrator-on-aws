@@ -17,7 +17,9 @@ Environment variables:
     BACKEND_TLS_SERVER_NAME: Private certificate identity asserted via SNI.
     BACKEND_TLS_ROOT_CA_PARAMETER: SSM parameter containing public CA roots.
     BACKEND_TLS_ROOT_CA_REGION: Region containing the public trust parameter.
-    PROXY_MAX_RETRIES: Max attempts for safe read-only methods (default: 3).
+    PROXY_MAX_RETRIES: Max attempts per request (default: 3). Read-only
+        methods spend them on any retryable answer; mutating methods only on
+        the ALB's own 503 page, served before a target is selected.
     PROXY_RETRY_BACKOFF_BASE: Base retry backoff in seconds (default: 0.3).
     SECRET_CACHE_TTL_SECONDS: Signing-key cache TTL in seconds (default: 300).
 """
@@ -35,8 +37,8 @@ from proxy_utils import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-10-05T01:20:02Z
+# Generated from Git commit: d0400a273ab7af4345ee9b4ee7c1900474019901
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.png``)
