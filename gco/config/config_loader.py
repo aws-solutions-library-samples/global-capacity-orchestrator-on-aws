@@ -1582,7 +1582,7 @@ class ConfigLoader:
 
     def get_kubernetes_version(self) -> str:
         """Get Kubernetes version from configuration"""
-        return self.app.node.try_get_context("kubernetes_version") or "1.36"
+        return self.app.node.try_get_context("kubernetes_version") or "1.37"
 
     def get_resource_thresholds(self) -> ResourceThresholds:
         """Get resource thresholds configuration"""

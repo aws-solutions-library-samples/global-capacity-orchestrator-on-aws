@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from kubernetes import client as kubernetes_client
 
+from gco.k8s_api_versions import METRICS_API_GROUP, METRICS_API_VERSION
 from gco.models import ManifestSubmissionRequest
 from gco.services.api_shared import (
     BulkDeleteRequest,
@@ -512,8 +513,8 @@ async def get_job_metrics(namespace: str, name: str) -> Response:
             for pod in pods.items:
                 try:
                     metrics = processor.custom_objects.get_namespaced_custom_object(
-                        group="metrics.k8s.io",
-                        version="v1beta1",
+                        group=METRICS_API_GROUP,
+                        version=METRICS_API_VERSION,
                         namespace=namespace,
                         plural="pods",
                         name=pod.metadata.name,

@@ -193,7 +193,7 @@ maintainer records the scheduling decision.
 ## Upgrading the EKS Kubernetes version
 
 The version lives in one place — `cdk.json` `context.kubernetes_version` (for
-example `1.36`) — and flows through `gco/config/config_loader.py`
+example `1.37`) — and flows through `gco/config/config_loader.py`
 (`get_kubernetes_version()`) into `GCORegionalStack`, which resolves it to
 `eks.KubernetesVersion.V1_<minor>` (falling back to `.of()` if the installed
 `aws-cdk-lib` does not yet expose that enum). Several pinned tools track the
@@ -208,12 +208,24 @@ shipping a skew.
    then regenerate the lock through the container exactly as described in
    [Updating a dependency](#updating-a-dependency) step 3 — don't run
    `pip-compile` against your host Python; the flags and platform differ from
-   what CI's staleness check expects.
+   what CI's staleness check expects. The same pin is restated in
+   `lambda/kubectl-applier-simple/requirements.txt`; move it in the same
+   change (`test_lambda_requirements_match_pyproject` fails otherwise).
+   kubernetes-client/python publishes the new client weeks after the
+   Kubernetes release, so the cluster may move first: the guard allows the
+   client to trail the cluster by one minor (see
+   [Version-skew rules](#version-skew-rules)), and the monthly dependency
+   scan reports that lag under **Version Consistency** until the pin catches
+   up. Do not pin a pre-release to close the gap.
 3. `gco/stacks/constants.py` — update the five `EKS_ADDON_*` constants to builds
    published for the new minor (see [validating add-ons](#validating-add-on-versions)).
-4. Confirm the pinned `aws-cdk-lib` exposes `eks.KubernetesVersion.V1_<minor>`.
-   If it does not, bump `aws-cdk-lib` in `pyproject.toml` and re-lock; otherwise
-   the stack silently uses the `.of()` fallback.
+4. Check whether the pinned `aws-cdk-lib` exposes
+   `eks.KubernetesVersion.V1_<minor>`. The enum usually trails a new EKS minor
+   by a release or two, and that is expected and harmless: `GCORegionalStack`
+   falls back to `eks.KubernetesVersion.of("<minor>")`, which renders the same
+   `AWS::EKS::Cluster` `Version`, and `tests/test_regional_stack.py` asserts
+   the synthesized template carries the `cdk.json` minor either way. Do not
+   bump `aws-cdk-lib` just to get the enum member.
 5. kubectl pins — bump to a patch of the new minor in the two committed spots,
    staying within one minor of the cluster:
    - `lambda/helm-installer/Dockerfile` — the `dl.k8s.io/release/...` URL and
@@ -235,12 +247,32 @@ shipping a skew.
    `RUN` line is the single source: workflows derive `HELM_VERSION` /
    `HELM_SHA256` from it exactly as with kubectl, guarded by the same test.
 7. `.github/workflows/integration-tests.yml` — bump the workflow-level
-   `KIND_NODE_IMAGE` env (`kindest/node:v<minor>.<patch>`) so CI exercises the
-   new control plane; both kind-based jobs read it from there.
+   `KIND_NODE_IMAGE` env so CI exercises the new control plane; every
+   kind-based job reads it from there. Copy the full
+   `kindest/node:v<minor>.<patch>@sha256:<digest>` reference from the release
+   notes of the pinned `KIND_VERSION`: kind builds node images per kind
+   release and re-pushes the same version tag each time, so a tag that
+   exists on Docker Hub is not necessarily built for the pinned kind, and a
+   tag-only pin names a different image after every kind release.
+   `test_kind_examples_smoke_issues_the_shipped_internal_pki` requires the digest form;
+   the monthly scan checks the digest still matches the tag (**Docker
+   Images**), the tag for a newer patch in the same minor (**CI tooling**),
+   and reports a pin that lost its digest (**Version consistency**). Move
+   `CALICO_VERSION` and
+   `CALICO_SHA256` alongside it to a Calico release whose requirements page
+   lists the new minor as tested; the checksum is `sha256sum` over
+   `https://raw.githubusercontent.com/projectcalico/calico/<tag>/manifests/calico.yaml`.
 8. `.github/config/.trivyignore` — revisit any suppressions tied to the old
    kubectl/helm binaries; several entries clear once the pins move.
 9. `tests/test_config_loader.py` and `tests/test_config_loader_validation.py` —
    update the hardcoded default minor.
+
+Nothing to change for the manifest schema gate: `integration:k8s:manifest-schema`
+validates against `<kubernetes_version>.0` schemas read from `cdk.json`
+(`kubernetes_schema_version()` in `.github/scripts/validate_k8s_manifests.py`),
+so step 1 moves it. kubeconform fetches those schemas from
+yannh/kubernetes-json-schema, which carries every upstream `vX.Y.0` well
+before EKS offers the minor.
 
 ### Validating add-on versions
 
@@ -261,6 +293,16 @@ for addon in eks-pod-identity-agent metrics-server aws-efs-csi-driver \
 done
 ```
 
+When the `metrics-server` pin moves past the `v0.9` line, re-check which
+resource-metrics API versions the new release registers
+(`pkg/api/install.go` in `kubernetes-sigs/metrics-server`): `v0.9.x` serves
+only `metrics.k8s.io/v1beta1`, upstream `master` also registers `v1` (GA in
+Kubernetes 1.37), so a `v0.10.x` build is expected to carry it. The health
+monitor and the Job metrics endpoint read the version from
+`METRICS_API_VERSION` in `gco/k8s_api_versions.py`; flip it to `v1` in that one
+place. `tests/test_k8s_api_versions.py` fails on a `v0.10+` pin while the
+constant still says `v1beta1`, as the reminder.
+
 ### Version-skew rules
 
 - **kubectl** pins in `Dockerfile.dev` and the helm-installer image must match
@@ -268,8 +310,19 @@ done
   skew policy). Enforced by
   `tests/test_integration.py::test_kubectl_versions_follow_eks_skew_policy`.
 - **kubernetes Python client**: its major must equal the cluster minor
-  (`kubernetes==36.x` ↔ EKS `1.36`). Enforced by
-  `tests/test_integration.py::test_kubernetes_python_client_matches_eks_version`.
+  (`kubernetes==37.x` ↔ EKS `1.37`) or trail it by exactly one
+  (`kubernetes==36.x` on EKS `1.37`). kubernetes-client/python documents that
+  a client one version behind the server works for every API the two have in
+  common, and GCO uses only GA core APIs, so the one-minor lag is safe while
+  upstream has no stable release for the new minor. A client ahead of the
+  cluster, or two or more minors behind, fails. Enforced by
+  `tests/test_integration.py::test_kubernetes_python_client_matches_eks_version`;
+  the lag itself is reported by the monthly dependency scan's **Version
+  Consistency** section until the pin is bumped. Closing it is a one-line
+  change in `pyproject.toml` (the `kubernetes==` pin appears in the base
+  dependencies and in the extras that restate it) and
+  `lambda/kubectl-applier-simple/requirements.txt`, plus the container
+  re-lock of `requirements-lock.txt`.
 
 ### Deploy and verify
 
@@ -766,9 +819,10 @@ There is no auto-retry wrapper — a flake is treated as a bug, not hidden.
   and therefore need no external SHA. Hand-installed CI tools — Trivy (the
   `install-trivy` action's `version` default), Helm and kubectl (derived at
   runtime from the `lambda/helm-installer/Dockerfile` pins), and the kind node
-  image (`KIND_NODE_IMAGE` in `integration-tests.yml`) — are tracked by the
-  scan's **CI tooling** and **Version consistency** rows, so a pin that must
-  move in lockstep across files is caught there.
+  image (`KIND_NODE_IMAGE` in `integration-tests.yml`, pinned by tag and
+  digest) — are tracked by the scan's **CI tooling** and **Version
+  consistency** rows (and, for the node image's digest, **Docker Images**), so
+  a pin that must move in lockstep across files is caught there.
 - On an EKS bump the kind `node_image` moves too — see
   [Upgrading the EKS Kubernetes version](#upgrading-the-eks-kubernetes-version).
 

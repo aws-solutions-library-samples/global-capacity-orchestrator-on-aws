@@ -66,9 +66,12 @@ permissions:
 # scoped to their one job on purpose.
 env:
   KIND_VERSION: "v0.33.0"
-  KIND_NODE_IMAGE: "kindest/node:v1.36.4"
-  CALICO_VERSION: "v3.32.2"
-  CALICO_SHA256: "a8c828a06a87c629a282ebbc424895b77f3a030251993e41ea400a743675bb02"
+  # Tag AND digest, the form kind's release notes publish: kind rebuilds and
+  # re-pushes the same version tag for every kind release, so the tag alone
+  # names a different image after each one. The digest is the v0.33.0 build.
+  KIND_NODE_IMAGE: "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+  CALICO_VERSION: "v3.33.0"
+  CALICO_SHA256: "2de8f47595fb9c41b3f47d7b767a1f8e72ecf84057af834738ff12689a234da5"
 
 jobs:
   integration-helm-charts-valid:

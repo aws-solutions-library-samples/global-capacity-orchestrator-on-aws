@@ -27,6 +27,7 @@ from hypothesis import strategies as st
 
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.regional_stack import (
+    _LARGE_MEMORY_NODE_AFFINITY,
     _OBSERVABILITY_STORAGE_CLASS,
     _compute_kubectl_observability_replacements,
 )
@@ -277,7 +278,73 @@ def test_static_grafana_values_leave_the_injected_keys_to_the_stack() -> None:
     """The installer replaces non-mapping values on merge; charts.yaml must not own them."""
     with open(_CHARTS_YAML, encoding="utf-8") as handle:
         grafana = yaml.safe_load(handle)["charts"]["kube-prometheus-stack"]["values"]["grafana"]
-    assert not {"extraContainers", "extraContainerVolumes", "nodeSelector"} & set(grafana)
+    assert not {"extraContainers", "extraContainerVolumes", "nodeSelector", "affinity"} & set(
+        grafana
+    )
+
+
+# --- node affinity: the memory-heavy singletons need more than a 4 GiB node ---
+#
+# Three EKS 1.37 live validations in a row failed on whichever 2 vCPU / 4 GiB
+# general-purpose node hosted Grafana, Prometheus or MLflow next to the ~1 GiB
+# Bottlerocket host footprint: memory reclaim evicted the host daemons' text
+# pages, kernel time saturated the node, and every probe on it timed out.
+# Requests alone did not move them off 4 GiB instances, so the stack pins the
+# three to instances with more than 4 GiB through the Auto Mode well-known
+# label. It is a stack value, not a charts.yaml one: the label does not exist
+# on kind nodes, where CI installs the same charts with the shipped values.
+
+_EXPECTED_AFFINITY = {
+    "nodeAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": {
+            "nodeSelectorTerms": [
+                {
+                    "matchExpressions": [
+                        {
+                            "key": "eks.amazonaws.com/instance-memory",
+                            "operator": "Gt",
+                            "values": ["4096"],
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}
+
+
+def test_grafana_and_prometheus_require_an_instance_with_more_than_4gib(
+    valid_cdk_context,
+) -> None:
+    values = RS._observability_chart_values(_stub(valid_cdk_context, enabled=True))["values"]
+    assert values["grafana"]["affinity"] == _EXPECTED_AFFINITY
+    assert values["prometheus"]["prometheusSpec"]["affinity"] == _EXPECTED_AFFINITY
+    # Alertmanager (~25Mi, and the operator already requests 200Mi for it)
+    # may run anywhere.
+    assert "affinity" not in values["alertmanager"]["alertmanagerSpec"]
+    # node-exporter is a DaemonSet: it must stay on every node.
+    assert "affinity" not in values["prometheus-node-exporter"]
+
+
+def test_large_memory_affinity_is_a_hard_requirement_on_the_auto_mode_label() -> None:
+    affinity = _LARGE_MEMORY_NODE_AFFINITY
+    assert set(affinity) == {"nodeAffinity"}
+    assert set(affinity["nodeAffinity"]) == {"requiredDuringSchedulingIgnoredDuringExecution"}
+    (term,) = affinity["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][
+        "nodeSelectorTerms"
+    ]
+    (expression,) = term["matchExpressions"]
+    # Gt takes exactly one integer-valued string; 4096 MiB is the 4 GiB node.
+    assert expression["operator"] == "Gt"
+    assert expression["key"].startswith("eks.amazonaws.com/")
+    assert [int(value) for value in expression["values"]] == [4096]
+
+
+def test_static_prometheus_values_leave_the_affinity_to_the_stack() -> None:
+    with open(_CHARTS_YAML, encoding="utf-8") as handle:
+        values = yaml.safe_load(handle)["charts"]["kube-prometheus-stack"]["values"]
+    assert "affinity" not in values["prometheus"]["prometheusSpec"]
+    assert "affinity" not in values["alertmanager"]["alertmanagerSpec"]
 
 
 # --- property: chart + gp3 StorageClass invariant (CP-2) ---------------------
@@ -503,6 +570,40 @@ def test_grafana_rolls_out_by_recreate_because_its_volume_is_read_write_once(kps
     grafana = kps_entry["values"]["grafana"]
     assert grafana["persistence"]["accessModes"] == ["ReadWriteOnce"]
     assert grafana["deploymentStrategy"] == {"type": "Recreate"}
+
+
+def _mebibytes(quantity: str) -> int:
+    units = {"Mi": 1, "Gi": 1024}
+    for suffix, factor in units.items():
+        if quantity.endswith(suffix):
+            return int(quantity[: -len(suffix)]) * factor
+    raise AssertionError(f"unexpected memory quantity {quantity!r}")
+
+
+def test_grafana_and_prometheus_carry_scheduling_requests_but_no_limits(kps_entry) -> None:
+    """Regression: the chart ships Grafana and Prometheus with no requests.
+
+    Two EKS 1.37 live release validations failed because the scheduler, seeing
+    them as free, packed them onto the densest 2-vCPU/4 GiB node, which then
+    thrashed (kernel-time saturation, ~23k major faults/s) until Grafana's
+    readiness and Prometheus' answers to OpenCost timed out. Requests give the
+    scheduler the memory they actually use; limits stay off so a busy scrape
+    set cannot OOM-kill Prometheus and Grafana's first-boot migrations are not
+    CPU-throttled past the liveness budget.
+    """
+    values = kps_entry["values"]
+    grafana_resources = values["grafana"]["resources"]
+    prometheus_resources = values["prometheus"]["prometheusSpec"]["resources"]
+    for resources in (grafana_resources, prometheus_resources):
+        assert set(resources) == {"requests"}, resources
+        assert set(resources["requests"]) == {"cpu", "memory"}, resources
+    assert _mebibytes(grafana_resources["requests"]["memory"]) >= 512
+    assert _mebibytes(prometheus_resources["requests"]["memory"]) >= 1024
+    # The Prometheus Operator already defaults Alertmanager to a 200Mi memory
+    # request; charts.yaml must not override it with something smaller.
+    alertmanager_resources = values["alertmanager"]["alertmanagerSpec"].get("resources")
+    if alertmanager_resources is not None:
+        assert _mebibytes(alertmanager_resources["requests"]["memory"]) >= 200
 
 
 # --- ServiceMonitors for scheduler/operator components -----------------------

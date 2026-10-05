@@ -5,6 +5,7 @@ This module provides common fixtures used across multiple test modules,
 including mock Kubernetes clients, sample manifests, and configuration objects.
 """
 
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,52 @@ from gco.models import (
     ResourceThresholds,
     ResourceUtilization,
 )
+
+# ============================================================================
+# Process-wide: no ambient AWS credentials reach the test process
+# ============================================================================
+#
+# CI runs the suite with no AWS credentials at all, so any boto3 call a test
+# leaves unmocked fails fast with NoCredentialsError there. A developer
+# machine is different: ``~/.aws/credentials``, ``AWS_PROFILE``, exported
+# keys, or an SSO cache give that same unmocked call a real identity. Caught
+# live on 2026-10-04: ``tests/test_stacks.py`` run from a shell with
+# administrator credentials, while a live-validation deployment was up,
+# drove ``StackManager.destroy_orchestrated`` through two tests whose class
+# was exempt from the sweep guard below but mocked only the SG helpers. The
+# real implicit log-group sweep deleted the live stacks' Lambda, EKS and
+# Container Insights log groups (28 ``DeleteLogGroup`` calls in CloudTrail)
+# and the real bastion sweep terminated an operator's SSM bastion; the
+# validation harness then refused to tear the deployment down because the
+# log-group generations it had checkpointed were gone.
+#
+# Make every pytest process look like CI before anything else imports boto3:
+# drop the credential and profile variables, point the shared credentials
+# and config files at paths that do not exist, and disable the instance
+# metadata credential provider. The CI job's default Region is mirrored so a
+# client built without an explicit Region behaves the same here as there.
+# Tests that need credentials set their own (``tests/_floci.py`` installs the
+# emulator session's throwaway key over these; ``test_addons_cli.py`` and
+# friends export ``testing``), which nests over this and wins.
+for _variable in (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_BEARER_TOKEN_BEDROCK",
+):
+    os.environ.pop(_variable, None)
+_NO_AWS_FILE = str(Path(__file__).resolve().parent / ".no-aws-credentials-in-tests")
+os.environ["AWS_SHARED_CREDENTIALS_FILE"] = _NO_AWS_FILE
+os.environ["AWS_CONFIG_FILE"] = _NO_AWS_FILE
+os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
+os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+os.environ.setdefault("AWS_REGION", "us-east-1")
 
 # tests/_floci.py hosts the session fixtures for the opt-in Floci emulator
 # layer (see docs/FLOCI_TESTING.md). Registering it as a plugin makes those
@@ -160,29 +207,69 @@ def _no_real_mission_memory():
 # Function-scoped: never make real AWS calls from the destroy-cleanup helpers
 # ============================================================================
 #
-# ``StackManager.destroy_orchestrated`` invokes three boto3-backed cleanup
-# helpers — ``_cleanup_backup_vault`` (deletes backup recovery points),
-# ``_start_eks_sg_watchdog`` (spawns a thread that polls EC2), and
-# ``_cleanup_eks_security_groups`` (deletes EKS-owned SGs + their ENIs).
-# Orchestration tests that mock ``destroy`` / ``list_stacks`` but not these
-# helpers otherwise fire real AWS calls: slow and non-hermetic, and outright
-# destructive if ``config.project_name`` resolved to a live value. No-op them
-# for every test except the classes that exercise them directly (those mock
-# boto3 themselves); tests that assert these methods were called still patch
-# them locally, so their patch nests over this one and wins.
-_DESTROY_CLEANUP_OWNERS = {
-    "TestCleanupBackupVault",
-    "TestEksSecurityGroupCleanup",
-    "TestCleanupEksSecurityGroups",
-    "TestEksSgWatchdog",
-    "TestImplicitLogGroupCleanup",
-    "TestBastionIamCleanup",
-    "TestTrafficDialParameterCleanup",
-    "TestClusterVolumeCleanup",
+# ``StackManager.destroy_orchestrated`` runs a set of boto3/AWS-CLI-backed
+# sweeps around the stack deletions: the image-registry preflight, the
+# ephemeral-bastion sweep (EC2 TerminateInstances), the backup-vault purge,
+# the EKS security-group watchdog and its final pass, the implicit log-group
+# sweep (CloudWatch DeleteLogGroup on every Lambda/EKS/Container Insights
+# group the stacks imply), bastion IAM retirement, the traffic-dial SSM purge,
+# and the post-regional EBS volume sweep. Orchestration tests that mock
+# ``destroy`` / ``list_stacks`` but not these helpers otherwise fire real AWS
+# calls: slow and non-hermetic, and outright destructive when
+# ``config.project_name`` resolves to a live value (see the credential scrub
+# at the top of this module for the day that happened).
+#
+# Every helper is no-oped for every test, except the exact helpers a test
+# class (or module-level test) owns and exercises for real with its own boto3
+# mocks. The map is per helper, not per class: a class that owns the SG
+# watchdog still gets the log-group and bastion sweeps stubbed, which is the
+# gap the 2026-10-04 incident fell through. Tests that assert one of these
+# methods was called still patch it locally, so their patch nests over this
+# one and wins.
+_DESTROY_CLEANUP_STUBS: dict[str, object] = {
+    "_image_registry_destroy_preflight": True,
+    "cleanup_orphaned_bastions": 0,
+    "_cleanup_backup_vault": None,
+    "_cleanup_eks_security_groups": None,
+    "_start_eks_sg_watchdog": MagicMock(),
+    "_collect_implicit_log_groups": {},
+    "_cleanup_implicit_log_groups": {"deleted": [], "missing": [], "errors": []},
+    "_cleanup_bastion_iam": {"completed_steps": 0, "absent_steps": 0, "errors": []},
+    "_cleanup_traffic_dial_parameters": {"deleted": [], "errors": []},
+    # The post-regional EBS sweep calls EC2 DeleteVolume. Left real, an
+    # orchestration test that names a live regional stack would destroy that
+    # cluster's Prometheus/Grafana data — the most destructive helper here.
+    "_cleanup_cluster_volumes": {"deleted": [], "surviving": [], "errors": []},
+}
+# Owner -> the helpers it exercises for real. An owner is a test class name,
+# a module-level test function name, or a test module name (its file stem);
+# a test unions the helpers of every key that applies to it.
+_DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
+    "TestImageRegistryDestroyPreflight": frozenset({"_image_registry_destroy_preflight"}),
+    # Drives destroy() into the real preflight against a cdk.json it writes.
+    "test_stacks_image_registry_destroy": frozenset({"_image_registry_destroy_preflight"}),
+    "TestCleanupOrphanedBastions": frozenset({"cleanup_orphaned_bastions"}),
+    "test_cleanup_orphaned_bastions_filters_stacks_and_parallelizes": frozenset(
+        {"cleanup_orphaned_bastions"}
+    ),
+    "test_cleanup_orphaned_bastions_default_strict_and_empty_inputs": frozenset(
+        {"cleanup_orphaned_bastions"}
+    ),
+    "TestCleanupBackupVault": frozenset({"_cleanup_backup_vault"}),
+    "TestEksSecurityGroupCleanup": frozenset({"_cleanup_eks_security_groups"}),
+    "TestCleanupEksSecurityGroups": frozenset({"_cleanup_eks_security_groups"}),
+    "TestEksSgWatchdog": frozenset({"_start_eks_sg_watchdog", "_cleanup_eks_security_groups"}),
+    "TestImplicitLogGroupCleanup": frozenset(
+        {"_collect_implicit_log_groups", "_cleanup_implicit_log_groups"}
+    ),
+    "TestBastionIamCleanup": frozenset({"_cleanup_bastion_iam"}),
+    "TestTrafficDialParameterCleanup": frozenset({"_cleanup_traffic_dial_parameters"}),
+    "TestClusterVolumeCleanup": frozenset({"_cleanup_cluster_volumes"}),
     # Floci layer: drives the real method against the local emulator, so the
     # no-op stub would defeat the entire point of the module.
-    "TestClusterVolumeSweepOverTheWire",
-    "TestDestroyOrchestratedImplicitCleanupWiring",
+    "TestClusterVolumeSweepOverTheWire": frozenset({"_cleanup_cluster_volumes"}),
+    # Patches every sweep itself to assert the wiring; owns none for real.
+    "TestDestroyOrchestratedImplicitCleanupWiring": frozenset(),
 }
 
 
@@ -226,45 +313,19 @@ def _no_real_stuck_stack_precheck(request):
 
 @pytest.fixture(autouse=True)
 def _no_real_destroy_cleanup_aws_calls(request):
-    if request.cls is not None and request.cls.__name__ in _DESTROY_CLEANUP_OWNERS:
-        yield
-        return
+    owners = [request.module.__name__.rsplit(".", 1)[-1], request.function.__name__]
+    if request.cls is not None:
+        owners.append(request.cls.__name__)
+    owned = frozenset().union(*(_DESTROY_CLEANUP_OWNERS.get(name, frozenset()) for name in owners))
+    from contextlib import ExitStack
+
     from cli import stacks as _stacks
 
-    with (
-        patch.object(_stacks.StackManager, "_cleanup_backup_vault", return_value=None),
-        patch.object(_stacks.StackManager, "_cleanup_eks_security_groups", return_value=None),
-        patch.object(_stacks.StackManager, "_start_eks_sg_watchdog", return_value=MagicMock()),
-        # The implicit log-group + bastion IAM sweep added for non-strict
-        # teardowns is boto3/AWS-CLI-backed as well; orchestration tests
-        # that don't own these helpers must never fire them for real.
-        patch.object(_stacks.StackManager, "_collect_implicit_log_groups", return_value={}),
-        patch.object(
-            _stacks.StackManager,
-            "_cleanup_implicit_log_groups",
-            return_value={"deleted": [], "missing": [], "errors": []},
-        ),
-        patch.object(
-            _stacks.StackManager,
-            "_cleanup_bastion_iam",
-            return_value={"completed_steps": 0, "absent_steps": 0, "errors": []},
-        ),
-        # The success-only runtime traffic-dial parameter purge is SSM-backed;
-        # left real it would delete /{project}/traffic-dial/* in a live account.
-        patch.object(
-            _stacks.StackManager,
-            "_cleanup_traffic_dial_parameters",
-            return_value={"deleted": [], "errors": []},
-        ),
-        # The post-regional EBS sweep calls EC2 DeleteVolume. Left real, an
-        # orchestration test that names a live regional stack would destroy that
-        # cluster's Prometheus/Grafana data — the most destructive helper here.
-        patch.object(
-            _stacks.StackManager,
-            "_cleanup_cluster_volumes",
-            return_value={"deleted": [], "surviving": [], "errors": []},
-        ),
-    ):
+    with ExitStack() as stack:
+        for helper, stub in _DESTROY_CLEANUP_STUBS.items():
+            if helper in owned:
+                continue
+            stack.enter_context(patch.object(_stacks.StackManager, helper, return_value=stub))
         yield
 
 
@@ -291,7 +352,7 @@ def sample_cluster_config(sample_thresholds):
     return ClusterConfig(
         region="us-east-1",
         cluster_name="gco-us-east-1",
-        kubernetes_version="1.36",
+        kubernetes_version="1.37",
         addons=["metrics-server"],
         resource_thresholds=sample_thresholds,
     )
@@ -476,7 +537,7 @@ def valid_cdk_context():
             "monitoring": "us-east-2",
             "regional": ["us-east-1", "us-west-2"],
         },
-        "kubernetes_version": "1.36",
+        "kubernetes_version": "1.37",
         "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 85, "gpu_threshold": 90},
         "global_accelerator": {
             "name": "gco-accelerator",

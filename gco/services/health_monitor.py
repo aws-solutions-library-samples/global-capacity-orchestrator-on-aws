@@ -34,6 +34,7 @@ from botocore.exceptions import ClientError
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
+from gco.k8s_api_versions import METRICS_API_GROUP, METRICS_API_VERSION
 from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization
 from gco.services.leader_lease import (
     LEASE_MIN_DURATION_SECONDS,
@@ -44,8 +45,8 @@ from gco.services.leader_lease import (
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-10-04T13:42:40Z
+# Generated from Git commit: c8a2c18a0d540e23acd5eda86d3aab9db69e5c41
 # Flowchart(s) generated from this file:
 #   * ``HealthMonitor.get_health_status`` -> ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.png``)
@@ -199,8 +200,8 @@ class HealthMonitor:
             # Fetch fresh metrics
             node_metrics: dict[str, Any] = await asyncio.to_thread(
                 self.metrics_v1beta1.list_cluster_custom_object,
-                group="metrics.k8s.io",
-                version="v1beta1",
+                group=METRICS_API_GROUP,
+                version=METRICS_API_VERSION,
                 plural="nodes",
                 _request_timeout=self._k8s_timeout,
             )

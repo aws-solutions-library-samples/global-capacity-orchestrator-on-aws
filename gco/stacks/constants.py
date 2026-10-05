@@ -319,16 +319,25 @@ def backend_tls_certificate_arn_parameter_name(project_name: str, region: str) -
 # The dependency scanner checks ``aws eks describe-addon-versions`` monthly
 # and opens an issue when newer builds are available.
 
-EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.2"
+EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.3"
 """EKS Pod Identity Agent — enables IRSA and Pod Identity for service accounts."""
 
-EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.10"
-"""Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``."""
+EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.11"
+"""Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``.
+
+The ``v0.9.x`` line registers only ``metrics.k8s.io/v1beta1``; the ``v1`` API
+that went GA in Kubernetes 1.37 arrives with a later metrics-server release.
+The two in-cluster callers (``gco.services.health_monitor`` and the jobs API
+route) read the version through ``METRICS_API_VERSION`` in
+``gco/k8s_api_versions.py``. When this pin moves to a release that also
+registers ``v1`` (upstream ``master`` does; expected from ``v0.10.x``), flip
+that constant.
+"""
 
 EKS_ADDON_EFS_CSI_DRIVER = "v3.4.2-eksbuild.1"
 """Amazon EFS CSI Driver — mounts EFS file systems as Kubernetes persistent volumes."""
 
-EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.6.0-eksbuild.1"
+EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.7.0-eksbuild.1"
 """Amazon CloudWatch Observability — Container Insights, Prometheus metrics, FluentBit logs."""
 
 EKS_ADDON_FSX_CSI_DRIVER = "v1.10.0-eksbuild.2"

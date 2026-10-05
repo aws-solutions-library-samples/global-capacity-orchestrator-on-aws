@@ -66,7 +66,9 @@ Modification Guide:
     - To add a new service: add dockerfiles/Dockerfile.<service> (discovery picks it up),
       call ``self._service_image_asset`` here, add a manifest in manifests/
     - To add a new optional feature: add a cdk.json context toggle, guard with if/else in this file
-    - To change EKS version: update KUBERNETES_VERSION in constants.py
+    - To change the EKS version: edit ``context.kubernetes_version`` in cdk.json and follow
+      "Upgrading the EKS Kubernetes version" in docs/MAINTENANCE.md (kubectl, kind, Calico,
+      add-on builds and the Python client move with it)
 """
 
 from __future__ import annotations
@@ -164,8 +166,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-28T07:34:51Z
-# Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0
+# Generated at (UTC): 2026-10-04T15:00:00Z
+# Generated from Git commit: 209111da256a97f34eb5a44b3d33c7fc91f94b5f
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -250,6 +252,48 @@ def _compute_kubectl_regional_shared_replacements(
 #: static (a placeholder in ``metadata.name`` would fail k8s schema
 #: validation), so the toggle gate lives in an annotation value instead.
 _OBSERVABILITY_STORAGE_CLASS = "gco-observability-gp3"
+
+#: Node affinity for the memory-heavy observability singletons (Prometheus,
+#: Grafana, MLflow): instances with more than 4 GiB, so 8 GiB or larger.
+#: EKS Auto Mode's built-in general-purpose pool bin-packs by requests and
+#: its smallest instances are 2 vCPU / 4 GiB. Three consecutive EKS 1.37
+#: live validations showed those nodes cannot carry one of these pods next
+#: to the ~1 GiB Bottlerocket host footprint (kubelet, containerd and one
+#: shim per pod, CoreDNS, the network-policy and node-monitoring agents, the
+#: EBS CSI node plugin) that the kubelet's 627Mi reservation under-counts:
+#: the node reached ~95% memory, reclaim evicted the host daemons' text
+#: pages (direct reclaim, ~1 GiB of active file pages churning, PSI memory
+#: "full" above 30% over five minutes, ~4k major page faults/s with up to
+#: 1.5 cores of kernel time on a 2-vCPU node), and every probe on the node
+#: timed out: Grafana never became ready, Prometheus answered OpenCost with
+#: 503s, and MLflow was liveness-killed in a loop. Resource requests alone
+#: did not help, because Karpenter kept picking 4 GiB instances for them.
+#: ``eks.amazonaws.com/instance-memory`` (MiB) is an Auto Mode well-known
+#: label, so Karpenter provisions a matching instance from the same pool
+#: and the kube-scheduler honors the same expression. Injected by the stack
+#: (not charts.yaml) because the label exists only on EKS Auto Mode nodes;
+#: the kind-based CI installs the same charts with the shipped values and
+#: would otherwise never schedule them. A plain literal assignment (no
+#: annotation) on purpose: the kind examples-smoke job lifts this module's
+#: literal constants with ``ast.Assign`` + ``ast.literal_eval`` to run
+#: ``_mlflow_chart_values`` outside CDK.
+_LARGE_MEMORY_NODE_AFFINITY = {
+    "nodeAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": {
+            "nodeSelectorTerms": [
+                {
+                    "matchExpressions": [
+                        {
+                            "key": "eks.amazonaws.com/instance-memory",
+                            "operator": "Gt",
+                            "values": ["4096"],
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}
 
 
 #: The MLflow server's own port (the chart Service's and the container's), and
@@ -1745,19 +1789,21 @@ class GCORegionalStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
         )
 
-        # Get Kubernetes version - use custom version if not available in CDK enum
+        # The cluster minor comes from cdk.json (``context.kubernetes_version``).
+        # aws-cdk-lib's KubernetesVersion enum trails EKS by a release or two;
+        # ``KubernetesVersion.of()`` is the library's supported path for a minor
+        # it does not name yet and renders the same AWS::EKS::Cluster Version.
         k8s_version_str = cluster_config.kubernetes_version
         try:
             k8s_version = getattr(eks.KubernetesVersion, f"V{k8s_version_str.replace('.', '_')}")
         except AttributeError:
-            # Version not in CDK enum yet, use custom version
             k8s_version = eks.KubernetesVersion.of(k8s_version_str)
 
         self.cluster = eks.Cluster(
             self,
             "GCOEksCluster",
             cluster_name=cluster_config.cluster_name,
-            version=k8s_version,  # Use configured version for Auto Mode with DRA support
+            version=k8s_version,
             vpc=self.vpc,
             compute=eks.ComputeConfig(
                 # Enable both built-in node pools - Auto Mode manages these automatically
@@ -5314,6 +5360,8 @@ class GCORegionalStack(Stack):
           renders both keys with ``toYaml``, so they are lists.
         - ``nodeSelector``: the service images are amd64 only, so the pod
           is pinned to amd64 nodes.
+        - ``affinity``: ``_LARGE_MEMORY_NODE_AFFINITY``, so the ~1.7 GiB
+          server lands on an instance with more than 4 GiB (see the constant).
         """
         s3_destination = (
             f"s3://{self.cluster_shared_identity.name}/mlflow-artifacts/{self.deployment_region}"
@@ -5349,6 +5397,7 @@ class GCORegionalStack(Stack):
                 "extraContainers": [sidecar],
                 "extraVolumes": [tls_volume],
                 "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                "affinity": _LARGE_MEMORY_NODE_AFFINITY,
             }
         }
 
@@ -5410,7 +5459,9 @@ class GCORegionalStack(Stack):
         from an optional Secret volume. The Grafana subchart renders
         ``extraContainers`` through ``tpl`` as a YAML string, while
         ``extraContainerVolumes`` is a list. The service images are amd64
-        only, so the Grafana pod is pinned to amd64 nodes.
+        only, so the Grafana pod is pinned to amd64 nodes. Grafana and
+        Prometheus also carry ``_LARGE_MEMORY_NODE_AFFINITY`` (instances with
+        more than 4 GiB; see the constant for the live evidence).
         """
         obs = self.config.get_cluster_observability_config()
         storage_class = _OBSERVABILITY_STORAGE_CLASS
@@ -5431,9 +5482,11 @@ class GCORegionalStack(Stack):
                     "extraContainers": _helm_container_list_string([grafana_sidecar]),
                     "extraContainerVolumes": [grafana_tls_volume],
                     "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                    "affinity": _LARGE_MEMORY_NODE_AFFINITY,
                 },
                 "prometheus": {
                     "prometheusSpec": {
+                        "affinity": _LARGE_MEMORY_NODE_AFFINITY,
                         "retention": obs["prometheus"]["retention"],
                         "storageSpec": {
                             "volumeClaimTemplate": {

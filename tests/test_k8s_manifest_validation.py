@@ -29,7 +29,9 @@ Two tiers:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -76,6 +78,56 @@ class TestBuiltInNodePoolContracts:
 
         assert set(arch_requirement["values"]) == {"amd64", "arm64"}
         assert "arch" not in labels
+
+    @pytest.mark.parametrize(
+        "manifest_path",
+        sorted(MANIFESTS_DIR.glob("4*-nodepool-*.yaml")),
+        ids=lambda path: path.name,
+    )
+    def test_every_shipped_nodepool_states_its_consolidation_policy(
+        self, manifest_path: Path
+    ) -> None:
+        """Every shipped NodePool must write its ``consolidationPolicy`` down.
+
+        On EKS Auto Mode, a NodePool created without the field gets the
+        platform default, and from Kubernetes 1.37 that default is ``Balanced``
+        (it was ``WhenEmptyOrUnderutilized`` before). An unset pool therefore
+        changes behavior on a GitOps recreate, with nothing in Git to show for
+        it. GCO's pools stay ``WhenEmpty`` deliberately — batch and inference
+        pods must not be consolidated mid-run — so the policy has to be
+        explicit, and one of the three values Karpenter accepts.
+        """
+        documents = [
+            document
+            for document in yaml.safe_load_all(manifest_path.read_text(encoding="utf-8"))
+            if document
+        ]
+        nodepools = [
+            document
+            for document in documents
+            if document.get("apiVersion") == "karpenter.sh/v1"
+            and document.get("kind") == "NodePool"
+        ]
+        assert nodepools, f"{manifest_path.name} ships no karpenter.sh/v1 NodePool"
+
+        for nodepool in nodepools:
+            name = nodepool["metadata"]["name"]
+            disruption = nodepool["spec"].get("disruption") or {}
+            policy = disruption.get("consolidationPolicy")
+            assert policy is not None, (
+                f"NodePool {name} in {manifest_path.name} leaves consolidationPolicy unset; "
+                "Auto Mode would default it (Balanced from EKS 1.37), silently changing "
+                "how running pods are evicted. State the policy in the manifest."
+            )
+            assert policy in {"WhenEmpty", "WhenEmptyOrUnderutilized", "Balanced"}, (
+                f"NodePool {name} in {manifest_path.name} has unknown "
+                f"consolidationPolicy {policy!r}"
+            )
+
+    def test_the_shipped_nodepool_count_is_the_expected_seven(self) -> None:
+        """The parametrized guard above runs over the real glob; make sure it
+        cannot pass vacuously because the files moved or were renamed."""
+        assert len(list(MANIFESTS_DIR.glob("4*-nodepool-*.yaml"))) == 7
 
 
 class TestStaticPodTokenBoundaries:
@@ -790,6 +842,119 @@ class TestConstants:
         loc = validator.CRD_CATALOG_SCHEMA_LOCATION
         assert loc.endswith(".json")
         assert "datreeio/CRDs-catalog" in loc
+
+
+# ── -kubernetes-version follows cdk.json (offline) ────────────────────────────
+#
+# The upstream schemas are resolved at the cluster's minor, not kubeconform's
+# floating ``master`` default. The minor comes from cdk.json's
+# ``context.kubernetes_version`` (the one source for the EKS minor) with patch
+# 0; a bump of that key moves the schema gate with it, with no edit here.
+
+
+class TestKubernetesSchemaVersion:
+    def test_follows_the_cdk_json_minor_with_patch_zero(self) -> None:
+        cdk_minor = json.loads((PROJECT_ROOT / "cdk.json").read_text(encoding="utf-8"))["context"][
+            "kubernetes_version"
+        ]
+        assert re.fullmatch(r"\d+\.\d+", cdk_minor)
+        assert validator.kubernetes_schema_version() == f"{cdk_minor}.0"
+
+    def test_reads_the_minor_from_the_given_cdk_json(self, tmp_path: Path) -> None:
+        cdk_json = tmp_path / "cdk.json"
+        cdk_json.write_text(json.dumps({"context": {"kubernetes_version": "1.42"}}))
+        assert validator.kubernetes_schema_version(cdk_json) == "1.42.0"
+
+    @pytest.mark.parametrize(
+        "context",
+        [
+            {},
+            {"kubernetes_version": "1.37.1"},
+            {"kubernetes_version": "latest"},
+            {"kubernetes_version": 1.37},
+            {"kubernetes_version": ""},
+        ],
+        ids=["missing", "patch-included", "word", "number", "empty"],
+    )
+    def test_rejects_a_minor_that_is_not_major_dot_minor(
+        self, tmp_path: Path, context: dict
+    ) -> None:
+        cdk_json = tmp_path / "cdk.json"
+        cdk_json.write_text(json.dumps({"context": context}))
+        with pytest.raises(ValueError, match="kubernetes_version"):
+            validator.kubernetes_schema_version(cdk_json)
+
+    def test_rejects_an_unreadable_cdk_json(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="cannot read"):
+            validator.kubernetes_schema_version(tmp_path / "absent.json")
+        broken = tmp_path / "cdk.json"
+        broken.write_text("{not json")
+        with pytest.raises(ValueError, match="cannot read"):
+            validator.kubernetes_schema_version(broken)
+
+    def test_run_kubeconform_passes_the_version_before_the_schema_locations(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[list[str]] = []
+
+        class _Done:
+            returncode = 0
+            stdout = '{"resources": [], "summary": {}}'
+
+        def fake_run(cmd, **_kwargs):
+            seen.append(list(cmd))
+            return _Done()
+
+        monkeypatch.setattr(validator.subprocess, "run", fake_run)
+
+        rc, parsed = validator.run_kubeconform(tmp_path, kubernetes_version="1.42.0")
+
+        assert (rc, parsed) == (0, {"resources": [], "summary": {}})
+        (cmd,) = seen
+        version_at = cmd.index("-kubernetes-version")
+        assert cmd[version_at + 1] == "1.42.0"
+        assert version_at < cmd.index("-schema-location")
+        assert "master" not in cmd
+
+    def test_run_kubeconform_derives_the_version_from_cdk_json_by_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[list[str]] = []
+
+        class _Done:
+            returncode = 0
+            stdout = ""
+
+        monkeypatch.setattr(
+            validator.subprocess, "run", lambda cmd, **_kw: seen.append(list(cmd)) or _Done()
+        )
+
+        validator.run_kubeconform(tmp_path)
+
+        (cmd,) = seen
+        assert cmd[cmd.index("-kubernetes-version") + 1] == validator.kubernetes_schema_version()
+
+    def test_main_fails_closed_when_the_version_cannot_be_derived(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        manifest = tmp_path / "one.yaml"
+        manifest.write_text("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: one\n")
+        monkeypatch.setattr(validator.shutil, "which", lambda _binary: "/usr/bin/kubeconform")
+
+        def refuse(cdk_json: Path = validator.CDK_JSON_PATH) -> str:
+            raise ValueError(f"{cdk_json}: context.kubernetes_version missing")
+
+        monkeypatch.setattr(validator, "kubernetes_schema_version", refuse)
+        ran: list[Path] = []
+        monkeypatch.setattr(
+            validator, "run_kubeconform", lambda directory, **_kw: ran.append(directory) or (0, {})
+        )
+
+        rc = validator.main(["--path", str(manifest), "--kubeconform-binary", "fake"])
+
+        assert rc == 2
+        assert ran == [], "kubeconform must not run against the floating master schemas"
+        assert "cannot derive the Kubernetes schema version" in capsys.readouterr().err
 
 
 # ── live manifests (online, opt-in) ────────────────────────────────────────────

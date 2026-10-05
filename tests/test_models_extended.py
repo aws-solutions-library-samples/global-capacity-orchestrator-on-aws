@@ -581,7 +581,7 @@ class TestClusterConfigValidation:
         config = ClusterConfig(
             region="us-east-1",
             cluster_name="test-cluster",
-            kubernetes_version="1.36",
+            kubernetes_version="1.37",
             addons=["metrics-server"],
             resource_thresholds=valid_thresholds,
         )
@@ -596,7 +596,7 @@ class TestClusterConfigValidation:
             ClusterConfig(
                 region="",
                 cluster_name="test-cluster",
-                kubernetes_version="1.36",
+                kubernetes_version="1.37",
                 addons=["metrics-server"],
                 resource_thresholds=valid_thresholds,
             )
@@ -609,7 +609,7 @@ class TestClusterConfigValidation:
             ClusterConfig(
                 region="us-east-1",
                 cluster_name="",
-                kubernetes_version="1.36",
+                kubernetes_version="1.37",
                 addons=["metrics-server"],
                 resource_thresholds=valid_thresholds,
             )

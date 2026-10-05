@@ -4328,7 +4328,10 @@ class TestActionTopology:
             }
         )
         ctx.session.get_partition_for_region.return_value = "aws"
-        ctx.cdk_context = {"api_gateway": {"regional_api_enabled": direct_access}}
+        ctx.cdk_context = {
+            "api_gateway": {"regional_api_enabled": direct_access},
+            "kubernetes_version": "1.33",
+        }
         eks = MagicMock()
         eks.describe_cluster.return_value = {
             "cluster": {
@@ -4524,6 +4527,58 @@ class TestActionTopology:
             pytest.raises(RuntimeError, match="gco-live-us-east-1 is not ACTIVE: UPDATING"),
         ):
             actions_topology.action_topology(ctx)
+
+    def test_cluster_on_another_kubernetes_minor_than_cdk_json_fails(self) -> None:
+        """An ACTIVE cluster on the previous minor is the failure an upgrade PR
+        exists to catch; nothing else in the run would notice it."""
+        ctx = self._ctx()
+        ctx.cdk_context["kubernetes_version"] = "1.34"
+
+        with (
+            self._checks(),
+            pytest.raises(
+                RuntimeError,
+                match=re.escape(
+                    "gco-live-us-east-1 runs Kubernetes '1.33'; "
+                    "cdk.json kubernetes_version is '1.34'"
+                ),
+            ),
+        ):
+            actions_topology.action_topology(ctx)
+
+        assert "queue_baseline" not in ctx.checkpoint.state
+
+    def test_cluster_version_is_compared_after_whitespace_is_stripped(self) -> None:
+        ctx = self._ctx()
+        ctx.cdk_context["kubernetes_version"] = " 1.33 "
+
+        with self._checks():
+            result = actions_topology.action_topology(ctx)
+
+        assert result["clusters"]["us-east-1"]["version"] == "1.33"
+
+    @pytest.mark.parametrize("value", [None, "", "   ", 1.33, ["1.33"]], ids=repr)
+    def test_a_missing_or_non_string_kubernetes_version_fails_before_the_describe(
+        self, value: Any
+    ) -> None:
+        """Rather than defaulting, a broken cdk.json fails loudly: the
+        comparison must never pass because both sides were absent."""
+        ctx = self._ctx()
+        if value is None:
+            del ctx.cdk_context["kubernetes_version"]
+        else:
+            ctx.cdk_context["kubernetes_version"] = value
+
+        with (
+            self._checks(),
+            pytest.raises(
+                RuntimeError,
+                match=re.escape("cdk.json context.kubernetes_version is missing or not a string"),
+            ),
+        ):
+            actions_topology.action_topology(ctx)
+
+        ctx.clients["eks"].describe_cluster.assert_not_called()
 
     def test_global_and_regional_endpoints_must_expose_urls(self) -> None:
         ctx = self._ctx()

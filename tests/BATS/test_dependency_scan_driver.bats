@@ -201,7 +201,7 @@ case "${1:-} ${2:-}" in
             empty) echo '{"clusterVersions": []}' ;;
             *)
                 current="$(catalog_get k8s current)"
-                latest="$(answer k8s current 1.36)"
+                latest="$(answer k8s current 1.37)"
                 printf '{"clusterVersions": [{"clusterVersion": "%s", "endOfStandardSupportDate": "2027-01-15T00:00:00+00:00"}, {"clusterVersion": "%s", "endOfStandardSupportDate": "2028-01-15T00:00:00+00:00"}]}\n' "$current" "$latest"
                 ;;
         esac
@@ -490,7 +490,10 @@ PY
             echo "github-release|crossplane-contrib/function-go-templating|$(extract_crossplane_function_pin lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating | head -1)"
             echo "github-release|kubernetes-sigs/kind|$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind"{print $2}' | head -1)"
             kind_node="$(extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}' | head -1)"
-            [ -n "$kind_node" ] && echo "image|docker.io/${kind_node%%:*}|${kind_node##*:}"
+            # Tag and digest: the tag half is a registry tag like any other image's;
+            # the digest half is recorded below with the other committed digests.
+            kind_node_tagged="${kind_node%%@sha256:*}"
+            [ -n "$kind_node_tagged" ] && echo "image|docker.io/${kind_node_tagged%%:*}|${kind_node_tagged##*:}"
             extract_precommit_hooks .pre-commit-config.yaml | while IFS='|' read -r repo rev; do
                 repo="${repo%.git}"; repo="${repo%/}"
                 echo "github-tags|${repo#https://github.com/}|$rev"
@@ -519,6 +522,7 @@ PY
                 extract_python_string_constant AWS_CLI_IMAGE gco/services/inference_monitor.py
                 grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" scripts/live_release_validation/manifests/ 2>/dev/null | sed 's/^image: //'
                 extract_crossplane_function_packages lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating
+                extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}'
             } | sort -u | while IFS= read -r ref; do
                 case "$ref" in *@sha256:*) echo "digest|${ref%@sha256:*}|${ref##*@sha256:}" ;; esac
             done
@@ -617,7 +621,7 @@ jobs:
       - uses: helm/kind-action@0000000000000000000000000000000000000000
         with:
           version: "v0.33.0"
-          node_image: "kindest/node:v1.36.4"
+          node_image: "kindest/node:v1.37.0@sha256:6666666666666666666666666666666666666666666666666666666666666666"
       - run: docker run --rm alpine:3.24.1 true
 YAML
     cat > "$root/.github/actions/install-trivy/action.yml" <<'YAML'
@@ -630,7 +634,7 @@ YAML
     printf '# none\n' > "$root/.github/config/.pip-audit-ignore"
     printf 'GHSA-0000-0000-0000 exp:2999-06-30 justification\n' > "$root/.github/config/.npm-audit-ignore"
     cat > "$root/cdk.json" <<'JSON'
-{"context": {"kubernetes_version": "1.36",
+{"context": {"kubernetes_version": "1.37",
  "bedrock": {"mission_default_model_id": "global.anthropic.claude-opus-5",
              "capacity_advisor_default_model_id": "global.anthropic.claude-opus-5",
              "claude_code_default_model_id": "global.anthropic.claude-opus-5",
@@ -668,7 +672,7 @@ ARG APT_SECURITY_EPOCH=${today}
 ARG NODE_VERSION=v24.21.0
 ARG NPM_VERSION=12.0.2
 ARG CDK_VERSION=2.1140.0
-ARG KUBECTL_VERSION=v1.36.4
+ARG KUBECTL_VERSION=v1.37.1
 ARG AWSCLI_VERSION=2.36.41
 ARG DOCKER_VERSION=29.8.0
 ARG BUILDX_VERSION=v0.37.0
@@ -679,7 +683,7 @@ FROM public.ecr.aws/lambda/python:3.14
 ARG DNF_SECURITY_EPOCH=${today}
 RUN curl -fsSL https://get.helm.sh/helm-v4.2.4-linux-amd64.tar.gz -o /tmp/helm.tar.gz \\
     && echo "${DIGEST_A}  /tmp/helm.tar.gz" | sha256sum -c - \\
-    && curl -fsSL https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl -o /tmp/kubectl \\
+    && curl -fsSL https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl -o /tmp/kubectl \\
     && echo "${DIGEST_B}  /tmp/kubectl" | sha256sum -c -
 EOF
     cat > "$root/lambda/helm-installer/charts.yaml" <<'YAML'
@@ -787,7 +791,7 @@ findings_path() {
     grep -q '^curl https://registry.npmjs.org/aws-cdk/latest' "$CALLS"
     grep -q '^curl https://registry.npmjs.org/@anthropic-ai%2Fclaude-code/latest' "$CALLS"
     grep -q '^curl https://pypi.org/pypi/setuptools/json' "$CALLS"
-    grep -q '^curl https://dl.k8s.io/release/stable-1.36.txt' "$CALLS"
+    grep -q '^curl https://dl.k8s.io/release/stable-1.37.txt' "$CALLS"
     grep -q '^skopeo list-tags --retry-times 3 docker://docker.io/library/busybox' "$CALLS"
     grep -q '^skopeo inspect --raw docker://public.ecr.aws/aws-cli/aws-cli:2.36.41' "$CALLS"
     # The Crossplane Function package's digest is bound to its tag, but the
@@ -795,9 +799,15 @@ findings_path() {
     # release check's, and the sweep would report the same release twice.
     grep -q '^skopeo inspect --raw docker://xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5' "$CALLS"
     ! grep -q '^skopeo list-tags .*function-go-templating' "$CALLS"
+    # The kind node image likewise: its digest is bound to its tag, the tag's
+    # patch drift is the CI tooling check's own list-tags call (no --retry-times),
+    # and it stays out of the generic image sweep.
+    grep -q '^skopeo inspect --raw docker://kindest/node:v1.37.0' "$CALLS"
+    grep -q '^skopeo list-tags docker://docker.io/kindest/node' "$CALLS"
+    ! grep -q '^skopeo list-tags --retry-times 3 docker://docker.io/kindest/node' "$CALLS"
     grep -q '^helm repo add keda https://kedacore.github.io/charts --force-update' "$CALLS"
     grep -q '^helm show chart oci://registry.k8s.io/kueue/charts/kueue' "$CALLS"
-    grep -q '^aws eks describe-addon-versions --addon-name metrics-server --kubernetes-version 1.36' "$CALLS"
+    grep -q '^aws eks describe-addon-versions --addon-name metrics-server --kubernetes-version 1.37' "$CALLS"
     grep -q '^aws bedrock list-foundation-models --by-output-modality EMBEDDING' "$CALLS"
 }
 
@@ -816,10 +826,11 @@ findings_path() {
     [[ "$output" == *"  - busybox:1.38.0 -> 2.38.0"* ]]
     [[ "$output" == *"  - public.ecr.aws/aws-cli/aws-cli:2.36.41: committed digest does not match the tag"* ]]
     [[ "$output" == *"  - xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5: committed digest does not match the tag (lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml)"* ]]
+    [[ "$output" == *"  - kindest/node:v1.37.0: committed digest does not match the tag (.github/workflows/integration-tests.yml KIND_NODE_IMAGE)"* ]]
     [[ "$output" == *"  - keda (keda): 2.20.2 -> 3.20.2"* ]]
     [[ "$output" == *"  - kueue (kueue): 0.19.2 -> 1.19.2"* ]]
     [[ "$output" == *"  - metrics-server: v0.9.0-eksbuild.7 -> v1.9.0-eksbuild.7"* ]]
-    [[ "$output" == *"  - kubernetes_version: 1.36 -> 2.36 (std support ends 2027-01-15)"* ]]
+    [[ "$output" == *"  - kubernetes_version: 1.37 -> 2.37 (std support ends 2027-01-15)"* ]]
     [[ "$output" == *"  - aurora-postgresql: 17.10 -> 18.10"* ]]
     [[ "$output" == *"  - emr-serverless: emr-7.14.0 -> emr-7.14.1"* ]]
     [[ "$output" == *"  - bedrock mission_default_model_id: global.anthropic.claude-opus-5 -> global.anthropic.claude-opus-6"* ]]
@@ -841,8 +852,8 @@ findings_path() {
     [[ "$output" == *"  - runner ubuntu-latest: ubuntu-22.04 -> ubuntu-24.04"* ]]
     [[ "$output" == *"  - Trivy (install-trivy action default): v0.74.0 -> v1.74.0"* ]]
     [[ "$output" == *"  - Crossplane function-go-templating (post-helm-crossplane.yaml): v0.12.5 -> v1.12.5"* ]]
-    [[ "$output" == *"  - kubectl (helm-installer Dockerfile): v1.36.4 -> v2.36.4"* ]]
-    [[ "$output" == *"  - kind node image (kindest/node): v1.36.4 -> v1.36.5"* ]]
+    [[ "$output" == *"  - kubectl (helm-installer Dockerfile): v1.37.1 -> v2.37.1"* ]]
+    [[ "$output" == *"  - kind node image (kindest/node): v1.37.0 -> v1.37.1"* ]]
     [[ "$output" == *"Found 2 offline accelerator policy finding(s)."* ]]
     [[ "$output" == *"Found 2 live EC2 catalog drift finding(s)."* ]]
     [[ "$output" == *"Incomplete lookups:       0"* ]]
@@ -972,8 +983,8 @@ findings_path() {
     [[ "$output" == *"endoflife.date query failed (network or schema change)."* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy) (GitHub API: transport error)."* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin UV_VERSION (GitHub API: transport error)."* ]]
-    [[ "$output" == *"INCOMPLETE: kubectl stable-version lookup failed for minor 1.36."* ]]
-    [[ "$output" == *"INCOMPLETE: Container registry lookup failed for kindest/node minor 1.36."* ]]
+    [[ "$output" == *"INCOMPLETE: kubectl stable-version lookup failed for minor 1.37."* ]]
+    [[ "$output" == *"INCOMPLETE: Container registry lookup failed for kindest/node minor 1.37."* ]]
     [[ "$output" == *"Offline accelerator validator failed operationally."* ]]
     [[ "$output" == *"Online accelerator scanner failed operationally."* ]]
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
@@ -1152,11 +1163,13 @@ YAML
     # a literal HELM_VERSION reintroduced in a workflow, disagreeing with the
     # installer; KUBECTL_VERSION disagreeing between Dockerfile.dev and installer;
     # CALICO_VERSION pinned twice; a non-exact build-system pin; a Lambda
-    # requirements copy behind pyproject; the same digest tag pinned twice.
+    # requirements copy behind pyproject; the same digest tag pinned twice;
+    # a kubernetes Python client one minor behind cdk.json (in the lock too,
+    # so only the skew row fires, not lockfile freshness).
     sed -i.bak 's/rev: v0.16.5/rev: v0.17.0/' "$root/.pre-commit-config.yaml"
     sed -i.bak 's/"packageManager": "npm@12.0.2"/"packageManager": "npm@11.0.0"/; s/"aws-cdk": "2.1140.0"/"aws-cdk": "^2"/' "$root/package.json"
     rm -f "$root/.nvmrc"
-    sed -i.bak 's/^ARG NODE_VERSION=v24.21.0/ARG NODE_VERSION=v22.0.0/; s/^ARG KUBECTL_VERSION=v1.36.4/ARG KUBECTL_VERSION=v1.36.9/' "$root/Dockerfile.dev"
+    sed -i.bak 's/^ARG NODE_VERSION=v24.21.0/ARG NODE_VERSION=v22.0.0/; s/^ARG KUBECTL_VERSION=v1.37.1/ARG KUBECTL_VERSION=v1.37.9/' "$root/Dockerfile.dev"
     cat >> "$root/.github/workflows/lint.yml" <<'YAML'
   stray:
     runs-on: ubuntu-latest
@@ -1166,7 +1179,8 @@ YAML
     steps:
       - run: echo
 YAML
-    sed -i.bak 's/requires = \["setuptools==84.0.0"\]/requires = ["setuptools>=84"]/' "$root/pyproject.toml"
+    sed -i.bak 's/requires = \["setuptools==84.0.0"\]/requires = ["setuptools>=84"]/; s/dependencies = \["boto3==1.40.0"\]/dependencies = ["boto3==1.40.0", "kubernetes==36.0.3"]/' "$root/pyproject.toml"
+    printf 'boto3==1.40.0\nkubernetes==36.0.3\nruff==0.16.5\n' > "$root/requirements-lock.txt"
     printf 'boto3==1.39.0\n' > "$root/lambda/helm-installer/requirements.txt"
     printf 'kind: Pod\nspec:\n  containers:\n    - image: public.ecr.aws/docker/library/busybox:1.38.0@sha256:%s\n' "$DIGEST_A" > "$root/scripts/live_release_validation/manifests/second.yaml"
     rm -f "$root"/*.bak "$root"/.pre-commit-config.yaml.bak
@@ -1182,12 +1196,37 @@ YAML
     [[ "$output" == *"  - CALICO_VERSION disagrees across workflows: v3.29.0,v3.30.0"* ]]
     [[ "$output" == *"  - HELM_VERSION is declared literally in a workflow again (should derive from the installer Dockerfile): v4.0.0"* ]]
     [[ "$output" == *"  - HELM_VERSION disagrees between helm-installer Dockerfile, workflows, and Dockerfile.dev: v4.0.0,v4.2.4"* ]]
-    [[ "$output" == *"  - KUBECTL_VERSION disagrees between helm-installer Dockerfile, workflows, and Dockerfile.dev: v1.36.4,v1.36.9"* ]]
+    [[ "$output" == *"  - KUBECTL_VERSION disagrees between helm-installer Dockerfile, workflows, and Dockerfile.dev: v1.37.1,v1.37.9"* ]]
     [[ "$output" == *"  - build-system requires entry is not an exact ==X.Y.Z pin: setuptools>=84"* ]]
+    [[ "$output" == *"  - kubernetes client vs cluster: kubernetes==36.0.3 is one minor behind EKS 1.37; pin kubernetes==37.x once a stable release is on PyPI"* ]]
+    grep -qF -- "| kubernetes Python client (pyproject.toml / cdk.json) | kubernetes==36.0.3 is one minor behind EKS 1.37; pin kubernetes==37.x once a stable release is on PyPI |" "$(report_path)"
     [[ "$output" == *"  - Lambda runtime pin: lambda/helm-installer/requirements.txt:"*"boto3"* ]]
     [[ "$output" == *"  - image digest: public.ecr.aws/docker/library/busybox:"* ]]
     grep -qx 'has_drift=true' "$GITHUB_OUTPUT"
     grep -qF -- "## Version Consistency" "$(report_path)"
+}
+
+@test "a kind node image pinned by tag alone is a consistency finding, and its tag is still checked" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    sed -i.bak 's|node_image: "kindest/node:v1.37.0@sha256:[0-9a-f]*"|node_image: "kindest/node:v1.37.0"|' "$root/.github/workflows/integration-tests.yml"
+    rm -f "$root/.github/workflows/integration-tests.yml.bak"
+    grep -q 'node_image: "kindest/node:v1.37.0"$' "$root/.github/workflows/integration-tests.yml"
+    build_catalog "$root"
+    run_scan "$root" FAKE_DRIFT=1
+
+    [ "$status" -eq 0 ]
+    # The tag half still rides the same-minor patch check, from the tag itself
+    # rather than from the text after the last colon.
+    [[ "$output" == *"  - kind node image (kindest/node): v1.37.0 -> v1.37.1"* ]]
+    [[ "$output" != *"INCOMPLETE: Container registry lookup failed for kindest/node"* ]]
+    # No digest to bind, so no manifest lookup, and no false digest row.
+    ! grep -q '^skopeo inspect --raw docker://kindest/node' "$CALLS"
+    [[ "$output" != *"kindest/node:v1.37.0: committed digest does not match"* ]]
+    # The missing digest is the finding.
+    [[ "$output" == *"  - kind node image (integration-tests.yml): kindest/node:v1.37.0 is not pinned by digest"* ]]
+    grep -qF -- "| kind node image (integration-tests.yml) | kindest/node:v1.37.0 is not pinned by digest; use the kindest/node:<tag>@sha256:<digest> reference from the kind release notes |" "$(report_path)"
+    grep -qx 'has_drift=true' "$GITHUB_OUTPUT"
 }
 
 @test "stale security epochs, expiring suppressions and a stale lockfile are reported with their numbers" {
@@ -1393,7 +1432,7 @@ YAML
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"  - kind pins disagree across kind-action steps: v0.33.0,v0.32.0"* ]]
-    [[ "$output" == *"  - kind-node pins disagree across kind-action steps: kindest/node:v1.36.4,kindest/node:v1.35.0"* ]]
+    [[ "$output" == *"  - kind-node pins disagree across kind-action steps: kindest/node:v1.37.0@sha256:6666666666666666666666666666666666666666666666666666666666666666,kindest/node:v1.35.0"* ]]
     [[ "$output" == *"  - python-version pins: 3.13,3.14 (project runtime: 3.14)"* ]]
     grep -qF -- "| kind (across kind-action steps) | v0.33.0,v0.32.0 |" "$(report_path)"
     grep -qF -- "| python-version (CI vs runtime) | CI: 3.13,3.14; runtime: 3.14 |" "$(report_path)"

@@ -70,7 +70,7 @@ Each region contains:
 
 **EKS Auto Mode Cluster**
 
-- Kubernetes 1.36
+- Kubernetes 1.37
 - Managed control plane
 - Private API endpoint by default; public API access is disabled by the stock configuration
 - Control plane logging enabled (API, Audit, Authenticator, Controller Manager, Scheduler)
@@ -85,6 +85,12 @@ Each region contains:
   - `cpu-general-pool`: general CPU workloads with project-specific limits, on
     x86_64 and Graviton (arm64) instances; GCO's amd64-only platform pods pin
     `kubernetes.io/arch: amd64` so they never land on the Graviton nodes
+- Consolidation: the built-in `system` and `general-purpose` pools use Auto
+  Mode's `Balanced` policy from Kubernetes 1.37 (fewer evictions than the
+  earlier `WhenEmptyOrUnderutilized`, and not overridable). Every GCO pool sets
+  `consolidationPolicy: WhenEmpty` explicitly, so a node running a Job or a
+  model server is never consolidated away mid-run; a guard test keeps the
+  field present in every shipped NodePool manifest
 
 **Application Load Balancer**
 
@@ -435,7 +441,14 @@ three shapes:
 - **The OpenCost, Grafana and MLflow chart pods** get it through Helm values the
   regional stack builds, running from the cost-monitor image (OpenCost) and the
   manifest-processor image (Grafana and MLflow). Those images are amd64-only, so
-  the three pods carry an amd64 node selector. The chart pods start before the
+  the three pods carry an amd64 node selector. The same values pin Grafana,
+  Prometheus and MLflow to instances with more than 4 GiB of memory (a
+  required node affinity on the Auto Mode label
+  `eks.amazonaws.com/instance-memory`): the built-in general-purpose pool
+  bin-packs by requests and otherwise lands them on 2 vCPU / 4 GiB nodes,
+  which cannot carry one of these pods next to the ~1 GiB Bottlerocket host
+  footprint; live EKS 1.37 validation saw such nodes thrash on memory reclaim
+  until every probe on them timed out. The chart pods start before the
   post-Helm Certificates exist, so the
   Secret volume is `optional` (mode 0444, because GCO does not own the chart
   pods' users), the sidecar waits up to 30 minutes for the keypair
@@ -544,7 +557,7 @@ The base pass applies the policy before Helm installs cert-manager. That order
 matters: a new policy is enforced a moment after it is stored, and cert-manager
 can turn the CA Ready faster than that. Applying the two together would let a
 request filed earlier be signed in the gap. The policy needs Kubernetes 1.30 or
-later; `cdk.json` `kubernetes_version` defaults to 1.36.
+later; `cdk.json` `kubernetes_version` defaults to 1.37.
 
 What the fence does not cover:
 
