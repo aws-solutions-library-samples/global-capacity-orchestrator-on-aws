@@ -15,9 +15,10 @@ environment pointing boto3 at the emulator:
   no datapoints for the never-written ``ClusterHealthy`` metric, driving the
   controller's fail-safe "hold" for real rather than through a mock.
 
-Global Accelerator is absent from Floci's catalog (documented gap; the same
-convention as the GA half of ``ga-registration``), so the GA client alone is
-mocked while every other client the handler constructs goes to the emulator.
+The Global Accelerator half needs a live accelerator in front of real
+regional endpoints (the same convention as the GA half of
+``ga-registration``), so the GA client alone is mocked while every other
+client the handler constructs goes to the emulator.
 """
 
 from __future__ import annotations
@@ -90,9 +91,10 @@ class TestTrafficDialController:
     def _run_with_real_aws_except_ga(self, handler, ga: MagicMock) -> dict:
         """Run lambda_handler with only the GA client mocked.
 
-        Global Accelerator is absent from the emulator's catalog, so its
-        client is answered locally while ssm/cloudwatch clients are built by
-        the real factory and hit the emulator over the wire.
+        The GA half needs a live accelerator in front of real regional
+        endpoints, so its client is answered locally while ssm/cloudwatch
+        clients are built by the real factory and hit the emulator over the
+        wire.
         """
         real_client = boto3.client
 

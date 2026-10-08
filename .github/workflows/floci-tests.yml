@@ -75,6 +75,12 @@ jobs:
           # In-memory state: every job starts from a blank emulator, which is
           # exactly the determinism these tests want.
           FLOCI_STORAGE_MODE: memory
+          # Metadata-only EKS. Since 2.2.0 a real-mode CreateCluster starts a
+          # k3s container and answers only once it is ready (~90 s), past
+          # botocore's 60 s read timeout, so the client's retry collides with
+          # the first create ("Cluster already exists"). This layer needs only
+          # the EKS API shape; the kind E2E owns live-cluster behavior.
+          FLOCI_SERVICES_EKS_MOCK: "true"
         volumes:
           # Floci's ECR CreateRepository is Docker-backed and needs the host
           # socket; without it the emulator answers InternalFailure and the
@@ -164,6 +170,8 @@ jobs:
           - 4566:4566
         env:
           FLOCI_STORAGE_MODE: memory
+          # Metadata-only EKS, as in floci:integration above.
+          FLOCI_SERVICES_EKS_MOCK: "true"
     env:
       # aws-cdk-lib wraps fs/child_process in performance.measure() telemetry;
       # the full app synth inside `cdk list` crosses Node's 1M-entry buffer,

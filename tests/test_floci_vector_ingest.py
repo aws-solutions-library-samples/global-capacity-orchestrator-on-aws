@@ -9,13 +9,14 @@ the genuine wire protocol against real service state. Only the Bedrock
 client is replaced (Floci does not emulate Bedrock): a deterministic
 fixed-width embedder, mirroring ``tests/test_floci_mission_memory.py``.
 
-The emulator cannot create DynamoDB vector indexes, so the ingest table
-here is the plain-key shape (``doc_id`` S HASH) — which is exactly what
-the write path sees anyway: ``put_item`` is index-agnostic. The final
-test pins that gap: the ``UpdateTable`` vector-index call the stack's
-custom resource makes must be rejected by the emulator. If a Floci
-release starts accepting it, that test fails loudly — the signal to
-grow real index + SearchVectors coverage here.
+The write-path tests use the plain-key table shape (``doc_id`` S HASH):
+``put_item`` is index-agnostic, and a plain table needs no index build.
+Since Floci 2.2.0 the emulator also materializes DynamoDB vector indexes
+and serves ``SearchVectors``, so the final class creates the index with
+the exact ``UpdateTable`` shape the global stack's custom resource issues
+and proves what the handler writes is what a search returns: the
+``INCLUDE`` projection, the inline ``source`` filter, and the
+``ValidationException`` a still-backfilling index answers.
 
 See docs/FLOCI_TESTING.md for the layer map.
 """
@@ -26,6 +27,7 @@ import hashlib
 import io
 import json
 import re
+import time
 
 import boto3
 import pytest
@@ -169,56 +171,162 @@ class TestIngestOverTheRealWire:
             handler.lambda_handler(_event(corpus_bucket, f"{_PREFIX}ghost.md"), context=None)
 
 
-class TestVectorIndexGap:
-    """Pin the emulator's exact vector-index gap (Floci 1.6.0, probed live).
+#: The stack's index (gco/stacks/global_stack.py ``VectorStoreIndex``),
+#: field for field, at this module's test width.
+_INDEX_NAME = "corpus-embedding-index"
+_PROJECTED = ["text", "source", "chunk_index", "title", "embedding_model_id"]
+_STACK_INDEX_UPDATE = {
+    "Create": {
+        "IndexName": _INDEX_NAME,
+        "VectorAttribute": {"AttributeName": "embedding"},
+        "Dimensions": _DIMENSIONS,
+        "DistanceFunction": "COSINE",
+        "SearchSchema": [{"AttributeName": "source", "SearchSchemaElementType": "INLINE_FILTER"}],
+        "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes": list(_PROJECTED)},
+    }
+}
+#: Upper bound for an index build. Floci's defaults are 4 s of allocation
+#: plus 10 s of backfill (FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_*_SECONDS).
+_INDEX_BUILD_TIMEOUT_SECONDS = 90
 
-    ``UpdateTable`` + ``VectorIndexUpdates`` is ACCEPTED but silently
-    dropped — ``DescribeTable`` shows no index afterwards — and
-    ``SearchVectors`` answers a typed ``UnknownOperationException``.
-    While both hold, running the ingest tests against a plain-keyed
-    table is sound (``put_item`` is index-agnostic) and the query side
-    stays out of emulator scope. If either test fails after a Floci
-    bump, the gap closed: grow real index + ``SearchVectors`` coverage
-    here and retire these pins.
+
+def _create_stack_index(dynamodb, table_name: str) -> None:
+    dynamodb.update_table(
+        TableName=table_name,
+        AttributeDefinitions=[{"AttributeName": "source", "AttributeType": "S"}],
+        VectorIndexUpdates=[_STACK_INDEX_UPDATE],
+    )
+
+
+def _index(dynamodb, table_name: str) -> dict:
+    (index,) = dynamodb.describe_table(TableName=table_name)["Table"]["VectorIndexes"]
+    return index
+
+
+def _wait_for_active_index(dynamodb, table_name: str) -> dict:
+    deadline = time.monotonic() + _INDEX_BUILD_TIMEOUT_SECONDS
+    while True:
+        index = _index(dynamodb, table_name)
+        if index["IndexStatus"] == "ACTIVE":
+            return index
+        if time.monotonic() > deadline:
+            pytest.fail(
+                f"vector index still {index['IndexStatus']} after {_INDEX_BUILD_TIMEOUT_SECONDS}s"
+            )
+        time.sleep(1)
+
+
+def _search(dynamodb, table_name: str, **kwargs) -> list[dict]:
+    response = dynamodb.search_vectors(
+        TableName=table_name,
+        IndexName=_INDEX_NAME,
+        SearchVector=[{"N": repr(component)} for component in _VECTOR],
+        TopK=5,
+        **kwargs,
+    )
+    return response["SearchResults"]
+
+
+@pytest.fixture(scope="module")
+def indexed_table(dynamodb):
+    """A store table carrying the stack's vector index, built once per module."""
+    table_name = unique_name("gco-vector-indexed")
+    dynamodb.create_table(
+        TableName=table_name,
+        KeySchema=[{"AttributeName": "doc_id", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "doc_id", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    dynamodb.get_waiter("table_exists").wait(TableName=table_name)
+    _create_stack_index(dynamodb, table_name)
+    _wait_for_active_index(dynamodb, table_name)
+    yield table_name
+    dynamodb.delete_table(TableName=table_name)
+
+
+@pytest.fixture
+def indexed_handler(monkeypatch, indexed_table):
+    module = load_lambda_module("vector-ingest")
+    monkeypatch.setenv("VECTOR_STORE_TABLE_NAME", indexed_table)
+    monkeypatch.setenv("EMBEDDING_MODEL_ID", _MODEL)
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", str(_DIMENSIONS))
+    monkeypatch.setenv("CORPUS_PREFIX", _PREFIX)
+    module._bedrock_client = _FixedBedrock()
+    return module
+
+
+class TestVectorIndexOverTheRealWire:
+    """The stack's index and ``SearchVectors``, against Floci 2.2.0.
+
+    Earlier Floci releases accepted ``VectorIndexUpdates`` but dropped it and
+    had no ``SearchVectors``; this module pinned that gap until 2.2.0 closed
+    it. The search side now runs for real.
     """
 
-    def test_index_create_is_silently_dropped_not_materialized(self, dynamodb, store_table):
-        # The exact UpdateTable shape the global stack's custom resource
-        # issues — the emulator swallows the unknown member.
-        dynamodb.update_table(
-            TableName=store_table,
-            AttributeDefinitions=[{"AttributeName": "source", "AttributeType": "S"}],
-            VectorIndexUpdates=[
-                {
-                    "Create": {
-                        "IndexName": "corpus-embedding-index",
-                        "VectorAttribute": {"AttributeName": "embedding"},
-                        "Dimensions": _DIMENSIONS,
-                        "DistanceFunction": "COSINE",
-                        "SearchSchema": [
-                            {
-                                "AttributeName": "source",
-                                "SearchSchemaElementType": "INLINE_FILTER",
-                            }
-                        ],
-                        "Projection": {
-                            "ProjectionType": "INCLUDE",
-                            "NonKeyAttributes": ["text", "source"],
-                        },
-                    }
-                }
-            ],
+    def test_the_stack_index_shape_materializes_with_its_declared_fields(
+        self, dynamodb, indexed_table
+    ):
+        index = _index(dynamodb, indexed_table)
+
+        assert index["IndexStatus"] == "ACTIVE"
+        assert index["VectorAttribute"] == {"AttributeName": "embedding"}
+        assert index["Dimensions"] == _DIMENSIONS
+        assert index["DistanceFunction"] == "COSINE"
+        assert index["Projection"] == {"ProjectionType": "INCLUDE", "NonKeyAttributes": _PROJECTED}
+
+    def test_an_ingested_chunk_is_searchable_through_the_projection(
+        self, indexed_handler, s3, dynamodb, corpus_bucket, indexed_table
+    ):
+        key = f"{_PREFIX}search/guide.md"
+        s3.put_object(Bucket=corpus_bucket, Key=key, Body=b"# Guide\n\nCapacity notes.")
+        indexed_handler.lambda_handler(_event(corpus_bucket, key), context=None)
+
+        results = _search(
+            dynamodb,
+            indexed_table,
+            SearchConditionExpression="#source = :source",
+            ExpressionAttributeNames={"#source": "source"},
+            ExpressionAttributeValues={":source": {"S": key}},
         )
 
-        description = dynamodb.describe_table(TableName=store_table)["Table"]
-        assert "VectorIndexes" not in description
+        (hit,) = results
+        # The INCLUDE projection plus the key, and nothing else: the vector
+        # and the provenance hash stay out of search responses.
+        assert set(hit["Item"]) == {"doc_id", *_PROJECTED}
+        assert hit["Item"]["source"] == {"S": key}
+        assert hit["Item"]["title"] == {"S": "Guide"}
+        assert hit["Item"]["embedding_model_id"] == {"S": _MODEL}
+        # Identical vectors: COSINE distance is zero up to rounding.
+        assert float(hit["Score"]) == pytest.approx(0.0, abs=1e-9)
 
-    def test_search_vectors_answers_a_typed_unknown_operation(self, dynamodb, store_table):
-        with pytest.raises(ClientError) as exc_info:
-            dynamodb.search_vectors(
-                TableName=store_table,
-                IndexName="corpus-embedding-index",
-                SearchVector=[{"N": repr(component)} for component in _VECTOR],
-                TopK=1,
-            )
-        assert exc_info.value.response["Error"]["Code"] == "UnknownOperationException"
+    def test_the_inline_source_filter_narrows_the_ranking(
+        self, indexed_handler, s3, dynamodb, corpus_bucket, indexed_table
+    ):
+        keys = [f"{_PREFIX}filter/a.txt", f"{_PREFIX}filter/b.txt"]
+        for key in keys:
+            s3.put_object(Bucket=corpus_bucket, Key=key, Body=b"same text")
+        indexed_handler.lambda_handler(_event(corpus_bucket, *keys), context=None)
+
+        filtered = _search(
+            dynamodb,
+            indexed_table,
+            SearchConditionExpression="#source = :source",
+            ExpressionAttributeNames={"#source": "source"},
+            ExpressionAttributeValues={":source": {"S": keys[1]}},
+        )
+
+        assert [hit["Item"]["source"]["S"] for hit in filtered] == [keys[1]]
+
+    def test_a_backfilling_index_answers_validation_exception(self, dynamodb, store_table):
+        # What the CLI maps to "the index may still be building": a search
+        # issued right after the index is created, before it is ACTIVE.
+        _create_stack_index(dynamodb, store_table)
+        try:
+            assert _index(dynamodb, store_table)["IndexStatus"] == "CREATING"
+            with pytest.raises(ClientError) as exc_info:
+                _search(dynamodb, store_table)
+            assert exc_info.value.response["Error"]["Code"] == "ValidationException"
+        finally:
+            # A table cannot be deleted while an index builds; let the
+            # function-scoped fixture's teardown find it ACTIVE.
+            _wait_for_active_index(dynamodb, store_table)

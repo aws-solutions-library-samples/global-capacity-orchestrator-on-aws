@@ -73,22 +73,29 @@ class TestCapacityPoller:
         # emulator runs; CI's fresh emulator per job masked this).
         dynamodb.delete_table(TableName=table_name)
 
-    def test_poll_reports_error_without_false_snapshot_when_capacity_apis_reject(
+    def test_poll_records_only_the_signals_the_capacity_apis_answer(
         self, history_table, monkeypatch
     ):
-        # The emulator's EC2 rejects get_spot_placement_scores,
-        # describe_spot_price_history, and describe_capacity_block_offerings.
-        # No authoritative signal means no history item: failure must never be
-        # persisted as a confirmed zero-capacity observation.
+        # Floci 2.2.0's EC2 still rejects get_spot_placement_scores and
+        # describe_capacity_block_offerings (UnsupportedOperation) but answers
+        # describe_spot_price_history with an empty history -- an
+        # authoritative "no spot offering observed" answer. The snapshot must
+        # carry exactly that one signal (az_count 0) and nothing fabricated
+        # for the probes that failed: no placement scores, no spot price, no
+        # Capacity Block counts. (The all-probes-fail path, which must write
+        # nothing, keeps its coverage in tests/test_capacity_poller_handler.py.)
         monkeypatch.setenv("CAPACITY_HISTORY_TABLE_NAME", history_table)
         monkeypatch.setenv("WATCH_INSTANCE_TYPES", "g4dn.xlarge")
         monkeypatch.setenv("ENABLED_REGIONS", "us-east-1")
         handler = load_lambda_module("capacity-poller")
 
         result = handler.lambda_handler({}, None)
-        assert result["written"] == 0
-        assert result["errors"] == 1
-        assert boto3.resource("dynamodb").Table(history_table).scan()["Items"] == []
+        assert result["written"] == 1
+        assert result["errors"] == 0
+        (item,) = boto3.resource("dynamodb").Table(history_table).scan()["Items"]
+        assert item["pk"] == "g4dn.xlarge#us-east-1"
+        assert item["az_count"] == 0
+        assert not {key for key in item if key.startswith(("spot_", "capacity_blocks_", "sps_"))}
 
     def test_disabling_the_long_probe_omits_the_long_tier(self, history_table, monkeypatch):
         monkeypatch.setenv("CAPACITY_HISTORY_TABLE_NAME", history_table)
