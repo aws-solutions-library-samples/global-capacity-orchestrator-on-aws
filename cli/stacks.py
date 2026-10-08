@@ -1973,7 +1973,14 @@ class StackManager:
 
     def list_stacks(self) -> list[str]:
         """List all available CDK stacks."""
-        result = self._run_cdk(["list"], capture_output=True)
+        # stdout is parsed as one stack name per line, so it must carry
+        # nothing else. With CI set (every GitHub Actions runner sets it) the
+        # CDK CLI routes its own log lines to stdout instead of stderr, and a
+        # warning such as "current credentials could not be used to assume
+        # '...lookup-role...', but are for the right account. Proceeding
+        # anyway." then reads as a stack name. --no-ci keeps the logs on
+        # stderr whatever the environment says.
+        result = self._run_cdk(["list", "--no-ci"], capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(f"Failed to list stacks: {result.stderr}")
         return [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]
