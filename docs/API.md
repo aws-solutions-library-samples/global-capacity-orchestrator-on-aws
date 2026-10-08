@@ -2168,7 +2168,7 @@ awscurl --service execute-api --region us-east-1 \
           "spec": {
             "containers": [{
               "name": "main",
-              "image": "python:3.14.7-slim",
+              "image": "python:3.14.8-slim",
               "command": ["python", "-c", "print(\"Hello World\")"]
             }],
             "restartPolicy": "Never"
@@ -2229,7 +2229,7 @@ awscurl --service execute-api --region us-east-1 \
         }
       }
     },
-    "parameters": {"image": "python:3.14.7-slim"}
+    "parameters": {"image": "python:3.14.8-slim"}
   }'
 
 # Create job from template

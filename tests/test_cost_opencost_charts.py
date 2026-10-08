@@ -232,7 +232,7 @@ class TestRegionalChartWiring:
 class TestOpencostTlsSidecar:
     """The verified-TLS front door the cost-monitor reaches OpenCost through.
 
-    Value keys are those of the pinned OpenCost chart 2.5.31:
+    Value keys are those of the pinned OpenCost chart 2.5.32:
     ``opencost.extraContainers`` (a list rendered with ``toYaml``), the
     root-level ``extraVolumes`` and ``opencost.nodeSelector``.
     """

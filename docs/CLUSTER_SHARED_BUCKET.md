@@ -176,7 +176,7 @@ spec:
       serviceAccountName: gco-service-account
       containers:
       - name: uploader
-        image: python:3.14.7-slim
+        image: python:3.14.8-slim
         command: ["python", "-c", "import os; print(os.environ['sharedBucketName'])"]
         envFrom:
         - configMapRef:

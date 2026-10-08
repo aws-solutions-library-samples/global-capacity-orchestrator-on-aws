@@ -579,7 +579,7 @@ Deploy an inference endpoint from a notebook:
 
 ```bash
 gco inference deploy exploration-llm \
-  --image vllm/vllm-openai:v0.29.0 \
+  --image vllm/vllm-openai:v0.31.0 \
   --replicas 1 --gpu-count 1 \
   --region us-east-1
 ```
@@ -1144,7 +1144,7 @@ spec:
       serviceAccountName: gco-service-account
       containers:
       - name: uploader
-        image: python:3.14.7-slim
+        image: python:3.14.8-slim
         command: ["python", "-c", "import os; print(os.environ['sharedBucketName'])"]
         envFrom:
         - configMapRef:

@@ -44,7 +44,7 @@ spec:
     spec:
       containers:
       - name: trainer
-        image: python:3.14.7-slim
+        image: python:3.14.8-slim
         securityContext:
           allowPrivilegeEscalation: false
         command: ["python3", "-c"]

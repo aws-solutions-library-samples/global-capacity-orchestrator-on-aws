@@ -98,7 +98,7 @@ This path commonly fails with the pinned-version `ResolutionImpossible` / depend
 # Python 3.14+ (3.14 used in CI)
 python3 --version
 
-# Node.js 24 and npm 12.0.2 (see .nvmrc and package.json)
+# Node.js 24 and npm 12.2.0 (see .nvmrc and package.json)
 node --version
 npm --version
 
@@ -266,7 +266,7 @@ GCO can also deploy long-running inference endpoints across regions. Here's a qu
 ```bash
 # Deploy a vLLM inference endpoint
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.29.0 \
+  -i vllm/vllm-openai:v0.31.0 \
   --gpu-count 1 \
   -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
   -r us-east-1

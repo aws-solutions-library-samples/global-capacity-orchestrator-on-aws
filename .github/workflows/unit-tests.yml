@@ -1037,9 +1037,11 @@ jobs:
       - name: Install the locked pip-tools version
         run: |
           set -euo pipefail
-          # pip-tools 7.6.1 imports a pip internal removed after 25.0.1.
-          # Keep this throwaway resolver environment on the documented
-          # compatibility version, and derive pip-tools from the committed lock.
+          # The documented lock-regeneration workflow (docs/MAINTENANCE.md)
+          # resolves on pip 25.0.1 — pip-tools 7.6.1 needed it, and the
+          # resolver version stays part of the reproducibility contract — so
+          # this throwaway environment uses the same pip and derives pip-tools
+          # from the committed lock.
           python -m pip install "pip==25.0.1"
           pin="$(grep -E '^pip-tools==' requirements-lock.txt)"
           test -n "$pin"

@@ -67,7 +67,7 @@ spec:
       spec:
         containers:
         - name: ray-head
-          image: rayproject/ray:2.58.0
+          image: rayproject/ray:2.59.0
           resources:
             requests:
               cpu: "2"
@@ -86,7 +86,7 @@ spec:
       spec:
         containers:
         - name: ray-worker
-          image: rayproject/ray:2.58.0
+          image: rayproject/ray:2.59.0
           resources:
             requests:
               cpu: "2"
@@ -104,7 +104,7 @@ spec:
       spec:
         containers:
         - name: ray-worker
-          image: rayproject/ray:2.58.0
+          image: rayproject/ray:2.59.0
           resources:
             requests:
               cpu: "4"
@@ -203,7 +203,7 @@ workerGroupSpecs:
     spec:
       containers:
       - name: ray-worker
-        image: rayproject/ray:2.58.0
+        image: rayproject/ray:2.59.0
         resources:
           requests:
             cpu: "4"

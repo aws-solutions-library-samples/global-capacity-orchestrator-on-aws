@@ -44,15 +44,15 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "boto3==1.43.93",
+    "boto3==1.43.109",
     "click==8.5.0",
     "requests==2.34.2",
     "pyyaml==6.0.3",
     "constructs==10.8.1",
-    "kubernetes==36.0.3",
-    "fastapi==0.141.1",
-    "uvicorn==0.52.4",
-    "pydantic==2.13.5",
+    "kubernetes==37.0.0",
+    "fastapi==0.143.0",
+    "uvicorn==0.54.0",
+    "pydantic==2.14.0",
     "prometheus-client==0.26.0",
     # httpx2 is Pydantic's maintained continuation of httpx (same API). Its
     # default TLS trust is the OS store, through truststore.
@@ -64,13 +64,13 @@ dependencies = [
     # only the OTLP protobuf encoder, not the stock OTLP/HTTP exporter (which
     # cannot sign). protobuf is a root because tracing.py imports
     # google.protobuf directly to decode X-Ray's partial-success responses.
-    "opentelemetry-api==1.45.0",
-    "opentelemetry-sdk==1.45.0",
-    "opentelemetry-exporter-otlp-proto-common==1.45.0",
-    "opentelemetry-proto==1.45.0",
-    "opentelemetry-instrumentation-fastapi==0.66b0",
-    "opentelemetry-instrumentation-httpx==0.66b0",
-    "protobuf==7.35.1",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-sdk==1.45.1",
+    "opentelemetry-exporter-otlp-proto-common==1.45.1",
+    "opentelemetry-proto==1.45.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-instrumentation-httpx==0.66b1",
+    "protobuf==7.36.2",
     "urllib3==2.8.0",
     # FastMCP powers the in-tree MCP server (gco_mcp/run_mcp.py). The ``tasks``
     # extra pulls in ``fastmcp-tasks``, the io.modelcontextprotocol/tasks
@@ -80,7 +80,7 @@ dependencies = [
     # ``fastmcp.experimental.transforms.code_mode`` dependencies (the
     # MontySandboxProvider runtime + the GetTags/Search/GetSchemas
     # discovery tools) used when GCO_MCP_TOOL_SEARCH=code_mode.
-    "fastmcp[tasks,code-mode]==4.0.3",
+    "fastmcp[tasks,code-mode]==4.0.11",
     # BM25 ranking backend for FastMCP's tool-search transform when
     # GCO_MCP_TOOL_SEARCH=bm25.
     "rank-bm25==0.2.2",
@@ -88,7 +88,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cdk = [
-    "aws-cdk-lib==2.269.0",
+    "aws-cdk-lib==2.272.0",
     "cdk-nag==3.0.2",
     "constructs==10.8.1",
 ]
@@ -106,8 +106,8 @@ diagrams = [
     # ``lint`` extra to avoid version-drift between the generator and
     # the CI lint gate).
     "pyflowchart==0.6.0",
-    "playwright==1.62.0",
-    "ruff==0.16.7",
+    "playwright==1.63.0",
+    "ruff==0.16.10",
 ]
 # Direct runtime roots for the six production service images. Their Dockerfiles
 # read exactly one group with Python 3.14's tomllib and use requirements-lock.txt
@@ -124,95 +124,95 @@ diagrams = [
 # (dockerfiles/runtime_smoke.py). The inference-monitor and queue-processor
 # images do not trace and ship none of it.
 image-health-monitor = [
-    "boto3==1.43.93",
-    "botocore==1.43.93",
-    "fastapi==0.141.1",
+    "boto3==1.43.109",
+    "botocore==1.43.109",
+    "fastapi==0.143.0",
     "httptools==0.8.0",
     "httpx2==2.13.1",
-    "kubernetes==36.0.3",
-    "opentelemetry-api==1.45.0",
-    "opentelemetry-exporter-otlp-proto-common==1.45.0",
-    "opentelemetry-instrumentation-fastapi==0.66b0",
-    "opentelemetry-instrumentation-httpx==0.66b0",
-    "opentelemetry-proto==1.45.0",
-    "opentelemetry-sdk==1.45.0",
+    "kubernetes==37.0.0",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-exporter-otlp-proto-common==1.45.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-instrumentation-httpx==0.66b1",
+    "opentelemetry-proto==1.45.1",
+    "opentelemetry-sdk==1.45.1",
     "prometheus-client==0.26.0",
-    "protobuf==7.35.1",
-    "starlette==1.6.0",
-    "uvicorn==0.52.4",
-    "uvloop==0.22.1",
+    "protobuf==7.36.2",
+    "starlette==1.7.0",
+    "uvicorn==0.54.0",
+    "uvloop==0.23.0",
 ]
 image-manifest-processor = [
-    "boto3==1.43.93",
-    "botocore==1.43.93",
-    "fastapi==0.141.1",
+    "boto3==1.43.109",
+    "botocore==1.43.109",
+    "fastapi==0.143.0",
     "httptools==0.8.0",
     "httpx2==2.13.1",
-    "kubernetes==36.0.3",
-    "opentelemetry-api==1.45.0",
-    "opentelemetry-exporter-otlp-proto-common==1.45.0",
-    "opentelemetry-instrumentation-fastapi==0.66b0",
-    "opentelemetry-instrumentation-httpx==0.66b0",
-    "opentelemetry-proto==1.45.0",
-    "opentelemetry-sdk==1.45.0",
+    "kubernetes==37.0.0",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-exporter-otlp-proto-common==1.45.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-instrumentation-httpx==0.66b1",
+    "opentelemetry-proto==1.45.1",
+    "opentelemetry-sdk==1.45.1",
     "prometheus-client==0.26.0",
-    "protobuf==7.35.1",
-    "pydantic==2.13.5",
+    "protobuf==7.36.2",
+    "pydantic==2.14.0",
     "pyyaml==6.0.3",
     "requests==2.34.2",
-    "starlette==1.6.0",
-    "uvicorn==0.52.4",
-    "uvloop==0.22.1",
+    "starlette==1.7.0",
+    "uvicorn==0.54.0",
+    "uvloop==0.23.0",
 ]
 image-inference-proxy = [
-    "boto3==1.43.93",
-    "botocore==1.43.93",
-    "fastapi==0.141.1",
+    "boto3==1.43.109",
+    "botocore==1.43.109",
+    "fastapi==0.143.0",
     "httptools==0.8.0",
     "httpx2==2.13.1",
-    "opentelemetry-api==1.45.0",
-    "opentelemetry-exporter-otlp-proto-common==1.45.0",
-    "opentelemetry-instrumentation-fastapi==0.66b0",
-    "opentelemetry-instrumentation-httpx==0.66b0",
-    "opentelemetry-proto==1.45.0",
-    "opentelemetry-sdk==1.45.0",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-exporter-otlp-proto-common==1.45.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-instrumentation-httpx==0.66b1",
+    "opentelemetry-proto==1.45.1",
+    "opentelemetry-sdk==1.45.1",
     "prometheus-client==0.26.0",
-    "protobuf==7.35.1",
-    "starlette==1.6.0",
-    "uvicorn==0.52.4",
-    "uvloop==0.22.1",
+    "protobuf==7.36.2",
+    "starlette==1.7.0",
+    "uvicorn==0.54.0",
+    "uvloop==0.23.0",
 ]
 image-inference-monitor = [
-    "boto3==1.43.93",
-    "botocore==1.43.93",
-    "kubernetes==36.0.3",
+    "boto3==1.43.109",
+    "botocore==1.43.109",
+    "kubernetes==37.0.0",
     "prometheus-client==0.26.0",
     "pyyaml==6.0.3",
 ]
 image-queue-processor = [
-    "boto3==1.43.93",
-    "kubernetes==36.0.3",
+    "boto3==1.43.109",
+    "kubernetes==37.0.0",
     "pyyaml==6.0.3",
 ]
 image-cost-monitor = [
-    "boto3==1.43.93",
-    "botocore==1.43.93",
-    "fastapi==0.141.1",
+    "boto3==1.43.109",
+    "botocore==1.43.109",
+    "fastapi==0.143.0",
     "httptools==0.8.0",
     "httpx2==2.13.1",
-    "opentelemetry-api==1.45.0",
-    "opentelemetry-exporter-otlp-proto-common==1.45.0",
-    "opentelemetry-instrumentation-fastapi==0.66b0",
-    "opentelemetry-instrumentation-httpx==0.66b0",
-    "opentelemetry-proto==1.45.0",
-    "opentelemetry-sdk==1.45.0",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-exporter-otlp-proto-common==1.45.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-instrumentation-httpx==0.66b1",
+    "opentelemetry-proto==1.45.1",
+    "opentelemetry-sdk==1.45.1",
     "prometheus-client==0.26.0",
-    "protobuf==7.35.1",
+    "protobuf==7.36.2",
     "pyarrow==25.0.1",
-    "pydantic==2.13.5",
-    "starlette==1.6.0",
-    "uvicorn==0.52.4",
-    "uvloop==0.22.1",
+    "pydantic==2.14.0",
+    "starlette==1.7.0",
+    "uvicorn==0.54.0",
+    "uvloop==0.23.0",
 ]
 # Optional metric-reader file formats. The readers in
 # gco_mcp/metric_readers/files.py lazy-import these and, when they are
@@ -221,7 +221,7 @@ image-cost-monitor = [
 # Install only the format(s) you actually read.
 metrics-parquet = [
     # Parquet metric files (pandas.read_parquet + its pyarrow engine).
-    "pandas==3.0.5",
+    "pandas==3.0.6",
     "pyarrow==25.0.1",
 ]
 metrics-tfevents = [
@@ -240,26 +240,26 @@ mcp = [
     # so the documented ``pip install -e ".[mcp]"`` install path keeps
     # working. Pinned to match the base ``dependencies`` entry exactly to
     # avoid resolver thrash.
-    "fastmcp[tasks,code-mode]==4.0.3",
+    "fastmcp[tasks,code-mode]==4.0.11",
 ]
 lint = [
-    "ruff==0.16.7",
+    "ruff==0.16.10",
     "yamllint==1.38.0",
 ]
 typecheck = [
-    "mypy==2.3.1",
+    "mypy==2.4.0",
     # gco/services/tls_proxy.py imports uvloop (which ships py.typed) for its
     # loop factory; without the wheel installed mypy would see ``Any`` and
     # warn_return_any would reject the factory's return. Same pin as the
     # image-* groups.
-    "uvloop==0.22.1",
-    "types-requests==2.33.0.20260906",
+    "uvloop==0.23.0",
+    "types-requests==2.33.0.20261006",
     "types-PyYAML==6.0.12.20260906",
 ]
 test = [
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
-    "pytest-mock==3.15.1",
+    "pytest-mock==3.16.0",
     "pytest-asyncio==1.4.0",
     "pytest-xdist[psutil]==3.8.0",
     "moto==5.2.3",
@@ -273,7 +273,7 @@ test = [
     # test seeds a CloudFormation stack for output discovery. Pinning it
     # explicitly keeps test environments reproducible.
     "openapi-spec-validator==0.9.0",
-    "hypothesis==6.168.0",
+    "hypothesis==6.168.5",
     # The cost-monitor service writes Parquet reports via pyarrow (pinned to
     # the same version the metrics-parquet extra already locks), so its unit
     # tests can execute the real writer instead of mocking serialization.
@@ -296,7 +296,7 @@ security = [
     # Fully decode tracked demo GIFs under strict resource ceilings so malformed
     # or disguised media fails in the read-only security workflow.
     "pillow==12.3.0",
-    "pip-tools==7.6.1",
+    "pip-tools==7.6.2",
 ]
 docs = [
     # Builds the orientation wiki (wiki/ -> GitHub Pages site root) with
@@ -306,7 +306,7 @@ docs = [
     # Python-Markdown extensions; its transitive pins (pymdown-extensions,
     # Pygments, Markdown, ...) are version-controlled through
     # requirements-lock.txt.
-    "zensical==0.0.63",
+    "zensical==0.0.68",
 ]
 dev = [
     "gco-cli[cdk,diagrams,lint,typecheck,test,security,docs]",

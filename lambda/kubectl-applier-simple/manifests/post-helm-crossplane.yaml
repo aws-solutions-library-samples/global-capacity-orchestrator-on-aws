@@ -54,7 +54,7 @@ metadata:
     gco.io/crossplane-enabled: "{{CROSSPLANE_ENABLED}}"
 spec:
   package:
-    xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5@sha256:064e60c64420832b947fba90f4bc498b9e8894d80d0c1394dbf298a4363ef59b
+    xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.13.0@sha256:d57fcf0b05f50d7ed7fa3a2e754fdc536aa78c22fc38505074d2dab114dda0ec
 
 # ─── Cluster-wide read: Crossplane watches what it composes ─────────
 ---

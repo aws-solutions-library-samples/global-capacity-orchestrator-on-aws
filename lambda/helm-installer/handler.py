@@ -167,7 +167,7 @@ class _PinnedManifestBundle:
 
 
 PINNED_GATEWAY_CRD_BUNDLES = (
-    # Controller v3.5.0 is built against Gateway API v1.6.0 and requires the
+    # Controller v3.6.0 is built against Gateway API v1.6.0 and requires the
     # CRDs to be updated BEFORE the controller (release notes: upgrading the
     # controller first silently disables gateway reconciliation until the
     # CRDs catch up — exactly the stale-Accepted failure the 2026-08 live
@@ -186,13 +186,13 @@ PINNED_GATEWAY_CRD_BUNDLES = (
         crd_count=10,
     ),
     _PinnedManifestBundle(
-        name="aws-lbc-gateway-v3.5.0",
+        name="aws-lbc-gateway-v3.6.0",
         url=(
             "https://raw.githubusercontent.com/kubernetes-sigs/"
-            "aws-load-balancer-controller/v3.5.0/config/crd/gateway/gateway-crds.yaml"
+            "aws-load-balancer-controller/v3.6.0/config/crd/gateway/gateway-crds.yaml"
         ),
-        size=129_368,
-        sha256="fce68bbfc74b4ed7dbea675f46981cbef1fffc8981cf19c0c1e7a2e9d6464862",
+        size=129_552,
+        sha256="3a4264e2a7cf132944fd095b04ce86299385f26ea31b1e89d0ac21761e1865a0",
         object_count=3,
         crd_count=3,
     ),

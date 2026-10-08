@@ -41,7 +41,7 @@ REDIS = "ecr-public.aws.com/docker/library/redis:8.6.4-alpine"
 ARGOCD = "quay.io/argoproj/argocd:v3.5.3"
 DIGEST = "sha256:" + "2c" * 32
 OTHER_DIGEST = "sha256:" + "ab" * 32
-PYTHON_PINNED = f"public.ecr.aws/docker/library/python:3.14.7-slim@{DIGEST}"
+PYTHON_PINNED = f"public.ecr.aws/docker/library/python:3.14.8-slim@{DIGEST}"
 LOCAL = "gco-ci-tls-proxy:local"
 
 ARGOCD_RENDER = """\

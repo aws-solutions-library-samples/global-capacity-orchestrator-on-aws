@@ -40,7 +40,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: uploader
-        image: python:3.14.7-slim
+        image: python:3.14.8-slim
         command:
         - python
         - -c

@@ -146,7 +146,8 @@ exact npm release declared by `packageManager`:
 bash .github/scripts/use-pinned-npm.sh package.json
 ```
 
-Keep these graphs separate: root development tools must never enter the deployable Lambda bundle. Direct versions must be exact, lockfiles must be committed, and every new repository-owned `package.json` must add a matching npm entry in `.github/dependabot.yml`. CI's `check_npm_package_management` guard fails on an unlocked, ranged, unpinned, or unmanaged graph. Node 24, npm 12.0.2, and the root CDK CLI pin are also checked against `.nvmrc`, `Dockerfile.dev`, `gco/stacks/constants.py`, and both manifests by the monthly dependency scan.
+Keep these graphs separate: root development tools must never enter the deployable Lambda bundle. Direct versions must be exact, lockfiles must be committed, and every new repository-owned `package.json` must add a matching npm entry in `.github/dependabot.yml`. CI's `check_npm_package_management` guard fails on an unlocked, ranged, unpinned, or unmanaged graph. Node 24, npm 12.2.0, and the root CDK CLI pin are also checked against `.nvmrc`, `Dockerfile.dev`, `gco/stacks/constants.py`, and both manifests by the monthly dependency scan.
+
 
 #### Regenerating the Lockfile
 
@@ -169,12 +170,14 @@ docker run --rm -v "$(pwd):/workspace" -w /workspace gco-dev bash -c '
 '
 ```
 
-The `pip install "pip==25.0.1"` step works around `pip-tools==7.6.1` importing
-pip internals (`pip._internal.utils.compat.stdlib_pkgs`) that newer pip — as
-shipped in the current `python:3.14-slim` base image — has removed. The
-downgrade lives only inside the throwaway container; upgrading `pip-tools`
-past 7.6 would remove the need for it, but that is a dependency change made on
-its own PR, not silently alongside a lockfile regeneration.
+The `pip install "pip==25.0.1"` step keeps the resolver on the exact pip that
+CI's `unit:lockfile:freshness` job uses. It began as a workaround for
+`pip-tools==7.6.1` importing pip internals
+(`pip._internal.utils.compat.stdlib_pkgs`) that newer pip had removed; the
+pinned `pip-tools==7.6.2` also resolves identically on the base image's stock
+pip, but the resolver version stays part of the reproducibility contract, so
+change it in the workflow and here together. The downgrade lives only inside
+the throwaway container.
 
 The `sed` step removes the `gco-cli @ file:///workspace` self-reference that
 `pip-compile` always emits (two lines — the `file://` URI and its `# via`

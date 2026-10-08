@@ -959,7 +959,7 @@ jobs:
       # Bump the tag+digest in lockstep with floci-tests.yml; the deps-scan
       # Docker-image section tracks both.
       floci:
-        image: floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb
+        image: floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520
         ports:
           - 4566:4566
         env:
@@ -1471,12 +1471,12 @@ jobs:
               print(f"OK: {binary} e_machine=0x{e_machine:X}")
           PY
       - name: Pre-pull the DinD probe base image (with retry)
-        # The inner build below is FROM alpine:3.24.1; warming the host
+        # The inner build below is FROM alpine:3.24.2; warming the host
         # daemon's cache here (the inner build talks to that same daemon
         # over the socket) keeps a registry blip from failing the probe.
         uses: ./.github/actions/docker-pull-with-retry
         with:
-          images: alpine:3.24.1
+          images: alpine:3.24.2
       - name: Verify Docker-in-Docker via host socket pass-through
         # `gco stacks deploy-all` drives `cdk deploy`, which shells out to
         # Docker to bundle Lambda assets. The dev container ships only the
@@ -1493,7 +1493,7 @@ jobs:
           # the container can see it via the workspace bind mount.
           mkdir -p /tmp/dind-probe
           cat > /tmp/dind-probe/Dockerfile <<'DOCKERFILE'
-          FROM alpine:3.24.1
+          FROM alpine:3.24.2
           RUN echo "dind-probe" > /ok
           CMD ["cat", "/ok"]
           DOCKERFILE
@@ -1511,7 +1511,7 @@ jobs:
           docker run --rm dind-probe:ci | grep -q '^dind-probe$'
 
           # Clean up the probe image so this job leaves the runner tidy.
-          docker image rm dind-probe:ci alpine:3.24.1 >/dev/null 2>&1 || true
+          docker image rm dind-probe:ci alpine:3.24.2 >/dev/null 2>&1 || true
 
   # --------------------------------------------------------------------------
   # Kind cluster E2E — applies the Kubernetes manifests to a real API server
@@ -1559,7 +1559,7 @@ jobs:
       # digest-pinned emulator the floci suites and
       # integration:docker:queue-processor use; tests/test_pinned_floci_version.py
       # requires every workflow occurrence to carry the identical tag+digest.
-      CI_SQS_EMULATOR_IMAGE: "floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb"
+      CI_SQS_EMULATOR_IMAGE: "floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520"
       # Tag the emulator is loaded into the kind node under. Digest-pinned
       # references cannot be addressed by `kind load`, and the pod must never
       # reach a registry, so the pinned image is retagged locally and the
@@ -1834,7 +1834,7 @@ jobs:
                   "env": {"MODEL": "facebook/opt-125m"},
               },
               "ci-sglang": {
-                  "image": "lmsysorg/sglang:v0.5.19",
+                  "image": "lmsysorg/sglang:v0.5.21",
                   "framework": "sglang",
                   "port": 30000,
                   "gpu_count": 1,
@@ -1842,7 +1842,7 @@ jobs:
                   "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
               },
               "ci-sglang-explicit": {
-                  "image": "lmsysorg/sglang:v0.5.19",
+                  "image": "lmsysorg/sglang:v0.5.21",
                   "framework": "sglang",
                   "port": 30000,
                   "gpu_count": 2,
@@ -2983,7 +2983,7 @@ jobs:
           assert labels["gco.io/submission-method"] == "sqs", labels
           assert labels["app"] == "ml-training", labels
           image = job["spec"]["template"]["spec"]["containers"][0]["image"]
-          assert image == "python:3.14.7-slim", image
+          assert image == "python:3.14.8-slim", image
           print(f"applied {job['metadata']['namespace']}/{job['metadata']['name']} from SQS")
           PY
           kubectl -n gco-ci-sqs port-forward svc/sqs 4566:4566 >/dev/null 2>&1 &
@@ -3225,7 +3225,7 @@ jobs:
       # Same digest-pinned emulator floci-tests.yml and cluster-e2e run;
       # tests/test_pinned_floci_version.py holds every occurrence to the
       # identical tag+digest. Here it is the cost report bucket's S3.
-      CI_S3_EMULATOR_IMAGE: "floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb"
+      CI_S3_EMULATOR_IMAGE: "floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520"
       # Digest references cannot be addressed by `kind load`; retagged
       # locally and pulled with imagePullPolicy: Never (see cluster-e2e).
       CI_S3_LOCAL_IMAGE: "gco-ci-s3-emulator:local"

@@ -267,9 +267,10 @@ class TestMlflowChartEntry:
     def test_metrics_and_service_monitor_feed_prometheus(self, charts):
         # kube-prometheus-stack discovers ServiceMonitors cluster-wide and
         # the mlflow conjunction guarantees it is present. path must
-        # accompany enabled: chart 0.1.0 renders the ServiceMonitor
+        # accompany enabled: chart 0.1.0 rendered the ServiceMonitor
         # endpoint path as null otherwise, the API server rejects it, and
-        # every helm upgrade fails (caught live, 2026-08-14).
+        # every helm upgrade fails (caught live, 2026-08-14). 3.17.0
+        # defaults the path, but the explicit value stays reviewable.
         metrics = charts["mlflow"]["values"]["metrics"]
         assert metrics["enabled"] is True
         assert metrics["path"] == "/metrics"
@@ -303,8 +304,9 @@ class TestMlflowChartEntry:
         # /health first answers within the probes' 1s budget at ~16s with
         # a full core but only ~62s at half a core — past the chart's
         # fixed liveness window (15s + 3x20s), which crash-looped the
-        # server on a contended node (2026-08-14). No probe knobs exist,
-        # so the guaranteed share is the only lever.
+        # server on a contended node (2026-08-14). Chart 0.1.x had no
+        # probe knobs, so the guaranteed share was the only lever; 3.17.0
+        # adds a startup probe on top, and the measured core stays.
         resources = charts["mlflow"]["values"]["resources"]
         assert resources["requests"]["cpu"] == resources["limits"]["cpu"] == "1"
 

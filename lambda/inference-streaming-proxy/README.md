@@ -28,7 +28,7 @@ The execution role needs `secretsmanager:GetSecretValue` and trust-parameter `ss
 
 ## Dependencies and CI
 
-`package.json` and `package-lock.json` are the deployment graph and pin Node 24, npm 12.0.2, and each direct AWS SDK client exactly. The root tooling graph is intentionally separate so [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html), diagram, and markdown tooling cannot enter the Lambda bundle. Install this graph with lifecycle scripts disabled:
+`package.json` and `package-lock.json` are the deployment graph and pin Node 24, npm 12.2.0, and each direct AWS SDK client exactly. The root tooling graph is intentionally separate so [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html), diagram, and markdown tooling cannot enter the Lambda bundle. Install this graph with lifecycle scripts disabled:
 
 ```bash
 npm ci --prefix lambda/inference-streaming-proxy --ignore-scripts --no-audit --no-fund

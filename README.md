@@ -105,7 +105,7 @@ Running GPU workloads at scale is hard. You need to find regions with available 
 **Host install path (advanced) additionally needs:**
 
 - Python 3.14+ and Node.js 24 (use `.nvmrc`)
-- npm 12.0.2 and the repository's locked tooling graph: run `npm ci --ignore-scripts --no-audit --no-fund` at the repository root; `gco` prefers its local `node_modules/.bin/cdk` over a global CLI
+- npm 12.2.0 and the repository's locked tooling graph: run `npm ci --ignore-scripts --no-audit --no-fund` at the repository root; `gco` prefers its local `node_modules/.bin/cdk` over a global CLI
 - A **clean** Python virtual environment or pipx — GCO pins exact versions of many packages, so installing into an existing environment commonly fails with dependency-resolver errors. If you hit `ResolutionImpossible`, switch to the dev container instead of debugging your local environment.
 
 ### Run everything from the dev container
@@ -202,7 +202,7 @@ gco jobs logs hello-gco -n gco-jobs -r us-east-1
 ### Deploy an inference endpoint
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.29.0 --gpu-count 1
+gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1
 gco inference status my-llm
 gco inference scale my-llm --replicas 3
 ```
