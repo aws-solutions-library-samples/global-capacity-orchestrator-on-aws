@@ -504,6 +504,21 @@ module = "gco.stacks.*"
 disallow_subclassing_any = false
 warn_unused_ignores = false
 
+# kubernetes 37.0.0 is the first client release that ships py.typed. Its
+# generated models annotate every attribute Optional (``V1Job.spec: V1JobSpec |
+# None``, ``V1Pod.metadata: V1ObjectMeta | None``, ...) regardless of what the
+# API server guarantees on a returned object, its top-level packages re-export
+# without ``__all__`` (so under no_implicit_reexport the idiomatic ``from
+# kubernetes import client, config`` spellings fail too), and config loaders
+# such as ``load_incluster_config`` are still untyped. Adopting those types is
+# a deliberate pass over ~320 findings in the services, the CLI and the
+# applier Lambda — asserting the server-guaranteed fields, importing from the
+# defining submodules — not a dependency bump. Until that lands, the client
+# stays the ``Any`` it was through 36.x.
+[[tool.mypy.overrides]]
+module = ["kubernetes", "kubernetes.*"]
+follow_imports = "skip"
+
 # Tests can use looser rules — the test runner resolves fixtures at runtime so
 # `disallow_untyped_defs` creates too much noise for little real-world benefit.
 #

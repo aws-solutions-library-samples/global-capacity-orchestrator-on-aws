@@ -200,8 +200,11 @@ def _resolve_webhook_target(
 
     addresses: set[str] = set()
     for family, _type, _proto, _canonname, sockaddr in resolved:
+        # typeshed (mypy 2.4) types every getaddrinfo result as AF_INET or
+        # AF_INET6, so it calls this branch dead; the resolver is C library
+        # code outside that model, and an SSRF guard fails closed on purpose.
         if family not in {socket.AF_INET, socket.AF_INET6}:
-            return None, "DNS resolution returned an unsupported address family"
+            return None, "DNS resolution returned an unsupported address family"  # type: ignore[unreachable]
         raw_address = sockaddr[0]
         if not isinstance(raw_address, str):
             return None, "DNS resolution returned a non-text IP address"
