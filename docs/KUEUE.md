@@ -56,7 +56,7 @@ ClusterQueue (cluster-wide quotas)
 Defines a type of resource (e.g., CPU nodes, GPU nodes):
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
   name: gpu-flavor
@@ -75,7 +75,7 @@ spec:
 Defines cluster-wide resource quotas:
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: cluster-queue
@@ -106,7 +106,7 @@ spec:
 Namespace-scoped queue that routes jobs to a ClusterQueue:
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
   name: user-queue
@@ -182,7 +182,7 @@ Kueue supports priority-based admission and preemption. Higher-priority jobs can
 ### Create priority classes
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: WorkloadPriorityClass
 metadata:
   name: high-priority
@@ -190,7 +190,7 @@ value: 1000
 description: "Critical training jobs"
 
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: WorkloadPriorityClass
 metadata:
   name: low-priority
@@ -229,7 +229,7 @@ spec:
 ### Configure preemption on ClusterQueues
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: team-queue
@@ -249,12 +249,12 @@ Create separate ClusterQueues for different teams sharing a cohort:
 
 ```yaml
 # Team A: 4 GPUs guaranteed, can borrow up to 4 more when Team B is idle
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: team-a-queue
 spec:
-  cohort: shared-gpus
+  cohortName: shared-gpus
   preemption:
     reclaimWithinCohort: Any
     withinClusterQueue: LowerPriority
@@ -270,12 +270,12 @@ spec:
 
 ---
 # Team B: 4 GPUs guaranteed, can borrow up to 4 more when Team A is idle
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: team-b-queue
 spec:
-  cohort: shared-gpus
+  cohortName: shared-gpus
   preemption:
     reclaimWithinCohort: Any
     withinClusterQueue: LowerPriority

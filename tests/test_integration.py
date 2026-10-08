@@ -283,7 +283,7 @@ class TestKubernetesManifests:
             "admissionregistration.k8s.io/v1",
             # Kueue default queue topology (post-helm-kueue-default-queues.yaml);
             # keep in lockstep with _QUEUEING_CUSTOM_OBJECTS in the applier.
-            "kueue.x-k8s.io/v1beta1",
+            "kueue.x-k8s.io/v1beta2",
             # Kubeflow Trainer runtime blueprint
             # (post-helm-kubeflow-trainer-runtimes.yaml); keep in lockstep
             # with TRAINJOB_API_VERSION in gco/services/manifest_processor.py.
