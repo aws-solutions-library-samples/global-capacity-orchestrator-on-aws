@@ -16,5 +16,8 @@
     "cdk-dia": "0.12.4",
     "markdownlint-cli2": "0.23.3",
     "swagger-ui-dist": "5.33.1"
+  },
+  "overrides": {
+    "smol-toml": "1.9.0"
   }
 }

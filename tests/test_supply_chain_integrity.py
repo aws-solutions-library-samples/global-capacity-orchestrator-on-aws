@@ -1,6 +1,7 @@
 """Offline contracts for CI and runtime artifact provenance controls."""
 
 import ast
+import json
 import re
 import stat
 import tomllib
@@ -1836,6 +1837,35 @@ def test_npm_audit_retries_a_registry_operational_error() -> None:
     retry_index = body.index("while true; do")
     checker_index = body.index("check_npm_audit.py")
     assert retry_index < checker_index
+
+
+def test_root_npm_overrides_are_exact_and_still_needed() -> None:
+    """``overrides`` lifts a transitive package to an advisory's fixed release
+    when the direct dependency pins the vulnerable version exactly (smol-toml
+    1.8.0 under markdownlint-cli2 0.23.3, GHSA-r4xh-jqrq-34v2, fixed in
+    1.9.0). Each override must be an exact version, must have taken effect in
+    the lock, and must be removed once the direct dependency requests the
+    fixed line itself -- an override that outlives its reason is an invisible
+    pin the monthly drift scan does not watch."""
+    manifest = json.loads(_read("package.json"))
+    lock = json.loads(_read("package-lock.json"))
+    packages = lock["packages"]
+    overrides = manifest.get("overrides") or {}
+    assert set(overrides) == {"smol-toml"}, (
+        "document every new root override here with the advisory it lifts"
+    )
+    for name, version in overrides.items():
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), f"override {name} must be exact"
+        assert packages[f"node_modules/{name}"]["version"] == version, (
+            f"override {name}={version} did not take effect; refresh package-lock.json"
+        )
+    # The direct dependency that made the override necessary. When this
+    # assertion trips, drop the override and the lock entry follows upstream.
+    requested = packages["node_modules/markdownlint-cli2"]["dependencies"]["smol-toml"]
+    assert tuple(int(part) for part in requested.split(".")) < (1, 9, 0), (
+        f"markdownlint-cli2 now requests smol-toml {requested}; "
+        "remove the smol-toml override from package.json"
+    )
 
 
 def _job_env_pins(workflow: dict) -> dict[str, dict[str, str]]:

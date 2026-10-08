@@ -148,6 +148,7 @@ bash .github/scripts/use-pinned-npm.sh package.json
 
 Keep these graphs separate: root development tools must never enter the deployable Lambda bundle. Direct versions must be exact, lockfiles must be committed, and every new repository-owned `package.json` must add a matching npm entry in `.github/dependabot.yml`. CI's `check_npm_package_management` guard fails on an unlocked, ranged, unpinned, or unmanaged graph. Node 24, npm 12.2.0, and the root CDK CLI pin are also checked against `.nvmrc`, `Dockerfile.dev`, `gco/stacks/constants.py`, and both manifests by the monthly dependency scan.
 
+An npm `overrides` entry is the one sanctioned way to lift a transitive package to an advisory's fixed release when the direct dependency pins the vulnerable version exactly and no release of that dependency has caught up (bundled copies are out of its reach and get an `.npm-audit-ignore` entry instead). Overrides must be exact versions and must go when the direct dependency catches up; `tests/test_supply_chain_integrity.py` fails the moment the lockfile shows the dependency requesting the fixed line itself.
 
 #### Regenerating the Lockfile
 

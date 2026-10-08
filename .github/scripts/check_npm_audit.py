@@ -142,6 +142,13 @@ def check_report(report: dict[str, Any], package_dir: str, suppressions: list[Su
             continue
         severity = str(finding.get("severity", ""))
         if SEVERITY.get(severity, -1) < SEVERITY[FAIL_AT]:
+            # Below the gate by policy. It still has to count as a cleared
+            # link: a dependent that npm marks high because of one suppressed
+            # chain can also be "vulnerable through" a low-severity package
+            # (markdownlint-cli2 via markdownlint via katex, 2026-10-05), and
+            # the gate that ignores the low record must not hold the chain
+            # record hostage to it.
+            cleared.add(package)
             continue
 
         advisories = _advisories(finding.get("via"))
