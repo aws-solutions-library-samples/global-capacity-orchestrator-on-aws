@@ -478,9 +478,11 @@ EOF
 @test "extract_emr_versions: reads EMR_SERVERLESS_RELEASE_LABEL from constants.py" {
     run extract_emr_versions "gco/stacks/constants.py"
     [ "$status" -eq 0 ]
-    # The pinned label is emr-7.13.0 at the time of writing — assert the
-    # shape so a legitimate bump of the constant does not break the test.
-    [[ "$output" =~ ^emr-[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    # Assert the shape, not the value, so a legitimate bump of the constant
+    # does not break the test — in either label family (classic emr-N.x.y or
+    # the AWS runtime for Apache Spark's emr-spark-N.x.y), using the same GA
+    # pattern the scanner ranks labels with.
+    [[ "$output" =~ $EMR_RELEASE_LABEL_RE ]]
 }
 
 @test "extract_emr_versions: returns the exact pinned constant value" {
