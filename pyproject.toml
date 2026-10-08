@@ -49,7 +49,7 @@ dependencies = [
     "requests==2.34.2",
     "pyyaml==6.0.3",
     "constructs==10.8.1",
-    "kubernetes==37.0.0",
+    "kubernetes==36.0.3",
     "fastapi==0.143.0",
     "uvicorn==0.54.0",
     "pydantic==2.14.0",
@@ -129,7 +129,7 @@ image-health-monitor = [
     "fastapi==0.143.0",
     "httptools==0.8.0",
     "httpx2==2.13.1",
-    "kubernetes==37.0.0",
+    "kubernetes==36.0.3",
     "opentelemetry-api==1.45.1",
     "opentelemetry-exporter-otlp-proto-common==1.45.1",
     "opentelemetry-instrumentation-fastapi==0.66b1",
@@ -148,7 +148,7 @@ image-manifest-processor = [
     "fastapi==0.143.0",
     "httptools==0.8.0",
     "httpx2==2.13.1",
-    "kubernetes==37.0.0",
+    "kubernetes==36.0.3",
     "opentelemetry-api==1.45.1",
     "opentelemetry-exporter-otlp-proto-common==1.45.1",
     "opentelemetry-instrumentation-fastapi==0.66b1",
@@ -185,13 +185,13 @@ image-inference-proxy = [
 image-inference-monitor = [
     "boto3==1.43.109",
     "botocore==1.43.109",
-    "kubernetes==37.0.0",
+    "kubernetes==36.0.3",
     "prometheus-client==0.26.0",
     "pyyaml==6.0.3",
 ]
 image-queue-processor = [
     "boto3==1.43.109",
-    "kubernetes==37.0.0",
+    "kubernetes==36.0.3",
     "pyyaml==6.0.3",
 ]
 image-cost-monitor = [
@@ -503,21 +503,6 @@ follow_imports = "skip"
 module = "gco.stacks.*"
 disallow_subclassing_any = false
 warn_unused_ignores = false
-
-# kubernetes 37.0.0 is the first client release that ships py.typed. Its
-# generated models annotate every attribute Optional (``V1Job.spec: V1JobSpec |
-# None``, ``V1Pod.metadata: V1ObjectMeta | None``, ...) regardless of what the
-# API server guarantees on a returned object, its top-level packages re-export
-# without ``__all__`` (so under no_implicit_reexport the idiomatic ``from
-# kubernetes import client, config`` spellings fail too), and config loaders
-# such as ``load_incluster_config`` are still untyped. Adopting those types is
-# a deliberate pass over ~320 findings in the services, the CLI and the
-# applier Lambda — asserting the server-guaranteed fields, importing from the
-# defining submodules — not a dependency bump. Until that lands, the client
-# stays the ``Any`` it was through 36.x.
-[[tool.mypy.overrides]]
-module = ["kubernetes", "kubernetes.*"]
-follow_imports = "skip"
 
 # Tests can use looser rules — the test runner resolves fixtures at runtime so
 # `disallow_untyped_defs` creates too much noise for little real-world benefit.
