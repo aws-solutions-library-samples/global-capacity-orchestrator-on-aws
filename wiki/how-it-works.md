@@ -84,3 +84,5 @@ section shows the exact request flow per partition.
   — the mental model behind the components
 - [README — Architecture Overview](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#architecture-overview)
   — the generated CDK diagram and per-stack workflows
+- [Official AWS Solutions Guidance](https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/)
+  — the benefits and reference architecture as the AWS Solutions Library publishes them

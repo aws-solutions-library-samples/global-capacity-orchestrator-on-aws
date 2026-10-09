@@ -1,6 +1,6 @@
 # GCO CLI Reference
 
-Complete command-line interface documentation for GCO (Global Capacity Orchestrator on AWS).
+Complete command-line interface documentation for Global Capacity Orchestrator (GCO).
 
 ## Table of Contents
 

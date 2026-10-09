@@ -322,6 +322,7 @@ gco-mcp = "gco_mcp.run_mcp:main"
 [project.urls]
 Documentation = "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/CLI.md"
 Repository = "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws"
+"AWS Solutions Guidance" = "https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/"
 
 # =============================================================================
 # Tool Configurations

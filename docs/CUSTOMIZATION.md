@@ -1,6 +1,6 @@
 # Customization Guide
 
-This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) for your specific needs.
+This guide shows you how to customize Global Capacity Orchestrator (GCO) for your specific needs.
 
 ## Table of Contents
 

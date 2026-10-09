@@ -47,8 +47,8 @@
 # =============================================================================
 
 [project]
-site_name = "Global Capacity Orchestrator on AWS"
-site_description = "Orientation wiki for GCO — intelligent global capacity orchestration for GPU/accelerated workloads on AWS."
+site_name = "Global Capacity Orchestrator"
+site_description = "Orientation wiki for Global Capacity Orchestrator (GCO) — intelligent global capacity orchestration for GPU/accelerated workloads on AWS."
 site_url = "https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/"
 repo_url = "https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws"
 repo_name = "aws-solutions-library-samples/global-capacity-orchestrator-on-aws"

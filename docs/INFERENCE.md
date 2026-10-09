@@ -1,6 +1,6 @@
 # Inference Serving Guide
 
-Deploy and manage multi-region GPU inference endpoints with GCO (Global Capacity Orchestrator on AWS).
+Deploy and manage multi-region GPU inference endpoints with Global Capacity Orchestrator (GCO).
 
 ## Table of Contents
 

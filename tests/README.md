@@ -1,6 +1,6 @@
 # GCO Test Suite
 
-This directory contains the test suite for GCO (Global Capacity Orchestrator on AWS). The tests are organized by component and functionality.
+This directory contains the test suite for Global Capacity Orchestrator (GCO). The tests are organized by component and functionality.
 
 ## Table of Contents
 

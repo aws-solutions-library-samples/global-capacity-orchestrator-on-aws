@@ -1,4 +1,6 @@
-# Global Capacity Orchestrator on AWS
+# Global Capacity Orchestrator
+
+[**Guidance for EKS AutoMode Clusters with Global Capacity Orchestrator on AWS** · Official AWS Solutions Guidance](https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/)
 
 *One API. Every Accelerator. Any Region.*
 
@@ -80,6 +82,7 @@ carries the itemized numbers and their pricing date.
 | Trying to understand the architecture | [How it works](how-it-works.md) — the control plane, a Region, a job's path, the security posture |
 | A developer exploring the codebase | [Repo tour](repo-tour.md) and [How we build & test](build-and-test.md) |
 | Ready to contribute or fork | [Contributing](contributing.md) |
+| Looking for the AWS Solutions Library listing | [Official AWS Solutions Guidance](https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/) — the overview, benefits, and reference architecture AWS publishes for GCO |
 
 Every page here is a short orientation over the authoritative documentation
 on GitHub — the

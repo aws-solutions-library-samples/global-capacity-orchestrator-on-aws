@@ -1,6 +1,6 @@
 # Kubernetes Manifest Examples
 
-This directory contains example Kubernetes manifests you can use with GCO (Global Capacity Orchestrator on AWS). Each example is self-contained and ready to submit.
+This directory contains example Kubernetes manifests you can use with Global Capacity Orchestrator (GCO). Each example is self-contained and ready to submit.
 
 > **New to GCO?** Follow the [Learning Path](../docs/LEARNING_PATH.md) — it sequences these examples into a staged, hands-on onboarding curriculum.
 

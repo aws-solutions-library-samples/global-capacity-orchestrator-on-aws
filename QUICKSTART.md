@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-Get GCO (Global Capacity Orchestrator on AWS) running in under 60 minutes.
+Get Global Capacity Orchestrator (GCO) running in under 60 minutes.
 
 > **🐳 Use the dev container.** GCO pins exact versions of a lot of Python packages so CI is reproducible, which makes installing on top of an existing Python environment a frequent source of `ResolutionImpossible` errors. The recommended path — and the one this guide follows — is the dev container: [`scripts/setup-dev-alias.sh`](scripts/setup-dev-alias.sh) builds it and installs a `gco` shell function, so every command below runs inside the container without a hand-written `docker run …`. Host installs are an advanced path for contributors who develop on their host; see [Installing on your host instead](#installing-on-your-host-instead-advanced).
 >

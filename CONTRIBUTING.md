@@ -1,6 +1,6 @@
-# Contributing to GCO (Global Capacity Orchestrator on AWS)
+# Contributing to Global Capacity Orchestrator (GCO)
 
-Thank you for contributing to GCO (Global Capacity Orchestrator on AWS)! This guide will help you get started.
+Thank you for contributing to Global Capacity Orchestrator (GCO)! This guide will help you get started.
 
 ## Table of Contents
 
