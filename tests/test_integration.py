@@ -1304,13 +1304,24 @@ class TestDocumentation:
             content = f.read()
 
         assert len(content) > 1000, "README.md should have substantial content"
-        # The H1 carries the official guidance name ("Guidance for EKS
-        # AutoMode Clusters with Global Capacity Orchestrator on AWS") and may
-        # accentuate the project name with inline markup (<br>, <em>), so
-        # assert the project name appears inside the top-level heading rather
-        # than matching an exact string.
+        # The H1 is the project's own name; inline markup is tolerated, so
+        # assert the name appears inside the top-level heading rather than
+        # matching an exact string.
         assert re.search(r"<h1>.*Global Capacity Orchestrator.*</h1>", content), (
             "README.md should have a project-title H1 naming Global Capacity Orchestrator"
+        )
+        # Directly below it sits the official AWS Solutions Library guidance
+        # name, linked to the guidance page and labelled as official guidance.
+        url = "https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/"
+        guidance = re.search(re.escape(f'<a href="{url}">') + r"(?P<label>.*?)</a>", content)
+        assert guidance, "README.md should link the official AWS Solutions Guidance page"
+        label = re.sub(r"<[^>]+>", " ", guidance.group("label"))
+        assert " ".join(label.split()) == (
+            "Guidance for EKS AutoMode Clusters with Global Capacity Orchestrator on AWS "
+            "Official AWS Solutions Guidance"
+        ), label
+        assert (
+            content.index("<h1>") < guidance.start() < content.index("<!-- BEGIN BADGE TABLE -->")
         )
         # The short project name is introduced in the intro copy instead of
         # the official title.
