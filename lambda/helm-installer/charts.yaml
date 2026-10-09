@@ -1389,26 +1389,24 @@ charts:
     create_namespace: true
     use_oci: true
     values:
-      # Enable integration with common job types
-      enablePlainPod: true
-      # Prevent Karpenter from evicting Kueue pods during node consolidation
-      podAnnotations:
-        karpenter.sh/do-not-disrupt: "true"
-      # Controller configuration
-      controller:
-        resources:
-          requests:
-            cpu: 100m
-            memory: 256Mi
-          limits:
-            cpu: 500m
-            memory: 512Mi
-      # Webhook configuration
-      webhook:
-        resources:
-          requests:
-            cpu: 50m
-            memory: 128Mi
-          limits:
-            cpu: 200m
-            memory: 256Mi
+      # The chart reads pod-level settings only under controllerManager.manager
+      # and silently drops keys outside its own layout. Its one workload, the
+      # kueue-controller-manager Deployment, also serves the admission
+      # webhooks (kueue-webhook-service), so there is no separate webhook pod
+      # to size or annotate.
+      #
+      # Everything not set here is the chart default. The integrations, plain
+      # Pods and batch Jobs among them, come from its default managerConfig.
+      # Resources stay at its 500m CPU / 512Mi requests and 2 CPU / 512Mi
+      # limits, the sizing every live validation has run: the webhooks sit in
+      # the path of every Pod create outside kube-system and kueue-system, so a
+      # lower CPU limit would slow admission across the cluster.
+      controllerManager:
+        manager:
+          # Keep Karpenter (EKS Auto Mode) from evicting the single replica
+          # during consolidation or drift. The chart registers its Job and Pod
+          # mutating webhooks with failurePolicy Fail for every namespace but
+          # kube-system and kueue-system, so while the pod is gone Job and Pod
+          # creates elsewhere in the cluster are rejected.
+          podAnnotations:
+            karpenter.sh/do-not-disrupt: "true"

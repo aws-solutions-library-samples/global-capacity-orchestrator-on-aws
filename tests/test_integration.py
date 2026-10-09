@@ -1671,6 +1671,23 @@ class TestNewSchedulerChartIntegration:
             f"Kueue's mutating webhook blocks other chart installs when its pod is unavailable."
         )
 
+    def test_kueue_values_follow_the_chart_layout(self):
+        """Kueue's values must sit where the upstream chart reads them.
+
+        The chart takes pod-level settings only under
+        ``controllerManager.manager`` and Helm drops unknown keys without a
+        word, so the top-level ``podAnnotations``, ``enablePlainPod``,
+        ``controller`` and ``webhook`` blocks GCO used to ship rendered
+        nothing: the controller pod, which serves the Job and Pod webhooks,
+        never carried its do-not-disrupt annotation.
+        """
+        values = self._load_charts()["kueue"]["values"]
+        assert values == {
+            "controllerManager": {
+                "manager": {"podAnnotations": {"karpenter.sh/do-not-disrupt": "true"}}
+            }
+        }
+
     def test_cdk_json_helm_section_has_all_chart_groups(self):
         """The cdk.json helm section should have entries for all togglable chart groups.
 

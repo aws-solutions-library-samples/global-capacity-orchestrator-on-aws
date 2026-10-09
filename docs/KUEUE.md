@@ -35,10 +35,9 @@ Kueue is installed via Helm chart in the `kueue-system` namespace:
 
 | Component | Description |
 |-----------|-------------|
-| kueue-controller-manager | Manages ClusterQueue, LocalQueue, and Workload CRDs |
-| kueue-webhook | Admission webhook for job validation |
+| kueue-controller-manager | Manages ClusterQueue, LocalQueue, and Workload CRDs, and serves Kueue's admission webhooks (`kueue-webhook-service`) |
 
-The `enablePlainPod: true` setting is on by default, which lets Kueue manage standalone pods (not just Jobs). This is useful for managing Ray head pods, inference servers, or any long-running workload that isn't wrapped in a Job.
+The chart's default configuration turns on the plain Pod integration alongside batch Jobs, Deployments, StatefulSets and the Ray, JobSet and Kubeflow kinds, so Kueue can also queue standalone pods that carry a `kueue.x-k8s.io/queue-name` label. This is useful for Ray head pods, inference servers, or any long-running workload that isn't wrapped in a Job. Because of that integration, every Pod create outside `kube-system` and `kueue-system` passes through Kueue's webhook, so GCO annotates the controller pod `karpenter.sh/do-not-disrupt` to keep EKS Auto Mode from evicting it during consolidation.
 
 ## Key Concepts
 
@@ -376,7 +375,7 @@ Chart versions and Helm values are pinned in [`lambda/helm-installer/charts.yaml
 { "context": { "helm": { "kueue": { "enabled": false } } } }
 ```
 
-Chart values such as `enablePlainPod: true` (manage standalone pods — useful for Ray and inference servers) live under `kueue` in `charts.yaml`. Kueue is installed last because its mutating webhook intercepts Job and Deployment mutations.
+Chart values live under `kueue.values` in `charts.yaml` and follow the upstream chart's own layout: pod-level settings such as `podAnnotations` and `resources` sit under `controllerManager.manager`, the integrations under `managerConfig.controllerManagerConfigYaml`, and Helm silently ignores keys the chart does not define. Kueue is installed last because its mutating webhooks intercept Job, Deployment and Pod creates.
 
 ## Cleanup
 
