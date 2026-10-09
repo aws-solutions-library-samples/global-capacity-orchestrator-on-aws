@@ -3015,15 +3015,35 @@ jobs:
         # the route builds; this proves a real API server accepts it: field
         # names as the Job API spells them (a dropped restartPolicy defaults
         # to Always, which a Job rejects), and no selector or controller-uid
-        # labels left over from the original Job. The route runs inside a
-        # manifest-processor pod, so the production image, ServiceAccount and
-        # validation policy build and submit the copy.
+        # labels left over from the original Job. The manifest-processor
+        # Deployment is scaled to zero by now (the inference-proxy rollout
+        # needed the node's CPU), so the route runs on the runner against the
+        # kind API server, with the validation policy copied from that
+        # Deployment's own env.
         run: |
           set -euo pipefail
-          kubectl -n gco-system exec -i deploy/manifest-processor -c manifest-processor -- \
-            python - <<'PY' > "${RUNNER_TEMP}/retry-route.log"
+          kubectl -n gco-system get deployment manifest-processor -o json \
+            > "${RUNNER_TEMP}/manifest-processor-deployment.json"
+          python3 - "${RUNNER_TEMP}/manifest-processor-deployment.json" <<'PY' \
+            | tee "${RUNNER_TEMP}/retry-route.log"
           import asyncio
           import json
+          import os
+          import re
+          import sys
+          deployment = json.load(open(sys.argv[1], encoding="utf-8"))
+          (container,) = [
+              c
+              for c in deployment["spec"]["template"]["spec"]["containers"]
+              if c["name"] == "manifest-processor"
+          ]
+          policy = re.compile(
+              r"(CLUSTER_NAME|REGION|ALLOWED_\w+|TRUSTED_\w+|BLOCK_\w+|MAX_\w+_PER_MANIFEST"
+              r"|REQUIRE_ACCELERATOR_TOLERATION|VALIDATION_ENABLED|YAML_MAX_DEPTH)"
+          )
+          for entry in container["env"]:
+              if "value" in entry and policy.fullmatch(entry["name"]):
+                  os.environ[entry["name"]] = entry["value"]
           from gco.services.api_routes import jobs as routes
           from gco.services.manifest_processor import create_manifest_processor_from_env
           processor = create_manifest_processor_from_env()
@@ -3033,7 +3053,6 @@ jobs:
           print("RETRY_RESULT=" + json.dumps({"status_code": response.status_code, **body}))
           PY
           result="$(sed -n 's/^RETRY_RESULT=//p' "${RUNNER_TEMP}/retry-route.log")"
-          printf '%s\n' "${result}"
           new_job="$(RESULT="${result}" python3 -c '
           import json, os
           result = json.loads(os.environ["RESULT"])

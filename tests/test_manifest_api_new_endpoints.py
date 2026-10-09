@@ -865,8 +865,9 @@ class TestRetryJobManifest:
 
     def test_a_real_api_server_accepts_the_copy_in_ci(self):
         # The doubles above cannot say what an API server accepts, so
-        # integration:kind:cluster-e2e retries a real Job through this route
-        # inside a manifest-processor pod and checks the Job it creates.
+        # integration:kind:cluster-e2e retries a real Job through this route,
+        # with the manifest-processor Deployment's validation policy, and
+        # checks the Job the API server created.
         from pathlib import Path
 
         import yaml
@@ -882,7 +883,8 @@ class TestRetryJobManifest:
         assert names.index(
             "Verify the submitted job was applied and the message acknowledged"
         ) < names.index(name)
-        assert "exec -i deploy/manifest-processor -c manifest-processor" in run
+        assert "kubectl -n gco-system get deployment manifest-processor -o json" in run
+        assert "processor = create_manifest_processor_from_env()" in run
         assert 'routes.retry_job("gco-jobs", "sqs-submitted-job")' in run
         assert '"batch.kubernetes.io/controller-uid": uid' in run
         assert 'pod_spec["restartPolicy"] == "Never"' in run
