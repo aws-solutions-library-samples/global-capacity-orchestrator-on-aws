@@ -1,6 +1,6 @@
 # Kubernetes Manifest Examples
 
-This directory contains example Kubernetes manifests you can use with GCO (Global Capacity Orchestrator on AWS). Each example is self-contained and ready to submit.
+This directory contains example Kubernetes manifests you can use with Global Capacity Orchestrator (GCO). Each example is self-contained and ready to submit.
 
 > **New to GCO?** Follow the [Learning Path](../docs/LEARNING_PATH.md) — it sequences these examples into a staged, hands-on onboarding curriculum.
 
@@ -406,8 +406,8 @@ maintained, with no planned updates, bug fixes, or security patches.
 **Deploy via CLI (recommended for multi-region):**
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.29.0 --gpu-count 1
-gco inference deploy my-sglang -i lmsysorg/sglang:v0.5.19 --framework sglang \
+gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1
+gco inference deploy my-sglang -i lmsysorg/sglang:v0.5.21 --framework sglang \
   --port 30000 --gpu-count 1 -e MODEL=microsoft/Phi-3.5-mini-instruct
 ```
 
@@ -652,7 +652,7 @@ Pre-downloads model weights from HuggingFace to shared EFS so inference endpoint
 ```bash
 kubectl apply -f examples/model-download-job.yaml
 # After completion, deploy inference with the cached model:
-gco inference deploy my-model -i vllm/vllm-openai:v0.29.0 --model-path /models/opt-125m
+gco inference deploy my-model -i vllm/vllm-openai:v0.31.0 --model-path /models/opt-125m
 ```
 
 **When to use:** Pre-caching model weights before inference deployment, avoiding repeated downloads across pods.

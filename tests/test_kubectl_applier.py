@@ -4798,9 +4798,9 @@ _APPLY_DISPATCH = [
     _namespaced_custom(
         "TargetGroupConfiguration", "gateway.k8s.aws/v1", "targetgroupconfigurations"
     ),
-    _cluster_custom("ResourceFlavor", "kueue.x-k8s.io/v1beta1", "resourceflavors"),
-    _cluster_custom("ClusterQueue", "kueue.x-k8s.io/v1beta1", "clusterqueues"),
-    _namespaced_custom("LocalQueue", "kueue.x-k8s.io/v1beta1", "localqueues"),
+    _cluster_custom("ResourceFlavor", "kueue.x-k8s.io/v1beta2", "resourceflavors"),
+    _cluster_custom("ClusterQueue", "kueue.x-k8s.io/v1beta2", "clusterqueues"),
+    _namespaced_custom("LocalQueue", "kueue.x-k8s.io/v1beta2", "localqueues"),
     _cluster_custom("ClusterIssuer", "cert-manager.io/v1", "clusterissuers"),
     _namespaced_custom("Issuer", "cert-manager.io/v1", "issuers"),
     _namespaced_custom("Certificate", "cert-manager.io/v1", "certificates"),
@@ -6012,7 +6012,7 @@ class TestManifestValidationEdgeCases:
     ):
         documents = [
             {
-                "apiVersion": "kueue.x-k8s.io/v1beta1",
+                "apiVersion": "kueue.x-k8s.io/v1beta2",
                 "kind": "ResourceFlavor",
                 "metadata": {"name": "gco-default-flavor"},
             },
@@ -6041,7 +6041,7 @@ class TestManifestValidationEdgeCases:
 
         message = str(error.value)
         assert (
-            "kueue.x-k8s.io/v1beta1/ResourceFlavor/<cluster>/gco-default-flavor "
+            "kueue.x-k8s.io/v1beta2/ResourceFlavor/<cluster>/gco-default-flavor "
             "[post-helm:post-helm-mixed.yaml]: object or API resource not found "
             "(resourceflavors not registered)"
         ) in message

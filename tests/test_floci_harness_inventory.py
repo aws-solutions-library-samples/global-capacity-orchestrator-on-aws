@@ -32,7 +32,7 @@ def harness_session(verified_floci_endpoint):
 
     session = ThrottleResilientSession()
     # The documented Floci gaps get local answers (unparseable GetStackPolicy
-    # responses; Global Accelerator and X-Ray absent; no Availability Zone
+    # responses; X-Ray absent; no canonical Availability Zone
     # IDs) so the other scanners run against the emulator for real. See
     # tests/_floci_gap_shims.py for the per-gap rationale.
     apply_known_floci_gap_shims(session.events)

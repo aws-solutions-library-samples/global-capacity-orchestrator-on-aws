@@ -9,7 +9,7 @@ import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, NonCallableMock, patch
 
 import pytest
 
@@ -172,6 +172,37 @@ def _no_real_image_mirror(request):
 @pytest.fixture(autouse=True)
 def _isolated_kubeconfig(monkeypatch, tmp_path):
     monkeypatch.setenv("KUBECONFIG", str(tmp_path / ".kube-isolated" / "config"))
+
+
+# ============================================================================
+# Function-scoped: never let a test leave a mock boto3 default session behind
+# ============================================================================
+#
+# ``boto3.client()`` and ``boto3.resource()`` build on the module-level
+# ``boto3.DEFAULT_SESSION``, which boto3 creates lazily on first use. A test
+# that patches ``boto3.Session`` while the code under test calls one of those
+# module-level helpers creates that default session from the mock, and
+# ``patch`` restores ``boto3.Session`` on exit but not ``DEFAULT_SESSION``.
+# Every later test on the same worker that builds a real client through
+# ``boto3.client()`` then receives a ``MagicMock``, and ``Stubber`` fails on
+# it with "'ParamValidator' object has no attribute '_validate_<MagicMock
+# ...>'". The ``BedrockCapacityAdvisor.get_recommendation`` tests in
+# ``tests/test_capacity.py`` do exactly that (the capacity-history lookup
+# calls ``boto3.resource("dynamodb")``), so ``tests/test_transaction_search.py``
+# failed whenever xdist ran it after them on the same worker: an
+# order-dependent failure that surfaced when sharding changed worker
+# composition. Put the previous default session back whenever a test leaves a
+# mock in its place. Only a leaked mock is reverted; a real default session a
+# test creates is kept, so its botocore model cache keeps serving later tests.
+@pytest.fixture(autouse=True)
+def _no_leaked_mock_boto3_default_session():
+    import boto3
+
+    previous = boto3.DEFAULT_SESSION
+    yield
+    leaked = boto3.DEFAULT_SESSION
+    if leaked is not previous and isinstance(leaked, NonCallableMock):
+        boto3.DEFAULT_SESSION = previous
 
 
 # ============================================================================

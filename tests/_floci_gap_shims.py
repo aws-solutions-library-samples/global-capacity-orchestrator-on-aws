@@ -1,6 +1,6 @@
 """Documented Floci-gap shims, importable without pytest.
 
-Four emulator gaps affect GCO's AWS surface (each probed empirically; see
+Three emulator gaps affect GCO's AWS surface (each probed empirically; see
 docs/FLOCI_TESTING.md):
 
 * CloudFormation ``GetStackPolicy`` responses omit the
@@ -8,21 +8,20 @@ docs/FLOCI_TESTING.md):
   ``KeyError`` whether or not the stack has a policy. Real AWS returns a
   parseable empty result for a policy-less stack — which is what every GCO
   stack is — and the harness already tolerates exactly that shape.
-* Global Accelerator is absent from the emulator's service catalog
-  (``UnknownOperationException``), while the harness's fail-closed
-  inventory requires its scanner to complete.
-* EC2 does not model Availability Zone IDs (see
+* EC2 does not answer the canonical Availability Zone IDs: Floci 2.2.0
+  reports ``<region>-azN`` and ignores the ``zone-id`` filter (see
   :func:`shim_floci_zone_id_lookup`).
-* X-Ray is absent from the catalog as well (``UnknownOperationException``
-  on every operation tried against Floci 2.0.1), while the harness's
+* X-Ray is absent from the emulator's service catalog
+  (``UnknownOperationException`` on every operation tried, re-probed against
+  Floci 2.2.0), while the harness's
   baseline records each Region's trace segment destination before anything
   deploys, so the Transaction Search state the run changes can be restored.
 
 Each shim registers a botocore ``before-send`` handler that answers exactly
 one read-only operation with the response real AWS would give for the
-resources GCO actually creates (no stack policy; no accelerators an
-emulator could host; the X-Ray destination of an account that never turned
-Transaction Search on, which a fabricated emulator account cannot have done).
+resources GCO actually creates (no stack policy; the canonical zone ids; the
+X-Ray destination of an account that never turned Transaction Search on,
+which a fabricated emulator account cannot have done).
 They live strictly in the test layer: in-process Floci tests apply them to
 their sessions, and the E2E injects them into harness subprocesses through
 ``tests/_floci_sitecustomize/``. Production code never imports this module.
@@ -47,7 +46,6 @@ _EMPTY_STACK_POLICY_XML = (
     b"</GetStackPolicyResponse>"
 )
 
-_EMPTY_ACCELERATORS_JSON = json.dumps({"Accelerators": []}).encode()
 
 # What GetTraceSegmentDestination returns for an account that has never
 # enabled CloudWatch Transaction Search: segments still go to X-Ray.
@@ -80,19 +78,11 @@ def shim_floci_get_stack_policy(events) -> None:
     events.register("before-send.cloudformation.GetStackPolicy", _synthesize)
 
 
-def shim_floci_missing_global_accelerator(events) -> None:
-    """Answer Global Accelerator ``ListAccelerators`` with an empty list."""
-
-    def _synthesize(request, **_kwargs):
-        return _local_response(request, _EMPTY_ACCELERATORS_JSON, "application/x-amz-json-1.1")
-
-    events.register("before-send.global-accelerator.ListAccelerators", _synthesize)
-
-
 def shim_floci_zone_id_lookup(events) -> None:
     """Answer zone-id-filtered ``DescribeAvailabilityZones`` with real mappings.
 
-    Third documented gap: Floci's EC2 does not model Availability Zone IDs,
+    Second documented gap: Floci's EC2 does not answer canonical Availability
+    Zone IDs (2.2.0 reports ``<region>-azN`` and ignores the ``zone-id`` filter),
     but a credentialed CDK synth runs the regional stack's fail-closed
     EKS-unsupported-AZ resolution, which filters
     ``DescribeAvailabilityZones`` by ``zone-id`` and refuses to proceed when
@@ -167,6 +157,5 @@ def shim_floci_missing_xray(events) -> None:
 def apply_known_floci_gap_shims(events) -> None:
     """Install every documented Floci-gap shim on a botocore event system."""
     shim_floci_get_stack_policy(events)
-    shim_floci_missing_global_accelerator(events)
     shim_floci_zone_id_lookup(events)
     shim_floci_missing_xray(events)

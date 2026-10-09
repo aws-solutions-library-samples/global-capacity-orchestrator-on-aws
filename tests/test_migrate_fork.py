@@ -129,6 +129,27 @@ def test_other_upstream_org_projects_are_preserved(migrate: Any, rules: tuple[An
         assert report.preserved, f"failed to classify as preserved: {line}"
 
 
+def test_aws_solutions_guidance_page_is_preserved(migrate: Any, rules: tuple[Any, ...]) -> None:
+    """The AWS Solutions Library page that publishes the project keeps its address.
+
+    Its slug ends in the repository name after a hyphen, which no rewrite rule
+    may claim: the page belongs to AWS and documents the upstream project.
+    """
+    url = (
+        "https://docs.aws.amazon.com/solutions/"
+        "eks-automode-clusters-with-global-capacity-orchestrator-on-aws/"
+    )
+    for line in (
+        f"[Official AWS Solutions Guidance]({url})",
+        f'<a href="{url}"><b>Guidance for EKS AutoMode Clusters with</b></a>',
+        f'"AWS Solutions Guidance" = "{url}"',
+    ):
+        report = migrate.Report()
+        assert migrate.rewrite_text(line, "README.md", rules, report) == line
+        assert report.rewrites == [], f"rewrote the guidance page link: {line}"
+        assert [o.rule.name for o in report.preserved] == ["aws-solutions-guidance-page"]
+
+
 def test_original_org_references_survive_untouched(migrate: Any, rules: tuple[Any, ...]) -> None:
     """References from the project's original ``awslabs`` home never rewrite.
 

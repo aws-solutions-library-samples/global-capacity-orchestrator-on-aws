@@ -9,10 +9,17 @@ every Kubernetes client used by the handlers. Authentication is bypassed
 explicitly because its cryptographic behavior has dedicated tests.
 """
 
+import copy
+import json
+import re
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from kubernetes.client import ApiClient
+from kubernetes.client.rest import ApiException
 
 from tests._auth import bypass_backend_auth
 
@@ -515,20 +522,22 @@ class TestRetryJobEndpoint:
         """Test retrying a job returns success."""
         from gco.models import ManifestSubmissionResponse, ResourceStatus
 
-        # Mock original job
-        mock_job = MagicMock()
-        mock_job.metadata.name = "test-job"
-        mock_job.metadata.namespace = "default"
-        mock_job.metadata.labels = {"app": "test"}
-        mock_job.metadata.annotations = {}
-        mock_job.spec.parallelism = 1
-        mock_job.spec.completions = 1
-        mock_job.spec.backoff_limit = 6
-        mock_job.spec.template.to_dict.return_value = {
-            "spec": {"containers": [{"name": "main", "image": "test:latest"}]}
+        # The original Job, read raw (_preload_content=False) as the API server sent it
+        original = {
+            "metadata": {"name": "test-job", "namespace": "default", "labels": {"app": "test"}},
+            "spec": {
+                "backoffLimit": 6,
+                "template": {
+                    "spec": {
+                        "containers": [{"name": "main", "image": "test:latest"}],
+                        "restartPolicy": "Never",
+                    }
+                },
+            },
         }
-
-        mock_manifest_processor.batch_v1.read_namespaced_job.return_value = mock_job
+        mock_manifest_processor.batch_v1.read_namespaced_job.return_value = MagicMock(
+            data=json.dumps(original).encode()
+        )
 
         # Mock submission response
         mock_response = ManifestSubmissionResponse(
@@ -597,6 +606,306 @@ class TestRetryJobEndpoint:
                     "/api/v1/jobs/kube-system/test-job/retry", headers=_AUTH_HEADERS
                 )
                 assert response.status_code == 403
+
+
+_RETRY_UID = "6f1c2c1e-3d0a-4b8e-9f3c-2b7e4f6a9d10"
+_RETRY_NAME = re.compile(r"trainer-retry-\d{14}")
+
+
+def _failed_job_object() -> dict[str, Any]:
+    """A failed Job exactly as the API server returns it from a GET.
+
+    It carries everything the server adds: identity metadata, managedFields,
+    defaulted spec fields, status, and the generated selector plus the
+    controller-uid/job-name labels on the pod template. Every field is one the
+    pinned kubernetes client's models define, so the round-trip check below
+    can tell a real field from a misspelled one.
+    """
+    controller_labels = {
+        "batch.kubernetes.io/controller-uid": _RETRY_UID,
+        "batch.kubernetes.io/job-name": "trainer",
+        "controller-uid": _RETRY_UID,
+        "job-name": "trainer",
+    }
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": "trainer",
+            "namespace": "gco-jobs",
+            "uid": _RETRY_UID,
+            "resourceVersion": "48211",
+            "generation": 1,
+            "creationTimestamp": "2026-10-08T21:04:11Z",
+            "labels": {"app": "ml-training", "kueue.x-k8s.io/queue-name": "user-queue"},
+            "annotations": {
+                "kubectl.kubernetes.io/last-applied-configuration": '{"kind":"Job"}\n',
+                "team": "research",
+            },
+            "managedFields": [
+                {
+                    "manager": "kube-controller-manager",
+                    "operation": "Update",
+                    "apiVersion": "batch/v1",
+                    "time": "2026-10-08T21:05:02Z",
+                    "fieldsType": "FieldsV1",
+                    "fieldsV1": {"f:status": {}},
+                    "subresource": "status",
+                }
+            ],
+        },
+        "spec": {
+            "parallelism": 1,
+            "completions": 1,
+            "backoffLimit": 0,
+            "selector": {"matchLabels": {"batch.kubernetes.io/controller-uid": _RETRY_UID}},
+            "template": {
+                "metadata": {
+                    "creationTimestamp": None,
+                    "labels": {"app": "ml-training", **controller_labels},
+                },
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "trainer",
+                            "image": "python:3.14.8-slim",
+                            "command": ["python", "-c", "raise SystemExit(1)"],
+                            "resources": {
+                                "limits": {"cpu": "1", "memory": "1Gi"},
+                                "requests": {"cpu": "500m", "memory": "512Mi"},
+                            },
+                            "terminationMessagePath": "/dev/termination-log",
+                            "terminationMessagePolicy": "File",
+                            "imagePullPolicy": "IfNotPresent",
+                            "securityContext": {
+                                "capabilities": {"drop": ["ALL"]},
+                                "readOnlyRootFilesystem": True,
+                                "allowPrivilegeEscalation": False,
+                            },
+                        }
+                    ],
+                    "restartPolicy": "Never",
+                    "terminationGracePeriodSeconds": 30,
+                    "dnsPolicy": "ClusterFirst",
+                    "automountServiceAccountToken": False,
+                    "securityContext": {"runAsUser": 1000, "runAsNonRoot": True},
+                    "schedulerName": "default-scheduler",
+                },
+            },
+            "completionMode": "NonIndexed",
+            "suspend": False,
+            "podReplacementPolicy": "TerminatingOrFailed",
+            "podFailurePolicy": {
+                "rules": [
+                    {
+                        "action": "Ignore",
+                        "onPodConditions": [{"type": "DisruptionTarget", "status": "True"}],
+                    }
+                ]
+            },
+            "ttlSecondsAfterFinished": 3600,
+        },
+        "status": {
+            "conditions": [
+                {
+                    "type": "Failed",
+                    "status": "True",
+                    "lastProbeTime": "2026-10-08T21:05:02Z",
+                    "lastTransitionTime": "2026-10-08T21:05:02Z",
+                    "reason": "BackoffLimitExceeded",
+                    "message": "Job has reached the specified backoff limit",
+                }
+            ],
+            "startTime": "2026-10-08T21:04:11Z",
+            "failed": 1,
+            "terminating": 0,
+            "ready": 0,
+            "uncountedTerminatedPods": {},
+        },
+    }
+
+
+async def _retry(original: dict[str, Any], name: str = "trainer") -> tuple[Any, dict[str, Any]]:
+    """Run the retry route against ``original``; return the response and the new Job."""
+    import gco.services.api_routes.jobs as routes
+    from gco.models import ManifestSubmissionResponse
+
+    processor = MagicMock(cluster_id="cluster", region="us-east-1")
+    processor.batch_v1.read_namespaced_job.return_value = MagicMock(
+        data=json.dumps(original).encode()
+    )
+    processor.process_manifest_submission = AsyncMock(
+        return_value=ManifestSubmissionResponse(True, "cluster", "us-east-1", [])
+    )
+    with (
+        patch.object(routes, "_check_processor", return_value=processor),
+        patch.object(routes, "_check_namespace"),
+    ):
+        response = await routes.retry_job("gco-jobs", name)
+
+    read = processor.batch_v1.read_namespaced_job
+    read.assert_called_once_with(name=name, namespace="gco-jobs", _preload_content=False)
+    read.return_value.release_conn.assert_called_once_with()
+    (request,) = processor.process_manifest_submission.call_args.args
+    assert request.validate is True
+    assert request.dry_run is False
+    (manifest,) = request.manifests
+    return response, manifest
+
+
+class TestRetryJobManifest:
+    """The retry route copies the Job the API server holds into a Job it accepts.
+
+    It used to rebuild the template from the typed model's ``to_dict()``,
+    whose Python field names (``restart_policy``) the API server does not
+    know, and it kept the labels that bind pods to the original Job's UID.
+    """
+
+    async def test_copies_the_spec_and_drops_what_the_server_generated(self):
+        original = _failed_job_object()
+        response, manifest = await _retry(original)
+
+        assert response.status_code == 201
+        new_name = manifest["metadata"]["name"]
+        assert _RETRY_NAME.fullmatch(new_name)
+        assert json.loads(response.body)["new_job"] == new_name
+        expected_spec = copy.deepcopy(original["spec"])
+        del expected_spec["selector"]
+        del expected_spec["suspend"]
+        expected_spec["template"]["metadata"] = {"labels": {"app": "ml-training"}}
+        assert manifest == {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": new_name,
+                "namespace": "gco-jobs",
+                "labels": {
+                    "app": "ml-training",
+                    "kueue.x-k8s.io/queue-name": "user-queue",
+                    "gco.io/retry-of": "trainer",
+                },
+                "annotations": {"team": "research", "gco.io/original-job": "trainer"},
+            },
+            "spec": expected_spec,
+        }
+
+    async def test_every_field_is_one_the_job_api_defines(self):
+        # Deserializing through the client's V1Job model keeps only the fields
+        # the Job API defines, so a misspelled field (restart_policy) vanishes
+        # from the round trip and the comparison fails.
+        _, manifest = await _retry(_failed_job_object())
+        with ApiClient() as api:
+            model = api.deserialize(SimpleNamespace(data=json.dumps(manifest)), "V1Job")
+            assert api.sanitize_for_serialization(model) == manifest
+
+    async def test_controller_labels_copied_onto_an_unlabeled_job_are_dropped(self):
+        # A Job created without labels gets its template's labels, generated
+        # ones included, as its own.
+        original = _failed_job_object()
+        original["metadata"]["labels"] = dict(original["spec"]["template"]["metadata"]["labels"])
+        _, manifest = await _retry(original)
+        assert manifest["metadata"]["labels"] == {
+            "app": "ml-training",
+            "gco.io/retry-of": "trainer",
+        }
+
+    async def test_a_manual_selector_and_its_labels_are_kept(self):
+        original = _failed_job_object()
+        original["metadata"]["labels"]["job-name"] = "trainer"
+        original["spec"]["manualSelector"] = True
+        original["spec"]["selector"] = {"matchLabels": {"run": "trainer-a"}}
+        original["spec"]["template"]["metadata"]["labels"] = {
+            "run": "trainer-a",
+            "job-name": "trainer",
+        }
+        _, manifest = await _retry(original)
+        assert manifest["metadata"]["labels"]["job-name"] == "trainer"
+        assert manifest["spec"]["manualSelector"] is True
+        assert manifest["spec"]["selector"] == {"matchLabels": {"run": "trainer-a"}}
+        assert manifest["spec"]["template"]["metadata"]["labels"] == {
+            "run": "trainer-a",
+            "job-name": "trainer",
+        }
+
+    async def test_a_template_without_metadata_is_copied_unchanged(self):
+        original = _failed_job_object()
+        del original["spec"]["template"]["metadata"]
+        _, manifest = await _retry(original)
+        assert manifest["spec"]["template"] == original["spec"]["template"]
+
+    def test_the_retry_name_fits_the_job_name_limit(self):
+        from gco.services.api_routes.jobs import _retry_job_name
+
+        now = datetime(2026, 10, 9, 12, 0, 0, tzinfo=UTC)
+        assert _retry_job_name("trainer", now) == "trainer-retry-20261009120000"
+        # 63 characters, the longest name a Job can have.
+        longest = "a" * 40 + "-" + "b" * 22
+        assert _retry_job_name(longest, now) == "a" * 40 + "-b-retry-20261009120000"
+        assert len(_retry_job_name(longest, now)) == 63
+        # A cut that lands on a separator does not leave it dangling.
+        assert _retry_job_name("a" * 41 + "-" + "b" * 21, now) == "a" * 41 + "-retry-20261009120000"
+
+    async def test_a_missing_job_is_404(self):
+        from fastapi import HTTPException
+
+        import gco.services.api_routes.jobs as routes
+
+        processor = MagicMock()
+        processor.batch_v1.read_namespaced_job.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        with (
+            patch.object(routes, "_check_processor", return_value=processor),
+            patch.object(routes, "_check_namespace"),
+            pytest.raises(HTTPException) as excinfo,
+        ):
+            await routes.retry_job("gco-jobs", "trainer")
+        assert excinfo.value.status_code == 404
+        processor.process_manifest_submission.assert_not_called()
+
+    def test_a_real_api_server_accepts_the_copy_in_ci(self):
+        # The doubles above cannot say what an API server accepts, so
+        # integration:kind:cluster-e2e retries a real Job through this route,
+        # with the manifest-processor Deployment's validation policy, and
+        # checks the Job the API server created.
+        from pathlib import Path
+
+        import yaml
+
+        workflow_path = (
+            Path(__file__).resolve().parents[1] / ".github/workflows/integration-tests.yml"
+        )
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["integration-kind-cluster-e2e"]["steps"]
+        names = [step.get("name") for step in steps]
+        name = "Retry the applied Job through the jobs API route"
+        run = steps[names.index(name)]["run"]
+        assert names.index(
+            "Verify the submitted job was applied and the message acknowledged"
+        ) < names.index(name)
+        assert "kubectl -n gco-system get deployment manifest-processor -o json" in run
+        assert "processor = create_manifest_processor_from_env()" in run
+        assert 'routes.retry_job("gco-jobs", "sqs-submitted-job")' in run
+        assert '"batch.kubernetes.io/controller-uid": uid' in run
+        assert 'pod_spec["restartPolicy"] == "Never"' in run
+        assert "batch.kubernetes.io/job-name=${new_job}" in run
+
+    async def test_a_payload_that_is_not_an_object_is_a_server_error(self):
+        from fastapi import HTTPException
+
+        import gco.services.api_routes.jobs as routes
+
+        processor = MagicMock()
+        # A response without release_conn, as a test double or another client may return.
+        processor.batch_v1.read_namespaced_job.return_value = SimpleNamespace(data=b"[]")
+        with (
+            patch.object(routes, "_check_processor", return_value=processor),
+            patch.object(routes, "_check_namespace"),
+            pytest.raises(HTTPException) as excinfo,
+        ):
+            await routes.retry_job("gco-jobs", "trainer")
+        assert excinfo.value.status_code == 500
+        processor.process_manifest_submission.assert_not_called()
 
 
 # =============================================================================

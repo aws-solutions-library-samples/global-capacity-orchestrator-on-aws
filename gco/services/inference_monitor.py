@@ -63,8 +63,8 @@ from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-26T23:26:19Z
-# Generated from Git commit: f3be7366f66f942f857b581eaf47f75a14c29d81
+# Generated at (UTC): 2026-10-08T19:00:07Z
+# Generated from Git commit: 231725d929e3dfd3c3768eba41d413effef39d67
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)
@@ -117,8 +117,8 @@ class AdminApiKeySecretError(Exception):
 # and immutable manifest-list digest together: both amd64 and arm64 inference
 # nodes resolve through this single verified index.
 AWS_CLI_IMAGE = (
-    "public.ecr.aws/aws-cli/aws-cli:2.36.44@"
-    "sha256:e8467f2c319f9bc9a1471808a69949a76915e9c95eaf4a09ece9f9e85fd32747"
+    "public.ecr.aws/aws-cli/aws-cli:2.37.10@"
+    "sha256:3dacc5db57c923c4223e949795f538ecf1f2212b2b7d5a028b47b97f91564c0d"
 )
 
 # Valid TCP port boundaries for KV-transfer bootstrap ports.
@@ -422,8 +422,8 @@ ENDPOINT_TLS_PROXY_SCRIPT_PATH = (
 # both amd64 and arm64 model nodes resolve through this single verified index.
 # The minor version must satisfy tls_proxy.py (it uses Python 3.14 syntax).
 ENDPOINT_TLS_PROXY_IMAGE = (
-    "public.ecr.aws/docker/library/python:3.14.7-slim@"
-    "sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d"
+    "public.ecr.aws/docker/library/python:3.14.8-slim@"
+    "sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2"
 )
 ENDPOINT_TLS_PROXY_IMAGE_ENV = "ENDPOINT_TLS_PROXY_IMAGE"
 

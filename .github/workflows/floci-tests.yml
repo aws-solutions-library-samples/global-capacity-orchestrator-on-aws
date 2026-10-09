@@ -68,13 +68,19 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       floci:
-        image: floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb
+        image: floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520
         ports:
           - 4566:4566
         env:
           # In-memory state: every job starts from a blank emulator, which is
           # exactly the determinism these tests want.
           FLOCI_STORAGE_MODE: memory
+          # Metadata-only EKS. Since 2.2.0 a real-mode CreateCluster starts a
+          # k3s container and answers only once it is ready (~90 s), past
+          # botocore's 60 s read timeout, so the client's retry collides with
+          # the first create ("Cluster already exists"). This layer needs only
+          # the EKS API shape; the kind E2E owns live-cluster behavior.
+          FLOCI_SERVICES_EKS_MOCK: "true"
         volumes:
           # Floci's ECR CreateRepository is Docker-backed and needs the host
           # socket; without it the emulator answers InternalFailure and the
@@ -159,11 +165,13 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       floci:
-        image: floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb
+        image: floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520
         ports:
           - 4566:4566
         env:
           FLOCI_STORAGE_MODE: memory
+          # Metadata-only EKS, as in floci:integration above.
+          FLOCI_SERVICES_EKS_MOCK: "true"
     env:
       # aws-cdk-lib wraps fs/child_process in performance.measure() telemetry;
       # the full app synth inside `cdk list` crosses Node's 1M-entry buffer,

@@ -8,6 +8,7 @@ retrieval errors out, and similar error-path branches. Authentication
 is bypassed explicitly because its cryptographic behavior has dedicated tests.
 """
 
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1053,18 +1054,16 @@ class TestJobsBulkDeleteCoverage:
 
 class TestJobsRetryCoverage:
     def test_success(self, jobs_mock_processor, jobs_api_client):
-        mock_job = MagicMock()
-        mock_job.metadata.name = "orig"
-        mock_job.metadata.namespace = "gco-jobs"
-        mock_job.metadata.labels = {"app": "train"}
-        mock_job.metadata.annotations = {}
-        mock_job.spec.parallelism = 1
-        mock_job.spec.completions = 1
-        mock_job.spec.backoff_limit = 3
-        mock_job.spec.template.to_dict.return_value = {
-            "spec": {"containers": [{"name": "main", "image": "test:latest"}]},
+        original = {
+            "metadata": {"name": "orig", "namespace": "gco-jobs", "labels": {"app": "train"}},
+            "spec": {
+                "backoffLimit": 3,
+                "template": {"spec": {"containers": [{"name": "main", "image": "test:latest"}]}},
+            },
         }
-        jobs_mock_processor.batch_v1.read_namespaced_job.return_value = mock_job
+        jobs_mock_processor.batch_v1.read_namespaced_job.return_value = MagicMock(
+            data=json.dumps(original).encode()
+        )
 
         mock_result = MagicMock(success=True, errors=[])
         jobs_mock_processor.process_manifest_submission = AsyncMock(return_value=mock_result)
@@ -1074,16 +1073,13 @@ class TestJobsRetryCoverage:
         assert resp.json()["success"] is True
 
     def test_submission_failure(self, jobs_mock_processor, jobs_api_client):
-        mock_job = MagicMock()
-        mock_job.metadata.name = "f"
-        mock_job.metadata.namespace = "gco-jobs"
-        mock_job.metadata.labels = {}
-        mock_job.metadata.annotations = {}
-        mock_job.spec.parallelism = 1
-        mock_job.spec.completions = 1
-        mock_job.spec.backoff_limit = 3
-        mock_job.spec.template.to_dict.return_value = {"spec": {"containers": []}}
-        jobs_mock_processor.batch_v1.read_namespaced_job.return_value = mock_job
+        original = {
+            "metadata": {"name": "f", "namespace": "gco-jobs"},
+            "spec": {"backoffLimit": 3, "template": {"spec": {"containers": []}}},
+        }
+        jobs_mock_processor.batch_v1.read_namespaced_job.return_value = MagicMock(
+            data=json.dumps(original).encode()
+        )
 
         mock_result = MagicMock(success=False, errors=["validation failed"])
         jobs_mock_processor.process_manifest_submission = AsyncMock(return_value=mock_result)

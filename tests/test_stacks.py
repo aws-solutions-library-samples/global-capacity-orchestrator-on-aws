@@ -1098,6 +1098,9 @@ class TestStackManagerOperations:
             stacks = manager.list_stacks()
 
             assert stacks == ["stack1", "stack2", "stack3"]
+            # Under CI=true the CDK CLI writes its warnings to stdout, where
+            # they would parse as stack names; the listing pins logs to stderr.
+            mock_run.assert_called_once_with(["list", "--no-ci"], capture_output=True)
 
     def test_list_stacks_error(self):
         """Test error handling when listing stacks fails."""

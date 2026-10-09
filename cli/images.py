@@ -51,8 +51,8 @@ from ._image_uri import (
 from .config import GCOConfig, _load_cdk_json, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-10-08T19:00:07Z
+# Generated from Git commit: 231725d929e3dfd3c3768eba41d413effef39d67
 # Flowchart(s) generated from this file:
 #   * ``ImageManager.build`` -> ``diagrams/code_diagrams/cli/images.ImageManager_build.html``
 #     (PNG: ``diagrams/code_diagrams/cli/images.ImageManager_build.png``)
@@ -102,7 +102,7 @@ _MAINTAINED_IMAGES: dict[str, str] = discover_service_dockerfiles()
 # this upstream image directly from Docker Hub. Pinned to an explicit version
 # for reproducibility; bump intentionally when validating a new vLLM release
 # and never use a mutable/rolling tag such as ``latest``.
-_DISAGGREGATED_DEFAULT_IMAGE = "vllm/vllm-openai:v0.29.0"
+_DISAGGREGATED_DEFAULT_IMAGE = "vllm/vllm-openai:v0.31.0"
 
 # Default lifecycle policy parameters.
 _DEFAULT_KEEP_TAGGED = 20

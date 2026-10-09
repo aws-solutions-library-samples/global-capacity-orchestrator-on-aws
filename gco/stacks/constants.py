@@ -376,7 +376,7 @@ restriction. Keep in sync with the AWS EKS networking requirements doc.
 # ``aws rds describe-db-engine-versions`` monthly for newer releases
 # within the same major line.
 
-AURORA_POSTGRES_VERSION = "17.10"
+AURORA_POSTGRES_VERSION = "17.11"
 """Aurora PostgreSQL engine version, applied via ``rds.AuroraPostgresEngineVersion.of()``.
 
 A plain ``major.minor`` string rather than a CDK enum name: enum members lag
@@ -395,7 +395,7 @@ library's enum catalog.
 # analytics stack, the regional stack, the global stack, and the tests import
 # from a single source of truth.
 
-EMR_SERVERLESS_RELEASE_LABEL = "emr-7.14.0"
+EMR_SERVERLESS_RELEASE_LABEL = "emr-spark-8.1.0"
 """EMR Serverless Spark release label used for ``emrserverless.CfnApplication``.
 
 Pinned to a stable Spark release so analytics workloads get a reproducible
@@ -403,12 +403,14 @@ runtime across deployments. Update alongside the EKS add-ons above when a
 newer EMR release is validated against the studio notebooks.
 
 Two label families are valid for the ``SPARK`` application this pins: the
-classic ``emr-N.x.y`` line and the AWS runtime for Apache Spark line,
-``emr-spark-N.x.y`` (Spark 4; ``emr-spark-8.0.0`` GA, then ``8.1.0``), which
-is the current major. The monthly dependency scan ranks both families by
-version and reports the newer one, so a move to ``emr-spark-8.x`` shows up
-as "new major available"; it is a Spark 3 to Spark 4 change for every
-notebook and example job, not a routine bump.
+classic ``emr-N.x.y`` line (Spark 3; ``emr-7.14.0`` was the last pin on it)
+and the AWS runtime for Apache Spark line, ``emr-spark-N.x.y`` (Spark 4;
+``emr-spark-8.0.0`` GA, then ``8.1.0``), which is the current major and the
+one pinned here. The monthly dependency scan ranks both families by version
+and reports the newer one, so a future major shows up as "new major
+available". Moving between families is a Spark major-version change for
+every notebook that runs on the application; the repository ships no Spark
+job of its own, so the pin carried no code change of ours.
 """
 
 SAGEMAKER_ROLE_NAME_PREFIX = "AmazonSageMaker"
@@ -589,7 +591,7 @@ def cost_athena_workgroup_name(project_name: str) -> str:
     return f"{project_name}-cost"
 
 
-MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.29.0"
+MOONCAKE_MASTER_DEFAULT_IMAGE = "vllm/vllm-openai:v0.31.0"
 """Default container image for the shared per-region Mooncake master.
 
 The master StatefulSet runs the ``mooncake_master`` daemon (RPC + built-in HTTP

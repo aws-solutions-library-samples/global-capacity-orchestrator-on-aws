@@ -87,8 +87,8 @@ from gco.services.leader_lease import (
 from gco.services.template_store import WebhookStore, get_webhook_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-26T23:26:19Z
-# Generated from Git commit: f3be7366f66f942f857b581eaf47f75a14c29d81
+# Generated at (UTC): 2026-10-08T19:00:07Z
+# Generated from Git commit: 231725d929e3dfd3c3768eba41d413effef39d67
 # Flowchart(s) generated from this file:
 #   * ``WebhookDispatcher._deliver_webhook`` -> ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.png``)
@@ -200,8 +200,11 @@ def _resolve_webhook_target(
 
     addresses: set[str] = set()
     for family, _type, _proto, _canonname, sockaddr in resolved:
+        # typeshed (mypy 2.4) types every getaddrinfo result as AF_INET or
+        # AF_INET6, so it calls this branch dead; the resolver is C library
+        # code outside that model, and an SSRF guard fails closed on purpose.
         if family not in {socket.AF_INET, socket.AF_INET6}:
-            return None, "DNS resolution returned an unsupported address family"
+            return None, "DNS resolution returned an unsupported address family"  # type: ignore[unreachable]
         raw_address = sockaddr[0]
         if not isinstance(raw_address, str):
             return None, "DNS resolution returned a non-text IP address"

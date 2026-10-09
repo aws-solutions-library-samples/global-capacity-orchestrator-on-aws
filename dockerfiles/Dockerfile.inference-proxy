@@ -13,7 +13,7 @@
 # liveness/readiness probes in lambda/kubectl-applier-simple/manifests/ are the
 # real check, and the distroless runtime stage has no shell for a Docker
 # HEALTHCHECK to exec anyway.
-FROM python:3.14.7-slim AS builder
+FROM python:3.14.8-slim AS builder
 
 # Set working directory
 WORKDIR /app

@@ -43,8 +43,8 @@ NAMESPACE = "gco-inference"
 # argument shape is exercised.
 IMAGES = [
     "vllm/vllm-openai:v0.6.0",
-    "lmsysorg/sglang:v0.5.19",
-    "nvcr.io/nvidia/tritonserver:26.08-py3",
+    "lmsysorg/sglang:v0.5.21",
+    "nvcr.io/nvidia/tritonserver:26.09-py3",
     "myregistry/custom-model:1.2.3",
     "123456789012.dkr.ecr.us-east-1.amazonaws.com/models/llama:prod",
 ]

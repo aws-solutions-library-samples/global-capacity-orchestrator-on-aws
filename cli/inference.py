@@ -25,8 +25,8 @@ from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T17:54:55Z
-# Generated from Git commit: 7a0b3c6fd401b7524cd0fe722ab2ce2629ae79ab
+# Generated at (UTC): 2026-10-08T19:00:07Z
+# Generated from Git commit: 231725d929e3dfd3c3768eba41d413effef39d67
 # Flowchart(s) generated from this file:
 #   * ``InferenceManager.deploy`` -> ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.html``
 #     (PNG: ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.png``)
@@ -513,7 +513,7 @@ class InferenceManager:
 
         Args:
             endpoint_name: Unique name for the endpoint
-            image: Container image (e.g. vllm/vllm-openai:v0.29.0). Optional
+            image: Container image (e.g. vllm/vllm-openai:v0.31.0). Optional
                 when ``mooncake_mode`` is set: a disaggregated/store deploy
                 with no image falls back to the default upstream
                 Mooncake-enabled vLLM image. A plain deploy still requires an

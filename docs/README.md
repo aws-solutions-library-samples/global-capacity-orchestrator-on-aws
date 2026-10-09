@@ -1,6 +1,6 @@
 # Documentation
 
-Comprehensive guides for understanding, deploying, operating, and customizing **Global Capacity Orchestrator (GCO)** — *One API. Every Accelerator. Any Region.*
+Comprehensive guides for understanding, deploying, operating, and customizing **Global Capacity Orchestrator (GCO)** — *One API. Every Accelerator. Any Region.* The AWS Solutions Library publishes GCO as [official AWS Solutions Guidance](https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/): an overview of its benefits and reference architecture.
 
 > **💡 Tip:** Connect the [MCP server](../gco_mcp/) to an agent and explore the codebase through conversation. Ask things like *"What [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stacks does GCO create?"* or *"How does the manifest processor validate jobs?"* — the agent reads the source code and docs to answer. See [gco_mcp/README.md](../gco_mcp/README.md) for setup.
 

@@ -1309,7 +1309,7 @@ def test_engine_environment_selects_codex(
 
     config = _parse_codex_config(_invoke(runner, ["--print-config"]))
 
-    assert config["model"] == "global.openai.gpt-6-sol"
+    assert config["model"] == "global.openai.gpt-6.1-sol"
 
 
 def test_engine_flag_beats_the_environment_and_preserves_claude_json(
@@ -1343,7 +1343,7 @@ def test_codex_print_config_matches_the_official_bedrock_runtime_schema(
     result = _invoke(runner, ["--engine", "codex", "--print-config"])
     config = _parse_codex_config(result)
 
-    assert config["model"] == "global.openai.gpt-6-sol"
+    assert config["model"] == "global.openai.gpt-6.1-sol"
     assert config["model"] == get_default_codex_model_id()
     assert config["model_provider"] == "amazon-bedrock-runtime" == CODEX_BEDROCK_PROVIDER
     assert config["model_reasoning_effort"] == "xhigh"
@@ -1900,12 +1900,12 @@ def test_codex_resume_and_passthrough_map_to_native_argv(
 def test_install_codex_uses_only_the_exact_npm_pin() -> None:
     from cli.autopilot import codex_install_command, install_codex
 
-    assert CODEX_VERSION == "0.154.0"
+    assert CODEX_VERSION == "0.161.0"
     assert codex_install_command() == [
         "npm",
         "install",
         "-g",
-        "@openai/codex@0.154.0",
+        "@openai/codex@0.161.0",
     ]
     with (
         patch("cli.autopilot.shutil.which", return_value="/usr/bin/npm"),
@@ -1927,7 +1927,7 @@ def test_codex_pin_source_is_an_exact_scanner_friendly_literal() -> None:
 
     pin = re.search(r'^CODEX_VERSION = "([^"]+)"$', source, re.M)
     assert pin is not None
-    assert pin.group(1) == CODEX_VERSION == "0.154.0"
+    assert pin.group(1) == CODEX_VERSION == "0.161.0"
     assert re.fullmatch(r"\d+\.\d+\.\d+", CODEX_VERSION)
 
 
@@ -2773,14 +2773,14 @@ def test_build_opencode_config_omits_empty_environments_and_sorts_servers() -> N
 def test_install_opencode_uses_only_the_exact_npm_pin() -> None:
     from cli.autopilot import install_opencode, opencode_install_command
 
-    assert OPENCODE_VERSION == "1.18.31"
+    assert OPENCODE_VERSION == "1.18.35"
     assert OPENCODE_PACKAGE == "opencode-ai"
     assert opencode_install_command() == [
         "npm",
         "install",
         "-g",
         "--allow-scripts=opencode-ai",
-        "opencode-ai@1.18.31",
+        "opencode-ai@1.18.35",
     ]
     with (
         patch("cli.autopilot.shutil.which", return_value="/usr/bin/npm"),
@@ -2802,7 +2802,7 @@ def test_opencode_pin_source_is_an_exact_scanner_friendly_literal() -> None:
 
     pin = re.search(r'^OPENCODE_VERSION = "([^"]+)"$', source, re.M)
     assert pin is not None
-    assert pin.group(1) == OPENCODE_VERSION == "1.18.31"
+    assert pin.group(1) == OPENCODE_VERSION == "1.18.35"
     assert re.fullmatch(r"\d+\.\d+\.\d+", OPENCODE_VERSION)
 
 

@@ -188,6 +188,14 @@ Every step reports what it did, and the command tells you where it stopped.
   requirements-lock.txt` from the repository root; see
   [TROUBLESHOOTING.md → Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask)
   — then `gco upgrade --skip-checkout`.
+- **At the first stack step, with `npm X is required to package the inference
+  streaming Lambda; found Y`**: the new release pins a different npm (the
+  `packageManager` field of its `package.json`), and the CDK app packages the
+  streaming Lambda only with that exact version. Packaging runs before the
+  first CloudFormation call, so no stack has changed, even though the message
+  arrives as `Upgrade failed during the stack cycle`; the checkout and local
+  install are on the new release. Run the `npm install --global npm@X` the
+  message names, then `gco upgrade --skip-checkout`.
 - **During the stack cycle**: the checkout and local install are on the new
   release. The failing stack is named; `gco stacks status <stack> -r <region>`
   and the CloudFormation console show why. An error that interrupts the cycle

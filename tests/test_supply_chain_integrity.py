@@ -1,6 +1,7 @@
 """Offline contracts for CI and runtime artifact provenance controls."""
 
 import ast
+import json
 import re
 import stat
 import tomllib
@@ -1725,13 +1726,13 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
     ]
 
     assert "ARG BUILDX_SHA256" not in dev_dockerfile
-    assert "ARG BUILDX_VERSION=v0.37.1" in buildx_section
+    assert "ARG BUILDX_VERSION=v0.38.0" in buildx_section
     assert "buildx-${BUILDX_VERSION}.linux-${TARGETARCH}" in buildx_section
     assert (
-        'amd64) BUILDX_SHA256="9447199cdb435f25880548343c128a4b6650e8891ee598905d8d29d39a8e359b"'
+        'amd64) BUILDX_SHA256="4fe4cc38adf48169132749b6ca22a990928db0118e3407584ee553723115d287"'
     ) in buildx_section
     assert (
-        'arm64) BUILDX_SHA256="e5cc9fe3bbff5cbc91230981f7860e06076110730a2db997082652199042a1f2"'
+        'arm64) BUILDX_SHA256="38e890e1a162bfdbf32fbe91404991dc4fc28e55b0de901b34374a061bab4d2c"'
     ) in buildx_section
     assert (
         'echo "${BUILDX_SHA256}  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c -'
@@ -1836,6 +1837,35 @@ def test_npm_audit_retries_a_registry_operational_error() -> None:
     retry_index = body.index("while true; do")
     checker_index = body.index("check_npm_audit.py")
     assert retry_index < checker_index
+
+
+def test_root_npm_overrides_are_exact_and_still_needed() -> None:
+    """``overrides`` lifts a transitive package to an advisory's fixed release
+    when the direct dependency pins the vulnerable version exactly (smol-toml
+    1.8.0 under markdownlint-cli2 0.23.3, GHSA-r4xh-jqrq-34v2, fixed in
+    1.9.0). Each override must be an exact version, must have taken effect in
+    the lock, and must be removed once the direct dependency requests the
+    fixed line itself -- an override that outlives its reason is an invisible
+    pin the monthly drift scan does not watch."""
+    manifest = json.loads(_read("package.json"))
+    lock = json.loads(_read("package-lock.json"))
+    packages = lock["packages"]
+    overrides = manifest.get("overrides") or {}
+    assert set(overrides) == {"smol-toml"}, (
+        "document every new root override here with the advisory it lifts"
+    )
+    for name, version in overrides.items():
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), f"override {name} must be exact"
+        assert packages[f"node_modules/{name}"]["version"] == version, (
+            f"override {name}={version} did not take effect; refresh package-lock.json"
+        )
+    # The direct dependency that made the override necessary. When this
+    # assertion trips, drop the override and the lock entry follows upstream.
+    requested = packages["node_modules/markdownlint-cli2"]["dependencies"]["smol-toml"]
+    assert tuple(int(part) for part in requested.split(".")) < (1, 9, 0), (
+        f"markdownlint-cli2 now requests smol-toml {requested}; "
+        "remove the smol-toml override from package.json"
+    )
 
 
 def _job_env_pins(workflow: dict) -> dict[str, dict[str, str]]:

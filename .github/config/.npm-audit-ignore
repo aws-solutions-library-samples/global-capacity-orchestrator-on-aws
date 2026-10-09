@@ -37,9 +37,12 @@
 # generator. A bundled copy is out of reach of `npm audit fix` and `overrides`,
 # and Dependabot's security update fails on it for the same reason.
 #
-# Not clearable by a pin bump: checked 2026-09-30, aws-cdk-lib 2.271.0 (the
-# latest release) still bundles brace-expansion 5.0.9. The upstream fix is
-# https://github.com/aws/aws-cdk/pull/38929.
+# Not clearable by a pin bump: re-checked 2026-10-08, aws-cdk-lib 2.272.0 (the
+# latest release, 2026-09-30, and the one this repository's lock now resolves)
+# still bundles brace-expansion 5.0.9. The upstream fix,
+# https://github.com/aws/aws-cdk/pull/38929 (bundled copy to 5.0.12), merged
+# on 2026-10-06 — after that release — so the next aws-cdk-lib release should
+# clear all three.
 #
 # Low risk: cdk-dia's runtime code never loads aws-cdk-lib. It matches the
 # construct names in the synthesized cdk.out/tree.json as strings, and its only
@@ -52,9 +55,9 @@
 # Advisories: https://github.com/advisories/GHSA-6j4f-fj2g-mc7p
 #             https://github.com/advisories/GHSA-qhr7-859c-m2p7
 #             https://github.com/advisories/GHSA-q2hr-2g5m-vwhr
-.|brace-expansion|GHSA-6j4f-fj2g-mc7p|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-10-30
-.|brace-expansion|GHSA-q2hr-2g5m-vwhr|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-10-30
-.|brace-expansion|GHSA-qhr7-859c-m2p7|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-10-30
+.|brace-expansion|GHSA-6j4f-fj2g-mc7p|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-11-29
+.|brace-expansion|GHSA-q2hr-2g5m-vwhr|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-11-29
+.|brace-expansion|GHSA-qhr7-859c-m2p7|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-11-29
 
 # GHSA-vfj7-8cjw-p6xm (CVE-2026-93687, high): braces, the brace-expansion
 # engine behind micromatch, walks a pattern's nested brace groups recursively
@@ -67,12 +70,12 @@
 # the root graph installs for CI, pre-commit and `npm run lint:markdown`; no
 # other owned graph depends on it.
 #
-# Not clearable by a pin bump: checked 2026-10-03, 3.0.3 (2024-09-18) is still
-# the newest braces release, the advisory lists no patched version, and
-# micromatch 4.0.8 is the newest micromatch, so every dependent up to
-# markdownlint-cli2 is reported as "depends on vulnerable versions" (npm's only
-# fix is downgrading markdownlint-cli2 to 0.0.4). The upstream report is
-# https://github.com/micromatch/braces/issues/70.
+# Not clearable by a pin bump: re-checked 2026-10-08, 3.0.3 (2024-05-21) is
+# still the newest braces release, the advisory (last updated 2026-10-02) still
+# lists no patched version, and micromatch 4.0.8 is the newest micromatch, so
+# every dependent up to markdownlint-cli2 is reported as "depends on vulnerable
+# versions" (npm's only fix is downgrading markdownlint-cli2 to 0.0.4). The
+# upstream report is https://github.com/micromatch/braces/issues/70.
 #
 # Low risk: the only patterns braces expands here are the `globs` and
 # `ignores` in .github/config/.markdownlint-cli2.yaml and the file arguments
@@ -84,4 +87,4 @@
 # a release the advisory lists as patched (`npm update braces` picks it up
 # through micromatch's ^3.0.3 range).
 # Advisory: https://github.com/advisories/GHSA-vfj7-8cjw-p6xm
-.|braces|GHSA-vfj7-8cjw-p6xm|node_modules/braces|exp:2026-10-30
+.|braces|GHSA-vfj7-8cjw-p6xm|node_modules/braces|exp:2026-11-29

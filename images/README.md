@@ -1,6 +1,6 @@
 # Images
 
-Screenshots and visual assets for GCO (Global Capacity Orchestrator on AWS) documentation. Generated infrastructure diagrams live under [`diagrams/infra_diagrams/`](../diagrams/infra_diagrams/README.md) and generated code flowcharts live under [`diagrams/code_diagrams/`](../diagrams/code_diagrams/README.md); keeping generated diagrams beside their tooling prevents unsourced architecture images from drifting.
+Screenshots and visual assets for Global Capacity Orchestrator (GCO) documentation. Generated infrastructure diagrams live under [`diagrams/infra_diagrams/`](../diagrams/infra_diagrams/README.md) and generated code flowcharts live under [`diagrams/code_diagrams/`](../diagrams/code_diagrams/README.md); keeping generated diagrams beside their tooling prevents unsourced architecture images from drifting.
 
 ## Table of Contents
 

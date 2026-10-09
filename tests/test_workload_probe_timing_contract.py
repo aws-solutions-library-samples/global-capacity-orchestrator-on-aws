@@ -326,7 +326,7 @@ INFERENCE_FRAMEWORK_SPECS: dict[str, dict[str, Any]] = {
         "env": {"MODEL": "facebook/opt-125m"},
     },
     "sglang": {
-        "image": "lmsysorg/sglang:v0.5.19",
+        "image": "lmsysorg/sglang:v0.5.21",
         "framework": "sglang",
         "port": 30000,
         "health_check_path": "/health",

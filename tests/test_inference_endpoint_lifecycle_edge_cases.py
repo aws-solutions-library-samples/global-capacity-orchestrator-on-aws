@@ -890,7 +890,7 @@ def test_manager_deploy_persists_sglang_when_the_model_is_supplied(kwargs: dict[
 
     manager.deploy(
         "ep",
-        image="lmsysorg/sglang:v0.5.19",
+        image="lmsysorg/sglang:v0.5.21",
         target_regions=["us-east-1"],
         port=30000,
         framework="sglang",
@@ -1460,7 +1460,7 @@ def test_manager_deploy_accepts_sglang_on_an_ampere_or_newer_selector() -> None:
     manager = _manager_with_store(store)
     manager.deploy(
         "ep",
-        image="lmsysorg/sglang:v0.5.19",
+        image="lmsysorg/sglang:v0.5.21",
         target_regions=["us-east-1"],
         framework="sglang",
         env={"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},

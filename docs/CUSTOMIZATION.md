@@ -1,6 +1,6 @@
 # Customization Guide
 
-This guide shows you how to customize GCO (Global Capacity Orchestrator on AWS) for your specific needs.
+This guide shows you how to customize Global Capacity Orchestrator (GCO) for your specific needs.
 
 ## Table of Contents
 
@@ -2188,7 +2188,7 @@ export GCO_MISSION_BEDROCK_MODEL_ID="us.anthropic.claude-sonnet-4-6"
 export GCO_MISSION_BEDROCK_REGION="eu-west-1"                    # default: us-east-1
 export GCO_AUTOPILOT_MODEL="us.anthropic.claude-sonnet-4-6"      # shared/Claude model
 export GCO_AUTOPILOT_ENGINE="codex"                              # or "opencode"
-export GCO_AUTOPILOT_CODEX_MODEL="global.openai.gpt-6-sol"       # Codex-specific
+export GCO_AUTOPILOT_CODEX_MODEL="global.openai.gpt-6.1-sol"     # Codex-specific
 export GCO_AUTOPILOT_OPENCODE_MODEL="global.moonshotai.kimi-k3"  # OpenCode-specific
 ```
 
@@ -2198,7 +2198,7 @@ export GCO_AUTOPILOT_OPENCODE_MODEL="global.moonshotai.kimi-k3"  # OpenCode-spec
 gco stacks bedrock set-mission-model global.anthropic.claude-opus-5-5 -y
 gco stacks bedrock set-capacity-advisor-model global.anthropic.claude-opus-5-5 -y
 gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
-gco stacks bedrock set-codex-model global.openai.gpt-6-sol -y
+gco stacks bedrock set-codex-model global.openai.gpt-6.1-sol -y
 gco stacks bedrock set-codex-reasoning-effort xhigh -y
 gco stacks bedrock set-opencode-model global.moonshotai.kimi-k3 -y
 ```

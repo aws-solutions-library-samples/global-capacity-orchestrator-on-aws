@@ -49,8 +49,8 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-28T07:34:51Z
-# Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0
+# Generated at (UTC): 2026-10-08T19:00:07Z
+# Generated from Git commit: 231725d929e3dfd3c3768eba41d413effef39d67
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -116,9 +116,9 @@ _GATEWAY_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
 # drift onto different objects. tests/test_kubectl_applier.py pins this map
 # against the manifests directory exactly like the gateway map.
 _QUEUEING_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
-    "ResourceFlavor": ("kueue.x-k8s.io", "v1beta1", "resourceflavors", True),
-    "ClusterQueue": ("kueue.x-k8s.io", "v1beta1", "clusterqueues", True),
-    "LocalQueue": ("kueue.x-k8s.io", "v1beta1", "localqueues", False),
+    "ResourceFlavor": ("kueue.x-k8s.io", "v1beta2", "resourceflavors", True),
+    "ClusterQueue": ("kueue.x-k8s.io", "v1beta2", "clusterqueues", True),
+    "LocalQueue": ("kueue.x-k8s.io", "v1beta2", "localqueues", False),
 }
 
 # cert-manager resources behind GCO's internal PKI
@@ -756,9 +756,9 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ("{{KUEUE_ENABLED}}", True): (
         # Deletion order matters: the LocalQueue references the ClusterQueue,
         # which references the ResourceFlavor.
-        ("kueue.x-k8s.io/v1beta1", "LocalQueue", "gco-jobs", "gco-default"),
-        ("kueue.x-k8s.io/v1beta1", "ClusterQueue", None, "gco-cluster-queue"),
-        ("kueue.x-k8s.io/v1beta1", "ResourceFlavor", None, "gco-default-flavor"),
+        ("kueue.x-k8s.io/v1beta2", "LocalQueue", "gco-jobs", "gco-default"),
+        ("kueue.x-k8s.io/v1beta2", "ClusterQueue", None, "gco-cluster-queue"),
+        ("kueue.x-k8s.io/v1beta2", "ResourceFlavor", None, "gco-default-flavor"),
     ),
     ("{{SLURM_ENABLED}}", True): (
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-cluster-internal"),

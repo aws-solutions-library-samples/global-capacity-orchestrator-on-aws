@@ -1125,7 +1125,7 @@ gco jobs bulk-delete --all-regions --status failed --older-than-days 30 --execut
 POST /api/v1/jobs/{namespace}/{name}/retry
 ```
 
-Retry a failed job by creating a new job from its spec.
+Retry a failed job by creating a new job from its spec. The new Job is named `<name>-retry-<UTC timestamp>`, with the original name shortened as needed to stay within Kubernetes' 63-character limit for Job names. It copies the original's spec, labels and annotations and adds `gco.io/retry-of` and `gco.io/original-job`. It leaves out the `suspend` flag, the `kubectl.kubernetes.io/last-applied-configuration` annotation, and the selector and `controller-uid`/`job-name` labels Kubernetes generated for the original Job (a Job with `manualSelector: true` keeps its own selector and labels). It goes through the same manifest validation as a submission.
 
 **CLI:**
 
@@ -2168,7 +2168,7 @@ awscurl --service execute-api --region us-east-1 \
           "spec": {
             "containers": [{
               "name": "main",
-              "image": "python:3.14.7-slim",
+              "image": "python:3.14.8-slim",
               "command": ["python", "-c", "print(\"Hello World\")"]
             }],
             "restartPolicy": "Never"
@@ -2229,7 +2229,7 @@ awscurl --service execute-api --region us-east-1 \
         }
       }
     },
-    "parameters": {"image": "python:3.14.7-slim"}
+    "parameters": {"image": "python:3.14.8-slim"}
   }'
 
 # Create job from template

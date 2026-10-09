@@ -74,8 +74,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-29T11:35:23Z
-# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
+# Generated at (UTC): 2026-10-08T23:18:11Z
+# Generated from Git commit: 8db7bcb60a459c97d6c04ad772f4e9d38e923db2
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -1973,7 +1973,14 @@ class StackManager:
 
     def list_stacks(self) -> list[str]:
         """List all available CDK stacks."""
-        result = self._run_cdk(["list"], capture_output=True)
+        # stdout is parsed as one stack name per line, so it must carry
+        # nothing else. With CI set (every GitHub Actions runner sets it) the
+        # CDK CLI routes its own log lines to stdout instead of stderr, and a
+        # warning such as "current credentials could not be used to assume
+        # '...lookup-role...', but are for the right account. Proceeding
+        # anyway." then reads as a stack name. --no-ci keeps the logs on
+        # stderr whatever the environment says.
+        result = self._run_cdk(["list", "--no-ci"], capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(f"Failed to list stacks: {result.stderr}")
         return [s.strip() for s in result.stdout.strip().split("\n") if s.strip()]

@@ -59,7 +59,6 @@ import pytest
 from tests._floci_gap_shims import (  # noqa: F401  (re-export)
     apply_known_floci_gap_shims,
     shim_floci_get_stack_policy,
-    shim_floci_missing_global_accelerator,
 )
 
 #: Environment variable that opts a run into the Floci layer. The value is

@@ -35,10 +35,9 @@ Kueue is installed via Helm chart in the `kueue-system` namespace:
 
 | Component | Description |
 |-----------|-------------|
-| kueue-controller-manager | Manages ClusterQueue, LocalQueue, and Workload CRDs |
-| kueue-webhook | Admission webhook for job validation |
+| kueue-controller-manager | Manages ClusterQueue, LocalQueue, and Workload CRDs, and serves Kueue's admission webhooks (`kueue-webhook-service`) |
 
-The `enablePlainPod: true` setting is on by default, which lets Kueue manage standalone pods (not just Jobs). This is useful for managing Ray head pods, inference servers, or any long-running workload that isn't wrapped in a Job.
+The chart's default configuration turns on the plain Pod integration alongside batch Jobs, Deployments, StatefulSets and the Ray, JobSet and Kubeflow kinds, so Kueue can also queue standalone pods that carry a `kueue.x-k8s.io/queue-name` label. This is useful for Ray head pods, inference servers, or any long-running workload that isn't wrapped in a Job. Because of that integration, every Pod create outside `kube-system` and `kueue-system` passes through Kueue's webhook, so GCO annotates the controller pod `karpenter.sh/do-not-disrupt` to keep EKS Auto Mode from evicting it during consolidation.
 
 ## Key Concepts
 
@@ -56,7 +55,7 @@ ClusterQueue (cluster-wide quotas)
 Defines a type of resource (e.g., CPU nodes, GPU nodes):
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
   name: gpu-flavor
@@ -75,7 +74,7 @@ spec:
 Defines cluster-wide resource quotas:
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: cluster-queue
@@ -106,7 +105,7 @@ spec:
 Namespace-scoped queue that routes jobs to a ClusterQueue:
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
   name: user-queue
@@ -182,7 +181,7 @@ Kueue supports priority-based admission and preemption. Higher-priority jobs can
 ### Create priority classes
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: WorkloadPriorityClass
 metadata:
   name: high-priority
@@ -190,7 +189,7 @@ value: 1000
 description: "Critical training jobs"
 
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: WorkloadPriorityClass
 metadata:
   name: low-priority
@@ -229,7 +228,7 @@ spec:
 ### Configure preemption on ClusterQueues
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: team-queue
@@ -249,12 +248,12 @@ Create separate ClusterQueues for different teams sharing a cohort:
 
 ```yaml
 # Team A: 4 GPUs guaranteed, can borrow up to 4 more when Team B is idle
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: team-a-queue
 spec:
-  cohort: shared-gpus
+  cohortName: shared-gpus
   preemption:
     reclaimWithinCohort: Any
     withinClusterQueue: LowerPriority
@@ -270,12 +269,12 @@ spec:
 
 ---
 # Team B: 4 GPUs guaranteed, can borrow up to 4 more when Team A is idle
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: team-b-queue
 spec:
-  cohort: shared-gpus
+  cohortName: shared-gpus
   preemption:
     reclaimWithinCohort: Any
     withinClusterQueue: LowerPriority
@@ -376,7 +375,7 @@ Chart versions and Helm values are pinned in [`lambda/helm-installer/charts.yaml
 { "context": { "helm": { "kueue": { "enabled": false } } } }
 ```
 
-Chart values such as `enablePlainPod: true` (manage standalone pods — useful for Ray and inference servers) live under `kueue` in `charts.yaml`. Kueue is installed last because its mutating webhook intercepts Job and Deployment mutations.
+Chart values live under `kueue.values` in `charts.yaml` and follow the upstream chart's own layout: pod-level settings such as `podAnnotations` and `resources` sit under `controllerManager.manager`, the integrations under `managerConfig.controllerManagerConfigYaml`, and Helm silently ignores keys the chart does not define. Kueue is installed last because its mutating webhooks intercept Job, Deployment and Pod creates.
 
 ## Cleanup
 

@@ -47,9 +47,15 @@ The globs are complements, so their union is always the whole layer.
 
 ```bash
 docker run --rm -p 4566:4566 -e FLOCI_STORAGE_MODE=memory \
-  floci/floci:2.0.1    # finch/podman work identically
+  -e FLOCI_SERVICES_EKS_MOCK=true \
+  floci/floci:2.2.0    # finch/podman work identically
 GCO_FLOCI_ENDPOINT=http://127.0.0.1:4566 pytest tests/test_floci_*.py -v
 ```
+
+`FLOCI_SERVICES_EKS_MOCK=true` matches CI: EKS stays metadata-only. In
+Floci's default real mode a `CreateCluster` starts a k3s container and
+answers only once it is ready (about 90 seconds), past botocore's 60-second
+read timeout, so the client's retry collides with the first create.
 
 The E2E module additionally needs the Node CDK toolchain on `PATH`
 (`npm ci`, then `export PATH="$PWD/node_modules/.bin:$PATH"`) and a clean
@@ -85,13 +91,13 @@ committed tests, not inferred from Floci's docs):
 
 | Service | GCO path under test | Depth |
 |---|---|---|
-| DynamoDB | `TemplateStore`/`WebhookStore`/`JobStore`/`InferenceEndpointStore`; `central_queue_worker` dispatch passes (worker-index discovery, fenced claims, transitions, gated deferrals, failure persistence); `capacity-poller` snapshot writes | Meaningful behavior: conditional writes, GSIs, pagination, waiters |
+| DynamoDB | `TemplateStore`/`WebhookStore`/`JobStore`/`InferenceEndpointStore`; `central_queue_worker` dispatch passes (worker-index discovery, fenced claims, transitions, gated deferrals, failure persistence); `capacity-poller` snapshot writes; the vector store (the stack's exact vector-index `UpdateTable`, `vector-ingest` writes, `SearchVectors` ranking, `INCLUDE` projection and inline `source` filter through `VectorStoreClient`, and the backfilling-index `ValidationException` the client maps to "still building") | Meaningful behavior: conditional writes, GSIs, vector indexes, pagination, waiters |
 | SQS | `JobManager.submit_job_sqs` producer path (CloudFormation-discovered queue, envelope schema) and the `queue_processor` consume path, queue+DLQ redrive pair — including the produce→consume contract over one real queue | Meaningful behavior incl. server-side redrive to the DLQ |
 | S3 | `CostMonitor` Parquet reports; presigned URLs | Meaningful behavior incl. `head_object` idempotency |
 | Secrets Manager | `auth_middleware` token load + rotation stages; `secret-rotation` Lambda four-step protocol | Meaningful behavior (staging labels, promotion, per-token idempotency) |
 | CloudFormation | `GCOAWSClient` discovery; harness fingerprints; `cross-region-aggregator` bridge discovery; E2E CDKToolkit/`cdk list` | Stack materialization, outputs, waiters, tags, fail-closed + bounded-stale discovery (see gaps) |
 | STS | preflight/emulator identity verification | Control plane (identity echo) |
-| EC2 | enabled-region discovery; VPC/subnet scaffolding for ALB fixtures; `capacity-poller` degraded-signal path (spot/capacity-block APIs reject with `ClientError`) | Control plane (see AZ-id and capacity-API gaps) |
+| EC2 | enabled-region discovery; VPC/subnet scaffolding for ALB fixtures; `capacity-poller` partial-signal path (only `DescribeSpotPriceHistory` answers) | Control plane (see AZ-id and capacity-API gaps) |
 | SSM | `aws_ssm` helpers; CFN-provisioned parameters | Meaningful behavior |
 | Step Functions | `helm-orchestrator` provider (start/adopt/fence), `helm-installer` teardown provider (ordered delete, drain, `is_complete`) | Meaningful behavior: named executions, `ExecutionAlreadyExists` adoption, stop confirmation, Fail-state error/cause |
 | ELBv2 | `regional-api-proxy` ownership validation; `ga-registration` tag/hostname ALB discovery | Meaningful behavior: real internal ALBs, tags, fail-closed rejections |
@@ -108,12 +114,14 @@ Global Accelerator and EKS halves of `ga-registration`, the Global
 Accelerator half of `traffic-dial-controller` (its SSM and CloudWatch halves
 run here; see `test_floci_traffic_dial.py`), and every
 kubeconfig-dependent Lambda path (`kubectl-applier-simple`,
-`helm-installer` worker, `tls-certificate-manager`): emulator EKS clusters
-never reach `ACTIVE`, so in-cluster behavior cannot be exercised honestly.
+`helm-installer` worker, `tls-certificate-manager`): the layer runs EKS in
+Floci's metadata-only mock mode, which has no Kubernetes API server, so
+in-cluster behavior cannot be exercised honestly.
 
 ## Known emulator gaps
 
-Each gap below was probed empirically; the first three have narrow,
+Each gap below was probed empirically (re-probed against Floci 2.2.0); the
+first three have narrow,
 documented answers in `tests/_floci_gap_shims.py` (a botocore `before-send`
 handler per read-only operation — production code is untouched; harness
 subprocesses receive them via `tests/_floci_sitecustomize/`):
@@ -121,20 +129,22 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
 1. **CloudFormation `GetStackPolicy`** responses omit the result wrapper and
    are unparseable by botocore. The shim answers with real AWS's no-policy
    shape — which is what every GCO stack has.
-2. **Global Accelerator and X-Ray** are absent from Floci's catalog (X-Ray
-   probed against Floci 2.0.1: every operation tried, reads and writes,
-   answers `UnknownOperationException`). The harness's fail-closed
-   inventory requires its Global Accelerator scanner to complete, and its
-   baseline records each Region's X-Ray trace segment destination before
-   anything deploys, so the Transaction Search state a run changes can be
-   restored. The shims answer `ListAccelerators` with the truthful empty
-   list and `GetTraceSegmentDestination` with what a fresh account returns
-   (`XRay`, `ACTIVE`: Transaction Search never enabled, which a fabricated
-   emulator account cannot have done). The GA scanner and the Transaction
-   Search restore logic keep their coverage in patched-client unit tests.
-   CloudWatch Logs `DescribeResourcePolicies`, the baseline's other
-   Transaction Search read, is modeled by Floci and needs no shim.
-3. **Availability Zone ids** are not modeled by Floci's EC2. A credentialed
+2. **X-Ray** is absent from Floci's catalog (re-probed against Floci
+   2.2.0: every operation tried, reads and writes, answers
+   `UnknownOperationException`). The harness's baseline records each
+   Region's X-Ray trace segment destination before anything deploys, so the
+   Transaction Search state a run changes can be restored. The shim answers
+   `GetTraceSegmentDestination` with what a fresh account returns (`XRay`,
+   `ACTIVE`: Transaction Search never enabled, which a fabricated emulator
+   account cannot have done); the restore logic keeps its coverage in
+   patched-client unit tests. CloudWatch Logs `DescribeResourcePolicies`,
+   the baseline's other Transaction Search read, is modeled by Floci and
+   needs no shim. Global Accelerator, absent through Floci 2.0.1, is modeled
+   since 2.2.0, so the harness's GA scanner now runs against the emulator
+   unshimmed.
+3. **Availability Zone ids** are not the canonical ones: Floci 2.2.0 reports
+   `<region>-azN` (for example `us-east-1-az3`, not `use1-az3`) and ignores a
+   `zone-id` filter, answering every zone. A credentialed
    synth runs the regional stack's fail-closed EKS-unsupported-AZ
    resolution (`DescribeAvailabilityZones` filtered by `zone-id`); the shim
    answers only that filtered query with the canonical id→name mapping so
@@ -145,10 +155,13 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    CI; under Finch/containerd-only local setups (no socket to mount)
    `CreateRepository` fails with `InternalFailure` and those tests skip
    themselves with that reason.
-5. **EC2 capacity APIs** (`GetSpotPlacementScores`,
-   `DescribeSpotPriceHistory`, `DescribeCapacityBlockOfferings`) reject with
-   `ClientError`. No shim: the capacity poller's degraded-signal handling is
-   the production behavior under test.
+5. **EC2 capacity APIs**: `GetSpotPlacementScores` and
+   `DescribeCapacityBlockOfferings` reject with `UnsupportedOperation`, while
+   `DescribeSpotPriceHistory` answers an empty history (Floci 2.2.0; earlier
+   releases rejected all three). No shim: the capacity poller recording that
+   one authoritative signal, and nothing for the probes that failed, is the
+   production behavior under test; the all-probes-fail path stays in the
+   unit suite.
 6. **Step Functions `ListExecutions`** keeps returning stopped executions
    under `statusFilter=RUNNING`. The teardown drain-loop's
    eventually-reports-zero contract therefore stays in the unit suite; the

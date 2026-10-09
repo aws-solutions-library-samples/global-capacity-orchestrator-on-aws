@@ -98,6 +98,7 @@ The [live release validation prerequisites](LIVE_RELEASE_VALIDATION.md#local-pre
 plus:
 
 - `git`, `node`, and `npm` on `PATH` (the base release's CDK CLI is installed from its own lock file);
+- when the base release and the candidate pin different npm versions (the `packageManager` field of `package.json`), an `npm` on `PATH` that runs whichever version the current checkout pins. Each release packages its streaming Lambda only with its own exact pin, and the harness runs every phase under one `PATH`, so a single npm fails one side: the base app's synth, or its `gco upgrade` packaging the candidate. A small wrapper that reads the nearest `package.json` carrying `packageManager` and execs the matching npm (each installed with `npm install --global --prefix <dir> npm@<version>`) covers both;
 - network access to PyPI and the npm registry for the base release's toolchain;
 - the free-space floor on the workspace volume as well: the workspace holds a clone of the base release (about 150 MB), its venv (about 750 MB), and its `node_modules`, and the base deploy and the upgrade build container images.
 

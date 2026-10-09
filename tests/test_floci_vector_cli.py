@@ -12,11 +12,12 @@ Each test namespaces its SSM parameters under a unique project name
 is exercised for real, including the ParameterNotFound → unavailable
 mapping an operator hits on a deployment without the feature.
 
-The search gap pin matches the ingest module's: the emulator answers
-``UnknownOperationException`` for ``SearchVectors``, which the client
-must surface as a typed error, not a raw traceback. When a Floci release
-implements the API, that pin fails — the signal to grow real similarity
-coverage here.
+Search runs for real too: since Floci 2.2.0 the emulator builds the
+stack's vector index and serves ``SearchVectors``, so the client's
+ranking, ``INCLUDE`` projection, aliased ``source`` filter, index status,
+and its mapping of a still-backfilling index to "unavailable" are all
+exercised over the wire (the index helpers are shared with
+``tests/test_floci_vector_ingest.py``).
 """
 
 from __future__ import annotations
@@ -30,10 +31,13 @@ import pytest
 
 from cli.vector_store import (
     VectorStoreClient,
-    VectorStoreError,
     VectorStoreUnavailableError,
 )
 from tests._floci import floci_test_markers, unique_name
+from tests.test_floci_vector_ingest import (
+    _create_stack_index,
+    _wait_for_active_index,
+)
 
 pytestmark = floci_test_markers()
 
@@ -152,9 +156,8 @@ class TestDiscoveryAndIngestOverTheRealWire:
 
         assert status["table_name"] == deployment["table"]
         assert status["table_status"] == "ACTIVE"
-        # The emulator cannot materialize vector indexes (pinned in
-        # tests/test_floci_vector_ingest.py), so the defensive describe
-        # walk must degrade to NOT_VISIBLE — never a KeyError.
+        # This deployment's table carries no vector index, so the defensive
+        # describe walk must degrade to NOT_VISIBLE — never a KeyError.
         assert status["index_status"] == "NOT_VISIBLE"
 
     def test_a_missing_deployment_maps_to_unavailable(self, monkeypatch):
@@ -164,8 +167,101 @@ class TestDiscoveryAndIngestOverTheRealWire:
             _client().status()
 
 
-class TestSearchVectorsGap:
-    def test_search_surfaces_a_typed_error_not_a_raw_exception(self, deployment):
-        """The emulator has no ``SearchVectors``; the client must map that."""
-        with pytest.raises(VectorStoreError, match="search failed"):
-            _client().search("anything at all")
+#: Items as the ingest Lambda writes them, at known distances from the
+#: query vector ``_FixedBedrock`` embeds every query to (``_VECTOR``).
+_CORPUS = {
+    "near#0000": ([0.5, -0.25, 1e-08], "vector-corpus/a.md", "nearest"),
+    "mid#0000": ([0.5, 0.5, 0.0], "vector-corpus/a.md", "middle"),
+    "far#0000": ([-0.5, 0.25, 0.0], "vector-corpus/b.md", "farthest"),
+}
+
+
+@pytest.fixture(scope="module")
+def indexed_deployment(dynamodb, s3, ssm):
+    """A full vector-store deployment: the stack's index, built once, plus data."""
+    project = unique_name("gco-vsearch")
+    table_name = f"{project}-vector-store"
+    bucket_name = f"{project}-cluster-shared"
+    dynamodb.create_table(
+        TableName=table_name,
+        KeySchema=[{"AttributeName": "doc_id", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "doc_id", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    dynamodb.get_waiter("table_exists").wait(TableName=table_name)
+    _create_stack_index(dynamodb, table_name)
+    _wait_for_active_index(dynamodb, table_name)
+    for doc_id, (vector, source, text) in _CORPUS.items():
+        dynamodb.put_item(
+            TableName=table_name,
+            Item={
+                "doc_id": {"S": doc_id},
+                "text": {"S": text},
+                "source": {"S": source},
+                "chunk_index": {"N": "0"},
+                "embedding_model_id": {"S": "floci-embed-model"},
+                "embedding": {"L": [{"N": repr(component)} for component in vector]},
+            },
+        )
+    s3.create_bucket(Bucket=bucket_name)
+    parameters = {
+        f"/{project}/vector-store-table-name": table_name,
+        f"/{project}/vector-store-index-name": "corpus-embedding-index",
+        f"/{project}/cluster-shared-bucket/name": bucket_name,
+        f"/{project}/cluster-shared-bucket/region": "us-east-1",
+    }
+    for name, value in parameters.items():
+        ssm.put_parameter(Name=name, Value=value, Type="String")
+
+    yield {"project": project, "table": table_name}
+
+    for name in parameters:
+        ssm.delete_parameter(Name=name)
+    s3.delete_bucket(Bucket=bucket_name)
+    dynamodb.delete_table(TableName=table_name)
+
+
+@pytest.fixture
+def searchable(indexed_deployment, monkeypatch):
+    monkeypatch.setenv("GCO_PROJECT_NAME", indexed_deployment["project"])
+    return indexed_deployment
+
+
+class TestSearchOverTheRealWire:
+    def test_search_ranks_by_distance_and_returns_plain_projected_dicts(self, searchable):
+        results = _client().search("anything at all", top_k=3)
+
+        assert [result["doc_id"] for result in results] == ["near#0000", "mid#0000", "far#0000"]
+        scores = [result["score"] for result in results]
+        assert scores == sorted(scores)
+        assert scores[0] == pytest.approx(0.0, abs=1e-9)
+        nearest = results[0]
+        assert nearest["text"] == "nearest"
+        assert nearest["source"] == "vector-corpus/a.md"
+        # Deserialized to JSON-friendly primitives, and never the vector.
+        assert nearest["chunk_index"] == 0 and isinstance(nearest["chunk_index"], int)
+        assert "embedding" not in nearest
+
+    def test_source_filter_rides_the_aliased_inline_filter(self, searchable):
+        # ``source`` is a reserved word; only a real expression parser proves
+        # the #source alias the client sends is valid.
+        results = _client().search("anything at all", top_k=3, source="vector-corpus/b.md")
+
+        assert [result["doc_id"] for result in results] == ["far#0000"]
+
+    def test_status_reports_the_real_index_state(self, searchable):
+        status = _client().status()
+
+        assert status["table_name"] == searchable["table"]
+        assert status["index_status"] == "ACTIVE"
+
+    def test_a_backfilling_index_maps_to_unavailable(self, deployment, dynamodb):
+        _create_stack_index(dynamodb, deployment["table"])
+        try:
+            assert _client().status()["index_status"] == "CREATING"
+            with pytest.raises(VectorStoreUnavailableError, match="still be building"):
+                _client().search("anything at all")
+        finally:
+            # The deployment fixture deletes the table, which DynamoDB refuses
+            # while an index builds.
+            _wait_for_active_index(dynamodb, deployment["table"])

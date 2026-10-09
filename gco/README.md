@@ -1,6 +1,6 @@
 # GCO Core
 
-The `gco` package contains the AWS CDK infrastructure, in-cluster services, shared data models, and validated configuration used by Global Capacity Orchestrator on AWS.
+The `gco` package contains the AWS CDK infrastructure, in-cluster services, shared data models, and validated configuration used by Global Capacity Orchestrator (GCO).
 
 ## Package Map
 

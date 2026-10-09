@@ -371,6 +371,45 @@ class TestCheckReport:
             "no advisory of its own, vulnerable only through globby, micromatch",
         ]
 
+    def test_chain_record_through_a_below_gate_link_still_clears(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """npm marks markdownlint-cli2 high because of the suppressed braces
+        chain, but also lists it as vulnerable through markdownlint, whose
+        only exposure is a low katex advisory (GHSA-238p-pmpm-9mq7). The gate
+        ignores low records, so the chain must clear through them."""
+        vulnerabilities = _unfixable_chain()
+        vulnerabilities["markdownlint-cli2"] = _chain_finding(
+            reached=("globby", "markdownlint", "micromatch"),
+            nodes=("node_modules/markdownlint-cli2",),
+        )
+        vulnerabilities["markdownlint"] = _chain_finding(
+            reached=("micromark-extension-math",),
+            nodes=("node_modules/markdownlint",),
+            severity="low",
+        )
+        vulnerabilities["micromark-extension-math"] = _chain_finding(
+            reached=("katex",), nodes=("node_modules/micromark-extension-math",), severity="low"
+        )
+        vulnerabilities["katex"] = _finding(
+            severity="low", advisories=("GHSA-238p-pmpm-9mq7",), nodes=("node_modules/katex",)
+        )
+
+        rc = checker.check_report(
+            _report(vulnerabilities), PACKAGE_DIR, [_suppression(**ROOT_SUPPRESSION_KWARGS)]
+        )
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert captured.err == ""
+        # The low records are neither suppressed nor announced; the chain
+        # record clears through them like any other cleared link.
+        assert "katex" not in captured.out
+        assert (
+            "::warning::Accepting markdownlint-cli2 at node_modules/markdownlint-cli2: "
+            "no advisory of its own, vulnerable only through globby, markdownlint, micromatch"
+        ) in captured.out
+
     def test_chain_records_fail_closed_while_the_package_they_reach_is_unsuppressed(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:

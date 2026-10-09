@@ -10,13 +10,19 @@
 !requirements-lock.txt
 !dockerfiles/
 
-# Re-exclude generated/cache dirs inside the allowed paths
+# Re-exclude generated/cache dirs inside the allowed paths. The tests import
+# the dockerfiles/ build helpers too, so their bytecode would otherwise change
+# every service image's CDK asset hash between a working checkout and a clean
+# clone of the same commit.
 gco/**/__pycache__/
 cli/**/__pycache__/
+dockerfiles/**/__pycache__/
 gco/**/*.pyc
 cli/**/*.pyc
+dockerfiles/**/*.pyc
 gco/**/*.pyo
 cli/**/*.pyo
+dockerfiles/**/*.pyo
 
 # gco/stacks/ is intentionally NOT excluded. Earlier versions dropped it
 # from the container build context to keep service images slim and to

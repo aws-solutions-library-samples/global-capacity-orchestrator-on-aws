@@ -59,12 +59,12 @@ from tests._scaffold_replay import (  # noqa: E402
 _EXPECTED_MISSION_MODEL_ID = "global.anthropic.claude-opus-5-5"
 _EXPECTED_CAPACITY_ADVISOR_MODEL_ID = "global.anthropic.claude-opus-5-5"
 _EXPECTED_CLAUDE_CODE_MODEL_ID = "global.anthropic.claude-opus-5-5"
-_EXPECTED_CODEX_MODEL_ID = "global.openai.gpt-6-sol"
+_EXPECTED_CODEX_MODEL_ID = "global.openai.gpt-6.1-sol"
 _EXPECTED_CODEX = {"reasoning_effort": "xhigh"}
 _EXPECTED_OPENCODE_MODEL_ID = "global.moonshotai.kimi-k3"
 _EXPECTED_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 _EXPECTED_FIXTURE_NAME = "global_anthropic_claude_opus_5_5.json"
-_EXPECTED_CODEX_FIXTURE_NAME = "global_openai_gpt_6_sol.json"
+_EXPECTED_CODEX_FIXTURE_NAME = "global_openai_gpt_6_1_sol.json"
 _EXPECTED_OPENCODE_FIXTURE_NAME = "global_moonshotai_kimi_k3.json"
 _EXPECTED_GENERATION_REASONING = {"effort": "high"}
 _RUNTIME_SOURCE_ROOTS = ("cli", "gco", "gco_mcp", "scripts", ".github/scripts")
@@ -1176,7 +1176,7 @@ def test_codex_payload_validation_fails_closed(payload: Any, message: str) -> No
 
 def test_codex_payload_trims_the_model_and_preserves_xhigh() -> None:
     configuration = bedrock_config._codex_configuration_from_payload(
-        _bedrock_payload(codex_model_id="  global.openai.gpt-6-sol\n"),
+        _bedrock_payload(codex_model_id="  global.openai.gpt-6.1-sol\n"),
         Path("/canonical/cdk.json"),
     )
 

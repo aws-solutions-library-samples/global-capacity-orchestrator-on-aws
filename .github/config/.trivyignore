@@ -31,12 +31,13 @@
 # Security workflow was green on main at eeeab67 (2026-08-18T20:50Z), 27
 # minutes before publication, so this appeared on an unchanged buildx binary.
 #
-# Not clearable by a stable pin bump: re-checked 2026-09-13 against the now
-# current stable Buildx v0.37.1, which this repository pins. Upstream published
-# go-archive v0.3.0 on 2026-07-30 (v0.3.3 by 2026-08-05), but Buildx has not
-# adopted it — v0.37.1 still links v0.2.0, verified with `go version -m` on the
-# published linux-amd64 binary. The advisory range is `< 0.3.0`, so the v0.37.0
-# -> v0.37.1 bump neither clears nor worsens the finding.
+# Not clearable by a stable pin bump: re-checked 2026-10-08 against the now
+# current stable Buildx v0.38.0 (2026-10-07), which this repository pins.
+# Upstream published go-archive v0.3.0 on 2026-07-30 (v0.3.3 by 2026-08-05),
+# but Buildx has not adopted it — v0.38.0 still links v0.2.0, verified with
+# `go version -m` on the published linux-amd64 binary (checksum matched the
+# release's checksums.txt). The advisory range is `< 0.3.0`, so the v0.37.1
+# -> v0.38.0 bump neither clears nor worsens the finding.
 #
 # Low runtime risk: the flagged path is tar extraction. buildx is a
 # build-time CLI plugin that extracts contexts and cache artifacts authored by
@@ -47,140 +48,36 @@
 # Clears when a buildx release ships requiring moby/go-archive >= 0.3.0: bump
 # BUILDX_VERSION in Dockerfile.dev (the monthly deps-scan tracks it) and drop
 # this entry. Advisory: https://avd.aquasec.com/nvd/cve-2026-17106
-CVE-2026-17106 exp:2026-11-14
-
-# CVE-2026-14257 (GHSA-mh99-v99m-4gvg) — brace-expansion denial of service via
-# unbounded expansion length, causing an out-of-memory process crash. Present in
-# the copy npm vendors inside its own node_modules
-# (usr/lib/node_modules/npm/node_modules/brace-expansion) in the dev image, so
-# it is surfaced only by security:trivy:container-scan on Dockerfile.dev. Fixed
-# upstream in brace-expansion 5.0.8.
-#
-# Not introduced by any change of ours: the advisory was published 2026-07-24
-# and reached the Trivy DB after the last green main run, so it appeared on an
-# unchanged dev image.
-#
-# Not clearable by a pin bump: re-checked 2026-09-01 against npm 12.0.2 (the
-# release this ARG now pins) — it still bundles brace-expansion 5.0.7,
-# verified in the installed tree
-# (node_modules/npm/node_modules/brace-expansion/package.json). The bundled
-# copy lives inside npm's published tarball, where neither `npm audit fix`
-# nor an `overrides` entry can reach it.
-#
-# Low runtime risk: the expansion path is reached through brace globs in npm's
-# own CLI argument handling, driven by the contributor or CI invocation rather
-# than untrusted remote input. The dev image is a contributor/CI tool and is
-# never deployed to a cluster.
-#
-# Clears when npm ships a release that re-vendors brace-expansion >= 5.0.8:
-# bump ARG NPM_VERSION in Dockerfile.dev (plus the packageManager pins the
-# consistency check holds in lockstep) and drop this entry.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-14257
-CVE-2026-14257 exp:2026-10-22
-
-# CVE-2026-69152 (GHSA-rgw5-rvv9-x895) — brace-expansion denial of service via
-# unbounded intermediate arrays, bypassing the CVE-2026-14257 mitigation
-# suppressed above. Published 2026-08-01, fixed upstream in brace-expansion
-# 5.0.9. Same vendored copy as CVE-2026-14257: npm ships brace-expansion 5.0.7
-# inside its own node_modules in the dev image, surfaced by
-# security:trivy:container-scan on Dockerfile.dev. The separate root graph is
-# now clear: aws-cdk-lib 2.267.0 bundles brace-expansion 5.0.9, so the lockfile
-# refresh removes the matching .npm-audit-ignore entry.
-#
-# This image finding is not clearable by a pin bump: re-checked 2026-09-01 —
-# npm 12.0.2 is still the latest npm release and still bundles 5.0.7 in its
-# immutable published tarball, beyond the reach of `npm audit fix` or an
-# `overrides` entry.
-#
-# Low runtime risk: same exposure profile as CVE-2026-14257 above — the
-# expansion path is driven by contributor/CI-authored brace globs, not
-# untrusted remote input, and the dev image is never deployed to a cluster.
-#
-# Clears when npm ships a release that re-vendors brace-expansion >= 5.0.9:
-# bump ARG NPM_VERSION in Dockerfile.dev (plus the packageManager pins the
-# consistency check holds in lockstep) and drop this entry.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-69152
-CVE-2026-69152 exp:2026-10-22
-
-# CVE-2026-69192 (GHSA-mwp4-54f8-5fhr) — ip-address parses leading-zero IPv4
-# octets as decimal while OS resolvers treat them as octal, enabling
-# SSRF/trust-boundary bypass in code that validates an address string and
-# then hands it to a resolver. Fixed upstream in ip-address 10.3.1. Present
-# only as ip-address 10.2.0 vendored inside npm's own node_modules
-# (socks-proxy-agent -> socks -> ip-address) in the dev image, surfaced by
-# security:trivy:container-scan on Dockerfile.dev.
-#
-# Not clearable by a pin bump: checked 2026-09-01 — npm 12.0.2 (ARG
-# NPM_VERSION in Dockerfile.dev) is the latest npm release on any dist-tag
-# and still bundles ip-address 10.2.0 inside its published tarball, out of
-# reach of `npm audit fix` and `overrides`.
-#
-# Low runtime risk: the flagged path only runs when npm connects through a
-# SOCKS proxy (npm's `proxy` config), and the address it parses is the
-# operator-configured proxy host — not untrusted remote input. The dev image
-# is a contributor/CI tool that is never deployed to a cluster.
-#
-# Clears when npm ships a release that re-vendors ip-address >= 10.3.1: bump
-# ARG NPM_VERSION in Dockerfile.dev (plus the packageManager pins the
-# consistency check holds in lockstep) and drop this entry.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-69192
-CVE-2026-69192 exp:2026-10-22
-
-# CVE-2026-73566 — node-tar denial of service: a crafted GNU L / PAX x
-# long-path header with thousands of slash-separated segments drives the
-# filesFilter mapHas helper into unbounded path.dirname() recursion, and the
-# resulting uncatchable RangeError terminates async/stream consumers of
-# tar.t()/tar.x() called with a member-selection list. Fixed upstream in tar
-# 7.5.21. Present only as tar 7.5.19 vendored inside npm's own node_modules
-# in the dev image, surfaced by security:trivy:container-scan on
-# Dockerfile.dev. Neither repository-owned npm graph (root or
-# lambda/inference-streaming-proxy) depends on tar at all.
-#
-# Not clearable by a pin bump: checked 2026-09-01 — npm 12.0.2 (ARG
-# NPM_VERSION in Dockerfile.dev) is the latest npm release on any dist-tag
-# and declares tar ^7.5.19, shipping 7.5.19 inside its published tarball,
-# out of reach of `npm audit fix` and `overrides`. Vendored-tar refresh is
-# tracked upstream in https://github.com/npm/cli/issues/8917. The
-# DNF_SECURITY_EPOCH knob only refreshes RPM packages and cannot touch
-# npm's bundled node_modules.
-#
-# Low runtime risk: the vulnerable path requires npm itself to list/extract
-# a hostile tarball with a selection filter; in the dev image npm handles
-# registry tarballs during contributor/CI installs, impact is limited to
-# process termination (DoS, no code execution), and the dev image is never
-# deployed to a cluster.
-#
-# Clears when npm ships a release that re-vendors tar >= 7.5.21: bump
-# ARG NPM_VERSION in Dockerfile.dev (plus the packageManager pins the
-# consistency check holds in lockstep) and drop this entry.
-# Advisory: https://avd.aquasec.com/nvd/cve-2026-73566
-CVE-2026-73566 exp:2026-11-14
+CVE-2026-17106 exp:2026-12-14
 
 # CVE-2026-102276 (GHSA-6j4f-fj2g-mc7p) and CVE-2026-102278
 # (GHSA-qhr7-859c-m2p7): brace-expansion denial of service by stack
 # exhaustion, through recursion in parseCommaParts() and on nested brace
-# groups. Fixed upstream in brace-expansion 5.0.10 and 5.0.11. Same vendored
-# copy as CVE-2026-14257 and CVE-2026-69152 above: npm ships brace-expansion
-# 5.0.7 inside its own node_modules in the dev image, surfaced by
-# security:trivy:container-scan on Dockerfile.dev.
+# groups. Fixed upstream in brace-expansion 5.0.10 and 5.0.11. npm ships its
+# own brace-expansion copy inside its node_modules in the dev image, surfaced
+# by security:trivy:container-scan on Dockerfile.dev.
 #
 # CVE-2026-19534 (GHSA-rfgv-xxqx-mfg5): the undici WebSocket client throws an
 # uncaught TypeError, ending the process, when a server's 101 response names
 # a subprotocol the client never requested. Fixed upstream in undici 6.28.1.
-# Present only as undici 6.27.0 vendored inside npm's own node_modules for
-# node-gyp, which uses undici's fetch to download Node headers and never opens
-# a WebSocket.
+# Present only as undici vendored inside npm's own node_modules for node-gyp,
+# which uses undici's fetch to download Node headers and never opens a
+# WebSocket.
 #
 # Not introduced by any change of ours: all three were published on
 # 2026-09-29. The Security workflow was green on PR #429's head (3335db58) at
 # 2026-09-30T01:56Z and red on its squash merge 50d86cd2, an identical tree,
 # at 09:24Z. The advisories reached the Trivy DB in between.
 #
-# Not clearable by a pin bump: checked 2026-09-30, npm 12.1.0 (the latest
-# release) vendors brace-expansion 5.0.9 and undici 6.28.0, so bumping ARG
-# NPM_VERSION from 12.0.2 clears none of the three. The root npm graph's
-# separate brace-expansion copy, bundled by aws-cdk-lib, is suppressed in
-# .npm-audit-ignore.
+# Not clearable by a pin bump: re-checked 2026-10-08 against npm 12.2.0 (the
+# latest release, 2026-09-30, and the ARG NPM_VERSION this repository now
+# pins) by reading the package.json files inside its published tarball — it
+# vendors brace-expansion 5.0.9 and undici 6.28.0, so the bump from 12.0.2
+# clears none of the three. The same bump did re-vendor ip-address 10.5.0 and
+# tar 7.5.22 and lifted brace-expansion past 5.0.9, which retired the
+# CVE-2026-14257, CVE-2026-69152, CVE-2026-69192 and CVE-2026-73566 entries
+# this file used to carry. The root npm graph's separate brace-expansion
+# copy, bundled by aws-cdk-lib, is suppressed in .npm-audit-ignore.
 #
 # Low runtime risk: the brace expansion runs on contributor/CI-authored globs
 # in npm's own CLI handling, not untrusted remote input, and the undici path
@@ -194,9 +91,9 @@ CVE-2026-73566 exp:2026-11-14
 # Advisories: https://avd.aquasec.com/nvd/cve-2026-102276
 #             https://avd.aquasec.com/nvd/cve-2026-102278
 #             https://avd.aquasec.com/nvd/cve-2026-19534
-CVE-2026-102276 exp:2026-10-22
-CVE-2026-102278 exp:2026-10-22
-CVE-2026-19534 exp:2026-10-22
+CVE-2026-102276 exp:2026-11-21
+CVE-2026-102278 exp:2026-11-21
+CVE-2026-19534 exp:2026-11-21
 
 # CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
 # (msgpack 1.1.2, fixed 1.2.1) — reported by security:trivy:container-scan
@@ -215,12 +112,14 @@ CVE-2026-19534 exp:2026-10-22
 # reports exactly these two ids and nothing else, with no repository content,
 # no AWS CLI and no apt package involved.
 #
-# Not clearable by any pin we control — checked 2026-09-08: python:3.14.7-slim
-# ships pip 26.2.1, which is the newest pip on PyPI, and it still vendors both
-# affected versions inside its published wheel. `pip install --upgrade pip` is a
-# no-op here, and no base-image bump can help because no fixed pip exists yet.
-# APT_SECURITY_EPOCH cannot reach this either: it only refreshes .deb packages,
-# and this is a python-pkg finding.
+# Not clearable by any pin we control — re-checked 2026-10-08 on the base this
+# repository now pins: python:3.14.8-slim still ships pip 26.2.1, which is the
+# newest pip on PyPI (2026-08-04), and its vendor.txt still pins both affected
+# versions. `pip install --upgrade pip` is a no-op here, and no base-image
+# bump can help because no fixed pip exists yet. pip's main branch has since
+# re-vendored msgpack 1.2.1 (so the GHSA clears with the next pip release)
+# but still pins setuptools 70.3.0. APT_SECURITY_EPOCH cannot reach this
+# either: it only refreshes .deb packages, and this is a python-pkg finding.
 #
 # The earlier AWS CLI attribution was wrong, and bumping AWSCLI_VERSION
 # 2.36.36 -> 2.36.41 on the strength of it did not clear either id. Recorded so
@@ -250,8 +149,8 @@ CVE-2026-19534 exp:2026-10-22
 #
 # Advisories: https://nvd.nist.gov/vuln/detail/CVE-2025-47273
 #             https://github.com/advisories/GHSA-6v7p-g79w-8964
-CVE-2025-47273 exp:2026-11-14
-GHSA-6v7p-g79w-8964 exp:2026-11-14
+CVE-2025-47273 exp:2026-12-14
+GHSA-6v7p-g79w-8964 exp:2026-12-14
 
 # -----------------------------------------------------------------------------
 # CVE-2026-97687 (traffic interception via an HTTPS proxy TLS configuration
@@ -274,10 +173,12 @@ GHSA-6v7p-g79w-8964 exp:2026-11-14
 # requirements-lock.txt, every lambda/*/requirements.txt, and each image's
 # urllib3-2.8.0.dist-info scans clean in the same reports.
 #
-# Not clearable by any pin we control — checked 2026-10-01: pip 26.2.1
-# (2026-08-04) is the newest pip on PyPI, and pip's main branch still vendors
-# urllib3 2.7.0, so no fixed pip exists to upgrade to. A base-image bump cannot
-# help until pip re-vendors, and APT_SECURITY_EPOCH only refreshes .deb packages.
+# Not clearable by any pin we control — re-checked 2026-10-08: pip 26.2.1
+# (2026-08-04) is still the newest pip on PyPI, python:3.14.8-slim (the base
+# this repository now pins) ships that same pip with `urllib3==2.7.0` in its
+# vendor.txt, and pip's main branch still vendors urllib3 2.7.0, so no fixed
+# pip exists to upgrade to. A base-image bump cannot help until pip
+# re-vendors, and APT_SECURITY_EPOCH only refreshes .deb packages.
 #
 # Low runtime risk: pip's vendored urllib3 runs only while pip itself talks to
 # a package index, which the Lambda images never do after build and which the
@@ -291,5 +192,91 @@ GHSA-6v7p-g79w-8964 exp:2026-11-14
 #
 # Advisories: https://nvd.nist.gov/vuln/detail/CVE-2026-97687
 #             https://nvd.nist.gov/vuln/detail/CVE-2026-97689
-CVE-2026-97687 exp:2026-11-14
-CVE-2026-97689 exp:2026-11-14
+CVE-2026-97687 exp:2026-12-14
+CVE-2026-97689 exp:2026-12-14
+
+# -----------------------------------------------------------------------------
+# Three advisories from the 2026-10-08 Go security release, fixed in Go 1.26.9
+# and 1.27.2:
+#   * CVE-2026-78667 (GHSA-f4xw-m386-m277, GO-2026-6609): net/http puts no
+#     limit on the ranges it parses from a Range header, so FileServer,
+#     ServeContent and ServeFile can be driven to excessive CPU use.
+#   * CVE-2026-97031 (GHSA-hq7w-2xrq-wp2j, GO-2026-6607): a crypto/tls server
+#     with Encrypted Client Hello enabled accepts repeated ECH outer extension
+#     references, which a client can use to exhaust the server's memory.
+#   * CVE-2026-78669 (GO-2026-6611): an HTTP/2 peer that opens many streams
+#     and then sends many small SETTINGS frames carrying
+#     SETTINGS_INITIAL_WINDOW_SIZE can drive a client or a server to excessive
+#     CPU use. It is also in golang.org/x/net/http2, fixed in x/net 0.60.0
+#     (2026-10-08).
+# Trivy reports them as `stdlib` (and CVE-2026-78669 also as golang.org/x/net)
+# under each Go binary's gobinary target in security:trivy:container-scan:
+#   * Dockerfile.dev: kubectl v1.37.1 (go1.26.8, x/net v0.57.0), the Docker
+#     CLI 29.8.2 (go1.26.8, no x/net) and the docker-buildx plugin v0.38.0
+#     (go1.26.8, x/net v0.59.0)
+#   * lambda/helm-installer: helm v4.3.0 (go1.27.1, x/net v0.57.0), kubectl
+#     v1.37.1 (as above) and the base image's aws-lambda-rie (go1.26.7, no
+#     x/net)
+#   * lambda/tls-certificate-manager: the base image's aws-lambda-rie
+#
+# Provenance, established 2026-10-09: `go version -m` on the exact pinned
+# linux-amd64 release artifacts, each checked against the sha256 trust anchor
+# its Dockerfile carries (the Docker static tarball publishes none), reports
+# the toolchains and x/net versions above. aws-lambda-rie is not ours: it
+# ships in public.ecr.aws/lambda/python:3.14 at /usr/local/bin/aws-lambda-rie,
+# and the copy in the unmodified base, republished 2026-10-09, still reports
+# go1.26.7.
+#
+# Not introduced by any change of ours: the Go advisories were published
+# 2026-10-08T22:31Z, and the GHSAs for the first two at 2026-10-09T00:31Z.
+# They reached the Trivy DB at different times: PR #451's Security runs
+# scanned the same three images clean at 2026-10-09T01:55Z (7b7b4b78), and
+# clean of CVE-2026-78669 as late as 14:14Z (b6686e5c). None of the three
+# Dockerfiles has changed since.
+#
+# Not clearable by a pin bump, re-checked 2026-10-09: every pinned release
+# predates the fixed Go and x/net. Kubernetes v1.37.1 (2026-09-23) is the
+# newest 1.37 patch, Helm v4.3.0 (2026-09-09) and Buildx v0.38.0 (2026-10-07)
+# are the newest Helm 4 and Buildx releases, and the newest upstream RIE,
+# v1.37 (2026-08-31), is older than both fixed Go releases. The one fixed
+# build is the Docker CLI 29.9.0 static release (2026-10-08, go1.26.9, no
+# x/net). It would clear the docker binary but not the ids, which kubectl,
+# helm, buildx and the RIE still carry, so the bump is left to the monthly
+# deps-scan (which tracks DOCKER_VERSION) rather than taking a one-day-old
+# minor release here.
+#
+# Low runtime risk. CVE-2026-78667 needs the process to serve files through
+# net/http to a peer that controls the Range header, and CVE-2026-97031 needs
+# a TLS server with ECH keys configured: GCO runs kubectl, helm, docker and
+# buildx only as clients (of the Kubernetes API, chart and image registries,
+# and the Docker daemon) and never starts kubectl's file-serving
+# `proxy --www` mode. CVE-2026-78669 does reach clients, but only from the
+# HTTP/2 peer itself, which for these clients is a TLS endpoint they chose to
+# call (the Kubernetes API, a chart repository or an image registry). The
+# worst case is CPU exhaustion of one CLI process, or of one helm-installer
+# invocation, which the Lambda timeout ends. aws-lambda-rie runs only when
+# AWS_LAMBDA_RUNTIME_API is unset, which means local emulation such as the
+# integration:docker smoke tests (.github/scripts/rie_smoke_test.sh), where it
+# answers plain-HTTP invokes on an ephemeral CI runner. Deployed Lambda
+# functions exec the managed runtime and never start it. The dev image is a
+# contributor/CI tool that is never deployed to a cluster.
+#
+# Clears when every flagged binary is built with Go >= 1.26.9 (or >= 1.27.2)
+# and, where it links x/net, with golang.org/x/net >= 0.60.0: the next
+# Kubernetes 1.37 patch (KUBECTL_VERSION in Dockerfile.dev, plus the kubectl
+# URL and sha256 in lambda/helm-installer/Dockerfile), the next Helm 4 release
+# (the helm URL and sha256 in that same Dockerfile), the next Buildx release
+# (BUILDX_VERSION and both sha256 anchors), DOCKER_VERSION 29.9.0 or later,
+# and a public.ecr.aws/lambda/python:3.14 whose aws-lambda-rie is built with a
+# fixed Go. Confirm each with `go version -m` on the binary (or
+# `trivy image`), then drop all three ids.
+# Advisories: https://pkg.go.dev/vuln/GO-2026-6609
+#             https://pkg.go.dev/vuln/GO-2026-6607
+#             https://pkg.go.dev/vuln/GO-2026-6611
+#             https://avd.aquasec.com/nvd/cve-2026-78667
+#             https://avd.aquasec.com/nvd/cve-2026-97031
+#             https://avd.aquasec.com/nvd/cve-2026-78669
+# RIE releases: https://github.com/aws/aws-lambda-runtime-interface-emulator/releases
+CVE-2026-78667 exp:2026-11-08
+CVE-2026-97031 exp:2026-11-08
+CVE-2026-78669 exp:2026-11-08

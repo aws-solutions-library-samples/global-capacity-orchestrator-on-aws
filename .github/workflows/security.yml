@@ -558,7 +558,7 @@ jobs:
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     container:
-      image: semgrep/semgrep:1.177.0
+      image: semgrep/semgrep:1.180.0
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.

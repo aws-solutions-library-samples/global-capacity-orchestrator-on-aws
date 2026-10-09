@@ -283,7 +283,7 @@ class TestKubernetesManifests:
             "admissionregistration.k8s.io/v1",
             # Kueue default queue topology (post-helm-kueue-default-queues.yaml);
             # keep in lockstep with _QUEUEING_CUSTOM_OBJECTS in the applier.
-            "kueue.x-k8s.io/v1beta1",
+            "kueue.x-k8s.io/v1beta2",
             # Kubeflow Trainer runtime blueprint
             # (post-helm-kubeflow-trainer-runtimes.yaml); keep in lockstep
             # with TRAINJOB_API_VERSION in gco/services/manifest_processor.py.
@@ -1304,13 +1304,24 @@ class TestDocumentation:
             content = f.read()
 
         assert len(content) > 1000, "README.md should have substantial content"
-        # The H1 carries the official guidance name ("Guidance for EKS
-        # AutoMode Clusters with Global Capacity Orchestrator on AWS") and may
-        # accentuate the project name with inline markup (<br>, <em>), so
-        # assert the project name appears inside the top-level heading rather
-        # than matching an exact string.
+        # The H1 is the project's own name; inline markup is tolerated, so
+        # assert the name appears inside the top-level heading rather than
+        # matching an exact string.
         assert re.search(r"<h1>.*Global Capacity Orchestrator.*</h1>", content), (
             "README.md should have a project-title H1 naming Global Capacity Orchestrator"
+        )
+        # Directly below it sits the official AWS Solutions Library guidance
+        # name, linked to the guidance page and labelled as official guidance.
+        url = "https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/"
+        guidance = re.search(re.escape(f'<a href="{url}">') + r"(?P<label>.*?)</a>", content)
+        assert guidance, "README.md should link the official AWS Solutions Guidance page"
+        label = re.sub(r"<[^>]+>", " ", guidance.group("label"))
+        assert " ".join(label.split()) == (
+            "Guidance for EKS AutoMode Clusters with Global Capacity Orchestrator on AWS "
+            "Official AWS Solutions Guidance"
+        ), label
+        assert (
+            content.index("<h1>") < guidance.start() < content.index("<!-- BEGIN BADGE TABLE -->")
         )
         # The short project name is introduced in the intro copy instead of
         # the official title.
@@ -1670,6 +1681,23 @@ class TestNewSchedulerChartIntegration:
             f"Kueue must be the last chart in charts.yaml (currently last is '{chart_names[-1]}'). "
             f"Kueue's mutating webhook blocks other chart installs when its pod is unavailable."
         )
+
+    def test_kueue_values_follow_the_chart_layout(self):
+        """Kueue's values must sit where the upstream chart reads them.
+
+        The chart takes pod-level settings only under
+        ``controllerManager.manager`` and Helm drops unknown keys without a
+        word, so the top-level ``podAnnotations``, ``enablePlainPod``,
+        ``controller`` and ``webhook`` blocks GCO used to ship rendered
+        nothing: the controller pod, which serves the Job and Pod webhooks,
+        never carried its do-not-disrupt annotation.
+        """
+        values = self._load_charts()["kueue"]["values"]
+        assert values == {
+            "controllerManager": {
+                "manager": {"podAnnotations": {"karpenter.sh/do-not-disrupt": "true"}}
+            }
+        }
 
     def test_cdk_json_helm_section_has_all_chart_groups(self):
         """The cdk.json helm section should have entries for all togglable chart groups.

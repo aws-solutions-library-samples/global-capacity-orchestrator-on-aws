@@ -323,6 +323,17 @@ constant still says `v1beta1`, as the reminder.
   dependencies and in the extras that restate it) and
   `lambda/kubectl-applier-simple/requirements.txt`, plus the container
   re-lock of `requirements-lock.txt`.
+- **kubernetes 37.x is a migration, not a pin bump.** 37.0.0 moved the client
+  to the modern OpenAPI generator (see its changelog): typed API calls now
+  validate a dict body against strict Pydantic models before sending, so a
+  user Job manifest with an unquoted quantity such as `nvidia.com/gpu: 1` —
+  which the API server accepts — is rejected client-side by the central
+  queue's `apply_queued_job` (`create_namespaced_job(body=manifest)`). The
+  release also ships `py.typed` (about 320 new mypy findings) and returns
+  plain dicts from single-resource deletes. GCO stays on 36.x until that path
+  normalizes or bypasses client-side validation and the move is proven
+  against a real API server; the scan's Version Consistency row keeps the lag
+  visible meanwhile.
 
 ### Deploy and verify
 
@@ -674,9 +685,11 @@ resolve, the environment is dirty — fix the environment, don't loosen the pin.
    '
    ```
 
-   The `pip==25.0.1` downgrade is required first: `pip-tools==7.6.1` imports
-   pip internals that newer pip (as shipped in the current `python:3.14-slim`
-   base) has removed, and it only affects the throwaway container. The final
+   The `pip==25.0.1` downgrade keeps the resolver on the exact pip CI's
+   `unit:lockfile:freshness` job uses (pip-tools 7.6.1 needed it — it imported
+   pip internals newer pip had removed; 7.6.2 also runs on the base image's
+   stock pip, but the resolver version is part of the reproducibility
+   contract), and it only affects the throwaway container. The final
    `chmod` undoes `sed -i` leaving the file owner-only on a macOS bind mount,
    which `gco stacks deploy` would refuse.
 

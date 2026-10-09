@@ -1,6 +1,6 @@
 # GCO CLI Reference
 
-Complete command-line interface documentation for GCO (Global Capacity Orchestrator on AWS).
+Complete command-line interface documentation for Global Capacity Orchestrator (GCO).
 
 ## Table of Contents
 
@@ -460,7 +460,7 @@ gco autopilot --engine opencode --dry-run
 # Any explicit Codex override intentionally omits canonical reasoning,
 # even when its ID equals the configured default.
 gco autopilot -m global.anthropic.claude-sonnet-4-6
-gco autopilot --engine codex -m global.openai.gpt-6-sol
+gco autopilot --engine codex -m global.openai.gpt-6.1-sol
 gco autopilot --engine opencode -m us.moonshotai.kimi-k3
 
 # Resume the previous workspace session using engine-native semantics
@@ -2725,9 +2725,9 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 **Example:**
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.29.0
+gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0
 gco inference deploy llama3-70b \
-  -i vllm/vllm-openai:v0.29.0 \
+  -i vllm/vllm-openai:v0.31.0 \
   -r us-east-1 -r eu-west-1 \
   --replicas 2 --gpu-count 4 \
   --model-source s3://bucket/models/llama3-70b \
@@ -2735,7 +2735,7 @@ gco inference deploy llama3-70b \
 
 # Deploy with autoscaling (creates a Kubernetes HPA)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.29.0 \
+  -i vllm/vllm-openai:v0.31.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70 --autoscale-metric memory:80
@@ -2743,7 +2743,7 @@ gco inference deploy my-llm \
 # Deploy with SGLang: the renderer supplies the official launcher and the
 # model comes from -e MODEL=...
 gco inference deploy my-sglang \
-  -i lmsysorg/sglang:v0.5.19 \
+  -i lmsysorg/sglang:v0.5.21 \
   --framework sglang --port 30000 --gpu-count 1 \
   -e MODEL=microsoft/Phi-3.5-mini-instruct
 ```
@@ -2876,7 +2876,7 @@ gco inference update-image ENDPOINT_NAME [OPTIONS]
 **Example:**
 
 ```bash
-gco inference update-image my-llm -i vllm/vllm-openai:v0.29.0
+gco inference update-image my-llm -i vllm/vllm-openai:v0.31.0
 ```
 
 #### `gco inference invoke`
@@ -3006,10 +3006,10 @@ gco inference canary ENDPOINT_NAME [OPTIONS]
 
 ```bash
 # 10% traffic to new version
-gco inference canary my-llm -i vllm/vllm-openai:v0.29.0
+gco inference canary my-llm -i vllm/vllm-openai:v0.31.0
 
 # 25% traffic with 2 canary replicas
-gco inference canary my-llm -i vllm/vllm-openai:v0.29.0 -w 25 -r 2
+gco inference canary my-llm -i vllm/vllm-openai:v0.31.0 -w 25 -r 2
 ```
 
 #### `gco inference promote`
@@ -5009,7 +5009,7 @@ gco stacks bedrock show
 gco stacks bedrock set-mission-model global.anthropic.claude-opus-5-5 -y
 gco stacks bedrock set-capacity-advisor-model us.amazon.nova-2-lite-v1:0 -y
 gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
-gco stacks bedrock set-codex-model global.openai.gpt-6-sol -y
+gco stacks bedrock set-codex-model global.openai.gpt-6.1-sol -y
 gco stacks bedrock set-codex-reasoning-effort xhigh -y
 gco stacks bedrock set-opencode-model global.moonshotai.kimi-k3 -y
 ```
@@ -6260,7 +6260,7 @@ gco models upload ./llama3-weights/ --name llama3-8b
 
 # 2. Deploy inference endpoint
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.29.0 \
+  -i vllm/vllm-openai:v0.31.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b) \
   -e MODEL=/models/my-llm \
@@ -6274,13 +6274,13 @@ gco inference scale my-llm --replicas 3
 
 # Or enable autoscaling
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.29.0 \
+  -i vllm/vllm-openai:v0.31.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70
 
 # 5. Rolling update
-gco inference update-image my-llm -i vllm/vllm-openai:v0.29.0
+gco inference update-image my-llm -i vllm/vllm-openai:v0.31.0
 
 # 6. Cleanup
 gco inference delete my-llm -y

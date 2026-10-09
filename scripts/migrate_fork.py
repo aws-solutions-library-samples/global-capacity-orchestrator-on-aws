@@ -136,6 +136,17 @@ def _build_rules(owner: str, repo: str) -> tuple[Rule, ...]:
             why="link to a different project in the upstream org",
         ),
         Rule(
+            name="aws-solutions-guidance-page",
+            # The AWS Solutions Library publishes this project as official
+            # guidance at a docs.aws.amazon.com page whose slug ends in the
+            # repository name. AWS owns that address and it documents the
+            # upstream project, so a fork has no counterpart to point at; a
+            # rewrite would only produce a dead link.
+            pattern=re.compile(rf"docs\.aws\.amazon\.com/solutions/[\w-]*{up_repo}(?![\w-])"),
+            replacement=None,
+            why="the AWS Solutions Library guidance page for the upstream project",
+        ),
+        Rule(
             name="upstream-package-name",
             # ``*`` is accepted so prose referring to a namespace as a glob
             # ("the awslabs.* MCP servers") classifies as a package reference

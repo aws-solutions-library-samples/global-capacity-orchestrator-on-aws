@@ -28,7 +28,7 @@ _LISTING = "\n".join(
         "cdkasset-bbb222:latest sha-B",
         "123456789012.dkr.ecr.us-east-2.amazonaws.com/cdk-abc12xyz-container-assets-123456789012-us-east-2:bbb222 sha-B",
         "public.ecr.aws/lambda/python:3.14 sha-C",
-        "docker.io/library/python:3.14.7-slim sha-D",
+        "docker.io/library/python:3.14.8-slim sha-D",
         "localhost/my-app:cdkasset-lookalike sha-E",
         "<none>:<none> sha-F",
         "malformed line with too many fields here",

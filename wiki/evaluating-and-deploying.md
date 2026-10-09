@@ -5,7 +5,10 @@ command-by-command fast path. This page is for the questions that come before
 and after that: what a deployment needs, what it costs, what you can change,
 and how it is upgraded and removed. The
 [Quick Start Guide](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/QUICKSTART.md)
-remains the authoritative walkthrough.
+remains the authoritative walkthrough, and the
+[official AWS Solutions Guidance](https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/)
+is a one-page summary of the benefits and reference architecture to share
+while you evaluate.
 
 ## What you need
 
@@ -14,9 +17,9 @@ remains the authoritative walkthrough.
   Python, Node.js, CDK, kubectl, and the AWS CLI at pinned versions — so you
   skip dependency resolution entirely.
 - **Host installs are the advanced path.** GCO pins exact versions of many
-  Python packages; the README's
-  [Prerequisites](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/README.md#prerequisites)
-  section covers the clean-virtualenv route and its known caveats.
+  Python packages; the Quick Start's
+  [host-install section](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/QUICKSTART.md#installing-on-your-host-instead-advanced)
+  covers the clean-virtualenv route and its known caveats.
 - **An AWS account you can create infrastructure in.** One deployment is one
   AWS partition (`aws`, `aws-cn`, or `aws-us-gov`); any number of Regions
   inside it.

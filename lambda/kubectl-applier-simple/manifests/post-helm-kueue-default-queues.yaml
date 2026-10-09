@@ -16,7 +16,7 @@
 # enables the Kueue chart; otherwise the unreplaced placeholder makes the
 # applier skip this file, and _FEATURE_RESOURCE_INVENTORY prunes the objects
 # on a later disable (same mechanism as FSx/Valkey/observability).
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
   name: gco-default-flavor
@@ -24,7 +24,7 @@ metadata:
     project: gco
     gco.io/kueue-enabled: "{{KUEUE_ENABLED}}"
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: gco-cluster-queue
@@ -48,7 +48,7 @@ spec:
             - name: "nvidia.com/gpu"
               nominalQuota: "{{QUOTA_MAX_GPU}}"
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
   name: gco-default

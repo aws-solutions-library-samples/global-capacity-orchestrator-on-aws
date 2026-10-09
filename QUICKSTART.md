@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-Get GCO (Global Capacity Orchestrator on AWS) running in under 60 minutes.
+Get Global Capacity Orchestrator (GCO) running in under 60 minutes.
 
 > **🐳 Use the dev container.** GCO pins exact versions of a lot of Python packages so CI is reproducible, which makes installing on top of an existing Python environment a frequent source of `ResolutionImpossible` errors. The recommended path — and the one this guide follows — is the dev container: [`scripts/setup-dev-alias.sh`](scripts/setup-dev-alias.sh) builds it and installs a `gco` shell function, so every command below runs inside the container without a hand-written `docker run …`. Host installs are an advanced path for contributors who develop on their host; see [Installing on your host instead](#installing-on-your-host-instead-advanced).
 >
@@ -98,7 +98,7 @@ This path commonly fails with the pinned-version `ResolutionImpossible` / depend
 # Python 3.14+ (3.14 used in CI)
 python3 --version
 
-# Node.js 24 and npm 12.0.2 (see .nvmrc and package.json)
+# Node.js 24 and npm 12.2.0 (see .nvmrc and package.json)
 node --version
 npm --version
 
@@ -266,7 +266,7 @@ GCO can also deploy long-running inference endpoints across regions. Here's a qu
 ```bash
 # Deploy a vLLM inference endpoint
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.29.0 \
+  -i vllm/vllm-openai:v0.31.0 \
   --gpu-count 1 \
   -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
   -r us-east-1

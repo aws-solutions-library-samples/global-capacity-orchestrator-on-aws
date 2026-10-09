@@ -959,7 +959,7 @@ jobs:
       # Bump the tag+digest in lockstep with floci-tests.yml; the deps-scan
       # Docker-image section tracks both.
       floci:
-        image: floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb
+        image: floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520
         ports:
           - 4566:4566
         env:
@@ -1471,12 +1471,12 @@ jobs:
               print(f"OK: {binary} e_machine=0x{e_machine:X}")
           PY
       - name: Pre-pull the DinD probe base image (with retry)
-        # The inner build below is FROM alpine:3.24.1; warming the host
+        # The inner build below is FROM alpine:3.24.2; warming the host
         # daemon's cache here (the inner build talks to that same daemon
         # over the socket) keeps a registry blip from failing the probe.
         uses: ./.github/actions/docker-pull-with-retry
         with:
-          images: alpine:3.24.1
+          images: alpine:3.24.2
       - name: Verify Docker-in-Docker via host socket pass-through
         # `gco stacks deploy-all` drives `cdk deploy`, which shells out to
         # Docker to bundle Lambda assets. The dev container ships only the
@@ -1493,7 +1493,7 @@ jobs:
           # the container can see it via the workspace bind mount.
           mkdir -p /tmp/dind-probe
           cat > /tmp/dind-probe/Dockerfile <<'DOCKERFILE'
-          FROM alpine:3.24.1
+          FROM alpine:3.24.2
           RUN echo "dind-probe" > /ok
           CMD ["cat", "/ok"]
           DOCKERFILE
@@ -1511,7 +1511,7 @@ jobs:
           docker run --rm dind-probe:ci | grep -q '^dind-probe$'
 
           # Clean up the probe image so this job leaves the runner tidy.
-          docker image rm dind-probe:ci alpine:3.24.1 >/dev/null 2>&1 || true
+          docker image rm dind-probe:ci alpine:3.24.2 >/dev/null 2>&1 || true
 
   # --------------------------------------------------------------------------
   # Kind cluster E2E — applies the Kubernetes manifests to a real API server
@@ -1559,7 +1559,7 @@ jobs:
       # digest-pinned emulator the floci suites and
       # integration:docker:queue-processor use; tests/test_pinned_floci_version.py
       # requires every workflow occurrence to carry the identical tag+digest.
-      CI_SQS_EMULATOR_IMAGE: "floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb"
+      CI_SQS_EMULATOR_IMAGE: "floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520"
       # Tag the emulator is loaded into the kind node under. Digest-pinned
       # references cannot be addressed by `kind load`, and the pod must never
       # reach a registry, so the pinned image is retagged locally and the
@@ -1834,7 +1834,7 @@ jobs:
                   "env": {"MODEL": "facebook/opt-125m"},
               },
               "ci-sglang": {
-                  "image": "lmsysorg/sglang:v0.5.19",
+                  "image": "lmsysorg/sglang:v0.5.21",
                   "framework": "sglang",
                   "port": 30000,
                   "gpu_count": 1,
@@ -1842,7 +1842,7 @@ jobs:
                   "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
               },
               "ci-sglang-explicit": {
-                  "image": "lmsysorg/sglang:v0.5.19",
+                  "image": "lmsysorg/sglang:v0.5.21",
                   "framework": "sglang",
                   "port": 30000,
                   "gpu_count": 2,
@@ -2983,7 +2983,7 @@ jobs:
           assert labels["gco.io/submission-method"] == "sqs", labels
           assert labels["app"] == "ml-training", labels
           image = job["spec"]["template"]["spec"]["containers"][0]["image"]
-          assert image == "python:3.14.7-slim", image
+          assert image == "python:3.14.8-slim", image
           print(f"applied {job['metadata']['namespace']}/{job['metadata']['name']} from SQS")
           PY
           kubectl -n gco-ci-sqs port-forward svc/sqs 4566:4566 >/dev/null 2>&1 &
@@ -3009,6 +3009,96 @@ jobs:
             exit 1
           fi
           echo "queue drained: the consumer acknowledged the message it applied"
+      - name: Retry the applied Job through the jobs API route
+        # POST /api/v1/jobs/{namespace}/{name}/retry rebuilds a Job from the
+        # one the API server holds. Unit tests can only inspect the manifest
+        # the route builds; this proves a real API server accepts it: field
+        # names as the Job API spells them (a dropped restartPolicy defaults
+        # to Always, which a Job rejects), and no selector or controller-uid
+        # labels left over from the original Job. The manifest-processor
+        # Deployment is scaled to zero by now (the inference-proxy rollout
+        # needed the node's CPU), so the route runs on the runner against the
+        # kind API server, with the validation policy copied from that
+        # Deployment's own env.
+        run: |
+          set -euo pipefail
+          kubectl -n gco-system get deployment manifest-processor -o json \
+            > "${RUNNER_TEMP}/manifest-processor-deployment.json"
+          python3 - "${RUNNER_TEMP}/manifest-processor-deployment.json" <<'PY' \
+            | tee "${RUNNER_TEMP}/retry-route.log"
+          import asyncio
+          import json
+          import os
+          import re
+          import sys
+          deployment = json.load(open(sys.argv[1], encoding="utf-8"))
+          (container,) = [
+              c
+              for c in deployment["spec"]["template"]["spec"]["containers"]
+              if c["name"] == "manifest-processor"
+          ]
+          policy = re.compile(
+              r"(CLUSTER_NAME|REGION|ALLOWED_\w+|TRUSTED_\w+|BLOCK_\w+|MAX_\w+_PER_MANIFEST"
+              r"|REQUIRE_ACCELERATOR_TOLERATION|VALIDATION_ENABLED|YAML_MAX_DEPTH)"
+          )
+          for entry in container["env"]:
+              if "value" in entry and policy.fullmatch(entry["name"]):
+                  os.environ[entry["name"]] = entry["value"]
+          from gco.services.api_routes import jobs as routes
+          from gco.services.manifest_processor import create_manifest_processor_from_env
+          processor = create_manifest_processor_from_env()
+          routes._check_processor = lambda: processor
+          response = asyncio.run(routes.retry_job("gco-jobs", "sqs-submitted-job"))
+          body = json.loads(response.body)
+          print("RETRY_RESULT=" + json.dumps({"status_code": response.status_code, **body}))
+          PY
+          result="$(sed -n 's/^RETRY_RESULT=//p' "${RUNNER_TEMP}/retry-route.log")"
+          new_job="$(RESULT="${result}" python3 -c '
+          import json, os
+          result = json.loads(os.environ["RESULT"])
+          assert result["status_code"] == 201 and result["success"] is True, result
+          print(result["new_job"])
+          ')"
+          kubectl -n gco-jobs get job "${new_job}" -o json > "${RUNNER_TEMP}/retried-job.json"
+          python3 - "${RUNNER_TEMP}/retried-job.json" <<'PY'
+          import json
+          import sys
+          job = json.load(open(sys.argv[1], encoding="utf-8"))
+          uid = job["metadata"]["uid"]
+          labels = job["metadata"]["labels"]
+          assert labels["gco.io/retry-of"] == "sqs-submitted-job", labels
+          assert labels["gco.io/submission-method"] == "sqs", labels
+          assert job["metadata"]["annotations"]["gco.io/original-job"] == "sqs-submitted-job"
+          # The API server generated a fresh selector and pod labels for the
+          # new Job's own UID.
+          assert job["spec"]["selector"]["matchLabels"] == {
+              "batch.kubernetes.io/controller-uid": uid
+          }, job["spec"]["selector"]
+          template_labels = job["spec"]["template"]["metadata"]["labels"]
+          assert template_labels["batch.kubernetes.io/controller-uid"] == uid, template_labels
+          assert template_labels["batch.kubernetes.io/job-name"] == job["metadata"]["name"]
+          # The user's spec survived in its JSON spelling.
+          assert job["spec"]["backoffLimit"] == 3, job["spec"]
+          assert job["spec"]["ttlSecondsAfterFinished"] == 3600, job["spec"]
+          pod_spec = job["spec"]["template"]["spec"]
+          assert pod_spec["restartPolicy"] == "Never", pod_spec
+          (container,) = pod_spec["containers"]
+          assert container["securityContext"]["readOnlyRootFilesystem"] is True, container
+          print(f"retry accepted: {job['metadata']['name']} (uid {uid})")
+          PY
+          # The Job controller creates the retry's pod from the copied template.
+          for _ in $(seq 1 30); do
+            pods="$(kubectl -n gco-jobs get pods -l "batch.kubernetes.io/job-name=${new_job}" \
+              -o name)"
+            if [ -n "${pods}" ]; then
+              printf 'retry pod created: %s\n' "${pods}"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the Job controller created no pod for ${new_job}"
+          kubectl -n gco-jobs describe job "${new_job}" || true
+          exit 1
       - name: Apply the kro capability tenant RBAC and prove its fence
         # 07-kro-tenant-access.yaml is the one base-pass file the kro EKS
         # Capability switches on (cdk.json eks_capabilities.kro;
@@ -3225,7 +3315,7 @@ jobs:
       # Same digest-pinned emulator floci-tests.yml and cluster-e2e run;
       # tests/test_pinned_floci_version.py holds every occurrence to the
       # identical tag+digest. Here it is the cost report bucket's S3.
-      CI_S3_EMULATOR_IMAGE: "floci/floci:2.0.1@sha256:4e451c39c7bb88e3cd4f87e8fc0c25d5b47695a51185d521e2241fa00486e8eb"
+      CI_S3_EMULATOR_IMAGE: "floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520"
       # Digest references cannot be addressed by `kind load`; retagged
       # locally and pulled with imagePullPolicy: Never (see cluster-e2e).
       CI_S3_LOCAL_IMAGE: "gco-ci-s3-emulator:local"
@@ -5829,6 +5919,10 @@ jobs:
       - name: Install the headless Chromium the captures drive (with retry)
         run: |
           set -euo pipefail
+          # An attempt that times out can leave its apt-get running and holding
+          # the dpkg lock, so the next attempt failed at once with "Could not
+          # get lock". Make every apt-get wait for the lock instead.
+          echo 'DPkg::Lock::Timeout "600";' | sudo tee /etc/apt/apt.conf.d/90-gco-dpkg-lock-timeout > /dev/null
           for attempt in 1 2 3; do
             if timeout 300s python -m playwright install --with-deps --only-shell chromium; then
               exit 0
