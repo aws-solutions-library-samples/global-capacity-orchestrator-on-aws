@@ -460,7 +460,7 @@ gco autopilot --engine opencode --dry-run
 # Any explicit Codex override intentionally omits canonical reasoning,
 # even when its ID equals the configured default.
 gco autopilot -m global.anthropic.claude-sonnet-4-6
-gco autopilot --engine codex -m global.openai.gpt-6-sol
+gco autopilot --engine codex -m global.openai.gpt-6.1-sol
 gco autopilot --engine opencode -m us.moonshotai.kimi-k3
 
 # Resume the previous workspace session using engine-native semantics
@@ -5009,7 +5009,7 @@ gco stacks bedrock show
 gco stacks bedrock set-mission-model global.anthropic.claude-opus-5-5 -y
 gco stacks bedrock set-capacity-advisor-model us.amazon.nova-2-lite-v1:0 -y
 gco stacks bedrock set-claude-code-model us.anthropic.claude-sonnet-4-6 -y
-gco stacks bedrock set-codex-model global.openai.gpt-6-sol -y
+gco stacks bedrock set-codex-model global.openai.gpt-6.1-sol -y
 gco stacks bedrock set-codex-reasoning-effort xhigh -y
 gco stacks bedrock set-opencode-model global.moonshotai.kimi-k3 -y
 ```

@@ -2,8 +2,8 @@
 
 Captured raw model output for the Mission scaffolder prompt. Each
 `*.json` file holds one model's response to a small set of canonical
-directives. The checked-in catalog currently covers 67 models from 15
-providers: 201 real, paid Converse responses. The replay test
+directives. The checked-in catalog currently covers 68 models from 15
+providers: 204 real, paid Converse responses. The replay test
 (`tests/test_scaffold_fixture_replay.py`) drives every captured response
 through the full scaffolder pipeline — JSON extraction, model-output
 normalisation, predicate autofix, and strict structural validation — so

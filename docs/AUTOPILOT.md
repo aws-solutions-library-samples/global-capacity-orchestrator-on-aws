@@ -197,7 +197,7 @@ Codex model precedence is:
 3. `GCO_AUTOPILOT_MODEL`
 4. `context.bedrock.codex_default_model_id`
 
-The shipped model is `global.openai.gpt-6-sol`. The generated TOML selects
+The shipped model is `global.openai.gpt-6.1-sol`. The generated TOML selects
 `model_provider = "amazon-bedrock-runtime"` and the Responses wire API so the
 cross-Region inference profile is sent to the Bedrock Runtime endpoint. The canonical
 model receives `context.bedrock.codex.reasoning_effort`, currently `xhigh`.
@@ -525,7 +525,7 @@ profile there).
 
 ## Mission Compatibility
 
-`global.openai.gpt-6-sol` and `global.moonshotai.kimi-k3` are also supported
+`global.openai.gpt-6.1-sol` and `global.moonshotai.kimi-k3` are also supported
 as explicit Mission sampling models. Mission uses Bedrock Converse rather than
 Codex's Responses API or OpenCode's AI SDK provider. The shared provider-aware
 request builder removes `temperature`, which the GPT profile and Kimi K3 both
@@ -534,7 +534,7 @@ allowlist rather than a provider-wide prefix), while leaving unrelated
 explicit-model controls intact.
 
 The repository includes live-captured three-directive playback fixtures at
-`tests/fixtures/scaffold_responses/global_openai_gpt_6_sol.json` and
+`tests/fixtures/scaffold_responses/global_openai_gpt_6_1_sol.json` and
 `tests/fixtures/scaffold_responses/global_moonshotai_kimi_k3.json`. Every
 capture is replayed through Mission's parse, normalize, autofix, and validation
 pipeline. This is compatibility evidence for Mission, not a change to Mission's
