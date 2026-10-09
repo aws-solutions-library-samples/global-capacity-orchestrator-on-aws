@@ -3009,6 +3009,77 @@ jobs:
             exit 1
           fi
           echo "queue drained: the consumer acknowledged the message it applied"
+      - name: Retry the applied Job through the jobs API route
+        # POST /api/v1/jobs/{namespace}/{name}/retry rebuilds a Job from the
+        # one the API server holds. Unit tests can only inspect the manifest
+        # the route builds; this proves a real API server accepts it: field
+        # names as the Job API spells them (a dropped restartPolicy defaults
+        # to Always, which a Job rejects), and no selector or controller-uid
+        # labels left over from the original Job. The route runs inside a
+        # manifest-processor pod, so the production image, ServiceAccount and
+        # validation policy build and submit the copy.
+        run: |
+          set -euo pipefail
+          kubectl -n gco-system exec -i deploy/manifest-processor -c manifest-processor -- \
+            python - <<'PY' > "${RUNNER_TEMP}/retry-route.log"
+          import asyncio
+          import json
+          from gco.services.api_routes import jobs as routes
+          from gco.services.manifest_processor import create_manifest_processor_from_env
+          processor = create_manifest_processor_from_env()
+          routes._check_processor = lambda: processor
+          response = asyncio.run(routes.retry_job("gco-jobs", "sqs-submitted-job"))
+          body = json.loads(response.body)
+          print("RETRY_RESULT=" + json.dumps({"status_code": response.status_code, **body}))
+          PY
+          result="$(sed -n 's/^RETRY_RESULT=//p' "${RUNNER_TEMP}/retry-route.log")"
+          printf '%s\n' "${result}"
+          new_job="$(RESULT="${result}" python3 -c '
+          import json, os
+          result = json.loads(os.environ["RESULT"])
+          assert result["status_code"] == 201 and result["success"] is True, result
+          print(result["new_job"])
+          ')"
+          kubectl -n gco-jobs get job "${new_job}" -o json > "${RUNNER_TEMP}/retried-job.json"
+          python3 - "${RUNNER_TEMP}/retried-job.json" <<'PY'
+          import json
+          import sys
+          job = json.load(open(sys.argv[1], encoding="utf-8"))
+          uid = job["metadata"]["uid"]
+          labels = job["metadata"]["labels"]
+          assert labels["gco.io/retry-of"] == "sqs-submitted-job", labels
+          assert labels["gco.io/submission-method"] == "sqs", labels
+          assert job["metadata"]["annotations"]["gco.io/original-job"] == "sqs-submitted-job"
+          # The API server generated a fresh selector and pod labels for the
+          # new Job's own UID.
+          assert job["spec"]["selector"]["matchLabels"] == {
+              "batch.kubernetes.io/controller-uid": uid
+          }, job["spec"]["selector"]
+          template_labels = job["spec"]["template"]["metadata"]["labels"]
+          assert template_labels["batch.kubernetes.io/controller-uid"] == uid, template_labels
+          assert template_labels["batch.kubernetes.io/job-name"] == job["metadata"]["name"]
+          # The user's spec survived in its JSON spelling.
+          assert job["spec"]["backoffLimit"] == 3, job["spec"]
+          assert job["spec"]["ttlSecondsAfterFinished"] == 3600, job["spec"]
+          pod_spec = job["spec"]["template"]["spec"]
+          assert pod_spec["restartPolicy"] == "Never", pod_spec
+          (container,) = pod_spec["containers"]
+          assert container["securityContext"]["readOnlyRootFilesystem"] is True, container
+          print(f"retry accepted: {job['metadata']['name']} (uid {uid})")
+          PY
+          # The Job controller creates the retry's pod from the copied template.
+          for _ in $(seq 1 30); do
+            pods="$(kubectl -n gco-jobs get pods -l "batch.kubernetes.io/job-name=${new_job}" \
+              -o name)"
+            if [ -n "${pods}" ]; then
+              printf 'retry pod created: %s\n' "${pods}"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the Job controller created no pod for ${new_job}"
+          kubectl -n gco-jobs describe job "${new_job}" || true
+          exit 1
       - name: Apply the kro capability tenant RBAC and prove its fence
         # 07-kro-tenant-access.yaml is the one base-pass file the kro EKS
         # Capability switches on (cdk.json eks_capabilities.kro;

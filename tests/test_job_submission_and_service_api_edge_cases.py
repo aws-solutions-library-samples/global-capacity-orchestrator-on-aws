@@ -1228,22 +1228,20 @@ async def test_jobs_bulk_delete_missing_timestamp_and_per_job_failure() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("template", [{"status": {"phase": "old"}}, "not-a-mapping"])
-async def test_jobs_retry_sanitizes_template_status_when_possible(template: Any) -> None:
+@pytest.mark.parametrize("template", [None, "not-a-mapping", {"metadata": "not-a-mapping"}])
+async def test_jobs_retry_leaves_a_malformed_template_to_validation(template: Any) -> None:
+    # The route copies what the API server returned; a template it cannot
+    # walk goes through untouched, and manifest validation decides.
     import gco.services.api_routes.jobs as routes
     from gco.models import ManifestSubmissionResponse
 
     processor = _api_processor()
-    original = SimpleNamespace(
-        metadata=SimpleNamespace(labels={}, annotations={}),
-        spec=SimpleNamespace(
-            parallelism=1,
-            completions=1,
-            backoff_limit=2,
-            template=SimpleNamespace(to_dict=lambda: template),
-        ),
+    original = {"metadata": {"name": "trainer"}, "spec": {"backoffLimit": 2}}
+    if template is not None:
+        original["spec"]["template"] = template
+    processor.batch_v1.read_namespaced_job.return_value = SimpleNamespace(
+        data=json.dumps(original).encode()
     )
-    processor.batch_v1.read_namespaced_job.return_value = original
     processor.process_manifest_submission = AsyncMock(
         return_value=ManifestSubmissionResponse(True, "cluster", "us-east-1", [])
     )
@@ -1254,10 +1252,7 @@ async def test_jobs_retry_sanitizes_template_status_when_possible(template: Any)
         response = await routes.retry_job("gco-jobs", "trainer")
     assert response.status_code == 201
     submitted = processor.process_manifest_submission.call_args.args[0].manifests[0]
-    if isinstance(template, dict):
-        assert "status" not in submitted["spec"]["template"]
-    else:
-        assert submitted["spec"]["template"] == "not-a-mapping"
+    assert submitted["spec"] == original["spec"]
 
 
 def _queue_request(**overrides: Any) -> Any:

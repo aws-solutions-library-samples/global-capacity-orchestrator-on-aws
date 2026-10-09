@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
@@ -87,6 +89,111 @@ def _labels_match(labels: Any, requirements: list[tuple[str, str]]) -> bool:
     if not isinstance(labels, dict):
         return False
     return all(labels.get(key) == value for key, value in requirements)
+
+
+# Labels the API server stamps on a Job's pod template (and on the Job itself
+# when it was created without labels of its own). They carry the original
+# Job's UID and name, so a copy that keeps them fails the generated-selector
+# validation of the new Job.
+_JOB_CONTROLLER_LABELS = frozenset(
+    {
+        "controller-uid",
+        "job-name",
+        "batch.kubernetes.io/controller-uid",
+        "batch.kubernetes.io/job-name",
+    }
+)
+# Annotations that describe the original object rather than the workload.
+_NON_PORTABLE_JOB_ANNOTATIONS = frozenset({"kubectl.kubernetes.io/last-applied-configuration"})
+_RETRY_NAME_SUFFIX_FORMAT = "-retry-%Y%m%d%H%M%S"
+# The Job controller copies the Job name into its pods' job-name label, so the
+# API server rejects Job names longer than a label value.
+_MAX_JOB_NAME_LENGTH = 63
+
+
+def _retry_job_name(name: str, now: datetime) -> str:
+    """Name a retry, shortening the original name so the result fits a Job."""
+    suffix = now.strftime(_RETRY_NAME_SUFFIX_FORMAT)
+    prefix = name[: _MAX_JOB_NAME_LENGTH - len(suffix)].rstrip("-.")
+    return f"{prefix}{suffix}"
+
+
+def _read_job_object(processor: Any, name: str, namespace: str) -> dict[str, Any]:
+    """Read a Job exactly as the API server returns it.
+
+    The typed ``V1Job`` model is the wrong source for a copy: its
+    ``to_dict()`` spells fields the Python way (``restart_policy``), which the
+    API server does not recognise, and it drops any field newer than the
+    client's models.
+    """
+    response = processor.batch_v1.read_namespaced_job(
+        name=name, namespace=namespace, _preload_content=False
+    )
+    release_conn = getattr(response, "release_conn", None)
+    try:
+        job = json.loads(response.data)
+    finally:
+        if callable(release_conn):
+            release_conn()
+    if not isinstance(job, dict):
+        raise TypeError(f"Kubernetes returned an unsupported Job payload: {type(job)!r}")
+    return job
+
+
+def _retry_job_manifest(
+    original: dict[str, Any], *, original_name: str, new_name: str, namespace: str
+) -> dict[str, Any]:
+    """Build a new Job from the original Job object.
+
+    The user's spec, labels and annotations carry over unchanged. What the API
+    server generated for the original does not: its identity and status, the
+    suspend flag, and, unless the Job manages its own selector
+    (``manualSelector: true``), the generated selector and the
+    controller-uid/job-name labels that tie pods to the original Job.
+    """
+    metadata = original.get("metadata") or {}
+    spec = copy.deepcopy(original.get("spec") or {})
+    generated_selector = spec.get("manualSelector") is not True
+
+    spec.pop("suspend", None)
+    if generated_selector:
+        spec.pop("selector", None)
+    template = spec.get("template")
+    template_metadata = template.get("metadata") if isinstance(template, dict) else None
+    if isinstance(template_metadata, dict):
+        template_metadata.pop("creationTimestamp", None)
+        template_labels = template_metadata.get("labels")
+        if generated_selector and isinstance(template_labels, dict):
+            template_metadata["labels"] = {
+                key: value
+                for key, value in template_labels.items()
+                if key not in _JOB_CONTROLLER_LABELS
+            }
+
+    labels = {
+        key: value
+        for key, value in (metadata.get("labels") or {}).items()
+        if not (generated_selector and key in _JOB_CONTROLLER_LABELS)
+    }
+    labels["gco.io/retry-of"] = original_name
+    annotations = {
+        key: value
+        for key, value in (metadata.get("annotations") or {}).items()
+        if key not in _NON_PORTABLE_JOB_ANNOTATIONS
+    }
+    annotations["gco.io/original-job"] = original_name
+
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": new_name,
+            "namespace": namespace,
+            "labels": labels,
+            "annotations": annotations,
+        },
+        "spec": spec,
+    }
 
 
 @router.get("")
@@ -755,7 +862,7 @@ async def retry_job(namespace: str, name: str) -> Response:
 
     try:
         try:
-            original_job = processor.batch_v1.read_namespaced_job(name=name, namespace=namespace)
+            original_job = _read_job_object(processor, name, namespace)
         except Exception as e:
             if "NotFound" in str(e) or "404" in str(e):
                 raise HTTPException(
@@ -763,35 +870,10 @@ async def retry_job(namespace: str, name: str) -> Response:
                 ) from e
             raise
 
-        new_name = f"{name}-retry-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
-
-        new_job_manifest = {
-            "apiVersion": "batch/v1",
-            "kind": "Job",
-            "metadata": {
-                "name": new_name,
-                "namespace": namespace,
-                "labels": {
-                    **(original_job.metadata.labels or {}),
-                    "gco.io/retry-of": name,
-                },
-                "annotations": {
-                    **(original_job.metadata.annotations or {}),
-                    "gco.io/original-job": name,
-                },
-            },
-            "spec": {
-                "parallelism": original_job.spec.parallelism,
-                "completions": original_job.spec.completions,
-                "backoffLimit": original_job.spec.backoff_limit,
-                "template": original_job.spec.template.to_dict(),
-            },
-        }
-
-        spec_dict = cast(dict[str, Any], new_job_manifest["spec"])
-        template_dict = spec_dict.get("template", {})
-        if isinstance(template_dict, dict) and "status" in template_dict:
-            del template_dict["status"]
+        new_name = _retry_job_name(name, datetime.now(UTC))
+        new_job_manifest = _retry_job_manifest(
+            original_job, original_name=name, new_name=new_name, namespace=namespace
+        )
 
         submission_request = ManifestSubmissionRequest(
             manifests=[new_job_manifest], namespace=namespace, dry_run=False, validate=True
