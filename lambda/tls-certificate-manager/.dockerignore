@@ -1,0 +1,8 @@
+# Exclude everything by default, then allowlist what the Dockerfile copies.
+# Local test and type-check caches (__pycache__/, .mypy_cache/) would otherwise
+# change the CDK image asset's hash between a working checkout and a clean
+# clone of the same commit. Docker always reads the Dockerfile, and CDK keeps
+# the Dockerfile and this file in the asset fingerprint.
+*
+!requirements.txt
+!handler.py
