@@ -194,3 +194,71 @@ GHSA-6v7p-g79w-8964 exp:2026-12-14
 #             https://nvd.nist.gov/vuln/detail/CVE-2026-97689
 CVE-2026-97687 exp:2026-12-14
 CVE-2026-97689 exp:2026-12-14
+
+# -----------------------------------------------------------------------------
+# CVE-2026-78667 (GHSA-f4xw-m386-m277, GO-2026-6609): net/http puts no limit
+# on the ranges it parses from a Range header, so FileServer, ServeContent and
+# ServeFile can be driven to excessive CPU use. CVE-2026-97031
+# (GHSA-hq7w-2xrq-wp2j, GO-2026-6607): a crypto/tls server with Encrypted
+# Client Hello enabled accepts repeated ECH outer extension references, which
+# a client can use to exhaust the server's memory. Both are Go standard
+# library flaws fixed in Go 1.26.9 and 1.27.2 (2026-10-08). Trivy reports them
+# as `stdlib` under each Go binary's gobinary target in
+# security:trivy:container-scan:
+#   * Dockerfile.dev: kubectl v1.37.1 (go1.26.8), the Docker CLI 29.8.2
+#     (go1.26.8) and the docker-buildx plugin v0.38.0 (go1.26.8)
+#   * lambda/helm-installer: helm v4.3.0 (go1.27.1), kubectl v1.37.1
+#     (go1.26.8) and the base image's aws-lambda-rie (go1.26.7)
+#   * lambda/tls-certificate-manager: the base image's aws-lambda-rie
+#     (go1.26.7)
+#
+# Provenance, established 2026-10-09: `go version` on the exact pinned
+# linux-amd64 release artifacts, each checked against the sha256 trust anchor
+# its Dockerfile carries (the Docker static tarball publishes none), reports
+# the toolchains above. aws-lambda-rie is not ours: it ships in
+# public.ecr.aws/lambda/python:3.14 at /usr/local/bin/aws-lambda-rie, and the
+# copy in the unmodified base, republished 2026-10-09, still reports go1.26.7.
+#
+# Not introduced by any change of ours: the Go advisories were published
+# 2026-10-08T22:31Z and the GHSAs at 2026-10-09T00:31Z. PR #451's Security run
+# on 7b7b4b78 scanned the same three images clean at 2026-10-09T01:55Z, before
+# the advisories reached the Trivy DB, and none of the three Dockerfiles has
+# changed since.
+#
+# Not clearable by a pin bump, re-checked 2026-10-09: every pinned release
+# predates the Go fix. Kubernetes v1.37.1 (2026-09-23) is the newest 1.37
+# patch, Helm v4.3.0 (2026-09-09) and Buildx v0.38.0 (2026-10-07) are the
+# newest Helm 4 and Buildx releases, and the newest upstream RIE, v1.37
+# (2026-08-31), is older than both fixed Go releases. The one fixed build is
+# the Docker CLI 29.9.0 static release (2026-10-08, go1.26.9). It would clear
+# the docker binary but not the ids, which kubectl, helm, buildx and the RIE
+# still carry, so the bump is left to the monthly deps-scan (which tracks
+# DOCKER_VERSION) rather than taking a one-day-old minor release here.
+#
+# Low runtime risk: both flaws are server-side. CVE-2026-78667 needs the
+# process to serve files through net/http to a peer that controls the Range
+# header, and CVE-2026-97031 needs a TLS server with ECH keys configured. GCO
+# runs kubectl, helm, docker and buildx only as clients (of the Kubernetes
+# API, chart and image registries, and the Docker daemon) and never starts
+# kubectl's file-serving `proxy --www` mode. aws-lambda-rie runs only when
+# AWS_LAMBDA_RUNTIME_API is unset, which means local emulation such as the
+# integration:docker smoke tests (.github/scripts/rie_smoke_test.sh), where it
+# answers plain-HTTP invokes on an ephemeral CI runner. Deployed Lambda
+# functions exec the managed runtime and never start it. The dev image is a
+# contributor/CI tool that is never deployed to a cluster.
+#
+# Clears when every flagged binary is built with Go >= 1.26.9 (or >= 1.27.2):
+# the next Kubernetes 1.37 patch (KUBECTL_VERSION in Dockerfile.dev, plus the
+# kubectl URL and sha256 in lambda/helm-installer/Dockerfile), the next Helm 4
+# release (the helm URL and sha256 in that same Dockerfile), the next Buildx
+# release (BUILDX_VERSION and both sha256 anchors),
+# DOCKER_VERSION 29.9.0 or later, and a public.ecr.aws/lambda/python:3.14
+# whose aws-lambda-rie is built with a fixed Go. Confirm each with
+# `go version` on the binary (or `trivy image`), then drop both ids.
+# Advisories: https://pkg.go.dev/vuln/GO-2026-6609
+#             https://pkg.go.dev/vuln/GO-2026-6607
+#             https://avd.aquasec.com/nvd/cve-2026-78667
+#             https://avd.aquasec.com/nvd/cve-2026-97031
+# RIE releases: https://github.com/aws/aws-lambda-runtime-interface-emulator/releases
+CVE-2026-78667 exp:2026-11-08
+CVE-2026-97031 exp:2026-11-08
