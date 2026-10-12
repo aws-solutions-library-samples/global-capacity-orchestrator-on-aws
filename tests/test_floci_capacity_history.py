@@ -91,7 +91,11 @@ def test_the_global_stack_declares_the_shape_this_module_provisions():
 class TestSnapshotsOverTheWire:
     def test_a_snapshot_round_trips_with_plain_numbers(self, store):
         instance_type = unique_name("g5.xlarge")
-        now = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+        # The write time sets the item's TTL (30 days with this store). A fixed
+        # date puts that TTL in the past 30 days later, and the emulator drops
+        # expired items as DynamoDB eventually does, so the read would come
+        # back empty from then on. Write at the current time instead.
+        now = datetime.now(UTC).replace(microsecond=0)
 
         stored = store.put_snapshot(
             instance_type,
