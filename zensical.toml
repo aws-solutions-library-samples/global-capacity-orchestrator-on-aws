@@ -108,6 +108,12 @@ variant = "modern"
 # No Google Fonts fetch: the built site must make zero third-party asset
 # requests. The theme falls back to a system font stack.
 font = false
+# The project logo's dark tile (images/gco-icon.svg, staged under
+# assets/images/). The header is light or dark with the palette toggle and an
+# <img> logo cannot follow it, so the tile, which reads on both, is the header
+# logo as well as the favicon.
+logo = "assets/images/gco-icon.svg"
+favicon = "assets/images/gco-icon.svg"
 features = [
   "navigation.sections",
   "navigation.footer",

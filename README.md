@@ -1,5 +1,10 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/gco-logo-dark.svg">
+  <img src="images/gco-logo.svg" alt="Global Capacity Orchestrator logo" width="112">
+</picture>
+
 <h1>Global Capacity Orchestrator</h1>
 
 <p><a href="https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/"><b>Guidance for EKS AutoMode Clusters with<br>Global Capacity Orchestrator on AWS</b><br><sub>Official AWS Solutions Guidance</sub></a></p>

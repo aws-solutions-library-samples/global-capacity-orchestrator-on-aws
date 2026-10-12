@@ -104,12 +104,14 @@ Refreshing the documents the sheets are rendered from is a separate step:
 CDK toolchain below) and `python scripts/generate_cluster_gateway_openapi.py`
 (the cluster gateway).
 
-The interaction diagram is the repository's one tracked SVG, and every tracked
-SVG is published as its own document on the Pages origin — so besides the
-byte-exact `--check`, `.github/scripts/validate_svg_assets.py` (run by the
-security workflow and by `tests/test_validate_svg_assets.py`) holds it to a
-content policy: an explicit path allowlist, drawing primitives, text and
-same-site `<a href>` links only, the default SVG namespace only, no DOCTYPE.
+The interaction diagram and the project logo
+([`images/`](../images/README.md#project-logo)) are the repository's tracked
+SVGs, and every tracked SVG is published as its own document on the Pages
+origin — so besides the byte-exact `--check`,
+`.github/scripts/validate_svg_assets.py` (run by the security workflow and by
+`tests/test_validate_svg_assets.py`) holds them to a content policy: an
+explicit path allowlist, drawing primitives, text and same-site `<a href>`
+links only, the default SVG namespace only, no DOCTYPE.
 A renderer change that needs a new element or attribute widens that policy in
 the same PR.
 

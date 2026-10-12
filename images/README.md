@@ -4,11 +4,24 @@ Screenshots and visual assets for Global Capacity Orchestrator (GCO) documentati
 
 ## Table of Contents
 
+- [Project Logo](#project-logo)
 - [Reference Architecture Diagrams](#reference-architecture-diagrams)
 - [MCP Server Screenshots](#mcp-server-screenshots)
 - [In-Cluster Monitoring Screenshots](#in-cluster-monitoring-screenshots)
 - [Platform Add-on Screenshots](#platform-add-on-screenshots)
 - [SageMaker Studio Screenshots](#sagemaker-studio-screenshots)
+
+## Project Logo
+
+The mark is a G whose crossbar doubles as a radar sweep, with an orange C and a dot (the O) nested inside: the project's initials, and the capacity search it runs across regions.
+
+| Image | Use |
+|-------|-----|
+| [gco-logo.svg](gco-logo.svg) | The mark for light backgrounds; the README header's default image |
+| [gco-logo-dark.svg](gco-logo-dark.svg) | The same mark recoloured for dark backgrounds; the README header in GitHub's dark mode |
+| [gco-icon.svg](gco-icon.svg) | The mark on a dark rounded tile, which reads on light and dark backgrounds; the wiki's header logo and favicon |
+
+The orange is the wiki theme's deep orange: `#F4511F`, or `#FF6E42` on dark backgrounds. The ink is `#171B26`, or `#F2F4F7` on dark backgrounds. Every file is drawn from filled paths and rectangles only, and is listed with a size limit in the SVG content policy, [`.github/scripts/validate_svg_assets.py`](../.github/scripts/validate_svg_assets.py). Edit the path data directly and keep to the policy's elements and attributes; exports from drawing tools usually add groups, transforms, styles or editor namespaces, which the policy rejects.
 
 ## Reference Architecture Diagrams
 

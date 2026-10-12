@@ -7,8 +7,9 @@ renderer fetch remote resources (``<image>``, ``<use>``, ``xlink:href``, CSS
 ``url()``). GitHub and the wiki embed the repository's SVGs as ``<img>``, where
 none of that runs — but each SVG is also published as its own document on the
 Pages origin (``scripts/build_wiki.py`` stages ``diagrams/api_specs/*.svg`` into
-the wiki's source tree as ``/api/``), and the interaction diagram's links only
-work when it is opened that way. Opened as a document, an SVG runs whatever it carries, on an origin every
+the wiki's source tree as ``/api/`` and ``images/*.svg`` as ``/assets/images/``),
+and the interaction diagram's links only work when it is opened that way.
+Opened as a document, an SVG runs whatever it carries, on an origin every
 project site in the GitHub organisation shares.
 
 ``diagrams/api_specs/generate.py --check`` proves the committed bytes are what
@@ -69,6 +70,13 @@ SVG_POLICIES = {
     # The API interaction diagram, ~25 KiB today. It grows with the route
     # inventory — one text line per new route prefix — not with rendering.
     Path("diagrams/api_specs/api-topology.svg"): SvgPolicy(96 * KIB),
+    # The project logo (images/README.md#project-logo): the mark for light and
+    # for dark backgrounds, shown in the README header, and the tile the wiki
+    # uses as its header logo and favicon. Four or five filled shapes each,
+    # under 1 KiB today; a redraw should not need more than this.
+    Path("images/gco-logo.svg"): SvgPolicy(4 * KIB),
+    Path("images/gco-logo-dark.svg"): SvgPolicy(4 * KIB),
+    Path("images/gco-icon.svg"): SvgPolicy(4 * KIB),
 }
 
 # Drawing primitives, text and links: what the interaction diagram is drawn

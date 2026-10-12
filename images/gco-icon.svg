@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-labelledby="title">
+  <title id="title">Global Capacity Orchestrator icon</title>
+  <rect x="0" y="0" width="200" height="200" rx="44" fill="#171B26"/>
+  <path d="M148.01 56.77A64.6 64.6 0 1 0 164.6 100L149.4 100A49.4 49.4 0 1 1 136.71 66.94A7.6 7.6 0 0 0 148.01 56.77Z" fill="#F2F4F7"/>
+  <path d="M100 92.4L164.15 92.4A64.6 64.6 0 0 1 164.15 107.6L100 107.6Z" fill="#F2F4F7"/>
+  <path d="M127.88 73.08A38.76 38.76 0 1 0 127.88 126.92A7.6 7.6 0 0 0 116.95 116.37A23.56 23.56 0 1 1 116.95 83.63A7.6 7.6 0 0 0 127.88 73.08Z" fill="#FF6E42"/>
+  <path d="M110.64 100A10.64 10.64 0 1 0 89.36 100A10.64 10.64 0 1 0 110.64 100Z" fill="#F2F4F7"/>
+</svg>

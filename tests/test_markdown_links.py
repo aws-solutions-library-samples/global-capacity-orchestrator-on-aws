@@ -4,7 +4,8 @@ Every tracked Markdown file outside ``wiki/`` is scanned and three classes
 of link are proven to resolve against the checkout:
 
 * **relative paths** — ``[text](docs/CLI.md)``, ``![img](images/x.png)``,
-  ``<img src="images/x.png">``, ``<a href="LICENSE">`` — must name a file or
+  ``<img src="images/x.png">``, ``<source srcset="images/x.svg">``,
+  ``<a href="LICENSE">`` — must name a file or
   directory that exists inside the repository (percent-encoding and
   root-relative ``/path`` forms included);
 * **anchors** — ``#fragment`` on the same page or on a linked ``.md`` page —
@@ -84,6 +85,9 @@ _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 #: parentheses is allowed inside a bare target, as CommonMark permits.
 _INLINE_TARGET = re.compile(r"\]\(\s*(?:<(?P<angle>[^>]*)>|(?P<bare>(?:[^()\s]|\([^()\s]*\))+))")
 _HTML_ATTR = re.compile(r"\b(?:src|href)=\"(?P<target>[^\"]+)\"")
+#: ``<source srcset="…">`` inside a ``<picture>`` (the README's dark-mode logo):
+#: comma-separated candidates, each a URL optionally followed by a descriptor.
+_SRCSET = re.compile(r"\bsrcset=\"(?P<candidates>[^\"]+)\"")
 _AUTOLINK = re.compile(r"<(?P<target>https?://[^>\s]+)>")
 _BARE_DEEP_LINK = re.compile(re.escape(REPO_URL) + r"/(?:blob|tree)/main/[^\s<>)\"']+")
 _REFERENCE_DEF = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*(?P<target>\S+)", re.MULTILINE)
@@ -157,6 +161,10 @@ def extract_links(path: Path) -> list[Link]:
             links.append(Link(path, line_no, target.strip()))
         for match in _HTML_ATTR.finditer(line):
             links.append(Link(path, line_no, match.group("target").strip()))
+        for match in _SRCSET.finditer(line):
+            for candidate in match.group("candidates").split(","):
+                if candidate.strip():
+                    links.append(Link(path, line_no, candidate.split()[0]))
         for match in _AUTOLINK.finditer(line):
             links.append(Link(path, line_no, match.group("target").strip()))
         # Bare repository deep links in prose are auto-linked by GitHub and
@@ -406,3 +414,22 @@ def test_code_and_comments_are_not_scanned(tmp_path: Path) -> None:
     )
     targets = sorted(link.target for link in extract_links(page))
     assert targets == ["pic.png", "real.md", "reference.md"]
+
+
+def test_every_srcset_candidate_is_a_link(tmp_path: Path) -> None:
+    """A ``<picture>``'s dark-mode ``srcset`` path rots as silently as an ``src``."""
+    page = tmp_path / "page.md"
+    page.write_text(
+        "\n".join(
+            [
+                "<picture>",
+                '  <source media="(prefers-color-scheme: dark)" srcset="dark.svg">',
+                '  <source srcset="small.png 1x, large.png 2x , wide.png 640w">',
+                '  <img src="light.svg" alt="logo">',
+                "</picture>",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    targets = sorted(link.target for link in extract_links(page))
+    assert targets == ["dark.svg", "large.png", "light.svg", "small.png", "wide.png"]
