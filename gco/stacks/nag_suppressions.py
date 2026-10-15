@@ -458,11 +458,14 @@ def add_iam_suppressions(
         regions: List of regional deployment regions (for EKS addon patterns)
         global_region: Global region for SSM parameters and DynamoDB tables
         api_gateway_region: Region where the API Gateway auth secret lives.
-            The regional service-account role's read grant is scoped to a
-            deterministic ARN in this region (see ``GCORegionalStack`` and
-            issue #125). Falls back to ``global_region`` for callers that
-            don't split the API Gateway stack into its own region — the two
-            are co-located in the default topology.
+            ``GCORegionalStack``'s roles (issue #125) and
+            ``GCORegionalApiGatewayStack``'s proxy roles (PR #461) scope their
+            read grants to a deterministic ARN in this region, so both must
+            pass it. Falls back to ``global_region`` for stacks that hold no
+            such grant. Never rely on that fallback for a stack that does: the
+            two regions coincide in the default topology, so the mismatch only
+            shows up once ``deployment_regions.api_gateway`` differs (the
+            ``api-gateway-region-split`` matrix entry).
         project_name: Deployment prefix (#139). Every allow-list ARN pattern
             below (auth secret, ``/<project>/`` SSM tree, ``<project>-*``
             DynamoDB tables and S3 buckets) is scoped to this so the
@@ -495,10 +498,11 @@ def add_iam_suppressions(
         # flow-log group (logs:CreateLogStream/PutLogEvents on `<group>.Arn:*`).
         "Resource::<VpcFlowLogGroup86559C69.Arn>:*",
         # Secrets Manager access for the backend HMAC signing key, with a
-        # trailing wildcard for the random 6-char suffix. The regional
-        # service-account role builds this exact ARN deterministically (from
-        # the secret name + API Gateway region + account) so it matches in
-        # both single-region and cross-region topologies — see issue #125.
+        # trailing wildcard for the random 6-char suffix. The regional stack's
+        # roles and the regional API bridge's proxy roles build this exact ARN
+        # deterministically (from the secret name + API Gateway region +
+        # account) so it matches in both single-region and cross-region
+        # topologies — see issue #125 and PR #461.
         f"Resource::arn:<AWS::Partition>:secretsmanager:{secret_region}:<AWS::AccountId>:secret:{api_gateway_auth_secret_name(project_name)}*",
     ]
 
@@ -1666,8 +1670,10 @@ def apply_all_suppressions(
             'regional_api_gateway', 'monitoring', or 'analytics'
         regions: List of regional deployment regions (for dynamic IAM suppression patterns)
         global_region: Global region for SSM parameters (for dynamic IAM suppression patterns)
-        api_gateway_region: API Gateway region (for analytics stack — used to
-            scope SageMaker execute-api and presigned-URL Lambda ARN patterns)
+        api_gateway_region: API Gateway region. The analytics stack uses it to
+            scope SageMaker execute-api and presigned-URL Lambda ARN patterns;
+            the regional and regional API gateway stacks use it to key the
+            auth-secret read suppression (see ``add_iam_suppressions``).
         project_name: Deployment prefix (#139), forwarded to
             ``add_iam_suppressions`` so the IAM allow-list ARN patterns match
             the deployment's project-scoped resource names. Defaults to

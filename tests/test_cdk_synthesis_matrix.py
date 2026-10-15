@@ -41,6 +41,12 @@ import pytest
 
 from tests._cdk_config_matrix import CONFIGS
 
+# One stack builder for both matrices (and scripts/dump_nag_findings.py). This
+# module used to carry its own copy, which drifted: it never passed the API
+# Gateway stack app.py's arguments, and like the original it never built the
+# regional API bridge stacks.
+from tests.test_nag_compliance import _build_all_stacks, _mock_helm_installer
+
 
 def _build_app(context_overrides: dict[str, Any]) -> cdk.App:
     """Construct a CDK ``App`` with the baseline cdk.json context plus
@@ -65,110 +71,6 @@ def _build_app(context_overrides: dict[str, Any]) -> cdk.App:
             context[key] = value
 
     return cdk.App(context=context)
-
-
-def _mock_helm_installer(stack: Any) -> None:
-    """Mock ``_create_helm_installer_lambda`` so synth doesn't need a
-    Docker daemon. Same implementation as ``test_nag_compliance``.
-    """
-    stack.helm_installer_lambda = MagicMock()
-    stack.helm_installer_provider = MagicMock()
-    stack.helm_installer_provider.service_token = (
-        "arn:aws:lambda:us-east-1:123456789012:function:mock"
-    )
-    stack.helm_installer_lambda_function_name = (
-        f"gco-helm-{getattr(stack, 'deployment_region', 'us-east-1')}"
-    )
-
-
-def _build_all_stacks(app: cdk.App) -> None:
-    """Instantiate every stack ``app.py::main`` builds. Kept in sync
-    with ``test_nag_compliance._build_all_stacks``; if you add or
-    remove a stack there, change it here too.
-    """
-    from gco.config.config_loader import ConfigLoader
-    from gco.stacks.analytics_stack import GCOAnalyticsStack
-    from gco.stacks.api_gateway_global_stack import (
-        AnalyticsApiConfig,
-        GCOApiGatewayGlobalStack,
-    )
-    from gco.stacks.global_stack import GCOGlobalStack
-    from gco.stacks.monitoring_stack import GCOMonitoringStack
-    from gco.stacks.regional_stack import GCORegionalStack
-
-    config = ConfigLoader(app)
-    project_name = config.get_project_name()
-    deployment_regions = config.get_deployment_regions()
-
-    global_region = deployment_regions["global"]
-    api_gateway_region = deployment_regions["api_gateway"]
-    monitoring_region = deployment_regions["monitoring"]
-    regional_regions = deployment_regions["regional"]
-
-    global_stack = GCOGlobalStack(
-        app,
-        f"{project_name}-global",
-        config=config,
-        env=cdk.Environment(region=global_region),
-    )
-
-    api_gateway_stack = GCOApiGatewayGlobalStack(
-        app,
-        f"{project_name}-api-gateway",
-        global_accelerator_dns=global_stack.get_accelerator_dns_name(),
-        env=cdk.Environment(region=api_gateway_region),
-    )
-    api_gateway_stack.add_stack_dependency(global_stack)
-
-    regional_stacks = []
-    for region in regional_regions:
-        regional_stack = GCORegionalStack(
-            app,
-            f"{project_name}-{region}",
-            config=config,
-            region=region,
-            auth_secret_arn=api_gateway_stack.secret.secret_arn,
-            env=cdk.Environment(region=region),
-        )
-        regional_stack.add_stack_dependency(global_stack)
-        regional_stack.add_stack_dependency(api_gateway_stack)
-        regional_stacks.append(regional_stack)
-        global_stack.add_regional_endpoint(region, regional_stack.alb_arn)  # type: ignore[arg-type]
-
-    monitoring_stack = GCOMonitoringStack(
-        app,
-        f"{project_name}-monitoring",
-        config=config,
-        global_stack=global_stack,
-        regional_stacks=regional_stacks,
-        api_gateway_stack=api_gateway_stack,
-        env=cdk.Environment(region=monitoring_region),
-    )
-    for regional_stack in regional_stacks:
-        monitoring_stack.add_stack_dependency(regional_stack)
-
-    if config.get_analytics_enabled():
-        analytics_stack = GCOAnalyticsStack(
-            app,
-            f"{project_name}-analytics",
-            config=config,
-            env=cdk.Environment(region=api_gateway_region),
-        )
-        analytics_stack.add_stack_dependency(global_stack)
-
-        analytics_api_config = AnalyticsApiConfig(
-            user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
-            user_pool_client_id=analytics_stack.cognito_client.user_pool_client_id,
-            presigned_url_lambda=analytics_stack.presigned_url_lambda,
-            studio_domain_name=analytics_stack.studio_domain.domain_name or "",
-            callback_url=(
-                f"https://{api_gateway_stack.api.rest_api_id}."
-                f"execute-api.{api_gateway_region}."
-                f"{api_gateway_stack.url_suffix}/prod/studio/callback"
-            ),
-        )
-        api_gateway_stack.set_analytics_config(analytics_api_config)
-        api_gateway_stack.add_stack_dependency(analytics_stack)
 
 
 @pytest.mark.parametrize(("config_name", "overrides"), CONFIGS, ids=[c[0] for c in CONFIGS])

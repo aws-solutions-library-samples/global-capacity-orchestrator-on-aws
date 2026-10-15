@@ -51,14 +51,15 @@ from gco.stacks.constants import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
     LAMBDA_NODEJS_RUNTIME,
     LAMBDA_PYTHON_RUNTIME,
+    api_gateway_auth_secret_name,
     backend_tls_root_ca_parameter_name,
     backend_tls_server_name,
     validated_request_body_limit,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-10-15T19:23:42Z
+# Generated from Git commit: f287464172b4f85b9fcd1cf68de7682205686cf1
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalApiGatewayStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.png``)
@@ -127,7 +128,37 @@ class GCORegionalApiGatewayStack(Stack):
             self,
             stack_type="regional_api_gateway",
             global_region=self.config.get_global_region(),
+            # Key the auth-secret read suppression on the Region the grants in
+            # this stack target (see ``_auth_secret_read_resource``).
+            api_gateway_region=self.config.get_api_gateway_region(),
             project_name=self.config.get_project_name(),
+        )
+
+    def _auth_secret_read_resource(self) -> str:
+        """IAM resource for reading the backend HMAC auth secret.
+
+        Built from the secret's name, the API Gateway Region, and this
+        account, never from ``self.auth_secret_arn``. That argument is a
+        cross-stack reference: an ARN built from the secret's name when this
+        stack is in another Region from the API Gateway stack, but a native
+        export (``<project>-api-gateway:ExportsOutputRef...``) when it shares
+        that Region, and ``f"{export}*"`` matches no suppression, so
+        ``cdk synth`` failed AwsSolutions-IAM5 there (PR #461; issue #125 was
+        the same failure on the regional stack's roles). The deterministic ARN
+        renders the same in every topology and matches the suppression
+        ``add_iam_suppressions`` registers for the API Gateway Region.
+
+        The Region must be the API Gateway's, not the global one: the API
+        Gateway stack creates the secret, and ``deployment_regions`` lets the
+        two differ, in which case a grant in the global Region denies every
+        read. The trailing ``*`` matches the six random characters Secrets
+        Manager appends to the secret's ARN. At runtime the Lambdas still read
+        ``SECRET_ARN``, the cross-stack reference itself.
+        """
+        return (
+            f"arn:{self.partition}:secretsmanager:{self.config.get_api_gateway_region()}:"
+            f"{self.account}:secret:"
+            f"{api_gateway_auth_secret_name(self.config.get_project_name())}*"
         )
 
     def _create_vpc_proxy_lambda(self) -> lambda_.Function:
@@ -159,7 +190,8 @@ class GCORegionalApiGatewayStack(Stack):
             ],
         )
 
-        # Grant read access to auth secret.
+        # Grant read access to the auth secret, scoped to its deterministic ARN
+        # in the API Gateway Region (see ``_auth_secret_read_resource``).
         lambda_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -167,7 +199,7 @@ class GCORegionalApiGatewayStack(Stack):
                     "secretsmanager:GetSecretValue",
                     "secretsmanager:DescribeSecret",
                 ],
-                resources=[f"{self.auth_secret_arn}*"],
+                resources=[self._auth_secret_read_resource()],
             )
         )
 
@@ -302,6 +334,8 @@ class GCORegionalApiGatewayStack(Stack):
                 )
             ],
         )
+        # The HMAC secret lives in the API Gateway Region, not the global one
+        # ``registry_region`` names (see ``_auth_secret_read_resource``).
         role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -309,7 +343,7 @@ class GCORegionalApiGatewayStack(Stack):
                     "secretsmanager:GetSecretValue",
                     "secretsmanager:DescribeSecret",
                 ],
-                resources=[f"{self.auth_secret_arn}*"],
+                resources=[self._auth_secret_read_resource()],
             )
         )
         role.add_to_policy(

@@ -95,6 +95,27 @@ def _assert_streaming_lambda_integrations(integrations: list[dict]) -> None:
         assert "response-streaming-invocations" in json.dumps(integration["Uri"])
 
 
+def _auth_secret_read_statements(template: assertions.Template) -> list[dict]:
+    """Every IAM statement in the stack that grants the auth-secret read."""
+    return [
+        statement
+        for policy in template.find_resources("AWS::IAM::Policy").values()
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]
+        if statement.get("Action")
+        == ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    ]
+
+
+def _secret_arn_env_values(template: assertions.Template) -> list:
+    """``SECRET_ARN`` as each Lambda in the stack receives it."""
+    values = []
+    for function in template.find_resources("AWS::Lambda::Function").values():
+        variables = function.get("Properties", {}).get("Environment", {}).get("Variables", {})
+        if "SECRET_ARN" in variables:
+            values.append(variables["SECRET_ARN"])
+    return values
+
+
 class TestRegionalApiGatewayStack:
     """Test cases for GCORegionalApiGatewayStack."""
 
@@ -104,6 +125,7 @@ class TestRegionalApiGatewayStack:
         config = MagicMock()
         config.get_project_name.return_value = "gco"
         config.get_global_region.return_value = "us-east-2"
+        config.get_api_gateway_region.return_value = "us-east-2"
         config.get_deployment_regions.return_value = {
             "global": "us-east-2",
             "api_gateway": "us-east-2",
@@ -411,6 +433,98 @@ class TestRegionalApiGatewayStack:
                 }
             },
         )
+
+    def test_secret_read_is_scoped_to_api_gateway_region_arn(self, app, mock_config, vpc):
+        """Both proxy roles read the auth secret at its deterministic ARN in the
+        API Gateway Region.
+
+        The API Gateway stack creates the secret in
+        ``deployment_regions.api_gateway``, which may differ from ``global``,
+        and both Lambdas build their Secrets Manager client in the Region that
+        ``SECRET_ARN`` names. The Regions here all differ, so the exact match
+        rejects a grant built in the global Region (us-east-2, where PR #461's
+        first draft pointed it) or in this stack's own Region (us-east-1). Both
+        would synthesize, then deny every read once deployed.
+        """
+        from gco.stacks.constants import api_gateway_auth_secret_name
+        from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
+
+        mock_config.get_api_gateway_region.return_value = "us-west-2"
+        # A literal, as stacks outside the API Gateway's Region receive it. It
+        # names this stack's Region, so a grant copied from it fails too.
+        passed_in_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret"
+        stack = GCORegionalApiGatewayStack(
+            app,
+            "TestRegionalApiStack",
+            config=mock_config,
+            region="us-east-1",
+            vpc=vpc,
+            alb_dns_name="internal-test-alb.elb.amazonaws.com",
+            auth_secret_arn=passed_in_arn,
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
+            env=cdk.Environment(region="us-east-1"),
+        )
+        template = assertions.Template.from_stack(stack)
+
+        expected = stack.resolve(
+            f"arn:{stack.partition}:secretsmanager:us-west-2:{stack.account}:"
+            f"secret:{api_gateway_auth_secret_name('gco')}*"
+        )
+        statements = _auth_secret_read_statements(template)
+        # The control-plane proxy role and the inference streaming proxy role.
+        assert len(statements) == 2
+        for statement in statements:
+            assert statement["Resource"] == expected
+            rendered = json.dumps(statement["Resource"])
+            assert "us-east-2" not in rendered
+            assert "us-east-1" not in rendered
+        # Only the grant is rebuilt; the Lambdas still read the passed-in ARN.
+        assert _secret_arn_env_values(template) == [passed_in_arn, passed_in_arn]
+
+    def test_secret_read_ignores_same_region_cross_stack_reference(self, app, mock_config, vpc):
+        """A stack in the API Gateway's Region gets ``auth_secret_arn`` as an
+        ``Fn::ImportValue``, and a grant on ``f"{reference}*"`` matched no
+        AwsSolutions-IAM5 suppression, so ``cdk synth`` failed there (the bug
+        PR #461 fixes). The grant stays the deterministic ARN and only
+        ``SECRET_ARN`` carries the reference.
+        """
+        from aws_cdk import aws_secretsmanager as secretsmanager
+
+        from gco.stacks.constants import api_gateway_auth_secret_name
+        from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
+
+        # Single-Region topology: the secret's stack shares this stack's Region.
+        mock_config.get_global_region.return_value = "us-east-1"
+        mock_config.get_api_gateway_region.return_value = "us-east-1"
+        secret_stack = cdk.Stack(app, "SecretStack", env=cdk.Environment(region="us-east-1"))
+        secret = secretsmanager.Secret(
+            secret_stack, "AuthSecret", secret_name=api_gateway_auth_secret_name("gco")
+        )
+        stack = GCORegionalApiGatewayStack(
+            app,
+            "TestRegionalApiStack",
+            config=mock_config,
+            region="us-east-1",
+            vpc=vpc,
+            alb_dns_name="internal-test-alb.elb.amazonaws.com",
+            auth_secret_arn=secret.secret_arn,
+            aggregator_role_arn="arn:aws:iam::123456789012:role/gco-test-aggregator",
+            env=cdk.Environment(region="us-east-1"),
+        )
+        template = assertions.Template.from_stack(stack)
+
+        expected = stack.resolve(
+            f"arn:{stack.partition}:secretsmanager:us-east-1:{stack.account}:"
+            f"secret:{api_gateway_auth_secret_name('gco')}*"
+        )
+        statements = _auth_secret_read_statements(template)
+        assert len(statements) == 2
+        for statement in statements:
+            assert statement["Resource"] == expected
+            assert "Fn::ImportValue" not in json.dumps(statement["Resource"])
+        env_values = _secret_arn_env_values(template)
+        assert len(env_values) == 2
+        assert all("Fn::ImportValue" in value for value in env_values)
 
     def test_regional_api_gateway_has_log_groups(self, app, mock_config, vpc):
         """Test that the regional API gateway has CloudWatch log groups."""

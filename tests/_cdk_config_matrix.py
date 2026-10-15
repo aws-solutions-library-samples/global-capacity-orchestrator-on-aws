@@ -76,11 +76,11 @@ CONFIGS: list[tuple[str, dict[str, Any]]] = [
         # reference resolves to a native CloudFormation export
         # (``gco-api-gateway:ExportsOutputRefGCOAuthSecret<hash>``) instead of
         # a literal ARN, which used to slip past the AwsSolutions-IAM5
-        # suppression and fail ``cdk synth``. Every other topology in this
-        # matrix keeps ``regional`` in a different region from ``global`` /
-        # ``api_gateway``, so this is the only entry that exercises the
-        # same-region auth-secret code path. Keep it here as a regression
-        # guard for both the synthesis matrix and the cdk-nag matrix.
+        # suppression and fail ``cdk synth``. Only this entry and
+        # ``api-gateway-region-split`` put a workload Region in the API
+        # Gateway's Region, so they are the two that exercise the same-region
+        # auth-secret code path. Keep it here as a regression guard for both
+        # the synthesis matrix and the cdk-nag matrix.
         "single-region",
         {
             "deployment_regions": {
@@ -88,6 +88,27 @@ CONFIGS: list[tuple[str, dict[str, Any]]] = [
                 "api_gateway": "us-east-1",
                 "monitoring": "us-east-1",
                 "regional": ["us-east-1"],
+            }
+        },
+    ),
+    (
+        # Split control plane: the API Gateway stack, and with it the HMAC
+        # auth secret, lives in a different Region from the global stack. It is
+        # the only entry where ``api_gateway`` differs from ``global``, so it
+        # is the only one that can tell "scoped to the secret's Region" from
+        # "scoped to the global Region": everywhere else the two coincide.
+        # PR #461 first scoped the regional API bridge's secret grants to the
+        # global Region, which would have denied every GetSecretValue in this
+        # topology. The first workload Region is the API Gateway's own, so its
+        # regional stacks also take the same-region cross-stack reference
+        # (issue #125); the second takes the cross-region one.
+        "api-gateway-region-split",
+        {
+            "deployment_regions": {
+                "global": "us-east-2",
+                "api_gateway": "us-west-2",
+                "monitoring": "us-east-2",
+                "regional": ["us-west-2", "us-east-1"],
             }
         },
     ),
@@ -820,6 +841,8 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
 #   3. fsx-enabled         — FSx CSI IRSA role + PassRole on shared CR role
 #   4. all-features-enabled — FSx + Valkey + public endpoint combined
 #   5. three-regions       — 3 regional stacks, max cross-region surface
+#   6. single-region / api-gateway-region-split — the auth-secret grants'
+#      same-region and split-control-plane forms (see their entries)
 #
 # Plus two analytics-environment fixtures that exercise the
 # optional ``GCOAnalyticsStack`` IAM surface — SageMaker Studio execution
@@ -833,13 +856,19 @@ _NAG_CONFIG_NAMES = {
     "default-regions",
     "multi-region",
     # Single-region topology (global == api_gateway == regional). This is the
-    # IAM code path from issue #125: the auth-secret grant on the regional
-    # service-account role must stay covered by its AwsSolutions-IAM5
-    # suppression even when the API Gateway stack is co-located with the
-    # regional stack. It is the only config that exercises the same-region
-    # cross-stack reference form, so it MUST run through cdk-nag, not just the
-    # synthesis matrix.
+    # IAM code path from issue #125: the auth-secret grants on the regional
+    # stack's roles and on the regional API bridge's proxy roles must stay
+    # covered by their AwsSolutions-IAM5 suppression even when the API Gateway
+    # stack is co-located with them. That same-region cross-stack reference
+    # form only appears when a workload Region is the API Gateway's Region, so
+    # it MUST run through cdk-nag, not just the synthesis matrix.
     "single-region",
+    # The only config where the API Gateway (and the auth secret) is not in
+    # the global Region. Every auth-secret grant and its suppression are keyed
+    # on the API Gateway Region, so a grant scoped to the global Region by
+    # mistake (PR #461's first draft) surfaces here as an unsuppressed
+    # AwsSolutions-IAM5 finding instead of as AccessDenied after a deploy.
+    "api-gateway-region-split",
     "fsx-enabled",
     "all-features-enabled",
     "three-regions",

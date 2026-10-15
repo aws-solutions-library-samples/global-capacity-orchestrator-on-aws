@@ -137,9 +137,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "gco/stacks/regional_api_gateway_stack.py": {
-      "digest": "b6cfc8a24e5c5910db198427c66ae673105ff1f1a0efe2f9a64bf2fe5646e8e1",
-      "generated_at": "2026-09-01T14:42:56Z",
-      "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
+      "digest": "1020b5e579738d856ad7a00d743d9b8058c2b7c93d88fbb9b524ffbff3f86fc1",
+      "generated_at": "2026-10-15T19:23:42Z",
+      "source_commit": "f287464172b4f85b9fcd1cf68de7682205686cf1"
     },
     "gco/stacks/regional_stack.py": {
       "digest": "cb5c4372c85a0b2b35527345096310ede338c5c54b1ae4f2affefdcf56cbf271",

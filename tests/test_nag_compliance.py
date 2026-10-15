@@ -4,10 +4,11 @@ What this catches
 -----------------
 The class ``TestCdkNagCompliance`` synthesizes the full CDK application
 exactly the way ``app.py`` does — Global, API Gateway, one or more
-Regional stacks, and the Monitoring stack — with the five cdk-nag rule
-packs registered as CDK policy-validation plugins. After ``app.synth()``
-returns, the test reads the cloud assembly's ``validation-report.json``
-and asserts that no unacknowledged findings survived.
+Regional and regional API bridge stacks, and the Monitoring stack — with
+the five cdk-nag rule packs registered as CDK policy-validation plugins.
+After ``app.synth()`` returns, the test reads the cloud assembly's
+``validation-report.json`` and asserts that no unacknowledged findings
+survived.
 
 Why read the validation report
 -------------------------------
@@ -27,8 +28,9 @@ Scope
 Parameterized across the IAM-relevant subset of the cdk.json
 configuration matrix (``tests/_cdk_config_matrix.NAG_CONFIGS``): the
 configs that produce distinct IAM policy surfaces (default,
-multi-region, FSx-enabled, all-features-enabled, three-regions, plus
-the analytics-environment fixtures). The full CONFIGS matrix runs
+multi-region, single-region, api-gateway-region-split, FSx-enabled,
+all-features-enabled, three-regions, plus the analytics-environment
+fixtures). The full CONFIGS matrix runs
 via ``tests/test_cdk_synthesis_matrix.py`` for synthesis correctness;
 this test focuses on the configs that actually change IAM roles and
 policies, which is where cdk-nag findings live.
@@ -148,11 +150,19 @@ def _format_violations(findings: list[dict[str, Any]]) -> str:
 
 def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
     """Instantiate every stack ``app.py`` builds: global, API gateway,
-    one regional stack per configured region, monitoring, and — when
-    ``analytics_environment.enabled=true`` — the optional
-    ``GCOAnalyticsStack``. Matches ``app.py::main`` one-for-one so the
-    cdk-nag findings captured here are the same ones a
-    ``cdk deploy --all`` would surface.
+    one regional stack and one regional API bridge stack per configured
+    region, monitoring, and — when ``analytics_environment.enabled=true`` —
+    the optional ``GCOAnalyticsStack``. Matches ``app.py::main`` stack for
+    stack, with the same constructor arguments, so the cdk-nag findings
+    captured here are the same ones a ``cdk deploy --all`` would surface.
+    ``tests/test_cdk_harness_contract.py`` fails if ``app.py`` constructs a
+    stack class, or passes a keyword argument, that this builder does not.
+
+    This is the one builder: ``tests/test_cdk_synthesis_matrix.py`` and
+    ``scripts/dump_nag_findings.py`` import it. It used to be copied into the
+    synthesis matrix, and both copies omitted the regional API bridge stacks,
+    so their IAM never reached cdk-nag here and a same-region synth failure in
+    their auth-secret grants reached a user first (PR #461).
 
     Args:
         app: the CDK app to attach the stacks to.
@@ -177,6 +187,7 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
     )
     from gco.stacks.global_stack import GCOGlobalStack
     from gco.stacks.monitoring_stack import GCOMonitoringStack
+    from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
     from gco.stacks.regional_stack import GCORegionalStack
 
     config = ConfigLoader(app)
@@ -187,6 +198,7 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
     api_gateway_region = deployment_regions["api_gateway"]
     monitoring_region = deployment_regions["monitoring"]
     regional_regions = deployment_regions["regional"]
+    manifest_processor_config = config.get_manifest_processor_config()
 
     global_stack = GCOGlobalStack(
         app,
@@ -195,11 +207,19 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
         env=cdk.Environment(account=account, region=global_region),
     )
 
+    # Same arguments as app.py. ``registry_region`` matters as soon as the API
+    # Gateway leaves the global Region (``api-gateway-region-split``): left
+    # unset, the stack would look for the SSM registry in its own Region.
     api_gateway_stack = GCOApiGatewayGlobalStack(
         app,
         f"{project_name}-api-gateway",
         global_accelerator_dns=global_stack.get_accelerator_dns_name(),
         project_name=project_name,
+        api_gateway_config=config.get_api_gateway_config(),
+        registry_region=global_region,
+        certificate_regions=regional_regions,
+        backend_tls_config=config.get_backend_tls_config(),
+        max_request_body_bytes=manifest_processor_config.get("max_request_body_bytes", 1_048_576),
         env=cdk.Environment(account=account, region=api_gateway_region),
     )
     api_gateway_stack.add_stack_dependency(global_stack)
@@ -218,6 +238,20 @@ def _build_all_stacks(app: cdk.App, account: str | None = None) -> None:
         regional_stack.add_stack_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
         global_stack.add_regional_endpoint(region, regional_stack.alb_arn)  # type: ignore[arg-type]
+
+        # The IAM-authenticated regional API bridge app.py builds in every
+        # Region. Its proxy Lambda roles read the HMAC auth secret.
+        regional_api_stack = GCORegionalApiGatewayStack(
+            app,
+            f"{project_name}-regional-api-{region}",
+            config=config,
+            region=region,
+            vpc=regional_stack.vpc,
+            auth_secret_arn=api_gateway_stack.secret.secret_arn,
+            aggregator_role_arn=api_gateway_stack.aggregator_role.role_arn,
+            env=cdk.Environment(account=account, region=region),
+        )
+        regional_api_stack.add_stack_dependency(regional_stack)
 
     monitoring_stack = GCOMonitoringStack(
         app,
@@ -357,7 +391,9 @@ class TestCdkNagCompliance:
         exercises. This is the regression guard for suppressions whose
         ``applies_to`` previously matched only the pseudo-parameter form (see
         ``acknowledge_nag_findings`` in ``gco/stacks/nag_suppressions.py``). The
-        account rendering is config-independent, so the default config suffices.
+        account rendering is config-independent, so the default config suffices,
+        and CI runs this in the ``default-regions`` cell of
+        ``unit:cdk:nag-compliance``.
         """
         from cli.stacks import cdk_asset_consumer
         from gco.stacks.regional_stack import GCORegionalStack

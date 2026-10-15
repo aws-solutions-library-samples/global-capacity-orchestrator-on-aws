@@ -946,19 +946,20 @@ jobs:
     name: "unit:cdk:nag-compliance (${{ matrix.config }})"
     # Fan out across ``NAG_CONFIGS`` so each configuration synthesizes
     # and runs cdk-nag in its own runner — the per-config work (build
-    # global + API gateway + regional(s) + monitoring + optionally
-    # analytics, then walk five rule packs across the resource tree)
-    # is heavy enough that GitHub's free 4-vCPU arm64 runner beats
-    # cramming every config onto a 2-vCPU amd64 runner under xdist.
+    # global + API gateway + regional(s) + regional API bridge(s) +
+    # monitoring + optionally analytics, then walk five rule packs across
+    # the resource tree) is heavy enough that GitHub's free 4-vCPU arm64
+    # runner beats cramming every config onto a 2-vCPU amd64 runner under
+    # xdist.
     #
-    # Each matrix cell invokes pytest with ``-k <config_name>`` so it
-    # runs exactly the parametrized case matching that config. This is
-    # the same hard gate as before against shipping an IAM-wildcard or
-    # similar cdk-nag error to a user's ``cdk deploy``: if every matrix
-    # cell is green, every configuration the user can pick from cdk.json
-    # has been validated against AwsSolutions, HIPAA Security, NIST
-    # 800-53 R5, PCI DSS 3.2.1, and Serverless rule packs in the same
-    # process that ``app.py`` uses for real deploys.
+    # Each matrix cell selects the parametrized case matching its config by
+    # node ID, so it runs exactly that config. This is the same hard gate as
+    # before against shipping an IAM-wildcard or similar cdk-nag error to a
+    # user's ``cdk deploy``: if every matrix cell is green, every
+    # configuration the user can pick from cdk.json has been validated
+    # against AwsSolutions, HIPAA Security, NIST 800-53 R5, PCI DSS 3.2.1,
+    # and Serverless rule packs in the same process that ``app.py`` uses for
+    # real deploys.
     needs: unit-cdk-nag-compliance-matrix
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 20
@@ -996,10 +997,18 @@ jobs:
         # test ID — ``::`` rather than ``-k`` avoids substring
         # collisions (e.g. ``analytics-enabled`` matching both
         # ``analytics-enabled`` and ``analytics-enabled-hyperpod-canvas``).
+        #
+        # The concrete-account case synthesizes the default config with a
+        # literal env account (the rendering a real ``cdk deploy`` uses), so it
+        # rides along in the default-regions cell instead of taking a runner.
+        # The core shards skip this module, so a test not named here never
+        # runs; tests/test_cdk_harness_contract.py fails when one is missing.
         run: |
-          pytest -v \
-            "tests/test_nag_compliance.py::TestCdkNagCompliance::test_no_unsuppressed_findings[${{ matrix.config }}]" \
-            --junitxml=report-nag-compliance-${{ matrix.config }}.xml
+          tests=("tests/test_nag_compliance.py::TestCdkNagCompliance::test_no_unsuppressed_findings[${{ matrix.config }}]")
+          if [ "${{ matrix.config }}" = "default-regions" ]; then
+            tests+=("tests/test_nag_compliance.py::TestCdkNagCompliance::test_no_unsuppressed_findings_with_concrete_account")
+          fi
+          pytest -v "${tests[@]}" --junitxml=report-nag-compliance-${{ matrix.config }}.xml
       - name: Upload nag compliance report
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry
