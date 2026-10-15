@@ -176,10 +176,17 @@ def test_builder_calls_what_app_py_calls_on_each_stack(path: str, name: str) -> 
 
 
 def _python_sources() -> Iterator[Path]:
+    """Authored Python under ``_SOURCE_ROOTS``: generated ``*-build`` trees,
+    installed ``node_modules`` and hidden directories (caches, virtualenvs)
+    are skipped."""
     yield APP_PY
     for root in _SOURCE_ROOTS:
         for path in sorted((ROOT / root).rglob("*.py")):
-            if not any(part.endswith("-build") for part in path.relative_to(ROOT).parts):
+            parts = path.relative_to(ROOT).parts[:-1]
+            if not any(
+                part.endswith("-build") or part == "node_modules" or part.startswith(".")
+                for part in parts
+            ):
                 yield path
 
 
@@ -193,7 +200,9 @@ def test_no_other_function_builds_the_whole_app() -> None:
     registered = {("app.py", "main"), *_APP_BUILDERS}
     found: set[tuple[str, str]] = set()
     for path in _python_sources():
-        text = path.read_text(encoding="utf-8")
+        # The cheap text filter runs first, so only a file that names four or
+        # more stack classes is ever parsed.
+        text = path.read_text(encoding="utf-8", errors="replace")
         if len(set(_STACK_CALL.findall(text))) < _APP_BUILDER_MIN_STACK_CLASSES:
             continue
         for node in ast.walk(ast.parse(text)):
