@@ -90,7 +90,7 @@ pytest tests/test_cdk_synthesis_matrix.py
 
 ### Dump cdk-nag Findings
 
-Reach for this when the `unit:cdk:nag-compliance` CI job fails. It synthesizes every config in `tests/_cdk_config_matrix.py` with the full cdk-nag rule pack lineup attached and prints a compact, grouped summary of every unsuppressed finding. Exits 0 if clean, 1 otherwise.
+Reach for this when the `unit:cdk:nag-compliance` CI job fails. It synthesizes every config the job checks (`NAG_CONFIGS` in `tests/_cdk_config_matrix.py`) with the full cdk-nag rule pack lineup attached and prints a compact, grouped summary of every unsuppressed finding. Exits 0 if clean, 1 otherwise.
 
 ```bash
 python3 scripts/dump_nag_findings.py

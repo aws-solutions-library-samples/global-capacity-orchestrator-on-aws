@@ -38,8 +38,6 @@ from cdk_nag import (
 )
 from constructs import IConstruct
 
-from gco.stacks.constants import api_gateway_auth_secret_name
-
 # ---------------------------------------------------------------------------
 # cdk-nag v3 acknowledgment mechanism
 # ---------------------------------------------------------------------------
@@ -445,7 +443,6 @@ def add_iam_suppressions(
     stack: Stack,
     regions: list[str] | None = None,
     global_region: str | None = None,
-    api_gateway_region: str | None = None,
     project_name: str = "gco",
 ) -> None:
     """Add suppressions for IAM-related cdk-nag findings.
@@ -457,29 +454,17 @@ def add_iam_suppressions(
         stack: The CDK stack to apply suppressions to
         regions: List of regional deployment regions (for EKS addon patterns)
         global_region: Global region for SSM parameters and DynamoDB tables
-        api_gateway_region: Region where the API Gateway auth secret lives.
-            ``GCORegionalStack``'s roles (issue #125) and
-            ``GCORegionalApiGatewayStack``'s proxy roles (PR #461) scope their
-            read grants to a deterministic ARN in this region, so both must
-            pass it. Falls back to ``global_region`` for stacks that hold no
-            such grant. Never rely on that fallback for a stack that does: the
-            two regions coincide in the default topology, so the mismatch only
-            shows up once ``deployment_regions.api_gateway`` differs (the
-            ``api-gateway-region-split`` matrix entry).
         project_name: Deployment prefix (#139). Every allow-list ARN pattern
-            below (auth secret, ``/<project>/`` SSM tree, ``<project>-*``
-            DynamoDB tables and S3 buckets) is scoped to this so the
-            suppression matches the deployment's actual, project-scoped
-            resource names. Defaults to ``"gco"`` so the rendered patterns are
-            byte-for-byte identical to the pre-#139 literals for the stock
-            deployment.
+            below (``/<project>/`` SSM tree, ``<project>-*`` DynamoDB tables
+            and S3 buckets) is scoped to this so the suppression matches the
+            deployment's actual, project-scoped resource names. Defaults to
+            ``"gco"`` so the rendered patterns are byte-for-byte identical to
+            the pre-#139 literals for the stock deployment.
     """
-    # Region the API Gateway auth secret is created in. It is normally the
-    # same as ``global_region`` (default cdk.json co-locates them), but the
-    # secret physically lives in the API Gateway stack's region, so scope the
-    # grant/suppression to that region when it is provided.
-    secret_region = api_gateway_region or global_region or "us-east-2"
-
+    # The API Gateway auth secret needs no entry here: its read grants end in
+    # ``-??????`` rather than ``*`` (see ``api_gateway_auth_secret_name``), and
+    # AwsSolutions-IAM5 only flags ``*``.
+    #
     # Build dynamic applies_to list based on configured regions
     applies_to = [
         # The convergence Step Functions state machine's role invokes each
@@ -497,13 +482,6 @@ def add_iam_suppressions(
         # VPC Flow Logs delivery role writes log events to every stream in the
         # flow-log group (logs:CreateLogStream/PutLogEvents on `<group>.Arn:*`).
         "Resource::<VpcFlowLogGroup86559C69.Arn>:*",
-        # Secrets Manager access for the backend HMAC signing key, with a
-        # trailing wildcard for the random 6-char suffix. The regional stack's
-        # roles and the regional API bridge's proxy roles build this exact ARN
-        # deterministically (from the secret name + API Gateway region +
-        # account) so it matches in both single-region and cross-region
-        # topologies — see issue #125 and PR #461.
-        f"Resource::arn:<AWS::Partition>:secretsmanager:{secret_region}:<AWS::AccountId>:secret:{api_gateway_auth_secret_name(project_name)}*",
     ]
 
     # Add EKS addon patterns for each configured region
@@ -593,11 +571,10 @@ def add_iam_suppressions(
                     "Wildcard permissions are required for: (1) EKS cluster admin access to manage "
                     "dynamic Kubernetes resources, (2) Custom resource providers to invoke Lambda versions, "
                     "(3) SSM parameter access for cross-region coordination, (4) EKS addon management, "
-                    "(5) VPC Flow Logs to write to CloudWatch, (6) Secrets Manager cross-region access "
-                    "with wildcard suffix for the HMAC signing key, (7) DynamoDB GSI access for job queue, templates, "
-                    "webhooks, and inference endpoints tables, (8) S3 access for model weights bucket "
-                    "(auto-generated name). All wildcards are scoped to specific patterns. "
-                    "(9) KMS decrypt scoped to S3 via condition for model weights bucket."
+                    "(5) VPC Flow Logs to write to CloudWatch, (6) DynamoDB GSI access for job queue, "
+                    "templates, webhooks, and inference endpoints tables, (7) S3 access for model "
+                    "weights bucket (auto-generated name). All wildcards are scoped to specific "
+                    "patterns. (8) KMS decrypt scoped to S3 via condition for model weights bucket."
                 ),
                 applies_to=applies_to,
             ),
@@ -1670,10 +1647,8 @@ def apply_all_suppressions(
             'regional_api_gateway', 'monitoring', or 'analytics'
         regions: List of regional deployment regions (for dynamic IAM suppression patterns)
         global_region: Global region for SSM parameters (for dynamic IAM suppression patterns)
-        api_gateway_region: API Gateway region. The analytics stack uses it to
-            scope SageMaker execute-api and presigned-URL Lambda ARN patterns;
-            the regional and regional API gateway stacks use it to key the
-            auth-secret read suppression (see ``add_iam_suppressions``).
+        api_gateway_region: API Gateway region (for analytics stack — used to
+            scope SageMaker execute-api and presigned-URL Lambda ARN patterns)
         project_name: Deployment prefix (#139), forwarded to
             ``add_iam_suppressions`` so the IAM allow-list ARN patterns match
             the deployment's project-scoped resource names. Defaults to
@@ -1685,7 +1660,6 @@ def apply_all_suppressions(
         stack,
         regions=regions,
         global_region=global_region,
-        api_gateway_region=api_gateway_region,
         project_name=project_name,
     )
 

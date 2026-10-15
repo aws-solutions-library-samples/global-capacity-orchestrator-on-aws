@@ -155,7 +155,6 @@ class GCOApiGatewayGlobalStack(Stack):
         scope: Construct,
         construct_id: str,
         global_accelerator_dns: str | None,
-        regional_endpoints: dict[str, str] | None = None,
         analytics_config: AnalyticsApiConfig | None = None,
         project_name: str = "gco",
         api_gateway_config: dict[str, Any] | None = None,
@@ -174,7 +173,6 @@ class GCOApiGatewayGlobalStack(Stack):
         # identical to the pre-#139 literals for the stock deployment.
         self.project_name = project_name
         self.ga_dns = str(global_accelerator_dns).strip() if global_accelerator_dns else None
-        self.regional_endpoints = regional_endpoints or {}
         # Regional ALB hostnames and backend-TLS public metadata are registered
         # in the global stack's SSM region, which may differ from this stack.
         self.registry_region = registry_region or self.region

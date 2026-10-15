@@ -1,15 +1,17 @@
 """Tests for ``scripts/dump_nag_findings.py``.
 
 The script is a dev-only debugging helper that iterates the same
-``CONFIGS`` list the pytest cdk-nag gate uses and prints every finding
+``NAG_CONFIGS`` list the pytest cdk-nag gate uses and prints every finding
 grouped by ``(pack, rule, resource_path)``. These tests cover:
 
 * ``run_config`` — the thin wrapper around
-  ``tests.test_nag_compliance._build_app`` / ``_build_all_stacks`` /
-  ``_mock_helm_installer`` / ``_collect_nag_violations``. We don't synth
+  ``tests.test_nag_compliance._build_app``,
+  ``tests._cdk_app_builder.synthesize_app`` and
+  ``tests.test_nag_compliance._collect_nag_violations``. We don't synth
   a real CDK app here (that's what ``test_nag_compliance`` does); we
-  patch the helpers and assert ``run_config`` threads overrides through
-  and returns the collected findings unchanged.
+  patch the helpers and assert ``run_config`` threads overrides through,
+  synthesizes before reading the report, and returns the collected
+  findings unchanged.
 * ``main`` — argparse-less entry point. Asserts the output structure
   (``CONFIG:`` header per config, ``UNIQUE FINDINGS`` summary, exit
   code 0 on clean, 1 on any finding) against a stubbed ``run_config``
@@ -68,24 +70,16 @@ def test_run_config_returns_collected_findings_verbatim():
 
     with (
         patch.object(dump_nag, "_build_app", return_value=app) as mock_build,
-        patch.object(dump_nag, "_build_all_stacks") as mock_stacks,
+        patch.object(dump_nag, "synthesize_app") as mock_synth,
         patch.object(dump_nag, "_collect_nag_violations", return_value=expected) as mock_collect,
-        # ecr_assets / helm are patched by run_config itself; let the real
-        # ``with patch(...)`` blocks run — they don't touch the network.
-        patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
     ):
-        mock_docker.return_value.image_uri = (
-            "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
-        )
-
         result = dump_nag.run_config("some-config", {"key": "value"})
 
     assert result == expected
     # overrides flow through to _build_app
     mock_build.assert_called_once_with(context_overrides={"key": "value"})
-    mock_stacks.assert_called_once_with(app)
+    mock_synth.assert_called_once_with(app)
     mock_collect.assert_called_once_with(app)
-    app.synth.assert_called_once()
 
 
 def test_run_config_empty_findings_list_when_clean():
@@ -94,39 +88,38 @@ def test_run_config_empty_findings_list_when_clean():
 
     with (
         patch.object(dump_nag, "_build_app", return_value=app),
-        patch.object(dump_nag, "_build_all_stacks"),
+        patch.object(dump_nag, "synthesize_app"),
         patch.object(dump_nag, "_collect_nag_violations", return_value=[]),
-        patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
     ):
-        mock_docker.return_value.image_uri = "x"
         result = dump_nag.run_config("clean-config", {})
 
     assert result == []
 
 
-def test_run_config_synthesizes_inside_mock_context():
-    """``app.synth()`` must be called while the Docker asset patch is active.
+def test_run_config_reads_findings_only_after_synthesizing():
+    """The validation report is written by synthesis, so it is read afterwards.
 
-    If synth runs after the ``with`` block exits, the real
-    ``ecr_assets.DockerImageAsset`` would try to build an image and fail
-    in CI. Assert synth happens before we leave the patch scope.
+    ``synthesize_app`` itself keeps the Docker image stand-in active for the
+    whole synth (``tests/test_cdk_harness_contract.py`` pins that).
     """
     calls: list[str] = []
-
     app = MagicMock()
-    app.synth.side_effect = lambda: calls.append("synth")
+
+    def _record(name: str, result: object = None):
+        def _call(*_args: object, **_kwargs: object) -> object:
+            calls.append(name)
+            return result
+
+        return _call
 
     with (
-        patch.object(dump_nag, "_build_app", return_value=app),
-        patch.object(dump_nag, "_build_all_stacks"),
-        patch.object(dump_nag, "_collect_nag_violations", return_value=[]),
-        patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+        patch.object(dump_nag, "_build_app", side_effect=_record("build", app)),
+        patch.object(dump_nag, "synthesize_app", side_effect=_record("synth")),
+        patch.object(dump_nag, "_collect_nag_violations", side_effect=_record("collect", [])),
     ):
-        mock_docker.return_value.image_uri = "x"
         dump_nag.run_config("c", {})
 
-    # synth was called at least once while the Docker patch was live.
-    assert "synth" in calls
+    assert calls == ["build", "synth", "collect"]
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +200,11 @@ def test_main_uses_live_configs_list_when_not_patched():
     """Integration check: the real ``CONFIGS`` import resolves and is non-empty.
 
     We don't synthesize anything — we just confirm the list that ``main``
-    would iterate is the live matrix shared with ``test_nag_compliance``.
+    would iterate is the gate's own ``NAG_CONFIGS``.
     """
+    from tests._cdk_config_matrix import NAG_CONFIGS
+
+    assert dump_nag.CONFIGS is NAG_CONFIGS
     assert len(dump_nag.CONFIGS) > 0
     # Each entry is a (name, overrides) tuple.
     for entry in dump_nag.CONFIGS:

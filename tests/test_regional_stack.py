@@ -354,20 +354,6 @@ class TestGlobalStackMethods:
         with pytest.raises(ValueError, match="No endpoint group found"):
             stack.get_endpoint_group_arn("invalid-region")
 
-    def test_global_stack_add_regional_endpoint(self):
-        """Test add_regional_endpoint method."""
-        from gco.stacks.global_stack import GCOGlobalStack
-
-        app = cdk.App()
-        config = MockConfigLoader(app)
-        stack = GCOGlobalStack(app, "test-global-add", config=config)
-
-        stack.add_regional_endpoint(
-            "us-east-1",
-            "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/test/123",
-        )
-        assert "us-east-1" in stack.regional_endpoints
-
 
 class TestGlobalStackSynthesis:
     """Tests for GlobalStack CloudFormation synthesis."""
@@ -1543,7 +1529,7 @@ class TestRegionalStackSynthesis:
                     "arn:",
                     {"Ref": "AWS::Partition"},
                     ":secretsmanager:us-east-2:123456789012:secret:"
-                    "gco-test/api-gateway-auth-token*",
+                    "gco-test/api-gateway-auth-token-??????",
                 ],
             ]
         }

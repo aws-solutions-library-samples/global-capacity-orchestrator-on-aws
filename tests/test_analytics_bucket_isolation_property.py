@@ -30,20 +30,19 @@ by :mod:`tests.test_nag_compliance`.
 
 ## Runtime budget
 
-Each example synthesizes the full CDK app (every stack ``app.py``
-builds) which takes ~5 s on a warm JSII bridge. The ``2×2×(region
-combinations)`` strategy space is small enough that
-:func:`functools.cache` on
-``(enabled, hyperpod, tuple(sorted(regions)))`` keeps the hot loop
-under the ``deadline=20000`` ms per-example budget, which also leaves
-headroom for the first (uncached) synth in each worker when the suite
-runs under pytest-xdist contention.
-``max_examples=30`` with caching completes in under 90 s on the
-benchmark workstation. The lower example count (vs. an earlier
-``max_examples=50`` setting) keeps the test under the project's
-suite-wide 120 s pytest-timeout while still drawing across the full
-2×2 toggle space and a representative slice of the 14 unique
-sorted-region tuples reachable from a 4-region candidate list with
+Each uncached example synthesizes the full CDK app (every stack
+``app.py`` builds, through ``tests/_cdk_app_builder.py``), which takes
+~8 s on a warm JSII bridge. The ``2×2×(region combinations)`` strategy
+space is small enough that :func:`functools.cache` on
+``(enabled, hyperpod, tuple(sorted(regions)))`` makes most examples
+cache hits, and ``setup_class`` pre-warms every single-region entry.
+The property runs with ``deadline=None``: an example that misses the
+cache spends its time in CDK synthesis, not in the property, and that
+time grows with the stacks the app builds and with pytest-xdist
+contention. Hypothesis would report a slow first synth followed by a
+fast cached replay as a flaky failure. ``max_examples=30`` still draws
+across the full 2×2 toggle space and a representative slice of the 14
+unique sorted-region tuples reachable from a 4-region candidate list with
 sizes 1–3.
 """
 
@@ -297,8 +296,7 @@ class TestBucketIsolationProperty:
         first-region prefix of multi-region draws. Multi-region draws
         with two or three regions fall back to the first-call synth
         cost on their first hit and cache thereafter; the
-        ``max_examples=30`` cap below bounds the total uncached-synth
-        budget at well under the project's 120 s suite-wide timeout.
+        ``max_examples=30`` cap below bounds the number of uncached synths.
         """
         from tests._analytics_strategies import CANDIDATE_REGIONS
 
@@ -309,7 +307,8 @@ class TestBucketIsolationProperty:
 
     @settings(
         max_examples=30,
-        deadline=20000,
+        # Uncached examples run a full CDK synth; see "Runtime budget" above.
+        deadline=None,
         suppress_health_check=[
             HealthCheck.too_slow,
             HealthCheck.function_scoped_fixture,

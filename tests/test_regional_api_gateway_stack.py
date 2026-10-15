@@ -436,7 +436,7 @@ class TestRegionalApiGatewayStack:
 
     def test_secret_read_is_scoped_to_api_gateway_region_arn(self, app, mock_config, vpc):
         """Both proxy roles read the auth secret at its deterministic ARN in the
-        API Gateway Region.
+        API Gateway Region, ending in ``-??????`` so it names no other secret.
 
         The API Gateway stack creates the secret in
         ``deployment_regions.api_gateway``, which may differ from ``global``,
@@ -468,7 +468,7 @@ class TestRegionalApiGatewayStack:
 
         expected = stack.resolve(
             f"arn:{stack.partition}:secretsmanager:us-west-2:{stack.account}:"
-            f"secret:{api_gateway_auth_secret_name('gco')}*"
+            f"secret:{api_gateway_auth_secret_name('gco')}-??????"
         )
         statements = _auth_secret_read_statements(template)
         # The control-plane proxy role and the inference streaming proxy role.
@@ -485,8 +485,8 @@ class TestRegionalApiGatewayStack:
         """A stack in the API Gateway's Region gets ``auth_secret_arn`` as an
         ``Fn::ImportValue``, and a grant on ``f"{reference}*"`` matched no
         AwsSolutions-IAM5 suppression, so ``cdk synth`` failed there (the bug
-        PR #461 fixes). The grant stays the deterministic ARN and only
-        ``SECRET_ARN`` carries the reference.
+        PR #461 fixed). The grant stays the ARN built from the secret's name
+        and only ``SECRET_ARN`` carries the reference.
         """
         from aws_cdk import aws_secretsmanager as secretsmanager
 
@@ -515,7 +515,7 @@ class TestRegionalApiGatewayStack:
 
         expected = stack.resolve(
             f"arn:{stack.partition}:secretsmanager:us-east-1:{stack.account}:"
-            f"secret:{api_gateway_auth_secret_name('gco')}*"
+            f"secret:{api_gateway_auth_secret_name('gco')}-??????"
         )
         statements = _auth_secret_read_statements(template)
         assert len(statements) == 2
