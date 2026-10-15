@@ -1597,7 +1597,7 @@ jobs:
             busybox:1.38.0
             ${{ env.CI_SQS_EMULATOR_IMAGE }}
       - name: Create kind cluster (no default CNI)
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
         with:
           version: "${{ env.KIND_VERSION }}"
           node_image: "${{ env.KIND_NODE_IMAGE }}"
@@ -3448,7 +3448,7 @@ jobs:
         # can take over: kindnet accepts NetworkPolicy objects without
         # enforcing them, and the egress probes at the end of this job are
         # only a test when the shipped gco-system policies are enforced.
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
         with:
           version: "${{ env.KIND_VERSION }}"
           node_image: "${{ env.KIND_NODE_IMAGE }}"
@@ -4661,7 +4661,7 @@ jobs:
         # kindnet accepts NetworkPolicy objects without enforcing them, and
         # the mlflow leg of this job is only a real test when the chart's
         # own policy is actually enforced.
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
         with:
           version: "${{ env.KIND_VERSION }}"
           node_image: "${{ env.KIND_NODE_IMAGE }}"
@@ -6023,7 +6023,7 @@ jobs:
         # kind's default CNI is enough here: nothing in this job depends on
         # NetworkPolicy enforcement (the add-on namespaces carry no policies
         # and the argo-cd chart's are switched off).
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
         with:
           version: "${{ env.KIND_VERSION }}"
           node_image: "${{ env.KIND_NODE_IMAGE }}"
