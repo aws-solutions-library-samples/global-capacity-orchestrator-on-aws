@@ -281,9 +281,9 @@ markupsafe==3.0.3
     # via
     #   jinja2
     #   werkzeug
-mcp==2.1.1
+mcp==2.2.0
     # via fastmcp-slim
-mcp-types==2.1.1
+mcp-types==2.2.0
     # via
     #   fastmcp-slim
     #   mcp
