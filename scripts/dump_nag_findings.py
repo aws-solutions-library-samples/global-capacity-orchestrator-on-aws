@@ -12,11 +12,12 @@ inside an ``AssertionError`` repr — useful for CI gate failures, but
 hard to read when you're trying to scope a new acknowledgment. This
 script:
 
-1. Iterates the same ``CONFIGS`` list pytest does (imported from
-   ``tests._cdk_config_matrix`` so the two can never drift).
-2. For each config, builds the full CDK app the way ``app.py`` does,
-   registers the five rule packs as policy-validation plugins, calls
-   ``app.synth()``, and reads the resulting ``validation-report.json``.
+1. Iterates ``NAG_CONFIGS``, the list the pytest gate parametrizes over
+   (imported from ``tests._cdk_config_matrix`` so the two can never drift).
+2. For each config, builds the full CDK app the way ``app.py`` does
+   (``tests._cdk_app_builder``, the builder the gate uses), registers the
+   five rule packs as policy-validation plugins, synthesizes, and reads the
+   resulting ``validation-report.json``.
 3. Groups them by ``(pack, rule, resource_path)`` so a wildcard that
    appears in N configs shows up once with the list of config names
    rather than N repeated entries.
@@ -32,7 +33,7 @@ and doesn't produce a junit.xml. For development use only.
 Relationship to other tooling
 -----------------------------
 * ``tests/test_nag_compliance.py`` — the PR gate. Parameterizes over
-  the same ``CONFIGS`` and fails if any unacknowledged finding exists.
+  the same ``NAG_CONFIGS`` and fails if any unacknowledged finding exists.
   cdk-nag v3 writes findings to ``validation-report.json`` in the cloud
   assembly; both this script and the gate read that file.
 * ``tests/test_cdk_synthesis_matrix.py`` — runs ``app.synth()``
@@ -62,57 +63,36 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
 
-# Put the repo root on sys.path so ``tests._cdk_config_matrix`` and
-# ``tests.test_nag_compliance`` are importable when this script is
+# Put the repo root on sys.path so ``tests._cdk_app_builder``,
+# ``tests._cdk_config_matrix`` and ``tests.test_nag_compliance`` are importable
+# when this script is
 # invoked as ``python3 scripts/dump_nag_findings.py`` from any CWD.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests._cdk_config_matrix import CONFIGS  # noqa: E402
-from tests.test_nag_compliance import (  # noqa: E402
-    _build_all_stacks,
-    _build_app,
-    _collect_nag_violations,
-    _mock_helm_installer,
-)
+from tests._cdk_app_builder import synthesize_app  # noqa: E402
+from tests._cdk_config_matrix import NAG_CONFIGS as CONFIGS  # noqa: E402
+from tests.test_nag_compliance import _build_app, _collect_nag_violations  # noqa: E402
 
 
 def run_config(name: str, overrides: dict[str, object]) -> list[dict[str, Any]]:
     """Build and synthesize the full CDK app under one config overlay.
 
     Mirrors what ``tests/test_nag_compliance.py::TestCdkNagCompliance``
-    does, minus the pytest wiring. The Docker image asset and the
-    helm installer Lambda are both mocked so no Docker daemon is
-    required — same as the regional-stack unit tests.
+    does, minus the pytest wiring: ``_build_app`` registers the rule packs and
+    ``synthesize_app`` builds every app.py stack and synthesizes offline, with
+    the Docker image assets stood in so no Docker daemon is required.
 
     Returns the list of finding dicts read from ``validation-report.json``
     (keys: ``pack`` / ``rule`` / ``description`` / ``paths``). An empty
     list means the config is clean.
     """
-    # Late import because ``_build_app`` also imports gco.stacks under
-    # the hood — keep the import side-effects inside the call so
-    # ``python3 scripts/dump_nag_findings.py --help`` (or future arg
-    # parsing) doesn't pay the CDK-init cost.
-    from cli.stacks import cdk_asset_consumer
-    from gco.stacks.regional_stack import GCORegionalStack
-
-    with cdk_asset_consumer(REPO_ROOT):
-        app = _build_app(context_overrides=overrides)
-        with (
-            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
-            patch.object(GCORegionalStack, "_create_helm_installer_lambda", _mock_helm_installer),
-        ):
-            mock_image = MagicMock()
-            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
-            mock_docker.return_value = mock_image
-            _build_all_stacks(app)
-            # ``app.synth()`` is what runs the validation plugins and writes
-            # validation-report.json — must happen inside the ``with`` block
-            # so the Docker/helm mocks are still active during synthesis.
-            app.synth()
+    app = _build_app(context_overrides=overrides)
+    # Synthesis is what runs the validation plugins and writes
+    # validation-report.json, so the findings are read only afterwards.
+    synthesize_app(app)
     return _collect_nag_violations(app)
 
 

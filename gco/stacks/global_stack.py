@@ -40,8 +40,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-16T14:35:30Z
-# Generated from Git commit: a3141db05a743a382b008c3642b98ab968a5aa34
+# Generated at (UTC): 2026-10-15T20:58:51Z
+# Generated from Git commit: a9078ddce55972be33de1eeeacbee8c792be85fe
 # Flowchart(s) generated from this file:
 #   * ``GCOGlobalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/global_stack.GCOGlobalStack___init__.png``)
@@ -165,7 +165,6 @@ class GCOGlobalStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         self.config = config
-        self.regional_endpoints: dict[str, str] = {}
         self.endpoint_groups: dict[str, ga.EndpointGroup] = {}
         supports_global_accelerator = getattr(config, "supports_global_accelerator", None)
         self.global_accelerator_enabled = (
@@ -1497,19 +1496,6 @@ class GCOGlobalStack(Stack):
             string_value=endpoint_group.endpoint_group_arn,
             description=f"Global Accelerator endpoint group ARN for {region}",
         )
-
-    def add_regional_endpoint(self, region: str, alb_arn: str) -> None:
-        """Add a regional ALB endpoint to the Global Accelerator.
-
-        Note: Due to cross-region reference limitations in CDK, the actual endpoint
-        registration is handled by a custom resource in the regional stack.
-        This method stores the ARN for reference but doesn't directly register it.
-
-        The regional stack should use the endpoint group ARN exported by this stack
-        to register its ALB via an AwsCustomResource.
-        """
-        self.regional_endpoints[region] = alb_arn
-        # Actual registration happens in regional stack via custom resource
 
     def get_accelerator_dns_name(self) -> str | None:
         """Return the Global Accelerator DNS name when this partition supports it."""

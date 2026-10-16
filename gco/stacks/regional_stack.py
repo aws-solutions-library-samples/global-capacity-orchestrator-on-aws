@@ -165,8 +165,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-15T15:31:13Z
-# Generated from Git commit: 012a4e30f0515f88ca91b2a6264d563a4b0ff006
+# Generated at (UTC): 2026-10-15T20:58:51Z
+# Generated from Git commit: a9078ddce55972be33de1eeeacbee8c792be85fe
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -1029,7 +1029,6 @@ class GCORegionalStack(Stack):
         self.config = config
         self.deployment_region = region
         self.auth_secret_arn = auth_secret_arn
-        self.alb_arn: str | None = None
         self.disable_efs_automatic_backups = _explicit_context_bool(
             self.node.try_get_context(_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT),
             key=_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT,
@@ -1287,7 +1286,6 @@ class GCORegionalStack(Stack):
             stack_type="regional",
             regions=self.config.get_regions(),
             global_region=self.config.get_global_region(),
-            api_gateway_region=self.config.get_api_gateway_region(),
             project_name=self.config.get_project_name(),
         )
 
@@ -2556,29 +2554,25 @@ class GCORegionalStack(Stack):
 
         # Grant permission to read the auth secret.
         #
-        # The resource is built as a *deterministic* ARN from the known secret
-        # name, the API Gateway region (where the secret lives), and this
-        # stack's account — rather than from ``self.auth_secret_arn``, which is
-        # ``api_gateway_stack.secret.secret_arn`` (a cross-stack reference
-        # token). The token was the source of issue #125: it renders
-        # differently depending on topology —
-        #   * cross-region  -> a literal ARN, and
-        #   * same-region   -> a native cross-stack export
-        #                      (``gco-api-gateway:ExportsOutputRefGCOAuthSecret<hash>``)
-        # so the trailing-``*`` IAM resource only matched the stack-level
-        # AwsSolutions-IAM5 suppression in the cross-region (default) topology.
-        # Collapsing every stack into one region left the export-token form
-        # unsuppressed and failed ``cdk synth``. Building the ARN ourselves
-        # makes the ``Resource`` render identically in both topologies so a
-        # single deterministic suppression (see ``add_iam_suppressions``)
-        # always matches.
+        # The resource is built from the secret's name, the API Gateway Region
+        # (where the API Gateway stack creates it) and this stack's account,
+        # never from ``self.auth_secret_arn``. That is a cross-stack reference
+        # (``api_gateway_stack.secret.secret_arn``) and renders differently by
+        # topology: in another Region, an ARN built from the name without the
+        # random suffix; in the same Region, a native export
+        # (``<project>-api-gateway:ExportsOutputRefGCOAuthSecret<hash>``).
+        # Issue #125 was a grant built on the export.
         #
-        # The trailing ``*`` matches the random 6-character suffix Secrets
-        # Manager appends to secret ARNs (Secrets Manager accepts either the
-        # full ARN with suffix or the partial ARN without it).
+        # ``-??????`` matches the six random characters Secrets Manager appends
+        # to the name in the ARN, and nothing else. IAM evaluates the request
+        # against that full ARN whether the caller names the secret by full ARN
+        # or, as pods outside the API Gateway Region do, by the suffix-less one.
+        # A trailing ``*`` would also have matched any other secret whose name
+        # starts the same way, and cost an AwsSolutions-IAM5 acknowledgment.
         auth_secret_resource = (
             f"arn:{self.partition}:secretsmanager:{self.config.get_api_gateway_region()}"
-            f":{self.account}:secret:{api_gateway_auth_secret_name(self.config.get_project_name())}*"
+            f":{self.account}:secret:"
+            f"{api_gateway_auth_secret_name(self.config.get_project_name())}-??????"
         )
         self.manifest_processor_role.add_to_policy(
             iam.PolicyStatement(

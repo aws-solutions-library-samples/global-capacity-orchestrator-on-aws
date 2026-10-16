@@ -259,8 +259,10 @@ def _build_regional_api(app: cdk.App, config: ConfigLoader) -> list[str]:
 def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
     """Build global, API, regional, monitoring, and enabled analytics stacks.
 
-    Returns ``None`` so callers diagram every stack. ``monitoring`` passes its
-    own ``--include`` to scope the view to the monitoring stack.
+    Mirrors ``app.py::main`` stack for stack and argument for argument
+    (descriptions aside); ``tests/test_cdk_harness_contract.py`` fails when the
+    two drift. Returns ``None`` so callers diagram every stack. ``monitoring``
+    passes its own ``--include`` to scope the view to the monitoring stack.
     """
     project = config.get_project_name()
     regions = config.get_deployment_regions()
@@ -277,9 +279,12 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
         registry_region=config.get_global_region(),
         certificate_regions=regions["regional"],
         backend_tls_config=config.get_backend_tls_config(),
+        max_request_body_bytes=config.get_manifest_processor_config().get(
+            "max_request_body_bytes", 1_048_576
+        ),
         env=cdk.Environment(region=regions["api_gateway"]),
     )
-    api_gateway_stack.add_dependency(global_stack)
+    api_gateway_stack.add_stack_dependency(global_stack)
 
     regional_stacks = []
     for region in regions["regional"]:
@@ -291,8 +296,8 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
             auth_secret_arn=api_gateway_stack.secret.secret_arn,
             env=cdk.Environment(region=region),
         )
-        regional_stack.add_dependency(global_stack)
-        regional_stack.add_dependency(api_gateway_stack)
+        regional_stack.add_stack_dependency(global_stack)
+        regional_stack.add_stack_dependency(api_gateway_stack)
         regional_stacks.append(regional_stack)
 
         regional_api_stack = GCORegionalApiGatewayStack(
@@ -305,7 +310,7 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
             aggregator_role_arn=api_gateway_stack.aggregator_role.role_arn,
             env=cdk.Environment(region=region),
         )
-        regional_api_stack.add_dependency(regional_stack)
+        regional_api_stack.add_stack_dependency(regional_stack)
 
     monitoring_stack = GCOMonitoringStack(
         app,
@@ -317,7 +322,7 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
         env=cdk.Environment(region=regions["monitoring"]),
     )
     for regional_stack in regional_stacks:
-        monitoring_stack.add_dependency(regional_stack)
+        monitoring_stack.add_stack_dependency(regional_stack)
 
     if config.get_analytics_enabled():
         analytics_stack = GCOAnalyticsStack(
@@ -329,7 +334,7 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
                 "Optional ML and analytics environment (SageMaker Studio, EMR Serverless, Cognito)"
             ),
         )
-        analytics_stack.add_dependency(global_stack)
+        analytics_stack.add_stack_dependency(global_stack)
         api_gateway_stack.set_analytics_config(
             AnalyticsApiConfig(
                 user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
@@ -338,11 +343,11 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
                 studio_domain_name=analytics_stack.studio_domain.domain_name or "",
                 callback_url=(
                     f"https://{api_gateway_stack.api.rest_api_id}.execute-api."
-                    f"{regions['api_gateway']}.amazonaws.com/prod/studio/callback"
+                    f"{regions['api_gateway']}.{api_gateway_stack.url_suffix}/prod/studio/callback"
                 ),
             )
         )
-        api_gateway_stack.add_dependency(analytics_stack)
+        api_gateway_stack.add_stack_dependency(analytics_stack)
     return None
 
 

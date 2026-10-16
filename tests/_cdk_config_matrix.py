@@ -75,12 +75,12 @@ CONFIGS: list[tuple[str, dict[str, Any]]] = [
         # co-located with the regional stack, the auth-secret cross-stack
         # reference resolves to a native CloudFormation export
         # (``gco-api-gateway:ExportsOutputRefGCOAuthSecret<hash>``) instead of
-        # a literal ARN, which used to slip past the AwsSolutions-IAM5
-        # suppression and fail ``cdk synth``. Only this entry and
-        # ``api-gateway-region-split`` put a workload Region in the API
-        # Gateway's Region, so they are the two that exercise the same-region
-        # auth-secret code path. Keep it here as a regression guard for both
-        # the synthesis matrix and the cdk-nag matrix.
+        # an ARN built from the secret's name, and a grant built on it used to
+        # fail ``cdk synth`` with an unsuppressed AwsSolutions-IAM5. Only this
+        # entry and ``api-gateway-region-split`` put a workload Region in the
+        # API Gateway's Region, so they are the two that exercise the
+        # same-region auth-secret code path. Keep it here as a regression guard
+        # for both the synthesis matrix and the cdk-nag matrix.
         "single-region",
         {
             "deployment_regions": {
@@ -99,9 +99,11 @@ CONFIGS: list[tuple[str, dict[str, Any]]] = [
         # "scoped to the global Region": everywhere else the two coincide.
         # PR #461 first scoped the regional API bridge's secret grants to the
         # global Region, which would have denied every GetSecretValue in this
-        # topology. The first workload Region is the API Gateway's own, so its
-        # regional stacks also take the same-region cross-stack reference
-        # (issue #125); the second takes the cross-region one.
+        # topology; the synthesis matrix's secret-grant check fails here if a
+        # grant does that again. The first workload Region is the API
+        # Gateway's own, so its regional stacks also take the same-region
+        # cross-stack reference (issue #125); the second takes the
+        # cross-region one.
         "api-gateway-region-split",
         {
             "deployment_regions": {
@@ -849,25 +851,26 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
 # role, Cognito user pool, EMR Serverless application, and the presigned-
 # URL Lambda role. These two configs are the only ones where
 # ``config.get_analytics_enabled()`` returns ``True``, so the test
-# harness ``_build_all_stacks`` has to instantiate the analytics stack
-# for them.
+# harness (``tests/_cdk_app_builder.build_all_stacks``) has to instantiate
+# the analytics stack for them.
 
 _NAG_CONFIG_NAMES = {
     "default-regions",
     "multi-region",
     # Single-region topology (global == api_gateway == regional). This is the
     # IAM code path from issue #125: the auth-secret grants on the regional
-    # stack's roles and on the regional API bridge's proxy roles must stay
-    # covered by their AwsSolutions-IAM5 suppression even when the API Gateway
-    # stack is co-located with them. That same-region cross-stack reference
+    # stack's roles and on the regional API bridge's proxy roles must not be
+    # built on the cross-stack reference, which is a native export when the
+    # API Gateway stack is co-located with them; ``f"{export}*"`` is an
+    # AwsSolutions-IAM5 finding no acknowledgment covers. That same-region
     # form only appears when a workload Region is the API Gateway's Region, so
     # it MUST run through cdk-nag, not just the synthesis matrix.
     "single-region",
     # The only config where the API Gateway (and the auth secret) is not in
-    # the global Region. Every auth-secret grant and its suppression are keyed
-    # on the API Gateway Region, so a grant scoped to the global Region by
-    # mistake (PR #461's first draft) surfaces here as an unsuppressed
-    # AwsSolutions-IAM5 finding instead of as AccessDenied after a deploy.
+    # the global Region, so every grant and acknowledgment keyed on a Region
+    # is checked against two different ones. (The auth-secret grants end in
+    # ``-??????``, which IAM5 does not flag; the synthesis matrix checks their
+    # Region instead.)
     "api-gateway-region-split",
     "fsx-enabled",
     "all-features-enabled",

@@ -245,22 +245,24 @@ def api_gateway_auth_secret_name(project_name: str) -> str:
     ``gco/api-gateway-auth-token`` — byte-for-byte identical to the pre-#139
     literal, so existing deployments see no resource replacement.
 
-    Single source of truth shared by three call sites that must agree exactly:
+    Single source of truth shared by the call sites that must agree exactly:
 
     1. ``GCOApiGatewayGlobalStack._create_secret`` — the ``secret_name`` the
        secret is actually created with.
-    2. ``GCORegionalStack`` — the deterministic IAM ``Resource`` ARN granting
-       the service-account role read access to the secret. Built from this
-       name plus the API Gateway region and account so it renders identically
-       whether the API Gateway stack is cross-region or co-located with the
-       regional stack (see issue #125 — a synthesis-time cross-stack export
-       token used to leak into the ARN and dodge the cdk-nag suppression in
-       single-region topologies).
-    3. ``gco.stacks.nag_suppressions.add_iam_suppressions`` — the
-       ``AwsSolutions-IAM5`` acknowledgment scoped to this exact ARN.
+    2. ``GCORegionalStack`` (the manifest-processor, inference-proxy and
+       health-monitor roles) and ``GCORegionalApiGatewayStack`` (both proxy
+       Lambda roles) — the IAM ``Resource`` granting read access to the
+       secret: ``arn:<partition>:secretsmanager:<API Gateway Region>:<account>:
+       secret:<this name>-??????``. Building it from the name renders the same
+       grant in every topology, whereas the passed-in cross-stack reference
+       becomes a native export when the stacks share a Region (issue #125,
+       PR #461). ``-??????`` matches the six random characters Secrets Manager
+       appends to the name in the ARN and nothing else, so the grant needs no
+       cdk-nag acknowledgment.
 
-    Keep the three call sites in lockstep by calling this helper with the
-    stack's ``project_name`` rather than re-typing the name.
+    Call this helper with the stack's ``project_name`` rather than re-typing
+    the name. ``tests/test_cdk_synthesis_matrix.py`` checks every rendered
+    grant on the secret against the API Gateway Region.
     """
     return f"{project_name}/api-gateway-auth-token"  # nosec B105  # secret path/name, not a credential
 

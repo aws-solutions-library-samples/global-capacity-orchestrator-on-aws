@@ -58,8 +58,8 @@ from gco.stacks.constants import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-15T19:23:42Z
-# Generated from Git commit: f287464172b4f85b9fcd1cf68de7682205686cf1
+# Generated at (UTC): 2026-10-15T20:58:51Z
+# Generated from Git commit: a9078ddce55972be33de1eeeacbee8c792be85fe
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalApiGatewayStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.png``)
@@ -128,9 +128,6 @@ class GCORegionalApiGatewayStack(Stack):
             self,
             stack_type="regional_api_gateway",
             global_region=self.config.get_global_region(),
-            # Key the auth-secret read suppression on the Region the grants in
-            # this stack target (see ``_auth_secret_read_resource``).
-            api_gateway_region=self.config.get_api_gateway_region(),
             project_name=self.config.get_project_name(),
         )
 
@@ -139,26 +136,26 @@ class GCORegionalApiGatewayStack(Stack):
 
         Built from the secret's name, the API Gateway Region, and this
         account, never from ``self.auth_secret_arn``. That argument is a
-        cross-stack reference: an ARN built from the secret's name when this
-        stack is in another Region from the API Gateway stack, but a native
-        export (``<project>-api-gateway:ExportsOutputRef...``) when it shares
-        that Region, and ``f"{export}*"`` matches no suppression, so
-        ``cdk synth`` failed AwsSolutions-IAM5 there (PR #461; issue #125 was
-        the same failure on the regional stack's roles). The deterministic ARN
-        renders the same in every topology and matches the suppression
-        ``add_iam_suppressions`` registers for the API Gateway Region.
+        cross-stack reference: an ARN built from the secret's name, without the
+        random suffix, when this stack is in another Region from the API
+        Gateway stack, but a native export
+        (``<project>-api-gateway:ExportsOutputRef...``) when it shares that
+        Region. A grant built on the export failed ``cdk synth`` there (PR #461;
+        issue #125 was the same failure on the regional stack's roles).
 
         The Region must be the API Gateway's, not the global one: the API
         Gateway stack creates the secret, and ``deployment_regions`` lets the
         two differ, in which case a grant in the global Region denies every
-        read. The trailing ``*`` matches the six random characters Secrets
-        Manager appends to the secret's ARN. At runtime the Lambdas still read
-        ``SECRET_ARN``, the cross-stack reference itself.
+        read. ``-??????`` matches the six random characters Secrets Manager
+        appends to the name in the ARN, and no other secret. IAM evaluates the
+        request against that full ARN even though, outside the API Gateway
+        Region, the Lambdas name the secret by the suffix-less ARN they get in
+        ``SECRET_ARN``.
         """
         return (
             f"arn:{self.partition}:secretsmanager:{self.config.get_api_gateway_region()}:"
             f"{self.account}:secret:"
-            f"{api_gateway_auth_secret_name(self.config.get_project_name())}*"
+            f"{api_gateway_auth_secret_name(self.config.get_project_name())}-??????"
         )
 
     def _create_vpc_proxy_lambda(self) -> lambda_.Function:
