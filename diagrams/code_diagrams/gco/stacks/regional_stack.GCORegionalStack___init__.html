@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-10-15T20:58:51Z">
-        <meta name="gco-source-commit" content="a9078ddce55972be33de1eeeacbee8c792be85fe">
-        <meta name="gco-flow-digest" content="96e5edcd51a29faf">
+        <meta name="gco-generated-at" content="2026-10-16T16:57:50Z">
+        <meta name="gco-source-commit" content="3458f76ef1541be718c00458b8ecc8f7c770c6ad">
+        <meta name="gco-flow-digest" content="6d589a864aee6093">
         <title>Regional stack constructor (VPC, EKS, ALB, SQS, EFS)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,80 +208,80 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub190=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op192=>operation: self.config = config
-op194=>operation: self.deployment_region = region
-op196=>operation: self.auth_secret_arn = auth_secret_arn
-op198=>operation: self.disable_efs_automatic_backups = _explicit_context_bool(self.node.try_get_context(_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT), key=_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT)
-op200=>operation: retain_provider_logs = self.node.try_get_context(_LIVE_VALIDATION_PROVIDER_LOG_CONTEXT)
-op202=>operation: self.provider_log_group_removal_policy = RemovalPolicy.RETAIN if retain_provider_logs is True or (isinstance(retain_provider_logs, str) and retain_provider_logs.strip().casefold() == 'true') else RemovalPolicy.DESTROY
-op204=>operation: supports_global_accelerator = getattr(config, 'supports_global_accelerator', None)
-op206=>operation: self.global_accelerator_enabled = bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
-op208=>operation: cluster_config = self.config.get_cluster_config(region)
-op210=>operation: self.cluster_config = cluster_config
-op212=>operation: self.vpc = ec2.Vpc(self, 'GCOVpc', max_azs=99, nat_gateways=2, subnet_configuration=[ec2.SubnetConfiguration(name='PublicSubnet', subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24), ec2.SubnetConfiguration(name='PrivateSubnet', subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24)])
-sub214=>subroutine: self._create_vpc_flow_logs()
-sub216=>subroutine: self._create_vpc_endpoints()
-sub218=>subroutine: self._create_sqs_queue()
-sub220=>subroutine: self._create_container_images()
-sub222=>subroutine: self._create_aws_custom_resource_role()
-op224=>operation: self.backend_tls_certificate_arn = self._resolve_backend_tls_certificate_arn()
-sub226=>subroutine: self._create_eks_cluster(cluster_config)
-sub228=>subroutine: self._configure_volcano_image_mirror()
-op230=>operation: self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
-sub232=>subroutine: self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
-cond235=>operation: self._create_mlflow_artifact_role(self.cluster_shared_identity) if  self._mlflow_active()
-sub245=>subroutine: self._create_regional_shared_bucket()
-sub247=>subroutine: self._create_efs()
-sub249=>subroutine: self._create_fsx_lustre()
-sub251=>subroutine: self._create_valkey_cache()
-sub253=>subroutine: self._create_aurora_pgvector()
-sub255=>subroutine: self._create_ga_registration_lambda()
-op257=>operation: self.helm_installer_provider_log_group = logs.LogGroup(self, 'HelmInstallerProviderLogGroup', retention=logs.RetentionDays.ONE_WEEK, removal_policy=self.provider_log_group_removal_policy)
-sub259=>subroutine: self._create_helm_installer_lambda()
-sub261=>subroutine: self._apply_kubernetes_manifests()
-sub263=>subroutine: self._create_transaction_search_resource()
-sub265=>subroutine: self._create_drift_detection()
-sub267=>subroutine: self._create_mcp_role()
-sub269=>subroutine: self._create_outputs()
-sub271=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub1466=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op1468=>operation: self.config = config
+op1470=>operation: self.deployment_region = region
+op1472=>operation: self.auth_secret_arn = auth_secret_arn
+op1474=>operation: self.disable_efs_automatic_backups = _explicit_context_bool(self.node.try_get_context(_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT), key=_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT)
+op1476=>operation: retain_provider_logs = self.node.try_get_context(_LIVE_VALIDATION_PROVIDER_LOG_CONTEXT)
+op1478=>operation: self.provider_log_group_removal_policy = RemovalPolicy.RETAIN if retain_provider_logs is True or (isinstance(retain_provider_logs, str) and retain_provider_logs.strip().casefold() == 'true') else RemovalPolicy.DESTROY
+op1480=>operation: supports_global_accelerator = getattr(config, 'supports_global_accelerator', None)
+op1482=>operation: self.global_accelerator_enabled = bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
+op1484=>operation: cluster_config = self.config.get_cluster_config(region)
+op1486=>operation: self.cluster_config = cluster_config
+op1488=>operation: self.vpc = ec2.Vpc(self, 'GCOVpc', max_azs=99, nat_gateways=2, subnet_configuration=[ec2.SubnetConfiguration(name='PublicSubnet', subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24), ec2.SubnetConfiguration(name='PrivateSubnet', subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24)])
+sub1490=>subroutine: self._create_vpc_flow_logs()
+sub1492=>subroutine: self._create_vpc_endpoints()
+sub1494=>subroutine: self._create_sqs_queue()
+sub1496=>subroutine: self._create_container_images()
+sub1498=>subroutine: self._create_aws_custom_resource_role()
+op1500=>operation: self.backend_tls_certificate_arn = self._resolve_backend_tls_certificate_arn()
+sub1502=>subroutine: self._create_eks_cluster(cluster_config)
+sub1504=>subroutine: self._configure_volcano_image_mirror()
+op1506=>operation: self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
+sub1508=>subroutine: self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
+cond1511=>operation: self._create_mlflow_artifact_role(self.cluster_shared_identity) if  self._mlflow_active()
+sub1521=>subroutine: self._create_regional_shared_bucket()
+sub1523=>subroutine: self._create_efs()
+sub1525=>subroutine: self._create_fsx_lustre()
+sub1527=>subroutine: self._create_valkey_cache()
+sub1529=>subroutine: self._create_aurora_pgvector()
+sub1531=>subroutine: self._create_ga_registration_lambda()
+op1533=>operation: self.helm_installer_provider_log_group = logs.LogGroup(self, 'HelmInstallerProviderLogGroup', retention=logs.RetentionDays.ONE_WEEK, removal_policy=self.provider_log_group_removal_policy)
+sub1535=>subroutine: self._create_helm_installer_lambda()
+sub1537=>subroutine: self._apply_kubernetes_manifests()
+sub1539=>subroutine: self._create_transaction_search_resource()
+sub1541=>subroutine: self._create_drift_detection()
+sub1543=>subroutine: self._create_mcp_role()
+sub1545=>subroutine: self._create_outputs()
+sub1547=>subroutine: self._apply_nag_suppressions()
 
-sub190->op192
-op192->op194
-op194->op196
-op196->op198
-op198->op200
-op200->op202
-op202->op204
-op204->op206
-op206->op208
-op208->op210
-op210->op212
-op212->sub214
-sub214->sub216
-sub216->sub218
-sub218->sub220
-sub220->sub222
-sub222->op224
-op224->sub226
-sub226->sub228
-sub228->op230
-op230->sub232
-sub232->cond235
-cond235->sub245
-sub245->sub247
-sub247->sub249
-sub249->sub251
-sub251->sub253
-sub253->sub255
-sub255->op257
-op257->sub259
-sub259->sub261
-sub261->sub263
-sub263->sub265
-sub265->sub267
-sub267->sub269
-sub269->sub271
+sub1466->op1468
+op1468->op1470
+op1470->op1472
+op1472->op1474
+op1474->op1476
+op1476->op1478
+op1478->op1480
+op1480->op1482
+op1482->op1484
+op1484->op1486
+op1486->op1488
+op1488->sub1490
+sub1490->sub1492
+sub1492->sub1494
+sub1494->sub1496
+sub1496->sub1498
+sub1498->op1500
+op1500->sub1502
+sub1502->sub1504
+sub1504->op1506
+op1506->sub1508
+sub1508->cond1511
+cond1511->sub1521
+sub1521->sub1523
+sub1523->sub1525
+sub1525->sub1527
+sub1527->sub1529
+sub1529->sub1531
+sub1531->op1533
+op1533->sub1535
+sub1535->sub1537
+sub1537->sub1539
+sub1539->sub1541
+sub1541->sub1543
+sub1543->sub1545
+sub1545->sub1547
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -291,17 +291,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-10-15T20:58:51Z -->
-        <!-- Generated from Git commit: a9078ddce55972be33de1eeeacbee8c792be85fe -->
+        <!-- Generated at (UTC): 2026-10-16T16:57:50Z -->
+        <!-- Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-10-15T20:58:51Z">2026-10-15T20:58:51Z</time>
+            Generated at (UTC): <time datetime="2026-10-16T16:57:50Z">2026-10-16T16:57:50Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>a9078ddce55972be33de1eeeacbee8c792be85fe</code>
+            Source commit: <code>3458f76ef1541be718c00458b8ecc8f7c770c6ad</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>96e5edcd51a29faf</code>
+            Flow content SHA-256: <code>6d589a864aee6093</code>
           </p>
           <div id="canvas"></div>
         </div>

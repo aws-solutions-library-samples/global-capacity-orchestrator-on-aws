@@ -54,11 +54,12 @@ from gco.stacks.constants import (
     cluster_shared_ssm_parameter_prefix,
     cognito_domain_prefix_default,
 )
+from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.nag_suppressions import apply_all_suppressions
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-12T06:04:03Z
-# Generated from Git commit: e96e2c39c3626a5088651f43873dfade6a346850
+# Generated at (UTC): 2026-10-16T16:57:50Z
+# Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad
 # Flowchart(s) generated from this file:
 #   * ``GCOAnalyticsStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/analytics_stack.GCOAnalyticsStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/analytics_stack.GCOAnalyticsStack___init__.png``)
@@ -1027,7 +1028,7 @@ class GCOAnalyticsStack(Stack):
             "CleanupFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.handler",
-            code=lambda_.Code.from_asset("lambda/analytics-cleanup"),
+            code=lambda_source_code("lambda/analytics-cleanup"),
             # 15 minutes covers the worst case of multiple async drain
             # loops in series: apps (up to ~2 min), spaces (up to ~3 min),
             # user profiles (up to ~3 min), SageMaker-managed EFS mount
@@ -1454,7 +1455,7 @@ class GCOAnalyticsStack(Stack):
             "PresignedUrlFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/analytics-presigned-url"),
+            code=lambda_source_code("lambda/analytics-presigned-url"),
             role=self.presigned_url_lambda_role,
             timeout=Duration.seconds(29),
             memory_size=256,

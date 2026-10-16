@@ -28,7 +28,7 @@ import aws_cdk as cdk
 import jsii
 from constructs import IConstruct
 
-from cli.stacks import cdk_asset_consumer
+from cli.stacks import cdk_asset_consumer, normalize_staged_asset_modes
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.analytics_stack import GCOAnalyticsStack
 from gco.stacks.api_gateway_global_stack import AnalyticsApiConfig, GCOApiGatewayGlobalStack
@@ -39,8 +39,8 @@ from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
 from gco.stacks.regional_stack import GCORegionalStack
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-01T14:42:56Z
-# Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc
+# Generated at (UTC): 2026-10-16T16:57:50Z
+# Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad
 # Flowchart(s) generated from this file:
 #   * ``main`` -> ``diagrams/code_diagrams/app.main.html``
 #     (PNG: ``diagrams/code_diagrams/app.main.png``)
@@ -266,7 +266,13 @@ def main() -> None:
         api_gateway_stack.set_analytics_config(analytics_api_config)
         api_gateway_stack.add_stack_dependency(analytics_stack)
 
-    app.synth()
+    assembly = app.synth()
+
+    # The CDK CLI zips, builds and uploads the staged asset copies once this
+    # process exits. CDK creates their directories under this process's umask
+    # and reuses an existing copy as it is, so give every copy the assembly
+    # publishes git's modes here, whichever shell ran the synth.
+    normalize_staged_asset_modes(assembly.directory)
 
 
 if __name__ == "__main__":

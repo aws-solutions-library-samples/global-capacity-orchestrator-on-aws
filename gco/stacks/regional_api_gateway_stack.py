@@ -56,10 +56,11 @@ from gco.stacks.constants import (
     backend_tls_server_name,
     validated_request_body_limit,
 )
+from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-15T20:58:51Z
-# Generated from Git commit: a9078ddce55972be33de1eeeacbee8c792be85fe
+# Generated at (UTC): 2026-10-16T16:57:50Z
+# Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalApiGatewayStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack___init__.png``)
@@ -286,7 +287,7 @@ class GCORegionalApiGatewayStack(Stack):
             function_name=f"{project_name}-regional-proxy-{self.deployment_region}",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/regional-api-proxy"),
+            code=lambda_source_code("lambda/regional-api-proxy"),
             timeout=Duration.seconds(29),
             memory_size=256,
             role=lambda_role,

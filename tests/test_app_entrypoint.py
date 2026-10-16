@@ -24,6 +24,8 @@ nothing else can reach AWS. See :func:`_run_main`.
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -227,6 +229,48 @@ class TestMain:
             isinstance(applied.aspect, app_module.LambdaTracingAspect)
             for applied in cdk.Aspects.of(app).applied
         )
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+    def test_staged_copies_are_published_with_git_modes_whoever_staged_them(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An owner-only copy from an earlier synth is corrected before the CLI publishes it.
+
+        CDK reuses the staged copy of unchanged content as it is, so the second
+        synth below finds the owner-only directories this test gives the first
+        synth's copies, as a synth from a ``umask 077`` shell leaves them. The
+        zips cdk-assets cached from those copies go too.
+        """
+        _run_main(tmp_path, monkeypatch, overrides={})
+        outdir = tmp_path / "cdk.out"
+        copies = sorted(path for path in outdir.glob("asset.*") if path.is_dir())
+        assert copies
+        for copy in copies:
+            for directory in (copy, *(path for path in copy.rglob("*") if path.is_dir())):
+                # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+                os.chmod(directory, 0o700)
+        zipped = {
+            asset_id
+            for manifest in outdir.glob("*.assets.json")
+            for asset_id, asset in json.loads(manifest.read_text())["files"].items()
+            if asset["source"].get("packaging") == "zip"
+        }
+        assert zipped
+        (outdir / ".cache").mkdir()
+        for asset_id in zipped:
+            (outdir / ".cache" / f"{asset_id}.zip").write_bytes(b"zipped from an owner-only copy")
+
+        _run_main(tmp_path, monkeypatch, overrides={})
+
+        assert sorted(path for path in outdir.glob("asset.*") if path.is_dir()) == copies
+        owner_only = [
+            path
+            for copy in copies
+            for path in (copy, *copy.rglob("*"))
+            if path.is_dir() and stat.S_IMODE(path.stat().st_mode) != 0o755
+        ]
+        assert owner_only == []
+        assert list((outdir / ".cache").iterdir()) == []
 
     def test_analytics_enabled_wires_studio_into_the_api_gateway(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-10-15T20:58:51Z">
-        <meta name="gco-source-commit" content="a9078ddce55972be33de1eeeacbee8c792be85fe">
-        <meta name="gco-flow-digest" content="d5e1be5509baeb96">
+        <meta name="gco-generated-at" content="2026-10-16T16:57:50Z">
+        <meta name="gco-source-commit" content="3458f76ef1541be718c00458b8ecc8f7c770c6ad">
+        <meta name="gco-flow-digest" content="10f0d41ecd117baf">
         <title>Global ECR replication rule (project-scoped PREFIX_MATCH filter, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,20 +208,20 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op372=>operation: 'Provision the ECR replication rule for ``gco/*`` repositories.\n\n        When ``images.replication.enabled`` is True and at least one\n        non-source destination resolves, creates one\n        ``aws_ecr.CfnReplicationConfiguration`` rule with a single\n        ``PREFIX_MATCH`` filter on ``gco/`` and one destination per resolved\n        region. When replication is disabled or the destination list is\n        empty (e.g. single-region deploy), no replication resource is\n        provisioned and the method becomes a no-op.\n        '
-cond375=>condition: if not self.images_config['replication']['enabled']
-e380=>end: end function return
-op386=>operation: destinations = self._resolve_replication_destinations(self.images_config['replication']['destinations'])
-cond389=>condition: if not destinations
-e394=>end: end function return
-sub400=>subroutine: ecr.CfnReplicationConfiguration(self, 'GcoImageReplicationConfig', replication_configuration=ecr.CfnReplicationConfiguration.ReplicationConfigurationProperty(rules=[ecr.CfnReplicationConfiguration.ReplicationRuleProperty(destinations=[ecr.CfnReplicationConfiguration.ReplicationDestinationProperty(region=region, registry_id=self.account) for region in destinations], repository_filters=[ecr.CfnReplicationConfiguration.RepositoryFilterProperty(filter=f'{self.config.get_project_name()}/', filter_type='PREFIX_MATCH')])]))
+        <div><textarea id="code" style="width: 100%;" rows="11">op1856=>operation: 'Provision the ECR replication rule for ``gco/*`` repositories.\n\n        When ``images.replication.enabled`` is True and at least one\n        non-source destination resolves, creates one\n        ``aws_ecr.CfnReplicationConfiguration`` rule with a single\n        ``PREFIX_MATCH`` filter on ``gco/`` and one destination per resolved\n        region. When replication is disabled or the destination list is\n        empty (e.g. single-region deploy), no replication resource is\n        provisioned and the method becomes a no-op.\n        '
+cond1859=>condition: if not self.images_config['replication']['enabled']
+e1864=>end: end function return
+op1870=>operation: destinations = self._resolve_replication_destinations(self.images_config['replication']['destinations'])
+cond1873=>condition: if not destinations
+e1878=>end: end function return
+sub1884=>subroutine: ecr.CfnReplicationConfiguration(self, 'GcoImageReplicationConfig', replication_configuration=ecr.CfnReplicationConfiguration.ReplicationConfigurationProperty(rules=[ecr.CfnReplicationConfiguration.ReplicationRuleProperty(destinations=[ecr.CfnReplicationConfiguration.ReplicationDestinationProperty(region=region, registry_id=self.account) for region in destinations], repository_filters=[ecr.CfnReplicationConfiguration.RepositoryFilterProperty(filter=f'{self.config.get_project_name()}/', filter_type='PREFIX_MATCH')])]))
 
-op372->cond375
-cond375(yes)->e380
-cond375(no)->op386
-op386->cond389
-cond389(yes)->e394
-cond389(no)->sub400
+op1856->cond1859
+cond1859(yes)->e1864
+cond1859(no)->op1870
+op1870->cond1873
+cond1873(yes)->e1878
+cond1873(no)->sub1884
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -231,17 +231,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-10-15T20:58:51Z -->
-        <!-- Generated from Git commit: a9078ddce55972be33de1eeeacbee8c792be85fe -->
+        <!-- Generated at (UTC): 2026-10-16T16:57:50Z -->
+        <!-- Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-10-15T20:58:51Z">2026-10-15T20:58:51Z</time>
+            Generated at (UTC): <time datetime="2026-10-16T16:57:50Z">2026-10-16T16:57:50Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>a9078ddce55972be33de1eeeacbee8c792be85fe</code>
+            Source commit: <code>3458f76ef1541be718c00458b8ecc8f7c770c6ad</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>d5e1be5509baeb96</code>
+            Flow content SHA-256: <code>10f0d41ecd117baf</code>
           </p>
           <div id="canvas"></div>
         </div>

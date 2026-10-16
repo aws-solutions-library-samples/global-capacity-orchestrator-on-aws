@@ -52,6 +52,25 @@ LAMBDA_PYTHON_RUNTIME = "PYTHON_3_14"
 LAMBDA_NODEJS_RUNTIME = "NODEJS_24_X"
 """CDK enum name for Node.js Lambdas (``lambda_.Runtime.NODEJS_24_X``)."""
 
+LAMBDA_SOURCE_ASSET_EXCLUDE = (
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".DS_Store",
+)
+"""Local caches never packaged from a ``lambda/`` source directory.
+
+A test run that imports a handler writes its bytecode next to it, and these
+files would otherwise ship in the function's zip and enter its asset hash, so
+a working checkout would publish different code than a clean clone of the
+same commit. CDK matches a pattern without a slash against every name below
+the asset directory. ``gco.stacks.lambda_assets.lambda_source_code`` applies
+them to the zipped source directories, and the CLI leaves the same caches out
+of its own Lambda builds (``cli/stacks.py``).
+"""
+
 
 # ---------------------------------------------------------------------------
 # Deployment Region Contract

@@ -66,6 +66,7 @@ from click import Abort
 from gco.lambda_shared_sources import LAMBDA_SHARED_SOURCE_TARGETS
 from gco.stacks.constants import (
     CONTROL_PLANE_ONLY_CONTEXT_KEY,
+    LAMBDA_SOURCE_ASSET_EXCLUDE,
     known_cloudformation_regions,
     validated_deployment_partition,
     validated_regional_deployment_regions,
@@ -74,8 +75,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-15T15:31:13Z
-# Generated from Git commit: 012a4e30f0515f88ca91b2a6264d563a4b0ff006
+# Generated at (UTC): 2026-10-16T16:57:50Z
+# Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -116,14 +117,9 @@ _LAMBDA_BUILD_MANIFEST = ".gco-build-manifest.json"
 _LAMBDA_BUILD_MANIFEST_VERSION = 1
 _LAMBDA_SOURCE_IGNORED_DIRECTORIES = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache"})
 _LAMBDA_SOURCE_IGNORED_FILES = frozenset({".DS_Store"})
-_LAMBDA_SOURCE_COPY_IGNORE_PATTERNS = (
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".DS_Store",
-    "*.pyc",
-    "*.pyo",
-)
+#: The caches the stacks leave out of every zipped Lambda source directory,
+#: left out of the CLI's own builds the same way.
+_LAMBDA_SOURCE_COPY_IGNORE_PATTERNS = LAMBDA_SOURCE_ASSET_EXCLUDE
 _FILE_LOCK_RETRY_SECONDS = 0.05
 # 15 minutes: comfortably above the longest legitimate hold (a cold publisher
 # rebuild, minutes) while bounding the pathological one (an abandoned pytest
@@ -334,7 +330,20 @@ def _hidden_from_other_users(metadata: os.stat_result) -> bool:
     return False
 
 
-def _normalize_asset_modes(root: Path) -> None:
+def _publish_mode(path: Path) -> bool:
+    """Give one asset entry its published mode; return whether it had to change."""
+    metadata = path.lstat()
+    wanted = _published_mode(metadata)
+    if wanted is None or stat.S_IMODE(metadata.st_mode) == wanted:
+        return False
+    # World-readable on purpose: the Lambda runtime and an image's non-root
+    # user must read every file and list and enter every directory.
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(path, wanted)
+    return True
+
+
+def _normalize_asset_modes(root: Path) -> bool:
     """Give a staged asset tree its publishable modes, whatever the umask was.
 
     ``pip install -t`` and ``npm ci`` create files under the process umask, and
@@ -343,21 +352,21 @@ def _normalize_asset_modes(root: Path) -> None:
     owner-only files. CDK's asset hash ignores modes, so such a zip would also
     be reused from the bootstrap bucket by later deploys. This runs before the
     completion manifest is written, so the build digest records the final
-    modes. Windows modes do not gate reads, so it is a no-op there.
+    modes. ``root`` may also be a single file; a symlink is left as it is.
+    Windows modes do not gate reads, so it is a no-op there.
+
+    Returns:
+        Whether any entry's mode had to change.
     """
     if not _modes_gate_reads():
-        return
-    # World-listable on purpose: the Lambda runtime and an image's non-root
-    # user must list and enter every asset directory (_PUBLISHED_DIRECTORY_MODE).
-    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
-    os.chmod(root, _PUBLISHED_DIRECTORY_MODE)
+        return False
+    changed = _publish_mode(root)
+    if root.is_symlink() or not root.is_dir():
+        return changed
     for directory, directories, files in os.walk(root):
         for name in (*directories, *files):
-            path = Path(directory, name)
-            metadata = path.lstat()
-            wanted = _published_mode(metadata)
-            if wanted is not None and stat.S_IMODE(metadata.st_mode) != wanted:
-                os.chmod(path, wanted)
+            changed = _publish_mode(Path(directory, name)) or changed
+    return changed
 
 
 def _asset_tree_is_world_readable(root: Path) -> bool:
@@ -379,6 +388,103 @@ def _asset_tree_is_world_readable(root: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+#: Where cdk-assets keeps the zip it packages from a staged directory, as
+#: ``<asset manifest directory>/.cache/<asset id>.zip``. It publishes that zip,
+#: without reading the staged copy again, whenever the bootstrap bucket lacks
+#: the object.
+_CDK_ASSET_ZIP_CACHE = ".cache"
+
+
+def _cloud_assembly_asset_manifests(assembly: Path) -> list[Path]:
+    """Every asset manifest a cloud assembly lists, its nested assemblies' included."""
+    manifests: list[Path] = []
+    pending = [assembly]
+    while pending:
+        directory = pending.pop()
+        try:
+            document = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            continue
+        for artifact in (document.get("artifacts") or {}).values():
+            properties = artifact.get("properties") or {}
+            if artifact.get("type") == "cdk:asset-manifest" and properties.get("file"):
+                manifests.append(directory / properties["file"])
+            elif artifact.get("type") == "cdk:cloud-assembly" and properties.get("directoryName"):
+                pending.append(directory / properties["directoryName"])
+    return manifests
+
+
+def _published_asset_copies(assembly: Path) -> dict[Path, set[Path]]:
+    """Map each staged copy a cloud assembly publishes to the zips cached from it.
+
+    CDK stages every asset at the top of the assembly as ``asset.<hash>``
+    (a directory, or a file for a single-file asset), nested assemblies
+    included; the stack templates are file assets too, but nothing stages
+    them. Only the copies the assembly's asset manifests name are returned:
+    CDK never removes a copy that a later synth stops using.
+    """
+    top = Path(os.path.normpath(assembly))
+    copies: dict[Path, set[Path]] = {}
+    for manifest_path in _cloud_assembly_asset_manifests(assembly):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            continue
+        work_dir = manifest_path.parent
+        # (path relative to the manifest, id of the zip cdk-assets caches from it)
+        sources: list[tuple[Any, str | None]] = []
+        for asset_id, asset in (manifest.get("files") or {}).items():
+            source = asset.get("source") or {}
+            zipped = source.get("packaging") == "zip"
+            sources.append((source.get("path"), asset_id if zipped else None))
+        for asset in (manifest.get("dockerImages") or {}).values():
+            sources.append(((asset.get("source") or {}).get("directory"), None))
+        for relative, zip_id in sources:
+            if not isinstance(relative, str):
+                continue
+            copy = Path(os.path.normpath(work_dir / relative))
+            if copy.parent != top or not copy.name.startswith("asset."):
+                continue
+            zips = copies.setdefault(copy, set())
+            if zip_id is not None:
+                zips.add(work_dir / _CDK_ASSET_ZIP_CACHE / f"{zip_id}.zip")
+    return copies
+
+
+def normalize_staged_asset_modes(assembly_directory: str | Path) -> list[str]:
+    """Give every asset copy a cloud assembly publishes git's modes.
+
+    CDK copies each asset into the cloud assembly before the CDK CLI zips,
+    builds or uploads it. The copy's files keep the checkout's modes, but CDK
+    creates its directories under the process umask, and an image's ``COPY``
+    keeps them: from a shell running ``umask 077``, the service images could
+    not import their own entry modules as their non-root users and failed the
+    distroless runtime smoke. CDK also reuses a staged copy for every later
+    synth of the same content (the hash ignores modes), so an owner-only copy
+    outlives the umask that made it, and so does any zip cdk-assets packaged
+    from it. ``app.py`` runs this as soon as synthesis finishes, so the copies
+    the CLI then publishes have git's modes however and whenever they were
+    staged, even by a ``cdk`` command run directly; a cached zip of a copy this
+    had to correct is removed so the next publish packages the corrected copy.
+    Templates and manifests keep the caller's modes, since no asset carries
+    them. Windows modes do not gate reads, so it is a no-op there.
+
+    Returns:
+        The names of the staged copies whose modes were corrected, sorted.
+    """
+    if not _modes_gate_reads():
+        return []
+    corrected: list[str] = []
+    for copy, zips in sorted(_published_asset_copies(Path(assembly_directory)).items()):
+        if not (copy.exists() or copy.is_symlink()):
+            continue
+        if _normalize_asset_modes(copy):
+            corrected.append(copy.name)
+            for packaged in zips:
+                packaged.unlink(missing_ok=True)
+    return corrected
 
 
 def _write_build_manifest(build_dir: Path, source_digest: str) -> None:

@@ -36,6 +36,15 @@
 
 ## Build
 
+Most directories are zipped as they are, through `lambda_source_code` in
+`gco/stacks/lambda_assets.py`. It leaves out the caches a local test or
+type-check run writes next to the code (`__pycache__/`, `*.pyc`, `*.pyo`,
+`.mypy_cache/`, `.pytest_cache/`, `.DS_Store`), so a working checkout publishes
+the same zip as a clean clone. Package a new source directory with it rather
+than `lambda_.Code.from_asset`; `tests/test_asset_permissions.py` enforces
+this. Only the generated `*-build` directories below use `from_asset`
+directly.
+
 The `kubectl-applier-simple` Lambda requires a build step to package dependencies.
 `gco stacks deploy` runs it automatically (`StackManager._build_kubectl_lambda`
 in `cli/stacks.py`); this is the equivalent by hand, pinned by the package's

@@ -163,10 +163,11 @@ from gco.stacks.constants import (
     parse_k8s_quantity,
     regional_shared_ssm_parameter_prefix,
 )
+from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-15T20:58:51Z
-# Generated from Git commit: a9078ddce55972be33de1eeeacbee8c792be85fe
+# Generated at (UTC): 2026-10-16T16:57:50Z
+# Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -4678,7 +4679,7 @@ class GCORegionalStack(Stack):
             "GaRegistrationFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/ga-registration"),
+            code=lambda_source_code("lambda/ga-registration"),
             timeout=Duration.minutes(15),  # Max Lambda timeout; handler uses 14 min budget
             memory_size=256,
             vpc=self.vpc,
@@ -4838,7 +4839,7 @@ class GCORegionalStack(Stack):
             "GaDeregistrationFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.on_delete_event",
-            code=lambda_.Code.from_asset("lambda/ga-registration"),
+            code=lambda_source_code("lambda/ga-registration"),
             timeout=Duration.minutes(15),  # covers the GA redeploy wait budget
             memory_size=256,
             tracing=lambda_.Tracing.ACTIVE,
@@ -4974,7 +4975,7 @@ class GCORegionalStack(Stack):
             "TransactionSearchFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/transaction-search"),
+            code=lambda_source_code("lambda/transaction-search"),
             timeout=Duration.minutes(5),  # three API calls plus throttling retries
             memory_size=256,
             tracing=lambda_.Tracing.ACTIVE,
@@ -5963,7 +5964,7 @@ class GCORegionalStack(Stack):
             "HelmOrchestratorOnEvent",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.on_event",
-            code=lambda_.Code.from_asset("lambda/helm-orchestrator"),
+            code=lambda_source_code("lambda/helm-orchestrator"),
             timeout=Duration.minutes(1),
             memory_size=256,
             environment={
@@ -6145,7 +6146,7 @@ class GCORegionalStack(Stack):
                 "aws-load-balancer-controller must be the first Helm chart for safe teardown"
             )
 
-        provider_code = lambda_.Code.from_asset("lambda/helm-installer")
+        provider_code = lambda_source_code("lambda/helm-installer")
         drain_checker = lambda_.Function(
             self,
             "HelmTeardownDrainChecker",
@@ -7313,7 +7314,7 @@ class GCORegionalStack(Stack):
             "DriftDetectionFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/drift-detection"),
+            code=lambda_source_code("lambda/drift-detection"),
             timeout=Duration.minutes(14),  # Leave headroom under Lambda 15-min cap
             memory_size=256,
             role=drift_lambda_role,

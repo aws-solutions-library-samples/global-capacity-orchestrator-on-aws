@@ -208,7 +208,11 @@ chmod -R a+rX lambda gco dockerfiles pyproject.toml requirements-lock.txt
 
 Cloning under `umask 022` avoids it. The builds the CLI makes itself (`lambda/*-build`) get git's modes (`0644`, or `0755` for directories and executables) whatever the umask, and a build an older CLI published owner-only is rebuilt on the next deploy.
 
+The umask of the shell you deploy from does not matter. CDK copies every asset into `cdk.out` before packaging it, creates the copy's directories under its own umask, and reuses the copy for every later deploy of the same content. `app.py` therefore gives every copy it publishes git's modes as soon as synthesis finishes, whether `gco` or a `cdk` command you ran directly started it, and also corrects a copy an older release left owner-only. Before this, a deploy from a shell running `umask 077` failed in the service image builds with `distroless runtime smoke FAILED` and `ModuleNotFoundError` for the image's own entry module (for example `gco.services.health_api`), even from a readable checkout.
+
 A deploy made by an older CLI may already have uploaded owner-only code; its functions fail with `Permission denied` or `Unable to import module`. Because the asset hash ignores modes, the next deploy reuses that object. Find the asset's `objectKey` in `cdk.out/<stack>.assets.json`, delete that object from the Region's `cdk-*-assets-*` bootstrap bucket, and deploy again so CDK uploads a readable copy.
+
+A container image an older CLI pushed from owner-only files, such as the TLS certificate manager's or the Helm installer's, is reused the same way. Find its `imageTag` under `dockerImages` in the same file, delete that tag from the Region's `cdk-*-container-assets-*` repository, and remove the local image `cdkasset-<imageTag>` (for example `docker image rm cdkasset-<imageTag>`, or the same with `finch` or `podman`) before you deploy again. Deleting only the repository tag is not enough: CDK pushes a local `cdkasset-` image that is already there instead of building a new one.
 
 ### Stack Stuck in REVIEW_IN_PROGRESS
 
