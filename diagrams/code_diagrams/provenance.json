@@ -42,9 +42,9 @@
       "source_commit": "42cc3f2094423b3f8056fbc5c20652e222b0650f"
     },
     "cli/stacks.py": {
-      "digest": "92b22cfcc2102bf829ab2c7edd5d64370242061e022662fba5383948ca5f3fe8",
-      "generated_at": "2026-10-15T15:31:13Z",
-      "source_commit": "012a4e30f0515f88ca91b2a6264d563a4b0ff006"
+      "digest": "4e08e5effe28acf2e5c220b8bcc3460a593364f9b2b043691069cb3ae2f3dc30",
+      "generated_at": "2026-10-16T12:23:11Z",
+      "source_commit": "1b7f47bfa65259f566384ea9a8a7003d9d146e60"
     },
     "cli/upgrade.py": {
       "digest": "250666b92297af33ca69a20ac036804aad5c06234d609bce2a3044b0da689f3c",
