@@ -187,10 +187,7 @@ Every step reports what it did, and the command tells you where it stopped.
   readable — `chmod -R a+rX lambda gco dockerfiles pyproject.toml
   requirements-lock.txt` from the repository root; see
   [TROUBLESHOOTING.md → Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask)
-  — then `gco upgrade --skip-checkout`. A stop at the same point with
-  `N staged CDK asset(s) are not readable by every user` names owner-only
-  copies an older CLI staged in `cdk.out`; remove them with `rm -rf cdk.out`
-  from the repository root, then `gco upgrade --skip-checkout`.
+  — then `gco upgrade --skip-checkout`.
 - **At the first stack step, with `npm X is required to package the inference
   streaming Lambda; found Y`**: the new release pins a different npm (the
   `packageManager` field of its `package.json`), and the CDK app packages the

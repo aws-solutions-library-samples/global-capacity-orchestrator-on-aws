@@ -79,6 +79,7 @@ from gco.stacks.constants import (
     cross_region_aggregator_role_name,
     validated_request_body_limit,
 )
+from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-10-15T20:58:51Z
@@ -753,7 +754,7 @@ class GCOApiGatewayGlobalStack(Stack):
             "SecretRotationFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/secret-rotation"),
+            code=lambda_source_code("lambda/secret-rotation"),
             timeout=Duration.seconds(30),
             memory_size=128,
             role=rotation_role,
@@ -854,7 +855,7 @@ class GCOApiGatewayGlobalStack(Stack):
             "ApiGatewayProxyFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/api-gateway-proxy"),
+            code=lambda_source_code("lambda/api-gateway-proxy"),
             timeout=Duration.seconds(29),
             memory_size=256,
             role=lambda_role,
@@ -1030,7 +1031,7 @@ class GCOApiGatewayGlobalStack(Stack):
             "CrossRegionAggregatorFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/cross-region-aggregator"),
+            code=lambda_source_code("lambda/cross-region-aggregator"),
             timeout=Duration.seconds(29),
             memory_size=512,
             role=aggregator_role,

@@ -196,11 +196,9 @@ If you deploy from your host instead, ensure one of `docker buildx`, Finch (`doc
 
 ### Deploy Refuses Owner-Only Sources (Restrictive umask)
 
-**Symptom**: `gco stacks deploy` or `deploy-all` stops before synthesis with `N deployable path(s) in the checkout are not readable by every user: ...` or `N staged CDK asset(s) are not readable by every user: cdk.out/asset.<hash>, ...`. `gco upgrade` stops with the same message after its checkout and before its teardown, and adds `No stack was changed`. An older CLI got further and failed in the service image builds instead, with `distroless runtime smoke FAILED` and `ModuleNotFoundError: No module named 'gco.services.health_api'` (or another service's entry module).
+**Symptom**: `gco stacks deploy` or `deploy-all` stops before synthesis with `N deployable path(s) in the checkout are not readable by every user: ...`. `gco upgrade` stops with the same message after its checkout and before its teardown, and adds `No stack was changed`.
 
 **Cause**: The checkout, or files added to it, was created under a restrictive umask such as `077`. CDK zips the plain Lambda directories and builds the service images from the checkout exactly as it is on disk. The Lambda runtime reads function code as an unprivileged user, and the service images run as non-root users, so owner-only files deploy cleanly and then fail at run time. CDK's asset hash ignores file modes, so an owner-only zip would also stay in the bootstrap bucket for every later deploy of the same content.
-
-CDK also copies every asset into `cdk.out` before packaging it, and reuses that copy for every later synth of the same content. The copy keeps the checkout's file modes, but its directories take the umask CDK runs under. `gco` runs CDK under `umask 022`, so the copies it stages are readable whatever the shell's umask. Copies staged from a shell running `umask 077`, by an older `gco` or a `cdk` command run directly, stay owner-only until they are removed.
 
 **Solution**: From the repository root, make the deployable sources readable and deploy again:
 
@@ -208,13 +206,9 @@ CDK also copies every asset into `cdk.out` before packaging it, and reuses that 
 chmod -R a+rX lambda gco dockerfiles pyproject.toml requirements-lock.txt
 ```
 
-For owner-only staged copies, remove them; the next synth stages every asset again:
-
-```bash
-rm -rf cdk.out
-```
-
 Cloning under `umask 022` avoids it. The builds the CLI makes itself (`lambda/*-build`) get git's modes (`0644`, or `0755` for directories and executables) whatever the umask, and a build an older CLI published owner-only is rebuilt on the next deploy.
+
+The umask of the shell you deploy from does not matter. CDK copies every asset into `cdk.out` before packaging it, creates the copy's directories under its own umask, and reuses the copy for every later deploy of the same content. `app.py` therefore gives every copy it publishes git's modes as soon as synthesis finishes, whether `gco` or a `cdk` command you ran directly started it, and also corrects a copy an older release left owner-only. Before this, a deploy from a shell running `umask 077` failed in the service image builds with `distroless runtime smoke FAILED` and `ModuleNotFoundError` for the image's own entry module (for example `gco.services.health_api`), even from a readable checkout.
 
 A deploy made by an older CLI may already have uploaded owner-only code; its functions fail with `Permission denied` or `Unable to import module`. Because the asset hash ignores modes, the next deploy reuses that object. Find the asset's `objectKey` in `cdk.out/<stack>.assets.json`, delete that object from the Region's `cdk-*-assets-*` bootstrap bucket, and deploy again so CDK uploads a readable copy.
 

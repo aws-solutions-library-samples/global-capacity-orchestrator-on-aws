@@ -66,6 +66,7 @@ from click import Abort
 from gco.lambda_shared_sources import LAMBDA_SHARED_SOURCE_TARGETS
 from gco.stacks.constants import (
     CONTROL_PLANE_ONLY_CONTEXT_KEY,
+    LAMBDA_SOURCE_ASSET_EXCLUDE,
     known_cloudformation_regions,
     validated_deployment_partition,
     validated_regional_deployment_regions,
@@ -74,8 +75,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-16T12:23:11Z
-# Generated from Git commit: 1b7f47bfa65259f566384ea9a8a7003d9d146e60
+# Generated at (UTC): 2026-10-15T15:31:13Z
+# Generated from Git commit: 012a4e30f0515f88ca91b2a6264d563a4b0ff006
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -116,14 +117,9 @@ _LAMBDA_BUILD_MANIFEST = ".gco-build-manifest.json"
 _LAMBDA_BUILD_MANIFEST_VERSION = 1
 _LAMBDA_SOURCE_IGNORED_DIRECTORIES = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache"})
 _LAMBDA_SOURCE_IGNORED_FILES = frozenset({".DS_Store"})
-_LAMBDA_SOURCE_COPY_IGNORE_PATTERNS = (
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".DS_Store",
-    "*.pyc",
-    "*.pyo",
-)
+#: The caches the stacks leave out of every zipped Lambda source directory,
+#: left out of the CLI's own builds the same way.
+_LAMBDA_SOURCE_COPY_IGNORE_PATTERNS = LAMBDA_SOURCE_ASSET_EXCLUDE
 _FILE_LOCK_RETRY_SECONDS = 0.05
 # 15 minutes: comfortably above the longest legitimate hold (a cold publisher
 # rebuild, minutes) while bounding the pathological one (an abandoned pytest
@@ -306,18 +302,6 @@ _PUBLISHED_DIRECTORY_MODE = 0o755
 _PUBLISHED_EXECUTABLE_MODE = 0o755
 _PUBLISHED_FILE_MODE = 0o644
 
-#: The umask every CDK process runs under. CDK copies each asset into its
-#: output directory before packaging it: the copy's files keep the checkout's
-#: modes, but its directories are created under the process umask, and an
-#: image's ``COPY`` keeps them. From a shell running ``umask 077`` those
-#: directories were owner-only, so a service image could not import its own
-#: entry module as its non-root user and failed the distroless runtime smoke.
-#: The deployable sources must already be world-readable
-#: (:func:`check_asset_sources_readable`), so staging them that way exposes
-#: nothing new. The upgrade-validation workspace runs its commands under the
-#: same umask.
-_CDK_PROCESS_UMASK = 0o022
-
 
 def _modes_gate_reads() -> bool:
     """Whether POSIX mode bits decide who may read a file (they do not on Windows)."""
@@ -346,7 +330,20 @@ def _hidden_from_other_users(metadata: os.stat_result) -> bool:
     return False
 
 
-def _normalize_asset_modes(root: Path) -> None:
+def _publish_mode(path: Path) -> bool:
+    """Give one asset entry its published mode; return whether it had to change."""
+    metadata = path.lstat()
+    wanted = _published_mode(metadata)
+    if wanted is None or stat.S_IMODE(metadata.st_mode) == wanted:
+        return False
+    # World-readable on purpose: the Lambda runtime and an image's non-root
+    # user must read every file and list and enter every directory.
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(path, wanted)
+    return True
+
+
+def _normalize_asset_modes(root: Path) -> bool:
     """Give a staged asset tree its publishable modes, whatever the umask was.
 
     ``pip install -t`` and ``npm ci`` create files under the process umask, and
@@ -355,21 +352,21 @@ def _normalize_asset_modes(root: Path) -> None:
     owner-only files. CDK's asset hash ignores modes, so such a zip would also
     be reused from the bootstrap bucket by later deploys. This runs before the
     completion manifest is written, so the build digest records the final
-    modes. Windows modes do not gate reads, so it is a no-op there.
+    modes. ``root`` may also be a single file; a symlink is left as it is.
+    Windows modes do not gate reads, so it is a no-op there.
+
+    Returns:
+        Whether any entry's mode had to change.
     """
     if not _modes_gate_reads():
-        return
-    # World-listable on purpose: the Lambda runtime and an image's non-root
-    # user must list and enter every asset directory (_PUBLISHED_DIRECTORY_MODE).
-    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
-    os.chmod(root, _PUBLISHED_DIRECTORY_MODE)
+        return False
+    changed = _publish_mode(root)
+    if root.is_symlink() or not root.is_dir():
+        return changed
     for directory, directories, files in os.walk(root):
         for name in (*directories, *files):
-            path = Path(directory, name)
-            metadata = path.lstat()
-            wanted = _published_mode(metadata)
-            if wanted is not None and stat.S_IMODE(metadata.st_mode) != wanted:
-                os.chmod(path, wanted)
+            changed = _publish_mode(Path(directory, name)) or changed
+    return changed
 
 
 def _asset_tree_is_world_readable(root: Path) -> bool:
@@ -391,6 +388,103 @@ def _asset_tree_is_world_readable(root: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+#: Where cdk-assets keeps the zip it packages from a staged directory, as
+#: ``<asset manifest directory>/.cache/<asset id>.zip``. It publishes that zip,
+#: without reading the staged copy again, whenever the bootstrap bucket lacks
+#: the object.
+_CDK_ASSET_ZIP_CACHE = ".cache"
+
+
+def _cloud_assembly_asset_manifests(assembly: Path) -> list[Path]:
+    """Every asset manifest a cloud assembly lists, its nested assemblies' included."""
+    manifests: list[Path] = []
+    pending = [assembly]
+    while pending:
+        directory = pending.pop()
+        try:
+            document = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            continue
+        for artifact in (document.get("artifacts") or {}).values():
+            properties = artifact.get("properties") or {}
+            if artifact.get("type") == "cdk:asset-manifest" and properties.get("file"):
+                manifests.append(directory / properties["file"])
+            elif artifact.get("type") == "cdk:cloud-assembly" and properties.get("directoryName"):
+                pending.append(directory / properties["directoryName"])
+    return manifests
+
+
+def _published_asset_copies(assembly: Path) -> dict[Path, set[Path]]:
+    """Map each staged copy a cloud assembly publishes to the zips cached from it.
+
+    CDK stages every asset at the top of the assembly as ``asset.<hash>``
+    (a directory, or a file for a single-file asset), nested assemblies
+    included; the stack templates are file assets too, but nothing stages
+    them. Only the copies the assembly's asset manifests name are returned:
+    CDK never removes a copy that a later synth stops using.
+    """
+    top = Path(os.path.normpath(assembly))
+    copies: dict[Path, set[Path]] = {}
+    for manifest_path in _cloud_assembly_asset_manifests(assembly):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            continue
+        work_dir = manifest_path.parent
+        # (path relative to the manifest, id of the zip cdk-assets caches from it)
+        sources: list[tuple[Any, str | None]] = []
+        for asset_id, asset in (manifest.get("files") or {}).items():
+            source = asset.get("source") or {}
+            zipped = source.get("packaging") == "zip"
+            sources.append((source.get("path"), asset_id if zipped else None))
+        for asset in (manifest.get("dockerImages") or {}).values():
+            sources.append(((asset.get("source") or {}).get("directory"), None))
+        for relative, zip_id in sources:
+            if not isinstance(relative, str):
+                continue
+            copy = Path(os.path.normpath(work_dir / relative))
+            if copy.parent != top or not copy.name.startswith("asset."):
+                continue
+            zips = copies.setdefault(copy, set())
+            if zip_id is not None:
+                zips.add(work_dir / _CDK_ASSET_ZIP_CACHE / f"{zip_id}.zip")
+    return copies
+
+
+def normalize_staged_asset_modes(assembly_directory: str | Path) -> list[str]:
+    """Give every asset copy a cloud assembly publishes git's modes.
+
+    CDK copies each asset into the cloud assembly before the CDK CLI zips,
+    builds or uploads it. The copy's files keep the checkout's modes, but CDK
+    creates its directories under the process umask, and an image's ``COPY``
+    keeps them: from a shell running ``umask 077``, the service images could
+    not import their own entry modules as their non-root users and failed the
+    distroless runtime smoke. CDK also reuses a staged copy for every later
+    synth of the same content (the hash ignores modes), so an owner-only copy
+    outlives the umask that made it, and so does any zip cdk-assets packaged
+    from it. ``app.py`` runs this as soon as synthesis finishes, so the copies
+    the CLI then publishes have git's modes however and whenever they were
+    staged, even by a ``cdk`` command run directly; a cached zip of a copy this
+    had to correct is removed so the next publish packages the corrected copy.
+    Templates and manifests keep the caller's modes, since no asset carries
+    them. Windows modes do not gate reads, so it is a no-op there.
+
+    Returns:
+        The names of the staged copies whose modes were corrected, sorted.
+    """
+    if not _modes_gate_reads():
+        return []
+    corrected: list[str] = []
+    for copy, zips in sorted(_published_asset_copies(Path(assembly_directory)).items()):
+        if not (copy.exists() or copy.is_symlink()):
+            continue
+        if _normalize_asset_modes(copy):
+            corrected.append(copy.name)
+            for packaged in zips:
+                packaged.unlink(missing_ok=True)
+    return corrected
 
 
 def _write_build_manifest(build_dir: Path, source_digest: str) -> None:
@@ -921,7 +1015,7 @@ class CdkToolchainError(RuntimeError):
 
 
 class AssetPermissionError(RuntimeError):
-    """Deployable sources, or the copies CDK staged of them, are not readable by every user."""
+    """Deployable sources in the checkout are not readable by every user."""
 
 
 #: The checkout paths CDK packages exactly as they sit on disk, relative to
@@ -939,10 +1033,6 @@ _ASSET_SOURCE_EXCLUDED = frozenset({"gco/stacks", "dockerfiles/README.md"})
 _CLI_BUILT_LAMBDA_SOURCES = frozenset({"kubectl-applier-simple", "inference-streaming-proxy"})
 _ASSET_SOURCE_IGNORED_DIRECTORIES = _LAMBDA_SOURCE_IGNORED_DIRECTORIES | {"node_modules"}
 _ASSET_SOURCE_REPORT_LIMIT = 10
-#: CDK's output directory, relative to the project root. The stack listing,
-#: ``synth`` and a sequential ``deploy`` stage every asset here; an
-#: orchestrated parallel deploy gives each stack a fresh temporary one.
-_CDK_OUTPUT_DIRECTORY = "cdk.out"
 
 
 def _skip_asset_source_directory(parent: str, name: str) -> bool:
@@ -1004,50 +1094,6 @@ def unreadable_asset_sources(project_root: str | Path) -> list[str]:
     return sorted(offenders)
 
 
-def unreadable_staged_assets(project_root: str | Path) -> list[str]:
-    """Return the assets staged in ``cdk.out`` that other users cannot read, sorted.
-
-    CDK stages each asset as ``cdk.out/asset.<hash>`` and reuses that copy for
-    every later synth of the same content, because the hash ignores modes. A
-    copy staged from a shell running ``umask 077`` (by a CLI from before
-    :data:`_CDK_PROCESS_UMASK`, or a ``cdk`` command run directly) therefore
-    keeps its owner-only directories however the umask changes afterwards,
-    and the service images built from it fail as their non-root user. An
-    asset is reported once, by its staged path, when it or anything in it is
-    hidden from other users or cannot be inspected; symlinks are not judged by
-    their own mode. Paths are relative to ``project_root``, POSIX-style.
-    """
-    root = Path(project_root)
-    output = root / _CDK_OUTPUT_DIRECTORY
-    try:
-        entries = sorted(output.iterdir())
-    except FileNotFoundError, NotADirectoryError:
-        return []  # nothing staged: the next synth stages every asset afresh
-    except OSError:
-        return [_CDK_OUTPUT_DIRECTORY]
-    offenders: list[str] = []
-    for asset in entries:
-        if not asset.name.startswith("asset."):
-            continue  # templates and manifests are not packaged into any asset
-        try:
-            hidden = _hidden_from_other_users(asset.lstat())
-        except FileNotFoundError:
-            continue  # removed while listing: nothing left to reuse
-        except OSError:
-            hidden = True
-        if hidden or not _asset_tree_is_world_readable(asset):
-            offenders.append(asset.relative_to(root).as_posix())
-    return offenders
-
-
-def _report_paths(paths: list[str]) -> str:
-    """Join ``paths`` for an error message, naming at most the report limit."""
-    shown = ", ".join(paths[:_ASSET_SOURCE_REPORT_LIMIT])
-    if len(paths) > _ASSET_SOURCE_REPORT_LIMIT:
-        shown += f" (and {len(paths) - _ASSET_SOURCE_REPORT_LIMIT} more)"
-    return shown
-
-
 def check_asset_sources_readable(project_root: str | Path) -> None:
     """Refuse to deploy from a checkout whose deployable sources are owner-only.
 
@@ -1057,11 +1103,8 @@ def check_asset_sources_readable(project_root: str | Path) -> None:
     the Lambda runtime cannot read (the function deploys and then fails when
     invoked), fails the service image builds once they run as their non-root
     user, and leaves those unreadable zips in the bootstrap bucket for later
-    deploys to reuse. Assets an earlier run staged owner-only in ``cdk.out``
-    are refused too (:func:`unreadable_staged_assets`): CDK would reuse them
-    whatever the umask is now. The checkout is judged first, because staged
-    copies keep its file modes. Runs before anything is packaged. Windows
-    modes do not gate reads, so there is nothing to check there.
+    deploys to reuse. Runs before anything is packaged. Windows modes do not
+    gate reads, so there is nothing to check there.
 
     Raises:
         AssetPermissionError: naming the offending paths and the fix.
@@ -1069,26 +1112,19 @@ def check_asset_sources_readable(project_root: str | Path) -> None:
     if not _modes_gate_reads():
         return
     offenders = unreadable_asset_sources(project_root)
-    if offenders:
-        raise AssetPermissionError(
-            f"{len(offenders)} deployable path(s) in the checkout are not readable by every "
-            f"user: {_report_paths(offenders)}. CDK packages them as they are, so Lambda could "
-            "not read the uploaded code and the service image builds would fail; a checkout "
-            "made under a restrictive umask (such as 077) does this. Make files "
-            "world-readable and directories world-searchable from the repository root, then "
-            f"deploy again: chmod -R a+rX {' '.join(_ASSET_SOURCE_ROOTS)}"
-        )
-    staged = unreadable_staged_assets(project_root)
-    if staged:
-        raise AssetPermissionError(
-            f"{len(staged)} staged CDK asset(s) are not readable by every user: "
-            f"{_report_paths(staged)}. CDK reuses a staged copy whose content has not "
-            "changed and packages it as it is, so the service images built from it would "
-            "fail as their non-root user; a CDK run from a shell with a restrictive umask "
-            "(such as 077), by an older gco or a cdk command run directly, left them. "
-            "Remove the staged copies from the repository root (the next synth stages them "
-            f"again), then deploy again: rm -rf {_CDK_OUTPUT_DIRECTORY}"
-        )
+    if not offenders:
+        return
+    shown = ", ".join(offenders[:_ASSET_SOURCE_REPORT_LIMIT])
+    if len(offenders) > _ASSET_SOURCE_REPORT_LIMIT:
+        shown += f" (and {len(offenders) - _ASSET_SOURCE_REPORT_LIMIT} more)"
+    raise AssetPermissionError(
+        f"{len(offenders)} deployable path(s) in the checkout are not readable by every "
+        f"user: {shown}. CDK packages them as they are, so Lambda could not read the "
+        "uploaded code and the service image builds would fail; a checkout made under a "
+        "restrictive umask (such as 077) does this. Make files world-readable and "
+        "directories world-searchable from the repository root, then deploy again: "
+        f"chmod -R a+rX {' '.join(_ASSET_SOURCE_ROOTS)}"
+    )
 
 
 @dataclass
@@ -1615,15 +1651,12 @@ class StackManager:
         """Run :func:`check_asset_sources_readable` once per manager.
 
         A multi-stack deploy calls ``deploy`` once per stack; the checkout's
-        modes and ``cdk.out``'s staged assets are only walked on the first
-        call, and every copy CDK stages after it is readable
-        (:data:`_CDK_PROCESS_UMASK`). ``gco upgrade`` calls it before its
-        teardown, so a checkout that could not be redeployed stops the upgrade
-        before any stack is touched.
+        modes are only walked on the first call. ``gco upgrade`` calls it before
+        its teardown, so a checkout that could not be redeployed stops the
+        upgrade before any stack is touched.
 
         Raises:
-            AssetPermissionError: when a deployable source, or an asset staged
-                from it, is owner-only.
+            AssetPermissionError: when a deployable source is owner-only.
         """
         if getattr(self, "_asset_sources_checked", False):
             return
@@ -1997,9 +2030,6 @@ class StackManager:
             "text": True,
             "env": full_env,
             "start_new_session": os.name == "posix",
-            # Readable staged assets whatever the caller's umask (see
-            # _CDK_PROCESS_UMASK); -1, Popen's default, leaves it alone.
-            "umask": _CDK_PROCESS_UMASK if _modes_gate_reads() else -1,
         }
         if os.name == "nt":
             popen_kwargs["creationflags"] = getattr(

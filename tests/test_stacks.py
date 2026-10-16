@@ -984,8 +984,6 @@ class TestStackManagerOperations:
         assert call_kwargs["stderr"] is subprocess.PIPE
         assert call_kwargs["text"] is True
         assert call_kwargs["start_new_session"] is (os.name == "posix")
-        # Staged asset copies stay readable whatever the caller's umask.
-        assert call_kwargs["umask"] == (0o022 if os.name != "nt" else -1)
         assert "PYTHONPATH" in call_kwargs["env"]
         assert call_kwargs["env"]["PYTHONPATH"]
         assert process.communicate_timeouts == [None]

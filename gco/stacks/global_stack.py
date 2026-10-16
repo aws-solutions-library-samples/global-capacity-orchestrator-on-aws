@@ -38,6 +38,7 @@ from gco.stacks.constants import (
     LAMBDA_PYTHON_RUNTIME,
     cluster_shared_ssm_parameter_prefix,
 )
+from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-10-15T20:58:51Z
@@ -399,7 +400,7 @@ class GCOGlobalStack(Stack):
             "TrafficDialControllerFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/traffic-dial-controller"),
+            code=lambda_source_code("lambda/traffic-dial-controller"),
             timeout=Duration.minutes(5),
             memory_size=256,
             role=controller_role,
@@ -616,7 +617,7 @@ class GCOGlobalStack(Stack):
             "CapacityPollerFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/capacity-poller"),
+            code=lambda_source_code("lambda/capacity-poller"),
             timeout=Duration.minutes(14),
             memory_size=256,
             role=poller_role,
@@ -1296,7 +1297,7 @@ class GCOGlobalStack(Stack):
             "VectorIngestFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/vector-ingest"),
+            code=lambda_source_code("lambda/vector-ingest"),
             timeout=Duration.minutes(5),
             memory_size=512,
             role=ingest_role,
@@ -2448,7 +2449,7 @@ class GCOGlobalStack(Stack):
             "ImageLookupFunction",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("lambda/image-lookup"),
+            code=lambda_source_code("lambda/image-lookup"),
             timeout=Duration.minutes(5),
             description=(
                 "Lookup-or-create custom resource handler for ECR "

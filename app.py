@@ -28,7 +28,7 @@ import aws_cdk as cdk
 import jsii
 from constructs import IConstruct
 
-from cli.stacks import cdk_asset_consumer
+from cli.stacks import cdk_asset_consumer, normalize_staged_asset_modes
 from gco.config.config_loader import ConfigLoader
 from gco.stacks.analytics_stack import GCOAnalyticsStack
 from gco.stacks.api_gateway_global_stack import AnalyticsApiConfig, GCOApiGatewayGlobalStack
@@ -266,7 +266,13 @@ def main() -> None:
         api_gateway_stack.set_analytics_config(analytics_api_config)
         api_gateway_stack.add_stack_dependency(analytics_stack)
 
-    app.synth()
+    assembly = app.synth()
+
+    # The CDK CLI zips, builds and uploads the staged asset copies once this
+    # process exits. CDK creates their directories under this process's umask
+    # and reuses an existing copy as it is, so give every copy the assembly
+    # publishes git's modes here, whichever shell ran the synth.
+    normalize_staged_asset_modes(assembly.directory)
 
 
 if __name__ == "__main__":

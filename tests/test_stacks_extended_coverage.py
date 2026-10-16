@@ -2765,8 +2765,6 @@ class TestCdkWorkerCancellation:
 
         assert popen.call_args.kwargs["creationflags"] == 512
         assert popen.call_args.kwargs["start_new_session"] is False
-        # Modes do not gate reads on Windows; Popen's default leaves the umask alone.
-        assert popen.call_args.kwargs["umask"] == -1
 
     def test_parallel_interrupt_cancels_before_executor_wait(self, manager: Any) -> None:
         events: list[str] = []
