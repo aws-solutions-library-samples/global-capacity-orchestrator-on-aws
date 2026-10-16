@@ -212,6 +212,8 @@ The umask of the shell you deploy from does not matter. CDK copies every asset i
 
 A deploy made by an older CLI may already have uploaded owner-only code; its functions fail with `Permission denied` or `Unable to import module`. Because the asset hash ignores modes, the next deploy reuses that object. Find the asset's `objectKey` in `cdk.out/<stack>.assets.json`, delete that object from the Region's `cdk-*-assets-*` bootstrap bucket, and deploy again so CDK uploads a readable copy.
 
+A container image an older CLI pushed from owner-only files, such as the TLS certificate manager's or the Helm installer's, is reused the same way. Find its `imageTag` under `dockerImages` in the same file, delete that tag from the Region's `cdk-*-container-assets-*` repository, and remove the local image `cdkasset-<imageTag>` (for example `docker image rm cdkasset-<imageTag>`, or the same with `finch` or `podman`) before you deploy again. Deleting only the repository tag is not enough: CDK pushes a local `cdkasset-` image that is already there instead of building a new one.
+
 ### Stack Stuck in REVIEW_IN_PROGRESS
 
 **Symptom**: Deploy fails with `ResourceExistenceCheck` or stack shows `REVIEW_IN_PROGRESS`
