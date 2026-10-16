@@ -4,18 +4,24 @@
 under the process umask (or copy a checkout's own modes), and CDK's asset hash
 ignores modes. A deploy from a shell running ``umask 077`` therefore used to
 upload Lambda code that the Lambda runtime cannot read, and the bootstrap
-bucket then served that zip to every later deploy of the same content. These
-tests pin the three defences in ``cli/stacks.py``: staged builds are given
-git's modes before their completion manifest is written, an owner-only build
-published before that no longer counts as fresh, and ``deploy`` refuses a
-checkout whose deployable sources other users cannot read.
+bucket then served that zip to every later deploy of the same content. CDK's
+own copies in ``cdk.out`` took the umask too, so the service images built from
+them could not import their entry module. These tests pin the defences in
+``cli/stacks.py``: staged builds are given git's modes before their completion
+manifest is written, an owner-only build published before that no longer
+counts as fresh, CDK runs under ``umask 022``, and ``deploy`` refuses a
+checkout whose deployable sources other users cannot read, or owner-only
+copies an earlier run staged in ``cdk.out``.
 """
 
 from __future__ import annotations
 
 import ast
 import os
+import shutil
 import stat
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -111,6 +117,7 @@ def test_modes_are_left_alone_where_they_do_not_gate_reads(tmp_path: Path) -> No
     with (
         patch.object(stacks, "_modes_gate_reads", return_value=False),
         patch.object(stacks, "unreadable_asset_sources") as walk,
+        patch.object(stacks, "unreadable_staged_assets") as staged_walk,
     ):
         stacks._normalize_asset_modes(tmp_path)
         world_readable = stacks._asset_tree_is_world_readable(tmp_path)
@@ -118,6 +125,7 @@ def test_modes_are_left_alone_where_they_do_not_gate_reads(tmp_path: Path) -> No
     assert _mode(private) == 0o600
     assert world_readable is True
     walk.assert_not_called()
+    staged_walk.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +423,161 @@ def test_the_real_checkout_is_deployable() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The copies CDK stages in cdk.out
+# ---------------------------------------------------------------------------
+
+# Stands in for the CDK CLI: stages one copy the way CDK does, making its
+# directories under the process umask and writing its file afresh.
+_STAGE_SCRIPT = """\
+import pathlib, sys
+module = pathlib.Path(sys.argv[1], "gco", "services", "health_api.py")
+module.parent.mkdir(parents=True)
+module.write_text("", encoding="utf-8")
+"""
+
+
+def _staged(root: Path, name: str) -> Path:
+    """A staged copy as CDK leaves it under ``umask 022``."""
+    asset = root / "cdk.out" / name
+    module = _write(asset / "gco" / "services" / "api.py")
+    for directory in (module.parent, module.parent.parent, asset):
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        os.chmod(directory, 0o755)
+    return asset
+
+
+@pytest.mark.usefixtures("restrictive_umask")
+def test_cdk_stages_readable_copies_from_a_restrictive_shell(tmp_path: Path) -> None:
+    """Real child processes, from a shell running ``umask 077``.
+
+    Started without a umask of its own, CDK staged owner-only directories, and
+    the health monitor's image could not import ``gco.services.health_api`` as
+    its non-root user. The preflight refuses that copy until it is removed;
+    ``_run_cdk`` then stages a readable one and leaves the caller's umask alone.
+    """
+    stage = tmp_path / "stage.py"
+    stage.write_text(_STAGE_SCRIPT, encoding="utf-8")
+    staged = tmp_path / "cdk.out" / "asset.0123"
+
+    # What a CLI from before _CDK_PROCESS_UMASK left behind.
+    subprocess.run([sys.executable, str(stage), str(staged)], check=True)
+    assert _mode(staged / "gco") == 0o700
+    with pytest.raises(stacks.AssetPermissionError, match=r"asset\.0123.*rm -rf cdk\.out$"):
+        stacks.check_asset_sources_readable(tmp_path)
+
+    shutil.rmtree(tmp_path / "cdk.out")
+    manager = _manager(tmp_path)
+    manager._cdk_path = sys.executable  # the "CDK CLI" runs the stage script
+    with patch.object(manager, "_ensure_cdk_toolchain"):
+        result = manager._run_cdk([str(stage), str(staged)], capture_output=True)
+
+    assert result.returncode == 0, result.stderr
+    assert _mode(staged) == 0o755
+    assert _mode(staged / "gco") == 0o755
+    assert _mode(staged / "gco" / "services") == 0o755
+    assert _mode(staged / "gco" / "services" / "health_api.py") == 0o644
+    stacks.check_asset_sources_readable(tmp_path)
+    (tmp_path / "after.txt").write_text("", encoding="utf-8")
+    assert _mode(tmp_path / "after.txt") == 0o600
+
+
+def test_readable_staged_assets_and_other_cdk_outputs_pass(tmp_path: Path) -> None:
+    _staged(tmp_path, "asset.0123")
+    _write(tmp_path / "cdk.out" / "asset.4567.zip")  # a file asset
+    # Templates and manifests are written under the umask, but no asset
+    # carries them, and the output directory's own mode reaches nothing.
+    _write(tmp_path / "cdk.out" / "manifest.json", mode=0o600)
+    _write(tmp_path / "cdk.out" / "gco-us-east-1.template.json", mode=0o600)
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(tmp_path / "cdk.out", 0o700)
+    link = tmp_path / "cdk.out" / "asset.0123" / "link"
+    link.symlink_to(_write(tmp_path / "private.txt", mode=0o600))
+
+    assert stacks.unreadable_staged_assets(tmp_path) == []
+    stacks.check_asset_sources_readable(tmp_path)
+
+
+def test_nothing_is_staged_without_an_output_directory(tmp_path: Path) -> None:
+    assert stacks.unreadable_staged_assets(tmp_path) == []
+    _write(tmp_path / "cdk.out")  # a file: CDK has staged nothing there
+    assert stacks.unreadable_staged_assets(tmp_path) == []
+
+
+def test_owner_only_staged_assets_are_reported_once_each(tmp_path: Path) -> None:
+    """Every shape a copy staged under ``umask 077`` can take."""
+    owner_only_root = _staged(tmp_path, "asset.aa")
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(owner_only_root, 0o700)
+    owner_only_package = _staged(tmp_path, "asset.bb")
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(owner_only_package / "gco", 0o700)  # what COPY gco/ ./gco/ kept
+    owner_only_file = _staged(tmp_path, "asset.cc")
+    os.chmod(owner_only_file / "gco" / "services" / "api.py", 0o600)
+    _write(tmp_path / "cdk.out" / "asset.dd.zip", mode=0o600)
+    _staged(tmp_path, "asset.ee")
+
+    assert stacks.unreadable_staged_assets(str(tmp_path)) == [
+        "cdk.out/asset.aa",
+        "cdk.out/asset.bb",
+        "cdk.out/asset.cc",
+        "cdk.out/asset.dd.zip",
+    ]
+
+
+def test_staged_assets_that_vanish_or_cannot_be_inspected(tmp_path: Path) -> None:
+    gone = _staged(tmp_path, "asset.gone")
+    locked = _staged(tmp_path, "asset.locked")
+    real_lstat = Path.lstat
+
+    def flaky_lstat(self: Path) -> os.stat_result:
+        if self == gone:
+            raise FileNotFoundError(self)  # another synth replaced it
+        if self == locked:
+            raise PermissionError(self)
+        return real_lstat(self)
+
+    with patch.object(Path, "lstat", flaky_lstat):
+        assert stacks.unreadable_staged_assets(tmp_path) == ["cdk.out/asset.locked"]
+
+    with patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
+        assert stacks.unreadable_staged_assets(tmp_path) == ["cdk.out"]
+
+
+def test_the_preflight_names_the_staged_assets_and_the_fix(tmp_path: Path) -> None:
+    root = _checkout(tmp_path)
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(_staged(root, "asset.0123") / "gco", 0o700)
+
+    with pytest.raises(stacks.AssetPermissionError) as raised:
+        stacks.check_asset_sources_readable(root)
+
+    message = str(raised.value)
+    assert message.startswith(
+        "1 staged CDK asset(s) are not readable by every user: cdk.out/asset.0123. "
+    )
+    assert "by an older gco or a cdk command run directly" in message
+    assert message.endswith("then deploy again: rm -rf cdk.out")
+
+
+def test_the_checkout_is_judged_before_its_staged_copies(tmp_path: Path) -> None:
+    """Staged copies keep the checkout's file modes, so its fix comes first."""
+    root = _owner_only_checkout(tmp_path)
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(_staged(root, "asset.0123"), 0o700)
+
+    with pytest.raises(stacks.AssetPermissionError, match=r"^1 deployable path\(s\) in the"):
+        stacks.check_asset_sources_readable(root)
+
+
+def test_a_long_staged_asset_list_is_truncated(tmp_path: Path) -> None:
+    for index in range(stacks._ASSET_SOURCE_REPORT_LIMIT + 2):
+        _write(tmp_path / "cdk.out" / f"asset.{index:02d}.zip", mode=0o600)
+
+    with pytest.raises(stacks.AssetPermissionError, match=r"^12 staged CDK .*\(and 2 more\)"):
+        stacks.check_asset_sources_readable(tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # Where the preflight runs
 # ---------------------------------------------------------------------------
 
@@ -439,6 +602,23 @@ def test_deploy_refuses_an_owner_only_checkout_before_packaging(tmp_path: Path) 
         patch.object(manager, "_ensure_lambda_build") as ensure,
         patch.object(manager, "_run_cdk") as run_cdk,
         pytest.raises(stacks.AssetPermissionError, match=r"lambda/fn/handler\.py"),
+    ):
+        manager.deploy("gco-us-east-1", require_approval=False)
+    sync.assert_not_called()
+    ensure.assert_not_called()
+    run_cdk.assert_not_called()
+
+
+def test_deploy_refuses_owner_only_staged_assets_before_packaging(tmp_path: Path) -> None:
+    root = _checkout(tmp_path)
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    os.chmod(_staged(root, "asset.0123") / "gco", 0o700)
+    manager = _manager(root)
+    with (
+        patch.object(manager, "_sync_lambda_sources") as sync,
+        patch.object(manager, "_ensure_lambda_build") as ensure,
+        patch.object(manager, "_run_cdk") as run_cdk,
+        pytest.raises(stacks.AssetPermissionError, match=r"cdk\.out/asset\.0123"),
     ):
         manager.deploy("gco-us-east-1", require_approval=False)
     sync.assert_not_called()

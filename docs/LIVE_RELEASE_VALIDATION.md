@@ -95,7 +95,7 @@ Use macOS or Linux with:
 - Node 24 and the exact npm version declared in `package.json`;
 - Docker available to CDK asset bundling;
 - at least 20 GiB free on the checkout, the report directory, and the home volume (where Docker Desktop and Podman keep their image stores) — `deploy` builds every service image locally and the checkpoint grows to tens of megabytes; `--min-free-disk-gib` adjusts the floor and `0` disables it;
-- a checkout made under the default `umask 022`, so its deployable sources (`lambda/`, `gco/`, `dockerfiles/`, `pyproject.toml`, `requirements-lock.txt`) are readable by every user — see [Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask);
+- a checkout made under the default `umask 022`, so its deployable sources (`lambda/`, `gco/`, `dockerfiles/`, `pyproject.toml`, `requirements-lock.txt`) are readable by every user; the preflight also refuses owner-only assets an older CLI staged in `cdk.out` — see [Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask);
 - AWS CLI plus the Session Manager plugin on `PATH` whenever a cluster-facing action — `inference`, `platform-workloads`, or `network-posture` (so also `--actions all`) — is selected;
 - the repository's pinned CDK CLI and Python CDK dependencies;
 - short-lived AWS credentials for the isolated validation account; and

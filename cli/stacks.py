@@ -306,6 +306,18 @@ _PUBLISHED_DIRECTORY_MODE = 0o755
 _PUBLISHED_EXECUTABLE_MODE = 0o755
 _PUBLISHED_FILE_MODE = 0o644
 
+#: The umask every CDK process runs under. CDK copies each asset into its
+#: output directory before packaging it: the copy's files keep the checkout's
+#: modes, but its directories are created under the process umask, and an
+#: image's ``COPY`` keeps them. From a shell running ``umask 077`` those
+#: directories were owner-only, so a service image could not import its own
+#: entry module as its non-root user and failed the distroless runtime smoke.
+#: The deployable sources must already be world-readable
+#: (:func:`check_asset_sources_readable`), so staging them that way exposes
+#: nothing new. The upgrade-validation workspace runs its commands under the
+#: same umask.
+_CDK_PROCESS_UMASK = 0o022
+
 
 def _modes_gate_reads() -> bool:
     """Whether POSIX mode bits decide who may read a file (they do not on Windows)."""
@@ -909,7 +921,7 @@ class CdkToolchainError(RuntimeError):
 
 
 class AssetPermissionError(RuntimeError):
-    """Deployable sources in the checkout are not readable by every user."""
+    """Deployable sources, or the copies CDK staged of them, are not readable by every user."""
 
 
 #: The checkout paths CDK packages exactly as they sit on disk, relative to
@@ -927,6 +939,10 @@ _ASSET_SOURCE_EXCLUDED = frozenset({"gco/stacks", "dockerfiles/README.md"})
 _CLI_BUILT_LAMBDA_SOURCES = frozenset({"kubectl-applier-simple", "inference-streaming-proxy"})
 _ASSET_SOURCE_IGNORED_DIRECTORIES = _LAMBDA_SOURCE_IGNORED_DIRECTORIES | {"node_modules"}
 _ASSET_SOURCE_REPORT_LIMIT = 10
+#: CDK's output directory, relative to the project root. The stack listing,
+#: ``synth`` and a sequential ``deploy`` stage every asset here; an
+#: orchestrated parallel deploy gives each stack a fresh temporary one.
+_CDK_OUTPUT_DIRECTORY = "cdk.out"
 
 
 def _skip_asset_source_directory(parent: str, name: str) -> bool:
@@ -988,6 +1004,50 @@ def unreadable_asset_sources(project_root: str | Path) -> list[str]:
     return sorted(offenders)
 
 
+def unreadable_staged_assets(project_root: str | Path) -> list[str]:
+    """Return the assets staged in ``cdk.out`` that other users cannot read, sorted.
+
+    CDK stages each asset as ``cdk.out/asset.<hash>`` and reuses that copy for
+    every later synth of the same content, because the hash ignores modes. A
+    copy staged from a shell running ``umask 077`` (by a CLI from before
+    :data:`_CDK_PROCESS_UMASK`, or a ``cdk`` command run directly) therefore
+    keeps its owner-only directories however the umask changes afterwards,
+    and the service images built from it fail as their non-root user. An
+    asset is reported once, by its staged path, when it or anything in it is
+    hidden from other users or cannot be inspected; symlinks are not judged by
+    their own mode. Paths are relative to ``project_root``, POSIX-style.
+    """
+    root = Path(project_root)
+    output = root / _CDK_OUTPUT_DIRECTORY
+    try:
+        entries = sorted(output.iterdir())
+    except FileNotFoundError, NotADirectoryError:
+        return []  # nothing staged: the next synth stages every asset afresh
+    except OSError:
+        return [_CDK_OUTPUT_DIRECTORY]
+    offenders: list[str] = []
+    for asset in entries:
+        if not asset.name.startswith("asset."):
+            continue  # templates and manifests are not packaged into any asset
+        try:
+            hidden = _hidden_from_other_users(asset.lstat())
+        except FileNotFoundError:
+            continue  # removed while listing: nothing left to reuse
+        except OSError:
+            hidden = True
+        if hidden or not _asset_tree_is_world_readable(asset):
+            offenders.append(asset.relative_to(root).as_posix())
+    return offenders
+
+
+def _report_paths(paths: list[str]) -> str:
+    """Join ``paths`` for an error message, naming at most the report limit."""
+    shown = ", ".join(paths[:_ASSET_SOURCE_REPORT_LIMIT])
+    if len(paths) > _ASSET_SOURCE_REPORT_LIMIT:
+        shown += f" (and {len(paths) - _ASSET_SOURCE_REPORT_LIMIT} more)"
+    return shown
+
+
 def check_asset_sources_readable(project_root: str | Path) -> None:
     """Refuse to deploy from a checkout whose deployable sources are owner-only.
 
@@ -997,8 +1057,11 @@ def check_asset_sources_readable(project_root: str | Path) -> None:
     the Lambda runtime cannot read (the function deploys and then fails when
     invoked), fails the service image builds once they run as their non-root
     user, and leaves those unreadable zips in the bootstrap bucket for later
-    deploys to reuse. Runs before anything is packaged. Windows modes do not
-    gate reads, so there is nothing to check there.
+    deploys to reuse. Assets an earlier run staged owner-only in ``cdk.out``
+    are refused too (:func:`unreadable_staged_assets`): CDK would reuse them
+    whatever the umask is now. The checkout is judged first, because staged
+    copies keep its file modes. Runs before anything is packaged. Windows
+    modes do not gate reads, so there is nothing to check there.
 
     Raises:
         AssetPermissionError: naming the offending paths and the fix.
@@ -1006,19 +1069,26 @@ def check_asset_sources_readable(project_root: str | Path) -> None:
     if not _modes_gate_reads():
         return
     offenders = unreadable_asset_sources(project_root)
-    if not offenders:
-        return
-    shown = ", ".join(offenders[:_ASSET_SOURCE_REPORT_LIMIT])
-    if len(offenders) > _ASSET_SOURCE_REPORT_LIMIT:
-        shown += f" (and {len(offenders) - _ASSET_SOURCE_REPORT_LIMIT} more)"
-    raise AssetPermissionError(
-        f"{len(offenders)} deployable path(s) in the checkout are not readable by every "
-        f"user: {shown}. CDK packages them as they are, so Lambda could not read the "
-        "uploaded code and the service image builds would fail; a checkout made under a "
-        "restrictive umask (such as 077) does this. Make files world-readable and "
-        "directories world-searchable from the repository root, then deploy again: "
-        f"chmod -R a+rX {' '.join(_ASSET_SOURCE_ROOTS)}"
-    )
+    if offenders:
+        raise AssetPermissionError(
+            f"{len(offenders)} deployable path(s) in the checkout are not readable by every "
+            f"user: {_report_paths(offenders)}. CDK packages them as they are, so Lambda could "
+            "not read the uploaded code and the service image builds would fail; a checkout "
+            "made under a restrictive umask (such as 077) does this. Make files "
+            "world-readable and directories world-searchable from the repository root, then "
+            f"deploy again: chmod -R a+rX {' '.join(_ASSET_SOURCE_ROOTS)}"
+        )
+    staged = unreadable_staged_assets(project_root)
+    if staged:
+        raise AssetPermissionError(
+            f"{len(staged)} staged CDK asset(s) are not readable by every user: "
+            f"{_report_paths(staged)}. CDK reuses a staged copy whose content has not "
+            "changed and packages it as it is, so the service images built from it would "
+            "fail as their non-root user; a CDK run from a shell with a restrictive umask "
+            "(such as 077), by an older gco or a cdk command run directly, left them. "
+            "Remove the staged copies from the repository root (the next synth stages them "
+            f"again), then deploy again: rm -rf {_CDK_OUTPUT_DIRECTORY}"
+        )
 
 
 @dataclass
@@ -1545,12 +1615,15 @@ class StackManager:
         """Run :func:`check_asset_sources_readable` once per manager.
 
         A multi-stack deploy calls ``deploy`` once per stack; the checkout's
-        modes are only walked on the first call. ``gco upgrade`` calls it before
-        its teardown, so a checkout that could not be redeployed stops the
-        upgrade before any stack is touched.
+        modes and ``cdk.out``'s staged assets are only walked on the first
+        call, and every copy CDK stages after it is readable
+        (:data:`_CDK_PROCESS_UMASK`). ``gco upgrade`` calls it before its
+        teardown, so a checkout that could not be redeployed stops the upgrade
+        before any stack is touched.
 
         Raises:
-            AssetPermissionError: when a deployable source is owner-only.
+            AssetPermissionError: when a deployable source, or an asset staged
+                from it, is owner-only.
         """
         if getattr(self, "_asset_sources_checked", False):
             return
@@ -1924,6 +1997,9 @@ class StackManager:
             "text": True,
             "env": full_env,
             "start_new_session": os.name == "posix",
+            # Readable staged assets whatever the caller's umask (see
+            # _CDK_PROCESS_UMASK); -1, Popen's default, leaves it alone.
+            "umask": _CDK_PROCESS_UMASK if _modes_gate_reads() else -1,
         }
         if os.name == "nt":
             popen_kwargs["creationflags"] = getattr(

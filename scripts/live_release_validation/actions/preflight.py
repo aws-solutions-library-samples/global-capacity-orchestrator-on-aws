@@ -122,8 +122,10 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
         free_disk_gib = _check_free_disk(settings)
 
     # A checkout made under a restrictive umask deploys Lambda code that the
-    # Lambda runtime cannot read; refuse it before the stack listing below
-    # synthesizes the app, and long before anything is created.
+    # Lambda runtime cannot read, and assets an older CLI staged owner-only in
+    # cdk.out would be reused for the service images; refuse both before the
+    # stack listing below synthesizes the app, and long before anything is
+    # created.
     if "deploy" in selected:
         check_asset_sources_readable(settings.repo_root)
 

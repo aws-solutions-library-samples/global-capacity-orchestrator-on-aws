@@ -5920,8 +5920,10 @@ gco upgrade [OPTIONS]
 - If the stack cycle fails, the checkout and local install are already on the new
   release. Fix the cause (the failing stack is named) and rerun
   `gco upgrade --skip-checkout` to finish; the teardown half is idempotent.
-- Owner-only deployable sources (a checkout made under `umask 077`) stop the
-  command before the teardown with no stack changed; make them readable
+- Owner-only deployable sources (a checkout made under `umask 077`), or
+  owner-only copies of them staged in `cdk.out`, stop the command before the
+  teardown with no stack changed; make the sources readable or remove
+  `cdk.out`
   ([Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask))
   and rerun `gco upgrade --skip-checkout`.
 - The running `gco` process keeps executing the previous release's CLI code until
