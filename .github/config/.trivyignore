@@ -211,63 +211,60 @@ CVE-2026-97689 exp:2026-12-14
 #     (2026-10-08).
 # Trivy reports them as `stdlib` (and CVE-2026-78669 also as golang.org/x/net)
 # under each Go binary's gobinary target in security:trivy:container-scan:
-#   * Dockerfile.dev: kubectl v1.37.1 (go1.26.8, x/net v0.57.0), the Docker
-#     CLI 29.8.2 (go1.26.8, no x/net) and the docker-buildx plugin v0.38.0
-#     (go1.26.8, x/net v0.59.0)
-#   * lambda/helm-installer: helm v4.3.0 (go1.27.1, x/net v0.57.0), kubectl
-#     v1.37.1 (as above) and the base image's aws-lambda-rie (go1.26.7, no
-#     x/net)
+#   * Dockerfile.dev: kubectl v1.37.1 (go1.26.8, x/net v0.57.0) and the
+#     docker-buildx plugin v0.38.0 (go1.26.8, x/net v0.59.0)
+#   * lambda/helm-installer: kubectl v1.37.1 (as above) and the base image's
+#     aws-lambda-rie (go1.26.7, no x/net)
 #   * lambda/tls-certificate-manager: the base image's aws-lambda-rie
+# The Docker CLI and helm no longer carry them: on 2026-10-19 DOCKER_VERSION
+# moved from 29.8.2 to 29.9.1 (go1.26.9, no x/net) and helm from v4.3.0 to
+# v4.3.1 (go1.27.2, x/net v0.60.0).
 #
-# Provenance, established 2026-10-09: `go version -m` on the exact pinned
+# Provenance, re-established 2026-10-19: `go version -m` on the exact pinned
 # linux-amd64 release artifacts, each checked against the sha256 trust anchor
 # its Dockerfile carries (the Docker static tarball publishes none), reports
-# the toolchains and x/net versions above. aws-lambda-rie is not ours: it
-# ships in public.ecr.aws/lambda/python:3.14 at /usr/local/bin/aws-lambda-rie,
-# and the copy in the unmodified base, republished 2026-10-09, still reports
-# go1.26.7.
+# the toolchains and x/net versions above, and a local Trivy scan of the same
+# artifacts reports all three ids for kubectl v1.37.1 and helm v4.3.0 and none
+# for Docker 29.9.1 or helm v4.3.1. aws-lambda-rie is not ours: it ships in
+# public.ecr.aws/lambda/python:3.14 at /usr/local/bin/aws-lambda-rie, and the
+# copy in the current base (created 2026-10-15) still reports go1.26.7.
 #
 # Not introduced by any change of ours: the Go advisories were published
 # 2026-10-08T22:31Z, and the GHSAs for the first two at 2026-10-09T00:31Z.
 # They reached the Trivy DB at different times: PR #451's Security runs
 # scanned the same three images clean at 2026-10-09T01:55Z (7b7b4b78), and
-# clean of CVE-2026-78669 as late as 14:14Z (b6686e5c). None of the three
-# Dockerfiles has changed since.
+# clean of CVE-2026-78669 as late as 14:14Z (b6686e5c).
 #
-# Not clearable by a pin bump, re-checked 2026-10-09: every pinned release
-# predates the fixed Go and x/net. Kubernetes v1.37.1 (2026-09-23) is the
-# newest 1.37 patch, Helm v4.3.0 (2026-09-09) and Buildx v0.38.0 (2026-10-07)
-# are the newest Helm 4 and Buildx releases, and the newest upstream RIE,
-# v1.37 (2026-08-31), is older than both fixed Go releases. The one fixed
-# build is the Docker CLI 29.9.0 static release (2026-10-08, go1.26.9, no
-# x/net). It would clear the docker binary but not the ids, which kubectl,
-# helm, buildx and the RIE still carry, so the bump is left to the monthly
-# deps-scan (which tracks DOCKER_VERSION) rather than taking a one-day-old
-# minor release here.
+# Not clearable by a pin bump, re-checked 2026-10-19: Kubernetes v1.37.1
+# (2026-09-23) is still the newest 1.37 patch (the October patch release,
+# targeted for 2026-10-13, has not shipped, and the next target is
+# 2026-11-10), Buildx v0.38.0 (2026-10-07) is still the newest Buildx
+# release, and the newest upstream RIE, v1.37 (2026-08-31), predates both
+# fixed Go releases. The 2026-11-08 expiry was extended for that reason: it
+# fell before any of the three could be fixed.
 #
 # Low runtime risk. CVE-2026-78667 needs the process to serve files through
 # net/http to a peer that controls the Range header, and CVE-2026-97031 needs
-# a TLS server with ECH keys configured: GCO runs kubectl, helm, docker and
-# buildx only as clients (of the Kubernetes API, chart and image registries,
-# and the Docker daemon) and never starts kubectl's file-serving
-# `proxy --www` mode. CVE-2026-78669 does reach clients, but only from the
-# HTTP/2 peer itself, which for these clients is a TLS endpoint they chose to
-# call (the Kubernetes API, a chart repository or an image registry). The
-# worst case is CPU exhaustion of one CLI process, or of one helm-installer
-# invocation, which the Lambda timeout ends. aws-lambda-rie runs only when
-# AWS_LAMBDA_RUNTIME_API is unset, which means local emulation such as the
-# integration:docker smoke tests (.github/scripts/rie_smoke_test.sh), where it
-# answers plain-HTTP invokes on an ephemeral CI runner. Deployed Lambda
-# functions exec the managed runtime and never start it. The dev image is a
-# contributor/CI tool that is never deployed to a cluster.
+# a TLS server with ECH keys configured: GCO runs kubectl and buildx only as
+# clients (of the Kubernetes API, image registries and the Docker daemon) and
+# never starts kubectl's file-serving `proxy --www` mode. CVE-2026-78669 does
+# reach clients, but only from the HTTP/2 peer itself, which for these
+# clients is a TLS endpoint they chose to call (the Kubernetes API or an
+# image registry). The worst case is CPU exhaustion of one CLI process, or of
+# one helm-installer invocation, which the Lambda timeout ends.
+# aws-lambda-rie runs only when AWS_LAMBDA_RUNTIME_API is unset, which means
+# local emulation such as the integration:docker smoke tests
+# (.github/scripts/rie_smoke_test.sh), where it answers plain-HTTP invokes on
+# an ephemeral CI runner. Deployed Lambda functions exec the managed runtime
+# and never start it. The dev image is a contributor/CI tool that is never
+# deployed to a cluster.
 #
-# Clears when every flagged binary is built with Go >= 1.26.9 (or >= 1.27.2)
-# and, where it links x/net, with golang.org/x/net >= 0.60.0: the next
-# Kubernetes 1.37 patch (KUBECTL_VERSION in Dockerfile.dev, plus the kubectl
-# URL and sha256 in lambda/helm-installer/Dockerfile), the next Helm 4 release
-# (the helm URL and sha256 in that same Dockerfile), the next Buildx release
-# (BUILDX_VERSION and both sha256 anchors), DOCKER_VERSION 29.9.0 or later,
-# and a public.ecr.aws/lambda/python:3.14 whose aws-lambda-rie is built with a
+# Clears when kubectl, buildx and the base image's RIE are built with Go >=
+# 1.26.9 (or >= 1.27.2) and, where they link x/net, with golang.org/x/net >=
+# 0.60.0: the next Kubernetes 1.37 patch (KUBECTL_VERSION in Dockerfile.dev,
+# plus the kubectl URL and sha256 in lambda/helm-installer/Dockerfile), the
+# next Buildx release (BUILDX_VERSION and both sha256 anchors), and a
+# public.ecr.aws/lambda/python:3.14 whose aws-lambda-rie is built with a
 # fixed Go. Confirm each with `go version -m` on the binary (or
 # `trivy image`), then drop all three ids.
 # Advisories: https://pkg.go.dev/vuln/GO-2026-6609
@@ -277,6 +274,39 @@ CVE-2026-97689 exp:2026-12-14
 #             https://avd.aquasec.com/nvd/cve-2026-97031
 #             https://avd.aquasec.com/nvd/cve-2026-78669
 # RIE releases: https://github.com/aws/aws-lambda-runtime-interface-emulator/releases
-CVE-2026-78667 exp:2026-11-08
-CVE-2026-97031 exp:2026-11-08
-CVE-2026-78669 exp:2026-11-08
+CVE-2026-78667 exp:2026-12-14
+CVE-2026-97031 exp:2026-12-14
+CVE-2026-78669 exp:2026-12-14
+
+# -----------------------------------------------------------------------------
+# CVE-2026-56851 (GO-2026-6629): the Nickname profile in
+# golang.org/x/text/secure/precis can panic with an out-of-bounds slice error
+# when it transforms crafted input into a short destination buffer. Fixed in
+# golang.org/x/text 0.41.0. security:trivy:container-scan reports it for
+# kubectl v1.37.1, which links x/text v0.40.0, in Dockerfile.dev and
+# lambda/helm-installer. No other scanned binary links an affected x/text.
+#
+# Not introduced by any change of ours: the Go advisory was published
+# 2026-10-07T14:09Z, but the Security run on main at 972fa63e (started
+# 2026-10-16T18:34Z) still scanned both images clean. The first run to
+# report it was PR #466's at 2026-10-19T10:17Z, with the same kubectl pin.
+#
+# Not clearable by a pin bump, re-checked 2026-10-19: v1.37.1 is still the
+# newest Kubernetes 1.37 patch (next target 2026-11-10; see the entry above).
+#
+# Not reachable: the vulnerable package is not compiled into kubectl. The
+# release binary is stripped, but Go keeps every linked function's name for
+# stack traces. Those names cover golang.org/x/text's cases, encoding,
+# internal/language, language, runes, secure/bidirule, transform,
+# unicode/bidi and unicode/norm packages, and nothing from
+# golang.org/x/text/secure/precis, whose Profile and Transformer methods the
+# advisory lists as the vulnerable symbols. govulncheck cannot confirm this
+# on a stripped binary: it falls back to module-level matching and reports
+# every symbol. Even where linked, the impact is a panic of one CLI process.
+#
+# Clears when a kubectl release links golang.org/x/text >= 0.41.0 (check with
+# `go version -m`): bump it as the entry above describes, then drop this id.
+# Expires with the entry above so the kubectl pins are re-evaluated in one
+# pass.
+# Advisory: https://pkg.go.dev/vuln/GO-2026-6629
+CVE-2026-56851 exp:2026-12-14
