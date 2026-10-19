@@ -403,10 +403,11 @@ TGI has to be redeployed. The TorchServe example was retired for the same
 reason: the PyTorch project notice states TorchServe is no longer actively
 maintained, with no planned updates, bug fixes, or security patches.
 
-**Deploy via CLI (recommended for multi-region):**
+**Deploy via CLI (recommended for multi-region):** each example's header carries the full command, Triton's included.
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1
+gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1 \
+  -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 gco inference deploy my-sglang -i lmsysorg/sglang:v0.5.21 --framework sglang \
   --port 30000 --gpu-count 1 -e MODEL=microsoft/Phi-3.5-mini-instruct
 ```
@@ -416,6 +417,8 @@ gco inference deploy my-sglang -i lmsysorg/sglang:v0.5.21 --framework sglang \
 ```bash
 gco jobs submit-direct examples/inference-vllm.yaml -r us-east-1
 ```
+
+A directly applied manifest isn't registered with the inference monitor, so `gco inference` doesn't manage it and the authenticated `/inference/` route doesn't reach it; each header shows how to test it with `kubectl port-forward` through the cluster tunnel.
 
 See the [Inference Guide](../docs/INFERENCE.md) for canary deployments, scaling, health checks, and multi-region routing.
 
@@ -645,17 +648,24 @@ gco monitoring open --service mlflow   # browse the logged run at http://localho
 
 **File:** `model-download-job.yaml`
 
-Pre-downloads model weights from HuggingFace to shared EFS so inference endpoints can mount them instantly. Downloads `facebook/opt-125m` by default — change the `MODEL_ID` env var for other models. For gated models (Llama, Mistral), uncomment the `HF_TOKEN` env var.
+Pre-downloads model weights from Hugging Face to the `gco-jobs` shared EFS volume (`gco-shared-storage`, mounted at `/mnt/gco`), where every job that mounts it can read them. Downloads `Qwen/Qwen2.5-0.5B-Instruct` by default (safetensors only) — change the `MODEL_ID` env var for other models. For gated models (Llama, Mistral), uncomment the `HF_TOKEN` env var.
 
 **Usage:**
 
 ```bash
 kubectl apply -f examples/model-download-job.yaml
-# After completion, deploy inference with the cached model:
-gco inference deploy my-model -i vllm/vllm-openai:v0.31.0 --model-path /models/opt-125m
+# After completion, jobs in gco-jobs read the weights from /mnt/gco/models/Qwen2.5-0.5B-Instruct
 ```
 
-**When to use:** Pre-caching model weights before inference deployment, avoiding repeated downloads across pods.
+Inference endpoints don't see this volume: `gco-inference` has its own EFS volume, because each PVC gets its own access point. To serve weights from an endpoint, upload them to the model registry and let each Region's init container sync them:
+
+```bash
+gco models upload ./Qwen2.5-0.5B-Instruct --name qwen-0-5b
+gco inference deploy my-model -i vllm/vllm-openai:v0.31.0 \
+  --model-source $(gco models uri qwen-0-5b) -e MODEL=/models/my-model
+```
+
+**When to use:** Pre-caching model weights for training and batch jobs, so each pod doesn't download them again.
 
 ---
 

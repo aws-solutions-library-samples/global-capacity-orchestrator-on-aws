@@ -1,24 +1,43 @@
 # NVIDIA Triton Inference Server Example
 #
 # Multi-framework model serving (TensorRT, ONNX, PyTorch, TensorFlow).
-# Deploys a Triton endpoint reachable through the authenticated API Gateway.
 #
 # Prerequisites:
 #   - GPU node
-#   - Model repository staged on EFS at /mnt/gco/models/triton-repo
+#   - A Triton model repository: one directory per model, each holding a
+#     config.pbtxt and numbered version directories
 #
-# Usage (recommended, multi-region aware):
+# Usage (recommended, multi-region aware). Upload the repository to the model
+# registry; each Region's init container syncs it to /models/<endpoint name>.
+# The image doesn't start the server on its own, so the --extra-args run
+# tritonserver against that directory:
+#   gco models upload ./triton-repo --name triton-repo
 #   gco inference deploy triton-models \
 #     -i nvcr.io/nvidia/tritonserver:26.09-py3 \
 #     --gpu-count 1 --replicas 2 \
-#     --model-path /mnt/gco/models/triton-repo \
-#     --health-path /v2/health/ready
+#     --health-path /v2/health/ready \
+#     --model-source $(gco models uri triton-repo) \
+#     --extra-args tritonserver \
+#     --extra-args=--model-repository=/models/triton-models
+#
+# Triton takes input tensors rather than a prompt, so name the model and send a
+# KServe v2 inference request:
+#   gco inference models triton-models
+#   gco inference invoke triton-models --path /v2/models/<model>/infer \
+#     -d '{"inputs": [{"name": "INPUT0", "shape": [3], "datatype": "FP32", "data": [1, 2, 3]}]}'
 #
 # Usage (single region, deploy this manifest directly):
 #   gco jobs submit-direct examples/inference-triton.yaml -r us-east-1
-#
-# Test the endpoint (SigV4-authenticated via API Gateway; see docs/INFERENCE.md):
-#   curl https://<API-Gateway-endpoint>/inference/triton-models/v2/models
+# This applies a plain Deployment and Service with the same name as the
+# managed endpoint above, so use one or the other in a Region. It serves the
+# triton-repo/ directory of the inference namespace's EFS volume (efs-claim);
+# while that is empty the server starts with no models. Nothing registers the
+# manifest with the inference monitor: `gco inference` doesn't manage it and
+# the /inference/ route doesn't reach it. Test it from your machine through the
+# cluster tunnel (`gco cluster tunnel --via-ssm auto` prints the kubectl flags
+# to use):
+#   kubectl port-forward -n gco-inference svc/triton-models 8000:80
+#   curl http://localhost:8000/v2/health/ready
 #
 # Docs: ../docs/INFERENCE.md
 
@@ -81,18 +100,30 @@ spec:
         - name: model-storage
           mountPath: /models
           subPath: triton-repo
+        # Triton listens only after it has loaded every model in the
+        # repository, so the startup probe holds liveness off for up to 20
+        # minutes while large models load (the inference monitor's budget for
+        # a managed endpoint).
+        startupProbe:
+          httpGet:
+            path: /v2/health/live
+            port: 8000
+          periodSeconds: 15
+          failureThreshold: 80
+          timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /v2/health/live
             port: 8000
-          initialDelaySeconds: 30
           periodSeconds: 10
+          failureThreshold: 6
+          timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /v2/health/ready
             port: 8000
-          initialDelaySeconds: 30
           periodSeconds: 10
+          timeoutSeconds: 5
       tolerations:
       - key: nvidia.com/gpu
         operator: Equal

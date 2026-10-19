@@ -1,59 +1,76 @@
 # vLLM Inference Endpoint Example
 #
-# OpenAI-compatible LLM serving with PagedAttention. Deploys a Llama 3.1 8B
-# endpoint reachable through the authenticated API Gateway.
+# OpenAI-compatible LLM serving with PagedAttention. Serves the ungated
+# Qwen2.5-1.5B-Instruct model, so no Hugging Face token is needed, and fits a
+# single 16 GB GPU (a T4 on g4dn is enough).
 #
 # Prerequisites:
-#   - GPU node with enough memory for the model (1x 24GB+ for Llama-3.1-8B)
-#   - HF_TOKEN env var if the model is gated
+#   - GPU node (the shipped GPU NodePools provide one on demand)
+#   - For a gated model such as meta-llama/Llama-3.1-8B-Instruct, a Hugging
+#     Face token. Don't pass it with -e: those values are stored in plain text
+#     in the endpoint record and the Deployment. Download the weights with your
+#     own token, `gco models upload` them, and deploy with --model-source
+#     (see docs/INFERENCE.md).
 #
-# Usage (recommended, multi-region aware):
-#   gco inference deploy vllm-llama3 \
+# Usage (recommended, multi-region aware). vLLM is started with
+# --model $(MODEL); each --extra-args value is one more server argument:
+#   gco inference deploy vllm-qwen \
 #     -i vllm/vllm-openai:v0.31.0 \
 #     --gpu-count 1 --replicas 1 \
-#     -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
-#     -e MAX_MODEL_LEN=4096
+#     -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \
+#     --extra-args=--max-model-len --extra-args 4096
+#   gco inference invoke vllm-qwen -p "Hello"
 #
 # Usage with autoscaling:
-#   gco inference deploy vllm-llama3 \
+#   gco inference deploy vllm-qwen \
 #     -i vllm/vllm-openai:v0.31.0 \
 #     --gpu-count 1 --replicas 2 \
 #     --min-replicas 1 --max-replicas 8 \
 #     --autoscale-metric cpu:70 --autoscale-metric memory:80 \
-#     -e MODEL=meta-llama/Llama-3.1-8B-Instruct
+#     -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
+#
+# A managed endpoint answers SigV4-signed requests at
+#   https://<ApiEndpoint>/inference/vllm-qwen/v1/completions
+# with a body such as
+#   {"model": "Qwen/Qwen2.5-1.5B-Instruct", "prompt": "Hello", "max_tokens": 50}
+# (see docs/API.md#invoking-an-endpoint).
 #
 # Usage (single region, deploy this manifest directly):
 #   gco jobs submit-direct examples/inference-vllm.yaml -r us-east-1
-#
-# Test the endpoint (SigV4-authenticated via API Gateway; see docs/INFERENCE.md):
-#   curl https://<API-Gateway-endpoint>/inference/vllm-llama3/v1/completions \
-#     -H "Content-Type: application/json" \
-#     -d '{"model": "meta-llama/Llama-3.1-8B-Instruct", "prompt": "Hello", "max_tokens": 50}'
+# This applies a plain Deployment and Service with the same name as the
+# managed endpoint above, so use one or the other in a Region. Nothing
+# registers the manifest with the inference monitor: `gco inference` doesn't
+# manage it and the /inference/ route doesn't reach it. Test it from your
+# machine through the cluster tunnel (`gco cluster tunnel --via-ssm auto`
+# prints the kubectl flags to use):
+#   kubectl port-forward -n gco-inference svc/vllm-qwen 8000:80
+#   curl http://localhost:8000/v1/completions -H "Content-Type: application/json" \
+#     -d '{"model": "Qwen/Qwen2.5-1.5B-Instruct", "prompt": "Hello", "max_tokens": 50}'
 #
 # Docs: ../docs/INFERENCE.md
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-llama3
+  name: vllm-qwen
   namespace: gco-inference
   labels:
     # No gco.io/type: inference here: on an object in gco-inference that label
     # marks it as the inference monitor's own, and only the monitor may set it
     # (09-tenant-write-fence.yaml). The pods below keep it, so they get the
     # model pods' network rules.
-    app: vllm-llama3
+    app: vllm-qwen
     project: gco
     framework: vllm
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: vllm-llama3
+      app: vllm-qwen
   template:
     metadata:
       labels:
-        app: vllm-llama3
+        app: vllm-qwen
         project: gco
         gco.io/type: inference
     spec:
@@ -69,8 +86,9 @@ spec:
         ports:
         - containerPort: 8000
         env:
+        # vLLM reads none of these itself: the args below pass them as flags.
         - name: MODEL
-          value: "meta-llama/Llama-3.1-8B-Instruct"
+          value: "Qwen/Qwen2.5-1.5B-Instruct"
         - name: MAX_MODEL_LEN
           value: "4096"
         - name: DTYPE
@@ -105,18 +123,31 @@ spec:
             cpu: "8"
             memory: "32Gi"
             nvidia.com/gpu: "1"
+        # vLLM answers /health only once the weights are downloaded and
+        # loaded. The startup probe holds liveness off for up to 20 minutes
+        # while that happens (the same budget the inference monitor gives a
+        # managed endpoint); without it the kubelet restarts the container
+        # mid-download and the download starts over.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 15
+          failureThreshold: 80
+          timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /health
             port: 8000
-          initialDelaySeconds: 120
           periodSeconds: 15
+          failureThreshold: 5
+          timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /health
             port: 8000
-          initialDelaySeconds: 60
           periodSeconds: 10
+          timeoutSeconds: 5
       tolerations:
       - key: nvidia.com/gpu
         operator: Equal
@@ -129,14 +160,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-llama3
+  name: vllm-qwen
   namespace: gco-inference
   labels:
-    app: vllm-llama3
+    app: vllm-qwen
     project: gco
 spec:
   selector:
-    app: vllm-llama3
+    app: vllm-qwen
   ports:
   - port: 80
     targetPort: 8000

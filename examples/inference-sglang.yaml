@@ -1,12 +1,15 @@
 # SGLang Inference Endpoint Example
 #
-# High-throughput LLM serving with RadixAttention. Deploys a Phi-3.5-mini
-# endpoint (ungated, no HF token required) reachable through the
-# authenticated API Gateway.
+# High-throughput LLM serving with RadixAttention. Serves the ungated
+# Phi-3.5-mini model, so no Hugging Face token is needed.
 #
 # Prerequisites:
-#   - GPU node
-#   - HF_TOKEN env var if switching to a gated model
+#   - GPU node with compute capability 8.0 or newer (A10G on g5 and later);
+#     SGLang's prebuilt kernels don't run on a T4
+#   - For a gated model, a Hugging Face token. Don't pass it with -e: those
+#     values are stored in plain text in the endpoint record and the
+#     Deployment. Upload the weights with `gco models upload` and deploy with
+#     --model-source instead (see docs/INFERENCE.md).
 #
 # Usage (recommended, multi-region aware). ``--framework sglang`` makes the
 # renderer supply the official launcher (python3 -m sglang.launch_server)
@@ -26,12 +29,25 @@
 #     --autoscale-metric cpu:70 --autoscale-metric memory:80 \
 #     -e MODEL=microsoft/Phi-3.5-mini-instruct
 #
+# Call it with:
+#   gco inference invoke sglang-phi3 -p "Hello"
+#
+# A managed endpoint also answers SigV4-signed OpenAI-compatible requests at
+#   https://<ApiEndpoint>/inference/sglang-phi3/v1/completions
+# with a body such as
+#   {"model": "microsoft/Phi-3.5-mini-instruct", "prompt": "Hello", "max_tokens": 50}
+# (see docs/API.md#invoking-an-endpoint).
+#
 # Usage (single region, deploy this manifest directly):
 #   gco jobs submit-direct examples/inference-sglang.yaml -r us-east-1
-#
-# Test the endpoint (SigV4-authenticated via API Gateway; OpenAI-compatible):
-#   curl https://<API-Gateway-endpoint>/inference/sglang-phi3/v1/completions \
-#     -H "Content-Type: application/json" \
+# This applies a plain Deployment and Service with the same name as the
+# managed endpoint above, so use one or the other in a Region. Nothing
+# registers the manifest with the inference monitor: `gco inference` doesn't
+# manage it and the /inference/ route doesn't reach it. Test it from your
+# machine through the cluster tunnel (`gco cluster tunnel --via-ssm auto`
+# prints the kubectl flags to use):
+#   kubectl port-forward -n gco-inference svc/sglang-phi3 30000:80
+#   curl http://localhost:30000/v1/completions -H "Content-Type: application/json" \
 #     -d '{"model": "microsoft/Phi-3.5-mini-instruct", "prompt": "Hello", "max_tokens": 50}'
 #
 # Docs: ../docs/INFERENCE.md
@@ -89,18 +105,33 @@ spec:
             cpu: "8"
             memory: "32Gi"
             nvidia.com/gpu: "1"
+        # SGLang answers /health with 503 until the weights are downloaded and
+        # loaded, so the startup probe holds liveness off for up to 20 minutes
+        # (the inference monitor's budget for a managed endpoint). Once
+        # serving, /health generates one token and polls for it at one-second
+        # steps, so it never answers in under a second: every probe states a
+        # 5-second timeout, because the kubelet's 1-second default fails each
+        # check and restarts a healthy server.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 30000
+          periodSeconds: 15
+          failureThreshold: 80
+          timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /health
             port: 30000
-          initialDelaySeconds: 300
           periodSeconds: 15
+          failureThreshold: 5
+          timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /health
             port: 30000
-          initialDelaySeconds: 120
           periodSeconds: 10
+          timeoutSeconds: 5
       tolerations:
       - key: nvidia.com/gpu
         operator: Equal

@@ -1,9 +1,12 @@
 # Model Download Job
 #
-# Downloads model weights from HuggingFace to shared EFS so inference
-# endpoints can mount them instantly. Defaults to facebook/opt-125m
-# (small, public, no token needed) — change MODEL_ID for other models,
-# or uncomment HF_TOKEN for gated models.
+# Downloads model weights from Hugging Face to the gco-jobs shared EFS volume,
+# where training and batch jobs can read them without downloading again.
+# Defaults to Qwen/Qwen2.5-0.5B-Instruct (about 1 GB, public, no token
+# needed) — change MODEL_ID for other models, or uncomment HF_TOKEN for gated
+# models. The download keeps the safetensors weights and skips the duplicate
+# .bin and the TensorFlow/Flax copies some repositories also carry, so pick a
+# model that ships safetensors.
 #
 # Prerequisites:
 #   - Shared EFS PVC (gco-shared-storage, default)
@@ -11,10 +14,17 @@
 #
 # Usage:
 #   kubectl apply -f examples/model-download-job.yaml
-#   # After completion, deploy inference with the cached model:
+#   # After completion, every job in gco-jobs that mounts gco-shared-storage
+#   # reads the weights from /mnt/gco/models/<model name>.
+#
+# Inference endpoints don't see this volume: gco-inference has its own EFS
+# volume (each PVC gets its own access point). To serve the weights, upload
+# them to the model registry and let each Region's init container sync them:
+#   gco models upload ./Qwen2.5-0.5B-Instruct --name qwen-0-5b
 #   gco inference deploy my-model \
 #     -i vllm/vllm-openai:v0.31.0 \
-#     --model-path /models/opt-125m
+#     --model-source $(gco models uri qwen-0-5b) \
+#     -e MODEL=/models/my-model
 #
 # Notes:
 #   - To pull from S3 instead of HuggingFace, swap the command for:
@@ -50,7 +60,7 @@ spec:
           sys.path.insert(0, "/tmp/pylib")
           from huggingface_hub import snapshot_download
 
-          model_id = os.environ.get("MODEL_ID", "facebook/opt-125m")
+          model_id = os.environ.get("MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")
           model_name = model_id.split("/")[-1]
           local_dir = f"/mnt/gco/models/{model_name}"
 
@@ -58,7 +68,7 @@ spec:
           snapshot_download(
               repo_id=model_id,
               local_dir=local_dir,
-              ignore_patterns=["*.gguf", "*.ggml", "*.bin"],
+              ignore_patterns=["*.gguf", "*.ggml", "*.bin", "*.h5", "*.msgpack"],
           )
           print(f"Download complete! Model saved to {local_dir}")
 
@@ -82,7 +92,7 @@ spec:
             memory: "4Gi"
         env:
         - name: MODEL_ID
-          value: "facebook/opt-125m"
+          value: "Qwen/Qwen2.5-0.5B-Instruct"
         - name: HF_HOME
           value: "/tmp/hf_cache"
         # Uncomment for gated models (Llama, Mistral, etc.)
