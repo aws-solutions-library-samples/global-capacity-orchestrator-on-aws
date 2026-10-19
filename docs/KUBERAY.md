@@ -40,7 +40,7 @@ The operator watches all namespaces for Ray custom resources.
 
 ### Version Compatibility
 
-KubeRay 1.7.x supports current Ray releases. GCO's examples use Ray 2.58.0; keep
+KubeRay 1.7.x supports current Ray releases. GCO's examples use Ray 2.59.0; keep
 `spec.rayVersion` and every head/worker image tag identical when upgrading.
 
 See the [KubeRay upgrade guide](https://docs.ray.io/en/latest/cluster/kubernetes/user-guides/upgrade-guide.html) for compatibility details and known-bad Ray release ranges.
@@ -58,7 +58,7 @@ metadata:
   name: my-cluster
   namespace: gco-jobs
 spec:
-  rayVersion: '2.58.0'
+  rayVersion: '2.59.0'
   headGroupSpec:
     rayStartParams:
       dashboard-host: '0.0.0.0'
@@ -150,14 +150,14 @@ The operator follows a RayJob through the head pod's dashboard API (port 8265) f
 
 ### RayService
 
-A long-running serving deployment with automatic scaling and zero-downtime upgrades:
+A long-running serving deployment with automatic scaling and zero-downtime upgrades. Run it in `gco-jobs` like the other Ray resources: `gco-inference` limits every pod's egress to DNS, HTTPS and the node's Pod Identity Agent, so Ray workers there can't reach their head. A RayService isn't a GCO inference endpoint either: `gco inference` doesn't manage it and the authenticated `/inference/` route doesn't reach it.
 
 ```yaml
 apiVersion: ray.io/v1
 kind: RayService
 metadata:
   name: my-model
-  namespace: gco-inference
+  namespace: gco-jobs
 spec:
   serveConfigV2: |
     applications:
@@ -287,7 +287,7 @@ securityContext:
     drop: ["ALL"]
 ```
 
-GCO's `gco-jobs` network policies allow every pod in the namespace to reach every other pod on any port and protocol (`allow-same-namespace` in `lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`), so Ray's dynamically allocated worker and object-manager ports need no per-cluster rule and renaming the cluster needs no policy change. Ingress from other namespaces stays denied by default; egress is DNS, HTTPS, and the in-VPC ranges from `vpc_endpoint_cidrs`. See [Network Security](ARCHITECTURE.md#network-security).
+GCO's `gco-jobs` network policies allow every pod in the namespace to reach every other pod on any port and protocol (`allow-same-namespace` in `lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`), so Ray's dynamically allocated worker and object-manager ports need no per-cluster rule and renaming the cluster needs no policy change. Ingress from other namespaces stays denied by default; egress is DNS, HTTPS, the node's EKS Pod Identity Agent, and the in-VPC ranges from `vpc_endpoint_cidrs`. See [Network Security](ARCHITECTURE.md#network-security).
 
 ## Customization
 
@@ -297,7 +297,7 @@ Chart versions and Helm values are pinned in [`lambda/helm-installer/charts.yaml
 { "context": { "helm": { "kuberay": { "enabled": false } } } }
 ```
 
-Chart values such as `watchNamespace` (empty watches every namespace; set `"gco-jobs"` to restrict the operator) live under `kuberay-operator` in `charts.yaml`.
+Chart values such as `watchNamespace` live under `kuberay-operator` in `charts.yaml`. The chart takes a list of namespaces: leave it empty to watch every namespace, or set `watchNamespace: ["gco-jobs"]` to restrict the operator to the jobs namespace.
 
 ## Cleanup
 

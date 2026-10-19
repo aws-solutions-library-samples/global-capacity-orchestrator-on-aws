@@ -2696,9 +2696,9 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--region` | `-r` | Target region(s), repeatable (default: all deployed regions) |
 | `--replicas` | | Replicas per region (default: 1) |
 | `--gpu-count` | | GPUs per replica (default: 1) |
-| `--gpu-type` | | GPU instance type hint (e.g. g5.xlarge) |
+| `--gpu-type` | | Preferred instance type (e.g. g5.xlarge), rendered as a preferred node affinity on `node.kubernetes.io/instance-type`. A hint, not a requirement: Karpenter launches another type when it can't get this one |
 | `--port` | | Container port (default: 8000; SGLang's documented default is 30000). 8443 is reserved for the pod's TLS sidecar, which is the only port the endpoint's Service publishes ([Model Endpoint TLS](INFERENCE.md#model-endpoint-tls)) |
-| `--model-path` | | EFS path for model weights |
+| `--model-path` | | Mount the inference namespace's EFS volume (`efs-claim`) at `/models` without syncing anything; `--model-source` mounts it too. The volume is separate from the `gco-shared-storage` volume jobs use in `gco-jobs` |
 | `--model-source` | | S3 URI for model weights (auto-synced via init container) |
 | `--health-path` | | Health check endpoint path (default: /health) |
 | `--env` | `-e` | Environment variable (KEY=VALUE), repeatable |
@@ -2710,7 +2710,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--capacity-type` | | Node capacity type: `on-demand` (default) or `spot` |
 | `--accelerator` | | Accelerator type: `nvidia` for GPU instances (default), `neuron` for [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/)/Inferentia |
 | `--node-selector` | | Node selector (key=value), repeatable. E.g. `eks.amazonaws.com/instance-family=inf2` |
-| `--extra-args` | | Extra arguments passed to the container (e.g. `--kv-transfer-config {...}`). Repeatable |
+| `--extra-args` | | One container argument per value, repeatable (e.g. `--extra-args=--max-model-len --extra-args 4096`). For vLLM the renderer adds `--model $(MODEL)` when `-e MODEL=...` is set, unless these arguments already name the model (`--model`, a positional model tag, or `--config`) |
 | `--mooncake-mode` | | Mooncake serving mode: `disaggregated` (prefill/decode split), `store` (shared KV-cache), or `both` |
 | `--prefill-replicas` | | Number of prefill replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
 | `--decode-replicas` | | Number of decode replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
@@ -2881,7 +2881,7 @@ gco inference update-image my-llm -i vllm/vllm-openai:v0.31.0
 
 #### `gco inference invoke`
 
-Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, SGLang, Triton) and builds the appropriate request body: OpenAI-compatible `/v1/completions` for vLLM and unknown images, SGLang's native `/generate` with `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`, and Triton's `/v2/models`.
+Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, SGLang, Triton) and builds the appropriate request body: OpenAI-compatible `/v1/completions` for vLLM and unknown images (a prompt sent to a `--path` ending in `/chat/completions` becomes one user message), and SGLang's native `/generate` with `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`. The OpenAI `model` field is the name the server answers to: `--served-model-name` from the deploy's `--extra-args`, else the model they name, else `MODEL`, else (for vLLM) the first entry of `/v1/models`. Triton takes input tensors rather than a prompt, so a Triton endpoint needs `--path /v2/models/<model>/infer` and `--data` with a KServe v2 inference request; without them, or with a prompt for a `/v2/` path, the command exits with that hint.
 
 ```bash
 gco inference invoke ENDPOINT_NAME [OPTIONS]
@@ -2925,8 +2925,12 @@ gco inference invoke my-llm -p "Hello" --stream
 # Raw JSON can opt in automatically when the explicit flag is omitted
 gco inference invoke my-llm -d '{"prompt": "Hello", "stream": true}'
 
-# Explicit API path
+# Explicit API path: the prompt is sent as a single chat message
 gco inference invoke my-llm -p "Hello" --path /v1/chat/completions
+
+# Triton: name the model and send its input tensors
+gco inference invoke triton-models --path /v2/models/identity/infer \
+  -d '{"inputs": [{"name": "INPUT0", "shape": [3], "datatype": "FP32", "data": [1, 2, 3]}]}'
 ```
 
 #### `gco inference health`
@@ -2959,7 +2963,7 @@ gco inference health my-llm -r us-east-1
 
 #### `gco inference models`
 
-Read the loaded model identity through the authenticated endpoint route. vLLM uses the OpenAI-compatible `/v1/models`; SGLang uses the read-only `/server_info` contract, from which only the identity fields (`model_path`, `served_model_name`, `revision`, `tokenizer_path`, `version`) are printed so the exact model and revision the launcher resolved are visible without the scheduler state that document also carries. The persisted `--framework` from deploy is used by default; a record persisted under the retired `tgi` contract is refused as unsupported.
+Read the loaded model identity through the authenticated endpoint route. vLLM uses the OpenAI-compatible `/v1/models`; SGLang uses the read-only `/server_info` contract, from which only the identity fields (`model_path`, `served_model_name`, `revision`, `tokenizer_path`, `version`) are printed so the exact model and revision the launcher resolved are visible without the scheduler state that document also carries. A Triton image gets `/v2/models/stats`, which names every loaded model and version (Triton has no model list of its own), and any other image the OpenAI-compatible `/v1/models`. The persisted `--framework` from deploy is used by default; a record persisted under the retired `tgi` contract is refused as unsupported.
 
 ```bash
 gco inference models ENDPOINT_NAME [OPTIONS]
@@ -4293,7 +4297,7 @@ Manage [Karpenter](https://karpenter.sh/) NodePools.
 | [`gco nodepools describe`](#gco-nodepools-describe) | Describe a specific NodePool. |
 | [`gco nodepools create-odcr`](#gco-nodepools-create-odcr) | Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). |
 | [`gco nodepools create-capacity-block`](#gco-nodepools-create-capacity-block) | Generate nodepool manifest for a purchased Capacity Block. |
-| [`gco nodepools delete`](#gco-nodepools-delete) | Delete a NodePool and its paired EC2NodeClass. |
+| [`gco nodepools delete`](#gco-nodepools-delete) | Delete a NodePool and its paired NodeClass. |
 
 </details>
 
@@ -4329,7 +4333,16 @@ gco nodepools describe NODEPOOL_NAME [OPTIONS]
 
 #### `gco nodepools create-odcr`
 
-Generate nodepool manifest for ODCR (On-Demand Capacity Reservation).
+Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). The manifest holds two objects: an [EKS Auto Mode `NodeClass`](https://docs.aws.amazon.com/eks/latest/userguide/create-node-class.html) named `<name>-nodeclass` that binds the reservation through `capacityReservationSelectorTerms`, and a `NodePool` that launches reserved capacity (`karpenter.sh/capacity-type: reserved`) through it. GCO clusters run EKS Auto Mode, so the NodeClass is Auto Mode's `eks.amazonaws.com/v1` kind rather than self-managed Karpenter's `EC2NodeClass`. It reuses the cluster's own node role, subnets and cluster security group, which the command reads from the cluster with `eks:DescribeCluster`, so nodes join the cluster the same way the built-in pools' nodes do. See [Control deployment of workloads into Capacity Reservations with EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html).
+
+Nothing is applied: the command prints the manifest or writes it to `--output-file`. The EKS endpoint is private by default, so apply it through [`gco cluster tunnel`](#gco-cluster-tunnel), which holds the tunnel open and prints the `kubectl` flags to use:
+
+```bash
+gco cluster tunnel --via-ssm auto                  # keep this running
+kubectl <printed flags> apply -f nodepool.yaml     # in another shell
+```
+
+Pods reach the pool with `nodeSelector: {karpenter.sh/nodepool: <name>}`, plus a toleration for the pool's taint when it has one: GPU instance types get `nvidia.com/gpu`, Trainium and Inferentia types get `aws.amazon.com/neuron`, and `--efa` adds `vpc.amazonaws.com/efa` alongside either. Nodes launched into the reservation carry the `eks.amazonaws.com/capacity-reservation-id` label. Once any NodeClass in a cluster selects capacity reservations, EKS Auto Mode stops launching into open ODCRs on its own for every NodeClass in that cluster.
 
 ```bash
 gco nodepools create-odcr [OPTIONS]
@@ -4339,14 +4352,15 @@ gco nodepools create-odcr [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--name` | `-n` | NodePool name (required) |
+| `--name` | `-n` | NodePool name (required); the NodeClass is `<name>-nodeclass` |
 | `--region` | `-r` | AWS region (required) |
-| `--capacity-reservation-id` | `-c` | EC2 Capacity Reservation ID (`cr-xxx`) or ODCR group ARN (required) |
-| `--instance-type` | `-i` | Instance type (repeatable) |
+| `--capacity-reservation-id` | `-c` | EC2 Capacity Reservation ID (`cr-xxx`) (required) |
+| `--instance-type` | `-i` | Instance type (repeatable). Without one the pool takes any `amd64` type the reservation offers |
 | `--max-nodes` | | Maximum nodes in the pool (default: 100) |
 | `--fallback-on-demand` | | Fall back to on-demand capacity when the reservation is exhausted |
 | `--efa` | | Enable EFA support (adds the EFA taint and labels for p4d/p5 instances) |
-| `--output-file` | `-o` | Output manifest to file instead of applying |
+| `--cluster` | | EKS cluster whose node role, subnets and security group the NodeClass uses (default: `<project_name>-<region>`) |
+| `--output-file` | `-o` | Write the manifest to this file instead of printing it |
 
 **Example:**
 
@@ -4361,7 +4375,7 @@ gco nodepools create-odcr \
 
 #### `gco nodepools create-capacity-block`
 
-Generate a Karpenter NodePool manifest for a purchased Capacity Block — the Capacity Block counterpart to [`gco nodepools create-odcr`](#gco-nodepools-create-odcr). Purchasing a Capacity Block (`gco capacity reserve`) yields an EC2 Capacity Reservation ID (`cr-xxx`), which the generated NodePool consumes via `capacityReservationSelectorTerms`. Because a block is prepaid for a fixed term, the NodePool defaults to holding the capacity (`WhenEmpty` consolidation) rather than consolidating it away early.
+Generate an EKS Auto Mode NodeClass and NodePool manifest for a purchased Capacity Block — the Capacity Block counterpart to [`gco nodepools create-odcr`](#gco-nodepools-create-odcr), with the same NodeClass, `--cluster` lookup, apply and targeting steps. Purchasing a Capacity Block (`gco capacity reserve`) yields an EC2 Capacity Reservation ID (`cr-xxx`), which the generated NodeClass binds through `capacityReservationSelectorTerms`; Auto Mode never launches into a Capacity Block without such a NodeClass. Because a block is prepaid for a fixed term, the NodePool defaults to holding the capacity (`WhenEmpty` consolidation) rather than consolidating it away early.
 
 ```bash
 gco nodepools create-capacity-block [OPTIONS]
@@ -4371,14 +4385,15 @@ gco nodepools create-capacity-block [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--name` | `-n` | NodePool name (required) |
+| `--name` | `-n` | NodePool name (required); the NodeClass is `<name>-nodeclass` |
 | `--region` | `-r` | AWS region (required) |
 | `--capacity-reservation-id` | `-c` | Capacity Reservation ID (`cr-xxx`) of the purchased Capacity Block (required) |
 | `--instance-type` | `-i` | Instance type (repeatable) |
 | `--max-nodes` | | Maximum nodes in the pool (default: 100) |
 | `--fallback-on-demand` | | Fall back to on-demand when the block is exhausted/expired |
 | `--efa` | | Enable EFA support (adds EFA taint and labels) |
-| `--output-file` | `-o` | Output manifest to file instead of applying |
+| `--cluster` | | EKS cluster whose node role, subnets and security group the NodeClass uses (default: `<project_name>-<region>`) |
+| `--output-file` | `-o` | Write the manifest to this file instead of printing it |
 
 **Example:**
 
@@ -4393,7 +4408,7 @@ gco nodepools create-capacity-block \
 
 #### `gco nodepools delete`
 
-Delete a NodePool and its paired `<name>-nodeclass` EC2NodeClass. Karpenter drains and terminates any nodes the NodePool provisioned. Cannot be undone.
+Delete a NodePool and its paired `<name>-nodeclass` NodeClass. EKS Auto Mode drains and terminates any nodes the NodePool provisioned. Cannot be undone.
 
 ```bash
 gco nodepools delete NODEPOOL_NAME [OPTIONS]

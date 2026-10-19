@@ -264,22 +264,37 @@ gco models delete llama3-8b -y
 When you deploy an endpoint with `--model-source`, the inference_monitor adds an init container to the Deployment that:
 
 1. Runs before the inference container starts
-2. Uses `aws s3 sync` to download model weights from S3 to a shared EFS volume
-3. Mounts the EFS volume at the model path inside the inference container
+2. Uses `aws s3 sync` to copy the weights from S3 to `/models/<endpoint name>` on the inference namespace's EFS volume (the `efs-claim` PVC in `gco-inference`)
+3. Shares that volume with the inference container, mounted at `/models`, so `-e MODEL=/models/<endpoint name>` (or the server's own model flag) points at the weights
 
-This happens automatically in every target region, so model weights are always local to the cluster.
+This happens automatically in every target region, so model weights are always local to the cluster. The inference volume is separate from the `gco-shared-storage` volume that jobs mount in `gco-jobs` (each PVC gets its own EFS access point), so weights a job writes there aren't visible to an endpoint. `--model-path` mounts the same `/models` volume without syncing anything.
 
 ## Deploying Inference Endpoints
 
 ### Basic Deployment
 
 ```bash
-# Deploy vLLM serving a model (downloads from HuggingFace at startup)
+# Deploy vLLM serving a model (downloads from Hugging Face at startup)
 gco inference deploy my-llm \
   -i vllm/vllm-openai:v0.31.0 \
   --gpu-count 1 \
-  -e MODEL=meta-llama/Llama-3.1-8B-Instruct
+  -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```
+
+`MODEL` names the model to serve: a Hugging Face model ID, or a path such as
+`/models/<endpoint>` for weights synced from S3. vLLM doesn't read the variable
+itself, so for a vLLM endpoint the renderer starts the server with
+`--model $(MODEL)` (the kubelet expands it at container start) unless the
+`--extra-args` already name the model with `--model`, a positional model tag,
+or `--config`. Other vLLM settings are server flags too: pass each token as one
+`--extra-args` value, for example `--extra-args=--max-model-len --extra-args
+4096`. An environment variable such as `MAX_MODEL_LEN` has no effect.
+
+The examples on this page use ungated models. A gated model such as
+`meta-llama/Llama-3.1-8B-Instruct` needs a Hugging Face token to download, and
+values passed with `-e` are stored in plain text in the endpoint record and the
+Deployment. Download gated weights with your own token instead, upload them
+with `gco models upload`, and deploy them with `--model-source` as shown next.
 
 ### Deployment with S3 Model Weights
 
@@ -303,9 +318,11 @@ gco inference deploy ENDPOINT_NAME \
   --region REGION                  # Target region(s), repeatable (default: all)
   --replicas N                     # Replicas per region (default: 1)
   --gpu-count N                    # GPUs per replica (default: 1)
-  --gpu-type TYPE                  # GPU instance type hint (e.g. g5.xlarge)
+  --gpu-type TYPE                  # Preferred instance type (e.g. g5.xlarge); a hint, not a requirement
+  --framework vllm|sglang          # Strict runtime adapter (see Supported Frameworks)
+  --extra-args TOKEN               # One server argument per value, repeatable
   --port PORT                      # Container port (default: 8000; not 8443, the TLS sidecar's)
-  --model-path PATH                # EFS path for model weights
+  --model-path PATH                # Mount the inference EFS volume at /models (no sync)
   --model-source S3_URI            # S3 URI for auto-sync via init container
   --health-path PATH               # Health check endpoint (default: /health)
   --env KEY=VALUE                  # Environment variable, repeatable
@@ -374,8 +391,16 @@ GCO works with any containerized inference server. These frameworks have example
 the runtimes with a strict adapter contract: the persisted framework selects
 the renderer arguments and probes, the request body `gco inference invoke`
 builds, and the model-identity document `gco inference models` reads. Triton
-and any other OpenAI-compatible server deploy without `--framework`; the CLI
-then falls back to OpenAI-compatible requests.
+and any other server deploy without `--framework`. The CLI recognises a Triton
+image and speaks its KServe v2 API (see [Triton Example](#triton-example));
+anything else gets OpenAI-compatible requests.
+
+Every model container gets a startup probe on its health path that holds
+liveness off for up to 20 minutes (15-second period, 80 attempts). A model
+server answers its health path only once the weights are downloaded and
+loaded, which for a multi-gigabyte checkpoint takes longer than the liveness
+budget; without the startup probe the kubelet would restart the container
+mid-download, and every restart starts the download again.
 
 PyTorch's TorchServe is not listed any more either: its project notice states
 it is no longer actively maintained, with no planned updates, bug fixes, new
@@ -393,12 +418,18 @@ has to be redeployed with `--framework sglang` or `vllm`.
 ### vLLM Example
 
 ```bash
-gco inference deploy vllm-llama3 \
+gco inference deploy vllm-qwen \
   -i vllm/vllm-openai:v0.31.0 \
   --gpu-count 1 \
-  -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
-  -e MAX_MODEL_LEN=4096
+  -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \
+  --extra-args=--max-model-len --extra-args 4096
 ```
+
+The renderer starts vLLM with `--model $(MODEL)` (see
+[Basic Deployment](#basic-deployment)). `gco inference invoke` sends the model
+name the server answers to: `--served-model-name` when the arguments set it,
+otherwise the model the arguments or `MODEL` name, otherwise the first entry of
+`/v1/models`.
 
 ### SGLang Example
 
@@ -451,12 +482,32 @@ placement for `--framework vllm`.
 ### Triton Example
 
 ```bash
+# Upload a Triton model repository (one directory per model, each with a
+# config.pbtxt and numbered version directories)
+gco models upload ./triton-repo --name triton-repo
+
 gco inference deploy triton-models \
   -i nvcr.io/nvidia/tritonserver:26.09-py3 \
   --port 8000 \
   --health-path /v2/health/ready \
   --gpu-count 1 \
-  --model-source s3://your-bucket/models/triton-repo
+  --model-source $(gco models uri triton-repo) \
+  --extra-args tritonserver \
+  --extra-args=--model-repository=/models/triton-models
+```
+
+The Triton image doesn't start the server on its own, so the `--extra-args`
+run `tritonserver` and point it at the repository the init container synced to
+`/models/<endpoint name>`. Triton serves models by name and takes input
+tensors rather than a prompt, so `gco inference invoke` needs the model's path
+and a KServe v2 inference request (see Triton's
+[HTTP/REST and GRPC Protocol](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/protocol/README.html)),
+and refuses a prompt with that hint:
+
+```bash
+gco inference models triton-models   # the loaded models, from /v2/models/stats
+gco inference invoke triton-models --path /v2/models/<model>/infer \
+  -d '{"inputs": [{"name": "INPUT0", "shape": [3], "datatype": "FP32", "data": [1, 2, 3]}]}'
 ```
 
 ## Disaggregated Inference (Mooncake)
@@ -471,7 +522,7 @@ gco inference deploy my-llm \
   --gpu-count 1 \
   --prefill-replicas 2 \
   --decode-replicas 4 \
-  -e MODEL=meta-llama/Llama-3.1-8B-Instruct
+  -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 When `--mooncake-mode disaggregated` is set:
@@ -826,7 +877,7 @@ gco inference invoke my-llm -p "Explain Kubernetes" --max-tokens 200
 gco inference invoke my-llm -p "Hello" --path /v1/completions
 
 # Raw JSON body for full control
-gco inference invoke my-llm -d '{"model": "meta-llama/Llama-3.1-8B-Instruct", "prompt": "Hello", "max_tokens": 50}'
+gco inference invoke my-llm -d '{"model": "Qwen/Qwen2.5-1.5B-Instruct", "prompt": "Hello", "max_tokens": 50}'
 
 # Stream chunks to stdout as the model emits them
 gco inference invoke my-llm -p "Explain Kubernetes" --stream
@@ -839,7 +890,7 @@ The CLI resolves the serving framework from the persisted `--framework` (falling
 
 - **vLLM** → `/v1/completions` (OpenAI-compatible; `--stream` sets `"stream": true`)
 - **SGLang** → `/generate` (native API: `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`; `--stream` sets `"stream": true` on the same path)
-- **Triton** → `/v2/models` (Triton HTTP API)
+- **Triton** → no default: pass `--path /v2/models/<model>/infer` and `--data` with a KServe v2 inference request (see [Triton Example](#triton-example)); a prompt is refused
 
 `--no-stream` explicitly forces buffered output, including when raw JSON contains
 `"stream": true`. Response streaming can continue for up to the 15-minute
@@ -876,13 +927,15 @@ Returns HTTP status and round-trip latency in milliseconds.
 
 ### Model Introspection
 
-Query which models are loaded on an endpoint (OpenAI-compatible servers):
+Query which models are loaded on an endpoint:
 
 ```bash
 gco inference models my-llm
 ```
 
-Returns the `/v1/models` response including model IDs, context lengths, and metadata.
+vLLM and other OpenAI-compatible servers return their `/v1/models` response
+(model IDs, context lengths and metadata), SGLang reports its launcher's model
+identity, and Triton returns `/v2/models/stats` for every loaded model.
 
 ### MCP Tools for AI Agents
 
@@ -893,7 +946,7 @@ The MCP server exposes four inference interaction tools so AI agents can use you
 | `invoke_inference` | Single-turn text completion with auto framework detection |
 | `chat_inference` | Multi-turn chat with OpenAI-compatible messages format |
 | `inference_health` | Health check with latency reporting |
-| `list_endpoint_models` | Discover loaded models via `/v1/models` |
+| `list_endpoint_models` | Discover loaded models (`/v1/models`; SGLang's model identity; Triton's `/v2/models/stats`) |
 
 Both `invoke_inference` and `chat_inference` currently return buffered
 strings because the MCP runner does not expose an incremental output channel.

@@ -108,10 +108,11 @@ ready-to-submit manifest in
 gco inference deploy my-llm \
   -i vllm/vllm-openai:v0.31.0 \
   --gpu-count 1 \
-  -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
+  -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \
   -r us-east-1
 
 gco inference status my-llm      # per-Region sync state
+gco inference invoke my-llm -p "Hello"
 gco inference list
 gco inference delete my-llm -y   # when you are done
 ```

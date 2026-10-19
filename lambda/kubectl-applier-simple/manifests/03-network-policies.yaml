@@ -356,8 +356,9 @@ spec:
 # ingress from other namespaces, so a RayJob there would be created and never
 # observed to finish. Admit the operator namespace to head pods on the
 # dashboard port only; RayCluster itself needs nothing (the operator manages
-# it through the Kubernetes API) and gco-inference isolates only model pods,
-# so a RayService head there is not affected.
+# it through the Kubernetes API). Ray belongs in gco-jobs, RayService
+# included: every gco-inference pod's egress is limited to DNS, HTTPS and the
+# Pod Identity Agent, so Ray workers there could not reach their head.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

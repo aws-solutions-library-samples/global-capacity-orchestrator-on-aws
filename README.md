@@ -49,7 +49,7 @@
 
 Running accelerated workloads across Regions means finding capacity, standing up clusters, wiring authentication, handling failover, and keeping job outputs after the pods exit. GCO packages all of it as one platform you deploy with a single command:
 
-- **Capacity-aware placement.** `gco capacity` reads spot placement scores, spot price history, On-Demand Capacity Reservations and Capacity Blocks for ML, and auto-Region submission builds on them.
+- **Capacity-aware placement.** `gco capacity` reads spot placement scores, spot price history, On-Demand Capacity Reservations and Capacity Blocks for ML, and auto-Region submission builds on them. For guaranteed capacity it buys a Capacity Block or creates an ODCR, and `gco nodepools` generates the NodePool that runs your pods on it.
 - **One authenticated front door.** A SigV4 [API](docs/API.md), the `gco` [CLI](docs/CLI.md) and an [MCP server](gco_mcp/README.md) reach every Region with the AWS credentials you already have, with no kubeconfig distribution.
 - **Accelerators on demand.** EKS Auto Mode NodePools for NVIDIA GPU (x86 and Arm), EFA, Trainium, Inferentia and CPU launch nodes only when a workload needs them.
 - **Inference in every Region.** One command deploys [vLLM](https://docs.vllm.ai/en/latest/), [SGLang](https://docs.sglang.ai/) or [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) endpoints everywhere, with automatic failover through [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) in the commercial `aws` partition.
@@ -116,9 +116,10 @@ gco jobs logs hello-gco -n gco-jobs -r us-east-1                    # read its o
 Serve a model from every Region with one command:
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1   # OpenAI-compatible endpoint
-gco inference status my-llm                                             # rollout state in every Region
-gco inference scale my-llm --replicas 3                                 # scale it out
+gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
+gco inference status my-llm                # rollout state in every Region
+gco inference invoke my-llm -p "Hello"     # an OpenAI-compatible completion
+gco inference scale my-llm --replicas 3    # scale it out
 ```
 
 ### Let an agent drive
@@ -223,23 +224,25 @@ See [Templates](docs/CLI.md#templates-commands), [DAG](docs/CLI.md#dag-commands)
 <details>
 <summary><b>Every way to host inference</b>: a managed endpoint in every Region, Mooncake prefill/decode, a canary, an agent, a manifest in one Region, or a batch job</summary>
 
-`gco inference deploy` is the main path. It records the endpoint in a global DynamoDB table, and the inference monitor in each target Region creates the Deployment, Service and optional autoscaler, keeps them reconciled, and reports their state. [vLLM](https://docs.vllm.ai/en/latest/) and [SGLang](https://docs.sglang.ai/) get a strict adapter through `--framework`; [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) and any other containerized server deploy without one:
+`gco inference deploy` is the main path. It records the endpoint in a global DynamoDB table, and the inference monitor in each target Region creates the Deployment, Service and optional autoscaler, keeps them reconciled, and reports their state. [vLLM](https://docs.vllm.ai/en/latest/) and [SGLang](https://docs.sglang.ai/) get a strict adapter through `--framework`; [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) and any other containerized server deploy without one. The Triton image doesn't start the server on its own, so its `--extra-args` run `tritonserver` against the model repository uploaded to the model registry:
 
 ```bash
-gco inference deploy vllm-llama3 -i vllm/vllm-openai:v0.31.0 --gpu-count 1 -e MODEL=meta-llama/Llama-3.1-8B-Instruct -e MAX_MODEL_LEN=4096
+gco inference deploy vllm-qwen -i vllm/vllm-openai:v0.31.0 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 gco inference deploy sglang-phi3 -i lmsysorg/sglang:v0.5.21 --framework sglang --port 30000 --gpu-count 1 -e MODEL=microsoft/Phi-3.5-mini-instruct
-gco inference deploy triton-models -i nvcr.io/nvidia/tritonserver:26.09-py3 --health-path /v2/health/ready --gpu-count 1 --model-source s3://your-bucket/models/triton-repo
+gco models upload ./triton-repo --name triton-repo
+gco inference deploy triton-models -i nvcr.io/nvidia/tritonserver:26.09-py3 --health-path /v2/health/ready --gpu-count 1 \
+  --model-source $(gco models uri triton-repo) --extra-args tritonserver --extra-args=--model-repository=/models/triton-models
 ```
 
-- **Placement and scaling**: every deployed Region by default, or the ones you name with `-r`. `--accelerator neuron` targets Trainium and Inferentia, `--capacity-type spot` runs on Spot capacity, and `--min-replicas`, `--max-replicas` and `--autoscale-metric` scale on CPU or memory through the HPA, or on GPU utilization through [KEDA](https://keda.sh/).
-- **Model weights**: downloaded from Hugging Face at startup (`-e MODEL=...`), synced to every Region from the S3 model registry (`gco models upload ./weights --name llama3-8b`, then `--model-source $(gco models uri llama3-8b)`), or read from EFS (`--model-path`).
+- **Placement and scaling**: every deployed Region by default, or the ones you name with `-r`. `--gpu-type g5.xlarge` prefers an instance type, `--accelerator neuron` targets Trainium and Inferentia, `--capacity-type spot` runs on Spot capacity, and `--min-replicas`, `--max-replicas` and `--autoscale-metric` scale on CPU or memory through the HPA, or on GPU utilization through [KEDA](https://keda.sh/).
+- **Model weights**: downloaded from Hugging Face at startup (`-e MODEL=<model id>`, which vLLM receives as `--model`), or synced to every Region from the S3 model registry (`gco models upload ./weights --name qwen`, then `--model-source $(gco models uri qwen) -e MODEL=/models/<endpoint name>`). These examples use ungated models; for a gated one, upload the weights rather than passing a Hugging Face token with `-e`, which is stored in plain text. Other server flags go in `--extra-args`, one token each (`--extra-args=--max-model-len --extra-args 4096`).
 - **Mooncake**: `--mooncake-mode disaggregated` splits prefill and decode into separately sized roles (`--prefill-replicas`, `--decode-replicas`, and later `gco inference set-topology`). `store` adds a shared KV-cache store in each Region, which `gco inference configure-store --cold-tier` extends with an S3 cold tier and `gco inference populate-kv` pre-warms, and `both` combines the two. See [Disaggregated Inference](docs/INFERENCE.md#disaggregated-inference-mooncake).
 - **New versions**: `gco inference canary <name> -i <image> --weight 10` sends 10% of requests to the new image until you `promote` or `rollback` it, and `update-image` replaces the image outright.
 - **From an agent**: the [GCO MCP server](gco_mcp/README.md#inference-endpoints) has tools to deploy (Mooncake included), scale, canary and call endpoints, and `gco autopilot` drives them from a prompt.
-- **One Region, by hand**: `gco jobs submit-direct examples/inference-vllm.yaml -r us-east-1` (or `inference-sglang.yaml`, `inference-triton.yaml`) applies a plain Deployment and Service for a quick test. Nothing registers it with the inference monitor, so `gco inference` does not manage it and the `/inference/` route does not reach it.
+- **One Region, by hand**: `gco jobs submit-direct examples/inference-vllm.yaml -r us-east-1` (or `inference-sglang.yaml`, `inference-triton.yaml`) applies a plain Deployment and Service for a quick test. Each manifest uses the same name as the matching command above, so try one or the other in a Region. Nothing registers it with the inference monitor, so `gco inference` does not manage it and the `/inference/` route does not reach it; each example's header shows how to reach it with `kubectl port-forward` through the cluster tunnel.
 - **Batch inference**: an offline run over a dataset is an ordinary job, so submit it through any path in the block above. Its pods request `nvidia.com/gpu` or `aws.amazon.com/neuron` the way [`examples/gpu-job.yaml`](examples/gpu-job.yaml) and [`examples/inferentia-job.yaml`](examples/inferentia-job.yaml) do.
 
-Call a managed endpoint with `gco inference invoke vllm-llama3 -p "Hello"` (add `--stream` to stream the reply), or send SigV4-signed requests to `<ApiEndpoint>/inference/vllm-llama3/v1/chat/completions` (see the [API reference](docs/API.md#invoking-an-endpoint)). Outside the commercial `aws` partition, call the Region's regional API instead. The [Inference Guide](docs/INFERENCE.md) has the details for each path.
+Call a managed endpoint with `gco inference invoke vllm-qwen -p "Hello"` (add `--stream` to stream the reply), or send SigV4-signed requests to `<ApiEndpoint>/inference/vllm-qwen/v1/chat/completions`, signed for the Region in the `ApiEndpoint` host (see the [API reference](docs/API.md#invoking-an-endpoint)). Triton takes tensors rather than a prompt: `gco inference invoke triton-models --path /v2/models/<model>/infer -d '<KServe v2 request>'`. Outside the commercial `aws` partition, call the Region's regional API instead. The [Inference Guide](docs/INFERENCE.md) has the details for each path.
 
 </details>
 
@@ -422,6 +425,7 @@ Everything GCO does, grouped by area; expand one for the details and its guide.
 
 - **EKS Auto Mode** with automatic node provisioning — no pre-scaling needed
 - **GPU and accelerator support** through [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), and [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), plus built-in and [project-scoped CPU pools](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml). Only families on the [EKS Auto Mode supported instance list](https://docs.aws.amazon.com/eks/latest/userguide/automode-learn-instances.html#auto-supported-instances) can launch at any one time; the pools deliberately list newer families (such as `g7`/`g7e`) ahead of that support so they come online without a GCO release — see [which instance types can actually launch](docs/CUSTOMIZATION.md#which-instance-types-can-actually-launch)
+- **Reserved capacity**: `gco capacity find-blocks` ranks Capacity Block offerings across Regions and `gco capacity reserve` buys one; `gco capacity create-reservation` creates an On-Demand Capacity Reservation. `gco nodepools create-capacity-block` and `gco nodepools create-odcr` then generate an EKS Auto Mode NodeClass bound to the reservation and a NodePool that launches into it, for you to apply with kubectl; pods reach it with the `karpenter.sh/nodepool: <name>` node selector — see [Nodepools Commands](docs/CLI.md#nodepools-commands)
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
 - **Distributed training** via [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) (on by default): multi-node PyTorch through the `TrainJob` API against platform-shipped runtimes, validated end to end by the same security pipeline as every other submission, with optional Kueue gang admission — see the [Distributed Training Guide](docs/DISTRIBUTED_TRAINING.md)
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
@@ -432,7 +436,7 @@ Everything GCO does, grouped by area; expand one for the details and its guide.
 <details>
 <summary><b>Inference serving</b>: multi-Region vLLM, SGLang and Triton endpoints, canaries, model weights, Spot and autoscaling</summary>
 
-- **Multi-region inference**: Deploy endpoints across regions with a single command. Each supported framework ships with a ready-to-run example manifest: [vLLM](https://docs.vllm.ai/en/latest/) ([example](examples/inference-vllm.yaml)), [SGLang](https://docs.sglang.ai/) ([example](examples/inference-sglang.yaml)), and [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](examples/inference-triton.yaml))
+- **Multi-region inference**: Deploy endpoints across regions with a single command. Each supported framework has an example whose header carries the `gco inference deploy` command, plus a single-Region manifest for a quick test: [vLLM](https://docs.vllm.ai/en/latest/) ([example](examples/inference-vllm.yaml)), [SGLang](https://docs.sglang.ai/) ([example](examples/inference-sglang.yaml)), and [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](examples/inference-triton.yaml))
 - **Canary deployments**: A/B test new model versions with weighted traffic routing
 - **Model weight management**: [Central S3 bucket](docs/INFERENCE.md#model-weight-management) with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
 - **Spot instance support**: Run inference on spot GPUs for significant cost savings
