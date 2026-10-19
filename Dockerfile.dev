@@ -93,7 +93,7 @@ RUN case "${TARGETARCH}" in \
 # APT_SECURITY_EPOCH busts the CI layer cache so a freshly-published
 # trixie-security patch isn't masked by a stale cached upgrade layer;
 # bump the date when a new fix needs pulling.
-ARG APT_SECURITY_EPOCH=2026-10-15
+ARG APT_SECURITY_EPOCH=2026-10-19
 RUN echo "apt security epoch ${APT_SECURITY_EPOCH}" \
     && apt-get update \
     && apt-get upgrade -y \
@@ -201,7 +201,7 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
 # Latest stable at pin time:
 #   https://download.docker.com/linux/static/stable/x86_64/
 #   https://download.docker.com/linux/static/stable/aarch64/
-ARG DOCKER_VERSION=29.8.2
+ARG DOCKER_VERSION=29.9.1
 RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${GNU_ARCH}/docker-${DOCKER_VERSION}.tgz" \
       -o /tmp/docker.tgz \
