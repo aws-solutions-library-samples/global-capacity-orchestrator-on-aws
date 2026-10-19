@@ -17,6 +17,7 @@ import yaml
 
 from cli.nodepools import (
     DEFAULT_VCPUS_PER_NODE,
+    AutoModeNodeClassInputs,
     NodePoolInfo,
     calculate_cpu_limit,
     describe_cluster_nodepool,
@@ -26,6 +27,13 @@ from cli.nodepools import (
     get_k8s_client,
     get_vcpus_for_instance_type,
     list_cluster_nodepools,
+)
+
+#: What resolve_auto_mode_node_class_inputs returns for a GCO cluster.
+NODE_CLASS = AutoModeNodeClassInputs(
+    role="gco-us-east-1-GCOEksClusternodePoolRole-ABC123",
+    subnet_ids=("subnet-0aaa", "subnet-0bbb"),
+    security_group_ids=("sg-0cluster",),
 )
 
 
@@ -143,6 +151,7 @@ class TestGenerateOdcrNodepoolManifest:
     def test_basic_manifest_generation(self):
         """Test generating a basic ODCR NodePool manifest."""
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="test-odcr",
             region="us-east-1",
             capacity_reservation_id="cr-12345678901234567",
@@ -157,23 +166,35 @@ class TestGenerateOdcrNodepoolManifest:
         docs = list(yaml.safe_load_all(manifest))
         assert len(docs) == 2
 
-        # Check EC2NodeClass
-        ec2_node_class = docs[0]
-        assert ec2_node_class["kind"] == "EC2NodeClass"
-        assert ec2_node_class["metadata"]["name"] == "test-odcr-nodeclass"
-        assert (
-            ec2_node_class["spec"]["capacityReservationSelectorTerms"][0]["id"]
-            == "cr-12345678901234567"
-        )
+        # The EKS Auto Mode NodeClass: the only node class API a GCO cluster serves.
+        node_class = docs[0]
+        assert node_class["apiVersion"] == "eks.amazonaws.com/v1"
+        assert node_class["kind"] == "NodeClass"
+        assert node_class["metadata"]["name"] == "test-odcr-nodeclass"
+        assert node_class["spec"] == {
+            "role": NODE_CLASS.role,
+            "subnetSelectorTerms": [{"id": "subnet-0aaa"}, {"id": "subnet-0bbb"}],
+            "securityGroupSelectorTerms": [{"id": "sg-0cluster"}],
+            "capacityReservationSelectorTerms": [{"id": "cr-12345678901234567"}],
+        }
 
         # Check NodePool
         nodepool = docs[1]
         assert nodepool["kind"] == "NodePool"
         assert nodepool["metadata"]["name"] == "test-odcr"
+        assert nodepool["spec"]["template"]["spec"]["nodeClassRef"] == {
+            "group": "eks.amazonaws.com",
+            "kind": "NodeClass",
+            "name": "test-odcr-nodeclass",
+        }
+        # The header says how to apply it, target it, and what it changes.
+        assert "karpenter.sh/nodepool: test-odcr" in manifest
+        assert "stops" in manifest and "open ODCRs" in manifest
 
     def test_manifest_with_instance_types(self):
         """Test generating manifest with specific instance types."""
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="gpu-pool",
             region="us-west-2",
             capacity_reservation_id="cr-abcdef",
@@ -197,6 +218,7 @@ class TestGenerateOdcrNodepoolManifest:
     def test_manifest_with_gpu_taints(self):
         """Test that GPU instance types get GPU taints."""
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="gpu-pool",
             region="us-east-1",
             capacity_reservation_id="cr-gpu",
@@ -214,6 +236,7 @@ class TestGenerateOdcrNodepoolManifest:
     def test_manifest_without_gpu_taints(self):
         """Test that non-GPU instance types don't get GPU taints."""
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="cpu-pool",
             region="us-east-1",
             capacity_reservation_id="cr-cpu",
@@ -229,6 +252,7 @@ class TestGenerateOdcrNodepoolManifest:
     def test_manifest_with_fallback_on_demand(self):
         """Test generating manifest with on-demand fallback."""
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="fallback-pool",
             region="us-east-1",
             capacity_reservation_id="cr-fallback",
@@ -253,6 +277,7 @@ class TestGenerateOdcrNodepoolManifest:
     def test_manifest_without_fallback(self):
         """Test generating manifest without on-demand fallback."""
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="reserved-only",
             region="us-east-1",
             capacity_reservation_id="cr-reserved",
@@ -274,6 +299,7 @@ class TestGenerateOdcrNodepoolManifest:
     def test_manifest_with_custom_max_nodes(self):
         """Test generating manifest with custom max nodes."""
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="limited-pool",
             region="us-east-1",
             capacity_reservation_id="cr-limited",
@@ -292,6 +318,7 @@ class TestGenerateOdcrNodepoolManifest:
         # Test with p4d.24xlarge (96 vCPUs)
         mock_get_vcpus.return_value = 96
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="p4d-pool",
             region="us-east-1",
             capacity_reservation_id="cr-p4d",
@@ -308,6 +335,7 @@ class TestGenerateOdcrNodepoolManifest:
         """Test CPU limit with smaller instance type."""
         mock_get_vcpus.return_value = 4
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="g4dn-pool",
             region="us-east-1",
             capacity_reservation_id="cr-g4dn",
@@ -325,6 +353,7 @@ class TestGenerateOdcrNodepoolManifest:
         """Test that CPU limit uses max vCPUs when multiple instance types specified."""
         mock_get_vcpus.side_effect = [4, 192]  # g4dn.xlarge, p5.48xlarge
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="mixed-pool",
             region="us-east-1",
             capacity_reservation_id="cr-mixed",
@@ -340,21 +369,24 @@ class TestGenerateOdcrNodepoolManifest:
     def test_manifest_labels_and_tags(self):
         """Test that manifest includes proper labels and tags."""
         manifest = generate_odcr_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="labeled-pool",
             region="us-east-1",
             capacity_reservation_id="cr-labeled",
         )
 
         docs = list(yaml.safe_load_all(manifest))
-        ec2_node_class = docs[0]
+        node_class = docs[0]
         nodepool = docs[1]
 
-        # Check EC2NodeClass labels
-        assert ec2_node_class["metadata"]["labels"]["app.kubernetes.io/part-of"] == "gco"
-        assert ec2_node_class["metadata"]["labels"]["gco.io/nodepool"] == "labeled-pool"
+        # NodeClass labels identify the pool and the reservation it binds.
+        labels = node_class["metadata"]["labels"]
+        assert labels["app.kubernetes.io/part-of"] == "gco"
+        assert labels["gco.io/nodepool"] == "labeled-pool"
+        assert labels["gco.io/capacity-reservation"] == "cr-labeled"
 
-        # Check EC2NodeClass tags
-        assert ec2_node_class["spec"]["tags"]["gco.io/nodepool"] == "labeled-pool"
+        # No EC2 tags: propagating custom tags needs IAM the cluster role lacks.
+        assert "tags" not in node_class["spec"]
 
         # Check NodePool labels
         assert nodepool["metadata"]["labels"]["app.kubernetes.io/part-of"] == "gco"
@@ -571,6 +603,7 @@ class TestGenerateCapacityBlockNodepoolManifest:
     def test_basic_manifest_generation(self):
         """Test generating a basic Capacity Block NodePool manifest."""
         manifest = generate_capacity_block_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="cb-pool",
             region="us-east-1",
             capacity_reservation_id="cr-cb12345678901234",
@@ -583,14 +616,15 @@ class TestGenerateCapacityBlockNodepoolManifest:
         docs = list(yaml.safe_load_all(manifest))
         assert len(docs) == 2
 
-        ec2_node_class = docs[0]
-        assert ec2_node_class["kind"] == "EC2NodeClass"
-        assert ec2_node_class["metadata"]["name"] == "cb-pool-nodeclass"
-        assert (
-            ec2_node_class["spec"]["capacityReservationSelectorTerms"][0]["id"]
-            == "cr-cb12345678901234"
-        )
-        assert ec2_node_class["spec"]["tags"]["gco.io/capacity-block"] == "cr-cb12345678901234"
+        node_class = docs[0]
+        assert node_class["kind"] == "NodeClass"
+        assert node_class["apiVersion"] == "eks.amazonaws.com/v1"
+        assert node_class["metadata"]["name"] == "cb-pool-nodeclass"
+        assert node_class["spec"]["capacityReservationSelectorTerms"] == [
+            {"id": "cr-cb12345678901234"}
+        ]
+        assert node_class["spec"]["role"] == NODE_CLASS.role
+        assert node_class["metadata"]["labels"]["gco.io/capacity-block"] == "cr-cb12345678901234"
 
         nodepool = docs[1]
         assert nodepool["kind"] == "NodePool"
@@ -603,6 +637,7 @@ class TestGenerateCapacityBlockNodepoolManifest:
     def test_reserved_only_by_default(self):
         """Without fallback, only the reserved capacity type is requested."""
         manifest = generate_capacity_block_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="cb-pool",
             region="us-east-1",
             capacity_reservation_id="cr-reserved",
@@ -617,6 +652,7 @@ class TestGenerateCapacityBlockNodepoolManifest:
     def test_fallback_on_demand(self):
         """With fallback, both reserved and on-demand are requested."""
         manifest = generate_capacity_block_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="cb-pool",
             region="us-east-1",
             capacity_reservation_id="cr-fallback",
@@ -634,6 +670,7 @@ class TestGenerateCapacityBlockNodepoolManifest:
     def test_gpu_taints_for_p6(self):
         """P6 (Blackwell) instances get GPU taints."""
         manifest = generate_capacity_block_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="cb-pool",
             region="us-east-1",
             capacity_reservation_id="cr-gpu",
@@ -647,6 +684,7 @@ class TestGenerateCapacityBlockNodepoolManifest:
     def test_efa_adds_taint_and_labels(self):
         """EFA adds an EFA taint plus efa/gpu-efa labels."""
         manifest = generate_capacity_block_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="cb-pool",
             region="us-east-1",
             capacity_reservation_id="cr-efa",
@@ -662,6 +700,7 @@ class TestGenerateCapacityBlockNodepoolManifest:
     def test_no_gpu_taints_for_cpu(self):
         """Non-GPU instance types don't get GPU taints."""
         manifest = generate_capacity_block_nodepool_manifest(
+            node_class=NODE_CLASS,
             name="cb-pool",
             region="us-east-1",
             capacity_reservation_id="cr-cpu",

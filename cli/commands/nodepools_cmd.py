@@ -17,6 +17,24 @@ def nodepools(config: Any) -> None:
     """Manage Karpenter NodePools with ODCR/Capacity Reservation support."""
 
 
+_CLUSTER_HELP = "EKS cluster name (defaults to <project_name>-<region>)"
+_OUTPUT_FILE_HELP = "Write the manifest to this file instead of printing it"
+
+
+def _write_or_print_manifest(formatter: Any, manifest: str, output_file: str | None) -> None:
+    """Print the generated manifest, or write it to ``output_file``, with the apply hint."""
+    if output_file:
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(manifest)
+        formatter.print_success(f"NodePool manifest written to {output_file}")
+        formatter.print_info(f"Apply with: kubectl apply -f {output_file}")
+    else:
+        # Print the manifest for review
+        print(manifest)
+        formatter.print_info("\nTo apply this manifest, save it to a file and run:")
+        formatter.print_info("  kubectl apply -f <filename>.yaml")
+
+
 @nodepools.command("create-odcr")
 @click.option("--name", "-n", required=True, help="NodePool name")
 @click.option("--region", "-r", required=True, help="AWS region")
@@ -24,7 +42,7 @@ def nodepools(config: Any) -> None:
     "--capacity-reservation-id",
     "-c",
     required=True,
-    help="EC2 Capacity Reservation ID (cr-xxx) or ODCR group ARN",
+    help="EC2 Capacity Reservation ID (cr-xxx)",
 )
 @click.option(
     "--instance-type",
@@ -39,7 +57,8 @@ def nodepools(config: Any) -> None:
     is_flag=True,
     help="Enable EFA support (adds EFA taint and labels for p4d/p5 instances)",
 )
-@click.option("--output-file", "-o", help="Output manifest to file instead of applying")
+@click.option("--cluster", help=_CLUSTER_HELP)
+@click.option("--output-file", "-o", help=_OUTPUT_FILE_HELP)
 @pass_config
 def create_odcr_nodepool(
     config: Any,
@@ -50,12 +69,19 @@ def create_odcr_nodepool(
     max_nodes: Any,
     fallback_on_demand: Any,
     efa: Any,
+    cluster: Any,
     output_file: Any,
 ) -> None:
-    """Create a NodePool backed by an On-Demand Capacity Reservation (ODCR).
+    """Generate a NodePool backed by an On-Demand Capacity Reservation (ODCR).
 
-    This creates a Karpenter NodePool and EC2NodeClass configured to use
-    a specific capacity reservation for guaranteed capacity.
+    Prints (or writes) an EKS Auto Mode NodeClass that binds the reservation
+    through capacityReservationSelectorTerms, using the cluster's own node
+    role, subnets and security group, plus a NodePool that launches reserved
+    capacity through it. Apply it with kubectl; pods select the pool with
+    nodeSelector karpenter.sh/nodepool: <name>.
+
+    Once any NodeClass selects capacity reservations, EKS Auto Mode stops
+    launching into open ODCRs on its own for every NodeClass in the cluster.
 
     Examples:
         gco nodepools create-odcr -n gpu-reserved -r us-east-1 \\
@@ -67,34 +93,27 @@ def create_odcr_nodepool(
         gco nodepools create-odcr -n efa-training -r us-east-1 \\
             -c cr-0123456789abcdef0 -i p4d.24xlarge --efa
 
-    See: https://karpenter.sh/docs/tasks/odcrs/
+    See: https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html
     """
-    from ..nodepools import generate_odcr_nodepool_manifest
+    from ..nodepools import generate_odcr_nodepool_manifest, resolve_auto_mode_node_class_inputs
 
     formatter = get_output_formatter(config)
 
     try:
+        node_class = resolve_auto_mode_node_class_inputs(
+            cluster or f"{config.project_name}-{region}", region
+        )
         manifest = generate_odcr_nodepool_manifest(
             name=name,
             region=region,
             capacity_reservation_id=capacity_reservation_id,
+            node_class=node_class,
             instance_types=list(instance_type) if instance_type else None,
             max_nodes=max_nodes,
             fallback_on_demand=fallback_on_demand,
             efa=efa,
-            project_name=config.project_name,
         )
-
-        if output_file:
-            with open(output_file, "w", encoding="utf-8") as f:
-                f.write(manifest)
-            formatter.print_success(f"NodePool manifest written to {output_file}")
-            formatter.print_info(f"Apply with: kubectl apply -f {output_file}")
-        else:
-            # Print the manifest for review
-            print(manifest)
-            formatter.print_info("\nTo apply this manifest, save it to a file and run:")
-            formatter.print_info("  kubectl apply -f <filename>.yaml")
+        _write_or_print_manifest(formatter, manifest, output_file)
 
     except Exception as e:
         formatter.print_error(f"Failed to create ODCR NodePool: {e}")
@@ -127,7 +146,8 @@ def create_odcr_nodepool(
     is_flag=True,
     help="Enable EFA support (adds EFA taint and labels for p4d/p5 instances)",
 )
-@click.option("--output-file", "-o", help="Output manifest to file instead of applying")
+@click.option("--cluster", help=_CLUSTER_HELP)
+@click.option("--output-file", "-o", help=_OUTPUT_FILE_HELP)
 @pass_config
 def create_capacity_block_nodepool(
     config: Any,
@@ -138,15 +158,18 @@ def create_capacity_block_nodepool(
     max_nodes: Any,
     fallback_on_demand: Any,
     efa: Any,
+    cluster: Any,
     output_file: Any,
 ) -> None:
-    """Create a NodePool backed by a purchased Capacity Block.
+    """Generate a NodePool backed by a purchased Capacity Block.
 
     Purchasing a Capacity Block ('gco capacity reserve') yields a normal EC2
-    Capacity Reservation ID (cr-xxx). This generates a Karpenter NodePool and
-    EC2NodeClass that consume it via capacityReservationSelectorTerms. Because a
-    Capacity Block is prepaid for a fixed term, the NodePool defaults to holding
-    that capacity rather than consolidating it away.
+    Capacity Reservation ID (cr-xxx). This generates an EKS Auto Mode
+    NodeClass that binds it through capacityReservationSelectorTerms and a
+    NodePool that launches reserved capacity through it; Auto Mode never uses
+    a Capacity Block without such a NodeClass. Because a Capacity Block is
+    prepaid for a fixed term, the NodePool defaults to holding that capacity
+    rather than consolidating it away.
 
     Examples:
         gco nodepools create-capacity-block -n cb-train -r us-east-1 \\
@@ -155,33 +178,30 @@ def create_capacity_block_nodepool(
         gco nodepools create-capacity-block -n cb-efa -r us-east-1 \\
             -c cr-0123456789abcdef0 -i p4d.24xlarge --efa
 
-    See: https://karpenter.sh/docs/concepts/nodeclasses/
+    See: https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html
     """
-    from ..nodepools import generate_capacity_block_nodepool_manifest
+    from ..nodepools import (
+        generate_capacity_block_nodepool_manifest,
+        resolve_auto_mode_node_class_inputs,
+    )
 
     formatter = get_output_formatter(config)
 
     try:
+        node_class = resolve_auto_mode_node_class_inputs(
+            cluster or f"{config.project_name}-{region}", region
+        )
         manifest = generate_capacity_block_nodepool_manifest(
             name=name,
             region=region,
             capacity_reservation_id=capacity_reservation_id,
+            node_class=node_class,
             instance_types=list(instance_type) if instance_type else None,
             max_nodes=max_nodes,
             fallback_on_demand=fallback_on_demand,
             efa=efa,
-            project_name=config.project_name,
         )
-
-        if output_file:
-            with open(output_file, "w", encoding="utf-8") as f:
-                f.write(manifest)
-            formatter.print_success(f"NodePool manifest written to {output_file}")
-            formatter.print_info(f"Apply with: kubectl apply -f {output_file}")
-        else:
-            print(manifest)
-            formatter.print_info("\nTo apply this manifest, save it to a file and run:")
-            formatter.print_info("  kubectl apply -f <filename>.yaml")
+        _write_or_print_manifest(formatter, manifest, output_file)
 
     except Exception as e:
         formatter.print_error(f"Failed to create Capacity Block NodePool: {e}")
@@ -195,10 +215,10 @@ def create_capacity_block_nodepool(
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @pass_config
 def delete_nodepool(config: Any, nodepool_name: Any, region: Any, cluster: Any, yes: Any) -> None:
-    """Delete a NodePool and its paired EC2NodeClass.
+    """Delete a NodePool and its paired NodeClass.
 
-    Removes the Karpenter NodePool and the ``<name>-nodeclass`` EC2NodeClass
-    created with it. Karpenter drains and terminates any nodes the NodePool
+    Removes the NodePool and the ``<name>-nodeclass`` NodeClass created with
+    it. EKS Auto Mode drains and terminates any nodes the NodePool
     provisioned. Cannot be undone.
 
     Examples:
@@ -216,8 +236,8 @@ def delete_nodepool(config: Any, nodepool_name: Any, region: Any, cluster: Any, 
         cluster_name = cluster or f"{config.project_name}-{region}"
         deleted = delete_cluster_nodepool(cluster_name, region, nodepool_name)
         formatter.print_success(f"Deleted NodePool {nodepool_name}")
-        if deleted.get("ec2nodeclass"):
-            formatter.print_info(f"Deleted EC2NodeClass {deleted['ec2nodeclass']}")
+        if deleted.get("nodeclass"):
+            formatter.print_info(f"Deleted NodeClass {deleted['nodeclass']}")
     except Exception as e:
         formatter.print_error(f"Failed to delete NodePool: {e}")
         sys.exit(1)

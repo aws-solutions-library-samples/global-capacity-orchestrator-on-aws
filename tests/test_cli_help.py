@@ -448,6 +448,8 @@ class TestNodepoolsHelp:
         result = runner.invoke(cli, ["nodepools", "create-odcr", "--help"])
         assert result.exit_code == 0
         assert "capacity-reservation" in result.output.lower()
+        # The NodeClass needs the cluster's node role and subnets.
+        assert "--cluster" in result.output
 
 
 class TestCapacityHelpExtended:

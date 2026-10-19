@@ -987,9 +987,9 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
                 print(f"  Start:          {result.get('start_date', 'N/A')}")
                 print(f"  End:            {result.get('end_date', 'N/A')}")
                 print()
-                print("  To create a NodePool for this reservation:")
+                print("  To create a NodePool for this Capacity Block:")
                 print(
-                    f"    gco nodepools create-odcr -n my-pool -r {region} "
+                    f"    gco nodepools create-capacity-block -n my-pool -r {region} "
                     f"-c {result['reservation_id']} -i {result['instance_type']}"
                 )
                 print()

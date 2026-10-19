@@ -176,8 +176,17 @@ def test_delete_nodepool_removes_the_paired_nodeclass() -> None:
     with patch("cli.nodepools.get_k8s_client", return_value=api):
         result = delete_cluster_nodepool("cluster", "us-east-1", "gpu")
 
-    assert result == {"nodepool": "gpu", "ec2nodeclass": "gpu-nodeclass"}
+    assert result == {"nodepool": "gpu", "nodeclass": "gpu-nodeclass"}
     assert api.delete_cluster_custom_object.call_count == 2
+    # The paired object is the EKS Auto Mode NodeClass; GCO clusters do not
+    # serve self-managed Karpenter's karpenter.k8s.aws EC2NodeClass.
+    nodeclass_call = api.delete_cluster_custom_object.call_args_list[1]
+    assert nodeclass_call.kwargs == {
+        "group": "eks.amazonaws.com",
+        "version": "v1",
+        "plural": "nodeclasses",
+        "name": "gpu-nodeclass",
+    }
 
 
 def test_delete_nodepool_ignores_a_missing_paired_nodeclass() -> None:
@@ -186,7 +195,7 @@ def test_delete_nodepool_ignores_a_missing_paired_nodeclass() -> None:
     with patch("cli.nodepools.get_k8s_client", return_value=api):
         result = delete_cluster_nodepool("cluster", "us-east-1", "gpu")
 
-    assert result == {"nodepool": "gpu", "ec2nodeclass": None}
+    assert result == {"nodepool": "gpu", "nodeclass": None}
 
 
 def test_delete_nodepool_warns_but_succeeds_when_nodeclass_cleanup_fails(caplog) -> None:
@@ -196,8 +205,8 @@ def test_delete_nodepool_warns_but_succeeds_when_nodeclass_cleanup_fails(caplog)
         result = delete_cluster_nodepool("cluster", "us-east-1", "gpu")
 
     assert result["nodepool"] == "gpu"
-    assert result["ec2nodeclass"] is None
-    assert "Could not delete EC2NodeClass" in caplog.text
+    assert result["nodeclass"] is None
+    assert "Could not delete NodeClass" in caplog.text
 
 
 def test_delete_nodepool_wraps_primary_deletion_failures() -> None:
@@ -213,7 +222,7 @@ def test_delete_nodepool_wraps_primary_deletion_failures() -> None:
 def test_delete_cli_confirmation_reports_the_paired_nodeclass() -> None:
     with patch(
         "cli.nodepools.delete_cluster_nodepool",
-        return_value={"nodepool": "gpu", "ec2nodeclass": "gpu-nodeclass"},
+        return_value={"nodepool": "gpu", "nodeclass": "gpu-nodeclass"},
     ) as delete:
         result = CliRunner().invoke(
             nodepools,
@@ -224,14 +233,14 @@ def test_delete_cli_confirmation_reports_the_paired_nodeclass() -> None:
 
     assert result.exit_code == 0, result.output
     assert "Delete NodePool 'gpu'" in result.output
-    assert "Deleted EC2NodeClass gpu-nodeclass" in result.output
+    assert "Deleted NodeClass gpu-nodeclass" in result.output
     delete.assert_called_once_with("test-gco-us-east-1", "us-east-1", "gpu")
 
 
 def test_delete_cli_yes_bypasses_confirmation_and_handles_no_nodeclass() -> None:
     with patch(
         "cli.nodepools.delete_cluster_nodepool",
-        return_value={"nodepool": "gpu", "ec2nodeclass": None},
+        return_value={"nodepool": "gpu", "nodeclass": None},
     ):
         result = CliRunner().invoke(
             nodepools,
@@ -242,7 +251,7 @@ def test_delete_cli_yes_bypasses_confirmation_and_handles_no_nodeclass() -> None
     assert result.exit_code == 0, result.output
     assert "Delete NodePool 'gpu'" not in result.output
     assert "Deleted NodePool gpu" in result.output
-    assert "EC2NodeClass" not in result.output
+    assert "NodeClass" not in result.output
 
 
 def test_delete_cli_surfaces_service_errors() -> None:

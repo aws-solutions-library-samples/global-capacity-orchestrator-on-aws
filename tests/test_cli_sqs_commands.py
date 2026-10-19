@@ -12,6 +12,7 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 
@@ -515,6 +516,21 @@ class TestCapacityRecommendRegionCommand:
 
 class TestNodePoolsCommands:
     """Tests for nodepools commands."""
+
+    @pytest.fixture(autouse=True)
+    def _node_class_inputs(self):
+        """Stand in for the eks:DescribeCluster lookup the create commands make."""
+        from cli.nodepools import AutoModeNodeClassInputs
+
+        with patch(
+            "cli.nodepools.resolve_auto_mode_node_class_inputs",
+            return_value=AutoModeNodeClassInputs(
+                role="gco-us-east-1-AutoModeNodeRole",
+                subnet_ids=("subnet-0123456789abcdef0",),
+                security_group_ids=("sg-0123456789abcdef0",),
+            ),
+        ):
+            yield
 
     def test_nodepools_help(self):
         """Test nodepools --help."""
