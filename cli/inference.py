@@ -521,9 +521,11 @@ class InferenceManager:
             target_regions: Regions to deploy to (default: all deployed regions)
             replicas: Number of replicas per region
             gpu_count: GPUs per replica
-            gpu_type: GPU instance type hint for node selector
+            gpu_type: Preferred instance type, rendered as a preferred node
+                affinity (a hint, not a requirement)
             port: Container port
-            model_path: EFS path for model weights
+            model_path: Mounts the inference namespace's EFS volume at
+                ``/models`` without syncing anything
             health_check_path: Health check endpoint path
             env: Environment variables
             namespace: Kubernetes namespace

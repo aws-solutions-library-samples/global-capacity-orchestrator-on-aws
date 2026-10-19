@@ -210,6 +210,29 @@ class TestInferenceDeploy:
         assert result.exit_code == 0
         assert "NOT deployed to" in result.output or "eu-west-1" in result.output
 
+    def test_deploy_succeeds_when_the_region_comparison_lookup_fails(self, runner):
+        """The endpoint is registered before the -r comparison; its failure is a warning."""
+        mock_mgr = MagicMock()
+        mock_mgr.deploy.return_value = {
+            "endpoint_name": "ep",
+            "target_regions": ["us-east-1"],
+            "ingress_path": "/inference/ep",
+        }
+        mock_client = MagicMock()
+        mock_client.discover_regional_stacks.side_effect = RuntimeError("DescribeRegions denied")
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(
+                cli, ["inference", "deploy", "ep", "-i", "img:v1", "-r", "us-east-1"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "registered for deployment" in result.output
+        assert "Could not list the other deployed Regions" in result.output
+        assert "DescribeRegions denied" in result.output
+        assert "Failed to deploy endpoint" not in result.output
+
     def test_deploy_value_error(self, runner):
         mock_mgr = MagicMock()
         mock_mgr.deploy.side_effect = ValueError("No deployed regions")
@@ -1059,7 +1082,34 @@ class TestInferenceInvoke:
         assert result.exit_code == 0
         assert "plain text response" in result.output
 
-    def test_invoke_triton_auto_path(self, runner):
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["-p", "test"],
+            ["-d", '{"inputs": []}'],
+            ["-p", "test", "--path", "/v2/models/identity/infer"],
+        ],
+        ids=["prompt-only", "data-without-path", "path-without-data"],
+    )
+    def test_invoke_triton_without_a_model_path_and_tensors_explains_what_to_pass(
+        self, runner, extra
+    ):
+        """Triton has no prompt API, so invoke refuses instead of POSTing a dead /v2/models."""
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._mock_endpoint(
+            image="nvcr.io/nvidia/tritonserver:25.01-py3"
+        )
+        mock_client = MagicMock()
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(cli, ["inference", "invoke", "ep", *extra])
+        assert result.exit_code == 1
+        assert "/v2/models/<model>/infer" in result.output
+        mock_client.make_authenticated_request.assert_not_called()
+
+    def test_invoke_triton_posts_the_given_tensors_to_the_given_model(self, runner):
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = self._mock_endpoint(
             image="nvcr.io/nvidia/tritonserver:25.01-py3"
@@ -1067,16 +1117,45 @@ class TestInferenceInvoke:
         mock_client = MagicMock()
         mock_resp = MagicMock()
         mock_resp.ok = True
-        mock_resp.json.return_value = {"models": []}
+        mock_resp.json.return_value = {"outputs": [{"name": "OUTPUT0", "data": [1, 2, 3]}]}
         mock_client.make_authenticated_request.return_value = mock_resp
+        body = {"inputs": [{"name": "INPUT0", "shape": [3], "datatype": "FP32", "data": [1, 2, 3]}]}
         with (
             patch("cli.inference.get_inference_manager", return_value=mock_mgr),
             patch("cli.aws_client.get_aws_client", return_value=mock_client),
         ):
-            result = runner.invoke(cli, ["inference", "invoke", "ep", "-p", "test"])
-        assert result.exit_code == 0
+            result = runner.invoke(
+                cli,
+                [
+                    "inference",
+                    "invoke",
+                    "ep",
+                    "--path",
+                    "/v2/models/identity/infer",
+                    "-d",
+                    json.dumps(body),
+                ],
+            )
+        assert result.exit_code == 0, result.output
         call_args = mock_client.make_authenticated_request.call_args
-        assert "/v2/models" in call_args.kwargs["path"]
+        assert call_args.kwargs["path"] == "/inference/ep/v2/models/identity/infer"
+        assert call_args.kwargs["body"] == body
+
+    def test_invoke_prompt_on_a_kserve_v2_path_is_refused_for_any_image(self, runner):
+        """A prompt can't become a v2 inference request even when the image isn't Triton's."""
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._mock_endpoint(image="registry.example/kserve:1")
+        mock_client = MagicMock()
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(
+                cli, ["inference", "invoke", "ep", "-p", "hi", "--path", "/v2/models/m/infer"]
+            )
+        assert result.exit_code == 1
+        assert "KServe v2 inference request" in result.output
+        mock_client.make_authenticated_request.assert_not_called()
 
     def test_invoke_openai_message_format(self, runner):
         """Test extraction of chat completion message format."""
@@ -1367,10 +1446,29 @@ class TestInferenceModels:
             "/inference/ep/server_info"
         )
 
-    @pytest.mark.parametrize(
-        "image",
-        ["nvcr.io/nvidia/tritonserver:26.09-py3", "registry.example/openai-compatible:1"],
-    )
+    def test_models_on_triton_reads_the_statistics_inventory(self, runner):
+        """Triton has no model list; /v2/models/stats names every loaded model and version."""
+        endpoint = self._mock_endpoint()
+        endpoint["spec"]["image"] = "nvcr.io/nvidia/tritonserver:26.09-py3"
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = endpoint
+        mock_client = MagicMock()
+        mock_resp = MagicMock(ok=True)
+        stats = {"model_stats": [{"name": "identity", "version": "1"}]}
+        mock_resp.json.return_value = stats
+        mock_client.make_authenticated_request.return_value = mock_resp
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(cli, ["inference", "models", "ep"])
+        assert result.exit_code == 0, result.output
+        assert mock_client.make_authenticated_request.call_args.kwargs["path"] == (
+            "/inference/ep/v2/models/stats"
+        )
+        assert '"identity"' in result.output
+
+    @pytest.mark.parametrize("image", ["registry.example/openai-compatible:1"])
     def test_models_without_an_identity_document_fall_back_to_the_openai_inventory(
         self, runner, image
     ):
@@ -1580,6 +1678,22 @@ class TestInferenceInvokeRemaining:
                 {"args": ["--dtype", "auto", "--model", "org/argument-model"]},
                 "org/argument-model",
             ),
+            # The arguments name the served model ahead of the MODEL env, the
+            # same precedence the renderer applies when it starts vLLM.
+            (
+                {"env": {"MODEL": "org/env-model"}, "args": ["--model=org/inline-model"]},
+                "org/inline-model",
+            ),
+            (
+                {"env": {"MODEL": "org/env-model"}, "args": ["org/positional-model"]},
+                "org/positional-model",
+            ),
+            # --served-model-name is the name the API answers to.
+            (
+                {"env": {"MODEL": "org/env-model"}, "args": ["--served-model-name", "chat"]},
+                "chat",
+            ),
+            ({"args": ["--served-model-name=chat", "--model", "org/m"]}, "chat"),
         ],
     )
     def test_invoke_selects_model_from_stored_spec(self, runner, spec_updates, expected_model):
@@ -1644,6 +1758,85 @@ class TestInferenceInvokeRemaining:
         assert discovery_request.kwargs["method"] == "GET"
         assert discovery_request.kwargs["path"] == "/inference/ep/v1/models"
         assert invoke_request.kwargs["body"]["model"] == expected_model
+
+    @pytest.mark.parametrize(
+        "spec_updates",
+        [
+            # A --config file can name the model, so MODEL may not be served.
+            {"env": {"MODEL": "org/env-model"}, "args": ["--config", "serve.yaml"]},
+            {"env": {"MODEL": "org/env-model"}, "args": ["--config=serve.yaml"]},
+            # A stored record with a null env still falls back to discovery.
+            {"env": None},
+        ],
+    )
+    def test_invoke_asks_vllm_when_the_spec_does_not_name_the_model(self, runner, spec_updates):
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint(**spec_updates)
+        discovery_response = self._buffered_response({"data": [{"id": "org/from-config"}]})
+        invoke_response = self._buffered_response({"choices": [{"text": "done"}]})
+        mock_client = MagicMock()
+        mock_client.make_authenticated_request.side_effect = [discovery_response, invoke_response]
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(cli, ["inference", "invoke", "ep", "-p", "hello"])
+
+        assert result.exit_code == 0, result.output
+        discovery_request, invoke_request = mock_client.make_authenticated_request.call_args_list
+        assert discovery_request.kwargs["path"] == "/inference/ep/v1/models"
+        assert invoke_request.kwargs["body"]["model"] == "org/from-config"
+
+    def test_invoke_prompt_on_a_chat_path_sends_one_user_message(self, runner):
+        """The chat API rejects a ``prompt`` body, so the prompt becomes one user turn."""
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint(env={"MODEL": "org/model"})
+        mock_client = MagicMock()
+        mock_client.make_authenticated_request.return_value = self._buffered_response(
+            {"choices": [{"message": {"role": "assistant", "content": "hi there"}}]}
+        )
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(
+                cli,
+                ["inference", "invoke", "ep", "-p", "hello", "--path", "/v1/chat/completions"],
+            )
+
+        assert result.exit_code == 0, result.output
+        request = mock_client.make_authenticated_request.call_args.kwargs
+        assert request["path"] == "/inference/ep/v1/chat/completions"
+        assert request["body"] == {
+            "model": "org/model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 100,
+            "stream": False,
+        }
+        assert "hi there" in result.output
+
+    def test_invoke_non_vllm_server_ignores_vllm_only_argument_forms(self, runner):
+        """A positional first argument or --config only names the model for vLLM."""
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint(
+            image="example/custom-server:v1",
+            env={"MODEL": "org/env-model"},
+            args=["serve", "--config", "x.yaml"],
+        )
+        mock_client = MagicMock()
+        mock_client.make_authenticated_request.return_value = self._buffered_response(
+            {"choices": [{"text": "done"}]}
+        )
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mock_mgr),
+            patch("cli.aws_client.get_aws_client", return_value=mock_client),
+        ):
+            result = runner.invoke(cli, ["inference", "invoke", "ep", "-p", "hello"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_client.make_authenticated_request.call_count == 1
+        request = mock_client.make_authenticated_request.call_args.kwargs
+        assert request["body"]["model"] == "org/env-model"
 
     def test_invoke_unknown_image_uses_openai_fallback(self, runner):
         mock_mgr = MagicMock()
