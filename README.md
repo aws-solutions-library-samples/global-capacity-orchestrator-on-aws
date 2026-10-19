@@ -205,6 +205,29 @@ gco jobs submit-direct examples/simple-job.yaml -r us-east-1
 
 </details>
 
+<details>
+<summary><b>Every way to host inference</b>: a managed endpoint in every Region, Mooncake prefill/decode, a canary, an agent, a manifest in one Region, or a batch job</summary>
+
+`gco inference deploy` is the main path. It records the endpoint in a global DynamoDB table, and the inference monitor in each target Region creates the Deployment, Service and optional autoscaler, keeps them reconciled, and reports their state. [vLLM](https://docs.vllm.ai/en/latest/) and [SGLang](https://docs.sglang.ai/) get a strict adapter through `--framework`; [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) and any other containerized server deploy without one:
+
+```bash
+gco inference deploy vllm-llama3 -i vllm/vllm-openai:v0.31.0 --gpu-count 1 -e MODEL=meta-llama/Llama-3.1-8B-Instruct -e MAX_MODEL_LEN=4096
+gco inference deploy sglang-phi3 -i lmsysorg/sglang:v0.5.21 --framework sglang --port 30000 --gpu-count 1 -e MODEL=microsoft/Phi-3.5-mini-instruct
+gco inference deploy triton-models -i nvcr.io/nvidia/tritonserver:26.09-py3 --health-path /v2/health/ready --gpu-count 1 --model-source s3://your-bucket/models/triton-repo
+```
+
+- **Placement and scaling**: every deployed Region by default, or the ones you name with `-r`. `--accelerator neuron` targets Trainium and Inferentia, `--capacity-type spot` runs on Spot capacity, and `--min-replicas`, `--max-replicas` and `--autoscale-metric` scale on CPU or memory through the HPA, or on GPU utilization through [KEDA](https://keda.sh/).
+- **Model weights**: downloaded from Hugging Face at startup (`-e MODEL=...`), synced to every Region from the S3 model registry (`gco models upload ./weights --name llama3-8b`, then `--model-source $(gco models uri llama3-8b)`), or read from EFS (`--model-path`).
+- **Mooncake**: `--mooncake-mode disaggregated` splits prefill and decode into separately sized roles (`--prefill-replicas`, `--decode-replicas`, and later `gco inference set-topology`). `store` adds a shared KV-cache store in each Region, which `gco inference configure-store --cold-tier` extends with an S3 cold tier and `gco inference populate-kv` pre-warms, and `both` combines the two. See [Disaggregated Inference](docs/INFERENCE.md#disaggregated-inference-mooncake).
+- **New versions**: `gco inference canary <name> -i <image> --weight 10` sends 10% of requests to the new image until you `promote` or `rollback` it, and `update-image` replaces the image outright.
+- **From an agent**: the [GCO MCP server](gco_mcp/README.md#inference-endpoints) has tools to deploy (Mooncake included), scale, canary and call endpoints, and `gco autopilot` drives them from a prompt.
+- **One Region, by hand**: `gco jobs submit-direct examples/inference-vllm.yaml -r us-east-1` (or `inference-sglang.yaml`, `inference-triton.yaml`) applies a plain Deployment and Service for a quick test. Nothing registers it with the inference monitor, so `gco inference` does not manage it and the `/inference/` route does not reach it.
+- **Batch inference**: an offline run over a dataset is an ordinary job, so submit it through any path in the block above. Its pods request `nvidia.com/gpu` or `aws.amazon.com/neuron` the way [`examples/gpu-job.yaml`](examples/gpu-job.yaml) and [`examples/inferentia-job.yaml`](examples/inferentia-job.yaml) do.
+
+Call a managed endpoint with `gco inference invoke vllm-llama3 -p "Hello"` (add `--stream` to stream the reply), or send SigV4-signed requests to `<ApiEndpoint>/inference/vllm-llama3/v1/chat/completions` (see the [API reference](docs/API.md#invoking-an-endpoint)). Outside the commercial `aws` partition, call the Region's regional API instead. The [Inference Guide](docs/INFERENCE.md) has the details for each path.
+
+</details>
+
 The [Quick Start Guide](QUICKSTART.md) walks through every step with the output to expect, and the [CLI Reference](docs/CLI.md) lists every command.
 
 ## See it running
@@ -398,7 +421,7 @@ Everything GCO does, grouped by area; expand one for the details and its guide.
 - **Canary deployments**: A/B test new model versions with weighted traffic routing
 - **Model weight management**: [Central S3 bucket](./docs/CLUSTER_SHARED_BUCKET.md) with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
 - **Spot instance support**: Run inference on spot GPUs for significant cost savings
-- **Autoscaling**: HPA-based scaling with CPU/memory metrics
+- **Autoscaling**: the HPA scales on CPU and memory, and [KEDA](https://keda.sh/) on GPU utilization
 
 </details>
 
