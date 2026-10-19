@@ -462,6 +462,86 @@ class TestRenderTree:
         assert rendered_path == dest / "examples" / "simple-job.yaml"
 
 
+# ── apply_api_server_defaults ─────────────────────────────────────────────────
+
+_KRO_GRAPH = """\
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: demo
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: Demo
+    spec:
+      message: 'string | default="hi"'
+  resources: []
+"""
+
+
+class TestApiServerDefaults:
+    """The rendered copy carries the defaults the API server applies before validating.
+
+    kubeconform validates a document as written, so a field a CRD marks
+    required but also defaults (kro's ``spec.schema.scope``) would be reported
+    missing although the API server accepts the manifest.
+    """
+
+    def test_a_kro_graph_without_a_scope_gets_the_api_server_default(self) -> None:
+        expected = yaml.safe_load(_KRO_GRAPH)
+        expected["spec"]["schema"]["scope"] = "Namespaced"
+        rendered = validator.apply_api_server_defaults(_KRO_GRAPH)
+        assert list(yaml.safe_load_all(rendered)) == [expected]
+
+    def test_a_scope_the_manifest_sets_is_kept_and_the_text_is_untouched(self) -> None:
+        text = _KRO_GRAPH.replace("    kind: Demo\n", "    kind: Demo\n    scope: Cluster\n")
+        assert validator.apply_api_server_defaults(text) == text
+
+    def test_a_graph_without_a_schema_is_left_for_kubeconform_to_report(self) -> None:
+        text = (
+            "apiVersion: kro.run/v1alpha1\nkind: ResourceGraphDefinition\n"
+            "metadata:\n  name: demo\nspec:\n  resources: []\n"
+        )
+        assert validator.apply_api_server_defaults(text) == text
+
+    def test_other_kinds_and_api_versions_are_untouched(self) -> None:
+        job = "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: x\n"
+        other_version = _KRO_GRAPH.replace("kro.run/v1alpha1", "kro.run/v1beta1")
+        assert validator.apply_api_server_defaults(job) == job
+        assert validator.apply_api_server_defaults(other_version) == other_version
+
+    def test_every_other_document_of_the_file_is_kept(self) -> None:
+        config_map = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\ndata:\n  key: value\n"
+        text = f"---\n{config_map}---\n---\n{_KRO_GRAPH}"
+        documents = list(yaml.safe_load_all(validator.apply_api_server_defaults(text)))
+        assert len(documents) == 2, "only the empty document may be dropped"
+        assert documents[0] == yaml.safe_load(config_map)
+        assert documents[1]["spec"]["schema"]["scope"] == "Namespaced"
+
+    def test_text_that_is_not_yaml_is_left_for_kubeconform_to_report(self) -> None:
+        text = "kind: ResourceGraphDefinition\nspec: [unterminated\n"
+        assert validator.apply_api_server_defaults(text) == text
+
+    def test_the_shipped_kro_example_omits_the_scope_and_is_rendered_with_it(
+        self, tmp_path: Path
+    ) -> None:
+        source = EXAMPLES_DIR / "kro-batch-api.yaml"
+        text = source.read_text(encoding="utf-8")
+        graph = next(document for document in yaml.safe_load_all(text) if document)
+        # Left out so the example also applies on a kro older than v0.9.0,
+        # whose strict field validation would reject an unknown field.
+        assert "scope" not in graph["spec"]["schema"]
+
+        rendered_path = validator.render_tree([source], tmp_path)[0]
+        rendered = next(
+            document
+            for document in yaml.safe_load_all(rendered_path.read_text(encoding="utf-8"))
+            if document
+        )
+        graph["spec"]["schema"]["scope"] = "Namespaced"
+        assert rendered == graph
+
+
 # ── format_failures ────────────────────────────────────────────────────────────
 
 

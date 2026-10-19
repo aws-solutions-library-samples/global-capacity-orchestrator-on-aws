@@ -4,7 +4,7 @@ Confirms that every hand-authored manifest this repo ships — the
 kubectl-applier's own manifests and the `examples/` gallery — is not just
 parseable YAML but a *schema-valid* Kubernetes (or supported CRD) resource.
 `kubeconform` (https://github.com/yannh/kubeconform) does the actual schema
-check; this script exists to bridge two gaps kubeconform can't close on its
+check; this script exists to bridge three gaps kubeconform can't close on its
 own:
 
   Template placeholders: `lambda/kubectl-applier-simple/manifests/*.yaml`
@@ -21,6 +21,14 @@ own:
     manifest) and JSON metric/state fixtures used by other examples. Those
     are excluded by construction (only `*.yaml`/`*.yml` under `examples/` are
     scanned, and `pipeline-dag.yaml` is skipped by name).
+
+  Defaulted required fields: a CRD can mark a field required and also give
+    it a default. The API server fills the default in before it validates,
+    so a manifest may leave the field out, but kubeconform validates the
+    document as written and reports the field missing. For the fields in
+    `_API_SERVER_DEFAULTS` (kro's `ResourceGraphDefinition`
+    `spec.schema.scope`), the rendered copy gets the value the API server
+    would fill in.
 
 Schema resolution: kubeconform's bundled catalog only covers upstream
 Kubernetes, and is resolved at the cluster's minor (`-kubernetes-version
@@ -53,8 +61,9 @@ Exit codes::
     2  unexpected I/O / argument error (kubeconform missing, directory absent)
 
 The module is importable from the test suite — call ``render_placeholders()``,
-``collect_target_files()``, or ``iter_target_files()`` directly to exercise the
-logic without invoking the binary.
+``apply_api_server_defaults()``, ``collect_target_files()``, or
+``iter_target_files()`` directly to exercise the logic without invoking the
+binary.
 """
 
 from __future__ import annotations
@@ -69,6 +78,8 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -124,6 +135,24 @@ SCHEMA_UNAVAILABLE_SKIPS = (
     "examples.gco.io/v1alpha1/BatchJob",
     "kro.run/v1alpha1/BatchJob",
 )
+
+# Required fields a CRD also defaults, keyed by (apiVersion, kind): the path to
+# each field and the value the API server fills in. A structural schema's
+# defaults are applied before the object is validated, so a manifest may leave
+# such a field out, but kubeconform validates the document as written and would
+# report it missing. apply_api_server_defaults() adds the default to the
+# rendered copy only. A value the manifest sets is kept, and a missing parent
+# object is left for kubeconform to report.
+#
+#   kro.run/v1alpha1 ResourceGraphDefinition spec.schema.scope: kro v0.9.0
+#   added it (Namespaced or Cluster, default Namespaced, immutable once set),
+#   and the datreeio catalog has marked it required since its kro v0.9.4
+#   refresh (2026-10-18). examples/kro-batch-api.yaml leaves it out on
+#   purpose: a kro older than v0.9.0 does not know the field, and kubectl's
+#   strict field validation would then reject the whole definition.
+_API_SERVER_DEFAULTS: dict[tuple[str, str], tuple[tuple[tuple[str, ...], str], ...]] = {
+    ("kro.run/v1alpha1", "ResourceGraphDefinition"): ((("spec", "schema", "scope"), "Namespaced"),),
+}
 
 # kubeconform's own default schema catalog (upstream Kubernetes resources).
 DEFAULT_SCHEMA_LOCATION = "default"
@@ -249,6 +278,41 @@ def render_placeholders(text: str) -> str:
     return _PLACEHOLDER_RE.sub(_GENERIC_STUB, text)
 
 
+def apply_api_server_defaults(text: str) -> str:
+    """Add the defaults the API server would fill in (see ``_API_SERVER_DEFAULTS``).
+
+    Text in which no document needs a default is returned unchanged, so every
+    other file reaches kubeconform exactly as rendered. Text that is not valid
+    YAML is also returned unchanged, for kubeconform to report.
+    """
+    if not any(kind in text for _api_version, kind in _API_SERVER_DEFAULTS):
+        return text
+    try:
+        documents = list(yaml.safe_load_all(text))
+    except yaml.YAMLError:
+        return text
+    changed = False
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        api_version, kind = document.get("apiVersion"), document.get("kind")
+        if not isinstance(api_version, str) or not isinstance(kind, str):
+            continue
+        for path, value in _API_SERVER_DEFAULTS.get((api_version, kind), ()):
+            parent: Any = document
+            for key in path[:-1]:
+                parent = parent.get(key) if isinstance(parent, dict) else None
+            if isinstance(parent, dict) and path[-1] not in parent:
+                parent[path[-1]] = value
+                changed = True
+    if not changed:
+        return text
+    dumped: str = yaml.safe_dump_all(
+        [document for document in documents if document is not None], sort_keys=False
+    )
+    return dumped
+
+
 def _manifest_files_in_directory(directory: Path) -> list[Path]:
     """Return supported direct-child manifests from one directory."""
     files: list[Path] = []
@@ -358,6 +422,7 @@ def render_tree(files: list[Path], dest: Path) -> list[Path]:
     for path in files:
         text = path.read_text(encoding="utf-8")
         rendered = render_placeholders(text) if "{{" in text else text
+        rendered = apply_api_server_defaults(rendered)
         rendered_path = dest / _rendered_relative_path(path)
         rendered_path.parent.mkdir(parents=True, exist_ok=True)
         rendered_path.write_text(rendered, encoding="utf-8")
@@ -648,7 +713,9 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "Fix the manifest (or, if this is a new CRD with no upstream schema "
             "yet, add it to SCHEMA_UNAVAILABLE_SKIPS in "
-            "validate_k8s_manifests.py with a comment explaining why)."
+            "validate_k8s_manifests.py with a comment explaining why; if the "
+            "catalog marks a field required that the API server defaults, add "
+            "it to _API_SERVER_DEFAULTS instead)."
         )
 
     _print_input_errors(input_errors)
