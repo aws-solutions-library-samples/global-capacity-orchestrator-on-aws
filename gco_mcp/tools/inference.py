@@ -70,8 +70,15 @@ def deploy_inference(
     port: int = 8000,
     region: str | None = None,
     env_vars: list[str] | None = None,
+    framework: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> str:
     """Deploy an inference endpoint across regions.
+
+    The model to serve is ``MODEL=<id-or-path>`` in ``env_vars``: vLLM and
+    SGLang both take it from there. Servers without a strict adapter, such as
+    Triton, need their command in ``extra_args`` (for Triton,
+    ``["tritonserver", "--model-repository=/models/<name>"]``).
 
     Args:
         name: Endpoint name (e.g. my-llm).
@@ -81,6 +88,9 @@ def deploy_inference(
         port: Container port.
         region: Target region(s). Omit for all deployed regions.
         env_vars: Environment variables as KEY=VALUE strings.
+        framework: Strict serving adapter, ``vllm`` or ``sglang``. Omit to let
+            the image name decide.
+        extra_args: Container arguments, one token per entry, appended in order.
     """
     args = [
         "inference",
@@ -99,6 +109,11 @@ def deploy_inference(
         args += ["-r", region]
     for env in env_vars or []:
         args += ["-e", env]
+    if framework:
+        args += ["--framework", framework]
+    # The ``--extra-args=<token>`` form keeps a token that starts with "--"
+    # from being read as an option of its own.
+    args += [f"--extra-args={token}" for token in extra_args or []]
     return cli_runner._run_cli(*args)
 
 
@@ -420,8 +435,10 @@ def invoke_inference(
     """Send a prompt to an inference endpoint and return the generated text.
 
     Automatically discovers the endpoint's ingress path, detects the serving
-    framework (vLLM, SGLang, Triton), and routes the request through the API
-    Gateway with SigV4 authentication.
+    framework (vLLM or SGLang), and routes the request through the API
+    Gateway with SigV4 authentication. Triton takes tensors rather than a
+    prompt, so a Triton endpoint is refused with the --path/--data form to use
+    through the CLI.
 
     Use this for single-turn text completions. For multi-turn conversations
     with chat models, use chat_inference instead.
@@ -510,7 +527,8 @@ def list_endpoint_models(name: str, region: str | None = None) -> str:
 
     Queries the endpoint's /v1/models path (OpenAI-compatible) to discover
     which models are loaded, their context length, and other metadata.
-    Works with vLLM and other OpenAI-compatible servers.
+    Works with vLLM and other OpenAI-compatible servers; SGLang reports its
+    launcher's model identity, and Triton its /v2/models/stats inventory.
 
     Args:
         name: Endpoint name.

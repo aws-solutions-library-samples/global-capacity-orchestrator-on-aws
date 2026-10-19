@@ -910,8 +910,8 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 |------|-------------|-----------|----------|
 | `nodepools_list` | List Karpenter NodePools in a cluster | safe | — |
 | `nodepools_describe` | Show one NodePool's full configuration | safe | — |
-| `nodepools_create_odcr` | Create an ODCR-backed NodePool with weighted scheduling | low-risk | — |
-| `nodepools_create_capacity_block` | Create a Capacity Block-backed NodePool (holds the prepaid block) | low-risk | — |
+| `nodepools_create_odcr` | Generate an ODCR-backed NodeClass and NodePool manifest to apply with kubectl | low-risk | — |
+| `nodepools_create_capacity_block` | Generate a Capacity Block-backed NodeClass and NodePool manifest that holds the prepaid block | low-risk | — |
 | `delete_nodepool` | Delete a NodePool (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Analytics

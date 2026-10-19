@@ -1037,6 +1037,23 @@ class TestInferenceTools:
             assert "-r" in cmd
             assert "-e" in cmd
             assert "MODEL=llama3" in cmd
+            assert "--framework" not in cmd
+            assert not any(token.startswith("--extra-args") for token in cmd)
+
+    def test_deploy_inference_passes_framework_and_extra_args_as_single_tokens(self):
+        """A token that starts with ``--`` must reach the CLI as a value, not an option."""
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.deploy_inference(
+                "triton-models",
+                "nvcr.io/nvidia/tritonserver:26.09-py3",
+                framework="vllm",
+                extra_args=["tritonserver", "--model-repository=/models/triton-models"],
+            )
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("--framework") + 1] == "vllm"
+            assert "--extra-args=tritonserver" in cmd
+            assert "--extra-args=--model-repository=/models/triton-models" in cmd
 
     def test_list_inference_endpoints(self):
         with patch("cli_runner.subprocess.run") as mock:
@@ -2728,6 +2745,7 @@ class TestNodepoolsTools:
             # Optional flags absent when not supplied.
             assert "--fallback-on-demand" not in cmd
             assert "--efa" not in cmd
+            assert "--cluster" not in cmd
 
     @pytest.mark.asyncio
     async def test_nodepools_create_odcr_with_options(self):
@@ -2741,6 +2759,7 @@ class TestNodepoolsTools:
                 max_nodes=50,
                 fallback_on_demand=True,
                 efa=True,
+                cluster="custom-cluster",
             )
             cmd = mock.call_args[0][0]
             assert "nodepools" in cmd
@@ -2754,6 +2773,10 @@ class TestNodepoolsTools:
             assert "p5.48xlarge" in cmd
             assert "--fallback-on-demand" in cmd
             assert "--efa" in cmd
+            assert cmd[cmd.index("--cluster") : cmd.index("--cluster") + 2] == [
+                "--cluster",
+                "custom-cluster",
+            ]
 
 
 class TestAnalyticsTools:
