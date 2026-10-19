@@ -57,6 +57,7 @@ from kubernetes.client.rest import ApiException
 from gco.models.inference_models import (
     GPU_NAME_NODE_LABEL,
     INFERENCE_PROBE_TIMEOUT_SECONDS,
+    INSTANCE_TYPE_NODE_LABEL,
     SGLANG_UNSUPPORTED_GPU_NAMES,
 )
 from gco.services.inference_store import InferenceEndpointStore
@@ -987,6 +988,21 @@ def _merge_skip_containers(existing: object) -> str:
     if ENDPOINT_TLS_PROXY_CONTAINER not in merged:
         merged.append(ENDPOINT_TLS_PROXY_CONTAINER)
     return ",".join(merged)
+
+
+def _vllm_args_name_model(args: list[str]) -> bool:
+    """True when vLLM arguments already choose the model to serve.
+
+    The model is named by ``--model`` / ``--model=...``, by the positional tag
+    ``vllm serve`` takes first, or inside a ``--config`` file the operator owns.
+    """
+    tokens = [str(arg) for arg in args]
+    if tokens and not tokens[0].startswith("-"):
+        return True
+    return any(
+        token in ("--model", "--config") or token.startswith(("--model=", "--config="))
+        for token in tokens
+    )
 
 
 def _reject_tls_port_collision(port: object) -> None:
@@ -3656,9 +3672,12 @@ class InferenceMonitor:
     def _ensure_intra_namespace_network_policies(self, ns: str, spec: dict[str, Any]) -> None:
         """Apply the intra-namespace allow rules disaggregated inference needs.
 
-        Alongside the default-deny posture in ``gco-inference`` (defined in
-        ``03-network-policies.yaml`` and never touched here), this maintains
-        four widening allow rules with create-if-absent semantics:
+        ``03-network-policies.yaml`` isolates ``gco-inference``: every pod's
+        egress is limited to DNS, HTTPS and the node's Pod Identity Agent, and
+        model pods accept ingress only from the inference proxy and, through
+        the rules below, from each other. The manifest ships these four
+        widening allow rules too; this re-creates any that are missing
+        (create-if-absent) and never touches the namespace's other policies:
 
         - ``allow-inference-internal`` — managed inference pods exchange TCP
           traffic and may reach the shared master's two fixed ports. This
@@ -3674,8 +3693,8 @@ class InferenceMonitor:
           :data:`MOONCAKE_BOOTSTRAP_BASE_PORT`).
 
         Each rule is created independently; an already-present rule (409) is the
-        steady state and counts as success. No deny rule is ever read, modified,
-        or deleted, so the default-deny policy is preserved regardless of
+        steady state and counts as success. No other policy is ever read,
+        modified, or deleted, so the namespace's isolation holds regardless of
         outcome.
 
         Args:
@@ -3687,7 +3706,7 @@ class InferenceMonitor:
         Raises:
             NetworkPolicyApplyError: If any single rule cannot be created. The
                 error names the failing rule; rules created before the failure
-                remain in place and the default-deny policy is untouched.
+                remain in place and no other policy is touched.
         """
         transfer = (spec.get("mooncake", {}) or {}).get("transfer", {}) or {}
         base_port = transfer.get("bootstrap_base_port", MOONCAKE_BOOTSTRAP_BASE_PORT)
@@ -3940,11 +3959,18 @@ class InferenceMonitor:
             else:
                 runtime_framework = None
         if not command and runtime_framework == "vllm":
-            if args:
-                if "--root-path" not in args:
-                    args = [*args, "--root-path", serving_prefix]
-            else:
-                args = ["--root-path", serving_prefix]
+            # vLLM never reads MODEL itself, so without this a deploy with
+            # -e MODEL=... served vLLM's built-in default model while
+            # ``gco inference invoke`` asked for MODEL by name. The model goes
+            # on argv as ``--model $(MODEL)`` (the kubelet expands it at
+            # container start); ``--model`` rather than the positional tag
+            # works for both the ``vllm serve`` and the older api_server
+            # entrypoints. Operator arguments that already name a model win.
+            args = list(args) if args else []
+            if "MODEL" in env_vars and not _vllm_args_name_model(args):
+                args = ["--model", "$(MODEL)", *args]
+            if "--root-path" not in args:
+                args = [*args, "--root-path", serving_prefix]
         if not command and runtime_framework == "sglang":
             # The lmsysorg/sglang image has no entrypoint (its CMD is a shell),
             # so the renderer supplies the official launcher. The launcher
@@ -4092,19 +4118,18 @@ class InferenceMonitor:
             volume_mounts=volume_mounts if volume_mounts else None,
             command=command,
             args=args,
-            # SGLang answers /health only once the model is loaded, which for a
-            # multi-gigabyte checkpoint outlasts the liveness budget below; the
-            # startup probe holds liveness off for up to 20 minutes while that
-            # happens.
-            startup_probe=(
-                client.V1Probe(
-                    http_get=client.V1HTTPGetAction(path=health_path, port=port),
-                    period_seconds=15,
-                    failure_threshold=80,
-                    timeout_seconds=probe_timeout,
-                )
-                if runtime_framework == "sglang"
-                else None
+            # A model server answers its health path only once the weights are
+            # downloaded and loaded: SGLang returns 503 until then, and vLLM
+            # and Triton don't listen at all. For a multi-gigabyte checkpoint
+            # that outlasts the liveness budget below (about three minutes),
+            # and every restart downloads the weights again, so the pod never
+            # comes up. The startup probe holds liveness off for up to 20
+            # minutes while that happens, whatever the runtime.
+            startup_probe=client.V1Probe(
+                http_get=client.V1HTTPGetAction(path=probe_health, port=port),
+                period_seconds=15,
+                failure_threshold=80,
+                timeout_seconds=probe_timeout,
             ),
             liveness_probe=client.V1Probe(
                 http_get=client.V1HTTPGetAction(path=probe_health, port=port),
@@ -4180,6 +4205,31 @@ class InferenceMonitor:
                     )
                 )
             )
+
+        # ``--gpu-type`` is a hint, so it is a preferred node affinity rather
+        # than a selector: Karpenter first tries to launch exactly this
+        # instance type and relaxes the preference when it can't, so a type
+        # that is out of capacity, or excluded by a selector or the SGLang
+        # affinity above, never leaves the pod unschedulable.
+        preferred_type = spec.get("gpu_type")
+        if isinstance(preferred_type, str) and preferred_type.strip():
+            preference = client.V1PreferredSchedulingTerm(
+                weight=100,
+                preference=client.V1NodeSelectorTerm(
+                    match_expressions=[
+                        client.V1NodeSelectorRequirement(
+                            key=INSTANCE_TYPE_NODE_LABEL,
+                            operator="In",
+                            values=[preferred_type.strip()],
+                        )
+                    ]
+                ),
+            )
+            if affinity is None:
+                affinity = client.V1Affinity(node_affinity=client.V1NodeAffinity())
+            affinity.node_affinity.preferred_during_scheduling_ignored_during_execution = [
+                preference
+            ]
 
         labels = {
             "app": app_label,

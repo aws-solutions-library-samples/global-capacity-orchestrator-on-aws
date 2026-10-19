@@ -1867,9 +1867,8 @@ def test_vllm_probes_state_the_same_timeout_instead_of_the_kubelet_default() -> 
     )
     container, sidecar = deployment.spec.template.spec.containers
     assert sidecar.name == ENDPOINT_TLS_PROXY_CONTAINER
-    assert container.startup_probe is None
-    assert container.liveness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
-    assert container.readiness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
+    for probe in (container.startup_probe, container.liveness_probe, container.readiness_probe):
+        assert probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
 
 
 def test_legacy_official_sglang_image_infers_the_sglang_contract() -> None:
@@ -1890,7 +1889,13 @@ def test_legacy_official_sglang_image_infers_the_sglang_contract() -> None:
     assert container.startup_probe is not None
 
 
-def test_vllm_renderer_has_no_startup_probe_and_keeps_root_path() -> None:
+def test_vllm_renderer_serves_the_model_env_and_keeps_root_path() -> None:
+    """``-e MODEL=...`` names the model on vLLM's argv; vLLM never reads the variable.
+
+    Before this, the documented ``gco inference deploy -i vllm/... -e MODEL=X``
+    started vLLM's built-in default model, and ``gco inference invoke`` then
+    asked for X by name and got a 404.
+    """
     monitor = _make_monitor()
     deployment = _build_deployment(
         monitor,
@@ -1904,16 +1909,134 @@ def test_vllm_renderer_has_no_startup_probe_and_keeps_root_path() -> None:
     )
     container = deployment.spec.template.spec.containers[0]
     assert container.command is None
-    assert container.args == ["--root-path", "/inference/chat"]
-    assert container.startup_probe is None
+    assert container.args == ["--model", "$(MODEL)", "--root-path", "/inference/chat"]
+    # The kubelet expands $(MODEL) from the container's own environment.
+    assert {"name": "MODEL", "value": "test/model"} in [
+        {"name": env.name, "value": env.value} for env in container.env
+    ]
+    startup = container.startup_probe
+    assert startup.http_get.path == "/inference/chat/health"
+    assert startup.http_get.port == 8000
+    assert startup.period_seconds * startup.failure_threshold == 1200
+
+
+def test_vllm_model_env_goes_before_operator_args_and_role_args() -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "vllm/vllm-openai:v0.31.0",
+            "framework": "vllm",
+            "env": {"MODEL": "test/model"},
+            "args": ["--max-model-len", "4096"],
+        },
+        extra_args=["--kv-transfer-config", "{}"],
+    )
+    assert deployment.spec.template.spec.containers[0].args == [
+        "--model",
+        "$(MODEL)",
+        "--max-model-len",
+        "4096",
+        "--root-path",
+        "/inference/chat",
+        "--kv-transfer-config",
+        "{}",
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--model", "org/explicit"],
+        ["--model=org/explicit"],
+        ["org/explicit", "--max-model-len", "4096"],
+        ["--config", "/models/serve.yaml"],
+        ["--config=/models/serve.yaml"],
+    ],
+    ids=["flag", "flag-equals", "positional-tag", "config", "config-equals"],
+)
+def test_vllm_args_that_already_name_a_model_win_over_the_model_env(args: list[str]) -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {"image": "vllm/vllm-openai:v0.31.0", "env": {"MODEL": "test/model"}, "args": args},
+    )
+    rendered = deployment.spec.template.spec.containers[0].args
+    assert "$(MODEL)" not in rendered
+    assert rendered == [*args, "--root-path", "/inference/chat"]
+
+
+def test_vllm_without_a_model_env_keeps_vllms_own_default() -> None:
+    deployment = _build_deployment(
+        _make_monitor(), {"image": "vllm/vllm-openai:v0.31.0", "framework": "vllm"}
+    )
+    assert deployment.spec.template.spec.containers[0].args == ["--root-path", "/inference/chat"]
+
+
+def test_vllm_args_name_model_reads_non_string_tokens_as_text() -> None:
+    from gco.services.inference_monitor import _vllm_args_name_model
+
+    assert _vllm_args_name_model([]) is False
+    assert _vllm_args_name_model(["--max-model-len", 4096]) is False  # type: ignore[list-item]
+    assert _vllm_args_name_model([7]) is True  # type: ignore[list-item]
+
+
+def _node_affinity(deployment):  # type: ignore[no-untyped-def]
+    affinity = deployment.spec.template.spec.affinity
+    return None if affinity is None else affinity.node_affinity
+
+
+def test_gpu_type_hint_renders_a_preferred_instance_type_affinity() -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {"image": "vllm/vllm-openai:v0.31.0", "framework": "vllm", "gpu_type": " g5.xlarge "},
+    )
+    node_affinity = _node_affinity(deployment)
+    assert node_affinity.required_during_scheduling_ignored_during_execution is None
+    (preferred,) = node_affinity.preferred_during_scheduling_ignored_during_execution
+    assert preferred.weight == 100
+    (requirement,) = preferred.preference.match_expressions
+    assert requirement.key == "node.kubernetes.io/instance-type"
+    assert requirement.operator == "In"
+    assert requirement.values == ["g5.xlarge"]
+    # A hint, not a selector: the node selector stays the accelerator default.
+    assert deployment.spec.template.spec.node_selector == {
+        "eks.amazonaws.com/instance-gpu-manufacturer": "nvidia"
+    }
+
+
+def test_gpu_type_hint_composes_with_the_sglang_pre_ampere_affinity() -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "lmsysorg/sglang:v0.5.21",
+            "framework": "sglang",
+            "port": 30000,
+            "env": {"MODEL": "test/model"},
+            "gpu_type": "g6.xlarge",
+        },
+    )
+    node_affinity = _node_affinity(deployment)
+    required = node_affinity.required_during_scheduling_ignored_during_execution
+    assert required.node_selector_terms[0].match_expressions[0].operator == "NotIn"
+    (preferred,) = node_affinity.preferred_during_scheduling_ignored_during_execution
+    assert preferred.preference.match_expressions[0].values == ["g6.xlarge"]
+
+
+@pytest.mark.parametrize("gpu_type", ["", "   ", None, 5])
+def test_blank_or_malformed_gpu_type_renders_no_affinity(gpu_type: object) -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {"image": "vllm/vllm-openai:v0.31.0", "framework": "vllm", "gpu_type": gpu_type},
+    )
+    assert deployment.spec.template.spec.affinity is None
 
 
 @pytest.mark.parametrize(
     "spec",
     [
         # A record persisted under the retired TGI contract, and a plain
-        # unknown image: neither gets a launcher, a root path, or the SGLang
-        # startup probe. Such an endpoint has to be redeployed as sglang/vllm.
+        # unknown image: neither gets a launcher or a root path. Such an
+        # endpoint has to be redeployed as sglang/vllm. Both still get the
+        # startup probe every model container carries.
         {
             "image": "ghcr.io/huggingface/text-generation-inference@sha256:" + "a" * 64,
             "framework": "tgi",
@@ -1936,6 +2059,7 @@ def test_unrecognised_runtimes_get_no_adapter_behaviour(spec: dict) -> None:
     container = deployment.spec.template.spec.containers[0]
     assert container.command is None
     assert container.args is None
-    assert container.startup_probe is None
     assert container.ports[0].container_port == spec["port"]
     assert container.readiness_probe.http_get.path == spec["health_check_path"]
+    assert container.startup_probe.http_get.path == spec["health_check_path"]
+    assert container.startup_probe.failure_threshold == 80

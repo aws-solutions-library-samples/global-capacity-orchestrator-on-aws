@@ -39,6 +39,9 @@ class RegionSyncState(StrEnum):
 #: and the instance family it was provisioned from.
 GPU_NAME_NODE_LABEL = "eks.amazonaws.com/instance-gpu-name"
 INSTANCE_FAMILY_NODE_LABEL = "eks.amazonaws.com/instance-family"
+#: The well-known Kubernetes label naming a node's EC2 instance type; the
+#: renderer prefers it for an endpoint's ``gpu_type`` hint.
+INSTANCE_TYPE_NODE_LABEL = "node.kubernetes.io/instance-type"
 
 #: NVIDIA GPUs older than Ampere, by their ``GPU_NAME_NODE_LABEL`` value.
 #: SGLang's prebuilt ``sgl-kernel`` / FlashInfer binaries target compute
