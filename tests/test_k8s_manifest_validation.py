@@ -510,6 +510,10 @@ class TestApiServerDefaults:
         assert validator.apply_api_server_defaults(job) == job
         assert validator.apply_api_server_defaults(other_version) == other_version
 
+    def test_a_document_without_an_api_version_is_left_for_kubeconform_to_report(self) -> None:
+        text = _KRO_GRAPH.replace("apiVersion: kro.run/v1alpha1\n", "")
+        assert validator.apply_api_server_defaults(text) == text
+
     def test_every_other_document_of_the_file_is_kept(self) -> None:
         config_map = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\ndata:\n  key: value\n"
         text = f"---\n{config_map}---\n---\n{_KRO_GRAPH}"
