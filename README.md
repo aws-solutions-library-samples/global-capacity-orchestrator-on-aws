@@ -181,9 +181,13 @@ A host install additionally needs:
 </details>
 
 <details>
-<summary><b>After you deploy</b>: add-ons converge in the background, and kubectl is optional</summary>
+<summary><b>After you deploy</b>: add-ons converge in the background, <code>gco status</code> shows the whole fleet, and kubectl is optional</summary>
 
 > **Heads up — Helm charts finish installing in the background.** When `deploy-all` reports the cluster `CREATE_COMPLETE`, the scheduler/operator Helm charts (KEDA, Volcano, KubeRay, cert-manager, Kueue, …) have only been *kicked off*; they converge asynchronously and can take **10–30+ minutes** to all become ready. This is intentional — a slow chart never rolls back the cluster. Track progress with `gco stacks addons status -r <region>` and re-converge any failures with `gco stacks addons install -r <region>`. See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md#helm-chart-configuration).
+
+<!-- -->
+
+> **The whole fleet in one view.** `gco status` gathers the stacks, queue depth, jobs, capacity and inference endpoints of every Region into one report. Each section reports its own status, so one failed read doesn't hide the rest. Add `--watch 10` to keep it refreshing, or `--fail-on-findings` to make it exit non-zero when it finds an error. See [Status Commands](docs/CLI.md#status-commands).
 
 <!-- -->
 
@@ -192,7 +196,7 @@ A host install additionally needs:
 </details>
 
 <details>
-<summary><b>Every way to submit a job</b>: SQS, the global queue, the REST API, or kubectl</summary>
+<summary><b>Every way to submit a job</b>: SQS, the global queue, the REST API, or kubectl, plus templates, pipelines and webhooks</summary>
 
 Submit a job using whichever path fits your setup — via SQS (recommended), via the global [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) queue, via API Gateway, or directly through kubectl:
 
@@ -202,6 +206,17 @@ gco queue submit examples/simple-job.yaml --region us-east-1
 gco jobs submit examples/simple-job.yaml -n gco-jobs
 gco jobs submit-direct examples/simple-job.yaml -r us-east-1
 ```
+
+For work you repeat, save a manifest with `{{parameter}}` placeholders as a template and run jobs from it, chain dependent jobs into a pipeline, and get a call when a job finishes:
+
+```bash
+gco templates create job.yaml -n train -p epochs=3                # store the manifest and its default values
+gco templates run train -n train-0001 -r us-east-1 -p epochs=10   # a job from it, with one value overridden
+gco dag run examples/pipeline-dag.yaml -r us-east-1               # steps in dependency order; a failed step skips its dependents
+gco webhooks create -u https://example.com/hook -e job.failed     # job events posted to your endpoint (-s signs them with HMAC)
+```
+
+See [Templates](docs/CLI.md#templates-commands), [DAG](docs/CLI.md#dag-commands) and [Webhooks](docs/CLI.md#webhooks-commands) in the CLI Reference.
 
 </details>
 
@@ -419,7 +434,7 @@ Everything GCO does, grouped by area; expand one for the details and its guide.
 
 - **Multi-region inference**: Deploy endpoints across regions with a single command. Each supported framework ships with a ready-to-run example manifest: [vLLM](https://docs.vllm.ai/en/latest/) ([example](examples/inference-vllm.yaml)), [SGLang](https://docs.sglang.ai/) ([example](examples/inference-sglang.yaml)), and [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](examples/inference-triton.yaml))
 - **Canary deployments**: A/B test new model versions with weighted traffic routing
-- **Model weight management**: [Central S3 bucket](./docs/CLUSTER_SHARED_BUCKET.md) with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
+- **Model weight management**: [Central S3 bucket](docs/INFERENCE.md#model-weight-management) with [KMS](https://docs.aws.amazon.com/kms/latest/developerguide/overview.html) encryption, automatic sync to each region
 - **Spot instance support**: Run inference on spot GPUs for significant cost savings
 - **Autoscaling**: the HPA scales on CPU and memory, and [KEDA](https://keda.sh/) on GPU utilization
 
@@ -438,9 +453,10 @@ Everything GCO does, grouped by area; expand one for the details and its guide.
 </details>
 
 <details>
-<summary><b>Storage and data</b>: EFS, FSx for Lustre, Valkey, Aurora pgvector and a globally replicated vector store</summary>
+<summary><b>Storage and data</b>: EFS, two shared S3 buckets, FSx for Lustre, Valkey, Aurora pgvector and a globally replicated vector store</summary>
 
 - **EFS**: Shared elastic storage for job outputs that persist after pod termination
+- **Shared S3 buckets**: two always-on, KMS-encrypted buckets that every job pod can read and write. The [Regional Shared Bucket](docs/REGIONAL_SHARED_BUCKET.md) lives in each cluster's own Region, so checkpoints and other large writes never cross a Region. The single [Cluster Shared Bucket](docs/CLUSTER_SHARED_BUCKET.md) is reachable from every Region and from SageMaker Studio. `gco storage list` shows each bucket's alias, and `gco storage sync regional-shared:us-east-1 ./data --direction upload` copies files in
 - **FSx for Lustre**: Optional high-performance parallel file system for ML training (toggle on/off)
 - **Valkey cache**: Optional serverless key-value cache for prompt caching and session state
 - **Aurora pgvector**: Optional serverless vector database for RAG, semantic search, and embedding storage
@@ -473,7 +489,7 @@ Everything GCO does, grouped by area; expand one for the details and its guide.
 </details>
 
 <details>
-<summary><b>Mission</b>: goal-directed iteration loops with deterministic verdicts and budget caps</summary>
+<summary><b>Mission and Swarm</b>: goal-directed iteration loops, and supervised fleets of them, with deterministic verdicts and budget caps</summary>
 
 Goal-directed iteration loop for orchestrated workflows. The operator declares a natural-language directive plus machine-checkable success criteria, a tool allowlist, and a budget; Mission runs five-phase iterations (propose → execute → observe → evaluate → decide) until a verdict is reached. Off by default — enable with `GCO_ENABLE_MISSION=true`. See [Mission Guide](docs/MISSION.md).
 
@@ -481,6 +497,12 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 - **Budget caps** on iterations and wall clock — the engine terminates cleanly when any cap fires. Cost guardrails live out-of-band via AWS Budgets and Cost Anomaly Detection at the account level.
 - **Scripted strategies** opt-in: an AST-validated Python sandbox with bounded duration and memory limits.
 - **CLI + MCP surface**: the `gco mission` command group (including the chained `gco mission run` that scaffolds criteria and drives a session to completion in one call, and `gco mission memory` for the session-memory index) with matching MCP tools, plus three `mission://sessions/{id}` resource templates.
+
+**Swarm** runs a supervised fleet of Missions. One orchestrator session spawns concurrent child Missions and finishes when its own criteria, evaluated over the children's results, reach a verdict. Off by default — enable with `GCO_ENABLE_SWARM=true`. See [Swarm Guide](docs/SWARM.md).
+
+- **Hard limits on the fleet**: a cap on live children (`--max-children`, default 3), a shared pool of child iterations (`--child-iteration-pool`, default 15), a bound on how many advance at once, and a finite iteration and wall-clock budget for every child. Children can't spawn children, and two live children can't share a tool that changes state unless you allow it.
+- **The same deterministic verdicts**: orchestrator and child verdicts come from the unchanged Mission cascade. Sampling is advisory: it suggests which children to propose and how to reword a failed child's directive, and every spawn still passes the full admission checks.
+- **Review, then run**: `gco swarm scaffold-plan` drafts a validated plan without starting anything, `gco swarm run --directive "..."` scaffolds, starts and drives the fleet in one call, and `gco swarm status` and `gco swarm abort` follow or stop it. The six `swarm_*` MCP tools mirror these. The [quickstart](docs/SWARM.md#quickstart-no-aws-required) completes a whole fleet with no AWS credentials.
 
 </details>
 
@@ -627,6 +649,7 @@ embedded.
 | Track and analyze workload cost | [Cost Monitoring Guide](docs/COST_MONITORING.md) |
 | Run interactive notebook analytics | [Analytics Guide](docs/ANALYTICS.md) |
 | Drive a goal-directed iteration loop | [Mission Guide](docs/MISSION.md) |
+| Supervise a fleet of Missions | [Swarm Guide](docs/SWARM.md) |
 | Perform routine maintenance & upgrades | [Maintenance Guide](docs/MAINTENANCE.md) |
 
 </details>
