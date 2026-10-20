@@ -39,6 +39,7 @@ from scripts.live_release_validation.checks import central_queue as checks_centr
 from scripts.live_release_validation.checks import inference as lifecycle_module
 from scripts.live_release_validation.checks import inference_inventory as inventory_module
 from scripts.live_release_validation.checks import inference_runtime as runtime_module
+from scripts.live_release_validation.checks import inference_scenarios as scenarios_module
 from scripts.live_release_validation.checks import jobs as checks_jobs
 from scripts.live_release_validation.checks import opencost as checks_opencost
 from scripts.live_release_validation.checks import policy as checks_policy
@@ -2707,7 +2708,16 @@ def _ready_kubectl(kubectl: _FakeKubectl, plans: tuple[Any, ...], settings: Any)
 
 
 def _inference_clock(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> _Clock:
-    return _install_clock(monkeypatch, lifecycle_module, runtime_module, inventory_module, **kwargs)
+    # Every module of the lifecycle shares one fake clock; a module left on the
+    # real clock would compare deadlines across two time bases.
+    return _install_clock(
+        monkeypatch,
+        lifecycle_module,
+        runtime_module,
+        inventory_module,
+        scenarios_module,
+        **kwargs,
+    )
 
 
 def _generous_settings(tmp_path: Path, **changes: Any) -> Any:
