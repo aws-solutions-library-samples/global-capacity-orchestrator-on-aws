@@ -837,6 +837,26 @@ async def test_reconcile_mooncake_promotion_waits_for_every_other_region() -> No
     store.update_desired_state.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        # No target regions: nothing can be "all running".
+        {"desired_state": "deploying", "lifecycle_id": LIFECYCLE_ID, "target_regions": []},
+        # No lifecycle id to fence the write on.
+        {"desired_state": "deploying", "target_regions": ["us-east-1"]},
+        {"desired_state": "deploying", "lifecycle_id": "", "target_regions": ["us-east-1"]},
+        # Already promoted.
+        {"desired_state": "running", "lifecycle_id": LIFECYCLE_ID, "target_regions": ["us-east-1"]},
+    ],
+)
+def test_promote_deploying_endpoint_refuses_unfenced_or_empty_targets(endpoint: dict) -> None:
+    store = MagicMock()
+    monitor = _make_monitor(store)
+
+    assert monitor._promote_deploying_endpoint("chat", endpoint, "running") is False
+    store.update_desired_state.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_reconcile_mooncake_does_not_promote_while_roles_are_creating() -> None:
     store = MagicMock()

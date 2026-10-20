@@ -1182,19 +1182,25 @@ def test_role_deployment_rolls_onto_a_rerendered_mooncake_config(
 def test_role_deployment_created_before_the_digest_is_stamped_once(
     monitor: InferenceMonitor,
 ) -> None:
-    """A pre-existing role without the annotation is rolled once onto the current file."""
+    """A pre-existing role without the annotation is rolled once onto the current file.
+
+    Without an observed resourceVersion the patch carries no compare-and-swap
+    metadata rather than an empty one.
+    """
     spec = {
         "image": MODEL_IMAGE,
         "port": 8000,
         "mooncake": {"mode": "store", "store": {"enabled": True}},
     }
-    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
-        {"chat": _role_deployment_with_sidecar("chat")}
-    )
+    deployment = _role_deployment_with_sidecar("chat")
+    deployment.metadata.resource_version = None
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name({"chat": deployment})
 
     monitor._ensure_role_deployment("chat", NAMESPACE, spec, "single", config_digest="c" * 64)
 
-    template = _deployment_patch(monitor, "chat")["spec"]["template"]
+    body = _deployment_patch(monitor, "chat")
+    assert "metadata" not in body
+    template = body["spec"]["template"]
     assert template["metadata"]["annotations"] == {MOONCAKE_CONFIG_DIGEST_ANNOTATION: "c" * 64}
 
 
