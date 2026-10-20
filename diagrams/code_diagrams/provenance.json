@@ -52,9 +52,9 @@
       "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
     },
     "gco/services/api_routes/inference_proxy.py": {
-      "digest": "15a888305d84b0f156bf210ae5fe7c13641783c7d08d6e254dd65e24b7b55213",
-      "generated_at": "2026-09-28T07:34:51Z",
-      "source_commit": "95213a3dfe214f41ea8e3977b79711b1be061ac0"
+      "digest": "7e106901ae18125e034334ffd7fc59814de8aa9b48aa1f962711fca1dc1efd7a",
+      "generated_at": "2026-10-20T06:22:48Z",
+      "source_commit": "a0b4465d48d14210d1b329dd2edb938b6440df52"
     },
     "gco/services/auth_middleware.py": {
       "digest": "df1109f10799c56726a5a0fd581d3071055166a7ded5faf553d1e5df86312a2f",
