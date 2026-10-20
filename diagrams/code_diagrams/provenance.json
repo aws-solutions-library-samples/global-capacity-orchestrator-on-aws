@@ -72,9 +72,9 @@
       "source_commit": "c8a2c18a0d540e23acd5eda86d3aab9db69e5c41"
     },
     "gco/services/inference_monitor.py": {
-      "digest": "1690eac6f2a340c57fcacf7151209ff1b3f1d3f0ba47a3b1b33760b87b700161",
-      "generated_at": "2026-10-20T05:48:45Z",
-      "source_commit": "c423142917c732c00afaacd6c183bc25ce3d591e"
+      "digest": "bfab182268fc8dda6f711984102836011dfebd33d6c21bb53f1255037a69c05b",
+      "generated_at": "2026-10-20T06:07:53Z",
+      "source_commit": "a79cb382e149c05b653fcf1d50a9793f0c861209"
     },
     "gco/services/manifest_api.py": {
       "digest": "7265a4b75a5304825493a36715cddff014f801ad642e0dfe25d2cdcd511ed554",
