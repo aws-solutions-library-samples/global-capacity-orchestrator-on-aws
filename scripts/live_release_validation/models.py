@@ -27,6 +27,11 @@ from .artifact_io import (
 )
 from .inference_contract import (
     INFERENCE_OWNER_LABEL,
+    MOONCAKE_CONFIG_DIGEST_ANNOTATION,
+    MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES,
+    TRITON_INPUT_DATA,
+    TRITON_MODEL_NAME,
+    TRITON_MODEL_VERSION,
     EndpointRole,
     Framework,
     InferenceRuntimeSpec,
@@ -38,11 +43,17 @@ from .inference_contract import (
     inference_mooncake_block,
     inference_request_body,
     validate_inference_settings,
+    write_triton_model_repository,
 )
 from .json_utils import loads_without_duplicate_keys
 
 __all__ = [
     "INFERENCE_OWNER_LABEL",
+    "MOONCAKE_CONFIG_DIGEST_ANNOTATION",
+    "MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES",
+    "TRITON_INPUT_DATA",
+    "TRITON_MODEL_NAME",
+    "TRITON_MODEL_VERSION",
     "ActionFailure",
     "ActionResult",
     "EndpointRole",
@@ -57,6 +68,7 @@ __all__ = [
     "ensure_private_directory",
     "ensure_private_run_directory",
     "utc_now",
+    "write_triton_model_repository",
 ]
 
 SCHEMA_VERSION = 2
