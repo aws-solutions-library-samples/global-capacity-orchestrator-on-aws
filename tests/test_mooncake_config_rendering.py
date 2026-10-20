@@ -217,6 +217,28 @@ def test_cold_tier_uri_present_only_when_cold_tier_enabled_is_true() -> None:
     assert "cold_tier_s3_uri" not in off
 
 
+def test_unresolved_cold_tier_uri_keeps_hot_store_and_drops_cold_tier() -> None:
+    """A requested cold tier whose bucket did not resolve is dropped, not fatal.
+
+    ``_resolve_region_services`` omits ``cold_tier_s3_uri`` when the own-region
+    bucket cannot be resolved (bucket parameter absent or unreadable). Rendering
+    must then still produce the hot-path store configuration rather than raise
+    on the missing key, which is what live validation saw as every reconcile
+    pass of a cold-tier endpoint failing with ``'cold_tier_s3_uri'``.
+    """
+    services = _region_services()
+    del services["cold_tier_s3_uri"]
+
+    cfg = render_mooncake_config(
+        {"store": {"enabled": True, "cold_tier_enabled": True}},
+        services,
+    )
+
+    assert cfg["master_server_address"] == services["master_server_address"]
+    assert "global_segment_size" in cfg
+    assert "cold_tier_s3_uri" not in cfg
+
+
 @pytest.mark.parametrize("cold_value", [None, "true", 1, "yes"])
 def test_non_boolean_true_leaves_cold_tier_off(cold_value: object) -> None:
     """Any non-``True`` ``cold_tier_enabled`` value keeps the cold tier off."""

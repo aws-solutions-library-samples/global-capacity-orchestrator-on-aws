@@ -55,9 +55,9 @@ class TestInferenceDeploy:
     def test_documented_sglang_deploy_persists_runtime_contract(self, runner):
         mock_mgr = MagicMock()
         mock_mgr.deploy.return_value = {
-            "endpoint_name": "sglang-phi3",
+            "endpoint_name": "sglang-qwen",
             "target_regions": ["us-east-1"],
-            "ingress_path": "/inference/sglang-phi3",
+            "ingress_path": "/inference/sglang-qwen",
         }
         with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
             result = runner.invoke(
@@ -65,7 +65,7 @@ class TestInferenceDeploy:
                 [
                     "inference",
                     "deploy",
-                    "sglang-phi3",
+                    "sglang-qwen",
                     "-i",
                     "lmsysorg/sglang:v0.5.21",
                     "--framework",
@@ -73,10 +73,10 @@ class TestInferenceDeploy:
                     "--port",
                     "30000",
                     "-e",
-                    "MODEL=microsoft/Phi-3.5-mini-instruct",
+                    "MODEL=Qwen/Qwen2.5-1.5B-Instruct",
                     "--extra-args=--model-path",
                     "--extra-args",
-                    "microsoft/Phi-3.5-mini-instruct",
+                    "Qwen/Qwen2.5-1.5B-Instruct",
                     "--extra-args=--revision",
                     "--extra-args",
                     "a" * 40,
@@ -86,10 +86,10 @@ class TestInferenceDeploy:
         call_kwargs = mock_mgr.deploy.call_args.kwargs
         assert call_kwargs["framework"] == "sglang"
         assert call_kwargs["port"] == 30000
-        assert call_kwargs["env"] == {"MODEL": "microsoft/Phi-3.5-mini-instruct"}
+        assert call_kwargs["env"] == {"MODEL": "Qwen/Qwen2.5-1.5B-Instruct"}
         assert call_kwargs["extra_args"] == [
             "--model-path",
-            "microsoft/Phi-3.5-mini-instruct",
+            "Qwen/Qwen2.5-1.5B-Instruct",
             "--revision",
             "a" * 40,
         ]
@@ -788,7 +788,7 @@ class TestInferenceInvoke:
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = self._mock_endpoint(
             image="lmsysorg/sglang:v0.5.21",
-            env={"MODEL": "microsoft/Phi-3.5-mini-instruct"},
+            env={"MODEL": "Qwen/Qwen2.5-1.5B-Instruct"},
             framework="sglang",
         )
         mock_client = MagicMock()
@@ -809,7 +809,7 @@ class TestInferenceInvoke:
         call_kwargs = mock_client.make_authenticated_request.call_args.kwargs
         assert call_kwargs["path"] == "/inference/ep/v1/completions"
         assert call_kwargs["body"] == {
-            "model": "microsoft/Phi-3.5-mini-instruct",
+            "model": "Qwen/Qwen2.5-1.5B-Instruct",
             "prompt": "Hello",
             "max_tokens": 100,
             "stream": False,

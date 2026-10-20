@@ -434,12 +434,12 @@ otherwise the model the arguments or `MODEL` name, otherwise the first entry of
 ### SGLang Example
 
 ```bash
-gco inference deploy sglang-phi3 \
+gco inference deploy sglang-qwen \
   -i lmsysorg/sglang:v0.5.21 \
   --framework sglang \
   --port 30000 \
   --gpu-count 1 \
-  -e MODEL=microsoft/Phi-3.5-mini-instruct
+  -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 With `--framework sglang` the renderer supplies the official launcher itself
@@ -478,6 +478,14 @@ refuses a `--node-selector` that pins one of those GPUs or families
 (`g4dn`, `p3`, `p2`, `g3`) with the reason. vLLM has no such constraint: it
 ships kernels down to compute capability 7.0, so a T4 remains a valid, cheaper
 placement for `--framework vllm`.
+
+Not every model runs on SGLang's default kernels either. On v0.5.21,
+`microsoft/Phi-3.5-mini-instruct` (head dimension 96) fails during CUDA graph
+capture, in the JIT KV-cache kernel with an illegal memory access and in the
+FlashInfer backend with `Unsupported head_dim: 96`, on A10G and L40S alike.
+Serve such a model with `--extra-args=--attention-backend --extra-args triton
+--extra-args=--disable-cuda-graph`; the examples use Qwen2.5-1.5B-Instruct,
+which runs on the defaults.
 
 ### Triton Example
 
@@ -898,6 +906,13 @@ Lambda/API Gateway integration limit while data is flowing. The edge/global
 path has a 30-second idle timeout and direct regional APIs have a 5-minute idle
 timeout. API Gateway does not stream request bodies.
 
+The API Gateway WAF rate-limits each source IP to `waf.per_ip_rate_limit`
+requests per 5-minute window (`cdk.json`, default 100). A client that exceeds it
+receives `HTTP 403` with an empty body for the rest of the window, from the edge
+rather than from the endpoint, so nothing appears in the inference-proxy or
+model-server logs. Raise the limit before running load tests or tight
+`gco inference invoke` loops from one machine.
+
 ### Chat Conversations
 
 For multi-turn conversations with chat models, use the `/v1/chat/completions` path:
@@ -1138,6 +1153,10 @@ kubectl logs -n gco-inference deployment/my-llm -c endpoint-tls-proxy
 | `running` | All target regions have healthy replicas |
 | `stopped` | Scaled to zero, configuration preserved |
 | `deleted` | Marked for deletion, inference_monitor cleaning up resources |
+
+The inference proxy only forwards requests while the endpoint's state is `running`, so an endpoint whose pods are Ready but whose state still reads `deploying` answers `HTTP 503: Inference endpoint is not ready in this region`. The monitor promotes `deploying` to `running` once every target region reports `running`; classic and Mooncake (disaggregated/store) endpoints promote the same way.
+
+`gco -o json inference status <name>` exposes the per-region detail the table hides. Mooncake endpoints add a `roles` map (prefill/decode ready and desired counts) and, when the store is enabled, a `store` sub-status with the master's readiness and address. When the cold tier is requested, `store.cold_tier` reports whether it is active (`enabled`, `s3_uri`); `enabled: false` with an `error` means the region's bucket could not be resolved and the hot-path store is serving without its S3 tier.
 
 ## Example Workflows
 

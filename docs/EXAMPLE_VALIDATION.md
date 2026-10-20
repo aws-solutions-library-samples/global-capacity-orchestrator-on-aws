@@ -204,8 +204,8 @@ skip):
 
 Disclosed mutations: a spec can rewrite a manifest value before submission
 (for example a model ID), and every mutation appears in the report row. The
-inference examples serve ungated models (vLLM's Qwen2.5-1.5B, SGLang's
-Phi-3.5) and run verbatim; the remaining mutations point a manifest at
+inference examples serve an ungated model (Qwen2.5-1.5B-Instruct for both
+vLLM and SGLang) and run verbatim; the remaining mutations point a manifest at
 something only the run can know, such as the KEDA example's disposable demo
 queue or the Argo CD example's commit under validation.
 

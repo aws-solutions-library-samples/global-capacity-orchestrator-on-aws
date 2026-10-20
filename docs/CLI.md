@@ -2745,7 +2745,7 @@ gco inference deploy my-llm \
 gco inference deploy my-sglang \
   -i lmsysorg/sglang:v0.5.21 \
   --framework sglang --port 30000 --gpu-count 1 \
-  -e MODEL=microsoft/Phi-3.5-mini-instruct
+  -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 #### `gco inference list`

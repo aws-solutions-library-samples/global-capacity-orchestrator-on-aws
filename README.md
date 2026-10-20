@@ -228,7 +228,7 @@ See [Templates](docs/CLI.md#templates-commands), [DAG](docs/CLI.md#dag-commands)
 
 ```bash
 gco inference deploy vllm-qwen -i vllm/vllm-openai:v0.31.0 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
-gco inference deploy sglang-phi3 -i lmsysorg/sglang:v0.5.21 --framework sglang --port 30000 --gpu-count 1 -e MODEL=microsoft/Phi-3.5-mini-instruct
+gco inference deploy sglang-qwen -i lmsysorg/sglang:v0.5.21 --framework sglang --port 30000 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 gco models upload ./triton-repo --name triton-repo
 gco inference deploy triton-models -i nvcr.io/nvidia/tritonserver:26.09-py3 --health-path /v2/health/ready --gpu-count 1 \
   --model-source $(gco models uri triton-repo) --extra-args tritonserver --extra-args=--model-repository=/models/triton-models

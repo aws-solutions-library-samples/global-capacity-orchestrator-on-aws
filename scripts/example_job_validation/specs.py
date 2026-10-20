@@ -242,7 +242,7 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             DEPLOYMENT_AVAILABLE,
             accelerator="nvidia",
             timeout_seconds=2400,
-            notes="default model (microsoft/Phi-3.5-mini-instruct) is ungated; runs verbatim",
+            notes="default model (Qwen/Qwen2.5-1.5B-Instruct) is ungated; runs verbatim",
         ),
         ExampleSpec(
             "inference-triton",

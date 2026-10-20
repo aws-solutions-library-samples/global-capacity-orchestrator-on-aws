@@ -773,8 +773,11 @@ def render_mooncake_config(
                 "cold_tier_s3_uri": "s3://gco-regional-shared-<acct>-<region>/...",
             }
 
-            ``master_server_address`` is required when the store is enabled and
-            ``cold_tier_s3_uri`` is required when the cold tier is enabled.
+            ``master_server_address`` is required when the store is enabled.
+            ``cold_tier_s3_uri`` carries the resolved cold-tier bucket; when the
+            caller could not resolve one (see
+            :class:`RegionServicesResolution.cold_tier_unresolved`) the key is
+            absent and the cold tier is left off.
 
     Returns:
         The ``mooncake.json`` contents as a dict, where:
@@ -782,8 +785,10 @@ def render_mooncake_config(
         - ``protocol`` and ``device_name`` are always present.
         - ``master_server_address`` is present only when the store is enabled.
         - ``cold_tier_s3_uri`` is present only when the cold tier is enabled,
-          which requires ``cold_tier_enabled`` to be the boolean ``True``; any
-          other value (absent, null, truthy non-bool) leaves the cold tier off.
+          which requires ``cold_tier_enabled`` to be the boolean ``True``, and
+          the caller resolved a URI for it; any other ``cold_tier_enabled``
+          value (absent, null, truthy non-bool) or an unresolved URI leaves the
+          cold tier off so the hot-path store keeps operating.
     """
     protocol, device_name = _resolved_mooncake_transfer(mooncake)
     store = mooncake.get("store", {})
@@ -805,9 +810,13 @@ def render_mooncake_config(
         # Only the boolean True enables the cold tier; any other value leaves it
         # off. The URI is resolved by the caller for the monitor's own region —
         # never authored by the user — and is an object-store backend kept off
-        # the RDMA transport block above.
-        if store.get("cold_tier_enabled") is True:
-            cfg["cold_tier_s3_uri"] = region_services["cold_tier_s3_uri"]
+        # the RDMA transport block above. When the caller could not resolve the
+        # own-region bucket it omits the key: the cold tier is dropped for this
+        # pass while the hot-path store stays configured, instead of failing
+        # the whole endpoint on a missing discovery value.
+        cold_tier_s3_uri = region_services.get("cold_tier_s3_uri")
+        if store.get("cold_tier_enabled") is True and cold_tier_s3_uri:
+            cfg["cold_tier_s3_uri"] = cold_tier_s3_uri
     return cfg
 
 
@@ -2400,35 +2409,54 @@ class InferenceMonitor:
             **status_conditions,
         )
 
-        # Promote desired state only from live local readiness plus explicit
-        # running observations for every *other* target region. The endpoint
-        # object may contain a stale local region_status from before this pass.
-        if state == "running" and endpoint.get("desired_state") == "deploying":
-            stored_statuses = endpoint.get("region_status", {})
-            target_regions = endpoint.get("target_regions", [])
-            all_running = bool(target_regions)
-            for target_region in target_regions:
-                if target_region == self.region:
-                    continue
-                target_status = (
-                    stored_statuses.get(target_region, {})
-                    if isinstance(stored_statuses, dict)
-                    else {}
-                )
-                if not isinstance(target_status, dict) or target_status.get("state") != "running":
-                    all_running = False
-                    break
-            if all_running:
-                lifecycle_id = endpoint.get("lifecycle_id")
-                if isinstance(lifecycle_id, str) and lifecycle_id:
-                    self.store.update_desired_state(
-                        name,
-                        "running",
-                        expected_lifecycle_id=lifecycle_id,
-                        expected_desired_state="deploying",
-                    )
+        self._promote_deploying_endpoint(name, endpoint, state)
 
         return None
+
+    def _promote_deploying_endpoint(
+        self, name: str, endpoint: dict[str, Any], local_state: str
+    ) -> bool:
+        """Promote ``desired_state`` from ``deploying`` to ``running`` once every region is up.
+
+        The inference proxy serves an endpoint only while its ``desired_state``
+        is ``running``, so a deploying endpoint that never promotes is
+        unreachable even when every pod is Ready. Promotion is decided from live
+        local readiness (``local_state``, the state this pass just wrote) plus
+        explicit ``running`` observations for every *other* target region. The
+        endpoint object may contain a stale local region_status from before this
+        pass, which is why the local region is never read back from it.
+
+        The write is fenced on the lifecycle id and the ``deploying`` state so a
+        concurrent delete or replacement cannot be resurrected. Both the classic
+        single-Deployment path and the Mooncake role-keyed path use this.
+
+        Returns:
+            ``True`` when a promotion write was issued, ``False`` otherwise.
+        """
+        if local_state != "running" or endpoint.get("desired_state") != "deploying":
+            return False
+        stored_statuses = endpoint.get("region_status", {})
+        target_regions = endpoint.get("target_regions", [])
+        if not target_regions:
+            return False
+        for target_region in target_regions:
+            if target_region == self.region:
+                continue
+            target_status = (
+                stored_statuses.get(target_region, {}) if isinstance(stored_statuses, dict) else {}
+            )
+            if not isinstance(target_status, dict) or target_status.get("state") != "running":
+                return False
+        lifecycle_id = endpoint.get("lifecycle_id")
+        if not isinstance(lifecycle_id, str) or not lifecycle_id:
+            return False
+        self.store.update_desired_state(
+            name,
+            "running",
+            expected_lifecycle_id=lifecycle_id,
+            expected_desired_state="deploying",
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Mooncake reconciliation branch
@@ -2595,6 +2623,8 @@ class InferenceMonitor:
         mooncake: dict[str, Any],
         region_services: dict[str, Any],
         endpoint: dict[str, Any] | None = None,
+        *,
+        cold_tier_error: str | None = None,
     ) -> str:
         """Write the role-keyed region status for a Mooncake endpoint.
 
@@ -2603,6 +2633,17 @@ class InferenceMonitor:
         a ``store`` sub-status with the master's readiness and address. The flat
         ``replicas_ready`` / ``replicas_desired`` fields are also populated with
         the totals so consumers that only read the flat shape still see motion.
+
+        When the endpoint asked for the cold tier, the ``store`` sub-status also
+        reports whether it is active (``cold_tier.enabled``) and the resolved
+        ``s3_uri``; an unresolved own-region bucket surfaces as
+        ``cold_tier.enabled: false`` with ``cold_tier_error`` as the reason, so
+        ``gco inference status`` shows that the hot-path store is serving
+        without its S3 tier instead of hiding the downgrade.
+
+        Args:
+            cold_tier_error: Why the cold tier was dropped this pass, or
+                ``None`` when it resolved (or was not requested).
 
         Returns:
             The reported endpoint state: ``"running"`` once every desired role
@@ -2654,10 +2695,20 @@ class InferenceMonitor:
         store = mooncake.get("store") or {}
         if store.get("enabled"):
             master_ready = self._mooncake_master_ready_replicas(ns) >= 1
-            extra["store"] = {
+            store_status: dict[str, Any] = {
                 "ready": master_ready,
                 "master": region_services.get("master_server_address"),
             }
+            if store.get("cold_tier_enabled") is True:
+                cold_tier_s3_uri = region_services.get("cold_tier_s3_uri")
+                cold_tier_status: dict[str, Any] = {
+                    "enabled": bool(cold_tier_s3_uri),
+                    "s3_uri": cold_tier_s3_uri,
+                }
+                if cold_tier_error:
+                    cold_tier_status["error"] = cold_tier_error
+                store_status["cold_tier"] = cold_tier_status
+            extra["store"] = store_status
             if not master_ready:
                 all_ready = False
 
@@ -2917,14 +2968,19 @@ class InferenceMonitor:
         else:
             self._create_service(name, ns, spec)
 
-        # Step 8: role-keyed status.
+        # Step 8: role-keyed status, then the same deploying -> running
+        # promotion the classic path performs. Without it a Mooncake endpoint
+        # would sit in ``deploying`` forever and the proxy would refuse every
+        # request with "not ready in this region" despite Ready role pods.
         state = self._report_role_status(
             name,
             ns,
             mooncake,
             region_services,
             endpoint,
+            cold_tier_error=services.error if services.cold_tier_unresolved else None,
         )
+        self._promote_deploying_endpoint(name, endpoint, state)
         return {"action": "reconcile_mooncake", "endpoint": name, "state": state}
 
     def _reconcile_stopped(

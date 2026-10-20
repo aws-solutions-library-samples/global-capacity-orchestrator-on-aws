@@ -3683,7 +3683,7 @@ class GCORegionalStack(Stack):
         # region's stack is deployed. The prefix from
         # ``regional_shared_ssm_parameter_prefix(project_name)`` is the single
         # source of truth for the namespace.
-        ssm.StringParameter(
+        self.regional_shared_bucket_name_parameter = ssm.StringParameter(
             self,
             "RegionalSharedBucketNameParam",
             parameter_name=f"{regional_shared_prefix}/name",
@@ -3783,9 +3783,9 @@ class GCORegionalStack(Stack):
         self._grant_regional_shared_bucket_to_service_account()
 
     def _grant_regional_shared_bucket_to_service_account(self) -> None:
-        """Attach RW + KMS permissions on the regional bucket to the pod role.
+        """Attach RW + KMS + discovery permissions on the regional bucket to the pod role.
 
-        Two ``iam.PolicyStatement``s are added to ``self.service_account_role``
+        Three ``iam.PolicyStatement``s are added to ``self.service_account_role``
         (the EKS Pod Identity role used by every pod in ``gco-jobs``,
         ``gco-system``, and ``gco-inference``):
 
@@ -3796,13 +3796,28 @@ class GCORegionalStack(Stack):
         2. KMS ``Decrypt`` / ``Encrypt`` / ``GenerateDataKey`` /
            ``DescribeKey`` scoped to the literal ``regional_shared_kms_key``
            ARN — and to no other key.
+        3. ``ssm:GetParameter`` on the literal ARN of the bucket's ``/name``
+           discovery parameter. The inference monitor runs under this role and
+           resolves the Mooncake cold-tier bucket from that parameter at
+           reconcile time (``_resolve_regional_shared_bucket``); without the
+           grant every cold-tier endpoint reads ``AccessDenied`` and the tier
+           is dropped.
 
-        Because both resources are local constructs in this stack, each ARN is
-        a concrete reference rather than a wildcard, so the role gains access to
-        precisely this bucket and this key. The grant runs unconditionally as
-        part of provisioning the always-on regional bucket.
+        Because all three resources are local constructs in this stack, each
+        ARN is a concrete reference rather than a wildcard, so the role gains
+        access to precisely this bucket, this key, and this parameter. The grant
+        runs unconditionally as part of provisioning the always-on regional
+        bucket.
         """
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        self.service_account_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ssm:GetParameter"],
+                resources=[self.regional_shared_bucket_name_parameter.parameter_arn],
+            )
+        )
 
         self.service_account_role.add_to_policy(
             iam.PolicyStatement(

@@ -409,7 +409,7 @@ maintained, with no planned updates, bug fixes, or security patches.
 gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1 \
   -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 gco inference deploy my-sglang -i lmsysorg/sglang:v0.5.21 --framework sglang \
-  --port 30000 --gpu-count 1 -e MODEL=microsoft/Phi-3.5-mini-instruct
+  --port 30000 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 **Deploy a manifest directly (single region):**
