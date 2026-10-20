@@ -398,7 +398,7 @@ pathspec==1.1.1
     #   mypy
     #   yamllint
     #   zensical
-pillow==12.3.0
+pillow==13.0.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
