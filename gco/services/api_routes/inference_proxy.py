@@ -225,7 +225,13 @@ async def _resolve_upstream(endpoint_name: str) -> tuple[str, str, str]:
     region_status = endpoint.get("region_status")
     local_status = region_status.get(region, {}) if isinstance(region_status, dict) else {}
     local_state = local_status.get("state") if isinstance(local_status, dict) else None
-    if desired_state != "running" or local_state != "running":
+    # Readiness is decided per region. ``deploying`` is the endpoint-wide
+    # summary while any target region still converges, and every spec update
+    # (scale, set-topology, configure-store, update-image) re-enters it until
+    # the monitor has observed all regions running again; a region whose own
+    # status is ``running`` has Ready pods and keeps serving throughout.
+    # Stopped and deleted endpoints never serve.
+    if desired_state not in ("running", "deploying") or local_state != "running":
         raise HTTPException(
             status_code=503, detail="Inference endpoint is not ready in this region"
         )

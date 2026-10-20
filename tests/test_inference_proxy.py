@@ -607,12 +607,49 @@ async def test_resolve_upstream_hides_endpoints_not_deployed_locally(
 
 
 @pytest.mark.parametrize(
+    "desired_state",
+    ["deploying", "running"],
+)
+async def test_resolve_upstream_serves_a_locally_running_region_while_deploying(
+    monkeypatch: pytest.MonkeyPatch,
+    desired_state: str,
+) -> None:
+    """A region that reports ``running`` serves even while the endpoint is ``deploying``.
+
+    ``deploying`` is the endpoint-wide summary while another target region
+    converges, and every spec update (scale, set-topology, configure-store,
+    update-image) re-enters it until the monitor sees all regions running
+    again. Live validation showed a healthy region answering 503 for the
+    interval after ``set-topology`` for that reason alone; readiness is the
+    local region's own status.
+    """
+    monkeypatch.setenv("REGION", "us-west-2")
+    monkeypatch.setenv("INFERENCE_NAMESPACE", "gco-inference")
+    _install_store(
+        monkeypatch,
+        _running_endpoint(
+            desired_state=desired_state,
+            target_regions=["us-west-2", "eu-west-1"],
+            region_status={
+                "us-west-2": {"state": "running"},
+                "eu-west-1": {"state": "creating"},
+            },
+        ),
+    )
+
+    assert await proxy._resolve_upstream("model") == ("model", "gco-inference", "/health")
+
+
+@pytest.mark.parametrize(
     ("desired_state", "region_status"),
     [
         ("stopped", {"us-west-2": {"state": "running"}}),
+        ("deleted", {"us-west-2": {"state": "running"}}),
         ("running", None),
         ("running", {"us-west-2": []}),
         ("running", {"us-west-2": {"state": "deploying"}}),
+        ("deploying", {"us-west-2": {"state": "creating"}}),
+        ("deploying", {"us-west-2": {"state": "updating"}}),
     ],
 )
 async def test_resolve_upstream_requires_desired_and_local_running_state(
