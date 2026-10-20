@@ -1839,33 +1839,48 @@ def test_npm_audit_retries_a_registry_operational_error() -> None:
     assert retry_index < checker_index
 
 
+#: Root ``overrides`` and the reason each exists: the direct dependency that
+#: pins the vulnerable version exactly, and the fixed line the override lifts
+#: it to. Both are under markdownlint-cli2 0.23.3, which pins every dependency
+#: exactly: smol-toml 1.8.0 (GHSA-r4xh-jqrq-34v2, fixed in 1.9.0) and
+#: markdown-it 15.0.1 (GHSA-r7fv-28h4-cvq7, quadratic smartquotes, fixed in
+#: 15.0.2).
+_ROOT_NPM_OVERRIDES: dict[str, tuple[str, tuple[int, int, int]]] = {
+    "smol-toml": ("markdownlint-cli2", (1, 9, 0)),
+    "markdown-it": ("markdownlint-cli2", (15, 0, 2)),
+}
+
+
 def test_root_npm_overrides_are_exact_and_still_needed() -> None:
     """``overrides`` lifts a transitive package to an advisory's fixed release
-    when the direct dependency pins the vulnerable version exactly (smol-toml
-    1.8.0 under markdownlint-cli2 0.23.3, GHSA-r4xh-jqrq-34v2, fixed in
-    1.9.0). Each override must be an exact version, must have taken effect in
-    the lock, and must be removed once the direct dependency requests the
-    fixed line itself -- an override that outlives its reason is an invisible
-    pin the monthly drift scan does not watch."""
+    when the direct dependency pins the vulnerable version exactly (see
+    ``_ROOT_NPM_OVERRIDES``). Each override must be an exact version, must have
+    taken effect in the lock, and must be removed once the direct dependency
+    requests the fixed line itself -- an override that outlives its reason is
+    an invisible pin the monthly drift scan does not watch."""
     manifest = json.loads(_read("package.json"))
     lock = json.loads(_read("package-lock.json"))
     packages = lock["packages"]
     overrides = manifest.get("overrides") or {}
-    assert set(overrides) == {"smol-toml"}, (
-        "document every new root override here with the advisory it lifts"
+    assert set(overrides) == set(_ROOT_NPM_OVERRIDES), (
+        "document every new root override in _ROOT_NPM_OVERRIDES with the advisory it lifts"
     )
     for name, version in overrides.items():
         assert re.fullmatch(r"\d+\.\d+\.\d+", version), f"override {name} must be exact"
         assert packages[f"node_modules/{name}"]["version"] == version, (
             f"override {name}={version} did not take effect; refresh package-lock.json"
         )
-    # The direct dependency that made the override necessary. When this
-    # assertion trips, drop the override and the lock entry follows upstream.
-    requested = packages["node_modules/markdownlint-cli2"]["dependencies"]["smol-toml"]
-    assert tuple(int(part) for part in requested.split(".")) < (1, 9, 0), (
-        f"markdownlint-cli2 now requests smol-toml {requested}; "
-        "remove the smol-toml override from package.json"
-    )
+        dependent, fixed_line = _ROOT_NPM_OVERRIDES[name]
+        assert tuple(int(part) for part in version.split(".")) >= fixed_line, (
+            f"override {name}={version} is below the advisory's fixed release"
+        )
+        # The direct dependency that made the override necessary. When this
+        # assertion trips, drop the override and the lock entry follows upstream.
+        requested = packages[f"node_modules/{dependent}"]["dependencies"][name]
+        assert tuple(int(part) for part in requested.split(".")) < fixed_line, (
+            f"{dependent} now requests {name} {requested}; "
+            f"remove the {name} override from package.json"
+        )
 
 
 def _job_env_pins(workflow: dict) -> dict[str, dict[str, str]]:
