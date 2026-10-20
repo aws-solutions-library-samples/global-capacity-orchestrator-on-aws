@@ -431,6 +431,11 @@ def build_delete_command(
     ]
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    """A dict payload as itself, anything else as an empty dict."""
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+
+
 def _last_json_document(output: str) -> Any:
     decoder = json.JSONDecoder()
     candidate: Any = None
@@ -974,19 +979,11 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
         )
         if not isinstance(deployment, dict):
             return None, False
-        metadata = (
-            deployment.get("metadata") if isinstance(deployment.get("metadata"), dict) else {}
-        )
-        spec = deployment.get("spec") if isinstance(deployment.get("spec"), dict) else {}
-        status = deployment.get("status") if isinstance(deployment.get("status"), dict) else {}
-        template = spec.get("template") if isinstance(spec.get("template"), dict) else {}
-        template_metadata = (
-            template.get("metadata") if isinstance(template.get("metadata"), dict) else {}
-        )
-        annotations = (
-            template_metadata.get("annotations")
-            if isinstance(template_metadata.get("annotations"), dict)
-            else {}
+        metadata = _mapping(deployment.get("metadata"))
+        spec = _mapping(deployment.get("spec"))
+        status = _mapping(deployment.get("status"))
+        annotations = _mapping(
+            _mapping(_mapping(spec.get("template")).get("metadata")).get("annotations")
         )
         digest = annotations.get(MOONCAKE_CONFIG_DIGEST_ANNOTATION)
         desired = int(spec.get("replicas") or 0)
