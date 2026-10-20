@@ -520,6 +520,8 @@ def _release_inference_args() -> list[str]:
         "test/sglang",
         "--inference-sglang-model-revision",
         "d" * 40,
+        "--inference-triton-image",
+        "registry.example/tritonserver@sha256:" + "e" * 64,
     ]
 
 

@@ -4591,7 +4591,7 @@ Release validation lifecycle.
 
 #### `gco release validate`
 
-Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`, `eks-capabilities`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM and SGLang images plus full immutable model revisions are mandatory; exact framework requests/responses, model-info probes, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
+Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`, `eks-capabilities`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM, SGLang and Triton images plus full immutable vLLM/SGLang model revisions are mandatory (Triton serves a harness-generated identity model from the model registry); exact framework requests/responses, model-info probes, the Mooncake store scenario, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
 
 ```bash
 gco release validate --expected-account 123456789012 \
@@ -4603,7 +4603,8 @@ gco release validate --expected-account 123456789012 \
   --inference-vllm-model-revision '<40-lowercase-hex-model-commit>' \
   --inference-sglang-image 'registry.example/sglang@sha256:<64-lowercase-hex-digest>' \
   --inference-sglang-model-id publisher/sglang-model \
-  --inference-sglang-model-revision '<40-lowercase-hex-model-commit>'
+  --inference-sglang-model-revision '<40-lowercase-hex-model-commit>' \
+  --inference-triton-image 'nvcr.io/nvidia/tritonserver@sha256:<64-lowercase-hex-digest>'
 ```
 
 **Options:**
@@ -4614,8 +4615,8 @@ gco release validate --expected-account 123456789012 \
 | `--i-understand-this-deploys-and-destroys-infrastructure` | Required consent flag: the run deploys real, paid infrastructure and destroys it afterwards. |
 | `--confirm-kms-key-deletion` | Authorize scheduling this run's retained EKS KMS keys for their 7-day deletion window; required whenever the `deploy` action is selected. |
 | `--actions` | Harness actions to run (default `all`); dependencies are added automatically. `all` includes first-class `inference` immediately after `topology`. A subset run reports `PARTIAL`, never `PASSED`. |
-| `--inference-region` | Required when `inference` runs. One deployed Region used for all four strictly sequential scenarios. |
-| `--inference-vllm-image` / `--inference-sglang-image` | Required. Separate immutable lowercase `@sha256:` server images; there are no mutable defaults. |
+| `--inference-region` | Required when `inference` runs. One deployed Region used for all six strictly sequential scenarios (vLLM baseline/HPA/Mooncake store, SGLang baseline/HPA, Triton baseline). |
+| `--inference-vllm-image` / `--inference-sglang-image` / `--inference-triton-image` | Required. Separate immutable lowercase `@sha256:` server images; there are no mutable defaults. Triton's model is the harness-generated identity repository, uploaded to the model registry for the run (`gco models upload`) and removed afterwards. |
 | `--inference-vllm-model-id` / `--inference-sglang-model-id` | Required. Exact model identifiers checked through framework-specific model-info APIs (vLLM `/v1/models`, SGLang `/server_info`). |
 | `--inference-vllm-model-revision` / `--inference-sglang-model-revision` | Required. Full lowercase 40-hex model commits forwarded to the official launchers and included in checkpoint identity. |
 | `--inference-gpu-count` | GPUs per endpoint replica (default `0`); part of checkpoint identity. |

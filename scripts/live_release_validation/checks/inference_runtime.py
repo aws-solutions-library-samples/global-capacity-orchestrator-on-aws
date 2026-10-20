@@ -486,6 +486,7 @@ class InferenceRuntimeMixin:
                     item.get("desired_state") == "running"
                     and isinstance(regional, dict)
                     and regional.get("state") == "running"
+                    and self._regional_status_satisfied(plan, record, regional)
                 ):
                     self._set_phase(record, "ddb-running")
                     return
@@ -504,6 +505,38 @@ class InferenceRuntimeMixin:
                     reason="ddb-running-timeout",
                 )
             time.sleep(min(float(self.settings.poll_interval_seconds), remaining))
+
+    def _regional_status_satisfied(
+        self, plan: Any, record: dict[str, Any], regional: dict[str, Any]
+    ) -> bool:
+        """Scenario-specific conditions on the monitor's regional observation.
+
+        A Mooncake store scenario is ready only when the shared master is
+        reported Ready and the requested cold tier is active with the
+        own-Region bucket URI: an unresolved cold tier (the monitor dropped it
+        and reported why) is not a running store for this harness, since the
+        scenario exists to prove that tier end to end.
+        """
+        if not getattr(plan, "mooncake_store", False):
+            return True
+        store = _dict_or_empty(regional.get("store"))
+        cold_tier = _dict_or_empty(store.get("cold_tier"))
+        s3_uri = cold_tier.get("s3_uri")
+        satisfied = (
+            store.get("ready") is True
+            and cold_tier.get("enabled") is True
+            and isinstance(s3_uri, str)
+            and s3_uri.startswith("s3://")
+        )
+        record["last_store_observation"] = {
+            "ready": store.get("ready"),
+            "master": store.get("master"),
+            "cold_tier": cold_tier,
+            "satisfied": satisfied,
+        }
+        if satisfied:
+            record["cold_tier_verified"] = True
+        return satisfied
 
     @staticmethod
     def _ready_condition(container_statuses: Any) -> bool:

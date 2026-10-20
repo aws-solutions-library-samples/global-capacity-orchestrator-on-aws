@@ -10,12 +10,21 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from scripts.example_job_validation.kube import KubectlRunner
 
+from ..inference_contract import (
+    MOONCAKE_CONFIG_DIGEST_ANNOTATION,
+    MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES,
+    TRITON_INPUT_DATA,
+    TRITON_MODEL_NAME,
+    TRITON_MODEL_VERSION,
+    write_triton_model_repository,
+)
 from ..models import (
     INFERENCE_OWNER_LABEL,
+    EndpointRole,
     InferenceRuntimeSpec,
     RunContext,
     RunSettings,
@@ -35,11 +44,16 @@ __all__ = [
     "EndpointPlan",
     "ManagedInferenceLifecycle",
     "ManagedInferenceValidationError",
+    "build_configure_store_command",
     "build_delete_command",
     "build_deploy_command",
     "build_endpoint_plans",
     "build_health_command",
     "build_invoke_command",
+    "build_model_delete_command",
+    "build_model_list_command",
+    "build_model_upload_command",
+    "build_model_uri_command",
     "build_models_command",
     "extract_generated_text",
     "initialize_run_state",
@@ -47,7 +61,6 @@ __all__ = [
 
 OWNER_LABEL = INFERENCE_OWNER_LABEL
 
-EndpointRole = Literal["baseline", "hpa"]
 _STATE_KEY = "inference_validation"
 _MAX_PRIVATE_OUTPUT = 64 * 1024
 
@@ -63,6 +76,18 @@ class EndpointPlan:
     autoscaling: bool
     runtime: InferenceRuntimeSpec
 
+    @property
+    def mooncake_store(self) -> bool:
+        """Whether this scenario is the Mooncake shared KV-cache store."""
+        return self.role == "store"
+
+    @property
+    def registry_model_name(self) -> str | None:
+        """The model-registry name this scenario uploads its weights under, if any."""
+        if not self.runtime.uses_model_registry:
+            return None
+        return f"{self.name}-repo"
+
     def private_dict(self, owner_nonce: str) -> dict[str, Any]:
         return {
             "ordinal": self.ordinal,
@@ -71,6 +96,7 @@ class EndpointPlan:
             "name": self.name,
             "replicas": self.replicas,
             "autoscaling": self.autoscaling,
+            "registry_model_name": self.registry_model_name,
             "owner_nonce": owner_nonce,
         }
 
@@ -79,20 +105,26 @@ def build_endpoint_plans(
     settings: RunSettings,
     owner_nonce: str,
 ) -> tuple[EndpointPlan, ...]:
-    """Build vLLM and SGLang baseline/HPA plans with peak concurrency of one."""
+    """Build every runtime's scenarios in matrix order with peak concurrency of one.
+
+    vLLM runs baseline, CPU-HPA and the Mooncake store; SGLang runs baseline
+    and CPU-HPA; Triton runs the baseline, served from the model registry.
+    """
     token = owner_nonce[:16]
     plans: list[EndpointPlan] = []
     for runtime in settings.inference_runtimes:
-        for role, replicas, autoscaling in (
-            ("baseline", settings.baseline_replicas, False),
-            ("hpa", settings.autoscale_initial_replicas, True),
-        ):
+        for role in runtime.roles:
+            autoscaling = role == "hpa"
             plans.append(
                 EndpointPlan(
                     ordinal=len(plans) + 1,
-                    role=cast(EndpointRole, role),
+                    role=role,
                     name=f"gco-mi-{token}-{runtime.framework}-{role}",
-                    replicas=replicas,
+                    replicas=(
+                        settings.autoscale_initial_replicas
+                        if autoscaling
+                        else settings.baseline_replicas
+                    ),
                     autoscaling=autoscaling,
                     runtime=runtime,
                 )
@@ -179,9 +211,22 @@ def build_deploy_command(
     settings: RunSettings,
     plan: EndpointPlan,
     owner_nonce: str,
+    *,
+    model_source: str | None = None,
 ) -> list[str]:
-    """Build the real argv-only ``gco inference deploy`` command."""
+    """Build the real argv-only ``gco inference deploy`` command.
+
+    ``model_source`` is the registry URI a Triton scenario serves from (the
+    plan's uploaded repository); it is required for such a plan and rejected
+    for every other one, so a deploy can never silently fall back to a
+    launcher that has no weights.
+    """
     runtime = plan.runtime
+    if runtime.uses_model_registry != bool(model_source):
+        raise ManagedInferenceValidationError(
+            "managed inference deploy needs a model-registry source exactly when the "
+            "runtime serves from the registry"
+        )
     command = [
         *_checkout_cli_prefix(),
         "--output",
@@ -191,31 +236,51 @@ def build_deploy_command(
         plan.name,
         "--image",
         runtime.image,
-        "--framework",
-        runtime.framework,
-        "--region",
-        settings.selected_region,
-        "--replicas",
-        str(plan.replicas),
-        "--gpu-count",
-        str(settings.gpu_count),
-        "--port",
-        str(runtime.port),
-        "--health-path",
-        settings.health_path,
-        "--namespace",
-        settings.namespace,
-        "--label",
-        f"{OWNER_LABEL}={owner_nonce}",
-        "--no-rewrite-image",
     ]
+    # ``--framework`` is the strict adapter contract the CLI knows for the two
+    # Hugging Face launchers; Triton is recognised from its image.
+    if runtime.framework in ("vllm", "sglang"):
+        command.extend(("--framework", runtime.framework))
+    command.extend(
+        (
+            "--region",
+            settings.selected_region,
+            "--replicas",
+            str(plan.replicas),
+            "--gpu-count",
+            str(settings.gpu_count),
+            "--port",
+            str(runtime.port),
+            "--health-path",
+            settings.runtime_health_path(runtime),
+            "--namespace",
+            settings.namespace,
+            "--label",
+            f"{OWNER_LABEL}={owner_nonce}",
+            "--no-rewrite-image",
+        )
+    )
+    if model_source:
+        command.extend(("--model-source", model_source))
     for key, value in sorted(settings.framework_env(runtime).items()):
         command.extend(("--env", f"{key}={value}"))
-    for value in settings.deploy_extra_args(runtime):
+    for value in settings.deploy_extra_args(runtime, endpoint_name=plan.name):
         if value.startswith("-"):
             command.append(f"--extra-args={value}")
         else:
             command.extend(("--extra-args", value))
+    if plan.mooncake_store:
+        # TCP keeps the scenario off the EFA pool; the cold tier is what
+        # exercises the regional bucket discovery grant and its rendering.
+        command.extend(
+            (
+                "--mooncake-mode",
+                "store",
+                "--mooncake-protocol",
+                "tcp",
+                "--mooncake-cold-tier",
+            )
+        )
     if plan.autoscaling:
         command.extend(
             (
@@ -270,18 +335,78 @@ def build_health_command(settings: RunSettings, plan: EndpointPlan) -> list[str]
 
 
 def build_models_command(settings: RunSettings, plan: EndpointPlan) -> list[str]:
-    """Build the framework-aware authenticated model-identity probe."""
-    return [
+    """Build the framework-aware authenticated model-identity probe.
+
+    ``--framework`` names the two launcher contracts the CLI accepts; for
+    Triton the command resolves the KServe statistics path from the image.
+    """
+    command = [
         *_checkout_cli_prefix(),
         "--output",
         "json",
         "inference",
         "models",
         plan.name,
-        "--framework",
-        plan.runtime.framework,
-        "--region",
-        settings.selected_region,
+    ]
+    if plan.runtime.framework in ("vllm", "sglang"):
+        command.extend(("--framework", plan.runtime.framework))
+    command.extend(("--region", settings.selected_region))
+    return command
+
+
+def build_model_upload_command(plan: EndpointPlan, repository_root: Path) -> list[str]:
+    """Build the registry upload of the plan's generated model repository."""
+    return [
+        *_checkout_cli_prefix(),
+        "--output",
+        "json",
+        "models",
+        "upload",
+        str(repository_root),
+        "--name",
+        str(plan.registry_model_name),
+    ]
+
+
+def build_model_uri_command(plan: EndpointPlan) -> list[str]:
+    """Build the lookup of the plan's registry URI (the deploy's ``--model-source``)."""
+    return [
+        *_checkout_cli_prefix(),
+        "--output",
+        "json",
+        "models",
+        "uri",
+        str(plan.registry_model_name),
+    ]
+
+
+def build_model_delete_command(plan: EndpointPlan) -> list[str]:
+    """Build the non-interactive removal of the plan's registry model."""
+    return [
+        *_checkout_cli_prefix(),
+        "models",
+        "delete",
+        str(plan.registry_model_name),
+        "--yes",
+    ]
+
+
+def build_model_list_command() -> list[str]:
+    """Build the registry listing used to prove a model's absence."""
+    return [*_checkout_cli_prefix(), "--output", "json", "models", "list"]
+
+
+def build_configure_store_command(plan: EndpointPlan) -> list[str]:
+    """Build the store reconfiguration whose re-rendered file must roll the role pods."""
+    return [
+        *_checkout_cli_prefix(),
+        "--output",
+        "json",
+        "inference",
+        "configure-store",
+        plan.name,
+        "--local-buffer-size",
+        str(MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES),
     ]
 
 
@@ -343,6 +468,26 @@ def extract_generated_text(output: str, framework: str) -> str:
         # sends and therefore never accepts.
         if isinstance(payload, dict):
             text = payload.get("text")
+    elif framework == "triton":
+        # KServe v2: the identity model must echo the request tensor exactly,
+        # so this is an equality check on ``outputs[0].data`` rather than a
+        # non-emptiness check on generated text.
+        outputs = payload.get("outputs") if isinstance(payload, dict) else None
+        first = outputs[0] if isinstance(outputs, list) and outputs else None
+        data = first.get("data") if isinstance(first, dict) else None
+        if (
+            isinstance(first, dict)
+            and first.get("name") == "OUTPUT0"
+            and isinstance(data, list)
+            and len(data) == len(TRITON_INPUT_DATA)
+            and all(
+                isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and float(value) == expected
+                for value, expected in zip(data, TRITON_INPUT_DATA, strict=True)
+            )
+        ):
+            text = json.dumps([float(value) for value in data])
     else:
         raise ManagedInferenceValidationError("unknown managed inference response framework")
     if not isinstance(text, str) or not text.strip():
@@ -353,7 +498,13 @@ def extract_generated_text(output: str, framework: str) -> str:
 
 
 class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
-    """Run and clean the four-scenario runtime matrix with durable ownership."""
+    """Run and clean the runtime matrix with durable ownership.
+
+    Six strictly sequential scenarios: vLLM baseline, CPU-HPA and Mooncake
+    store (TCP, cold tier, reconfigured mid-leg), SGLang baseline and CPU-HPA,
+    and Triton baseline served from a model repository the run uploads to the
+    registry and removes afterwards.
+    """
 
     def __init__(
         self,
@@ -486,21 +637,48 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
         runtime = plan.runtime
         expected_base: dict[str, Any] = {
             "image": runtime.image,
-            "framework": runtime.framework,
             "port": runtime.port,
             "replicas": plan.replicas,
             "gpu_count": self.settings.gpu_count,
-            "health_check_path": self.settings.health_path,
-            "env": self.settings.framework_env(runtime),
+            "health_check_path": self.settings.runtime_health_path(runtime),
         }
-        # Both launchers receive the immutable model on argv, so a stored
-        # record without exactly those args is not this run's endpoint.
-        expected_base["args"] = list(self.settings.deploy_extra_args(runtime))
+        # The two launcher contracts are persisted explicitly; Triton has no
+        # ``--framework`` and is recognised from its image.
+        expected_base["framework"] = (
+            runtime.framework if runtime.framework in ("vllm", "sglang") else None
+        )
+        # Every launcher receives its arguments on argv, so a stored record
+        # without exactly those args is not this run's endpoint.
+        expected_base["args"] = list(
+            self.settings.deploy_extra_args(runtime, endpoint_name=plan.name)
+        )
+        # The scenario's Mooncake block (store mode with the cold tier, plus
+        # the buffer size once ``configure-store`` has run) or none at all.
+        expected_base["mooncake"] = self.settings.mooncake_block(
+            plan.role, reconfigured=record.get("store_reconfigured") is True
+        )
         for key, value in expected_base.items():
             if spec.get(key) != value:
                 raise ManagedInferenceValidationError(
                     "managed inference stored endpoint contract does not match this run"
                 )
+        # A runtime that takes no environment persists none (``None`` or an
+        # empty map); the launchers persist exactly ``MODEL``.
+        expected_env = self.settings.framework_env(runtime)
+        if (spec.get("env") or {}) != expected_env:
+            raise ManagedInferenceValidationError(
+                "managed inference stored endpoint contract does not match this run"
+            )
+        if runtime.uses_model_registry:
+            model_source = record.get("model_source")
+            if not isinstance(model_source, str) or spec.get("model_source") != model_source:
+                raise ManagedInferenceValidationError(
+                    "managed inference stored model source does not match this run's upload"
+                )
+        elif spec.get("model_source") is not None:
+            raise ManagedInferenceValidationError(
+                "managed inference stored endpoint unexpectedly serves from a model source"
+            )
         if item.get("target_regions") != [self.settings.selected_region]:
             raise ManagedInferenceValidationError(
                 "managed inference stored target region does not match this run"
@@ -661,12 +839,15 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                 "managed inference Kubernetes name collision detected; refusing creation"
             )
         self._set_phase(record, "collision-checked")
+        model_source = self.ensure_model_repository(plan, record)
         self._set_phase(record, "deploy-started")
         try:
             self._run_command(
                 record,
                 "deploy",
-                build_deploy_command(self.settings, plan, self.owner_nonce),
+                build_deploy_command(
+                    self.settings, plan, self.owner_nonce, model_source=model_source
+                ),
             )
         except _CommandFailure as exc:
             self._record_failure(record, "deploy", exc)
@@ -676,6 +857,237 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                     "managed inference deploy failed; inspect the private checkpoint"
                 ) from None
         self._wait_for_owned_record(plan, record)
+
+    def ensure_model_repository(
+        self,
+        plan: EndpointPlan,
+        record: dict[str, Any],
+    ) -> str | None:
+        """Upload the plan's generated model repository and return its registry URI.
+
+        Only runtimes served from the registry (Triton) have one. The repository
+        is written into the private report directory, published with
+        ``gco models upload`` under a run-owned name, and its URI read back with
+        ``gco models uri`` so the deploy's ``--model-source`` is exactly what the
+        registry resolves. Re-running after a crash re-uploads the same files,
+        which is idempotent; the recorded URI is the one the stored spec is
+        later checked against.
+        """
+        if not plan.runtime.uses_model_registry:
+            return None
+        repository_root = write_triton_model_repository(
+            self.settings.report_dir / "model-repositories" / plan.name
+        )
+        record["model_repository"] = {
+            "registry_model_name": plan.registry_model_name,
+            "phase": "uploading",
+            "model": TRITON_MODEL_NAME,
+            "version": TRITON_MODEL_VERSION,
+        }
+        self._persist()
+        try:
+            self._run_command(
+                record,
+                "model-upload",
+                build_model_upload_command(plan, repository_root),
+            )
+            uri_output = self._run_command(record, "model-uri", build_model_uri_command(plan))
+        except _CommandFailure as exc:
+            self._record_failure(record, "model-upload", exc)
+            raise ManagedInferenceValidationError(
+                "managed inference model repository upload failed; inspect the private checkpoint"
+            ) from None
+        uri_document = _last_json_document(uri_output)
+        model_source = uri_document.get("s3_uri") if isinstance(uri_document, dict) else None
+        if not isinstance(model_source, str) or not model_source.startswith("s3://"):
+            raise ManagedInferenceValidationError(
+                "managed inference model registry did not resolve an S3 URI for the upload"
+            )
+        record["model_source"] = model_source
+        record["model_repository"]["phase"] = "uploaded"
+        self._persist()
+        return model_source
+
+    def cleanup_model_repository(
+        self,
+        plan: EndpointPlan,
+        record: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Remove the plan's registry model and prove the registry no longer lists it.
+
+        Runs only after the endpoint itself is proven absent, and only when an
+        upload was attempted, so a leg that failed before uploading never
+        touches the registry. A model that was already removed is still proven
+        absent through the listing.
+        """
+        if not plan.runtime.uses_model_registry or "model_repository" not in record:
+            return None
+        repository = record["model_repository"]
+        if repository.get("cleanup") == "absent":
+            return cast(dict[str, Any], repository)
+        try:
+            self._run_command(record, "model-delete", build_model_delete_command(plan))
+            listing_output = self._run_command(record, "model-list", build_model_list_command())
+        except _CommandFailure as exc:
+            self._record_failure(record, "model-cleanup", exc)
+            raise ManagedInferenceValidationError(
+                "managed inference model repository cleanup failed; inspect the private checkpoint"
+            ) from None
+        listing = _last_json_document(listing_output)
+        names = (
+            {
+                entry.get("model_name")
+                for entry in listing
+                if isinstance(entry, dict) and isinstance(entry.get("model_name"), str)
+            }
+            if isinstance(listing, list)
+            else set()
+        )
+        if plan.registry_model_name in names:
+            repository["cleanup"] = "listed-after-delete"
+            self._persist()
+            raise ManagedInferenceValidationError(
+                "managed inference model registry still lists the deleted repository"
+            )
+        repository["cleanup"] = "absent"
+        self._persist()
+        return cast(dict[str, Any], repository)
+
+    def _store_deployment_rollout(
+        self,
+        plan: EndpointPlan,
+        record: dict[str, Any],
+        *,
+        deadline: float,
+    ) -> tuple[str | None, bool]:
+        """Return the store Deployment's config digest and whether its rollout is complete."""
+        deployment = self._kubectl_json(
+            record,
+            "get",
+            "deployment",
+            plan.name,
+            "--namespace",
+            self.settings.namespace,
+            "--output",
+            "json",
+            deadline=deadline,
+        )
+        if not isinstance(deployment, dict):
+            return None, False
+        metadata = (
+            deployment.get("metadata") if isinstance(deployment.get("metadata"), dict) else {}
+        )
+        spec = deployment.get("spec") if isinstance(deployment.get("spec"), dict) else {}
+        status = deployment.get("status") if isinstance(deployment.get("status"), dict) else {}
+        template = spec.get("template") if isinstance(spec.get("template"), dict) else {}
+        template_metadata = (
+            template.get("metadata") if isinstance(template.get("metadata"), dict) else {}
+        )
+        annotations = (
+            template_metadata.get("annotations")
+            if isinstance(template_metadata.get("annotations"), dict)
+            else {}
+        )
+        digest = annotations.get(MOONCAKE_CONFIG_DIGEST_ANNOTATION)
+        desired = int(spec.get("replicas") or 0)
+        complete = (
+            desired > 0
+            and int(status.get("observedGeneration") or 0) >= int(metadata.get("generation") or 0)
+            and int(status.get("updatedReplicas") or 0) == desired
+            and int(status.get("readyReplicas") or 0) == desired
+            and int(status.get("availableReplicas") or 0) == desired
+            and int(status.get("replicas") or 0) == desired
+        )
+        return (digest if isinstance(digest, str) else None), complete
+
+    def verify_store_reconfigure(
+        self,
+        plan: EndpointPlan,
+        record: dict[str, Any],
+    ) -> None:
+        """Reconfigure the store and require the role pods to roll onto the new file.
+
+        The Mooncake connectors read ``mooncake.json`` once at start-up, so a
+        ``configure-store`` that only re-rendered the ConfigMap would leave the
+        running pod on its old settings. The monitor stamps a digest of the
+        rendered file on the pod template and rolls the Deployment when it
+        changes; this phase proves that: the digest observed before the change
+        must differ from the one after it, the rollout must complete with the
+        same replica count, the endpoint must be promoted back to ``running``
+        (``update_spec`` re-enters ``deploying``), and a second invocation must
+        succeed against the rolled pod.
+        """
+        if not plan.mooncake_store:
+            return
+        deadline = time.monotonic() + self.settings.readiness_timeout_seconds
+        digest_before, _complete = self._store_deployment_rollout(plan, record, deadline=deadline)
+        if digest_before is None:
+            raise ManagedInferenceValidationError(
+                "managed store Deployment carries no mooncake config digest before reconfigure"
+            )
+        evidence: dict[str, Any] = {"digest_before": digest_before, "phase": "configuring"}
+        record["store_reconfigure"] = evidence
+        self._persist()
+        try:
+            self._run_command(record, "configure-store", build_configure_store_command(plan))
+        except _CommandFailure as exc:
+            self._record_failure(record, "configure-store", exc)
+            raise ManagedInferenceValidationError(
+                "managed store reconfiguration command failed; inspect the private checkpoint"
+            ) from None
+        # From here the stored spec carries the new buffer size.
+        record["store_reconfigured"] = True
+        evidence["phase"] = "rolling"
+        self._persist()
+        heartbeat_at = time.monotonic()
+        diagnostics_at = time.monotonic()
+        while True:
+            digest, complete = self._store_deployment_rollout(plan, record, deadline=deadline)
+            evidence["digest_after"] = digest
+            evidence["rollout_complete"] = complete
+            self._persist()
+            if digest is not None and digest != digest_before and complete:
+                break
+            if time.monotonic() >= deadline:
+                raise self._timeout_error(
+                    plan,
+                    record,
+                    "managed store Deployment did not roll onto the re-rendered mooncake.json",
+                    reason="store-reconfigure-timeout",
+                )
+            heartbeat_at = self.keep_cluster_tunnel_alive(record, heartbeat_at, deadline=deadline)
+            diagnostics_at = self._diagnostics_due(
+                record, plan, diagnostics_at, "store-reconfigure-wait"
+            )
+            time.sleep(
+                min(
+                    float(self.settings.poll_interval_seconds),
+                    max(0.0, deadline - time.monotonic()),
+                )
+            )
+        evidence["phase"] = "rolled"
+        self._persist()
+        # The spec update parked the endpoint in ``deploying``; the monitor must
+        # promote it again before the rolled pod is proven to answer.
+        self.wait_for_ddb_running(plan, record)
+        try:
+            output = self._run_command(
+                record, "invoke-after-reconfigure", build_invoke_command(self.settings, plan)
+            )
+            generated_text = extract_generated_text(output, plan.runtime.framework)
+        except (ManagedInferenceValidationError, _CommandFailure) as exc:
+            self._record_failure(record, "invoke-after-reconfigure", exc)
+            raise ManagedInferenceValidationError(
+                "managed store invocation after reconfigure failed its response contract"
+            ) from None
+        evidence.update(
+            {
+                "phase": "verified",
+                "invoked_after_rollout": True,
+                "generated_text_length": len(generated_text),
+            }
+        )
+        self._set_phase(record, "store-reconfigured")
 
     def _wait_for_healthy_backend(
         self,
@@ -795,7 +1207,7 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                 "health": {
                     "healthy": True,
                     "http_status": health["http_status"],
-                    "path": self.settings.health_path,
+                    "path": self.settings.runtime_health_path(plan.runtime),
                 }
             }
 
@@ -826,6 +1238,30 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                     "configured_model_present": True,
                     "model_revision_pinned": True,
                     "model_count": len(model_ids),
+                }
+            elif runtime.framework == "triton":
+                # ``/v2/models/stats`` is Triton's inventory: every loaded
+                # model by name and version. The generated identity model must
+                # be loaded at its single version.
+                stats = model_info.get("model_stats") if isinstance(model_info, dict) else None
+                loaded = (
+                    {
+                        (entry.get("name"), str(entry.get("version")))
+                        for entry in stats
+                        if isinstance(entry, dict)
+                    }
+                    if isinstance(stats, list)
+                    else set()
+                )
+                if (runtime.model_id, TRITON_MODEL_VERSION) not in loaded:
+                    raise ManagedInferenceValidationError(
+                        "managed Triton model statistics omitted the generated model"
+                    )
+                evidence["model_info"] = {
+                    "path": runtime.model_info_path,
+                    "configured_model_present": True,
+                    "model_version": TRITON_MODEL_VERSION,
+                    "model_count": len(loaded),
                 }
             else:
                 # ``gco inference models --framework sglang`` projects the
@@ -1011,6 +1447,9 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
             self.verify_hpa_stability(plan, record)
         self.verify_backend_probes(plan, record)
         self.invoke(plan, record)
+        # The store scenario then changes its configuration and must roll
+        # onto it; the rolled pods are what the restart audit below sees.
+        self.verify_store_reconfigure(plan, record)
         # Last, so it covers the whole leg: a container that crashed or was
         # killed by a probe anywhere between creation and invocation fails
         # the leg even though every wait above was satisfied in between.
@@ -1076,6 +1515,7 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
 
         try:
             evidence = self.prove_absence(record)
+            repository = self.cleanup_model_repository(plan, record)
         except (Exception, KeyboardInterrupt) as exc:
             attempt["completed"] = False
             attempt["error"] = f"{type(exc).__name__}: {exc}"
@@ -1083,6 +1523,8 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                 attempt["delete_error"] = f"{type(delete_error).__name__}: {delete_error}"
             self._persist()
             raise
+        if repository is not None:
+            evidence = {**evidence, "model_repository": repository.get("cleanup")}
         attempt["completed"] = True
         attempt["delete_recovered"] = delete_error is not None
         record["cleanup_phase"] = "absent"
@@ -1149,10 +1591,12 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
         self._persist()
         completed = sum(1 for record in self.records if record.get("validation_complete") is True)
         frameworks: dict[str, dict[str, Any]] = {}
+        model_registry = {"uploaded": 0, "removed": 0}
+        mooncake_store = {"cold_tier_verified": 0, "reconfigure_rolled": 0}
         for plan, record in zip(self.plans, self.records, strict=True):
             framework = frameworks.setdefault(
                 plan.runtime.framework,
-                {"baseline": False, "hpa": False, "invocations": 0, "model_info": 0},
+                {**dict.fromkeys(plan.runtime.roles, False), "invocations": 0, "model_info": 0},
             )
             framework[plan.role] = record.get("validation_complete") is True
             if isinstance(record.get("invoke_evidence"), dict):
@@ -1160,6 +1604,16 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
             probes = record.get("backend_probe_evidence")
             if isinstance(probes, dict) and isinstance(probes.get("model_info"), dict):
                 framework["model_info"] += 1
+            repository = record.get("model_repository")
+            if isinstance(repository, dict):
+                model_registry["uploaded"] += repository.get("phase") == "uploaded"
+                model_registry["removed"] += repository.get("cleanup") == "absent"
+            if plan.mooncake_store:
+                mooncake_store["cold_tier_verified"] += record.get("cold_tier_verified") is True
+                reconfigure = record.get("store_reconfigure")
+                mooncake_store["reconfigure_rolled"] += (
+                    isinstance(reconfigure, dict) and reconfigure.get("phase") == "verified"
+                )
         shared_proxy = self.state.get("shared_proxy_autoscaling")
         return {
             "endpoint_count": len(self.plans),
@@ -1167,6 +1621,8 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
             "newly_validated": validated,
             "execution": "strictly-sequential",
             "frameworks": frameworks,
+            "model_registry": model_registry,
+            "mooncake_store": mooncake_store,
             "shared_proxy_autoscaling_verified": (
                 isinstance(shared_proxy, dict) and shared_proxy.get("phase") == "verified"
             ),
