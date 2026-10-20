@@ -532,6 +532,18 @@ class TestNodePoolsCommands:
         ):
             yield
 
+    @pytest.fixture(autouse=True)
+    def _api_server_route(self, monkeypatch):
+        """Pin the route list/describe take to the API server (no aws CLI, no tunnel)."""
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+
+        @contextmanager
+        def fake_tunnel(formatter, **kwargs):
+            yield SimpleNamespace(server=None, tls_server_name=None)
+
+        monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
+
     def test_nodepools_help(self):
         """Test nodepools --help."""
         from cli.main import cli

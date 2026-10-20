@@ -889,10 +889,10 @@ def test_nodepools_section_private_endpoint_never_attempts_the_list() -> None:
     list_pools.assert_not_called()
     assert section.status == STATUS_UNAVAILABLE
     assert section.reason is not None
-    assert "gco cluster tunnel" in section.reason
+    assert "gco nodepools list -r <region> --via-ssm auto" in section.reason
     entry = section.data["by_region"]["us-east-1"]
     assert entry["reachable"] is False
-    assert "gco cluster tunnel" in entry["note"]
+    assert "gco nodepools list -r us-east-1 --via-ssm auto" in entry["note"]
 
 
 def test_nodepools_section_public_endpoint_lists_pools() -> None:

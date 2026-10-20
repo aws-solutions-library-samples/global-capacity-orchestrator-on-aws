@@ -1211,8 +1211,8 @@ command.
 
 Every command that reaches the API server (`cluster tunnel`, `monitoring open`,
 `costs dashboard`, `gitops open|password|screenshot`, `crossplane
-open|screenshot`) picks its route the same way, and prints a `Route:` line
-naming it:
+open|screenshot`, `nodepools list|describe|delete`) picks its route the same
+way, and prints a `Route:` line naming it:
 
 | Endpoint access | No `--via-ssm` | `--via-ssm INSTANCE_ID` or `auto` |
 |---|---|---|
@@ -4303,7 +4303,7 @@ Manage [Karpenter](https://karpenter.sh/) NodePools.
 
 #### `gco nodepools list`
 
-List NodePools in a cluster.
+List NodePools in a cluster. The listing talks to the cluster's EKS API endpoint, which is private by default, so it takes the same `--via-ssm` route options as [`gco cluster tunnel`](#gco-cluster-tunnel) and follows the [route selection](#route-selection) table.
 
 ```bash
 gco nodepools list [OPTIONS]
@@ -4315,10 +4315,19 @@ gco nodepools list [OPTIONS]
 |--------|-------|-------------|
 | `--region` | `-r` | Filter by region |
 | `--cluster` | | EKS cluster name (default: `<project_name>-<region>`) |
+| `--via-ssm INSTANCE_ID\|auto` | | Reach the private API endpoint through an SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down afterwards |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`) |
+| `--yes` | `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion |
+
+**Example:**
+
+```bash
+gco nodepools list -r us-east-1 --via-ssm auto -y
+```
 
 #### `gco nodepools describe`
 
-Describe a specific NodePool.
+Describe a specific NodePool, through the same API-server route options as `list`.
 
 ```bash
 gco nodepools describe NODEPOOL_NAME [OPTIONS]
@@ -4330,6 +4339,9 @@ gco nodepools describe NODEPOOL_NAME [OPTIONS]
 |--------|-------|-------------|
 | `--region` | `-r` | AWS region (required) |
 | `--cluster` | | EKS cluster name (default: `<project_name>-<region>`) |
+| `--via-ssm INSTANCE_ID\|auto` | | Reach the private API endpoint through an SSM-managed instance, or `auto` for an ephemeral bastion |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`) |
+| `--yes` | `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion |
 
 #### `gco nodepools create-odcr`
 
@@ -4408,7 +4420,7 @@ gco nodepools create-capacity-block \
 
 #### `gco nodepools delete`
 
-Delete a NodePool and its paired `<name>-nodeclass` NodeClass. EKS Auto Mode drains and terminates any nodes the NodePool provisioned. Cannot be undone.
+Delete a NodePool and its paired `<name>-nodeclass` NodeClass. EKS Auto Mode drains and terminates any nodes the NodePool provisioned. Cannot be undone. The deletion goes to the cluster's EKS API endpoint, private by default, through the same `--via-ssm` route options as `list`.
 
 ```bash
 gco nodepools delete NODEPOOL_NAME [OPTIONS]
@@ -4420,13 +4432,15 @@ gco nodepools delete NODEPOOL_NAME [OPTIONS]
 |--------|-------|-------------|
 | `--region` | `-r` | AWS region (required) |
 | `--cluster` | | EKS cluster name (defaults to `gco-<region>`) |
-| `--yes` | `-y` | Skip confirmation |
+| `--via-ssm INSTANCE_ID\|auto` | | Reach the private API endpoint through an SSM-managed instance, or `auto` for an ephemeral bastion |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`) |
+| `--yes` | `-y` | Skip the deletion confirmation and the `--via-ssm auto` bastion prompt |
 
 **Example:**
 
 ```bash
-gco nodepools delete gpu-reserved -r us-east-1
-gco nodepools delete gpu-reserved -r us-east-1 -y
+gco nodepools delete gpu-reserved -r us-east-1 --via-ssm auto
+gco nodepools delete gpu-reserved -r us-east-1 --via-ssm auto -y
 ```
 
 ---
@@ -5231,7 +5245,7 @@ gco status --fail-on-findings
 |--------|-------------|
 | `--region`, `-r` | Restrict the gather to a single region |
 | `--with-costs` | Include the `costs` section (Cost Explorer bills per `GetCostAndUsage` request) |
-| `--with-nodepools` | Include the `nodepools` section (needs a reachable cluster API endpoint; private endpoints report `unavailable` and point at `gco cluster tunnel`) |
+| `--with-nodepools` | Include the `nodepools` section (needs a reachable cluster API endpoint; private endpoints report `unavailable` and point at `gco nodepools list --via-ssm auto`) |
 | `--with-policy` | Include the `policy` section: compare the job-validation policy each region enforces and report any field that differs (one API call per region) |
 | `--watch SECONDS` | Re-gather and redraw on an interval (minimum 5 seconds; table output only). With `--with-costs`, the costs section is re-fetched at most every 15 minutes and carries an `as_of` timestamp |
 | `--fail-on-findings` | Exit 1 after rendering when any `error`-severity finding is present |

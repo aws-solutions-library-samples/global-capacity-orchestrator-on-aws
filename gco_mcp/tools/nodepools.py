@@ -1,4 +1,13 @@
-"""Karpenter NodePool management MCP tools (read-only)."""
+"""Karpenter NodePool management MCP tools.
+
+``nodepools_list``, ``nodepools_describe`` and ``delete_nodepool`` talk to the
+cluster's EKS API endpoint, which GCO deploys private by default. These tools
+never provision a bastion (that launches a billable EC2 instance), so they
+work from inside the VPC or when the operator has a tunnel open; otherwise
+``cluster_tunnel_command`` describes the route and the ``gco nodepools``
+commands take ``--via-ssm auto`` themselves. The two generators only read
+EKS and EC2 and return a manifest.
+"""
 
 import asyncio
 
@@ -11,6 +20,9 @@ from server import mcp
 @audit_logged
 async def nodepools_list(region: str | None = None, cluster: str | None = None) -> str:
     """`gco nodepools list` — list Karpenter NodePools in a cluster.
+
+    Needs the cluster's EKS API endpoint to be reachable (it is private by
+    default; see ``cluster_tunnel_command``).
 
     Args:
         region: AWS region to query.

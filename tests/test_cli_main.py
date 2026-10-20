@@ -2398,6 +2398,61 @@ class TestNodepoolsCommands:
             self.resolver = resolver
             yield
 
+    @pytest.fixture(autouse=True)
+    def _api_server_route(self, monkeypatch):
+        """Pin the route list/describe/delete take to the API server; record each request."""
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+
+        self.routes = []
+        self.session = (None, None)
+
+        @contextmanager
+        def fake_tunnel(formatter, **kwargs):
+            self.routes.append(kwargs)
+            server, sni = self.session
+            yield SimpleNamespace(server=server, tls_server_name=sni)
+
+        monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
+
+    @pytest.mark.parametrize(
+        ("argv", "function"),
+        [
+            (["list", "-r", "us-east-1"], "list_cluster_nodepools"),
+            (["describe", "gpu-x86-pool", "-r", "us-east-1"], "describe_cluster_nodepool"),
+        ],
+    )
+    def test_read_commands_reach_the_api_server_through_the_requested_tunnel(self, argv, function):
+        """--via-ssm hands the tunnel's address and TLS name to the Kubernetes client."""
+        from cli.main import cli
+
+        self.session = ("https://127.0.0.1:8443", "ABC.gr7.us-east-1.eks.amazonaws.com")
+        with patch(f"cli.nodepools.{function}") as mock_fn:
+            mock_fn.return_value = [{"name": "gpu-x86-pool"}] if "list" in argv else {"n": 1}
+            result = CliRunner().invoke(
+                cli, ["nodepools", *argv, "--via-ssm", "i-0123456789abcdef0", "-y"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert self.routes[0]["via_ssm"] == "i-0123456789abcdef0"
+        assert self.routes[0]["assume_yes"] is True
+        assert self.routes[0]["cluster"] == "gco-us-east-1"
+        assert mock_fn.call_args.kwargs == {
+            "server": "https://127.0.0.1:8443",
+            "tls_server_name": "ABC.gr7.us-east-1.eks.amazonaws.com",
+        }
+
+    def test_list_defaults_the_region_from_config_when_only_cluster_is_given(self):
+        from cli.main import cli
+
+        with patch("cli.nodepools.list_cluster_nodepools", return_value=[]) as mock_list:
+            result = CliRunner().invoke(cli, ["nodepools", "list", "--cluster", "custom"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_list.call_args.args == ("custom", "us-east-1")
+        assert self.routes[0]["cluster"] == "custom"
+        assert self.routes[0]["via_ssm"] is None
+
     @pytest.mark.parametrize(
         ("command", "generator"),
         [

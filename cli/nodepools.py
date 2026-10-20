@@ -587,8 +587,20 @@ def get_eks_token(cluster_name: str, region: str) -> str:
     return f"k8s-aws-v1.{token_b64}"
 
 
-def get_k8s_client(cluster_name: str, region: str) -> CustomObjectsApi:
-    """Get configured Kubernetes client for EKS cluster."""
+def get_k8s_client(
+    cluster_name: str,
+    region: str,
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
+) -> CustomObjectsApi:
+    """Get configured Kubernetes client for EKS cluster.
+
+    ``server`` and ``tls_server_name`` point the client at an SSM tunnel to the
+    cluster's private endpoint (``gco cluster tunnel``): requests go to the
+    local tunnel address while TLS keeps the endpoint's own host name for SNI
+    and certificate verification, so the cluster CA still validates.
+    """
     from kubernetes import client
 
     eks = boto3.client("eks", region_name=region)
@@ -596,7 +608,9 @@ def get_k8s_client(cluster_name: str, region: str) -> CustomObjectsApi:
     cluster = cluster_info["cluster"]
 
     configuration = client.Configuration()
-    configuration.host = cluster["endpoint"]
+    configuration.host = server or cluster["endpoint"]
+    if tls_server_name:
+        configuration.tls_server_name = tls_server_name
     configuration.verify_ssl = True
 
     # The ApiClient reads this path throughout its lifetime. Keep the file until
@@ -636,19 +650,29 @@ def get_k8s_client(cluster_name: str, region: str) -> CustomObjectsApi:
     return custom_api
 
 
-def list_cluster_nodepools(cluster_name: str, region: str) -> list[dict[str, Any]]:
+def list_cluster_nodepools(
+    cluster_name: str,
+    region: str,
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
+) -> list[dict[str, Any]]:
     """
     List NodePools in an EKS cluster.
 
     Args:
         cluster_name: EKS cluster name
         region: AWS region
+        server: API server override (an SSM tunnel address); see :func:`get_k8s_client`
+        tls_server_name: The endpoint host name TLS verifies against through the tunnel
 
     Returns:
         List of NodePool information dictionaries
     """
     try:
-        custom_api = get_k8s_client(cluster_name, region)
+        custom_api = get_k8s_client(
+            cluster_name, region, server=server, tls_server_name=tls_server_name
+        )
 
         nodepools = custom_api.list_cluster_custom_object(
             group="karpenter.sh",
@@ -697,7 +721,12 @@ def list_cluster_nodepools(cluster_name: str, region: str) -> list[dict[str, Any
 
 
 def describe_cluster_nodepool(
-    cluster_name: str, region: str, nodepool_name: str
+    cluster_name: str,
+    region: str,
+    nodepool_name: str,
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Describe a specific NodePool in an EKS cluster.
@@ -706,12 +735,16 @@ def describe_cluster_nodepool(
         cluster_name: EKS cluster name
         region: AWS region
         nodepool_name: Name of the NodePool
+        server: API server override (an SSM tunnel address); see :func:`get_k8s_client`
+        tls_server_name: The endpoint host name TLS verifies against through the tunnel
 
     Returns:
         NodePool details or None if not found
     """
     try:
-        custom_api = get_k8s_client(cluster_name, region)
+        custom_api = get_k8s_client(
+            cluster_name, region, server=server, tls_server_name=tls_server_name
+        )
 
         nodepool = custom_api.get_cluster_custom_object(
             group="karpenter.sh",
@@ -730,7 +763,14 @@ def describe_cluster_nodepool(
         raise RuntimeError(f"Failed to describe NodePool: {e}") from e
 
 
-def delete_cluster_nodepool(cluster_name: str, region: str, nodepool_name: str) -> dict[str, Any]:
+def delete_cluster_nodepool(
+    cluster_name: str,
+    region: str,
+    nodepool_name: str,
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
+) -> dict[str, Any]:
     """
     Delete a NodePool (and its paired NodeClass) from an EKS cluster.
 
@@ -744,13 +784,17 @@ def delete_cluster_nodepool(cluster_name: str, region: str, nodepool_name: str) 
         cluster_name: EKS cluster name
         region: AWS region
         nodepool_name: Name of the NodePool to delete
+        server: API server override (an SSM tunnel address); see :func:`get_k8s_client`
+        tls_server_name: The endpoint host name TLS verifies against through the tunnel
 
     Returns:
         Dict describing what was deleted: ``{"nodepool": <name>,
         "nodeclass": <name-or-None>}``.
     """
     try:
-        custom_api = get_k8s_client(cluster_name, region)
+        custom_api = get_k8s_client(
+            cluster_name, region, server=server, tls_server_name=tls_server_name
+        )
 
         custom_api.delete_cluster_custom_object(
             group="karpenter.sh",
