@@ -19,6 +19,7 @@ DDB wait, exactly like the runtime and inventory mixins.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any, cast
 
 from ..models import (
@@ -75,34 +76,16 @@ class InferenceScenarioMixin:
     ) -> None:  # pragma: no cover - implemented by lifecycle
         raise NotImplementedError
 
-    def _kubectl_json(
-        self,
-        record: dict[str, Any],
-        *arguments: str,
-        optional_api: bool = False,
-        deadline: float | None = None,
-    ) -> Any | None:  # pragma: no cover - implemented by inventory mixin
-        raise NotImplementedError
-
-    def keep_cluster_tunnel_alive(
-        self, record: dict[str, Any], last_heartbeat: float, *, deadline: float | None = None
-    ) -> float:  # pragma: no cover - implemented by runtime mixin
-        raise NotImplementedError
-
-    def _diagnostics_due(
-        self, record: dict[str, Any], plan: Any, last_capture: float, reason: str
-    ) -> float:  # pragma: no cover - implemented by runtime mixin
-        raise NotImplementedError
-
-    def _timeout_error(
-        self, plan: Any, record: dict[str, Any], message: str, *, reason: str
-    ) -> ManagedInferenceValidationError:  # pragma: no cover - implemented by runtime mixin
-        raise NotImplementedError
-
-    def wait_for_ddb_running(
-        self, plan: Any, record: dict[str, Any]
-    ) -> None:  # pragma: no cover - implemented by runtime mixin
-        raise NotImplementedError
+    # Supplied by the sibling mixins the lifecycle composes (inventory:
+    # ``_kubectl_json``; runtime: the rest). Declared as annotations only, never
+    # as values, so no base class carries a competing definition and the
+    # resolution cannot depend on base-class order; the same convention the
+    # runtime mixin uses for ``_kubectl_json``.
+    _kubectl_json: Callable[..., Any | None]
+    keep_cluster_tunnel_alive: Callable[..., float]
+    _diagnostics_due: Callable[..., float]
+    _timeout_error: Callable[..., ManagedInferenceValidationError]
+    wait_for_ddb_running: Callable[..., None]
 
     def ensure_model_repository(
         self,

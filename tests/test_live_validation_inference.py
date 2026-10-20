@@ -2463,6 +2463,29 @@ class TestTritonAndStoreScenarios:
                 return plan, record
         raise AssertionError(f"no {framework} {role} plan")
 
+    def test_lifecycle_mixins_never_compete_for_a_member(self) -> None:
+        """No two bases of the lifecycle define the same member.
+
+        Each mixin declares what a sibling supplies as an annotation only
+        (``_kubectl_json: Callable[...]``), never as a stub with a value: a stub
+        would win or lose purely by base-class order, and a reordering would
+        swap a real method for ``raise NotImplementedError`` at runtime. The
+        members the lifecycle class itself implements are exempt, since the
+        derived class always wins.
+        """
+        bases = ManagedInferenceLifecycle.__bases__
+        lifecycle_members = set(vars(ManagedInferenceLifecycle))
+        seen: dict[str, str] = {}
+        for base in bases:
+            for name in vars(base):
+                if name.startswith("__") or name in lifecycle_members:
+                    continue
+                assert name not in seen, (
+                    f"{name} is defined by both {seen[name]} and {base.__name__}; "
+                    "declare the sibling-provided member as an annotation instead"
+                )
+                seen[name] = base.__name__
+
     def test_digest_annotation_matches_the_monitor(self) -> None:
         from gco.services import inference_monitor
 
