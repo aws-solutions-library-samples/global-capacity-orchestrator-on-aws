@@ -275,8 +275,8 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `delete_nodepool` | `gco nodepools delete` — delete a Karpenter NodePool. |
-| `nodepools_create_capacity_block` | `gco nodepools create-capacity-block` — create a Karpenter NodePool for a purchased Capacity Block. |
-| `nodepools_create_odcr` | `gco nodepools create-odcr` — create a Karpenter NodePool tied to an ODCR. |
+| `nodepools_create_capacity_block` | `gco nodepools create-capacity-block` — generate the Auto Mode NodeClass and NodePool manifest for a purchased Capacity Block (nothing is applied). |
+| `nodepools_create_odcr` | `gco nodepools create-odcr` — generate the Auto Mode NodeClass and NodePool manifest for an ODCR (nothing is applied). |
 | `nodepools_describe` | `gco nodepools describe` — describe a single NodePool. |
 | `nodepools_list` | `gco nodepools list` — list Karpenter NodePools in a cluster. |
 

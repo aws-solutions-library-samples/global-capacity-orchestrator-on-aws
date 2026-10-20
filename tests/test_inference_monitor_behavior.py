@@ -26,6 +26,8 @@ from gco.services.inference_monitor import (
     RegionServicesResolution,
     ResourceCleanupResult,
     build_endpoint_tls_proxy,
+    mooncake_config_digest,
+    render_mooncake_config,
 )
 
 NAMESPACE = "gco-inference"
@@ -613,11 +615,11 @@ async def test_reconcile_mooncake_orders_roles_autoscalers_and_front_end() -> No
         events.append("gate")
         return MasterReadinessGate(proceed=True)
 
-    def report(*_args):
+    def report(*_args, **_kwargs):
         events.append("status")
         return "running"
 
-    def ensure_role(_name, _ns, _spec, role):
+    def ensure_role(_name, _ns, _spec, role, **_kwargs):
         events.append(f"role:{role}")
         return 0, 1, False
 
@@ -692,7 +694,7 @@ async def test_mooncake_delayed_keda_hpa_blocks_proxy_across_reconcile_passes() 
     monitor._ensure_mooncake_configmap = MagicMock()  # type: ignore[method-assign]
     pass_number = {"value": 0}
 
-    def ensure_role(_name, _namespace, _spec, role):
+    def ensure_role(_name, _namespace, _spec, role, **_kwargs):
         restarted = role == "prefill" and pass_number["value"] == 0
         return 0, 2 if role == "prefill" else 1, restarted
 
@@ -772,6 +774,153 @@ async def test_reconcile_mooncake_reports_admin_key_failure_without_status_overw
     monitor._report_role_status.assert_not_called()
 
 
+def _store_mode_monitor(store: MagicMock, *, reported_state: str) -> InferenceMonitor:
+    """A monitor whose Mooncake pass is admitted end to end and reports ``reported_state``."""
+    monitor = _make_monitor(store)
+    _admit_mooncake(monitor)
+    monitor._ensure_mooncake_configmap = MagicMock()  # type: ignore[method-assign]
+    monitor._ensure_role_deployment = MagicMock(return_value=(1, 1, False))  # type: ignore[method-assign]
+    monitor._create_service = MagicMock()  # type: ignore[method-assign]
+    monitor._report_role_status = MagicMock(return_value=reported_state)  # type: ignore[method-assign]
+    return monitor
+
+
+def _deploying_endpoint(*regions: str, local_region: str = "us-east-1") -> dict[str, object]:
+    """A ``deploying`` endpoint whose *other* regions already report running."""
+    return {
+        "endpoint_name": "chat",
+        "desired_state": "deploying",
+        "lifecycle_id": LIFECYCLE_ID,
+        "target_regions": [local_region, *regions],
+        "region_status": {region: {"state": "running"} for region in regions},
+    }
+
+
+@pytest.mark.asyncio
+async def test_reconcile_mooncake_promotes_deploying_endpoint_once_roles_are_running() -> None:
+    """A Mooncake endpoint leaves ``deploying`` the same way a classic one does.
+
+    The inference proxy refuses traffic while ``desired_state`` is ``deploying``;
+    live validation found store and disaggregated endpoints answering 503 "not
+    ready in this region" forever because only the classic path promoted. The
+    promotion is fenced on the lifecycle id and the ``deploying`` state.
+    """
+    store = MagicMock()
+    monitor = _store_mode_monitor(store, reported_state="running")
+    spec = {
+        "image": "vllm/vllm-openai:pinned",
+        "mooncake": {"mode": "store", "store": {"enabled": True}},
+    }
+
+    action = await monitor._reconcile_mooncake("chat", NAMESPACE, spec, _deploying_endpoint())
+
+    assert action == {"action": "reconcile_mooncake", "endpoint": "chat", "state": "running"}
+    store.update_desired_state.assert_called_once_with(
+        "chat",
+        "running",
+        expected_lifecycle_id=LIFECYCLE_ID,
+        expected_desired_state="deploying",
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_mooncake_promotion_waits_for_every_other_region() -> None:
+    """A still-creating sibling region holds the Mooncake endpoint in ``deploying``."""
+    store = MagicMock()
+    monitor = _store_mode_monitor(store, reported_state="running")
+    spec = {"mooncake": {"mode": "store", "store": {"enabled": True}}}
+    endpoint = _deploying_endpoint("eu-west-1")
+    endpoint["region_status"]["eu-west-1"] = {"state": "creating"}
+
+    await monitor._reconcile_mooncake("chat", NAMESPACE, spec, endpoint)
+
+    store.update_desired_state.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        # No target regions: nothing can be "all running".
+        {"desired_state": "deploying", "lifecycle_id": LIFECYCLE_ID, "target_regions": []},
+        # No lifecycle id to fence the write on.
+        {"desired_state": "deploying", "target_regions": ["us-east-1"]},
+        {"desired_state": "deploying", "lifecycle_id": "", "target_regions": ["us-east-1"]},
+        # Already promoted.
+        {"desired_state": "running", "lifecycle_id": LIFECYCLE_ID, "target_regions": ["us-east-1"]},
+    ],
+)
+def test_promote_deploying_endpoint_refuses_unfenced_or_empty_targets(endpoint: dict) -> None:
+    store = MagicMock()
+    monitor = _make_monitor(store)
+
+    assert monitor._promote_deploying_endpoint("chat", endpoint, "running") is False
+    store.update_desired_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_mooncake_does_not_promote_while_roles_are_creating() -> None:
+    store = MagicMock()
+    monitor = _store_mode_monitor(store, reported_state="creating")
+    spec = {"mooncake": {"mode": "store", "store": {"enabled": True}}}
+
+    await monitor._reconcile_mooncake("chat", NAMESPACE, spec, _deploying_endpoint())
+
+    store.update_desired_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_mooncake_passes_unresolved_cold_tier_reason_to_status() -> None:
+    """An unresolved cold-tier bucket is reported through the role status, not raised."""
+    store = MagicMock()
+    monitor = _store_mode_monitor(store, reported_state="running")
+    monitor._resolve_region_services = MagicMock(  # type: ignore[method-assign]
+        return_value=RegionServicesResolution(
+            region_services=dict(REGION_SERVICES),
+            cold_tier_unresolved=True,
+            error="general-purpose regional bucket for region us-east-1 could not be resolved",
+        )
+    )
+    spec = {
+        "mooncake": {"mode": "store", "store": {"enabled": True, "cold_tier_enabled": True}},
+    }
+
+    action = await monitor._reconcile_mooncake("chat", NAMESPACE, spec, _deploying_endpoint())
+
+    assert action == {"action": "reconcile_mooncake", "endpoint": "chat", "state": "running"}
+    # The transport ConfigMap was still rendered (hot path intact) ...
+    rendered = monitor._ensure_mooncake_configmap.call_args.args[2]
+    assert rendered["master_server_address"] == REGION_SERVICES["master_server_address"]
+    assert "cold_tier_s3_uri" not in rendered
+    # ... the degraded render is not rolled onto the pods ...
+    assert monitor._ensure_role_deployment.call_args.kwargs == {"config_digest": None}
+    # ... and the status write carries the reason the cold tier is off.
+    assert monitor._report_role_status.call_args.kwargs["cold_tier_error"] == (
+        "general-purpose regional bucket for region us-east-1 could not be resolved"
+    )
+
+
+def test_report_role_status_surfaces_cold_tier_state() -> None:
+    """The ``store`` sub-status says whether the requested cold tier is active and why not."""
+    store = MagicMock()
+    monitor = _make_monitor(store)
+    monitor._get_deployment = MagicMock(  # type: ignore[method-assign]
+        return_value=_deployment_with_ready_replicas(1)
+    )
+    monitor._mooncake_master_ready_replicas = MagicMock(return_value=1)  # type: ignore[method-assign]
+    mooncake = {"mode": "store", "store": {"enabled": True, "cold_tier_enabled": True}}
+
+    resolved = dict(REGION_SERVICES, cold_tier_s3_uri="s3://regional-bucket/mooncake-kv/chat/")
+    monitor._report_role_status("chat", NAMESPACE, mooncake, resolved)
+    active = store.update_region_status.call_args.kwargs["extra"]["store"]["cold_tier"]
+    assert active == {"enabled": True, "s3_uri": "s3://regional-bucket/mooncake-kv/chat/"}
+
+    monitor._report_role_status(
+        "chat", NAMESPACE, mooncake, REGION_SERVICES, cold_tier_error="bucket unresolved"
+    )
+    dropped = store.update_region_status.call_args.kwargs["extra"]["store"]["cold_tier"]
+    assert dropped == {"enabled": False, "s3_uri": None, "error": "bucket unresolved"}
+
+
 @pytest.mark.asyncio
 async def test_reconcile_mooncake_store_mode_uses_direct_service_front_end() -> None:
     monitor = _make_monitor()
@@ -791,7 +940,15 @@ async def test_reconcile_mooncake_store_mode_uses_direct_service_front_end() -> 
     action = await monitor._reconcile_mooncake("chat", NAMESPACE, spec, endpoint)
 
     assert action == {"action": "reconcile_mooncake", "endpoint": "chat", "state": "running"}
-    monitor._ensure_role_deployment.assert_called_once_with("chat", NAMESPACE, spec, "single")
+    monitor._ensure_role_deployment.assert_called_once_with(
+        "chat",
+        NAMESPACE,
+        spec,
+        "single",
+        config_digest=mooncake_config_digest(
+            render_mooncake_config(spec["mooncake"], REGION_SERVICES)
+        ),
+    )
     monitor._create_service.assert_called_once_with("chat", NAMESPACE, spec)
     monitor._create_role_service.assert_not_called()
     monitor._create_pd_proxy.assert_not_called()
@@ -1867,9 +2024,8 @@ def test_vllm_probes_state_the_same_timeout_instead_of_the_kubelet_default() -> 
     )
     container, sidecar = deployment.spec.template.spec.containers
     assert sidecar.name == ENDPOINT_TLS_PROXY_CONTAINER
-    assert container.startup_probe is None
-    assert container.liveness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
-    assert container.readiness_probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
+    for probe in (container.startup_probe, container.liveness_probe, container.readiness_probe):
+        assert probe.timeout_seconds == INFERENCE_PROBE_TIMEOUT_SECONDS
 
 
 def test_legacy_official_sglang_image_infers_the_sglang_contract() -> None:
@@ -1890,7 +2046,13 @@ def test_legacy_official_sglang_image_infers_the_sglang_contract() -> None:
     assert container.startup_probe is not None
 
 
-def test_vllm_renderer_has_no_startup_probe_and_keeps_root_path() -> None:
+def test_vllm_renderer_serves_the_model_env_and_keeps_root_path() -> None:
+    """``-e MODEL=...`` names the model on vLLM's argv; vLLM never reads the variable.
+
+    Before this, the documented ``gco inference deploy -i vllm/... -e MODEL=X``
+    started vLLM's built-in default model, and ``gco inference invoke`` then
+    asked for X by name and got a 404.
+    """
     monitor = _make_monitor()
     deployment = _build_deployment(
         monitor,
@@ -1904,16 +2066,134 @@ def test_vllm_renderer_has_no_startup_probe_and_keeps_root_path() -> None:
     )
     container = deployment.spec.template.spec.containers[0]
     assert container.command is None
-    assert container.args == ["--root-path", "/inference/chat"]
-    assert container.startup_probe is None
+    assert container.args == ["--model", "$(MODEL)", "--root-path", "/inference/chat"]
+    # The kubelet expands $(MODEL) from the container's own environment.
+    assert {"name": "MODEL", "value": "test/model"} in [
+        {"name": env.name, "value": env.value} for env in container.env
+    ]
+    startup = container.startup_probe
+    assert startup.http_get.path == "/inference/chat/health"
+    assert startup.http_get.port == 8000
+    assert startup.period_seconds * startup.failure_threshold == 1200
+
+
+def test_vllm_model_env_goes_before_operator_args_and_role_args() -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "vllm/vllm-openai:v0.31.0",
+            "framework": "vllm",
+            "env": {"MODEL": "test/model"},
+            "args": ["--max-model-len", "4096"],
+        },
+        extra_args=["--kv-transfer-config", "{}"],
+    )
+    assert deployment.spec.template.spec.containers[0].args == [
+        "--model",
+        "$(MODEL)",
+        "--max-model-len",
+        "4096",
+        "--root-path",
+        "/inference/chat",
+        "--kv-transfer-config",
+        "{}",
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--model", "org/explicit"],
+        ["--model=org/explicit"],
+        ["org/explicit", "--max-model-len", "4096"],
+        ["--config", "/models/serve.yaml"],
+        ["--config=/models/serve.yaml"],
+    ],
+    ids=["flag", "flag-equals", "positional-tag", "config", "config-equals"],
+)
+def test_vllm_args_that_already_name_a_model_win_over_the_model_env(args: list[str]) -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {"image": "vllm/vllm-openai:v0.31.0", "env": {"MODEL": "test/model"}, "args": args},
+    )
+    rendered = deployment.spec.template.spec.containers[0].args
+    assert "$(MODEL)" not in rendered
+    assert rendered == [*args, "--root-path", "/inference/chat"]
+
+
+def test_vllm_without_a_model_env_keeps_vllms_own_default() -> None:
+    deployment = _build_deployment(
+        _make_monitor(), {"image": "vllm/vllm-openai:v0.31.0", "framework": "vllm"}
+    )
+    assert deployment.spec.template.spec.containers[0].args == ["--root-path", "/inference/chat"]
+
+
+def test_vllm_args_name_model_reads_non_string_tokens_as_text() -> None:
+    from gco.services.inference_monitor import _vllm_args_name_model
+
+    assert _vllm_args_name_model([]) is False
+    assert _vllm_args_name_model(["--max-model-len", 4096]) is False  # type: ignore[list-item]
+    assert _vllm_args_name_model([7]) is True  # type: ignore[list-item]
+
+
+def _node_affinity(deployment):  # type: ignore[no-untyped-def]
+    affinity = deployment.spec.template.spec.affinity
+    return None if affinity is None else affinity.node_affinity
+
+
+def test_gpu_type_hint_renders_a_preferred_instance_type_affinity() -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {"image": "vllm/vllm-openai:v0.31.0", "framework": "vllm", "gpu_type": " g5.xlarge "},
+    )
+    node_affinity = _node_affinity(deployment)
+    assert node_affinity.required_during_scheduling_ignored_during_execution is None
+    (preferred,) = node_affinity.preferred_during_scheduling_ignored_during_execution
+    assert preferred.weight == 100
+    (requirement,) = preferred.preference.match_expressions
+    assert requirement.key == "node.kubernetes.io/instance-type"
+    assert requirement.operator == "In"
+    assert requirement.values == ["g5.xlarge"]
+    # A hint, not a selector: the node selector stays the accelerator default.
+    assert deployment.spec.template.spec.node_selector == {
+        "eks.amazonaws.com/instance-gpu-manufacturer": "nvidia"
+    }
+
+
+def test_gpu_type_hint_composes_with_the_sglang_pre_ampere_affinity() -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {
+            "image": "lmsysorg/sglang:v0.5.21",
+            "framework": "sglang",
+            "port": 30000,
+            "env": {"MODEL": "test/model"},
+            "gpu_type": "g6.xlarge",
+        },
+    )
+    node_affinity = _node_affinity(deployment)
+    required = node_affinity.required_during_scheduling_ignored_during_execution
+    assert required.node_selector_terms[0].match_expressions[0].operator == "NotIn"
+    (preferred,) = node_affinity.preferred_during_scheduling_ignored_during_execution
+    assert preferred.preference.match_expressions[0].values == ["g6.xlarge"]
+
+
+@pytest.mark.parametrize("gpu_type", ["", "   ", None, 5])
+def test_blank_or_malformed_gpu_type_renders_no_affinity(gpu_type: object) -> None:
+    deployment = _build_deployment(
+        _make_monitor(),
+        {"image": "vllm/vllm-openai:v0.31.0", "framework": "vllm", "gpu_type": gpu_type},
+    )
+    assert deployment.spec.template.spec.affinity is None
 
 
 @pytest.mark.parametrize(
     "spec",
     [
         # A record persisted under the retired TGI contract, and a plain
-        # unknown image: neither gets a launcher, a root path, or the SGLang
-        # startup probe. Such an endpoint has to be redeployed as sglang/vllm.
+        # unknown image: neither gets a launcher or a root path. Such an
+        # endpoint has to be redeployed as sglang/vllm. Both still get the
+        # startup probe every model container carries.
         {
             "image": "ghcr.io/huggingface/text-generation-inference@sha256:" + "a" * 64,
             "framework": "tgi",
@@ -1936,6 +2216,7 @@ def test_unrecognised_runtimes_get_no_adapter_behaviour(spec: dict) -> None:
     container = deployment.spec.template.spec.containers[0]
     assert container.command is None
     assert container.args is None
-    assert container.startup_probe is None
     assert container.ports[0].container_port == spec["port"]
     assert container.readiness_probe.http_get.path == spec["health_check_path"]
+    assert container.startup_probe.http_get.path == spec["health_check_path"]
+    assert container.startup_probe.failure_threshold == 80

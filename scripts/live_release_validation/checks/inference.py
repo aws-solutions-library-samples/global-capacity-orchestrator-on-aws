@@ -6,19 +6,33 @@ import json
 import os
 import secrets
 import subprocess
-import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from scripts.example_job_validation.kube import KubectlRunner
 
 from ..models import (
-    INFERENCE_OWNER_LABEL,
-    InferenceRuntimeSpec,
+    TRITON_MODEL_VERSION,
     RunContext,
     RunSettings,
+)
+from .inference_commands import (
+    OWNER_LABEL,
+    EndpointPlan,
+    _last_json_document,
+    build_configure_store_command,
+    build_delete_command,
+    build_deploy_command,
+    build_endpoint_plans,
+    build_health_command,
+    build_invoke_command,
+    build_model_delete_command,
+    build_model_list_command,
+    build_model_upload_command,
+    build_model_uri_command,
+    build_models_command,
+    extract_generated_text,
 )
 from .inference_common import (
     InferenceCommandFailure as _CommandFailure,
@@ -28,6 +42,7 @@ from .inference_common import (
 )
 from .inference_inventory import KUBERNETES_INVENTORY_KINDS, InferenceInventoryMixin
 from .inference_runtime import InferenceRuntimeMixin
+from .inference_scenarios import InferenceScenarioMixin
 
 __all__ = [
     "KUBERNETES_INVENTORY_KINDS",
@@ -35,69 +50,23 @@ __all__ = [
     "EndpointPlan",
     "ManagedInferenceLifecycle",
     "ManagedInferenceValidationError",
+    "build_configure_store_command",
     "build_delete_command",
     "build_deploy_command",
     "build_endpoint_plans",
     "build_health_command",
     "build_invoke_command",
+    "build_model_delete_command",
+    "build_model_list_command",
+    "build_model_upload_command",
+    "build_model_uri_command",
     "build_models_command",
     "extract_generated_text",
     "initialize_run_state",
 ]
 
-OWNER_LABEL = INFERENCE_OWNER_LABEL
-
-EndpointRole = Literal["baseline", "hpa"]
 _STATE_KEY = "inference_validation"
 _MAX_PRIVATE_OUTPUT = 64 * 1024
-
-
-@dataclass(frozen=True)
-class EndpointPlan:
-    """One immutable framework/role scenario in the sequential matrix."""
-
-    ordinal: int
-    role: EndpointRole
-    name: str
-    replicas: int
-    autoscaling: bool
-    runtime: InferenceRuntimeSpec
-
-    def private_dict(self, owner_nonce: str) -> dict[str, Any]:
-        return {
-            "ordinal": self.ordinal,
-            "framework": self.runtime.framework,
-            "role": self.role,
-            "name": self.name,
-            "replicas": self.replicas,
-            "autoscaling": self.autoscaling,
-            "owner_nonce": owner_nonce,
-        }
-
-
-def build_endpoint_plans(
-    settings: RunSettings,
-    owner_nonce: str,
-) -> tuple[EndpointPlan, ...]:
-    """Build vLLM and SGLang baseline/HPA plans with peak concurrency of one."""
-    token = owner_nonce[:16]
-    plans: list[EndpointPlan] = []
-    for runtime in settings.inference_runtimes:
-        for role, replicas, autoscaling in (
-            ("baseline", settings.baseline_replicas, False),
-            ("hpa", settings.autoscale_initial_replicas, True),
-        ):
-            plans.append(
-                EndpointPlan(
-                    ordinal=len(plans) + 1,
-                    role=cast(EndpointRole, role),
-                    name=f"gco-mi-{token}-{runtime.framework}-{role}",
-                    replicas=replicas,
-                    autoscaling=autoscaling,
-                    runtime=runtime,
-                )
-            )
-    return tuple(plans)
 
 
 def initialize_run_state(
@@ -170,190 +139,16 @@ def initialize_run_state(
     return plans, state
 
 
-def _checkout_cli_prefix() -> list[str]:
-    """Bind every side effect to the interpreter and checkout preflight attested."""
-    return [sys.executable, "-m", "cli.main"]
+class ManagedInferenceLifecycle(
+    InferenceInventoryMixin, InferenceRuntimeMixin, InferenceScenarioMixin
+):
+    """Run and clean the runtime matrix with durable ownership.
 
-
-def build_deploy_command(
-    settings: RunSettings,
-    plan: EndpointPlan,
-    owner_nonce: str,
-) -> list[str]:
-    """Build the real argv-only ``gco inference deploy`` command."""
-    runtime = plan.runtime
-    command = [
-        *_checkout_cli_prefix(),
-        "--output",
-        "json",
-        "inference",
-        "deploy",
-        plan.name,
-        "--image",
-        runtime.image,
-        "--framework",
-        runtime.framework,
-        "--region",
-        settings.selected_region,
-        "--replicas",
-        str(plan.replicas),
-        "--gpu-count",
-        str(settings.gpu_count),
-        "--port",
-        str(runtime.port),
-        "--health-path",
-        settings.health_path,
-        "--namespace",
-        settings.namespace,
-        "--label",
-        f"{OWNER_LABEL}={owner_nonce}",
-        "--no-rewrite-image",
-    ]
-    for key, value in sorted(settings.framework_env(runtime).items()):
-        command.extend(("--env", f"{key}={value}"))
-    for value in settings.deploy_extra_args(runtime):
-        if value.startswith("-"):
-            command.append(f"--extra-args={value}")
-        else:
-            command.extend(("--extra-args", value))
-    if plan.autoscaling:
-        command.extend(
-            (
-                "--autoscale-metric",
-                f"cpu:{settings.hpa_cpu_target}",
-                "--min-replicas",
-                str(settings.hpa_min_replicas),
-                "--max-replicas",
-                str(settings.hpa_max_replicas),
-            )
-        )
-    return command
-
-
-def build_invoke_command(
-    settings: RunSettings,
-    plan: EndpointPlan,
-) -> list[str]:
-    """Build the deterministic, buffered real CLI invocation."""
-    return [
-        *_checkout_cli_prefix(),
-        "--output",
-        "json",
-        "inference",
-        "invoke",
-        plan.name,
-        "--data",
-        json.dumps(
-            settings.request_body(plan.runtime),
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        "--path",
-        plan.runtime.request_path,
-        "--region",
-        settings.selected_region,
-    ]
-
-
-def build_health_command(settings: RunSettings, plan: EndpointPlan) -> list[str]:
-    """Build an authenticated health probe through the public CLI path."""
-    return [
-        *_checkout_cli_prefix(),
-        "--output",
-        "json",
-        "inference",
-        "health",
-        plan.name,
-        "--region",
-        settings.selected_region,
-    ]
-
-
-def build_models_command(settings: RunSettings, plan: EndpointPlan) -> list[str]:
-    """Build the framework-aware authenticated model-identity probe."""
-    return [
-        *_checkout_cli_prefix(),
-        "--output",
-        "json",
-        "inference",
-        "models",
-        plan.name,
-        "--framework",
-        plan.runtime.framework,
-        "--region",
-        settings.selected_region,
-    ]
-
-
-def build_delete_command(
-    settings: RunSettings,
-    plan: EndpointPlan,
-    owner_nonce: str,
-    lifecycle_id: str,
-) -> list[str]:
-    """Build deletion atomically bound to owner nonce and endpoint incarnation."""
-    del settings  # Kept for a parallel command-builder interface.
-    return [
-        *_checkout_cli_prefix(),
-        "inference",
-        "delete",
-        plan.name,
-        "--expected-owner-label",
-        f"{OWNER_LABEL}={owner_nonce}",
-        "--expected-lifecycle-id",
-        lifecycle_id,
-        "--yes",
-    ]
-
-
-def _last_json_document(output: str) -> Any:
-    decoder = json.JSONDecoder()
-    candidate: Any = None
-    found = False
-    for index, character in enumerate(output):
-        if character not in "[{":
-            continue
-        try:
-            value, end = decoder.raw_decode(output, index)
-        except json.JSONDecodeError:
-            continue
-        if output[end:].strip():
-            continue
-        candidate = value
-        found = True
-    if not found:
-        raise ManagedInferenceValidationError(
-            "managed inference invoke returned no terminal JSON document"
-        )
-    return candidate
-
-
-def extract_generated_text(output: str, framework: str) -> str:
-    """Require the exact response schema for the request adapter in use."""
-    payload = _last_json_document(output)
-    text: Any = None
-    if framework == "vllm":
-        if isinstance(payload, dict):
-            choices = payload.get("choices")
-            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                text = choices[0].get("text")
-    elif framework == "sglang":
-        # Native ``/generate`` answers a single prompt with one object; a
-        # batched prompt would answer with a list, which this adapter never
-        # sends and therefore never accepts.
-        if isinstance(payload, dict):
-            text = payload.get("text")
-    else:
-        raise ManagedInferenceValidationError("unknown managed inference response framework")
-    if not isinstance(text, str) or not text.strip():
-        raise ManagedInferenceValidationError(
-            f"managed {framework} inference response did not match its non-empty text schema"
-        )
-    return text.strip()
-
-
-class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
-    """Run and clean the four-scenario runtime matrix with durable ownership."""
+    Six strictly sequential scenarios: vLLM baseline, CPU-HPA and Mooncake
+    store (TCP, cold tier, reconfigured mid-leg), SGLang baseline and CPU-HPA,
+    and Triton baseline served from a model repository the run uploads to the
+    registry and removes afterwards.
+    """
 
     def __init__(
         self,
@@ -486,21 +281,48 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
         runtime = plan.runtime
         expected_base: dict[str, Any] = {
             "image": runtime.image,
-            "framework": runtime.framework,
             "port": runtime.port,
             "replicas": plan.replicas,
             "gpu_count": self.settings.gpu_count,
-            "health_check_path": self.settings.health_path,
-            "env": self.settings.framework_env(runtime),
+            "health_check_path": self.settings.runtime_health_path(runtime),
         }
-        # Both launchers receive the immutable model on argv, so a stored
-        # record without exactly those args is not this run's endpoint.
-        expected_base["args"] = list(self.settings.deploy_extra_args(runtime))
+        # The two launcher contracts are persisted explicitly; Triton has no
+        # ``--framework`` and is recognised from its image.
+        expected_base["framework"] = (
+            runtime.framework if runtime.framework in ("vllm", "sglang") else None
+        )
+        # Every launcher receives its arguments on argv, so a stored record
+        # without exactly those args is not this run's endpoint.
+        expected_base["args"] = list(
+            self.settings.deploy_extra_args(runtime, endpoint_name=plan.name)
+        )
+        # The scenario's Mooncake block (store mode with the cold tier, plus
+        # the buffer size once ``configure-store`` has run) or none at all.
+        expected_base["mooncake"] = self.settings.mooncake_block(
+            plan.role, reconfigured=record.get("store_reconfigured") is True
+        )
         for key, value in expected_base.items():
             if spec.get(key) != value:
                 raise ManagedInferenceValidationError(
                     "managed inference stored endpoint contract does not match this run"
                 )
+        # A runtime that takes no environment persists none (``None`` or an
+        # empty map); the launchers persist exactly ``MODEL``.
+        expected_env = self.settings.framework_env(runtime)
+        if (spec.get("env") or {}) != expected_env:
+            raise ManagedInferenceValidationError(
+                "managed inference stored endpoint contract does not match this run"
+            )
+        if runtime.uses_model_registry:
+            model_source = record.get("model_source")
+            if not isinstance(model_source, str) or spec.get("model_source") != model_source:
+                raise ManagedInferenceValidationError(
+                    "managed inference stored model source does not match this run's upload"
+                )
+        elif spec.get("model_source") is not None:
+            raise ManagedInferenceValidationError(
+                "managed inference stored endpoint unexpectedly serves from a model source"
+            )
         if item.get("target_regions") != [self.settings.selected_region]:
             raise ManagedInferenceValidationError(
                 "managed inference stored target region does not match this run"
@@ -661,12 +483,15 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                 "managed inference Kubernetes name collision detected; refusing creation"
             )
         self._set_phase(record, "collision-checked")
+        model_source = self.ensure_model_repository(plan, record)
         self._set_phase(record, "deploy-started")
         try:
             self._run_command(
                 record,
                 "deploy",
-                build_deploy_command(self.settings, plan, self.owner_nonce),
+                build_deploy_command(
+                    self.settings, plan, self.owner_nonce, model_source=model_source
+                ),
             )
         except _CommandFailure as exc:
             self._record_failure(record, "deploy", exc)
@@ -795,7 +620,7 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                 "health": {
                     "healthy": True,
                     "http_status": health["http_status"],
-                    "path": self.settings.health_path,
+                    "path": self.settings.runtime_health_path(plan.runtime),
                 }
             }
 
@@ -826,6 +651,30 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                     "configured_model_present": True,
                     "model_revision_pinned": True,
                     "model_count": len(model_ids),
+                }
+            elif runtime.framework == "triton":
+                # ``/v2/models/stats`` is Triton's inventory: every loaded
+                # model by name and version. The generated identity model must
+                # be loaded at its single version.
+                stats = model_info.get("model_stats") if isinstance(model_info, dict) else None
+                loaded = (
+                    {
+                        (entry.get("name"), str(entry.get("version")))
+                        for entry in stats
+                        if isinstance(entry, dict)
+                    }
+                    if isinstance(stats, list)
+                    else set()
+                )
+                if (runtime.model_id, TRITON_MODEL_VERSION) not in loaded:
+                    raise ManagedInferenceValidationError(
+                        "managed Triton model statistics omitted the generated model"
+                    )
+                evidence["model_info"] = {
+                    "path": runtime.model_info_path,
+                    "configured_model_present": True,
+                    "model_version": TRITON_MODEL_VERSION,
+                    "model_count": len(loaded),
                 }
             else:
                 # ``gco inference models --framework sglang`` projects the
@@ -1011,6 +860,9 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
             self.verify_hpa_stability(plan, record)
         self.verify_backend_probes(plan, record)
         self.invoke(plan, record)
+        # The store scenario then changes its configuration and must roll
+        # onto it; the rolled pods are what the restart audit below sees.
+        self.verify_store_reconfigure(plan, record)
         # Last, so it covers the whole leg: a container that crashed or was
         # killed by a probe anywhere between creation and invocation fails
         # the leg even though every wait above was satisfied in between.
@@ -1076,6 +928,7 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
 
         try:
             evidence = self.prove_absence(record)
+            repository = self.cleanup_model_repository(plan, record)
         except (Exception, KeyboardInterrupt) as exc:
             attempt["completed"] = False
             attempt["error"] = f"{type(exc).__name__}: {exc}"
@@ -1083,6 +936,8 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
                 attempt["delete_error"] = f"{type(delete_error).__name__}: {delete_error}"
             self._persist()
             raise
+        if repository is not None:
+            evidence = {**evidence, "model_repository": repository.get("cleanup")}
         attempt["completed"] = True
         attempt["delete_recovered"] = delete_error is not None
         record["cleanup_phase"] = "absent"
@@ -1149,10 +1004,12 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
         self._persist()
         completed = sum(1 for record in self.records if record.get("validation_complete") is True)
         frameworks: dict[str, dict[str, Any]] = {}
+        model_registry = {"uploaded": 0, "removed": 0}
+        mooncake_store = {"cold_tier_verified": 0, "reconfigure_rolled": 0}
         for plan, record in zip(self.plans, self.records, strict=True):
             framework = frameworks.setdefault(
                 plan.runtime.framework,
-                {"baseline": False, "hpa": False, "invocations": 0, "model_info": 0},
+                {**dict.fromkeys(plan.runtime.roles, False), "invocations": 0, "model_info": 0},
             )
             framework[plan.role] = record.get("validation_complete") is True
             if isinstance(record.get("invoke_evidence"), dict):
@@ -1160,6 +1017,16 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
             probes = record.get("backend_probe_evidence")
             if isinstance(probes, dict) and isinstance(probes.get("model_info"), dict):
                 framework["model_info"] += 1
+            repository = record.get("model_repository")
+            if isinstance(repository, dict):
+                model_registry["uploaded"] += repository.get("phase") == "uploaded"
+                model_registry["removed"] += repository.get("cleanup") == "absent"
+            if plan.mooncake_store:
+                mooncake_store["cold_tier_verified"] += record.get("cold_tier_verified") is True
+                reconfigure = record.get("store_reconfigure")
+                mooncake_store["reconfigure_rolled"] += (
+                    isinstance(reconfigure, dict) and reconfigure.get("phase") == "verified"
+                )
         shared_proxy = self.state.get("shared_proxy_autoscaling")
         return {
             "endpoint_count": len(self.plans),
@@ -1167,6 +1034,8 @@ class ManagedInferenceLifecycle(InferenceInventoryMixin, InferenceRuntimeMixin):
             "newly_validated": validated,
             "execution": "strictly-sequential",
             "frameworks": frameworks,
+            "model_registry": model_registry,
+            "mooncake_store": mooncake_store,
             "shared_proxy_autoscaling_verified": (
                 isinstance(shared_proxy, dict) and shared_proxy.get("phase") == "verified"
             ),

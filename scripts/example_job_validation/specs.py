@@ -104,12 +104,6 @@ class ExampleSpec:
 #: Sentinel mutation value: remove the targeted entry instead of replacing it.
 REMOVE_VALUE = "__REMOVE__"
 
-_GATED_MODEL_MUTATION_NOTE = (
-    "the manifest's default model is HuggingFace-gated; validation substitutes "
-    "the ungated facebook/opt-125m so the endpoint can become ready without "
-    "credentials — the serving path itself is exercised unchanged"
-)
-
 EXAMPLE_SPECS: dict[str, ExampleSpec] = {
     spec.name: spec
     for spec in (
@@ -239,12 +233,8 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             SUBMIT_DIRECT,
             DEPLOYMENT_AVAILABLE,
             accelerator="nvidia",
-            mutations={
-                "Deployment.env.MODEL": "facebook/opt-125m",
-                "Deployment.env.MAX_MODEL_LEN": "2048",
-            },
             timeout_seconds=2400,
-            notes=_GATED_MODEL_MUTATION_NOTE,
+            notes="default model (Qwen/Qwen2.5-1.5B-Instruct) is ungated; runs verbatim",
         ),
         ExampleSpec(
             "inference-sglang",
@@ -252,7 +242,7 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             DEPLOYMENT_AVAILABLE,
             accelerator="nvidia",
             timeout_seconds=2400,
-            notes="default model (microsoft/Phi-3.5-mini-instruct) is ungated; runs verbatim",
+            notes="default model (Qwen/Qwen2.5-1.5B-Instruct) is ungated; runs verbatim",
         ),
         ExampleSpec(
             "inference-triton",

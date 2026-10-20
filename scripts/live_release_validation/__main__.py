@@ -22,6 +22,7 @@ from .checks.eks_capabilities import build_eks_capabilities_overrides, overrides
 from .checks.schedulers import OPTIONAL_SCHEDULERS
 from .checks.tracing import tracing_overrides_json
 from .cli_args import path_from_root, repository_root, split_csv_names
+from .inference_contract import TRITON_MODEL_NAME, triton_model_repository_revision
 from .models import (
     InferenceRuntimeSpec,
     RunCheckpoint,
@@ -164,13 +165,22 @@ def _build_parser() -> argparse.ArgumentParser:
             help=f"Full immutable 40-hex model commit served by {framework}",
         )
         parser.set_defaults(**{f"inference_{framework}_port": default_port})
+    parser.add_argument(
+        "--inference-triton-image",
+        help=(
+            "Immutable Triton Inference Server image reference containing @sha256:; "
+            "its model is the harness-generated identity repository served from "
+            "the model registry"
+        ),
+    )
     parser.add_argument("--inference-gpu-count", type=int, default=0)
     parser.add_argument(
         "--confirm-inference-deployment",
         action="store_true",
         help=(
             "Explicitly authorize the inference action to create and delete "
-            "four strictly sequential vLLM/SGLang endpoint scenarios"
+            "every strictly sequential vLLM/SGLang/Triton endpoint scenario, "
+            "including the Mooncake KV-cache store and its model-registry upload"
         ),
     )
     parser.epilog = "Actions: " + ", ".join(registry)
@@ -234,6 +244,7 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             "inference_sglang_image",
             "inference_sglang_model_id",
             "inference_sglang_model_revision",
+            "inference_triton_image",
         )
         for option in required:
             if not getattr(args, option):
@@ -313,6 +324,15 @@ def _settings_from_args(
                 model_id=args.inference_sglang_model_id or "",
                 model_revision=args.inference_sglang_model_revision or "",
                 port=30000,
+            ),
+            # Triton serves the repository the harness generates and uploads;
+            # its identity is that repository's content digest.
+            InferenceRuntimeSpec(
+                framework="triton",
+                image=args.inference_triton_image or "",
+                model_id=TRITON_MODEL_NAME,
+                model_revision=triton_model_repository_revision(),
+                port=8000,
             ),
         )
         if inference_enabled

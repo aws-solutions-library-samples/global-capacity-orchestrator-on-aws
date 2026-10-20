@@ -12,6 +12,7 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 
@@ -515,6 +516,33 @@ class TestCapacityRecommendRegionCommand:
 
 class TestNodePoolsCommands:
     """Tests for nodepools commands."""
+
+    @pytest.fixture(autouse=True)
+    def _node_class_inputs(self):
+        """Stand in for the eks:DescribeCluster lookup the create commands make."""
+        from cli.nodepools import AutoModeNodeClassInputs
+
+        with patch(
+            "cli.nodepools.resolve_auto_mode_node_class_inputs",
+            return_value=AutoModeNodeClassInputs(
+                role="gco-us-east-1-AutoModeNodeRole",
+                subnet_ids=("subnet-0123456789abcdef0",),
+                security_group_ids=("sg-0123456789abcdef0",),
+            ),
+        ):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _api_server_route(self, monkeypatch):
+        """Pin the route list/describe take to the API server (no aws CLI, no tunnel)."""
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+
+        @contextmanager
+        def fake_tunnel(formatter, **kwargs):
+            yield SimpleNamespace(server=None, tls_server_name=None)
+
+        monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
 
     def test_nodepools_help(self):
         """Test nodepools --help."""

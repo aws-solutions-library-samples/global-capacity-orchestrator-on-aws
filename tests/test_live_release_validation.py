@@ -45,6 +45,10 @@ from scripts.live_release_validation.checks import topology as checks_topology
 from scripts.live_release_validation.cleanup import ecr as cleanup_ecr
 from scripts.live_release_validation.cleanup import log_groups as cleanup_log_groups
 from scripts.live_release_validation.cleanup import workloads as cleanup_workloads_module
+from scripts.live_release_validation.inference_contract import (
+    TRITON_MODEL_NAME,
+    triton_model_repository_revision,
+)
 from scripts.live_release_validation.inventory import ecr as inventory_ecr
 from scripts.live_release_validation.inventory import scanners as inventory_scanners
 from scripts.live_release_validation.ownership import dynamodb_streams as ownership_streams
@@ -5079,6 +5083,8 @@ class TestLocalOnlyRuntime:
                 "publisher/sglang-model",
                 "--inference-sglang-model-revision",
                 "e" * 40,
+                "--inference-triton-image",
+                "registry.example/tritonserver@sha256:" + "f" * 64,
                 "--inference-gpu-count",
                 "1",
                 "--confirm-inference-deployment",
@@ -5111,8 +5117,12 @@ class TestLocalOnlyRuntime:
         }
         identity = full_identity["inference"]
         assert identity["selected_region"] == "us-east-1"
-        assert [runtime["framework"] for runtime in identity["runtimes"]] == ["vllm", "sglang"]
-        assert identity["contract_version"] == 3
+        assert [runtime["framework"] for runtime in identity["runtimes"]] == [
+            "vllm",
+            "sglang",
+            "triton",
+        ]
+        assert identity["contract_version"] == 4
         assert identity["runtimes"][0]["image"].endswith("b" * 64)
         assert identity["runtimes"][0]["model"] == {
             "id": "publisher/vllm-model",
@@ -5130,6 +5140,32 @@ class TestLocalOnlyRuntime:
         assert identity["runtimes"][1]["deploy_contract"] == {
             "framework_env": {"MODEL": "publisher/sglang-model"},
             "extra_args": ["--model-path", "publisher/sglang-model", "--revision", "e" * 40],
+        }
+        # Triton's identity is the harness-generated repository, pinned by its
+        # content digest, served from the model registry on its own health path.
+        triton = identity["runtimes"][2]
+        assert triton["image"].endswith("f" * 64)
+        assert triton["model"] == {
+            "id": TRITON_MODEL_NAME,
+            "revision": triton_model_repository_revision(),
+        }
+        assert triton["server"] == {
+            "port": 8000,
+            "health_path": "/v2/health/ready",
+            "model_source": "model-registry",
+        }
+        assert triton["request_contract"]["path"] == f"/v2/models/{TRITON_MODEL_NAME}/infer"
+        assert triton["request_contract"]["response"] == "outputs[0].data:echoes-input"
+        assert triton["probe_contract"]["model_info_path"] == "/v2/models/stats"
+        assert triton["deploy_contract"] == {
+            "framework_env": {},
+            "extra_args": ["tritonserver", "--model-repository=/models/<endpoint>"],
+        }
+        assert identity["endpoint_contract"]["count"] == 6
+        assert identity["endpoint_contract"]["roles_per_runtime"] == {
+            "vllm": ["baseline", "hpa", "store"],
+            "sglang": ["baseline", "hpa"],
+            "triton": ["baseline"],
         }
         assert identity["endpoint_contract"]["gpu_count"] == 1
         assert identity["shared_proxy_contract"]["tls_cpu_request"] == "125m"
@@ -5173,6 +5209,8 @@ class TestLocalOnlyRuntime:
                 "publisher/sglang-model",
                 "--inference-sglang-model-revision",
                 "e" * 40,
+                "--inference-triton-image",
+                "registry.example/tritonserver@sha256:" + "f" * 64,
                 "--confirm-inference-deployment",
             ]
         )

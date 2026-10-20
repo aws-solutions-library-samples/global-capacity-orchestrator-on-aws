@@ -1211,8 +1211,8 @@ command.
 
 Every command that reaches the API server (`cluster tunnel`, `monitoring open`,
 `costs dashboard`, `gitops open|password|screenshot`, `crossplane
-open|screenshot`) picks its route the same way, and prints a `Route:` line
-naming it:
+open|screenshot`, `nodepools list|describe|delete`) picks its route the same
+way, and prints a `Route:` line naming it:
 
 | Endpoint access | No `--via-ssm` | `--via-ssm INSTANCE_ID` or `auto` |
 |---|---|---|
@@ -2696,9 +2696,9 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--region` | `-r` | Target region(s), repeatable (default: all deployed regions) |
 | `--replicas` | | Replicas per region (default: 1) |
 | `--gpu-count` | | GPUs per replica (default: 1) |
-| `--gpu-type` | | GPU instance type hint (e.g. g5.xlarge) |
+| `--gpu-type` | | Preferred instance type (e.g. g5.xlarge), rendered as a preferred node affinity on `node.kubernetes.io/instance-type`. A hint, not a requirement: Karpenter launches another type when it can't get this one |
 | `--port` | | Container port (default: 8000; SGLang's documented default is 30000). 8443 is reserved for the pod's TLS sidecar, which is the only port the endpoint's Service publishes ([Model Endpoint TLS](INFERENCE.md#model-endpoint-tls)) |
-| `--model-path` | | EFS path for model weights |
+| `--model-path` | | Mount the inference namespace's EFS volume (`efs-claim`) at `/models` without syncing anything; `--model-source` mounts it too. The volume is separate from the `gco-shared-storage` volume jobs use in `gco-jobs` |
 | `--model-source` | | S3 URI for model weights (auto-synced via init container) |
 | `--health-path` | | Health check endpoint path (default: /health) |
 | `--env` | `-e` | Environment variable (KEY=VALUE), repeatable |
@@ -2710,7 +2710,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--capacity-type` | | Node capacity type: `on-demand` (default) or `spot` |
 | `--accelerator` | | Accelerator type: `nvidia` for GPU instances (default), `neuron` for [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/)/Inferentia |
 | `--node-selector` | | Node selector (key=value), repeatable. E.g. `eks.amazonaws.com/instance-family=inf2` |
-| `--extra-args` | | Extra arguments passed to the container (e.g. `--kv-transfer-config {...}`). Repeatable |
+| `--extra-args` | | One container argument per value, repeatable (e.g. `--extra-args=--max-model-len --extra-args 4096`). For vLLM the renderer adds `--model $(MODEL)` when `-e MODEL=...` is set, unless these arguments already name the model (`--model`, a positional model tag, or `--config`) |
 | `--mooncake-mode` | | Mooncake serving mode: `disaggregated` (prefill/decode split), `store` (shared KV-cache), or `both` |
 | `--prefill-replicas` | | Number of prefill replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
 | `--decode-replicas` | | Number of decode replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
@@ -2745,7 +2745,7 @@ gco inference deploy my-llm \
 gco inference deploy my-sglang \
   -i lmsysorg/sglang:v0.5.21 \
   --framework sglang --port 30000 --gpu-count 1 \
-  -e MODEL=microsoft/Phi-3.5-mini-instruct
+  -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 #### `gco inference list`
@@ -2881,7 +2881,7 @@ gco inference update-image my-llm -i vllm/vllm-openai:v0.31.0
 
 #### `gco inference invoke`
 
-Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, SGLang, Triton) and builds the appropriate request body: OpenAI-compatible `/v1/completions` for vLLM and unknown images, SGLang's native `/generate` with `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`, and Triton's `/v2/models`.
+Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, SGLang, Triton) and builds the appropriate request body: OpenAI-compatible `/v1/completions` for vLLM and unknown images (a prompt sent to a `--path` ending in `/chat/completions` becomes one user message), and SGLang's native `/generate` with `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`. The OpenAI `model` field is the name the server answers to: `--served-model-name` from the deploy's `--extra-args`, else the model they name, else `MODEL`, else (for vLLM) the first entry of `/v1/models`. Triton takes input tensors rather than a prompt, so a Triton endpoint needs `--path /v2/models/<model>/infer` and `--data` with a KServe v2 inference request; without them, or with a prompt for a `/v2/` path, the command exits with that hint.
 
 ```bash
 gco inference invoke ENDPOINT_NAME [OPTIONS]
@@ -2925,8 +2925,12 @@ gco inference invoke my-llm -p "Hello" --stream
 # Raw JSON can opt in automatically when the explicit flag is omitted
 gco inference invoke my-llm -d '{"prompt": "Hello", "stream": true}'
 
-# Explicit API path
+# Explicit API path: the prompt is sent as a single chat message
 gco inference invoke my-llm -p "Hello" --path /v1/chat/completions
+
+# Triton: name the model and send its input tensors
+gco inference invoke triton-models --path /v2/models/identity/infer \
+  -d '{"inputs": [{"name": "INPUT0", "shape": [3], "datatype": "FP32", "data": [1, 2, 3]}]}'
 ```
 
 #### `gco inference health`
@@ -2959,7 +2963,7 @@ gco inference health my-llm -r us-east-1
 
 #### `gco inference models`
 
-Read the loaded model identity through the authenticated endpoint route. vLLM uses the OpenAI-compatible `/v1/models`; SGLang uses the read-only `/server_info` contract, from which only the identity fields (`model_path`, `served_model_name`, `revision`, `tokenizer_path`, `version`) are printed so the exact model and revision the launcher resolved are visible without the scheduler state that document also carries. The persisted `--framework` from deploy is used by default; a record persisted under the retired `tgi` contract is refused as unsupported.
+Read the loaded model identity through the authenticated endpoint route. vLLM uses the OpenAI-compatible `/v1/models`; SGLang uses the read-only `/server_info` contract, from which only the identity fields (`model_path`, `served_model_name`, `revision`, `tokenizer_path`, `version`) are printed so the exact model and revision the launcher resolved are visible without the scheduler state that document also carries. A Triton image gets `/v2/models/stats`, which names every loaded model and version (Triton has no model list of its own), and any other image the OpenAI-compatible `/v1/models`. The persisted `--framework` from deploy is used by default; a record persisted under the retired `tgi` contract is refused as unsupported.
 
 ```bash
 gco inference models ENDPOINT_NAME [OPTIONS]
@@ -3075,7 +3079,7 @@ gco inference set-topology my-llm --prefill 3 --decode 6
 
 #### `gco inference configure-store`
 
-Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. Settings merge onto the endpoint's existing store block and re-trigger reconciliation, so changing one field leaves the others intact.
+Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. Settings merge onto the endpoint's existing store block and re-trigger reconciliation, so changing one field leaves the others intact. The monitor re-renders the endpoint's `mooncake.json` and rolls its role pods onto it (the connectors read the file at start-up), so expect one rolling restart per change.
 
 ```bash
 gco inference configure-store ENDPOINT_NAME [OPTIONS]
@@ -4293,13 +4297,13 @@ Manage [Karpenter](https://karpenter.sh/) NodePools.
 | [`gco nodepools describe`](#gco-nodepools-describe) | Describe a specific NodePool. |
 | [`gco nodepools create-odcr`](#gco-nodepools-create-odcr) | Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). |
 | [`gco nodepools create-capacity-block`](#gco-nodepools-create-capacity-block) | Generate nodepool manifest for a purchased Capacity Block. |
-| [`gco nodepools delete`](#gco-nodepools-delete) | Delete a NodePool and its paired EC2NodeClass. |
+| [`gco nodepools delete`](#gco-nodepools-delete) | Delete a NodePool and its paired NodeClass. |
 
 </details>
 
 #### `gco nodepools list`
 
-List NodePools in a cluster.
+List NodePools in a cluster. The listing talks to the cluster's EKS API endpoint, which is private by default, so it takes the same `--via-ssm` route options as [`gco cluster tunnel`](#gco-cluster-tunnel) and follows the [route selection](#route-selection) table.
 
 ```bash
 gco nodepools list [OPTIONS]
@@ -4311,10 +4315,19 @@ gco nodepools list [OPTIONS]
 |--------|-------|-------------|
 | `--region` | `-r` | Filter by region |
 | `--cluster` | | EKS cluster name (default: `<project_name>-<region>`) |
+| `--via-ssm INSTANCE_ID\|auto` | | Reach the private API endpoint through an SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down afterwards |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`) |
+| `--yes` | `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion |
+
+**Example:**
+
+```bash
+gco nodepools list -r us-east-1 --via-ssm auto -y
+```
 
 #### `gco nodepools describe`
 
-Describe a specific NodePool.
+Describe a specific NodePool, through the same API-server route options as `list`.
 
 ```bash
 gco nodepools describe NODEPOOL_NAME [OPTIONS]
@@ -4326,10 +4339,22 @@ gco nodepools describe NODEPOOL_NAME [OPTIONS]
 |--------|-------|-------------|
 | `--region` | `-r` | AWS region (required) |
 | `--cluster` | | EKS cluster name (default: `<project_name>-<region>`) |
+| `--via-ssm INSTANCE_ID\|auto` | | Reach the private API endpoint through an SSM-managed instance, or `auto` for an ephemeral bastion |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`) |
+| `--yes` | `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion |
 
 #### `gco nodepools create-odcr`
 
-Generate nodepool manifest for ODCR (On-Demand Capacity Reservation).
+Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). The manifest holds two objects: an [EKS Auto Mode `NodeClass`](https://docs.aws.amazon.com/eks/latest/userguide/create-node-class.html) named `<name>-nodeclass` that binds the reservation through `capacityReservationSelectorTerms`, and a `NodePool` that launches reserved capacity (`karpenter.sh/capacity-type: reserved`) through it. GCO clusters run EKS Auto Mode, so the NodeClass is Auto Mode's `eks.amazonaws.com/v1` kind rather than self-managed Karpenter's `EC2NodeClass`. It reuses the cluster's own node role, subnets and cluster security group, which the command reads from the cluster with `eks:DescribeCluster`, so nodes join the cluster the same way the built-in pools' nodes do. See [Control deployment of workloads into Capacity Reservations with EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html).
+
+Nothing is applied: the command prints the manifest or writes it to `--output-file`. The EKS endpoint is private by default, so apply it through [`gco cluster tunnel`](#gco-cluster-tunnel), which holds the tunnel open and prints the `kubectl` flags to use:
+
+```bash
+gco cluster tunnel --via-ssm auto                  # keep this running
+kubectl <printed flags> apply -f nodepool.yaml     # in another shell
+```
+
+Pods reach the pool with `nodeSelector: {karpenter.sh/nodepool: <name>}`, plus a toleration for the pool's taint when it has one: types with an NVIDIA GPU get `nvidia.com/gpu`, Trainium and Inferentia types get `aws.amazon.com/neuron`, and `--efa` adds `vpc.amazonaws.com/efa` alongside either. Which taint applies is read from EC2 (`ec2:DescribeInstanceTypes`, the same call that sizes the pool's CPU limit) rather than from a list of families, so a new family needs no GCO release; when that lookup fails, the reviewed accelerator catalog the monthly dependency scan maintains answers instead. The manifest header names each instance type's class, vCPUs and which of the two answered. Nodes launched into the reservation carry the `eks.amazonaws.com/capacity-reservation-id` label. Once any NodeClass in a cluster selects capacity reservations, EKS Auto Mode stops launching into open ODCRs on its own for every NodeClass in that cluster.
 
 ```bash
 gco nodepools create-odcr [OPTIONS]
@@ -4339,14 +4364,15 @@ gco nodepools create-odcr [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--name` | `-n` | NodePool name (required) |
+| `--name` | `-n` | NodePool name (required); the NodeClass is `<name>-nodeclass` |
 | `--region` | `-r` | AWS region (required) |
-| `--capacity-reservation-id` | `-c` | EC2 Capacity Reservation ID (`cr-xxx`) or ODCR group ARN (required) |
-| `--instance-type` | `-i` | Instance type (repeatable) |
+| `--capacity-reservation-id` | `-c` | EC2 Capacity Reservation ID (`cr-xxx`) (required) |
+| `--instance-type` | `-i` | Instance type (repeatable). Without one the pool takes any `amd64` type the reservation offers |
 | `--max-nodes` | | Maximum nodes in the pool (default: 100) |
 | `--fallback-on-demand` | | Fall back to on-demand capacity when the reservation is exhausted |
 | `--efa` | | Enable EFA support (adds the EFA taint and labels for p4d/p5 instances) |
-| `--output-file` | `-o` | Output manifest to file instead of applying |
+| `--cluster` | | EKS cluster whose node role, subnets and security group the NodeClass uses (default: `<project_name>-<region>`) |
+| `--output-file` | `-o` | Write the manifest to this file instead of printing it |
 
 **Example:**
 
@@ -4361,7 +4387,7 @@ gco nodepools create-odcr \
 
 #### `gco nodepools create-capacity-block`
 
-Generate a Karpenter NodePool manifest for a purchased Capacity Block — the Capacity Block counterpart to [`gco nodepools create-odcr`](#gco-nodepools-create-odcr). Purchasing a Capacity Block (`gco capacity reserve`) yields an EC2 Capacity Reservation ID (`cr-xxx`), which the generated NodePool consumes via `capacityReservationSelectorTerms`. Because a block is prepaid for a fixed term, the NodePool defaults to holding the capacity (`WhenEmpty` consolidation) rather than consolidating it away early.
+Generate an EKS Auto Mode NodeClass and NodePool manifest for a purchased Capacity Block — the Capacity Block counterpart to [`gco nodepools create-odcr`](#gco-nodepools-create-odcr), with the same NodeClass, `--cluster` lookup, apply and targeting steps. Purchasing a Capacity Block (`gco capacity reserve`) yields an EC2 Capacity Reservation ID (`cr-xxx`), which the generated NodeClass binds through `capacityReservationSelectorTerms`; Auto Mode never launches into a Capacity Block without such a NodeClass. Because a block is prepaid for a fixed term, the NodePool defaults to holding the capacity (`WhenEmpty` consolidation) rather than consolidating it away early.
 
 ```bash
 gco nodepools create-capacity-block [OPTIONS]
@@ -4371,14 +4397,15 @@ gco nodepools create-capacity-block [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--name` | `-n` | NodePool name (required) |
+| `--name` | `-n` | NodePool name (required); the NodeClass is `<name>-nodeclass` |
 | `--region` | `-r` | AWS region (required) |
 | `--capacity-reservation-id` | `-c` | Capacity Reservation ID (`cr-xxx`) of the purchased Capacity Block (required) |
 | `--instance-type` | `-i` | Instance type (repeatable) |
 | `--max-nodes` | | Maximum nodes in the pool (default: 100) |
 | `--fallback-on-demand` | | Fall back to on-demand when the block is exhausted/expired |
 | `--efa` | | Enable EFA support (adds EFA taint and labels) |
-| `--output-file` | `-o` | Output manifest to file instead of applying |
+| `--cluster` | | EKS cluster whose node role, subnets and security group the NodeClass uses (default: `<project_name>-<region>`) |
+| `--output-file` | `-o` | Write the manifest to this file instead of printing it |
 
 **Example:**
 
@@ -4393,7 +4420,7 @@ gco nodepools create-capacity-block \
 
 #### `gco nodepools delete`
 
-Delete a NodePool and its paired `<name>-nodeclass` EC2NodeClass. Karpenter drains and terminates any nodes the NodePool provisioned. Cannot be undone.
+Delete a NodePool and its paired `<name>-nodeclass` NodeClass. EKS Auto Mode drains and terminates any nodes the NodePool provisioned. Cannot be undone. The deletion goes to the cluster's EKS API endpoint, private by default, through the same `--via-ssm` route options as `list`.
 
 ```bash
 gco nodepools delete NODEPOOL_NAME [OPTIONS]
@@ -4405,13 +4432,15 @@ gco nodepools delete NODEPOOL_NAME [OPTIONS]
 |--------|-------|-------------|
 | `--region` | `-r` | AWS region (required) |
 | `--cluster` | | EKS cluster name (defaults to `gco-<region>`) |
-| `--yes` | `-y` | Skip confirmation |
+| `--via-ssm INSTANCE_ID\|auto` | | Reach the private API endpoint through an SSM-managed instance, or `auto` for an ephemeral bastion |
+| `--bastion-ttl-minutes` | | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`) |
+| `--yes` | `-y` | Skip the deletion confirmation and the `--via-ssm auto` bastion prompt |
 
 **Example:**
 
 ```bash
-gco nodepools delete gpu-reserved -r us-east-1
-gco nodepools delete gpu-reserved -r us-east-1 -y
+gco nodepools delete gpu-reserved -r us-east-1 --via-ssm auto
+gco nodepools delete gpu-reserved -r us-east-1 --via-ssm auto -y
 ```
 
 ---
@@ -4562,7 +4591,7 @@ Release validation lifecycle.
 
 #### `gco release validate`
 
-Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`, `eks-capabilities`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM and SGLang images plus full immutable model revisions are mandatory; exact framework requests/responses, model-info probes, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
+Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`, `eks-capabilities`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM, SGLang and Triton images plus full immutable vLLM/SGLang model revisions are mandatory (Triton serves a harness-generated identity model from the model registry); exact framework requests/responses, model-info probes, the Mooncake store scenario, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
 
 ```bash
 gco release validate --expected-account 123456789012 \
@@ -4574,7 +4603,8 @@ gco release validate --expected-account 123456789012 \
   --inference-vllm-model-revision '<40-lowercase-hex-model-commit>' \
   --inference-sglang-image 'registry.example/sglang@sha256:<64-lowercase-hex-digest>' \
   --inference-sglang-model-id publisher/sglang-model \
-  --inference-sglang-model-revision '<40-lowercase-hex-model-commit>'
+  --inference-sglang-model-revision '<40-lowercase-hex-model-commit>' \
+  --inference-triton-image 'nvcr.io/nvidia/tritonserver@sha256:<64-lowercase-hex-digest>'
 ```
 
 **Options:**
@@ -4585,8 +4615,8 @@ gco release validate --expected-account 123456789012 \
 | `--i-understand-this-deploys-and-destroys-infrastructure` | Required consent flag: the run deploys real, paid infrastructure and destroys it afterwards. |
 | `--confirm-kms-key-deletion` | Authorize scheduling this run's retained EKS KMS keys for their 7-day deletion window; required whenever the `deploy` action is selected. |
 | `--actions` | Harness actions to run (default `all`); dependencies are added automatically. `all` includes first-class `inference` immediately after `topology`. A subset run reports `PARTIAL`, never `PASSED`. |
-| `--inference-region` | Required when `inference` runs. One deployed Region used for all four strictly sequential scenarios. |
-| `--inference-vllm-image` / `--inference-sglang-image` | Required. Separate immutable lowercase `@sha256:` server images; there are no mutable defaults. |
+| `--inference-region` | Required when `inference` runs. One deployed Region used for all six strictly sequential scenarios (vLLM baseline/HPA/Mooncake store, SGLang baseline/HPA, Triton baseline). |
+| `--inference-vllm-image` / `--inference-sglang-image` / `--inference-triton-image` | Required. Separate immutable lowercase `@sha256:` server images; there are no mutable defaults. Triton's model is the harness-generated identity repository, uploaded to the model registry for the run (`gco models upload`) and removed afterwards. |
 | `--inference-vllm-model-id` / `--inference-sglang-model-id` | Required. Exact model identifiers checked through framework-specific model-info APIs (vLLM `/v1/models`, SGLang `/server_info`). |
 | `--inference-vllm-model-revision` / `--inference-sglang-model-revision` | Required. Full lowercase 40-hex model commits forwarded to the official launchers and included in checkpoint identity. |
 | `--inference-gpu-count` | GPUs per endpoint replica (default `0`); part of checkpoint identity. |
@@ -5216,7 +5246,7 @@ gco status --fail-on-findings
 |--------|-------------|
 | `--region`, `-r` | Restrict the gather to a single region |
 | `--with-costs` | Include the `costs` section (Cost Explorer bills per `GetCostAndUsage` request) |
-| `--with-nodepools` | Include the `nodepools` section (needs a reachable cluster API endpoint; private endpoints report `unavailable` and point at `gco cluster tunnel`) |
+| `--with-nodepools` | Include the `nodepools` section (needs a reachable cluster API endpoint; private endpoints report `unavailable` and point at `gco nodepools list --via-ssm auto`) |
 | `--with-policy` | Include the `policy` section: compare the job-validation policy each region enforces and report any field that differs (one API call per region) |
 | `--watch SECONDS` | Re-gather and redraw on an interval (minimum 5 seconds; table output only). With `--with-costs`, the costs section is re-fetched at most every 15 minutes and carries an `as_of` timestamp |
 | `--fail-on-findings` | Exit 1 after rendering when any `error`-severity finding is present |

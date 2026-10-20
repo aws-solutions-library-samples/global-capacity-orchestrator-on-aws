@@ -51,17 +51,25 @@ def inference(config: Any) -> None:
 )
 @click.option("--replicas", default=1, help="Replicas per region (default: 1)")
 @click.option("--gpu-count", default=1, help="GPUs per replica (default: 1)")
-@click.option("--gpu-type", help="GPU instance type hint (e.g. g5.xlarge)")
+@click.option(
+    "--gpu-type",
+    help="Preferred instance type (e.g. g5.xlarge). A hint, not a requirement: "
+    "the pods prefer it, and Karpenter launches another type when it can't get this one.",
+)
 @click.option(
     "--port",
     default=8000,
     help="Container port (default: 8000; SGLang's documented default is 30000)",
 )
-@click.option("--model-path", help="EFS path for model weights")
+@click.option(
+    "--model-path",
+    help="Mount the inference namespace's EFS volume at /models without syncing "
+    "anything (--model-source mounts it too); point -e MODEL at a path under it.",
+)
 @click.option(
     "--model-source",
-    help="S3 URI for model weights (e.g. s3://bucket/models/llama3). "
-    "Auto-synced to each region via init container.",
+    help="S3 URI for model weights (e.g. $(gco models uri llama3)), synced to "
+    "/models/<endpoint name> in each region by an init container.",
 )
 @click.option("--health-path", default="/health", help="Health check path (default: /health)")
 @click.option("--env", "-e", multiple=True, help="Environment variable (KEY=VALUE). Repeatable")
@@ -213,12 +221,20 @@ def inference_deploy(
     Examples:
         gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0
 
+        gco inference deploy qwen \\
+            -i vllm/vllm-openai:v0.31.0 \\
+            -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \\
+            --extra-args=--max-model-len --extra-args 4096
+
         gco inference deploy llama3-70b \\
             -i vllm/vllm-openai:v0.31.0 \\
             -r us-east-1 -r eu-west-1 \\
             --replicas 2 --gpu-count 4 \\
-            --model-path /mnt/gco/models/llama3-70b \\
-            -e MODEL_NAME=meta-llama/Llama-3-70B
+            --model-source $(gco models uri llama3-70b) \\
+            -e MODEL=/models/llama3-70b
+
+    vLLM is started with --model $(MODEL) unless --extra-args already name
+    the model; each --extra-args value is one server argument.
     """
     from ..inference import get_inference_manager
 
@@ -400,21 +416,31 @@ def inference_deploy(
             "Use 'gco inference status' to track progress."
         )
 
-        # Warn if deploying to a subset of regions
+        # Warn if deploying to a subset of regions. The endpoint is already
+        # registered by now, so a failed lookup here is only a missing
+        # warning: reporting "Failed to deploy endpoint" and exiting 1 would
+        # misstate a deploy that succeeded.
         if region:
             from ..aws_client import get_aws_client as _get_client
 
-            all_stacks = _get_client(config).discover_regional_stacks()
-            all_regions = set(all_stacks.keys())
-            target_set = set(result.get("target_regions", []))
-            missing = all_regions - target_set
-            if missing:
+            try:
+                all_stacks = _get_client(config).discover_regional_stacks()
+            except Exception as lookup_error:
                 formatter.print_warning(
-                    f"Endpoint is NOT deployed to: {', '.join(sorted(missing))}. "
-                    "Global Accelerator may route users to those regions where "
-                    "the endpoint won't exist. Consider deploying to all regions "
-                    "(omit -r) for consistent global routing."
+                    "Could not list the other deployed Regions to compare with -r "
+                    f"({lookup_error}); the endpoint is registered for: {regions_str}."
                 )
+            else:
+                all_regions = set(all_stacks.keys())
+                target_set = set(result.get("target_regions", []))
+                missing = all_regions - target_set
+                if missing:
+                    formatter.print_warning(
+                        f"Endpoint is NOT deployed to: {', '.join(sorted(missing))}. "
+                        "Global Accelerator may route users to those regions where "
+                        "the endpoint won't exist. Consider deploying to all regions "
+                        "(omit -r) for consistent global routing."
+                    )
 
         if config.output_format != "table":
             formatter.print(result)
@@ -743,6 +769,15 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
         sys.exit(1)
 
 
+#: Why ``invoke`` can't build a Triton request from a prompt, and what to pass.
+_TRITON_INVOKE_HINT = (
+    "Triton serves models by name and takes input tensors, not a prompt: pass "
+    "--path /v2/models/<model>/infer and --data with a KServe v2 inference request, "
+    'e.g. --data \'{"inputs": [{"name": "INPUT0", "shape": [3], "datatype": "FP32", '
+    '"data": [1, 2, 3]}]}\'. `gco inference models <name>` lists the loaded models.'
+)
+
+
 def _resolve_invoke_framework(persisted_framework: Any, image_lower: str) -> str:
     """Return the serving contract ``invoke``/``models`` should speak to an endpoint.
 
@@ -759,6 +794,38 @@ def _resolve_invoke_framework(persisted_framework: Any, image_lower: str) -> str
     if "tritonserver" in image_lower or "triton" in image_lower:
         return "triton"
     return "openai"
+
+
+def _flag_value(args: list[str], flag: str) -> str | None:
+    """The value of ``flag`` in ``args``, given as ``flag value`` or ``flag=value``."""
+    for index, arg in enumerate(args):
+        if arg == flag and index + 1 < len(args):
+            return args[index + 1]
+        if arg.startswith(f"{flag}="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _openai_request_model(spec: dict[str, Any], *, vllm: bool) -> str | None:
+    """The ``model`` an OpenAI-compatible request to this endpoint must name.
+
+    Mirrors how the renderer starts vLLM: ``--served-model-name`` is the name
+    the API answers to; otherwise the model the arguments name (``--model``,
+    or the positional tag ``vllm serve`` takes first) wins over the ``MODEL``
+    env convention. ``None`` means the spec doesn't say, including a model
+    named inside a ``--config`` file, so the caller asks ``/v1/models``.
+    """
+    args = [str(arg) for arg in spec.get("args") or []]
+    for flag in ("--served-model-name", "--model"):
+        value = _flag_value(args, flag)
+        if value:
+            return value
+    if vllm and args and not args[0].startswith("-"):
+        return args[0]
+    if vllm and any(arg == "--config" or arg.startswith("--config=") for arg in args):
+        return None
+    model = (spec.get("env") or {}).get("MODEL")
+    return str(model) if model else None
 
 
 _SGLANG_SERVER_INFO_IDENTITY_KEYS = (
@@ -858,14 +925,14 @@ def inference_invoke(
         # image heuristics remain only for legacy records created before that
         # field existed.
         resolved_framework = _resolve_invoke_framework(persisted_framework, image_lower)
+        if resolved_framework == "triton" and (api_path is None or parsed_data is None):
+            # Triton has no prompt API: an inference request names a model and
+            # carries its input tensors, so neither can be guessed here.
+            formatter.print_error(_TRITON_INVOKE_HINT)
+            sys.exit(1)
         if api_path is None:
-            if resolved_framework == "sglang":
-                # Native SGLang API; streaming is a body flag on the same path.
-                api_path = "/generate"
-            elif resolved_framework == "triton":
-                api_path = "/v2/models"
-            else:
-                api_path = "/v1/completions"
+            # Native SGLang API; streaming is a body flag on the same path.
+            api_path = "/generate" if resolved_framework == "sglang" else "/v1/completions"
 
         full_path = f"{endpoint_path}{api_path}"
 
@@ -884,26 +951,20 @@ def inference_invoke(
                     "stream": stream_response,
                 }
             elif "/v2/" in api_path:
-                # Triton — just list models, prompt not used for this path.
-                body = {}
+                # A KServe v2 (Triton) path takes tensors; a prompt can't
+                # become an inference request.
+                formatter.print_error(_TRITON_INVOKE_HINT)
+                sys.exit(1)
             else:
                 # OpenAI-compatible (vLLM, etc.)
                 # Determine model name for OpenAI-compatible request
                 model_name = endpoint_name
                 if isinstance(spec, dict):
-                    # Check env vars first
-                    model_name = spec.get("env", {}).get("MODEL", model_name)
-                    # Check container args for --model (vLLM, etc.)
-                    args_list = spec.get("args") or []
-                    for i, arg in enumerate(args_list):
-                        if arg == "--model" and i + 1 < len(args_list):
-                            model_name = args_list[i + 1]
-                            break
+                    is_vllm = persisted_framework == "vllm" or "vllm" in image_lower
+                    model_name = _openai_request_model(spec, vllm=is_vllm) or endpoint_name
                     # Default for vLLM with no explicit model — auto-detect
                     # by querying /v1/models on the running endpoint
-                    if model_name == endpoint_name and (
-                        persisted_framework == "vllm" or "vllm" in image_lower
-                    ):
+                    if model_name == endpoint_name and is_vllm:
                         try:
                             detect_client = get_aws_client(config)
                             models_path = f"/inference/{endpoint_name}/v1/models"
@@ -918,12 +979,13 @@ def inference_invoke(
                                     model_name = models_data[0]["id"]
                         except Exception:  # nosec B110  # discovery is best-effort
                             pass  # Fall through to endpoint_name as model
-                body = {
-                    "model": model_name,
-                    "prompt": prompt,
-                    "max_tokens": max_tokens,
-                    "stream": stream_response,
-                }
+                body = {"model": model_name, "max_tokens": max_tokens, "stream": stream_response}
+                if api_path.rstrip("/").endswith("/chat/completions"):
+                    # The chat API takes messages, not a prompt: the prompt
+                    # becomes a single user turn.
+                    body["messages"] = [{"role": "user", "content": prompt}]
+                else:
+                    body["prompt"] = prompt
 
         if stream_response:
             # Keep streamed stdout byte-for-byte pipeline-friendly; request
@@ -1268,7 +1330,9 @@ def inference_models(
 ) -> None:
     """Read exact model identity from vLLM /v1/models or SGLang /server_info.
 
-    vLLM's OpenAI inventory is printed as returned. For SGLang the command
+    vLLM's OpenAI inventory is printed as returned, and so is a Triton
+    endpoint's /v2/models/stats, which names every loaded model and version
+    (Triton has no model list of its own). For SGLang the command
     reads ``/server_info`` (the launcher arguments the running server
     resolved) and prints only the identity fields — ``model_path``,
     ``served_model_name``, ``revision``, ``tokenizer_path`` and ``version`` —
@@ -1300,12 +1364,18 @@ def inference_models(
         selected_framework = framework or _resolve_invoke_framework(
             persisted_framework, image_lower
         )
-        if selected_framework not in ("vllm", "sglang"):
-            # Triton and unknown OpenAI-compatible images publish no model
-            # identity document this command knows how to read; the OpenAI
-            # inventory is the closest thing to one.
+        if selected_framework not in ("vllm", "sglang", "triton"):
+            # Unknown OpenAI-compatible images publish no model identity
+            # document this command knows how to read; the OpenAI inventory is
+            # the closest thing to one.
             selected_framework = "vllm"
-        model_path = {"vllm": "v1/models", "sglang": "server_info"}[selected_framework]
+        # Triton has no model list; its statistics extension reports every
+        # loaded model by name and version, which is the inventory we need.
+        model_path = {
+            "vllm": "v1/models",
+            "sglang": "server_info",
+            "triton": "v2/models/stats",
+        }[selected_framework]
         full_path = f"{ingress_path}/{model_path}"
 
         client = get_aws_client(config)
@@ -1495,7 +1565,7 @@ def inference_configure_store(
             formatter.print_success(f"Endpoint '{endpoint_name}' store configuration updated")
             formatter.print_info(
                 "The inference_monitor will re-render the KV-cache store "
-                "configuration in each region."
+                "configuration in each region and roll the role pods onto it."
             )
             if config.output_format != "table":
                 formatter.print(result)

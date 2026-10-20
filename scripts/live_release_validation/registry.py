@@ -81,7 +81,7 @@ def build_action_registry() -> dict[str, ActionDefinition]:
         ),
         ActionDefinition(
             "inference",
-            "Run vLLM/SGLang baseline and HPA matrix, then prove stable absence",
+            "Run the vLLM/SGLang/Triton matrix (incl. the Mooncake store), then prove stable absence",
             ("topology",),
             action_inference,
         ),

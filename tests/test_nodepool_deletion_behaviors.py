@@ -5,6 +5,10 @@ from __future__ import annotations
 import base64
 import gc
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -31,6 +35,21 @@ def _cluster_response() -> dict:
 
 def _config() -> GCOConfig:
     return GCOConfig(project_name="test-gco", default_region="us-east-1")
+
+
+@pytest.fixture
+def tunnel(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Fake ``open_api_server_tunnel``: records the route request, yields the session."""
+    state: dict[str, Any] = {"requests": [], "session": (None, None)}
+
+    @contextmanager
+    def fake_tunnel(formatter: Any, **kwargs: Any) -> Iterator[Any]:
+        state["requests"].append(kwargs)
+        server, sni = state["session"]
+        yield SimpleNamespace(server=server, tls_server_name=sni)
+
+    monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
+    return state
 
 
 def test_k8s_client_closes_only_a_descriptor_it_still_owns() -> None:
@@ -176,8 +195,17 @@ def test_delete_nodepool_removes_the_paired_nodeclass() -> None:
     with patch("cli.nodepools.get_k8s_client", return_value=api):
         result = delete_cluster_nodepool("cluster", "us-east-1", "gpu")
 
-    assert result == {"nodepool": "gpu", "ec2nodeclass": "gpu-nodeclass"}
+    assert result == {"nodepool": "gpu", "nodeclass": "gpu-nodeclass"}
     assert api.delete_cluster_custom_object.call_count == 2
+    # The paired object is the EKS Auto Mode NodeClass; GCO clusters do not
+    # serve self-managed Karpenter's karpenter.k8s.aws EC2NodeClass.
+    nodeclass_call = api.delete_cluster_custom_object.call_args_list[1]
+    assert nodeclass_call.kwargs == {
+        "group": "eks.amazonaws.com",
+        "version": "v1",
+        "plural": "nodeclasses",
+        "name": "gpu-nodeclass",
+    }
 
 
 def test_delete_nodepool_ignores_a_missing_paired_nodeclass() -> None:
@@ -186,7 +214,7 @@ def test_delete_nodepool_ignores_a_missing_paired_nodeclass() -> None:
     with patch("cli.nodepools.get_k8s_client", return_value=api):
         result = delete_cluster_nodepool("cluster", "us-east-1", "gpu")
 
-    assert result == {"nodepool": "gpu", "ec2nodeclass": None}
+    assert result == {"nodepool": "gpu", "nodeclass": None}
 
 
 def test_delete_nodepool_warns_but_succeeds_when_nodeclass_cleanup_fails(caplog) -> None:
@@ -196,8 +224,8 @@ def test_delete_nodepool_warns_but_succeeds_when_nodeclass_cleanup_fails(caplog)
         result = delete_cluster_nodepool("cluster", "us-east-1", "gpu")
 
     assert result["nodepool"] == "gpu"
-    assert result["ec2nodeclass"] is None
-    assert "Could not delete EC2NodeClass" in caplog.text
+    assert result["nodeclass"] is None
+    assert "Could not delete NodeClass" in caplog.text
 
 
 def test_delete_nodepool_wraps_primary_deletion_failures() -> None:
@@ -210,10 +238,10 @@ def test_delete_nodepool_wraps_primary_deletion_failures() -> None:
         delete_cluster_nodepool("cluster", "us-east-1", "gpu")
 
 
-def test_delete_cli_confirmation_reports_the_paired_nodeclass() -> None:
+def test_delete_cli_confirmation_reports_the_paired_nodeclass(tunnel: dict[str, Any]) -> None:
     with patch(
         "cli.nodepools.delete_cluster_nodepool",
-        return_value={"nodepool": "gpu", "ec2nodeclass": "gpu-nodeclass"},
+        return_value={"nodepool": "gpu", "nodeclass": "gpu-nodeclass"},
     ) as delete:
         result = CliRunner().invoke(
             nodepools,
@@ -224,14 +252,28 @@ def test_delete_cli_confirmation_reports_the_paired_nodeclass() -> None:
 
     assert result.exit_code == 0, result.output
     assert "Delete NodePool 'gpu'" in result.output
-    assert "Deleted EC2NodeClass gpu-nodeclass" in result.output
-    delete.assert_called_once_with("test-gco-us-east-1", "us-east-1", "gpu")
+    assert "Deleted NodeClass gpu-nodeclass" in result.output
+    delete.assert_called_once_with(
+        "test-gco-us-east-1", "us-east-1", "gpu", server=None, tls_server_name=None
+    )
+    # Without --via-ssm the route is the shared helper's default for the cluster.
+    assert tunnel["requests"] == [
+        {
+            "cluster": "test-gco-us-east-1",
+            "region": "us-east-1",
+            "via_ssm": None,
+            "bastion_ttl_minutes": 120,
+            "assume_yes": False,
+        }
+    ]
 
 
-def test_delete_cli_yes_bypasses_confirmation_and_handles_no_nodeclass() -> None:
+def test_delete_cli_yes_bypasses_confirmation_and_handles_no_nodeclass(
+    tunnel: dict[str, Any],
+) -> None:
     with patch(
         "cli.nodepools.delete_cluster_nodepool",
-        return_value={"nodepool": "gpu", "ec2nodeclass": None},
+        return_value={"nodepool": "gpu", "nodeclass": None},
     ):
         result = CliRunner().invoke(
             nodepools,
@@ -242,10 +284,69 @@ def test_delete_cli_yes_bypasses_confirmation_and_handles_no_nodeclass() -> None
     assert result.exit_code == 0, result.output
     assert "Delete NodePool 'gpu'" not in result.output
     assert "Deleted NodePool gpu" in result.output
-    assert "EC2NodeClass" not in result.output
+    assert "NodeClass" not in result.output
+    # --yes also skips the bastion prompt, and --cluster names the tunnel target.
+    assert tunnel["requests"][0]["cluster"] == "custom"
+    assert tunnel["requests"][0]["assume_yes"] is True
 
 
-def test_delete_cli_surfaces_service_errors() -> None:
+def test_delete_cli_via_ssm_reaches_the_private_endpoint_through_the_tunnel(
+    tunnel: dict[str, Any],
+) -> None:
+    """The private EKS endpoint is the default, so delete can go through an SSM tunnel."""
+    tunnel["session"] = ("https://127.0.0.1:8443", "ABC.gr7.us-east-1.eks.amazonaws.com")
+    with patch(
+        "cli.nodepools.delete_cluster_nodepool",
+        return_value={"nodepool": "gpu", "nodeclass": "gpu-nodeclass"},
+    ) as delete:
+        result = CliRunner().invoke(
+            nodepools,
+            [
+                "delete",
+                "gpu",
+                "--region",
+                "us-east-1",
+                "--via-ssm",
+                "auto",
+                "--bastion-ttl-minutes",
+                "30",
+                "--yes",
+            ],
+            obj=_config(),
+        )
+
+    assert result.exit_code == 0, result.output
+    assert tunnel["requests"][0]["via_ssm"] == "auto"
+    assert tunnel["requests"][0]["bastion_ttl_minutes"] == 30
+    delete.assert_called_once_with(
+        "test-gco-us-east-1",
+        "us-east-1",
+        "gpu",
+        server="https://127.0.0.1:8443",
+        tls_server_name="ABC.gr7.us-east-1.eks.amazonaws.com",
+    )
+
+
+def test_delete_cli_reports_a_route_that_cannot_be_opened(monkeypatch) -> None:
+    @contextmanager
+    def failing_tunnel(formatter: Any, **kwargs: Any) -> Iterator[Any]:
+        raise RuntimeError("--via-ssm auto needs the cluster's API endpoint")
+        yield  # pragma: no cover - never reached
+
+    monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", failing_tunnel)
+    with patch("cli.nodepools.delete_cluster_nodepool") as delete:
+        result = CliRunner().invoke(
+            nodepools,
+            ["delete", "gpu", "--region", "us-east-1", "--via-ssm", "auto", "--yes"],
+            obj=_config(),
+        )
+
+    assert result.exit_code == 1
+    assert "needs the cluster's API endpoint" in result.output
+    delete.assert_not_called()
+
+
+def test_delete_cli_surfaces_service_errors(tunnel: dict[str, Any]) -> None:
     with patch(
         "cli.nodepools.delete_cluster_nodepool", side_effect=RuntimeError("cluster unavailable")
     ):
@@ -291,3 +392,79 @@ def test_k8s_client_closes_api_client_if_custom_api_construction_fails(tmp_path)
 
     api_client.close.assert_called_once_with()
     assert not ca_path.exists()
+
+
+def test_k8s_client_points_at_the_tunnel_but_verifies_the_endpoints_name(tmp_path) -> None:
+    """Through an SSM tunnel the client dials 127.0.0.1 while TLS still checks the EKS host."""
+    eks = MagicMock()
+    eks.describe_cluster.return_value = _cluster_response()
+    ca_paths = [tmp_path / "tunnel.crt", tmp_path / "direct.crt"]
+    descriptors = [
+        (os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600), str(path)) for path in ca_paths
+    ]
+
+    class FakeConfiguration:
+        pass
+
+    class FakeApiClient:
+        def __init__(self, configuration):
+            self.configuration = configuration
+
+        def close(self):
+            return None
+
+    class FakeCustomObjectsApi:
+        def __init__(self, api_client):
+            self.api_client = api_client
+
+    with (
+        patch("cli.nodepools.boto3.client", return_value=eks),
+        patch("cli.nodepools.tempfile.mkstemp", side_effect=descriptors),
+        patch("cli.nodepools.get_eks_token", return_value="token"),
+        patch("kubernetes.client.Configuration", FakeConfiguration),
+        patch("kubernetes.client.ApiClient", FakeApiClient),
+        patch("kubernetes.client.CustomObjectsApi", FakeCustomObjectsApi),
+    ):
+        custom_api = get_k8s_client(
+            "cluster",
+            "us-east-1",
+            server="https://127.0.0.1:8443",
+            tls_server_name="ABC.gr7.us-east-1.eks.amazonaws.com",
+        )
+        direct = get_k8s_client("cluster", "us-east-1")
+
+    configuration = custom_api.api_client.configuration
+    assert configuration.host == "https://127.0.0.1:8443"
+    assert configuration.tls_server_name == "ABC.gr7.us-east-1.eks.amazonaws.com"
+    assert configuration.verify_ssl is True
+    # Without a tunnel the endpoint itself is dialed and no SNI override is set.
+    assert direct.api_client.configuration.host == "https://cluster.example"
+    assert not hasattr(direct.api_client.configuration, "tls_server_name")
+
+
+@pytest.mark.parametrize(
+    ("function", "args"),
+    [
+        (list_cluster_nodepools, ()),
+        (describe_cluster_nodepool, ("gpu",)),
+        (delete_cluster_nodepool, ("gpu",)),
+    ],
+)
+def test_cluster_operations_hand_the_route_to_the_client(function, args) -> None:
+    api = MagicMock()
+    api.list_cluster_custom_object.return_value = {"items": []}
+    api.get_cluster_custom_object.return_value = {"metadata": {"name": "gpu"}}
+    with patch("cli.nodepools.get_k8s_client", return_value=api) as client:
+        function(
+            "cluster",
+            "us-east-1",
+            *args,
+            server="https://127.0.0.1:8443",
+            tls_server_name="ABC.gr7.us-east-1.eks.amazonaws.com",
+        )
+    client.assert_called_once_with(
+        "cluster",
+        "us-east-1",
+        server="https://127.0.0.1:8443",
+        tls_server_name="ABC.gr7.us-east-1.eks.amazonaws.com",
+    )

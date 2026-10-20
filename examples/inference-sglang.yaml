@@ -1,63 +1,85 @@
 # SGLang Inference Endpoint Example
 #
-# High-throughput LLM serving with RadixAttention. Deploys a Phi-3.5-mini
-# endpoint (ungated, no HF token required) reachable through the
-# authenticated API Gateway.
+# High-throughput LLM serving with RadixAttention. Serves the ungated
+# Qwen2.5-1.5B-Instruct model (the same one the vLLM example serves), so no
+# Hugging Face token is needed. Not every model runs on SGLang's default
+# kernels: on v0.5.21, microsoft/Phi-3.5-mini-instruct (head dimension 96)
+# fails during CUDA graph capture in both the FlashInfer backend and the JIT
+# KV-cache kernel. A model like that needs
+#   --attention-backend triton --disable-cuda-graph
+# (as --extra-args on a managed endpoint, or in the args below).
 #
 # Prerequisites:
-#   - GPU node
-#   - HF_TOKEN env var if switching to a gated model
+#   - GPU node with compute capability 8.0 or newer (A10G on g5 and later);
+#     SGLang's prebuilt kernels don't run on a T4
+#   - For a gated model, a Hugging Face token. Don't pass it with -e: those
+#     values are stored in plain text in the endpoint record and the
+#     Deployment. Upload the weights with `gco models upload` and deploy with
+#     --model-source instead (see docs/INFERENCE.md).
 #
 # Usage (recommended, multi-region aware). ``--framework sglang`` makes the
 # renderer supply the official launcher (python3 -m sglang.launch_server)
 # bound to 0.0.0.0:--port with --model-path taken from -e MODEL=...:
-#   gco inference deploy sglang-phi3 \
+#   gco inference deploy sglang-qwen \
 #     -i lmsysorg/sglang:v0.5.21 \
 #     --framework sglang --port 30000 \
 #     --gpu-count 1 --replicas 1 \
-#     -e MODEL=microsoft/Phi-3.5-mini-instruct
+#     -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 #
 # Usage with autoscaling:
-#   gco inference deploy sglang-phi3 \
+#   gco inference deploy sglang-qwen \
 #     -i lmsysorg/sglang:v0.5.21 \
 #     --framework sglang --port 30000 \
 #     --gpu-count 1 --replicas 2 \
 #     --min-replicas 1 --max-replicas 8 \
 #     --autoscale-metric cpu:70 --autoscale-metric memory:80 \
-#     -e MODEL=microsoft/Phi-3.5-mini-instruct
+#     -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
+#
+# Call it with:
+#   gco inference invoke sglang-qwen -p "Hello"
+#
+# A managed endpoint also answers SigV4-signed OpenAI-compatible requests at
+#   https://<ApiEndpoint>/inference/sglang-qwen/v1/completions
+# with a body such as
+#   {"model": "Qwen/Qwen2.5-1.5B-Instruct", "prompt": "Hello", "max_tokens": 50}
+# (see docs/API.md#invoking-an-endpoint).
 #
 # Usage (single region, deploy this manifest directly):
 #   gco jobs submit-direct examples/inference-sglang.yaml -r us-east-1
-#
-# Test the endpoint (SigV4-authenticated via API Gateway; OpenAI-compatible):
-#   curl https://<API-Gateway-endpoint>/inference/sglang-phi3/v1/completions \
-#     -H "Content-Type: application/json" \
-#     -d '{"model": "microsoft/Phi-3.5-mini-instruct", "prompt": "Hello", "max_tokens": 50}'
+# This applies a plain Deployment and Service with the same name as the
+# managed endpoint above, so use one or the other in a Region. Nothing
+# registers the manifest with the inference monitor: `gco inference` doesn't
+# manage it and the /inference/ route doesn't reach it. Test it from your
+# machine through the cluster tunnel (`gco cluster tunnel --via-ssm auto`
+# prints the kubectl flags to use):
+#   kubectl port-forward -n gco-inference svc/sglang-qwen 30000:80
+#   curl http://localhost:30000/v1/completions -H "Content-Type: application/json" \
+#     -d '{"model": "Qwen/Qwen2.5-1.5B-Instruct", "prompt": "Hello", "max_tokens": 50}'
 #
 # Docs: ../docs/INFERENCE.md
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sglang-phi3
+  name: sglang-qwen
   namespace: gco-inference
   labels:
     # No gco.io/type: inference here: on an object in gco-inference that label
     # marks it as the inference monitor's own, and only the monitor may set it
     # (09-tenant-write-fence.yaml). The pods below keep it, so they get the
     # model pods' network rules.
-    app: sglang-phi3
+    app: sglang-qwen
     project: gco
     framework: sglang
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: sglang-phi3
+      app: sglang-qwen
   template:
     metadata:
       labels:
-        app: sglang-phi3
+        app: sglang-qwen
         project: gco
         gco.io/type: inference
     spec:
@@ -70,16 +92,14 @@ spec:
         - containerPort: 30000
         env:
         - name: MODEL
-          value: "microsoft/Phi-3.5-mini-instruct"
+          value: "Qwen/Qwen2.5-1.5B-Instruct"
         command: ["/bin/bash", "-c"]
         args:
         - |
           python3 -m sglang.launch_server \
             --model-path $MODEL \
             --port 30000 \
-            --host 0.0.0.0 \
-            --attention-backend triton \
-            --disable-cuda-graph
+            --host 0.0.0.0
         resources:
           requests:
             cpu: "4"
@@ -89,18 +109,33 @@ spec:
             cpu: "8"
             memory: "32Gi"
             nvidia.com/gpu: "1"
+        # SGLang answers /health with 503 until the weights are downloaded and
+        # loaded, so the startup probe holds liveness off for up to 20 minutes
+        # (the inference monitor's budget for a managed endpoint). Once
+        # serving, /health generates one token and polls for it at one-second
+        # steps, so it never answers in under a second: every probe states a
+        # 5-second timeout, because the kubelet's 1-second default fails each
+        # check and restarts a healthy server.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 30000
+          periodSeconds: 15
+          failureThreshold: 80
+          timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /health
             port: 30000
-          initialDelaySeconds: 300
           periodSeconds: 15
+          failureThreshold: 5
+          timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /health
             port: 30000
-          initialDelaySeconds: 120
           periodSeconds: 10
+          timeoutSeconds: 5
       tolerations:
       - key: nvidia.com/gpu
         operator: Equal
@@ -114,14 +149,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: sglang-phi3
+  name: sglang-qwen
   namespace: gco-inference
   labels:
-    app: sglang-phi3
+    app: sglang-qwen
     project: gco
 spec:
   selector:
-    app: sglang-phi3
+    app: sglang-qwen
   ports:
   - port: 80
     targetPort: 30000

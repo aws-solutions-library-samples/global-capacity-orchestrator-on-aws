@@ -70,7 +70,7 @@ from scripts.live_release_validation.models import (
 from scripts.live_release_validation.registry import ActionDefinition, build_action_registry
 from tests._live_validation_patching import patch_live_validation_helper
 from tests.test_live_release_validation import _central_job, _context, _real_context, _response
-from tests.test_live_validation_inference import _runtime
+from tests.test_live_validation_inference import _runtime, _runtime_matrix
 from tests.test_live_validation_inference import _settings as _inference_settings
 
 _ACCOUNT = "123456789012"
@@ -2279,6 +2279,8 @@ def _inference_argv(*extra: str) -> list[str]:
         "publisher/sglang-model",
         "--inference-sglang-model-revision",
         "e" * 40,
+        "--inference-triton-image",
+        "registry.example/tritonserver@sha256:" + "f" * 64,
         *extra,
         actions="inference",
     )
@@ -2624,9 +2626,9 @@ class TestMainEntryPoint:
 
 class TestInferenceContractValidation:
     def test_validate_runtime_rejects_unknown_frameworks(self) -> None:
-        runtime = dataclasses.replace(_runtime("vllm"), framework="triton")
+        runtime = dataclasses.replace(_runtime("vllm"), framework="tgi")
 
-        with pytest.raises(ValueError, match="must be 'vllm' or 'sglang'"):
+        with pytest.raises(ValueError, match="must be 'vllm', 'sglang' or 'triton'"):
             inference_contract._validate_runtime(runtime)
 
     @pytest.mark.parametrize(
@@ -2634,35 +2636,45 @@ class TestInferenceContractValidation:
         [
             ({"selected_region": "US-EAST-1"}, "lowercase AWS Region name"),
             ({"selected_region": "useast1"}, "lowercase AWS Region name"),
-            ({"inference_runtimes": [_runtime("vllm"), _runtime("sglang")]}, "vLLM then SGLang"),
-            ({"inference_runtimes": (_runtime("sglang"), _runtime("vllm"))}, "vLLM then SGLang"),
-            ({"inference_runtimes": (_runtime("vllm"), _runtime("vllm"))}, "vLLM then SGLang"),
             (
-                {
-                    "inference_runtimes": (
-                        _runtime("vllm", model_id=" padded"),
-                        _runtime("sglang"),
-                    )
-                },
+                {"inference_runtimes": list(_runtime_matrix())},
+                "vLLM, SGLang then Triton",
+            ),
+            (
+                {"inference_runtimes": (_runtime("sglang"), _runtime("vllm"), _runtime("triton"))},
+                "vLLM, SGLang then Triton",
+            ),
+            (
+                {"inference_runtimes": (_runtime("vllm"), _runtime("sglang"))},
+                "vLLM, SGLang then Triton",
+            ),
+            (
+                {"inference_runtimes": _runtime_matrix(vllm=_runtime("vllm", model_id=" padded"))},
                 "vllm model_id must be a non-empty trimmed value",
             ),
             (
                 {
-                    "inference_runtimes": (
-                        _runtime("vllm"),
-                        dataclasses.replace(_runtime("sglang"), model_id=""),
+                    "inference_runtimes": _runtime_matrix(
+                        sglang=dataclasses.replace(_runtime("sglang"), model_id="")
                     )
                 },
                 "sglang model_id must be a non-empty trimmed value",
             ),
             (
                 {
-                    "inference_runtimes": (
-                        _runtime("vllm"),
-                        dataclasses.replace(_runtime("sglang"), port=8080),
+                    "inference_runtimes": _runtime_matrix(
+                        sglang=dataclasses.replace(_runtime("sglang"), port=8080)
                     )
                 },
                 "sglang live validation port must be 30000",
+            ),
+            (
+                {
+                    "inference_runtimes": _runtime_matrix(
+                        triton=dataclasses.replace(_runtime("triton"), port=8001)
+                    )
+                },
+                "triton live validation port must be 8000",
             ),
             ({"request_prompt": "   "}, "request_prompt must be non-empty"),
             ({"namespace": "Bad_Namespace"}, "DNS-safe Kubernetes name"),
@@ -2694,12 +2706,21 @@ class TestInferenceContractValidation:
         self, tmp_path: Path
     ) -> None:
         settings = _inference_settings(tmp_path)
-        vllm, sglang = settings.inference_runtimes
-
-        # Both runtimes share GCO's ``MODEL`` environment convention; each
-        # launcher receives the immutable model on argv under its own flag.
+        vllm, sglang, triton = settings.inference_runtimes
+        # Both launchers share GCO's ``MODEL`` environment convention; each
+        # receives the immutable model on argv under its own flag. Triton takes
+        # no environment and is started with its command and repository.
         assert settings.framework_env(vllm) == {"MODEL": "test/vllm-model"}
         assert settings.framework_env(sglang) == {"MODEL": "test/sglang-model"}
+        assert settings.framework_env(triton) == {}
+        assert settings.deploy_extra_args(triton, endpoint_name="ep") == (
+            "tritonserver",
+            "--model-repository=/models/ep",
+        )
+        assert settings.deploy_extra_args(triton) == (
+            "tritonserver",
+            "--model-repository=/models/<endpoint>",
+        )
         assert settings.deploy_extra_args(vllm) == (
             "--model",
             "test/vllm-model",

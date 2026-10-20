@@ -31,14 +31,28 @@ from scripts.live_release_validation.checks.inference import (
     EndpointPlan,
     ManagedInferenceLifecycle,
     ManagedInferenceValidationError,
+    build_configure_store_command,
     build_delete_command,
     build_deploy_command,
     build_endpoint_plans,
     build_health_command,
     build_invoke_command,
+    build_model_delete_command,
+    build_model_list_command,
+    build_model_upload_command,
+    build_model_uri_command,
     build_models_command,
     extract_generated_text,
     initialize_run_state,
+)
+from scripts.live_release_validation.inference_contract import (
+    MOONCAKE_CONFIG_DIGEST_ANNOTATION,
+    MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES,
+    TRITON_MODEL_NAME,
+    TRITON_MODEL_REPOSITORY_FILES,
+    TRITON_MODEL_VERSION,
+    triton_model_repository_revision,
+    write_triton_model_repository,
 )
 from scripts.live_release_validation.models import (
     InferenceRuntimeSpec,
@@ -51,14 +65,28 @@ from scripts.live_release_validation.runner import LiveValidationRunner
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VLLM_IMAGE = "registry.example/vllm@sha256:" + "a" * 64
 SGLANG_IMAGE = "registry.example/sglang@sha256:" + "b" * 64
+TRITON_IMAGE = "registry.example/tritonserver@sha256:" + "9" * 64
 VLLM_REVISION = "c" * 40
 SGLANG_REVISION = "d" * 40
+TRITON_REVISION = triton_model_repository_revision()
 OWNER_NONCE = "e" * 64
 LIFECYCLE_ID = "f" * 64
+MODEL_SOURCE = "s3://registry-bucket/models/" + f"gco-mi-{OWNER_NONCE[:16]}-triton-baseline-repo"
+#: Matrix order: vLLM baseline/HPA/store, SGLang baseline/HPA, Triton baseline.
+PLAN_COUNT = 6
+TRITON_STATS = {
+    "model_stats": [
+        {"name": TRITON_MODEL_NAME, "version": TRITON_MODEL_VERSION, "inference_count": 1}
+    ]
+}
+TRITON_ECHO = {
+    "model_name": TRITON_MODEL_NAME,
+    "outputs": [{"name": "OUTPUT0", "datatype": "FP32", "shape": [3], "data": [1.0, 2.0, 3.0]}],
+}
 
 
 def _runtime(
-    framework: Literal["vllm", "sglang"],
+    framework: Literal["vllm", "sglang", "triton"],
     *,
     image: str | None = None,
     model_id: str | None = None,
@@ -72,6 +100,14 @@ def _runtime(
             model_revision=revision or VLLM_REVISION,
             port=8000,
         )
+    if framework == "triton":
+        return InferenceRuntimeSpec(
+            framework="triton",
+            image=image or TRITON_IMAGE,
+            model_id=model_id or TRITON_MODEL_NAME,
+            model_revision=revision or TRITON_REVISION,
+            port=8000,
+        )
     return InferenceRuntimeSpec(
         framework="sglang",
         image=image or SGLANG_IMAGE,
@@ -81,8 +117,12 @@ def _runtime(
     )
 
 
-def _runtime_matrix() -> tuple[InferenceRuntimeSpec, ...]:
-    return (_runtime("vllm"), _runtime("sglang"))
+def _runtime_matrix(
+    vllm: InferenceRuntimeSpec | None = None,
+    sglang: InferenceRuntimeSpec | None = None,
+    triton: InferenceRuntimeSpec | None = None,
+) -> tuple[InferenceRuntimeSpec, ...]:
+    return (vllm or _runtime("vllm"), sglang or _runtime("sglang"), triton or _runtime("triton"))
 
 
 def _settings(tmp_path: Path, **changes: Any) -> RunSettings:
@@ -187,20 +227,35 @@ def _owned_item(
     runtime = plan.runtime
     spec: dict[str, Any] = {
         "image": runtime.image,
-        "framework": runtime.framework,
+        "framework": runtime.framework if runtime.framework in ("vllm", "sglang") else None,
         "port": runtime.port,
         "replicas": plan.replicas,
         "gpu_count": settings.gpu_count,
-        "health_check_path": settings.health_path,
-        "env": settings.framework_env(runtime),
-        "args": list(settings.deploy_extra_args(runtime)),
+        "health_check_path": settings.runtime_health_path(runtime),
+        "env": settings.framework_env(runtime) or None,
+        "args": list(settings.deploy_extra_args(runtime, endpoint_name=plan.name)),
+        "mooncake": settings.mooncake_block(plan.role),
     }
+    if runtime.uses_model_registry:
+        spec["model_source"] = MODEL_SOURCE
     if plan.autoscaling:
         spec["autoscaling"] = {
             "enabled": True,
             "min_replicas": settings.hpa_min_replicas,
             "max_replicas": settings.hpa_max_replicas,
             "metrics": [{"type": "cpu", "target": settings.hpa_cpu_target}],
+        }
+    regional: dict[str, Any] = {"state": "running"}
+    if plan.mooncake_store:
+        # The monitor's role-keyed status for a store: master Ready and the
+        # requested cold tier active on the own-Region bucket.
+        regional["store"] = {
+            "ready": True,
+            "master": "mooncake-master:50051",
+            "cold_tier": {
+                "enabled": True,
+                "s3_uri": f"s3://regional-bucket/mooncake-kv/{plan.name}/",
+            },
         }
     return {
         "endpoint_name": plan.name,
@@ -210,7 +265,7 @@ def _owned_item(
         "lifecycle_id": lifecycle_id,
         "labels": {OWNER_LABEL: owner_nonce},
         "spec": spec,
-        "region_status": {settings.selected_region: {"state": "running"}},
+        "region_status": {settings.selected_region: regional},
     }
 
 
@@ -230,18 +285,23 @@ class TestStrictSettings:
             ("selected_region", "us-west-2"),
             (
                 "inference_runtimes",
-                (
-                    _runtime("vllm", image="registry.example/vllm@sha256:" + "9" * 64),
-                    _runtime("sglang"),
+                _runtime_matrix(
+                    vllm=_runtime("vllm", image="registry.example/vllm@sha256:" + "8" * 64)
                 ),
             ),
             (
                 "inference_runtimes",
-                (_runtime("vllm", model_id="other/model"), _runtime("sglang")),
+                _runtime_matrix(vllm=_runtime("vllm", model_id="other/model")),
             ),
             (
                 "inference_runtimes",
-                (_runtime("vllm", revision="8" * 40), _runtime("sglang")),
+                _runtime_matrix(vllm=_runtime("vllm", revision="8" * 40)),
+            ),
+            (
+                "inference_runtimes",
+                _runtime_matrix(
+                    triton=_runtime("triton", image="registry.example/triton@sha256:" + "7" * 64)
+                ),
             ),
             ("request_prompt", "A different deterministic prompt"),
             ("gpu_count", 1),
@@ -272,7 +332,7 @@ class TestStrictSettings:
         with pytest.raises(ValueError, match="@sha256"):
             _settings(
                 tmp_path,
-                inference_runtimes=(_runtime("vllm", image=image), _runtime("sglang")),
+                inference_runtimes=_runtime_matrix(vllm=_runtime("vllm", image=image)),
             )
 
     def test_digest_parser_is_linear_on_repeated_slash_prefixes(self, tmp_path: Path) -> None:
@@ -281,10 +341,7 @@ class TestStrictSettings:
         with pytest.raises(ValueError, match="@sha256"):
             _settings(
                 tmp_path,
-                inference_runtimes=(
-                    _runtime("vllm", image=adversarial),
-                    _runtime("sglang"),
-                ),
+                inference_runtimes=_runtime_matrix(vllm=_runtime("vllm", image=adversarial)),
             )
 
     def test_digest_parser_accepts_standard_uppercase_tags(self, tmp_path: Path) -> None:
@@ -292,10 +349,7 @@ class TestStrictSettings:
         assert immutable_sha256_digest(image) == "6" * 64
         settings = _settings(
             tmp_path,
-            inference_runtimes=(
-                _runtime("vllm", image=image),
-                _runtime("sglang"),
-            ),
+            inference_runtimes=_runtime_matrix(vllm=_runtime("vllm", image=image)),
         )
         assert settings.inference_runtimes[0].image == image
 
@@ -320,25 +374,18 @@ class TestStrictSettings:
         with pytest.raises(ValueError, match="immutable lowercase @sha256"):
             _settings(
                 tmp_path,
-                inference_runtimes=(
-                    _runtime("vllm", image=image),
-                    _runtime("sglang"),
-                ),
+                inference_runtimes=_runtime_matrix(vllm=_runtime("vllm", image=image)),
             )
 
     def test_framework_images_must_be_independent_digests(self, tmp_path: Path) -> None:
         same_digest = "7" * 64
-        with pytest.raises(ValueError, match="distinct immutable digests"):
+        with pytest.raises(ValueError, match="distinct immutable digest"):
             _settings(
                 tmp_path,
-                inference_runtimes=(
-                    _runtime(
-                        "vllm",
-                        image="registry.example/vllm@sha256:" + same_digest,
-                    ),
-                    _runtime(
-                        "sglang",
-                        image="registry.example/sglang@sha256:" + same_digest,
+                inference_runtimes=_runtime_matrix(
+                    vllm=_runtime("vllm", image="registry.example/vllm@sha256:" + same_digest),
+                    sglang=_runtime(
+                        "sglang", image="registry.example/sglang@sha256:" + same_digest
                     ),
                 ),
             )
@@ -348,17 +395,49 @@ class TestStrictSettings:
         with pytest.raises(ValueError, match="model_revision"):
             _settings(
                 tmp_path,
-                inference_runtimes=(
-                    _runtime("vllm", revision=revision),
-                    _runtime("sglang"),
-                ),
+                inference_runtimes=_runtime_matrix(vllm=_runtime("vllm", revision=revision)),
             )
 
-    def test_exact_four_endpoints_and_fixed_hpa_bounds(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="exactly four"):
-            _settings(tmp_path, endpoint_count=3)
+    def test_endpoint_count_is_every_scenario_and_hpa_bounds_are_fixed(
+        self, tmp_path: Path
+    ) -> None:
+        """The matrix is derived from the runtimes: an old four-endpoint assumption fails loudly."""
+        assert _settings(tmp_path).endpoint_count == PLAN_COUNT
+        with pytest.raises(ValueError, match=f"exactly {PLAN_COUNT} endpoints"):
+            _settings(tmp_path, endpoint_count=4)
         with pytest.raises(ValueError, match="min_replicas=max_replicas=2"):
             _settings(tmp_path, hpa_max_replicas=3)
+
+    def test_triton_model_identity_is_the_generated_repository(self, tmp_path: Path) -> None:
+        """Triton's model is the harness-generated repository, pinned by its content digest."""
+        assert re.fullmatch(r"[0-9a-f]{40}", TRITON_REVISION)
+        with pytest.raises(ValueError, match="harness-generated repository"):
+            _settings(
+                tmp_path,
+                inference_runtimes=_runtime_matrix(triton=_runtime("triton", model_id="other")),
+            )
+        with pytest.raises(ValueError, match="harness-generated repository"):
+            _settings(
+                tmp_path,
+                inference_runtimes=_runtime_matrix(triton=_runtime("triton", revision="0" * 40)),
+            )
+        repository = write_triton_model_repository(tmp_path / "repo")
+        assert sorted(
+            str(path.relative_to(repository)) for path in repository.rglob("*") if path.is_file()
+        ) == sorted(TRITON_MODEL_REPOSITORY_FILES)
+        assert (
+            (repository / TRITON_MODEL_NAME / "config.pbtxt")
+            .read_text()
+            .startswith(f'name: "{TRITON_MODEL_NAME}"')
+        )
+        assert (repository / TRITON_MODEL_NAME / TRITON_MODEL_VERSION / "model.py").exists()
+
+    def test_runtime_order_is_fixed(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="vLLM, SGLang then Triton"):
+            _settings(
+                tmp_path,
+                inference_runtimes=(_runtime("vllm"), _runtime("sglang")),
+            )
 
     def test_explicit_consent_is_required(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="consent"):
@@ -366,7 +445,7 @@ class TestStrictSettings:
 
     def test_request_contracts_are_literal_and_distinct(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
-        vllm, sglang = settings.inference_runtimes
+        vllm, sglang, triton = settings.inference_runtimes
         assert vllm.request_path == "/v1/completions"
         assert settings.request_body(vllm) == {
             "max_tokens": 8,
@@ -383,15 +462,50 @@ class TestStrictSettings:
             "sampling_params": {"max_new_tokens": 8, "temperature": 0},
             "text": "Reply with a short deterministic validation response.",
         }
+        # Triton speaks KServe v2: one FP32 tensor the identity model echoes.
+        assert triton.request_path == f"/v2/models/{TRITON_MODEL_NAME}/infer"
+        assert settings.request_body(triton) == {
+            "inputs": [
+                {"name": "INPUT0", "shape": [3], "datatype": "FP32", "data": [1.0, 2.0, 3.0]}
+            ]
+        }
+        assert triton.model_info_path == "/v2/models/stats"
+        assert settings.runtime_health_path(triton) == "/v2/health/ready"
+        assert settings.runtime_health_path(vllm) == "/health"
+        assert settings.framework_env(triton) == {}
+        assert settings.deploy_extra_args(triton, endpoint_name="ep") == (
+            "tritonserver",
+            "--model-repository=/models/ep",
+        )
         identities = settings.identity()["inference"]["runtimes"]
         assert identities[0]["request_contract"]["body"] == settings.request_body(vllm)
         assert identities[1]["request_contract"]["body"] == settings.request_body(sglang)
+        assert identities[2]["request_contract"]["body"] == settings.request_body(triton)
         assert identities[0]["request_contract"] != identities[1]["request_contract"]
         assert identities[0]["request_contract"]["response"] == "choices[0].text:non-empty-string"
         assert identities[1]["request_contract"]["response"] == "text:non-empty-string"
+        assert identities[2]["request_contract"]["response"] == "outputs[0].data:echoes-input"
         assert set(identities[0]["request_contract"]["body"]).isdisjoint(
             identities[1]["request_contract"]["body"]
         )
+        assert identities[2]["server"] == {
+            "port": 8000,
+            "health_path": "/v2/health/ready",
+            "model_source": "model-registry",
+        }
+        assert [identity["roles"] for identity in identities] == [
+            ["baseline", "hpa", "store"],
+            ["baseline", "hpa"],
+            ["baseline"],
+        ]
+        contract = settings.identity()["inference"]["endpoint_contract"]
+        assert contract["count"] == PLAN_COUNT
+        assert contract["mooncake_store"] == {
+            "mode": "store",
+            "protocol": "tcp",
+            "cold_tier": True,
+            "reconfigured_local_buffer_size": MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES,
+        }
 
 
 class TestNamesAndOwnership:
@@ -411,13 +525,19 @@ class TestNamesAndOwnership:
         settings = _settings(tmp_path)
         context = _ctx(tmp_path)
         plans, state = initialize_run_state(context, settings)
-        assert len(plans) == 4
+        assert len(plans) == PLAN_COUNT
         assert [(plan.runtime.framework, plan.role) for plan in plans] == [
             ("vllm", "baseline"),
             ("vllm", "hpa"),
+            ("vllm", "store"),
             ("sglang", "baseline"),
             ("sglang", "hpa"),
+            ("triton", "baseline"),
         ]
+        assert [plan.registry_model_name for plan in plans] == [None] * 5 + [
+            f"{plans[5].name}-repo"
+        ]
+        assert [plan.mooncake_store for plan in plans] == [False, False, True, False, False, False]
         assert state["phase"] == "planned"
         assert re.fullmatch(r"[0-9a-f]{64}", state["owner_nonce"])
         assert [item["name"] for item in state["plan"]] == [plan.name for plan in plans]
@@ -488,13 +608,17 @@ class TestNamesAndOwnership:
 class TestCommandsAndResponses:
     def test_commands_are_argument_arrays_with_noninteractive_delete(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
-        vllm_baseline, vllm_hpa, sglang_baseline, sglang_hpa = build_endpoint_plans(
-            settings, OWNER_NONCE
+        vllm_baseline, vllm_hpa, vllm_store, sglang_baseline, sglang_hpa, triton_baseline = (
+            build_endpoint_plans(settings, OWNER_NONCE)
         )
         baseline_command = build_deploy_command(settings, vllm_baseline, OWNER_NONCE)
         hpa_command = build_deploy_command(settings, vllm_hpa, OWNER_NONCE)
+        store_command = build_deploy_command(settings, vllm_store, OWNER_NONCE)
         sglang_command = build_deploy_command(settings, sglang_baseline, OWNER_NONCE)
         sglang_hpa_command = build_deploy_command(settings, sglang_hpa, OWNER_NONCE)
+        triton_command = build_deploy_command(
+            settings, triton_baseline, OWNER_NONCE, model_source=MODEL_SOURCE
+        )
         invoke_command = build_invoke_command(settings, vllm_baseline)
         health_command = build_health_command(settings, vllm_baseline)
         models_command = build_models_command(settings, vllm_baseline)
@@ -508,8 +632,10 @@ class TestCommandsAndResponses:
         for command in (
             baseline_command,
             hpa_command,
+            store_command,
             sglang_command,
             sglang_hpa_command,
+            triton_command,
             invoke_command,
             health_command,
             models_command,
@@ -528,7 +654,68 @@ class TestCommandsAndResponses:
         ]
         assert baseline_command[baseline_command.index("--framework") + 1] == "vllm"
         assert baseline_command[baseline_command.index("--gpu-count") + 1] == "0"
+        assert baseline_command[baseline_command.index("--health-path") + 1] == "/health"
         assert "--autoscale-metric" not in baseline_command
+        assert "--mooncake-mode" not in baseline_command
+        assert "--model-source" not in baseline_command
+        # The store scenario is the same vLLM image and model as a Mooncake
+        # shared KV-cache store over TCP with the S3 cold tier.
+        assert store_command[store_command.index("--mooncake-mode") + 1] == "store"
+        assert store_command[store_command.index("--mooncake-protocol") + 1] == "tcp"
+        assert "--mooncake-cold-tier" in store_command
+        assert "--autoscale-metric" not in store_command
+        assert store_command[store_command.index("--replicas") + 1] == "1"
+        assert "MODEL=test/vllm-model" in store_command
+        # Triton has no --framework; it serves the uploaded repository from the
+        # registry with the tritonserver command and its own readiness path.
+        assert "--framework" not in triton_command
+        assert triton_command[triton_command.index("--health-path") + 1] == "/v2/health/ready"
+        assert triton_command[triton_command.index("--model-source") + 1] == MODEL_SOURCE
+        assert triton_command[triton_command.index("--port") + 1] == "8000"
+        assert "--env" not in triton_command
+        assert triton_command[triton_command.index("--extra-args") :][:3] == [
+            "--extra-args",
+            "tritonserver",
+            f"--extra-args=--model-repository=/models/{triton_baseline.name}",
+        ]
+        with pytest.raises(ManagedInferenceValidationError, match="model-registry source"):
+            build_deploy_command(settings, triton_baseline, OWNER_NONCE)
+        with pytest.raises(ManagedInferenceValidationError, match="model-registry source"):
+            build_deploy_command(settings, vllm_baseline, OWNER_NONCE, model_source=MODEL_SOURCE)
+        triton_models = build_models_command(settings, triton_baseline)
+        assert "--framework" not in triton_models
+        assert triton_models[-2:] == ["--region", settings.selected_region]
+        triton_invoke = build_invoke_command(settings, triton_baseline)
+        assert triton_invoke[triton_invoke.index("--path") + 1] == (
+            f"/v2/models/{TRITON_MODEL_NAME}/infer"
+        )
+        repository_root = tmp_path / "repo"
+        assert build_model_upload_command(triton_baseline, repository_root)[-5:] == [
+            "models",
+            "upload",
+            str(repository_root),
+            "--name",
+            f"{triton_baseline.name}-repo",
+        ]
+        assert build_model_uri_command(triton_baseline)[-3:] == [
+            "models",
+            "uri",
+            f"{triton_baseline.name}-repo",
+        ]
+        assert build_model_delete_command(triton_baseline)[-4:] == [
+            "models",
+            "delete",
+            f"{triton_baseline.name}-repo",
+            "--yes",
+        ]
+        assert build_model_list_command()[-4:] == ["--output", "json", "models", "list"]
+        assert build_configure_store_command(vllm_store)[-5:] == [
+            "inference",
+            "configure-store",
+            vllm_store.name,
+            "--local-buffer-size",
+            str(MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES),
+        ]
         assert hpa_command[hpa_command.index("--autoscale-metric") + 1] == "cpu:70"
         assert hpa_command[hpa_command.index("--min-replicas") + 1] == "2"
         assert hpa_command[hpa_command.index("--max-replicas") + 1] == "2"
@@ -612,6 +799,13 @@ class TestCommandsAndResponses:
         [
             ("vllm", {"choices": [{"text": " generated "}]}, "generated"),
             ("sglang", {"text": " sglang ", "meta_info": {"finish_reason": "x"}}, "sglang"),
+            ("triton", TRITON_ECHO, "[1.0, 2.0, 3.0]"),
+            # Triton may serialize whole floats as integers; the echo is checked numerically.
+            (
+                "triton",
+                {"outputs": [{"name": "OUTPUT0", "datatype": "FP32", "data": [1, 2, 3]}]},
+                "[1.0, 2.0, 3.0]",
+            ),
         ],
     )
     def test_exact_invoke_response_schemas(
@@ -635,6 +829,14 @@ class TestCommandsAndResponses:
             ("sglang", {"text": "   "}),
             ("sglang", {"text": ["not", "a", "string"]}),
             ("sglang", {"not_text": "value"}),
+            ("triton", {"choices": [{"text": "wrong-framework"}]}),
+            ("triton", {"outputs": []}),
+            ("triton", {"outputs": [{"name": "OUTPUT1", "data": [1.0, 2.0, 3.0]}]}),
+            ("triton", {"outputs": [{"name": "OUTPUT0", "data": [1.0, 2.0]}]}),
+            ("triton", {"outputs": [{"name": "OUTPUT0", "data": [1.0, 2.0, 4.0]}]}),
+            ("triton", {"outputs": [{"name": "OUTPUT0", "data": [True, 2.0, 3.0]}]}),
+            ("triton", {"outputs": [{"name": "OUTPUT0", "data": "1,2,3"}]}),
+            ("triton", [TRITON_ECHO]),
         ],
     )
     def test_cross_framework_empty_or_alternate_schemas_are_rejected(
@@ -673,16 +875,26 @@ class TestSequentialAndFinallyBehavior:
         assert events == [
             *[
                 event
-                for ordinal in range(1, 5)
+                for ordinal in range(1, PLAN_COUNT + 1)
                 for event in (f"run-{ordinal}", f"cleanup-{ordinal}")
             ],
-            *[f"cleanup-{ordinal}" for ordinal in range(1, 5)],
+            *[f"cleanup-{ordinal}" for ordinal in range(1, PLAN_COUNT + 1)],
         ]
         assert summary["execution"] == "strictly-sequential"
+        assert summary["endpoint_count"] == PLAN_COUNT
         assert summary["frameworks"] == {
-            "vllm": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 0},
+            "vllm": {
+                "baseline": True,
+                "hpa": True,
+                "store": True,
+                "invocations": 3,
+                "model_info": 0,
+            },
             "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 0},
+            "triton": {"baseline": True, "invocations": 1, "model_info": 0},
         }
+        assert summary["model_registry"] == {"uploaded": 0, "removed": 0}
+        assert summary["mooncake_store"] == {"cold_tier_verified": 0, "reconfigure_rolled": 0}
         assert summary["all_endpoints_absent"] is True
         serialized = json.dumps(summary)
         assert all(plan.name not in serialized for plan in runner.plans)
@@ -738,7 +950,7 @@ class TestSequentialAndFinallyBehavior:
         with pytest.raises(ManagedInferenceValidationError, match="all cleanup attempts"):
             runner.execute()
         assert f"cleanup-{failing_ordinal}" in events
-        assert all(f"cleanup-{ordinal}" in events for ordinal in range(1, 5))
+        assert all(f"cleanup-{ordinal}" in events for ordinal in range(1, PLAN_COUNT + 1))
 
     def test_keyboard_interrupt_still_runs_all_cleanup_without_baseexception_catch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -759,7 +971,7 @@ class TestSequentialAndFinallyBehavior:
         monkeypatch.setattr(runner, "cleanup_endpoint", cleanup)
         with pytest.raises(KeyboardInterrupt):
             runner.execute()
-        assert cleanup_events == [1, 1, 2, 3, 4]
+        assert cleanup_events == [1, *range(1, PLAN_COUNT + 1)]
 
     def test_cleanup_continues_after_one_cleanup_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -783,7 +995,7 @@ class TestSequentialAndFinallyBehavior:
         monkeypatch.setattr(runner, "cleanup_endpoint", cleanup)
         with pytest.raises(ManagedInferenceValidationError, match="cleanup failures"):
             runner.execute()
-        assert cleanup_events[-4:] == [1, 2, 3, 4]
+        assert cleanup_events[-PLAN_COUNT:] == list(range(1, PLAN_COUNT + 1))
 
     def test_completed_resume_phase_is_not_recreated_or_reinvoked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1996,8 +2208,8 @@ class TestBackendProbeContracts:
     ) -> None:
         settings = _settings(tmp_path)
         runner, plans, records, _ = _lifecycle(tmp_path, settings=settings)
-        plan = plans[2]
-        record = records[2]
+        plan = plans[3]
+        record = records[3]
         assert plan.runtime.framework == "sglang"
         runner.table.item = _owned_item(settings, plan, runner.owner_nonce)
         stages: list[str] = []
@@ -2056,8 +2268,9 @@ class TestBackendProbeContracts:
     ) -> None:
         settings = _settings(tmp_path)
         runner, plans, records, _ = _lifecycle(tmp_path, settings=settings)
-        plan = plans[2]
-        record = records[2]
+        plan = plans[3]
+        record = records[3]
+        assert plan.runtime.framework == "sglang"
         runner.table.item = _owned_item(settings, plan, runner.owner_nonce)
 
         def run_command(
@@ -2236,6 +2449,560 @@ class TestBackendProbeContracts:
 
         assert stages == ["health"]
         assert record["backend_probe_attempts"][0]["classification"] == "terminal-contract"
+
+
+class TestTritonAndStoreScenarios:
+    """The registry-served Triton runtime and the Mooncake store scenario."""
+
+    @staticmethod
+    def _plan(
+        runner: ManagedInferenceLifecycle, framework: str, role: str
+    ) -> tuple[EndpointPlan, dict[str, Any]]:
+        for plan, record in zip(runner.plans, runner.records, strict=True):
+            if plan.runtime.framework == framework and plan.role == role:
+                return plan, record
+        raise AssertionError(f"no {framework} {role} plan")
+
+    def test_lifecycle_mixins_never_compete_for_a_member(self) -> None:
+        """No two bases of the lifecycle define the same member.
+
+        Each mixin declares what a sibling supplies as an annotation only
+        (``_kubectl_json: Callable[...]``), never as a stub with a value: a stub
+        would win or lose purely by base-class order, and a reordering would
+        swap a real method for ``raise NotImplementedError`` at runtime. The
+        members the lifecycle class itself implements are exempt, since the
+        derived class always wins.
+        """
+        bases = ManagedInferenceLifecycle.__bases__
+        lifecycle_members = set(vars(ManagedInferenceLifecycle))
+        seen: dict[str, str] = {}
+        for base in bases:
+            for name in vars(base):
+                if name.startswith("__") or name in lifecycle_members:
+                    continue
+                assert name not in seen, (
+                    f"{name} is defined by both {seen[name]} and {base.__name__}; "
+                    "declare the sibling-provided member as an annotation instead"
+                )
+                seen[name] = base.__name__
+
+    def test_digest_annotation_matches_the_monitor(self) -> None:
+        from gco.services import inference_monitor
+
+        assert (
+            MOONCAKE_CONFIG_DIGEST_ANNOTATION == inference_monitor.MOONCAKE_CONFIG_DIGEST_ANNOTATION
+        )
+
+    def test_triton_deploy_uploads_the_repository_then_binds_its_registry_uri(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings(tmp_path)
+        runner, _, _, _ = _lifecycle(tmp_path, settings=settings)
+        plan, record = self._plan(runner, "triton", "baseline")
+        stages: list[str] = []
+        commands: list[list[str]] = []
+
+        def run_command(
+            checkpoint: dict[str, Any], stage: str, command: list[str], **kwargs: Any
+        ) -> str:
+            del checkpoint, kwargs
+            stages.append(stage)
+            commands.append(command)
+            if stage == "model-uri":
+                return json.dumps({"model_name": plan.registry_model_name, "s3_uri": MODEL_SOURCE})
+            if stage == "deploy":
+                runner.table.item = _owned_item(settings, plan, runner.owner_nonce)
+            return "{}"
+
+        monkeypatch.setattr(runner, "_run_command", run_command)
+        runner.ensure_owned_endpoint(plan, record)
+
+        assert stages == ["model-upload", "model-uri", "deploy"]
+        upload_root = Path(commands[0][commands[0].index("upload") + 1])
+        assert upload_root == settings.report_dir / "model-repositories" / plan.name
+        assert (upload_root / TRITON_MODEL_NAME / "config.pbtxt").is_file()
+        assert (upload_root / TRITON_MODEL_NAME / TRITON_MODEL_VERSION / "model.py").is_file()
+        assert commands[0][-2:] == ["--name", plan.registry_model_name]
+        deploy = commands[2]
+        assert deploy[deploy.index("--model-source") + 1] == MODEL_SOURCE
+        assert record["model_source"] == MODEL_SOURCE
+        assert record["model_repository"] == {
+            "registry_model_name": plan.registry_model_name,
+            "phase": "uploaded",
+            "model": TRITON_MODEL_NAME,
+            "version": TRITON_MODEL_VERSION,
+        }
+        assert record["phase"] == "ownership-confirmed"
+
+    def test_triton_upload_failure_or_missing_uri_fails_before_deploy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _, _, _ = _lifecycle(tmp_path)
+        plan, record = self._plan(runner, "triton", "baseline")
+
+        def failing_upload(checkpoint: dict[str, Any], stage: str, *_: Any, **__: Any) -> str:
+            raise lifecycle_module._CommandFailure(f"{stage} exited nonzero")
+
+        monkeypatch.setattr(runner, "_run_command", failing_upload)
+        with pytest.raises(ManagedInferenceValidationError, match="repository upload failed"):
+            runner.ensure_model_repository(plan, record)
+        assert record["failures"][-1]["stage"] == "model-upload"
+
+        def no_uri(checkpoint: dict[str, Any], stage: str, *_: Any, **__: Any) -> str:
+            return (
+                json.dumps({"model_name": plan.registry_model_name})
+                if stage == "model-uri"
+                else "{}"
+            )
+
+        monkeypatch.setattr(runner, "_run_command", no_uri)
+        with pytest.raises(ManagedInferenceValidationError, match="did not resolve an S3 URI"):
+            runner.ensure_model_repository(plan, record)
+        assert "model_source" not in record
+        # Launcher runtimes never touch the registry.
+        vllm_plan, vllm_record = self._plan(runner, "vllm", "baseline")
+        assert runner.ensure_model_repository(vllm_plan, vllm_record) is None
+        assert "model_repository" not in vllm_record
+
+    def test_triton_contract_binds_the_stored_model_source_to_this_upload(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        runner, _, _, _ = _lifecycle(tmp_path, settings=settings)
+        plan, record = self._plan(runner, "triton", "baseline")
+        item = _owned_item(settings, plan, runner.owner_nonce)
+        with pytest.raises(ManagedInferenceValidationError, match="model source does not match"):
+            runner._verify_item_contract(plan, item, record)
+        record["model_source"] = MODEL_SOURCE
+        runner._verify_item_contract(plan, item, record)
+        item["spec"]["model_source"] = "s3://other-bucket/models/foreign"
+        with pytest.raises(ManagedInferenceValidationError, match="model source does not match"):
+            runner._verify_item_contract(plan, item, record)
+        # A launcher endpoint must not serve from a model source at all.
+        vllm_plan, vllm_record = self._plan(runner, "vllm", "baseline")
+        vllm_item = _owned_item(settings, vllm_plan, runner.owner_nonce)
+        vllm_item["spec"]["model_source"] = MODEL_SOURCE
+        with pytest.raises(ManagedInferenceValidationError, match="unexpectedly serves"):
+            runner._verify_item_contract(vllm_plan, vllm_item, vllm_record)
+
+    def test_triton_contract_expects_no_env_its_health_path_and_no_framework(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        runner, _, _, _ = _lifecycle(tmp_path, settings=settings)
+        plan, record = self._plan(runner, "triton", "baseline")
+        record["model_source"] = MODEL_SOURCE
+        item = _owned_item(settings, plan, runner.owner_nonce)
+        assert item["spec"]["health_check_path"] == "/v2/health/ready"
+        assert item["spec"]["framework"] is None
+        assert item["spec"]["env"] is None
+        runner._verify_item_contract(plan, item, record)
+        item["spec"]["env"] = {}
+        runner._verify_item_contract(plan, item, record)
+        for key, wrong in (
+            ("env", {"MODEL": "x"}),
+            ("framework", "vllm"),
+            ("health_check_path", "/health"),
+            ("args", ["tritonserver"]),
+        ):
+            broken = _owned_item(settings, plan, runner.owner_nonce)
+            broken["spec"][key] = wrong
+            with pytest.raises(ManagedInferenceValidationError, match="contract does not match"):
+                runner._verify_item_contract(plan, broken, record)
+
+    def test_triton_probes_require_the_generated_model_in_the_statistics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings(tmp_path)
+        runner, _, _, _ = _lifecycle(tmp_path, settings=settings)
+        plan, record = self._plan(runner, "triton", "baseline")
+        record["model_source"] = MODEL_SOURCE
+        runner.table.item = _owned_item(settings, plan, runner.owner_nonce)
+        commands: list[list[str]] = []
+
+        def run_command(
+            checkpoint: dict[str, Any], stage: str, command: list[str], **kwargs: Any
+        ) -> str:
+            del checkpoint, kwargs
+            commands.append(command)
+            if stage == "health":
+                return json.dumps({"status": "healthy", "http_status": 200, "path": "x"})
+            return json.dumps(TRITON_STATS)
+
+        monkeypatch.setattr(runner, "_run_command", run_command)
+        runner.verify_backend_probes(plan, record)
+        assert "--framework" not in commands[1]
+        assert record["backend_probe_evidence"] == {
+            "health": {"healthy": True, "http_status": 200, "path": "/v2/health/ready"},
+            "model_info": {
+                "path": "/v2/models/stats",
+                "configured_model_present": True,
+                "model_version": TRITON_MODEL_VERSION,
+                "model_count": 1,
+            },
+        }
+
+    @pytest.mark.parametrize(
+        "stats",
+        [
+            {"model_stats": []},
+            {"model_stats": [{"name": "other", "version": "1"}]},
+            {"model_stats": [{"name": TRITON_MODEL_NAME, "version": "2"}]},
+            {"data": [{"id": TRITON_MODEL_NAME}]},
+            [TRITON_MODEL_NAME],
+        ],
+    )
+    def test_triton_probes_reject_statistics_without_the_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stats: Any
+    ) -> None:
+        settings = _settings(tmp_path)
+        runner, _, _, _ = _lifecycle(tmp_path, settings=settings)
+        plan, record = self._plan(runner, "triton", "baseline")
+        record["model_source"] = MODEL_SOURCE
+        runner.table.item = _owned_item(settings, plan, runner.owner_nonce)
+
+        def run_command(checkpoint: dict[str, Any], stage: str, *_: Any, **__: Any) -> str:
+            if stage == "health":
+                return json.dumps({"status": "healthy", "http_status": 200})
+            return json.dumps(stats)
+
+        monkeypatch.setattr(runner, "_run_command", run_command)
+        with pytest.raises(ManagedInferenceValidationError, match="health/model probe failed"):
+            runner.verify_backend_probes(plan, record)
+        assert "omitted the generated model" in record["failures"][-1]["error"]
+
+    def test_triton_cleanup_removes_the_registry_model_and_proves_absence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _, _, _ = _lifecycle(tmp_path)
+        plan, record = self._plan(runner, "triton", "baseline")
+        # Nothing was uploaded: the registry is never touched.
+        assert runner.cleanup_model_repository(plan, record) is None
+        record["model_repository"] = {
+            "registry_model_name": plan.registry_model_name,
+            "phase": "uploaded",
+        }
+        stages: list[str] = []
+
+        def run_command(checkpoint: dict[str, Any], stage: str, *_: Any, **__: Any) -> str:
+            stages.append(stage)
+            if stage == "model-list":
+                return json.dumps([{"model_name": "unrelated", "files": 3}])
+            return ""
+
+        monkeypatch.setattr(runner, "_run_command", run_command)
+        assert runner.cleanup_model_repository(plan, record)["cleanup"] == "absent"
+        assert stages == ["model-delete", "model-list"]
+        # Already proven absent: no further registry traffic.
+        assert runner.cleanup_model_repository(plan, record)["cleanup"] == "absent"
+        assert stages == ["model-delete", "model-list"]
+
+        still_listed = dict(record["model_repository"], cleanup=None)
+        record["model_repository"] = still_listed
+
+        def still_there(checkpoint: dict[str, Any], stage: str, *_: Any, **__: Any) -> str:
+            if stage == "model-list":
+                return json.dumps([{"model_name": plan.registry_model_name, "files": 2}])
+            return ""
+
+        monkeypatch.setattr(runner, "_run_command", still_there)
+        with pytest.raises(ManagedInferenceValidationError, match="still lists"):
+            runner.cleanup_model_repository(plan, record)
+        assert record["model_repository"]["cleanup"] == "listed-after-delete"
+
+        def broken_delete(checkpoint: dict[str, Any], stage: str, *_: Any, **__: Any) -> str:
+            raise lifecycle_module._CommandFailure("model-delete exited nonzero")
+
+        record["model_repository"]["cleanup"] = None
+        monkeypatch.setattr(runner, "_run_command", broken_delete)
+        with pytest.raises(ManagedInferenceValidationError, match="repository cleanup failed"):
+            runner.cleanup_model_repository(plan, record)
+
+    def test_cleanup_endpoint_removes_the_registry_model_after_the_endpoint_is_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _, _, _ = _lifecycle(tmp_path)
+        plan, record = self._plan(runner, "triton", "baseline")
+        record["model_repository"] = {
+            "registry_model_name": plan.registry_model_name,
+            "phase": "uploaded",
+        }
+        order: list[str] = []
+        monkeypatch.setattr(
+            runner,
+            "prove_absence",
+            lambda rec: order.append("absence") or {"ddb_absent": True, "kubernetes_counts": {}},
+        )
+        monkeypatch.setattr(
+            runner,
+            "cleanup_model_repository",
+            lambda p, rec: order.append("registry") or {"cleanup": "absent"},
+        )
+        evidence = runner.cleanup_endpoint(plan, record)
+        assert order == ["absence", "registry"]
+        assert evidence["model_repository"] == "absent"
+        assert record["cleanup_phase"] == "absent"
+
+    def test_store_contract_expects_the_mooncake_block_and_then_the_reconfigured_buffer(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        runner, _, _, _ = _lifecycle(tmp_path, settings=settings)
+        plan, record = self._plan(runner, "vllm", "store")
+        item = _owned_item(settings, plan, runner.owner_nonce)
+        assert item["spec"]["mooncake"] == {
+            "mode": "store",
+            "store": {"enabled": True, "cold_tier_enabled": True},
+            "transfer": {"protocol": "tcp"},
+        }
+        runner._verify_item_contract(plan, item, record)
+        record["store_reconfigured"] = True
+        with pytest.raises(ManagedInferenceValidationError, match="contract does not match"):
+            runner._verify_item_contract(plan, item, record)
+        item["spec"]["mooncake"]["store"]["local_buffer_size"] = str(
+            MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES
+        )
+        runner._verify_item_contract(plan, item, record)
+        # A classic scenario must not carry a Mooncake block.
+        baseline_plan, baseline_record = self._plan(runner, "vllm", "baseline")
+        baseline_item = _owned_item(settings, baseline_plan, runner.owner_nonce)
+        assert baseline_item["spec"]["mooncake"] is None
+        baseline_item["spec"]["mooncake"] = {"mode": "store"}
+        with pytest.raises(ManagedInferenceValidationError, match="contract does not match"):
+            runner._verify_item_contract(baseline_plan, baseline_item, baseline_record)
+
+    def test_store_ddb_running_requires_a_ready_master_and_an_active_cold_tier(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings(tmp_path, readiness_timeout_seconds=3, poll_interval_seconds=1)
+        runner, _, _, _ = _lifecycle(tmp_path, settings=settings)
+        plan, record = self._plan(runner, "vllm", "store")
+        dropped = _owned_item(settings, plan, runner.owner_nonce)
+        dropped["region_status"][settings.selected_region]["store"] = {
+            "ready": True,
+            "master": "mooncake-master:50051",
+            "cold_tier": {"enabled": False, "s3_uri": None, "error": "bucket unresolved"},
+        }
+        active = _owned_item(settings, plan, runner.owner_nonce)
+        active["region_status"][settings.selected_region]["store"] = {
+            "ready": True,
+            "master": "mooncake-master:50051",
+            "cold_tier": {"enabled": True, "s3_uri": "s3://regional/mooncake-kv/ep/"},
+        }
+        observations = iter((dropped, active))
+        monkeypatch.setattr(runner, "_strong_get", lambda rec: next(observations))
+        monkeypatch.setattr(runner, "keep_cluster_tunnel_alive", lambda *a, **k: 0.0)
+        monkeypatch.setattr(runtime_module.time, "sleep", lambda seconds: None)
+
+        runner.wait_for_ddb_running(plan, record)
+
+        assert record["phase"] == "ddb-running"
+        assert record["cold_tier_verified"] is True
+        assert record["last_store_observation"]["cold_tier"]["s3_uri"] == (
+            "s3://regional/mooncake-kv/ep/"
+        )
+        # Without a store block at all the scenario keeps waiting until the deadline.
+        plain = _owned_item(settings, plan, runner.owner_nonce)
+        del plain["region_status"][settings.selected_region]["store"]
+        record.pop("cold_tier_verified")
+        monkeypatch.setattr(runner, "_strong_get", lambda rec: plain)
+        with pytest.raises(ManagedInferenceValidationError, match="running state was not observed"):
+            runner.wait_for_ddb_running(plan, record)
+        assert record["last_store_observation"]["satisfied"] is False
+        assert "cold_tier_verified" not in record
+        # Classic scenarios have no store condition.
+        baseline_plan, baseline_record = self._plan(runner, "vllm", "baseline")
+        baseline = _owned_item(settings, baseline_plan, runner.owner_nonce)
+        monkeypatch.setattr(runner, "_strong_get", lambda rec: baseline)
+        runner.wait_for_ddb_running(baseline_plan, baseline_record)
+        assert "last_store_observation" not in baseline_record
+
+    @staticmethod
+    def _deployment(
+        digest: str | None,
+        *,
+        generation: int = 2,
+        observed: int = 2,
+        replicas: int = 1,
+        ready: int = 1,
+        total: int = 1,
+    ) -> dict[str, Any]:
+        annotations = {MOONCAKE_CONFIG_DIGEST_ANNOTATION: digest} if digest else {}
+        return {
+            "metadata": {"generation": generation},
+            "spec": {"replicas": replicas, "template": {"metadata": {"annotations": annotations}}},
+            "status": {
+                "observedGeneration": observed,
+                "updatedReplicas": ready,
+                "readyReplicas": ready,
+                "availableReplicas": ready,
+                "replicas": total,
+            },
+        }
+
+    def test_store_reconfigure_requires_a_new_digest_a_complete_rollout_and_a_reinvoke(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings(tmp_path, readiness_timeout_seconds=30, poll_interval_seconds=1)
+        runner, _, _, _ = _lifecycle(tmp_path, settings=settings)
+        plan, record = self._plan(runner, "vllm", "store")
+        deployments = iter(
+            (
+                self._deployment("a" * 64),
+                # Same digest: the monitor has not re-rendered yet.
+                self._deployment("a" * 64),
+                # New digest but the old ReplicaSet is still winding down.
+                self._deployment("b" * 64, generation=3, observed=3, ready=1, total=2),
+                self._deployment("b" * 64, generation=3, observed=3),
+            )
+        )
+        monkeypatch.setattr(runner, "_kubectl_json", lambda *a, **k: next(deployments))
+        stages: list[str] = []
+
+        def run_command(
+            checkpoint: dict[str, Any], stage: str, command: list[str], **kwargs: Any
+        ) -> str:
+            del checkpoint, kwargs
+            stages.append(stage)
+            if stage == "configure-store":
+                assert command[-2:] == [
+                    "--local-buffer-size",
+                    str(MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES),
+                ]
+                return "{}"
+            return json.dumps({"choices": [{"text": "after rollout"}]})
+
+        monkeypatch.setattr(runner, "_run_command", run_command)
+        monkeypatch.setattr(
+            runner, "wait_for_ddb_running", lambda p, r: stages.append("ddb-running")
+        )
+        monkeypatch.setattr(runner, "keep_cluster_tunnel_alive", lambda *a, **k: 0.0)
+        monkeypatch.setattr(runtime_module.time, "sleep", lambda seconds: None)
+
+        runner.verify_store_reconfigure(plan, record)
+
+        assert stages == ["configure-store", "ddb-running", "invoke-after-reconfigure"]
+        assert record["store_reconfigured"] is True
+        assert record["store_reconfigure"] == {
+            "digest_before": "a" * 64,
+            "digest_after": "b" * 64,
+            "rollout_complete": True,
+            "phase": "verified",
+            "invoked_after_rollout": True,
+            "generated_text_length": len("after rollout"),
+        }
+        assert record["phase"] == "store-reconfigured"
+
+    def test_store_reconfigure_fails_when_the_pods_never_roll(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings(tmp_path, readiness_timeout_seconds=2, poll_interval_seconds=1)
+        runner, _, _, _ = _lifecycle(tmp_path, settings=settings)
+        plan, record = self._plan(runner, "vllm", "store")
+        monkeypatch.setattr(runner, "_kubectl_json", lambda *a, **k: self._deployment("a" * 64))
+        monkeypatch.setattr(runner, "_run_command", lambda *a, **k: "{}")
+        monkeypatch.setattr(runner, "keep_cluster_tunnel_alive", lambda *a, **k: 0.0)
+        monkeypatch.setattr(
+            runner, "capture_workload_diagnostics", lambda *a, **k: {"summary": "pods unchanged"}
+        )
+        clock = SimpleNamespace(now=100.0)
+        monkeypatch.setattr(runtime_module.time, "monotonic", lambda: float(clock.now))
+        monkeypatch.setattr(lifecycle_module.time, "monotonic", lambda: float(clock.now))
+        monkeypatch.setattr(
+            lifecycle_module.time,
+            "sleep",
+            lambda seconds: setattr(clock, "now", clock.now + seconds),
+        )
+        with pytest.raises(ManagedInferenceValidationError, match="did not roll"):
+            runner.verify_store_reconfigure(plan, record)
+        assert record["store_reconfigure"]["phase"] == "rolling"
+        assert record["store_reconfigured"] is True
+
+    def test_store_reconfigure_rejects_a_deployment_without_a_digest_and_a_failed_command(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _, _, _ = _lifecycle(tmp_path)
+        plan, record = self._plan(runner, "vllm", "store")
+        monkeypatch.setattr(runner, "_kubectl_json", lambda *a, **k: self._deployment(None))
+        with pytest.raises(ManagedInferenceValidationError, match="no mooncake config digest"):
+            runner.verify_store_reconfigure(plan, record)
+        monkeypatch.setattr(runner, "_kubectl_json", lambda *a, **k: self._deployment("a" * 64))
+
+        def failing(checkpoint: dict[str, Any], stage: str, *_: Any, **__: Any) -> str:
+            raise lifecycle_module._CommandFailure(f"{stage} exited nonzero")
+
+        monkeypatch.setattr(runner, "_run_command", failing)
+        with pytest.raises(ManagedInferenceValidationError, match="reconfiguration command failed"):
+            runner.verify_store_reconfigure(plan, record)
+        assert record["store_reconfigure"]["phase"] == "configuring"
+        # A missing Deployment reads as no digest and an incomplete rollout.
+        monkeypatch.setattr(runner, "_kubectl_json", lambda *a, **k: None)
+        assert runner._store_deployment_rollout(plan, record, deadline=10.0) == (None, False)
+        # Classic scenarios skip the phase entirely.
+        baseline_plan, baseline_record = self._plan(runner, "vllm", "baseline")
+        runner.verify_store_reconfigure(baseline_plan, baseline_record)
+        assert "store_reconfigure" not in baseline_record
+
+    def test_store_reconfigure_reinvoke_must_match_the_response_contract(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _, _, _ = _lifecycle(tmp_path)
+        plan, record = self._plan(runner, "vllm", "store")
+        deployments = iter((self._deployment("a" * 64), self._deployment("b" * 64)))
+        monkeypatch.setattr(runner, "_kubectl_json", lambda *a, **k: next(deployments))
+        monkeypatch.setattr(runner, "_run_command", lambda *a, **k: json.dumps({"text": "wrong"}))
+        monkeypatch.setattr(runner, "wait_for_ddb_running", lambda p, r: None)
+        with pytest.raises(ManagedInferenceValidationError, match="after reconfigure failed"):
+            runner.verify_store_reconfigure(plan, record)
+        assert record["failures"][-1]["stage"] == "invoke-after-reconfigure"
+
+    def test_run_endpoint_reconfigures_the_store_between_invoke_and_the_restart_audit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _, _, _ = _lifecycle(tmp_path)
+        plan, record = self._plan(runner, "vllm", "store")
+        order: list[str] = []
+        for method in (
+            "ensure_owned_endpoint",
+            "wait_for_ddb_running",
+            "wait_for_kubernetes_ready",
+            "verify_backend_probes",
+            "invoke",
+            "verify_store_reconfigure",
+            "verify_no_container_restarts",
+        ):
+            monkeypatch.setattr(runner, method, lambda p, r, method=method: order.append(method))
+        assert runner.run_endpoint(plan, record) is True
+        assert order[-3:] == ["invoke", "verify_store_reconfigure", "verify_no_container_restarts"]
+
+    def test_summary_counts_registry_and_store_evidence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, _, _, _ = _lifecycle(tmp_path)
+
+        def fake_run(plan: EndpointPlan, record: dict[str, Any]) -> bool:
+            record["invoke_evidence"] = {"generated_text_non_empty": True}
+            if plan.runtime.uses_model_registry:
+                record["model_repository"] = {"phase": "uploaded", "cleanup": "absent"}
+            if plan.mooncake_store:
+                record["cold_tier_verified"] = True
+                record["store_reconfigure"] = {"phase": "verified"}
+            return True
+
+        def fake_cleanup(plan: EndpointPlan, record: dict[str, Any]) -> dict[str, Any]:
+            record["absence_proven"] = True
+            return {}
+
+        monkeypatch.setattr(runner, "run_endpoint", fake_run)
+        monkeypatch.setattr(runner, "cleanup_endpoint", fake_cleanup)
+        summary = runner.execute()
+        assert summary["model_registry"] == {"uploaded": 1, "removed": 1}
+        assert summary["mooncake_store"] == {"cold_tier_verified": 1, "reconfigure_rolled": 1}
+        assert summary["frameworks"]["triton"] == {
+            "baseline": True,
+            "invocations": 1,
+            "model_info": 0,
+        }
 
 
 class TestDefaultKubeconfigCompatibility:

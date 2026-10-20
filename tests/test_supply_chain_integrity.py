@@ -104,8 +104,8 @@ def test_lockfile_check_uses_its_pinned_resolver_toolchain() -> None:
         ),
         (
             "lambda/helm-installer/Dockerfile",
-            "v4.3.0",
-            "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb",
+            "v4.3.1",
+            "0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b",
         ),
         (
             "lambda/helm-installer/Dockerfile",
@@ -1740,9 +1740,9 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
 
     assert "ARG HELM_SHA256" not in installer_dockerfile
     assert "ARG KUBECTL_SHA256" not in installer_dockerfile
-    assert "helm-v4.3.0-linux-amd64.tar.gz" in helm_section
+    assert "helm-v4.3.1-linux-amd64.tar.gz" in helm_section
     assert (
-        "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  /tmp/helm.tar.gz"
+        "0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b  /tmp/helm.tar.gz"
     ) in helm_section
     assert "release/v1.37.1/bin/linux/amd64/kubectl" in kubectl_section
     assert (

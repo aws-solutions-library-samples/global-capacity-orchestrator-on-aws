@@ -25,7 +25,8 @@ metadata:
   name: ray-cluster
   namespace: gco-jobs
 spec:
-  rayVersion: '2.58.0'
+  # Keep in step with the rayproject/ray image tag below.
+  rayVersion: '2.59.0'
 
   # Head node configuration
   headGroupSpec:

@@ -39,6 +39,7 @@ from scripts.live_release_validation.checks import central_queue as checks_centr
 from scripts.live_release_validation.checks import inference as lifecycle_module
 from scripts.live_release_validation.checks import inference_inventory as inventory_module
 from scripts.live_release_validation.checks import inference_runtime as runtime_module
+from scripts.live_release_validation.checks import inference_scenarios as scenarios_module
 from scripts.live_release_validation.checks import jobs as checks_jobs
 from scripts.live_release_validation.checks import opencost as checks_opencost
 from scripts.live_release_validation.checks import policy as checks_policy
@@ -47,6 +48,7 @@ from scripts.live_release_validation.checks.inference_common import (
     InferenceCommandFailure,
     ManagedInferenceValidationError,
 )
+from scripts.live_release_validation.inference_contract import MOONCAKE_CONFIG_DIGEST_ANNOTATION
 from tests._live_validation_patching import patch_live_validation_helper
 from tests.test_live_release_validation import (
     TestDeterministicTopologyReadiness as _TopologyFixtures,
@@ -54,7 +56,10 @@ from tests.test_live_release_validation import (
 from tests.test_live_release_validation import _central_job, _context, _real_context, _response
 from tests.test_live_validation_inference import (
     LIFECYCLE_ID,
+    MODEL_SOURCE,
     OWNER_NONCE,
+    TRITON_ECHO,
+    TRITON_STATS,
     _lifecycle,
     _owned_item,
     _settings,
@@ -2514,15 +2519,27 @@ class _FakeKubectl:
         return 0, json.dumps(handler), ""
 
 
-def _deployment_payload(name: str, replicas: int, *, ready: int | None = None) -> dict[str, Any]:
+def _deployment_payload(
+    name: str,
+    replicas: int,
+    *,
+    ready: int | None = None,
+    config_digest: str = "a" * 64,
+) -> dict[str, Any]:
     ready_count = replicas if ready is None else ready
     return {
         "metadata": {"name": name, "generation": 1},
-        "spec": {"replicas": replicas},
+        "spec": {
+            "replicas": replicas,
+            "template": {
+                "metadata": {"annotations": {MOONCAKE_CONFIG_DIGEST_ANNOTATION: config_digest}}
+            },
+        },
         "status": {
             "readyReplicas": ready_count,
             "availableReplicas": ready_count,
             "updatedReplicas": ready_count,
+            "replicas": ready_count,
             "observedGeneration": 1,
         },
     }
@@ -2571,9 +2588,48 @@ class _FakeCli:
         self.table = table
         self.stages: list[str] = []
         self.overrides: dict[str, Any] = {}
+        #: Registry models currently "uploaded"; ``models list`` reports them.
+        self.registry: set[str] = set()
+        #: Store endpoints whose ``configure-store`` has been applied; the fake
+        #: kubectl reads this to roll the Deployment onto a new config digest.
+        self.reconfigured: set[str] = set()
+
+    def _registry_command(self, command: list[str]) -> Any:
+        index = command.index("models")
+        stage = command[index + 1]
+        if stage == "list":
+            self.stages.append("models-list")
+            return _completed(
+                command,
+                0,
+                json.dumps([{"model_name": name, "files": 2} for name in sorted(self.registry)]),
+            )
+        model_name = (
+            command[-1]
+            if stage == "uri"
+            else command[command.index("--name") + 1]
+            if stage == "upload"
+            else command[index + 2]
+        )
+        plan = next(item for item in self.plans if item.registry_model_name == model_name)
+        self.stages.append(f"models-{stage}:{plan.ordinal}")
+        if stage == "upload":
+            self.registry.add(model_name)
+            return _completed(
+                command, 0, json.dumps({"model_name": model_name, "files_uploaded": 2})
+            )
+        if stage == "uri":
+            return _completed(
+                command, 0, json.dumps({"model_name": model_name, "s3_uri": MODEL_SOURCE})
+            )
+        assert stage == "delete"
+        self.registry.discard(model_name)
+        return _completed(command, 0, "")
 
     def __call__(self, command: list[str], **kwargs: Any) -> Any:
         assert kwargs["shell"] is False
+        if "inference" not in command:
+            return self._registry_command(command)
         index = command.index("inference")
         stage = command[index + 1]
         plan = next(item for item in self.plans if item.name == command[index + 2])
@@ -2591,25 +2647,33 @@ class _FakeCli:
         if stage == "health":
             return _completed(command, 0, json.dumps({"status": "healthy", "http_status": 200}))
         if stage == "models":
-            payload = (
-                {"data": [{"id": plan.runtime.model_id}]}
-                if framework == "vllm"
-                else {
+            if framework == "vllm":
+                payload: Any = {"data": [{"id": plan.runtime.model_id}]}
+            elif framework == "triton":
+                payload = TRITON_STATS
+            else:
+                payload = {
                     "model_path": plan.runtime.model_id,
                     "served_model_name": plan.runtime.model_id,
                     "revision": plan.runtime.model_revision,
                     "tokenizer_path": plan.runtime.model_id,
                     "version": "0.5.19",
                 }
-            )
             return _completed(command, 0, "log line\n" + json.dumps(payload))
         if stage == "invoke":
-            payload = (
-                {"choices": [{"text": " generated "}]}
-                if framework == "vllm"
-                else {"text": "generated", "meta_info": {"finish_reason": {"type": "length"}}}
-            )
+            if framework == "vllm":
+                payload = {"choices": [{"text": " generated "}]}
+            elif framework == "triton":
+                payload = TRITON_ECHO
+            else:
+                payload = {"text": "generated", "meta_info": {"finish_reason": {"type": "length"}}}
             return _completed(command, 0, json.dumps(payload))
+        if stage == "configure-store":
+            self.reconfigured.add(plan.name)
+            item = self.table.item
+            assert item is not None
+            item["spec"]["mooncake"]["store"]["local_buffer_size"] = command[-1]
+            return _completed(command, 0, json.dumps({"endpoint_name": plan.name}))
         assert stage == "delete"
         self.table.item = None
         return _completed(command, 0, "")
@@ -2622,9 +2686,14 @@ def _ready_kubectl(kubectl: _FakeKubectl, plans: tuple[Any, ...], settings: Any)
     def replicas_for(plan: Any) -> int:
         return settings.hpa_min_replicas if plan.autoscaling else plan.replicas
 
-    kubectl.payloads["deployment"] = lambda args: _deployment_payload(
-        args[2], replicas_for(by_name[args[2]])
-    )
+    def deployment(args: tuple[str, ...]) -> dict[str, Any]:
+        # A reconfigured store Deployment has rolled onto a new config digest
+        # (``kubectl.reconfigured`` is shared with the fake CLI by the test).
+        reconfigured = getattr(kubectl, "reconfigured", set())
+        digest = "b" * 64 if args[2] in reconfigured else "a" * 64
+        return _deployment_payload(args[2], replicas_for(by_name[args[2]]), config_digest=digest)
+
+    kubectl.payloads["deployment"] = deployment
 
     def pods(args: tuple[str, ...]) -> dict[str, Any]:
         if "--selector" not in args:
@@ -2639,7 +2708,16 @@ def _ready_kubectl(kubectl: _FakeKubectl, plans: tuple[Any, ...], settings: Any)
 
 
 def _inference_clock(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> _Clock:
-    return _install_clock(monkeypatch, lifecycle_module, runtime_module, inventory_module, **kwargs)
+    # Every module of the lifecycle shares one fake clock; a module left on the
+    # real clock would compare deadlines across two time bases.
+    return _install_clock(
+        monkeypatch,
+        lifecycle_module,
+        runtime_module,
+        inventory_module,
+        scenarios_module,
+        **kwargs,
+    )
 
 
 def _generous_settings(tmp_path: Path, **changes: Any) -> Any:
@@ -2717,7 +2795,7 @@ class TestResponseParsing:
 
     def test_unknown_framework_is_refused(self) -> None:
         with pytest.raises(ManagedInferenceValidationError, match="unknown managed inference"):
-            lifecycle_module.extract_generated_text('{"x": 1}', "triton")
+            lifecycle_module.extract_generated_text('{"x": 1}', "tgi")
 
     def test_vllm_list_payload_is_rejected(self) -> None:
         with pytest.raises(ManagedInferenceValidationError, match="schema"):
@@ -3095,7 +3173,7 @@ class TestHealthProbeGuards:
     ) -> None:
         runner, plans, records, _ = _lifecycle(tmp_path)
         _inference_clock(monkeypatch)
-        sglang_plan, sglang_record = plans[2], records[2]
+        sglang_plan, sglang_record = plans[3], records[3]
         assert sglang_plan.runtime.framework == "sglang"
         runner.table.item = _owned_item(runner.settings, sglang_plan, runner.owner_nonce)
         cli = _FakeCli(runner, plans, runner.table)
@@ -3321,27 +3399,60 @@ class TestExecuteMatrix:
         _ready_kubectl(kubectl, plans, settings)
         _inference_clock(monkeypatch)
         cli = _FakeCli(runner, plans, runner.table)
+        kubectl.reconfigured = cli.reconfigured
         monkeypatch.setattr(lifecycle_module.subprocess, "run", cli)
 
         evidence = runner.execute()
 
-        assert evidence["endpoint_count"] == 4
-        assert evidence["validated_or_resumed"] == 4
-        assert evidence["newly_validated"] == 4
+        assert evidence["endpoint_count"] == 6
+        assert evidence["validated_or_resumed"] == 6
+        assert evidence["newly_validated"] == 6
         assert evidence["all_endpoints_absent"] is True
         assert evidence["shared_proxy_autoscaling_verified"] is False
-        assert evidence["invocations"]["completed"] == 4
+        assert evidence["invocations"]["completed"] == 6
         assert evidence["frameworks"] == {
-            "vllm": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 2},
+            "vllm": {
+                "baseline": True,
+                "hpa": True,
+                "store": True,
+                "invocations": 3,
+                "model_info": 3,
+            },
             "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 2},
+            "triton": {"baseline": True, "invocations": 1, "model_info": 1},
         }
+        assert evidence["model_registry"] == {"uploaded": 1, "removed": 1}
+        assert evidence["mooncake_store"] == {"cold_tier_verified": 1, "reconfigure_rolled": 1}
+        classic = ("deploy", "health", "models", "invoke", "delete")
         assert cli.stages == [
-            f"{stage}:{ordinal}"
-            for ordinal in (1, 2, 3, 4)
-            for stage in ("deploy", "health", "models", "invoke", "delete")
+            *[f"{stage}:1" for stage in classic],
+            *[f"{stage}:2" for stage in classic],
+            # The store scenario reconfigures itself and invokes the rolled pod.
+            "deploy:3",
+            "health:3",
+            "models:3",
+            "invoke:3",
+            "configure-store:3",
+            "invoke:3",
+            "delete:3",
+            *[f"{stage}:4" for stage in classic],
+            *[f"{stage}:5" for stage in classic],
+            # Triton uploads its repository first and removes it after the endpoint is gone.
+            "models-upload:6",
+            "models-uri:6",
+            *[f"{stage}:6" for stage in classic],
+            "models-delete:6",
+            "models-list",
         ]
-        assert [record["phase"] for record in records] == ["complete"] * 4
+        assert [record["phase"] for record in records] == ["complete"] * 6
         assert records[1]["hpa_stability_observations"][-1]["ready"] == 2
+        assert records[2]["store_reconfigure"]["digest_before"] == "a" * 64
+        assert records[2]["store_reconfigure"]["digest_after"] == "b" * 64
+        assert records[2]["store_reconfigure"]["phase"] == "verified"
+        assert records[2]["cold_tier_verified"] is True
+        assert records[5]["model_source"] == MODEL_SOURCE
+        assert records[5]["model_repository"]["cleanup"] == "absent"
+        assert cli.registry == set()
         assert runner.state["phase"] == "complete"
 
     def test_completed_resume_only_reproves_absence(
@@ -3358,18 +3469,25 @@ class TestExecuteMatrix:
         evidence = runner.execute()
 
         launched.assert_not_called()
-        assert evidence["validated_or_resumed"] == 4
+        assert evidence["validated_or_resumed"] == 6
         assert evidence["newly_validated"] == 0
         assert evidence["invocations"]["completed"] == 0
         assert evidence["frameworks"] == {
-            "vllm": {"baseline": True, "hpa": True, "invocations": 0, "model_info": 0},
+            "vllm": {
+                "baseline": True,
+                "hpa": True,
+                "store": True,
+                "invocations": 0,
+                "model_info": 0,
+            },
             "sglang": {"baseline": True, "hpa": True, "invocations": 0, "model_info": 0},
+            "triton": {"baseline": True, "invocations": 0, "model_info": 0},
         }
         assert all(record["absence_proven"] is True for record in records)
         inventory_reads = [call for call in kubectl.calls if call[0] == "get"]
         # Three absence proofs per endpoint (run, inner cleanup, final cleanup),
         # each two full sweeps of the inventory kinds.
-        assert len(inventory_reads) == 4 * 3 * 2 * len(inventory_module.KUBERNETES_INVENTORY_KINDS)
+        assert len(inventory_reads) == 6 * 3 * 2 * len(inventory_module.KUBERNETES_INVENTORY_KINDS)
 
     def test_cleanup_failure_after_a_successful_endpoint_fails_the_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3381,7 +3499,7 @@ class TestExecuteMatrix:
             raise ManagedInferenceValidationError("kubectl unavailable")
 
         monkeypatch.setattr(runner, "cleanup_endpoint", failing_cleanup)
-        with pytest.raises(ManagedInferenceValidationError, match="cleanup failures: 5"):
+        with pytest.raises(ManagedInferenceValidationError, match="cleanup failures: 7"):
             runner.execute()
         assert records[0]["failures"][0] == {
             "stage": "endpoint-finally-cleanup",
@@ -3389,7 +3507,7 @@ class TestExecuteMatrix:
         }
         assert records[0]["last_failed_phase"] == "aggregate-finally-cleanup"
         assert runner.state["phase"] == "failed"
-        assert runner.state["cleanup_failure_count"] == 5
+        assert runner.state["cleanup_failure_count"] == 7
 
 
 # --------------------------------------------------------------- inference_runtime

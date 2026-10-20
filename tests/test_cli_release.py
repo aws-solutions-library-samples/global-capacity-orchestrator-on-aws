@@ -71,6 +71,8 @@ INFERENCE = (
     "test/sglang-model",
     "--inference-sglang-model-revision",
     "d" * 40,
+    "--inference-triton-image",
+    "registry.example/tritonserver@sha256:" + "e" * 64,
 )
 BASE = (
     "--expected-account",
@@ -110,6 +112,7 @@ class TestConsentGates:
         assert "--confirm-kms-key-deletion" not in command
         assert "--inference-vllm-image" not in command
         assert "--inference-sglang-image" not in command
+        assert "--inference-triton-image" not in command
         assert "--confirm-inference-deployment" not in command
 
     def test_workload_actions_imply_deploy_for_the_kms_gate(self, fake_processes):
@@ -126,6 +129,25 @@ class TestConsentGates:
         result = _invoke(*BASE, "--inference-sglang-image", same)
         assert result.exit_code != 0
         assert "distinct immutable digests" in result.output
+        assert fake_processes.harness_calls == []
+        triton_same = "registry.example/tritonserver@sha256:" + "a" * 64
+        result = _invoke(*BASE, "--inference-triton-image", triton_same)
+        assert result.exit_code != 0
+        assert "distinct immutable digests" in result.output
+        assert fake_processes.harness_calls == []
+
+    def test_inference_requires_the_triton_image(self, fake_processes):
+        without_triton = [
+            value for value in BASE if not value.startswith("registry.example/tritonserver")
+        ]
+        without_triton.remove("--inference-triton-image")
+        result = _invoke(*without_triton)
+        assert result.exit_code != 0
+        assert "--inference-triton-image" in result.output
+        assert fake_processes.harness_calls == []
+        result = _invoke(*BASE, "--inference-triton-image", "nvcr.io/nvidia/tritonserver:26.09-py3")
+        assert result.exit_code != 0
+        assert "--inference-triton-image must be an immutable" in result.output
         assert fake_processes.harness_calls == []
 
     def test_resume_requires_run_id_and_report_dir(self, fake_processes):
@@ -162,6 +184,7 @@ class TestHarnessInvocation:
         assert value_of("--inference-sglang-image").endswith("c" * 64)
         assert value_of("--inference-sglang-model-id") == "test/sglang-model"
         assert value_of("--inference-sglang-model-revision") == "d" * 40
+        assert value_of("--inference-triton-image").endswith("e" * 64)
         assert not any("tgi" in value for value in command)
         assert value_of("--inference-gpu-count") == "0"
         assert "--confirm-inference-deployment" in command
@@ -181,7 +204,7 @@ class TestHarnessInvocation:
         assert "run-id:" in result.output and "branch:" in result.output
 
     def test_uppercase_image_tag_is_accepted_with_digest(self, fake_processes):
-        image = "registry.example/team/vllm:CUDA12@sha256:" + "e" * 64
+        image = "registry.example/team/vllm:CUDA12@sha256:" + "7" * 64
         result = _invoke(*BASE, "--inference-vllm-image", image)
         assert result.exit_code == 0, result.output
         command = fake_processes.harness_calls[0]["command"]

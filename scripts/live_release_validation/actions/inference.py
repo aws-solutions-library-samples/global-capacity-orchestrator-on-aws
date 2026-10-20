@@ -16,7 +16,7 @@ from ..models import RunContext
 
 
 def action_inference(ctx: RunContext) -> dict[str, Any]:
-    """Run four strictly sequential runtime scenarios and prove stable absence."""
+    """Run every runtime scenario strictly sequentially and prove stable absence."""
     settings = ctx.settings
     if not settings.inference_enabled:
         raise ManagedInferenceValidationError(

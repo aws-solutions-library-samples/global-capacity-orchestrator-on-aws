@@ -57,14 +57,15 @@ from kubernetes.client.rest import ApiException
 from gco.models.inference_models import (
     GPU_NAME_NODE_LABEL,
     INFERENCE_PROBE_TIMEOUT_SECONDS,
+    INSTANCE_TYPE_NODE_LABEL,
     SGLANG_UNSUPPORTED_GPU_NAMES,
 )
 from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-08T19:00:07Z
-# Generated from Git commit: 231725d929e3dfd3c3768eba41d413effef39d67
+# Generated at (UTC): 2026-10-20T06:07:53Z
+# Generated from Git commit: a79cb382e149c05b653fcf1d50a9793f0c861209
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)
@@ -453,6 +454,13 @@ SKIP_CONTAINERS_ANNOTATION = "eks.amazonaws.com/skip-containers"
 # unchanged templates on every pass.
 ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION = "gco.io/endpoint-tls-proxy-digest"
 
+# Digest of the rendered ``mooncake.json``, stamped on every Mooncake role pod
+# template. The connectors read the file once at start-up, so re-rendering the
+# ConfigMap alone (``configure-store``, a transport change) would leave running
+# pods on the old configuration; a differing digest patches the template and
+# rolls the role, the same way the sidecar digest does.
+MOONCAKE_CONFIG_DIGEST_ANNOTATION = "gco.io/mooncake-config-digest"
+
 
 @dataclass
 class RegionServicesResolution:
@@ -772,8 +780,11 @@ def render_mooncake_config(
                 "cold_tier_s3_uri": "s3://gco-regional-shared-<acct>-<region>/...",
             }
 
-            ``master_server_address`` is required when the store is enabled and
-            ``cold_tier_s3_uri`` is required when the cold tier is enabled.
+            ``master_server_address`` is required when the store is enabled.
+            ``cold_tier_s3_uri`` carries the resolved cold-tier bucket; when the
+            caller could not resolve one (see
+            :class:`RegionServicesResolution.cold_tier_unresolved`) the key is
+            absent and the cold tier is left off.
 
     Returns:
         The ``mooncake.json`` contents as a dict, where:
@@ -781,8 +792,10 @@ def render_mooncake_config(
         - ``protocol`` and ``device_name`` are always present.
         - ``master_server_address`` is present only when the store is enabled.
         - ``cold_tier_s3_uri`` is present only when the cold tier is enabled,
-          which requires ``cold_tier_enabled`` to be the boolean ``True``; any
-          other value (absent, null, truthy non-bool) leaves the cold tier off.
+          which requires ``cold_tier_enabled`` to be the boolean ``True``, and
+          the caller resolved a URI for it; any other ``cold_tier_enabled``
+          value (absent, null, truthy non-bool) or an unresolved URI leaves the
+          cold tier off so the hot-path store keeps operating.
     """
     protocol, device_name = _resolved_mooncake_transfer(mooncake)
     store = mooncake.get("store", {})
@@ -804,10 +817,25 @@ def render_mooncake_config(
         # Only the boolean True enables the cold tier; any other value leaves it
         # off. The URI is resolved by the caller for the monitor's own region —
         # never authored by the user — and is an object-store backend kept off
-        # the RDMA transport block above.
-        if store.get("cold_tier_enabled") is True:
-            cfg["cold_tier_s3_uri"] = region_services["cold_tier_s3_uri"]
+        # the RDMA transport block above. When the caller could not resolve the
+        # own-region bucket it omits the key: the cold tier is dropped for this
+        # pass while the hot-path store stays configured, instead of failing
+        # the whole endpoint on a missing discovery value.
+        cold_tier_s3_uri = region_services.get("cold_tier_s3_uri")
+        if store.get("cold_tier_enabled") is True and cold_tier_s3_uri:
+            cfg["cold_tier_s3_uri"] = cold_tier_s3_uri
     return cfg
+
+
+def mooncake_config_digest(cfg: dict[str, Any]) -> str:
+    """Return the stable digest of a rendered ``mooncake.json``.
+
+    Keys are sorted and separators fixed so the same configuration always
+    hashes identically across passes and monitor replicas; the value is what
+    :data:`MOONCAKE_CONFIG_DIGEST_ANNOTATION` carries on role pod templates.
+    """
+    encoded = json.dumps(cfg, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -> None:
@@ -987,6 +1015,21 @@ def _merge_skip_containers(existing: object) -> str:
     if ENDPOINT_TLS_PROXY_CONTAINER not in merged:
         merged.append(ENDPOINT_TLS_PROXY_CONTAINER)
     return ",".join(merged)
+
+
+def _vllm_args_name_model(args: list[str]) -> bool:
+    """True when vLLM arguments already choose the model to serve.
+
+    The model is named by ``--model`` / ``--model=...``, by the positional tag
+    ``vllm serve`` takes first, or inside a ``--config`` file the operator owns.
+    """
+    tokens = [str(arg) for arg in args]
+    if tokens and not tokens[0].startswith("-"):
+        return True
+    return any(
+        token in ("--model", "--config") or token.startswith(("--model=", "--config="))
+        for token in tokens
+    )
 
 
 def _reject_tls_port_collision(port: object) -> None:
@@ -2384,35 +2427,54 @@ class InferenceMonitor:
             **status_conditions,
         )
 
-        # Promote desired state only from live local readiness plus explicit
-        # running observations for every *other* target region. The endpoint
-        # object may contain a stale local region_status from before this pass.
-        if state == "running" and endpoint.get("desired_state") == "deploying":
-            stored_statuses = endpoint.get("region_status", {})
-            target_regions = endpoint.get("target_regions", [])
-            all_running = bool(target_regions)
-            for target_region in target_regions:
-                if target_region == self.region:
-                    continue
-                target_status = (
-                    stored_statuses.get(target_region, {})
-                    if isinstance(stored_statuses, dict)
-                    else {}
-                )
-                if not isinstance(target_status, dict) or target_status.get("state") != "running":
-                    all_running = False
-                    break
-            if all_running:
-                lifecycle_id = endpoint.get("lifecycle_id")
-                if isinstance(lifecycle_id, str) and lifecycle_id:
-                    self.store.update_desired_state(
-                        name,
-                        "running",
-                        expected_lifecycle_id=lifecycle_id,
-                        expected_desired_state="deploying",
-                    )
+        self._promote_deploying_endpoint(name, endpoint, state)
 
         return None
+
+    def _promote_deploying_endpoint(
+        self, name: str, endpoint: dict[str, Any], local_state: str
+    ) -> bool:
+        """Promote ``desired_state`` from ``deploying`` to ``running`` once every region is up.
+
+        The inference proxy serves an endpoint only while its ``desired_state``
+        is ``running``, so a deploying endpoint that never promotes is
+        unreachable even when every pod is Ready. Promotion is decided from live
+        local readiness (``local_state``, the state this pass just wrote) plus
+        explicit ``running`` observations for every *other* target region. The
+        endpoint object may contain a stale local region_status from before this
+        pass, which is why the local region is never read back from it.
+
+        The write is fenced on the lifecycle id and the ``deploying`` state so a
+        concurrent delete or replacement cannot be resurrected. Both the classic
+        single-Deployment path and the Mooncake role-keyed path use this.
+
+        Returns:
+            ``True`` when a promotion write was issued, ``False`` otherwise.
+        """
+        if local_state != "running" or endpoint.get("desired_state") != "deploying":
+            return False
+        stored_statuses = endpoint.get("region_status", {})
+        target_regions = endpoint.get("target_regions", [])
+        if not target_regions:
+            return False
+        for target_region in target_regions:
+            if target_region == self.region:
+                continue
+            target_status = (
+                stored_statuses.get(target_region, {}) if isinstance(stored_statuses, dict) else {}
+            )
+            if not isinstance(target_status, dict) or target_status.get("state") != "running":
+                return False
+        lifecycle_id = endpoint.get("lifecycle_id")
+        if not isinstance(lifecycle_id, str) or not lifecycle_id:
+            return False
+        self.store.update_desired_state(
+            name,
+            "running",
+            expected_lifecycle_id=lifecycle_id,
+            expected_desired_state="deploying",
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Mooncake reconciliation branch
@@ -2522,13 +2584,26 @@ class InferenceMonitor:
             logger.info("Updated mooncake config map %s/%s", ns, cm_name)
 
     def _ensure_role_deployment(
-        self, name: str, ns: str, spec: dict[str, Any], role: str
+        self,
+        name: str,
+        ns: str,
+        spec: dict[str, Any],
+        role: str,
+        *,
+        config_digest: str | None = None,
     ) -> tuple[int, int, bool]:
         """Ensure one role target has its static or restart-seed capacity.
 
         Existing autoscaled targets normally retain controller ownership, but a
         manually stopped zero target is seeded to the role minimum before its
         autoscaler is reapplied. Static roles always converge to topology.
+
+        Args:
+            config_digest: Digest of the ``mooncake.json`` the role must run
+                with (see :func:`mooncake_config_digest`). A new Deployment is
+                stamped with it; an existing one whose pod template carries a
+                different digest is patched so its pods roll onto the
+                re-rendered configuration. ``None`` leaves the template alone.
         """
         mooncake = spec.get("mooncake") or {}
         deploy_name = name if role == "single" else f"{name}-{role}"
@@ -2536,18 +2611,22 @@ class InferenceMonitor:
 
         deployment = self._get_deployment(deploy_name, ns)
         if deployment is None:
-            self._create_role_deployment(name, ns, spec, role)
+            self._create_role_deployment(name, ns, spec, role, config_digest=config_digest)
             return 0, desired, False
 
         # Role Deployments created before the TLS sidecar existed gain it in
         # place (the PD proxy and kube-proxy only reach the role through it).
-        self._converge_endpoint_tls_proxy(
+        sidecar_patched = self._converge_endpoint_tls_proxy(
             deploy_name,
             ns,
             deployment,
             config_map_name=_tls_proxy_config_map_name(name),
             fallback_port=spec.get("port", 8000),
         )
+        # One compare-and-swap per pass: the sidecar patch above already moved
+        # the resourceVersion, so a config digest change waits for the next pass.
+        if config_digest is not None and not sidecar_patched:
+            self._converge_mooncake_config_digest(deploy_name, ns, deployment, config_digest)
 
         autoscaling = mooncake.get("autoscaling") or {}
         role_autoscaling = autoscaling.get(role)
@@ -2579,6 +2658,8 @@ class InferenceMonitor:
         mooncake: dict[str, Any],
         region_services: dict[str, Any],
         endpoint: dict[str, Any] | None = None,
+        *,
+        cold_tier_error: str | None = None,
     ) -> str:
         """Write the role-keyed region status for a Mooncake endpoint.
 
@@ -2587,6 +2668,17 @@ class InferenceMonitor:
         a ``store`` sub-status with the master's readiness and address. The flat
         ``replicas_ready`` / ``replicas_desired`` fields are also populated with
         the totals so consumers that only read the flat shape still see motion.
+
+        When the endpoint asked for the cold tier, the ``store`` sub-status also
+        reports whether it is active (``cold_tier.enabled``) and the resolved
+        ``s3_uri``; an unresolved own-region bucket surfaces as
+        ``cold_tier.enabled: false`` with ``cold_tier_error`` as the reason, so
+        ``gco inference status`` shows that the hot-path store is serving
+        without its S3 tier instead of hiding the downgrade.
+
+        Args:
+            cold_tier_error: Why the cold tier was dropped this pass, or
+                ``None`` when it resolved (or was not requested).
 
         Returns:
             The reported endpoint state: ``"running"`` once every desired role
@@ -2638,10 +2730,20 @@ class InferenceMonitor:
         store = mooncake.get("store") or {}
         if store.get("enabled"):
             master_ready = self._mooncake_master_ready_replicas(ns) >= 1
-            extra["store"] = {
+            store_status: dict[str, Any] = {
                 "ready": master_ready,
                 "master": region_services.get("master_server_address"),
             }
+            if store.get("cold_tier_enabled") is True:
+                cold_tier_s3_uri = region_services.get("cold_tier_s3_uri")
+                cold_tier_status: dict[str, Any] = {
+                    "enabled": bool(cold_tier_s3_uri),
+                    "s3_uri": cold_tier_s3_uri,
+                }
+                if cold_tier_error:
+                    cold_tier_status["error"] = cold_tier_error
+                store_status["cold_tier"] = cold_tier_status
+            extra["store"] = store_status
             if not master_ready:
                 all_ready = False
 
@@ -2770,6 +2872,11 @@ class InferenceMonitor:
         cfg = render_mooncake_config(mooncake, region_services)
         self._ensure_mooncake_configmap(name, ns, cfg)
         self._ensure_tls_proxy_configmap(name, ns)
+        # Role pods start with the file they mount, so a re-render must roll
+        # them (digest stamped on the pod template). A degraded render — the
+        # cold tier dropped because its bucket did not resolve this pass — is
+        # not rolled out: that would flap pods on a transient lookup failure.
+        config_digest = None if services.cold_tier_unresolved else mooncake_config_digest(cfg)
 
         # Steps 5-6: converge ownership before creating/scaling any role
         # Deployment. This is the same recreate/handoff barrier used by classic
@@ -2834,7 +2941,9 @@ class InferenceMonitor:
         role_ready_total = 0
         role_desired_total = 0
         for role in desired_roles:
-            ready, desired, _restarted = self._ensure_role_deployment(name, ns, spec, role)
+            ready, desired, _restarted = self._ensure_role_deployment(
+                name, ns, spec, role, config_digest=config_digest
+            )
             role_ready_total += ready
             role_desired_total += desired
 
@@ -2901,14 +3010,19 @@ class InferenceMonitor:
         else:
             self._create_service(name, ns, spec)
 
-        # Step 8: role-keyed status.
+        # Step 8: role-keyed status, then the same deploying -> running
+        # promotion the classic path performs. Without it a Mooncake endpoint
+        # would sit in ``deploying`` forever and the proxy would refuse every
+        # request with "not ready in this region" despite Ready role pods.
         state = self._report_role_status(
             name,
             ns,
             mooncake,
             region_services,
             endpoint,
+            cold_tier_error=services.error if services.cold_tier_unresolved else None,
         )
+        self._promote_deploying_endpoint(name, endpoint, state)
         return {"action": "reconcile_mooncake", "endpoint": name, "state": state}
 
     def _reconcile_stopped(
@@ -3656,9 +3770,12 @@ class InferenceMonitor:
     def _ensure_intra_namespace_network_policies(self, ns: str, spec: dict[str, Any]) -> None:
         """Apply the intra-namespace allow rules disaggregated inference needs.
 
-        Alongside the default-deny posture in ``gco-inference`` (defined in
-        ``03-network-policies.yaml`` and never touched here), this maintains
-        four widening allow rules with create-if-absent semantics:
+        ``03-network-policies.yaml`` isolates ``gco-inference``: every pod's
+        egress is limited to DNS, HTTPS and the node's Pod Identity Agent, and
+        model pods accept ingress only from the inference proxy and, through
+        the rules below, from each other. The manifest ships these four
+        widening allow rules too; this re-creates any that are missing
+        (create-if-absent) and never touches the namespace's other policies:
 
         - ``allow-inference-internal`` — managed inference pods exchange TCP
           traffic and may reach the shared master's two fixed ports. This
@@ -3674,8 +3791,8 @@ class InferenceMonitor:
           :data:`MOONCAKE_BOOTSTRAP_BASE_PORT`).
 
         Each rule is created independently; an already-present rule (409) is the
-        steady state and counts as success. No deny rule is ever read, modified,
-        or deleted, so the default-deny policy is preserved regardless of
+        steady state and counts as success. No other policy is ever read,
+        modified, or deleted, so the namespace's isolation holds regardless of
         outcome.
 
         Args:
@@ -3687,7 +3804,7 @@ class InferenceMonitor:
         Raises:
             NetworkPolicyApplyError: If any single rule cannot be created. The
                 error names the failing rule; rules created before the failure
-                remain in place and the default-deny policy is untouched.
+                remain in place and no other policy is touched.
         """
         transfer = (spec.get("mooncake", {}) or {}).get("transfer", {}) or {}
         base_port = transfer.get("bootstrap_base_port", MOONCAKE_BOOTSTRAP_BASE_PORT)
@@ -3940,11 +4057,18 @@ class InferenceMonitor:
             else:
                 runtime_framework = None
         if not command and runtime_framework == "vllm":
-            if args:
-                if "--root-path" not in args:
-                    args = [*args, "--root-path", serving_prefix]
-            else:
-                args = ["--root-path", serving_prefix]
+            # vLLM never reads MODEL itself, so without this a deploy with
+            # -e MODEL=... served vLLM's built-in default model while
+            # ``gco inference invoke`` asked for MODEL by name. The model goes
+            # on argv as ``--model $(MODEL)`` (the kubelet expands it at
+            # container start); ``--model`` rather than the positional tag
+            # works for both the ``vllm serve`` and the older api_server
+            # entrypoints. Operator arguments that already name a model win.
+            args = list(args) if args else []
+            if "MODEL" in env_vars and not _vllm_args_name_model(args):
+                args = ["--model", "$(MODEL)", *args]
+            if "--root-path" not in args:
+                args = [*args, "--root-path", serving_prefix]
         if not command and runtime_framework == "sglang":
             # The lmsysorg/sglang image has no entrypoint (its CMD is a shell),
             # so the renderer supplies the official launcher. The launcher
@@ -4092,19 +4216,18 @@ class InferenceMonitor:
             volume_mounts=volume_mounts if volume_mounts else None,
             command=command,
             args=args,
-            # SGLang answers /health only once the model is loaded, which for a
-            # multi-gigabyte checkpoint outlasts the liveness budget below; the
-            # startup probe holds liveness off for up to 20 minutes while that
-            # happens.
-            startup_probe=(
-                client.V1Probe(
-                    http_get=client.V1HTTPGetAction(path=health_path, port=port),
-                    period_seconds=15,
-                    failure_threshold=80,
-                    timeout_seconds=probe_timeout,
-                )
-                if runtime_framework == "sglang"
-                else None
+            # A model server answers its health path only once the weights are
+            # downloaded and loaded: SGLang returns 503 until then, and vLLM
+            # and Triton don't listen at all. For a multi-gigabyte checkpoint
+            # that outlasts the liveness budget below (about three minutes),
+            # and every restart downloads the weights again, so the pod never
+            # comes up. The startup probe holds liveness off for up to 20
+            # minutes while that happens, whatever the runtime.
+            startup_probe=client.V1Probe(
+                http_get=client.V1HTTPGetAction(path=probe_health, port=port),
+                period_seconds=15,
+                failure_threshold=80,
+                timeout_seconds=probe_timeout,
             ),
             liveness_probe=client.V1Probe(
                 http_get=client.V1HTTPGetAction(path=probe_health, port=port),
@@ -4181,6 +4304,31 @@ class InferenceMonitor:
                 )
             )
 
+        # ``--gpu-type`` is a hint, so it is a preferred node affinity rather
+        # than a selector: Karpenter first tries to launch exactly this
+        # instance type and relaxes the preference when it can't, so a type
+        # that is out of capacity, or excluded by a selector or the SGLang
+        # affinity above, never leaves the pod unschedulable.
+        preferred_type = spec.get("gpu_type")
+        if isinstance(preferred_type, str) and preferred_type.strip():
+            preference = client.V1PreferredSchedulingTerm(
+                weight=100,
+                preference=client.V1NodeSelectorTerm(
+                    match_expressions=[
+                        client.V1NodeSelectorRequirement(
+                            key=INSTANCE_TYPE_NODE_LABEL,
+                            operator="In",
+                            values=[preferred_type.strip()],
+                        )
+                    ]
+                ),
+            )
+            if affinity is None:
+                affinity = client.V1Affinity(node_affinity=client.V1NodeAffinity())
+            affinity.node_affinity.preferred_during_scheduling_ignored_during_execution = [
+                preference
+            ]
+
         labels = {
             "app": app_label,
             "project": "gco",
@@ -4255,7 +4403,15 @@ class InferenceMonitor:
         # Single store instance: kv_both runs as one replica.
         return 1
 
-    def _create_role_deployment(self, name: str, ns: str, spec: dict[str, Any], role: str) -> None:
+    def _create_role_deployment(
+        self,
+        name: str,
+        ns: str,
+        spec: dict[str, Any],
+        role: str,
+        *,
+        config_digest: str | None = None,
+    ) -> None:
         """Materialize one role Deployment for a Mooncake endpoint.
 
         Disaggregated and ``both`` modes split work across ``{name}-prefill``
@@ -4271,6 +4427,10 @@ class InferenceMonitor:
             spec: The endpoint spec; ``spec["mooncake"]`` selects the mode and
                 topology.
             role: One of ``"prefill"``, ``"decode"``, or ``"single"``.
+            config_digest: Digest of the rendered ``mooncake.json`` the pods
+                start with, stamped on the pod template as
+                :data:`MOONCAKE_CONFIG_DIGEST_ANNOTATION` so a later
+                re-render is detected and rolled out.
         """
         mooncake = spec.get("mooncake") or {}
 
@@ -4295,6 +4455,12 @@ class InferenceMonitor:
         # Land role pods on the EFA fabric when KV transfer runs over RDMA,
         # preserving the GPU asks already built into the pod.
         apply_efa_scheduling(mooncake, deployment.spec.template.spec)
+        if config_digest is not None:
+            template_metadata = deployment.spec.template.metadata
+            template_metadata.annotations = {
+                **(template_metadata.annotations or {}),
+                MOONCAKE_CONFIG_DIGEST_ANNOTATION: config_digest,
+            }
 
         self._assert_mutation_authority()
         self.apps_v1.create_namespaced_deployment(
@@ -5184,6 +5350,57 @@ class InferenceMonitor:
             _request_timeout=self._k8s_timeout,
         )
         logger.info("Rolled the TLS sidecar into deployment %s/%s", namespace, deploy_name)
+        return True
+
+    def _converge_mooncake_config_digest(
+        self,
+        deploy_name: str,
+        namespace: str,
+        deployment: Any,
+        config_digest: str,
+    ) -> bool:
+        """Roll a Mooncake role Deployment onto a re-rendered ``mooncake.json``.
+
+        The connectors read the mounted configuration once at start-up, so a
+        ConfigMap re-render after ``configure-store`` (or any transport change)
+        would otherwise never reach running pods. When the pod template's
+        :data:`MOONCAKE_CONFIG_DIGEST_ANNOTATION` differs from ``config_digest``
+        (including Deployments created before the annotation existed) the
+        template annotation is patched, which starts an ordinary rolling update
+        onto pods that mount the current file. The observed resourceVersion makes
+        the patch a compare-and-swap.
+
+        Returns:
+            ``True`` when the Deployment was patched.
+        """
+        template = getattr(getattr(deployment, "spec", None), "template", None)
+        raw_annotations = getattr(getattr(template, "metadata", None), "annotations", None)
+        annotations = dict(raw_annotations) if isinstance(raw_annotations, dict) else {}
+        if annotations.get(MOONCAKE_CONFIG_DIGEST_ANNOTATION) == config_digest:
+            return False
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(deployment)
+        body: dict[str, Any] = {
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": {MOONCAKE_CONFIG_DIGEST_ANNOTATION: config_digest}}
+                }
+            }
+        }
+        if resource_version:
+            body["metadata"] = {"resourceVersion": resource_version}
+        self._assert_mutation_authority()
+        self.apps_v1.patch_namespaced_deployment(
+            deploy_name,
+            namespace,
+            body=body,
+            _request_timeout=self._k8s_timeout,
+        )
+        logger.info(
+            "Rolled deployment %s/%s onto re-rendered mooncake.json (%s)",
+            namespace,
+            deploy_name,
+            config_digest[:12],
+        )
         return True
 
     def _create_proxy_service(self, proxy_name: str, namespace: str) -> None:

@@ -132,6 +132,15 @@ def release() -> None:
     default=None,
     help="Full immutable 40-hex SGLang model commit.",
 )
+@click.option(
+    "--inference-triton-image",
+    default=None,
+    help=(
+        "Immutable Triton Inference Server @sha256 image. Its model is the "
+        "harness-generated identity repository, uploaded to the model registry "
+        "for the run and removed afterwards."
+    ),
+)
 @click.option("--inference-gpu-count", type=click.IntRange(min=0), default=0, show_default=True)
 @click.option(
     "--optional-schedulers",
@@ -200,6 +209,7 @@ def release_validate(
     inference_sglang_image: str | None,
     inference_sglang_model_id: str | None,
     inference_sglang_model_revision: str | None,
+    inference_triton_image: str | None,
     inference_gpu_count: int,
     optional_schedulers: str | None,
     eks_capabilities: str | None,
@@ -271,6 +281,7 @@ def release_validate(
             "--inference-sglang-image": inference_sglang_image,
             "--inference-sglang-model-id": inference_sglang_model_id,
             "--inference-sglang-model-revision": inference_sglang_model_revision,
+            "--inference-triton-image": inference_triton_image,
         }
         missing = [name for name, value in required_inference.items() if not value]
         if missing:
@@ -279,13 +290,14 @@ def release_validate(
         for option, image in (
             ("--inference-vllm-image", inference_vllm_image),
             ("--inference-sglang-image", inference_sglang_image),
+            ("--inference-triton-image", inference_triton_image),
         ):
             digest = immutable_sha256_digest(image)
             if digest is None:
                 _fail(f"{option} must be an immutable lowercase @sha256: reference")
             image_digests.append(digest)
-        if len(set(image_digests)) != 2:
-            _fail("vLLM and SGLang inference images must have distinct immutable digests")
+        if len(set(image_digests)) != 3:
+            _fail("vLLM, SGLang and Triton inference images must have distinct immutable digests")
         for option, revision in (
             ("--inference-vllm-model-revision", inference_vllm_model_revision),
             ("--inference-sglang-model-revision", inference_sglang_model_revision),
@@ -351,6 +363,8 @@ def release_validate(
                 str(inference_sglang_model_id),
                 "--inference-sglang-model-revision",
                 str(inference_sglang_model_revision),
+                "--inference-triton-image",
+                str(inference_triton_image),
                 "--inference-gpu-count",
                 str(inference_gpu_count),
                 "--confirm-inference-deployment",

@@ -47,8 +47,8 @@ from gco.services import internal_tls, tracing
 from gco.services.inference_store import InferenceEndpointStore, get_inference_endpoint_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-28T07:34:51Z
-# Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0
+# Generated at (UTC): 2026-10-20T06:22:48Z
+# Generated from Git commit: a0b4465d48d14210d1b329dd2edb938b6440df52
 # Flowchart(s) generated from this file:
 #   * ``_resolve_upstream`` -> ``diagrams/code_diagrams/gco/services/api_routes/inference_proxy._resolve_upstream.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/api_routes/inference_proxy._resolve_upstream.png``)
@@ -225,7 +225,13 @@ async def _resolve_upstream(endpoint_name: str) -> tuple[str, str, str]:
     region_status = endpoint.get("region_status")
     local_status = region_status.get(region, {}) if isinstance(region_status, dict) else {}
     local_state = local_status.get("state") if isinstance(local_status, dict) else None
-    if desired_state != "running" or local_state != "running":
+    # Readiness is decided per region. ``deploying`` is the endpoint-wide
+    # summary while any target region still converges, and every spec update
+    # (scale, set-topology, configure-store, update-image) re-enters it until
+    # the monitor has observed all regions running again; a region whose own
+    # status is ``running`` has Ready pods and keeps serving throughout.
+    # Stopped and deleted endpoints never serve.
+    if desired_state not in ("running", "deploying") or local_state != "running":
         raise HTTPException(
             status_code=503, detail="Inference endpoint is not ready in this region"
         )

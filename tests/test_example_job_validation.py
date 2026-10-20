@@ -353,8 +353,15 @@ class TestPackageStructure:
 
 
 class TestMutations:
-    def test_vllm_mutations_replace_model_env(self) -> None:
+    def test_env_mutations_replace_values_in_a_shipped_example(self) -> None:
+        import dataclasses
+
         parsed = static_checks.parse_example(REPO_ROOT, "inference-vllm")
+        mutations = {
+            "Deployment.env.MODEL": "facebook/opt-125m",
+            "Deployment.env.MAX_MODEL_LEN": "2048",
+        }
+        parsed.spec = dataclasses.replace(parsed.spec, mutations=mutations)
         path, disclosed = drivers.apply_mutations(parsed)
         try:
             import yaml
@@ -367,9 +374,14 @@ class TestMutations:
             }
             assert env["MODEL"] == "facebook/opt-125m"
             assert env["MAX_MODEL_LEN"] == "2048"
-            assert disclosed == EXAMPLE_SPECS["inference-vllm"].mutations
+            assert disclosed == mutations
         finally:
             path.unlink(missing_ok=True)
+
+    def test_shipped_inference_examples_run_verbatim(self) -> None:
+        """Every inference example's default model is ungated, so none is rewritten."""
+        for name in ("inference-vllm", "inference-sglang", "inference-triton"):
+            assert EXAMPLE_SPECS[name].mutations == {}, name
 
     def test_unmutated_example_submits_the_shipped_file(self) -> None:
         parsed = static_checks.parse_example(REPO_ROOT, "simple-job")
@@ -2103,19 +2115,19 @@ class TestWaitDeploymentAvailable:
     def test_available_with_service_endpoints(self) -> None:
         kubectl = _ScriptedKubectl(
             {
-                ("wait",): (0, "deployment.apps/vllm-llama3 condition met", ""),
+                ("wait",): (0, "deployment.apps/vllm-qwen condition met", ""),
                 ("get", "endpoints"): (0, "10.0.1.5 10.0.2.9\n", ""),
             }
         )
         evidence = drivers.wait_deployment_available(self._parsed(), kubectl, timeout=900)
         assert evidence == {
-            "deployment": "gco-inference/vllm-llama3=Available",
+            "deployment": "gco-inference/vllm-qwen=Available",
             "service_endpoints": "10.0.1.5 10.0.2.9",
         }
         wait_args, wait_kwargs = kubectl.calls[0]
         assert wait_args == (
             "wait",
-            "deployment/vllm-llama3",
+            "deployment/vllm-qwen",
             "-n",
             "gco-inference",
             "--for",
@@ -2123,21 +2135,21 @@ class TestWaitDeploymentAvailable:
             "--timeout=900s",
         )
         assert wait_kwargs == {"timeout": 960}
-        assert kubectl.calls[1][0][:5] == ("get", "endpoints", "vllm-llama3", "-n", "gco-inference")
+        assert kubectl.calls[1][0][:5] == ("get", "endpoints", "vllm-qwen", "-n", "gco-inference")
 
     def test_available_without_a_service_skips_the_endpoint_check(self) -> None:
         kubectl = _ScriptedKubectl({("wait",): (0, "", "")})
         evidence = drivers.wait_deployment_available(
             self._parsed(with_service=False), kubectl, timeout=60
         )
-        assert evidence == {"deployment": "gco-inference/vllm-llama3=Available"}
+        assert evidence == {"deployment": "gco-inference/vllm-qwen=Available"}
         assert len(kubectl.calls) == 1
 
     def test_service_without_endpoints_fails(self) -> None:
         kubectl = _ScriptedKubectl({("wait",): (0, "", ""), ("get", "endpoints"): (0, "  \n", "")})
         with pytest.raises(
             drivers.ExampleValidationError,
-            match="Service gco-inference/vllm-llama3 has no endpoints",
+            match="Service gco-inference/vllm-qwen has no endpoints",
         ):
             drivers.wait_deployment_available(self._parsed(), kubectl, timeout=60)
 
@@ -2145,7 +2157,7 @@ class TestWaitDeploymentAvailable:
         kubectl = _ScriptedKubectl(
             {
                 ("wait",): (1, "", "error: timed out waiting for the condition\n"),
-                ("get", "pods"): (0, "vllm-llama3-1=Pending", ""),
+                ("get", "pods"): (0, "vllm-qwen-1=Pending", ""),
                 ("describe",): (0, "Events:\n  FailedScheduling insufficient nvidia.com/gpu", ""),
             }
         )
@@ -2153,8 +2165,8 @@ class TestWaitDeploymentAvailable:
             drivers.wait_deployment_available(self._parsed(), kubectl, timeout=60)
         message = str(excinfo.value)
         assert message.startswith(
-            "Deployment gco-inference/vllm-llama3 never became Available: "
-            "error: timed out waiting for the condition; pods: vllm-llama3-1=Pending; "
+            "Deployment gco-inference/vllm-qwen never became Available: "
+            "error: timed out waiting for the condition; pods: vllm-qwen-1=Pending; "
         )
         assert message.endswith(
             "describe tail: Events:\n  FailedScheduling insufficient nvidia.com/gpu"
@@ -2163,10 +2175,10 @@ class TestWaitDeploymentAvailable:
             "-n",
             "gco-inference",
             "-l",
-            "app=vllm-llama3",
+            "app=vllm-qwen",
         )
         assert kubectl.calls[2] == (
-            ("describe", "deployment/vllm-llama3", "-n", "gco-inference"),
+            ("describe", "deployment/vllm-qwen", "-n", "gco-inference"),
             {"timeout": 60},
         )
 

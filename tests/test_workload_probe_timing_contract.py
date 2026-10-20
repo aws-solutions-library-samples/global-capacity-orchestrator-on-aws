@@ -332,6 +332,13 @@ INFERENCE_FRAMEWORK_SPECS: dict[str, dict[str, Any]] = {
         "health_check_path": "/health",
         "env": {"MODEL": "Qwen/Qwen2.5-0.5B-Instruct"},
     },
+    # Any other server (no strict adapter) is rendered with the same probes.
+    "triton": {
+        "image": "nvcr.io/nvidia/tritonserver:26.09-py3",
+        "port": 8000,
+        "health_check_path": "/v2/health/ready",
+        "args": ["tritonserver", "--model-repository=/models/chat"],
+    },
 }
 
 #: SGLang's ``/health`` sleeps a full second before its first look at the
@@ -417,10 +424,20 @@ def test_rendered_inference_liveness_restarts_only_after_a_minute(framework: str
     )
 
 
-def test_rendered_sglang_startup_probe_budgets_for_the_model_download() -> None:
-    probes = dict(_rendered_probes("sglang"))
+@pytest.mark.parametrize("framework", sorted(INFERENCE_FRAMEWORK_SPECS))
+def test_rendered_startup_probe_budgets_for_the_model_download(framework: str) -> None:
+    """Every runtime downloads and loads weights before its health path answers.
+
+    vLLM and Triton don't listen at all until then, so without a startup probe
+    liveness killed any checkpoint slower than about three minutes, and each
+    restart started the download again.
+    """
+    probes = dict(_rendered_probes(framework))
     startup = probes["startupProbe"]
     budget = startup.period_seconds * startup.failure_threshold
     assert budget >= MINIMUM_STARTUP_BUDGET_SECONDS, (
-        f"sglang startup budget is only {budget}s; allow at least {MINIMUM_STARTUP_BUDGET_SECONDS}s"
+        f"{framework} startup budget is only {budget}s; allow at least "
+        f"{MINIMUM_STARTUP_BUDGET_SECONDS}s"
     )
+    # Same path as liveness, so startup proves exactly what liveness then checks.
+    assert startup.http_get.path == probes["livenessProbe"].http_get.path

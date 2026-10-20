@@ -1,4 +1,13 @@
-"""Karpenter NodePool management MCP tools (read-only)."""
+"""Karpenter NodePool management MCP tools.
+
+``nodepools_list``, ``nodepools_describe`` and ``delete_nodepool`` talk to the
+cluster's EKS API endpoint, which GCO deploys private by default. These tools
+never provision a bastion (that launches a billable EC2 instance), so they
+work from inside the VPC or when the operator has a tunnel open; otherwise
+``cluster_tunnel_command`` describes the route and the ``gco nodepools``
+commands take ``--via-ssm auto`` themselves. The two generators only read
+EKS and EC2 and return a manifest.
+"""
 
 import asyncio
 
@@ -11,6 +20,9 @@ from server import mcp
 @audit_logged
 async def nodepools_list(region: str | None = None, cluster: str | None = None) -> str:
     """`gco nodepools list` — list Karpenter NodePools in a cluster.
+
+    Needs the cluster's EKS API endpoint to be reachable (it is private by
+    default; see ``cluster_tunnel_command``).
 
     Args:
         region: AWS region to query.
@@ -55,20 +67,26 @@ async def nodepools_create_odcr(
     max_nodes: int = 100,
     fallback_on_demand: bool = False,
     efa: bool = False,
+    cluster: str | None = None,
 ) -> str:
-    """`gco nodepools create-odcr` — create a Karpenter NodePool tied to an ODCR.
+    """`gco nodepools create-odcr` — generate a NodePool manifest tied to an ODCR.
 
-    Generates a Karpenter NodePool + EC2NodeClass that consume an On-Demand
-    Capacity Reservation via ``capacityReservationSelectorTerms``.
+    Returns an EKS Auto Mode NodeClass that binds an On-Demand Capacity
+    Reservation through ``capacityReservationSelectorTerms`` (with the
+    cluster's own node role, subnets and security group) plus a NodePool
+    that launches reserved capacity through it. Nothing is applied: apply
+    the returned YAML with kubectl, and target the pool from a pod with
+    ``nodeSelector karpenter.sh/nodepool: <name>``.
 
     Args:
         name: NodePool name.
         region: AWS region.
-        capacity_reservation_id: EC2 Capacity Reservation ID (``cr-...``) or ODCR group ARN.
+        capacity_reservation_id: EC2 Capacity Reservation ID (``cr-...``).
         instance_type: Instance types the NodePool may provision (one per entry).
         max_nodes: Maximum nodes in the pool.
         fallback_on_demand: Fall back to on-demand when the ODCR is exhausted.
         efa: Enable EFA support (adds EFA taint and labels).
+        cluster: EKS cluster name (defaults to ``gco-<region>``).
     """
     args = [
         "nodepools",
@@ -88,6 +106,8 @@ async def nodepools_create_odcr(
         args.append("--fallback-on-demand")
     if efa:
         args.append("--efa")
+    if cluster:
+        args += ["--cluster", cluster]
     return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 
@@ -101,14 +121,16 @@ async def nodepools_create_capacity_block(
     max_nodes: int = 100,
     fallback_on_demand: bool = False,
     efa: bool = False,
+    cluster: str | None = None,
 ) -> str:
-    """`gco nodepools create-capacity-block` — NodePool for a purchased Capacity Block.
+    """`gco nodepools create-capacity-block` — NodePool manifest for a Capacity Block.
 
     The Capacity Block counterpart to ``nodepools_create_odcr``. Purchasing a
-    Capacity Block yields an EC2 Capacity Reservation id (``cr-...``), which this
-    NodePool consumes via ``capacityReservationSelectorTerms``. Because a block is
-    prepaid for a fixed term, the NodePool holds the capacity rather than
-    consolidating it early.
+    Capacity Block yields an EC2 Capacity Reservation id (``cr-...``), which the
+    returned EKS Auto Mode NodeClass binds through
+    ``capacityReservationSelectorTerms``. Because a block is prepaid for a
+    fixed term, the NodePool holds the capacity rather than consolidating it
+    early. Nothing is applied: apply the returned YAML with kubectl.
 
     Args:
         name: NodePool name.
@@ -118,6 +140,7 @@ async def nodepools_create_capacity_block(
         max_nodes: Maximum nodes in the pool.
         fallback_on_demand: Fall back to on-demand when the block is exhausted/expired.
         efa: Enable EFA support (adds EFA taint and labels).
+        cluster: EKS cluster name (defaults to ``gco-<region>``).
     """
     args = [
         "nodepools",
@@ -137,6 +160,8 @@ async def nodepools_create_capacity_block(
         args.append("--fallback-on-demand")
     if efa:
         args.append("--efa")
+    if cluster:
+        args += ["--cluster", cluster]
     return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 
@@ -170,8 +195,8 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
         """[gated by GCO_ENABLE_DESTRUCTIVE_OPERATIONS] destructive.
 
         `gco nodepools delete` — delete a Karpenter NodePool.
-        Cannot be undone — the NodePool, its EC2NodeClass, and any nodes
-        currently provisioned through it are removed.
+        Cannot be undone — the NodePool, its paired ``<name>-nodeclass``
+        NodeClass, and any nodes currently provisioned through it are removed.
 
         Args:
             nodepool_name: NodePool name.

@@ -264,15 +264,18 @@ gco capacity status
 GCO can also deploy long-running inference endpoints across regions. Here's a quick example:
 
 ```bash
-# Deploy a vLLM inference endpoint
+# Deploy a vLLM inference endpoint (an ungated model, no Hugging Face token needed)
 gco inference deploy my-llm \
   -i vllm/vllm-openai:v0.31.0 \
   --gpu-count 1 \
-  -e MODEL=meta-llama/Llama-3.1-8B-Instruct \
+  -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \
   -r us-east-1
 
 # Check deployment progress
 gco inference status my-llm
+
+# Send it a prompt once it reports running
+gco inference invoke my-llm -p "Hello"
 
 # List all inference endpoints
 gco inference list

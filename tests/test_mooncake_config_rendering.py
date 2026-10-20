@@ -26,6 +26,7 @@ import pytest
 
 from gco.services.inference_monitor import (
     build_kv_transfer_config,
+    mooncake_config_digest,
     render_mooncake_config,
 )
 
@@ -215,6 +216,41 @@ def test_cold_tier_uri_present_only_when_cold_tier_enabled_is_true() -> None:
         _region_services(),
     )
     assert "cold_tier_s3_uri" not in off
+
+
+def test_config_digest_is_stable_and_tracks_every_rendered_field() -> None:
+    """The digest ignores key order but changes when the cold tier joins the file."""
+    hot = render_mooncake_config({"store": {"enabled": True}}, _region_services())
+    reordered = dict(reversed(list(hot.items())))
+    with_cold_tier = render_mooncake_config(
+        {"store": {"enabled": True, "cold_tier_enabled": True}}, _region_services()
+    )
+
+    assert mooncake_config_digest(hot) == mooncake_config_digest(reordered)
+    assert len(mooncake_config_digest(hot)) == 64
+    assert mooncake_config_digest(hot) != mooncake_config_digest(with_cold_tier)
+
+
+def test_unresolved_cold_tier_uri_keeps_hot_store_and_drops_cold_tier() -> None:
+    """A requested cold tier whose bucket did not resolve is dropped, not fatal.
+
+    ``_resolve_region_services`` omits ``cold_tier_s3_uri`` when the own-region
+    bucket cannot be resolved (bucket parameter absent or unreadable). Rendering
+    must then still produce the hot-path store configuration rather than raise
+    on the missing key, which is what live validation saw as every reconcile
+    pass of a cold-tier endpoint failing with ``'cold_tier_s3_uri'``.
+    """
+    services = _region_services()
+    del services["cold_tier_s3_uri"]
+
+    cfg = render_mooncake_config(
+        {"store": {"enabled": True, "cold_tier_enabled": True}},
+        services,
+    )
+
+    assert cfg["master_server_address"] == services["master_server_address"]
+    assert "global_segment_size" in cfg
+    assert "cold_tier_s3_uri" not in cfg
 
 
 @pytest.mark.parametrize("cold_value", [None, "true", 1, "yes"])

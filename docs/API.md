@@ -267,26 +267,35 @@ application integrity, freshness, and replay defense, not encryption.
 
 ### Using AWS CLI with SigV4
 
-Set `API_GATEWAY_ENDPOINT` to your API Gateway host, then reuse it in each
-request. Replace the `<API_GATEWAY_ENDPOINT>` placeholder with the host from
-the `ApiEndpoint` CloudFormation output (for example
-`abc123.execute-api.us-east-1.amazonaws.com`):
+Set `API_GATEWAY_ENDPOINT` to your API Gateway host and `API_REGION` to the
+Region in that host name, then reuse both in each request. Replace the
+`<API_GATEWAY_ENDPOINT>` placeholder with the host from the `ApiEndpoint`
+CloudFormation output (for example
+`abc123.execute-api.us-east-2.amazonaws.com`). The global API lives in the
+`deployment_regions.api_gateway` Region from `cdk.json` (`us-east-2` by
+default), not in a workload Region, and SigV4 rejects a signature made for any
+other Region. A regional API's host names its own Region.
 
 ```bash
 export API_GATEWAY_ENDPOINT=<API_GATEWAY_ENDPOINT>
+export API_REGION=us-east-2   # the Region in API_GATEWAY_ENDPOINT
 
 # Using awscurl (recommended)
 pip install awscurl
 
 awscurl --service execute-api \
-  --region us-east-1 \
+  --region "$API_REGION" \
   "https://$API_GATEWAY_ENDPOINT/api/v1/jobs"
 
 # Or using curl with AWS credentials
 curl "https://$API_GATEWAY_ENDPOINT/api/v1/jobs" \
-  --aws-sigv4 "aws:amz:us-east-1:execute-api" \
+  --aws-sigv4 "aws:amz:$API_REGION:execute-api" \
   --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY"
 ```
+
+With temporary credentials (an assumed role or IAM Identity Center), `curl`
+also needs `-H "x-amz-security-token: $AWS_SESSION_TOKEN"`; `awscurl` reads the
+session token itself.
 
 ### Using Python with boto3
 
@@ -300,7 +309,8 @@ session = boto3.Session()
 credentials = session.get_credentials()
 
 request = AWSRequest(method="GET", url="https://<API_GATEWAY_ENDPOINT>/api/v1/jobs")
-SigV4Auth(credentials, "execute-api", "us-east-1").add_auth(request)
+# Sign for the Region in the endpoint's host name (us-east-2 by default).
+SigV4Auth(credentials, "execute-api", "us-east-2").add_auth(request)
 
 response = requests.get(request.url, headers=dict(request.headers))
 ```
@@ -1817,21 +1827,24 @@ common call is a `POST` to `v1/chat/completions`:
 
 ```bash
 export API_GATEWAY_ENDPOINT=<API_GATEWAY_ENDPOINT>
+export API_REGION=us-east-2   # the Region in API_GATEWAY_ENDPOINT
 
-awscurl --service execute-api --region us-east-1 \
+awscurl --service execute-api --region "$API_REGION" \
   -X POST \
   -H "Content-Type: application/json" \
   -d '{
-        "model": "my-llm",
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
         "messages": [{"role": "user", "content": "Hello"}]
       }' \
   "https://$API_GATEWAY_ENDPOINT/inference/my-llm/v1/chat/completions"
 ```
 
-List the models a running endpoint serves:
+`model` is the name the server answers to, which is the model it serves (for
+example the endpoint's `MODEL`) rather than the endpoint name; `v1/models`
+lists it. List the models a running endpoint serves:
 
 ```bash
-awscurl --service execute-api --region us-east-1 \
+awscurl --service execute-api --region "$API_REGION" \
   "https://$API_GATEWAY_ENDPOINT/inference/my-llm/v1/models"
 ```
 
@@ -2141,18 +2154,21 @@ gco jobs bulk-delete --all-regions --status completed --older-than-days 7 --exec
 
 All examples below use `awscurl` for SigV4 authentication. Install with `pip install awscurl`.
 
-Set `API_GATEWAY_ENDPOINT` once and reuse it in every request. Replace the
-`<API_GATEWAY_ENDPOINT>` placeholder with the host from the `ApiEndpoint`
-CloudFormation output (for example `abc123.execute-api.us-east-1.amazonaws.com`):
+Set `API_GATEWAY_ENDPOINT` and `API_REGION` once and reuse them in every
+request. Replace the `<API_GATEWAY_ENDPOINT>` placeholder with the host from the
+`ApiEndpoint` CloudFormation output (for example
+`abc123.execute-api.us-east-2.amazonaws.com`), and set `API_REGION` to the
+Region in that host name (see [Using AWS CLI with SigV4](#using-aws-cli-with-sigv4)):
 
 ```bash
 export API_GATEWAY_ENDPOINT=<API_GATEWAY_ENDPOINT>
+export API_REGION=us-east-2
 ```
 
 ### Submit a Job
 
 ```bash
-awscurl --service execute-api --region us-east-1 \
+awscurl --service execute-api --region "$API_REGION" \
   -X POST "https://$API_GATEWAY_ENDPOINT/api/v1/manifests" \
   -H "Content-Type: application/json" \
   -d '{
@@ -2182,21 +2198,21 @@ awscurl --service execute-api --region us-east-1 \
 ### List Jobs with Pagination
 
 ```bash
-awscurl --service execute-api --region us-east-1 \
+awscurl --service execute-api --region "$API_REGION" \
   "https://$API_GATEWAY_ENDPOINT/api/v1/jobs?namespace=gco-jobs&limit=10&offset=0&status=running"
 ```
 
 ### Get Job Logs with Container Selection
 
 ```bash
-awscurl --service execute-api --region us-east-1 \
+awscurl --service execute-api --region "$API_REGION" \
   "https://$API_GATEWAY_ENDPOINT/api/v1/jobs/gco-jobs/my-job/logs?container=main&tail=500&timestamps=true"
 ```
 
 ### Bulk Delete Old Completed Jobs
 
 ```bash
-awscurl --service execute-api --region us-east-1 \
+awscurl --service execute-api --region "$API_REGION" \
   -X DELETE "https://$API_GATEWAY_ENDPOINT/api/v1/jobs" \
   -H "Content-Type: application/json" \
   -d '{
@@ -2211,7 +2227,7 @@ awscurl --service execute-api --region us-east-1 \
 
 ```bash
 # Create template
-awscurl --service execute-api --region us-east-1 \
+awscurl --service execute-api --region "$API_REGION" \
   -X POST "https://$API_GATEWAY_ENDPOINT/api/v1/templates" \
   -H "Content-Type: application/json" \
   -d '{
@@ -2233,7 +2249,7 @@ awscurl --service execute-api --region us-east-1 \
   }'
 
 # Create job from template
-awscurl --service execute-api --region us-east-1 \
+awscurl --service execute-api --region "$API_REGION" \
   -X POST "https://$API_GATEWAY_ENDPOINT/api/v1/jobs/from-template/python-job" \
   -H "Content-Type: application/json" \
   -d '{

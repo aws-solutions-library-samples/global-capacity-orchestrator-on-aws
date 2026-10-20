@@ -27,20 +27,36 @@ from .artifact_io import (
 )
 from .inference_contract import (
     INFERENCE_OWNER_LABEL,
+    MOONCAKE_CONFIG_DIGEST_ANNOTATION,
+    MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES,
+    TRITON_INPUT_DATA,
+    TRITON_MODEL_NAME,
+    TRITON_MODEL_VERSION,
+    EndpointRole,
     Framework,
     InferenceRuntimeSpec,
+    expected_endpoint_count,
     inference_deploy_extra_args,
     inference_framework_env,
+    inference_health_path,
     inference_identity_fields,
+    inference_mooncake_block,
     inference_request_body,
     validate_inference_settings,
+    write_triton_model_repository,
 )
 from .json_utils import loads_without_duplicate_keys
 
 __all__ = [
     "INFERENCE_OWNER_LABEL",
+    "MOONCAKE_CONFIG_DIGEST_ANNOTATION",
+    "MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES",
+    "TRITON_INPUT_DATA",
+    "TRITON_MODEL_NAME",
+    "TRITON_MODEL_VERSION",
     "ActionFailure",
     "ActionResult",
+    "EndpointRole",
     "Framework",
     "InferenceRuntimeSpec",
     "RunCheckpoint",
@@ -52,6 +68,7 @@ __all__ = [
     "ensure_private_directory",
     "ensure_private_run_directory",
     "utc_now",
+    "write_triton_model_repository",
 ]
 
 SCHEMA_VERSION = 2
@@ -170,7 +187,10 @@ class RunSettings:
     hpa_min_replicas: int = 2
     hpa_max_replicas: int = 2
     hpa_cpu_target: int = 70
-    endpoint_count: int = 4
+    #: Scenarios in the matrix. ``None`` derives it from the runtimes (every
+    #: role of every runtime); an explicit value must match, so a checkpoint
+    #: or caller that still assumes the old four-scenario matrix fails loudly.
+    endpoint_count: int | None = None
     proxy_tls_cpu_request: str = "100m"
     proxy_tls_cpu_target: int = 70
     command_timeout_seconds: int = 300
@@ -194,6 +214,10 @@ class RunSettings:
                 f"Checkpoint filename is reserved for a validation report: {checkpoint_path.name}"
             )
         if self.inference_enabled:
+            if self.endpoint_count is None:
+                object.__setattr__(
+                    self, "endpoint_count", expected_endpoint_count(self.inference_runtimes)
+                )
             validate_inference_settings(self)
 
     def request_body(self, runtime: InferenceRuntimeSpec) -> dict[str, Any]:
@@ -205,8 +229,19 @@ class RunSettings:
         return inference_framework_env(runtime)
 
     @staticmethod
-    def deploy_extra_args(runtime: InferenceRuntimeSpec) -> tuple[str, ...]:
-        return inference_deploy_extra_args(runtime)
+    def deploy_extra_args(
+        runtime: InferenceRuntimeSpec, *, endpoint_name: str = "<endpoint>"
+    ) -> tuple[str, ...]:
+        return inference_deploy_extra_args(runtime, endpoint_name=endpoint_name)
+
+    def runtime_health_path(self, runtime: InferenceRuntimeSpec) -> str:
+        """The readiness path the deploy probes for ``runtime``."""
+        return inference_health_path(self, runtime)
+
+    @staticmethod
+    def mooncake_block(role: EndpointRole, *, reconfigured: bool = False) -> dict[str, Any] | None:
+        """The ``spec.mooncake`` block a scenario persists, or ``None``."""
+        return inference_mooncake_block(role, reconfigured=reconfigured)
 
     @property
     def kubeconfig_path(self) -> Path:

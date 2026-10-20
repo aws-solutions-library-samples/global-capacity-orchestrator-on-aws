@@ -288,7 +288,10 @@ def _rich_document() -> FleetStatus:
             "nodepools": Section(
                 name="nodepools",
                 status=STATUS_UNAVAILABLE,
-                reason="cluster endpoint is private; open a tunnel with `gco cluster tunnel`",
+                reason=(
+                    "cluster endpoint is private; run `gco nodepools list --via-ssm auto` "
+                    "to list through an SSM tunnel"
+                ),
             ),
         },
     )
@@ -311,7 +314,7 @@ def test_status_table_renders_every_section_status_with_reasons(runner: CliRunne
     assert "costs [skipped]" in output
     assert "not requested; pass --with-costs" in output
     assert "nodepools [unavailable]" in output
-    assert "gco cluster tunnel" in output
+    assert "gco nodepools list --via-ssm auto" in output
 
 
 def test_status_table_renders_findings_above_section_detail(runner: CliRunner) -> None:

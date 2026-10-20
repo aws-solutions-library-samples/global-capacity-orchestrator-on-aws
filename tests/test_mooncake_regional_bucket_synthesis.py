@@ -17,7 +17,10 @@ concrete shape of those resources:
   ``/gco/regional-shared-bucket`` namespace;
 * the pod role's S3 grant points at only that one bucket (its ARN and its
   object-key space) and its KMS grant points at only that bucket's key — no
-  other bucket or key is reachable through the regional grant.
+  other bucket or key is reachable through the regional grant;
+* the pod role's only SSM read is ``ssm:GetParameter`` on the ``/name``
+  discovery parameter, which the inference monitor resolves the cold-tier
+  bucket from.
 
 The Docker + helm-installer patching pattern is borrowed from
 ``tests/test_regional_stack.py`` so the synth needs no Docker daemon, and the
@@ -26,6 +29,7 @@ synthesized template is cached so every assertion reuses one synth.
 
 from __future__ import annotations
 
+import json
 from functools import cache
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -142,10 +146,12 @@ def _regional_key_logical_id(template: dict[str, Any], bucket_logical_id: str) -
 
 
 def _references_logical_id(obj: Any, logical_id: str) -> bool:
-    """True iff ``obj`` contains an ``Fn::GetAtt`` to ``logical_id`` anywhere."""
+    """True iff ``obj`` contains an ``Fn::GetAtt`` or ``Ref`` to ``logical_id`` anywhere."""
     if isinstance(obj, dict):
         getatt = obj.get("Fn::GetAtt")
         if isinstance(getatt, list) and getatt and getatt[0] == logical_id:
+            return True
+        if obj.get("Ref") == logical_id:
             return True
         return any(_references_logical_id(v, logical_id) for v in obj.values())
     if isinstance(obj, list):
@@ -347,4 +353,49 @@ class TestRegionalSharedBucketSynthesis:
         assert resource_entries[0] != "*"
         assert _references_logical_id(resource_entries[0], key_id), (
             "regional KMS grant must reference only the regional bucket's key"
+        )
+
+    def test_pod_role_can_read_only_the_bucket_name_parameter(self) -> None:
+        """The pod role may read the ``/name`` discovery parameter, by literal ARN.
+
+        The inference monitor runs under the pod role and resolves the Mooncake
+        cold-tier bucket from ``/<project>/regional-shared-bucket/name`` at
+        reconcile time. Live validation showed the read denied (the role had S3
+        and KMS on the bucket but no SSM grant), which dropped the cold tier on
+        every pass. The grant is one ``ssm:GetParameter`` statement whose only
+        resource is that parameter's ARN — no wildcard and no other parameter.
+        """
+        template = _regional_template_json()
+        statements = _pod_role_statements(template)
+
+        ssm_grants = [
+            stmt
+            for stmt in statements
+            if stmt.get("Effect") == "Allow"
+            and _as_action_set(stmt.get("Action", [])) & {"ssm:GetParameter", "ssm:*"}
+        ]
+        assert len(ssm_grants) == 1, (
+            f"expected exactly one SSM read grant on the pod role, found {len(ssm_grants)}"
+        )
+        grant = ssm_grants[0]
+        assert _as_action_set(grant["Action"]) == {"ssm:GetParameter"}
+
+        name_parameter_ids = [
+            logical_id
+            for logical_id, res in template.get("Resources", {}).items()
+            if res.get("Type") == "AWS::SSM::Parameter"
+            and res.get("Properties", {}).get("Name")
+            == f"{REGIONAL_SHARED_SSM_PARAMETER_PREFIX}/name"
+        ]
+        assert len(name_parameter_ids) == 1
+
+        resource_entries = _as_resource_list(grant["Resource"])
+        assert len(resource_entries) == 1
+        rendered = json.dumps(resource_entries[0])
+        assert "*" not in rendered
+        # The ARN is assembled around a Ref to the parameter construct itself
+        # (Ref on an SSM parameter yields its name), so the grant is bound to
+        # exactly the parameter this stack publishes.
+        assert _references_logical_id(resource_entries[0], name_parameter_ids[0]), (
+            f"pod-role SSM grant must reference the /name discovery parameter, got {rendered}"
         )

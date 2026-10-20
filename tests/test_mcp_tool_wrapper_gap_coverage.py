@@ -1324,6 +1324,7 @@ def test_stacks_gated_addons_install_precedence(
                 "max_nodes": 12,
                 "fallback_on_demand": True,
                 "efa": True,
+                "cluster": "custom-cluster",
             },
             (
                 "nodepools",
@@ -1342,6 +1343,8 @@ def test_stacks_gated_addons_install_precedence(
                 "p6-b200.48xlarge",
                 "--fallback-on-demand",
                 "--efa",
+                "--cluster",
+                "custom-cluster",
             ),
         ),
     ],

@@ -2381,6 +2381,150 @@ class TestRecommendRegionCommand:
 class TestNodepoolsCommands:
     """Tests for nodepools commands."""
 
+    @pytest.fixture(autouse=True)
+    def _node_class_inputs(self):
+        """Stand in for the eks:DescribeCluster lookup the create commands make."""
+        from cli.nodepools import AutoModeNodeClassInputs
+
+        inputs = AutoModeNodeClassInputs(
+            role="gco-us-east-1-AutoModeNodeRole",
+            subnet_ids=("subnet-0123456789abcdef0",),
+            security_group_ids=("sg-0123456789abcdef0",),
+        )
+        with patch(
+            "cli.nodepools.resolve_auto_mode_node_class_inputs", return_value=inputs
+        ) as resolver:
+            self.node_class_inputs = inputs
+            self.resolver = resolver
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _api_server_route(self, monkeypatch):
+        """Pin the route list/describe/delete take to the API server; record each request."""
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+
+        self.routes = []
+        self.session = (None, None)
+
+        @contextmanager
+        def fake_tunnel(formatter, **kwargs):
+            self.routes.append(kwargs)
+            server, sni = self.session
+            yield SimpleNamespace(server=server, tls_server_name=sni)
+
+        monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
+
+    @pytest.mark.parametrize(
+        ("argv", "function"),
+        [
+            (["list", "-r", "us-east-1"], "list_cluster_nodepools"),
+            (["describe", "gpu-x86-pool", "-r", "us-east-1"], "describe_cluster_nodepool"),
+        ],
+    )
+    def test_read_commands_reach_the_api_server_through_the_requested_tunnel(self, argv, function):
+        """--via-ssm hands the tunnel's address and TLS name to the Kubernetes client."""
+        from cli.main import cli
+
+        self.session = ("https://127.0.0.1:8443", "ABC.gr7.us-east-1.eks.amazonaws.com")
+        with patch(f"cli.nodepools.{function}") as mock_fn:
+            mock_fn.return_value = [{"name": "gpu-x86-pool"}] if "list" in argv else {"n": 1}
+            result = CliRunner().invoke(
+                cli, ["nodepools", *argv, "--via-ssm", "i-0123456789abcdef0", "-y"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert self.routes[0]["via_ssm"] == "i-0123456789abcdef0"
+        assert self.routes[0]["assume_yes"] is True
+        assert self.routes[0]["cluster"] == "gco-us-east-1"
+        assert mock_fn.call_args.kwargs == {
+            "server": "https://127.0.0.1:8443",
+            "tls_server_name": "ABC.gr7.us-east-1.eks.amazonaws.com",
+        }
+
+    def test_list_defaults_the_region_from_config_when_only_cluster_is_given(self):
+        from cli.main import cli
+
+        with patch("cli.nodepools.list_cluster_nodepools", return_value=[]) as mock_list:
+            result = CliRunner().invoke(cli, ["nodepools", "list", "--cluster", "custom"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_list.call_args.args == ("custom", "us-east-1")
+        assert self.routes[0]["cluster"] == "custom"
+        assert self.routes[0]["via_ssm"] is None
+
+    @pytest.mark.parametrize(
+        ("command", "generator"),
+        [
+            ("create-odcr", "generate_odcr_nodepool_manifest"),
+            ("create-capacity-block", "generate_capacity_block_nodepool_manifest"),
+        ],
+    )
+    def test_create_resolves_the_default_cluster(self, command, generator):
+        """Without --cluster the NodeClass inputs come from <project>-<region>."""
+        from cli.commands.nodepools_cmd import nodepools
+        from cli.config import GCOConfig
+
+        with patch(f"cli.nodepools.{generator}", return_value="kind: NodePool\n") as mock_gen:
+            result = CliRunner().invoke(
+                nodepools,
+                [command, "-n", "pool", "-r", "us-west-2", "-c", "cr-0123456789abcdef0"],
+                obj=GCOConfig(project_name="acme", default_region="us-east-1"),
+            )
+
+        assert result.exit_code == 0, result.output
+        self.resolver.assert_called_once_with("acme-us-west-2", "us-west-2")
+        assert mock_gen.call_args.kwargs["node_class"] is self.node_class_inputs
+
+    @pytest.mark.parametrize(
+        ("command", "generator"),
+        [
+            ("create-odcr", "generate_odcr_nodepool_manifest"),
+            ("create-capacity-block", "generate_capacity_block_nodepool_manifest"),
+        ],
+    )
+    def test_create_passes_an_explicit_cluster_through(self, command, generator):
+        """--cluster names the EKS cluster whose node role and subnets are used."""
+        from cli.commands.nodepools_cmd import nodepools
+        from cli.config import GCOConfig
+
+        with patch(f"cli.nodepools.{generator}", return_value="kind: NodePool\n"):
+            result = CliRunner().invoke(
+                nodepools,
+                [
+                    command,
+                    "-n",
+                    "pool",
+                    "-r",
+                    "us-east-1",
+                    "-c",
+                    "cr-0123456789abcdef0",
+                    "--cluster",
+                    "custom-cluster",
+                ],
+                obj=GCOConfig(project_name="acme", default_region="us-east-1"),
+            )
+
+        assert result.exit_code == 0, result.output
+        self.resolver.assert_called_once_with("custom-cluster", "us-east-1")
+
+    @pytest.mark.parametrize("command", ["create-odcr", "create-capacity-block"])
+    def test_create_reports_a_cluster_without_auto_mode(self, command):
+        """A failed NodeClass lookup exits non-zero before any manifest is printed."""
+        from cli.commands.nodepools_cmd import nodepools
+        from cli.config import GCOConfig
+
+        self.resolver.side_effect = ValueError("does not run EKS Auto Mode")
+        result = CliRunner().invoke(
+            nodepools,
+            [command, "-n", "pool", "-r", "us-east-1", "-c", "cr-0123456789abcdef0"],
+            obj=GCOConfig(project_name="acme", default_region="us-east-1"),
+        )
+
+        assert result.exit_code == 1
+        assert "does not run EKS Auto Mode" in result.output
+        assert "kind: NodePool" not in result.output
+
     def test_nodepools_help(self):
         """Test nodepools --help."""
         from click.testing import CliRunner

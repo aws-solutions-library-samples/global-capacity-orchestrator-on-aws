@@ -82,6 +82,7 @@ expected, not a mistake; do not remove one for that reason alone (see
 | Capacity-history observation | `cdk.json` → `historical.watch_instance_types`; fallback in `gco/config/config_loader.py` | Both copies must exactly equal the catalog's `instance_types` list |
 | Spot Placement Score pools | `scripts/accelerator_catalog.py` → `INSTANCE_POOLS` and `UNPOOLED_INSTANCE_TYPES` | Every pool has three-plus interchangeable watched members; every watched type is either pooled or explicitly declared unpooled with a rationale |
 | Karpenter scheduling | `lambda/kubectl-applier-simple/manifests/40-*.yaml` through `46-*.yaml` | Explicit `eks.amazonaws.com/instance-family` policy per workload class |
+| Reservation NodePool taints | `cli/nodepools.py` (`describe_instance_type`) | No list to maintain: `gco nodepools create-odcr` / `create-capacity-block` read each instance type's accelerator class from EC2 `DescribeInstanceTypes` (`GpuInfo` manufacturer, `NeuronInfo`) and, when that lookup fails, from the catalog's `families`, which ships inside the wheel. `tests/test_nodepools.py` checks that every shipped NodePool family resolves to its pool's taint |
 | Rich CLI hardware/pricing metadata | `cli/capacity/models.py` and the curated defaults in `cli/capacity/advisor.py` | Add only when the CLI needs local vCPU, memory, accelerator, or advisor metadata |
 | Pinned examples and prose | `examples/*.yaml`, `gco/stacks/regional_stack.py`, `README.md`, `docs/CUSTOMIZATION.md` | Keep selectors and human guidance aligned with reviewed scheduling support |
 

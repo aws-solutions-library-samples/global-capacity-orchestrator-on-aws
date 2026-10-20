@@ -41,7 +41,7 @@ The handler's `_SUPPORTED_MANIFEST_KINDS` is the authoritative list:
 - **Core and apps:** Namespace, ServiceAccount, ConfigMap, Secret, Service, Pod, Deployment, StatefulSet, DaemonSet, Job, CronJob, HorizontalPodAutoscaler (`autoscaling/v2`), PodDisruptionBudget, PriorityClass, ResourceQuota, LimitRange, Lease, StorageClass, PersistentVolume, PersistentVolumeClaim, NetworkPolicy, APIService, CustomResourceDefinition, DeviceClass
 - **RBAC:** ClusterRole, ClusterRoleBinding, Role, RoleBinding
 - **Gateway API and AWS Load Balancer Controller:** GatewayClass, Gateway, HTTPRoute, LoadBalancerConfiguration, TargetGroupConfiguration
-- **Karpenter / EKS Auto Mode:** NodePool, EC2NodeClass
+- **Karpenter:** NodePool (the shipped pools reference EKS Auto Mode's built-in `default` NodeClass) and self-managed Karpenter's EC2NodeClass, which GCO's Auto Mode clusters don't serve
 - **cert-manager:** ClusterIssuer (cluster-scoped), Issuer, Certificate — GCO's internal CA chain and its TLS leaves
 - **Admission policy:** ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding (both cluster-scoped) — the issuance fence on the internal CA (`08-internal-ca-issuance.yaml`)
 - **Prometheus Operator:** ServiceMonitor, PodMonitor

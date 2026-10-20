@@ -202,11 +202,12 @@ skip):
   SQS directly, and after cleanup requires SQS to stop resolving it: a queue
   that outlives its object is a leak.
 
-Disclosed mutations: the inference example whose default model is
-HuggingFace-gated (vLLM's Llama 3.1) is validated with the ungated
-`facebook/opt-125m` substituted. The serving path itself runs unchanged, and
-every mutation appears in the report row. Examples whose defaults are
-ungated (SGLang's Phi-3.5) run verbatim.
+Disclosed mutations: a spec can rewrite a manifest value before submission
+(for example a model ID), and every mutation appears in the report row. The
+inference examples serve an ungated model (Qwen2.5-1.5B-Instruct for both
+vLLM and SGLang) and run verbatim; the remaining mutations point a manifest at
+something only the run can know, such as the KEDA example's disposable demo
+queue or the Argo CD example's commit under validation.
 
 Capacity-gated examples (`efa-distributed-training` on P-family,
 inferentia/trainium on Inf/Trn) check the account's service quota first

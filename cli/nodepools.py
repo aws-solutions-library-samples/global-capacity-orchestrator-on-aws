@@ -1,34 +1,175 @@
 """
 NodePool management utilities for GCO CLI.
 
-Provides functionality to create and manage Karpenter NodePools with
+Provides functionality to create and manage EKS Auto Mode NodePools with
 support for On-Demand Capacity Reservations (ODCRs) and Capacity Blocks.
 
 Key Features:
-- Generate NodePool manifests for ODCR-backed capacity
-- List and describe NodePools in EKS clusters
-- Support for fallback to on-demand when ODCR is exhausted
+- Generate NodeClass + NodePool manifests for ODCR- and Capacity Block-backed
+  capacity, bound through the Auto Mode NodeClass's
+  ``capacityReservationSelectorTerms``
+- Taint reserved GPU and Neuron nodes the way the shipped NodePools do, with
+  each instance type's accelerator class read from EC2 (``DescribeInstanceTypes``)
+  and, when that lookup fails, from the reviewed accelerator catalog the
+  monthly dependency scan keeps current
+- List, describe and delete NodePools in EKS clusters
+- Support for fallback to on-demand when the reservation is exhausted
 
-See: https://karpenter.sh/docs/tasks/odcrs/
+See: https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html
 """
 
 import base64
+import functools
+import json
 import logging
 import os
 import tempfile
 import weakref
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import boto3
 import yaml
 from kubernetes.client import CustomObjectsApi
 
+import gco
+
 logger = logging.getLogger(__name__)
 
 # Default vCPU count when instance type lookup fails (conservative estimate)
 DEFAULT_VCPUS_PER_NODE = 96
+
+#: Where an instance type's accelerator class came from (``InstanceTypeFacts.source``).
+FACTS_SOURCE_EC2 = "ec2"
+FACTS_SOURCE_CATALOG = "catalog"
+FACTS_SOURCE_UNKNOWN = "unknown"
+
+#: The reviewed accelerator catalog, shipped inside the ``gco.config`` package
+#: (pyproject's package-data). The monthly dependency scan compares its
+#: families with EC2 and the maintainer refreshes it (docs/MAINTENANCE.md), so
+#: it is the offline answer to "does this family carry an NVIDIA GPU or Neuron
+#: devices" and nothing in this module keeps its own list of families. Located
+#: from the ``gco`` package directory rather than imported through
+#: ``gco.config``, whose ``__init__`` pulls in the CDK (an optional extra).
+_ACCELERATOR_CATALOG_PATH = (
+    Path(gco.__file__).resolve().parent / "config" / "accelerator_catalog.json"
+)
+_ACCELERATOR_CLASSES = frozenset({"nvidia", "neuron"})
+
+
+@dataclass(frozen=True)
+class InstanceTypeFacts:
+    """What the NodePool generator needs to know about one EC2 instance type.
+
+    ``accelerator`` is ``"nvidia"``, ``"neuron"`` or ``None``; ``source`` says
+    whether it was read live from EC2, from the reviewed catalog because the
+    EC2 lookup failed, or could not be determined at all.
+    """
+
+    instance_type: str
+    vcpus: int
+    accelerator: str | None
+    source: str
+
+    @property
+    def family(self) -> str:
+        return self.instance_type.partition(".")[0]
+
+    def describe(self) -> str:
+        """One manifest-comment line: the class, the vCPUs and where they came from."""
+        if self.accelerator == "nvidia":
+            hardware = "NVIDIA GPU"
+        elif self.accelerator == "neuron":
+            hardware = "AWS Neuron"
+        elif self.source == FACTS_SOURCE_UNKNOWN:
+            hardware = "accelerator unknown"
+        else:
+            hardware = "no accelerator"
+        provenance = {
+            FACTS_SOURCE_EC2: "EC2 DescribeInstanceTypes",
+            FACTS_SOURCE_CATALOG: "reviewed catalog; EC2 lookup failed",
+        }.get(
+            self.source,
+            "EC2 lookup failed and the family is not in the reviewed catalog; no accelerator taint",
+        )
+        return f"# {self.instance_type}: {hardware}, {self.vcpus} vCPUs ({provenance})"
+
+
+def accelerator_from_ec2_record(record: Mapping[str, Any]) -> str | None:
+    """Classify one ``DescribeInstanceTypes`` record the way the accelerator catalog does.
+
+    An NVIDIA GPU (``GpuInfo.Gpus[].Manufacturer``) wins over Neuron devices;
+    AMD GPUs, FPGAs and media accelerators are not accelerators GCO schedules.
+    """
+    gpu_info = record.get("GpuInfo")
+    gpus = gpu_info.get("Gpus") if isinstance(gpu_info, Mapping) else None
+    for gpu in gpus if isinstance(gpus, list) else []:
+        manufacturer = gpu.get("Manufacturer") if isinstance(gpu, Mapping) else None
+        if isinstance(manufacturer, str) and manufacturer.casefold() == "nvidia":
+            return "nvidia"
+    neuron_info = record.get("NeuronInfo")
+    devices = neuron_info.get("NeuronDevices") if isinstance(neuron_info, Mapping) else None
+    if isinstance(devices, list) and devices:
+        return "neuron"
+    return None
+
+
+@functools.cache
+def _catalog_family_accelerators() -> dict[str, str]:
+    """``family -> accelerator`` from the reviewed catalog; empty when it can't be read."""
+    try:
+        parsed = json.loads(_ACCELERATOR_CATALOG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.debug("Reviewed accelerator catalog unavailable: %s", exc)
+        return {}
+    families = parsed.get("families") if isinstance(parsed, dict) else None
+    if not isinstance(families, dict):
+        return {}
+    return {
+        str(name): str(policy["accelerator"])
+        for name, policy in families.items()
+        if isinstance(policy, dict) and policy.get("accelerator") in _ACCELERATOR_CLASSES
+    }
+
+
+def accelerator_from_catalog(instance_type: str) -> str | None:
+    """The reviewed catalog's accelerator class for an instance type's family, if any."""
+    return _catalog_family_accelerators().get(instance_type.partition(".")[0])
+
+
+def describe_instance_type(instance_type: str, region: str = "us-east-1") -> InstanceTypeFacts:
+    """Read an instance type's vCPUs and accelerator class from EC2, with fallbacks.
+
+    One ``DescribeInstanceTypes`` call answers both. When it fails (no
+    credentials, an unknown type in this Region, throttling) the vCPU count
+    falls back to :data:`DEFAULT_VCPUS_PER_NODE` and the accelerator class to
+    the reviewed catalog's entry for the family.
+    """
+    try:
+        ec2 = boto3.client("ec2", region_name=region)
+        response = ec2.describe_instance_types(InstanceTypes=[instance_type])
+        records = response.get("InstanceTypes") or []
+        if records:
+            record = records[0]
+            return InstanceTypeFacts(
+                instance_type=instance_type,
+                vcpus=int(record["VCpuInfo"]["DefaultVCpus"]),
+                accelerator=accelerator_from_ec2_record(record),
+                source=FACTS_SOURCE_EC2,
+            )
+        logger.debug("EC2 returned no record for instance type %s in %s", instance_type, region)
+    except Exception as exc:
+        logger.debug("Failed to describe instance type %s in %s: %s", instance_type, region, exc)
+    accelerator = accelerator_from_catalog(instance_type)
+    return InstanceTypeFacts(
+        instance_type=instance_type,
+        vcpus=DEFAULT_VCPUS_PER_NODE,
+        accelerator=accelerator,
+        source=FACTS_SOURCE_CATALOG if accelerator is not None else FACTS_SOURCE_UNKNOWN,
+    )
 
 
 def _unlink_temp_ca_cert(path: str) -> None:
@@ -43,54 +184,15 @@ def _unlink_temp_ca_cert(path: str) -> None:
         logger.debug("Failed to remove temporary Kubernetes CA certificate %s: %s", path, exc)
 
 
-def get_vcpus_for_instance_type(instance_type: str, region: str = "us-east-1") -> int:
+def calculate_cpu_limit(facts: Sequence[InstanceTypeFacts], max_nodes: int) -> int:
+    """The NodePool CPU limit: ``max_nodes`` times the largest instance type's vCPUs.
+
+    Without instance types (any type the reservation offers) the conservative
+    :data:`DEFAULT_VCPUS_PER_NODE` stands in for the largest type.
     """
-    Get the vCPU count for an instance type from EC2 API.
-
-    Args:
-        instance_type: EC2 instance type (e.g., "p4d.24xlarge")
-        region: AWS region for API calls
-
-    Returns:
-        Number of vCPUs for the instance type, or DEFAULT_VCPUS_PER_NODE if lookup fails
-    """
-    try:
-        ec2 = boto3.client("ec2", region_name=region)
-        response = ec2.describe_instance_types(InstanceTypes=[instance_type])
-        if response["InstanceTypes"]:
-            return int(response["InstanceTypes"][0]["VCpuInfo"]["DefaultVCpus"])
-    except Exception as e:
-        logger.debug("Failed to get vCPU count for %s: %s", instance_type, e)
-
-    return DEFAULT_VCPUS_PER_NODE
-
-
-def calculate_cpu_limit(
-    instance_types: list[str] | None, max_nodes: int, region: str = "us-east-1"
-) -> int:
-    """
-    Calculate the CPU limit for a NodePool based on instance types.
-
-    If multiple instance types are specified, uses the maximum vCPU count
-    to ensure the limit can accommodate the largest instances.
-
-    Args:
-        instance_types: List of instance types (None means any)
-        max_nodes: Maximum number of nodes in the pool
-        region: AWS region for API calls
-
-    Returns:
-        Total CPU limit (max_nodes * max_vcpus_per_instance)
-    """
-    if not instance_types:
-        # No specific instance types - use conservative default
+    if not facts:
         return max_nodes * DEFAULT_VCPUS_PER_NODE
-
-    # Get vCPU count for each instance type and use the maximum
-    vcpu_counts = [get_vcpus_for_instance_type(it, region) for it in instance_types]
-    max_vcpus = max(vcpu_counts) if vcpu_counts else DEFAULT_VCPUS_PER_NODE
-
-    return max_nodes * max_vcpus
+    return max_nodes * max(fact.vcpus for fact in facts)
 
 
 @dataclass
@@ -106,205 +208,314 @@ class NodePoolInfo:
     capacity_reservation_id: str | None = None
 
 
-def generate_odcr_nodepool_manifest(
+#: EKS Auto Mode's node class API. GCO clusters run Auto Mode, which serves
+#: ``NodeClass`` objects in this group; self-managed Karpenter's
+#: ``karpenter.k8s.aws`` ``EC2NodeClass`` CRD does not exist on them.
+AUTO_MODE_NODECLASS_GROUP = "eks.amazonaws.com"
+AUTO_MODE_NODECLASS_VERSION = "v1"
+AUTO_MODE_NODECLASS_KIND = "NodeClass"
+AUTO_MODE_NODECLASS_PLURAL = "nodeclasses"
+
+#: Header lines every generated reservation manifest carries.
+_RESERVATION_MANIFEST_NOTES = (
+    "#",
+    "# Apply with: kubectl apply -f <this-file>.yaml. The EKS endpoint is private by",
+    "# default: run `gco cluster tunnel --via-ssm auto` and add the kubectl flags it prints.",
+    "# Target the pool from a pod with nodeSelector karpenter.sh/nodepool: {name},",
+    "# plus a toleration for the pool's taint when it has one.",
+    "#",
+    "# Once any NodeClass selects capacity reservations, EKS Auto Mode stops",
+    "# launching into open ODCRs on its own for every NodeClass in the cluster.",
+    "# See: https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html",
+)
+
+
+@dataclass(frozen=True)
+class AutoModeNodeClassInputs:
+    """What a custom Auto Mode NodeClass needs to launch nodes like the built-in one.
+
+    ``role`` is the cluster's Auto Mode node role, which already has the EC2
+    access entry nodes join with; ``subnet_ids`` and ``security_group_ids`` are
+    the cluster's own subnets and cluster security group, which the built-in
+    ``default`` NodeClass uses too.
+    """
+
+    role: str
+    subnet_ids: tuple[str, ...]
+    security_group_ids: tuple[str, ...]
+
+
+def resolve_auto_mode_node_class_inputs(cluster_name: str, region: str) -> AutoModeNodeClassInputs:
+    """Read the node role, subnets and security group of an Auto Mode cluster.
+
+    The CDK app names none of these (CloudFormation generates the role name),
+    so they come from ``eks:DescribeCluster`` at generation time.
+
+    Raises:
+        ValueError: The cluster does not run EKS Auto Mode, or reports no node
+            role, subnet, or cluster security group.
+    """
+    eks = boto3.client("eks", region_name=region)
+    cluster = eks.describe_cluster(name=cluster_name)["cluster"]
+    compute = cluster.get("computeConfig") or {}
+    role_arn = compute.get("nodeRoleArn")
+    if not compute.get("enabled") or not isinstance(role_arn, str) or not role_arn:
+        raise ValueError(
+            f"EKS cluster {cluster_name} in {region} does not run EKS Auto Mode with a "
+            "node role, so it has no NodeClass API to bind a reservation to"
+        )
+    vpc_config = cluster.get("resourcesVpcConfig") or {}
+    subnet_ids = tuple(
+        subnet for subnet in vpc_config.get("subnetIds") or () if isinstance(subnet, str) and subnet
+    )
+    security_group = vpc_config.get("clusterSecurityGroupId")
+    if not subnet_ids or not isinstance(security_group, str) or not security_group:
+        raise ValueError(
+            f"EKS cluster {cluster_name} in {region} reports no subnets or cluster security group"
+        )
+    return AutoModeNodeClassInputs(
+        role=role_arn.rsplit("/", 1)[-1],
+        subnet_ids=subnet_ids,
+        security_group_ids=(security_group,),
+    )
+
+
+def _reservation_node_class(
     name: str,
-    region: str,
     capacity_reservation_id: str,
-    instance_types: list[str] | None = None,
-    max_nodes: int = 100,
-    fallback_on_demand: bool = False,
-    efa: bool = False,
-    project_name: str = "gco",
-) -> str:
-    """
-    Generate a Karpenter NodePool manifest for ODCR-backed capacity.
-
-    Args:
-        name: Name for the NodePool
-        region: AWS region
-        capacity_reservation_id: EC2 Capacity Reservation ID (cr-xxx) or ODCR group ARN
-        instance_types: List of instance types (if None, uses ODCR's instance type)
-        max_nodes: Maximum number of nodes
-        fallback_on_demand: Whether to fall back to on-demand if ODCR exhausted
-        efa: Whether to enable EFA support (adds EFA taint and labels)
-
-    Returns:
-        YAML manifest string for the NodePool and EC2NodeClass
-    """
-    # Determine capacity types based on fallback setting
-    capacity_types = ["reserved", "on-demand"] if fallback_on_demand else ["reserved"]
-
-    # Build the EC2NodeClass with capacity reservation selector
-    ec2_node_class = {
-        "apiVersion": "karpenter.k8s.aws/v1",
-        "kind": "EC2NodeClass",
+    node_class: AutoModeNodeClassInputs,
+    reservation_label: str,
+) -> dict[str, Any]:
+    """The Auto Mode NodeClass that binds one capacity reservation."""
+    return {
+        "apiVersion": f"{AUTO_MODE_NODECLASS_GROUP}/{AUTO_MODE_NODECLASS_VERSION}",
+        "kind": AUTO_MODE_NODECLASS_KIND,
         "metadata": {
             "name": f"{name}-nodeclass",
             "labels": {
                 "app.kubernetes.io/part-of": "gco",
                 "gco.io/nodepool": name,
+                reservation_label: capacity_reservation_id,
             },
         },
         "spec": {
-            "role": f"KarpenterNodeRole-{project_name}",
-            "subnetSelectorTerms": [
-                {"tags": {"karpenter.sh/discovery": f"{project_name}-{region}"}}
-            ],
+            "role": node_class.role,
+            "subnetSelectorTerms": [{"id": subnet} for subnet in node_class.subnet_ids],
             "securityGroupSelectorTerms": [
-                {"tags": {"karpenter.sh/discovery": f"{project_name}-{region}"}}
+                {"id": group} for group in node_class.security_group_ids
             ],
             "capacityReservationSelectorTerms": [{"id": capacity_reservation_id}],
-            "tags": {
-                "Name": f"{project_name}-{name}",
-                "gco.io/nodepool": name,
-                "gco.io/capacity-reservation": capacity_reservation_id,
-            },
         },
     }
 
-    # Build requirements list
+
+def _reservation_nodepool(
+    name: str,
+    facts: Sequence[InstanceTypeFacts],
+    max_nodes: int,
+    fallback_on_demand: bool,
+    efa: bool,
+    template_labels: dict[str, str],
+    disruption: dict[str, Any],
+) -> dict[str, Any]:
+    """The NodePool that launches reserved capacity through ``<name>-nodeclass``.
+
+    Reserved nodes get the same NoSchedule taint the shipped GPU and Neuron
+    NodePools carry, so only pods that tolerate it (the workloads the
+    reservation was bought for) consume them. Which taint follows from each
+    instance type's accelerator class in ``facts``, read from EC2 or the
+    reviewed catalog; no family list is kept here.
+    """
+    capacity_types = ["reserved", "on-demand"] if fallback_on_demand else ["reserved"]
     requirements: list[dict[str, Any]] = [
-        {
-            "key": "karpenter.sh/capacity-type",
-            "operator": "In",
-            "values": capacity_types,
-        },
-        {
-            "key": "kubernetes.io/arch",
-            "operator": "In",
-            "values": ["amd64"],
-        },
+        {"key": "karpenter.sh/capacity-type", "operator": "In", "values": capacity_types},
     ]
-
-    # Build the NodePool
-    nodepool: dict[str, Any] = {
-        "apiVersion": "karpenter.sh/v1",
-        "kind": "NodePool",
-        "metadata": {
-            "name": name,
-            "labels": {
-                "app.kubernetes.io/part-of": "gco",
-            },
-        },
-        "spec": {
-            "template": {
-                "metadata": {
-                    "labels": {
-                        "workload-type": "reserved-capacity",
-                        "project": "gco",
-                        "gco.io/capacity-reservation": capacity_reservation_id,
-                    },
-                },
-                "spec": {
-                    "nodeClassRef": {
-                        "group": "karpenter.k8s.aws",
-                        "kind": "EC2NodeClass",
-                        "name": f"{name}-nodeclass",
-                    },
-                    "requirements": requirements,
-                },
-            },
-            "limits": {
-                "cpu": str(calculate_cpu_limit(instance_types, max_nodes, region)),
-            },
-            "disruption": {
-                "consolidationPolicy": "WhenEmptyOrUnderutilized",
-                "consolidateAfter": "30s",
-                "budgets": [{"nodes": "10%"}],
-            },
-        },
-    }
-
-    # Add instance type requirements if specified
-    if instance_types:
+    if facts:
+        # The reservation's instance types pin the architecture, Arm included.
         requirements.append(
             {
                 "key": "node.kubernetes.io/instance-type",
                 "operator": "In",
-                "values": instance_types,
+                "values": [fact.instance_type for fact in facts],
             }
         )
+    else:
+        requirements.append({"key": "kubernetes.io/arch", "operator": "In", "values": ["amd64"]})
 
-    # Add GPU taints for GPU instances
-    gpu_families = ["p3", "p4", "p5", "p6", "g4", "g5", "g6"]
-    if instance_types and any(
-        any(it.startswith(fam) for fam in gpu_families) for it in instance_types
-    ):
-        taints = [
-            {
-                "key": "nvidia.com/gpu",
-                "value": "true",
-                "effect": "NoSchedule",
-            }
-        ]
-        if efa:
-            taints.append(
-                {
-                    "key": "vpc.amazonaws.com/efa",
-                    "value": "true",
-                    "effect": "NoSchedule",
-                }
-            )
-        nodepool["spec"]["template"]["spec"]["taints"] = taints
-
-    # Add EFA labels
+    labels = dict(template_labels)
+    taints: list[dict[str, str]] = []
+    accelerators = {fact.accelerator for fact in facts}
+    if "nvidia" in accelerators:
+        taints.append({"key": "nvidia.com/gpu", "value": "true", "effect": "NoSchedule"})
+    if "neuron" in accelerators:
+        taints.append({"key": "aws.amazon.com/neuron", "value": "true", "effect": "NoSchedule"})
     if efa:
-        nodepool["spec"]["template"]["metadata"]["labels"]["efa"] = "true"
-        nodepool["spec"]["template"]["metadata"]["labels"]["workload-type"] = "gpu-efa"
-        # Use WhenEmpty consolidation for EFA workloads to avoid disrupting
-        # long-running distributed training jobs
-        nodepool["spec"]["disruption"] = {
+        labels["efa"] = "true"
+        labels["workload-type"] = "gpu-efa"
+        if taints:
+            taints.append({"key": "vpc.amazonaws.com/efa", "value": "true", "effect": "NoSchedule"})
+
+    template_spec: dict[str, Any] = {
+        "nodeClassRef": {
+            "group": AUTO_MODE_NODECLASS_GROUP,
+            "kind": AUTO_MODE_NODECLASS_KIND,
+            "name": f"{name}-nodeclass",
+        },
+        "requirements": requirements,
+    }
+    if taints:
+        template_spec["taints"] = taints
+
+    return {
+        "apiVersion": "karpenter.sh/v1",
+        "kind": "NodePool",
+        "metadata": {"name": name, "labels": {"app.kubernetes.io/part-of": "gco"}},
+        "spec": {
+            "template": {"metadata": {"labels": labels}, "spec": template_spec},
+            "limits": {"cpu": str(calculate_cpu_limit(facts, max_nodes))},
+            "disruption": disruption,
+        },
+    }
+
+
+def _render_reservation_manifest(
+    header: list[str],
+    name: str,
+    facts: Sequence[InstanceTypeFacts],
+    node_class: dict[str, Any],
+    nodepool: dict[str, Any],
+) -> str:
+    notes = [line.format(name=name) for line in _RESERVATION_MANIFEST_NOTES]
+    if facts:
+        notes = ["# Instance types:", *(fact.describe() for fact in facts), *notes]
+    return "\n".join(
+        [
+            *header,
+            *notes,
+            "---",
+            yaml.dump(node_class, default_flow_style=False, sort_keys=False),
+            "---",
+            yaml.dump(nodepool, default_flow_style=False, sort_keys=False),
+        ]
+    )
+
+
+def _instance_type_facts(
+    instance_types: Sequence[str] | None, region: str
+) -> tuple[InstanceTypeFacts, ...]:
+    return tuple(describe_instance_type(item, region) for item in instance_types or ())
+
+
+def generate_odcr_nodepool_manifest(
+    name: str,
+    region: str,
+    capacity_reservation_id: str,
+    *,
+    node_class: AutoModeNodeClassInputs,
+    instance_types: list[str] | None = None,
+    max_nodes: int = 100,
+    fallback_on_demand: bool = False,
+    efa: bool = False,
+) -> str:
+    """
+    Generate an EKS Auto Mode NodeClass and NodePool for ODCR-backed capacity.
+
+    The NodeClass binds the reservation through
+    ``capacityReservationSelectorTerms``; nodes launched into it carry
+    ``karpenter.sh/capacity-type: reserved`` and the
+    ``eks.amazonaws.com/capacity-reservation-id`` label.
+
+    Args:
+        name: Name for the NodePool (the NodeClass is ``<name>-nodeclass``)
+        region: AWS region
+        capacity_reservation_id: EC2 Capacity Reservation ID (cr-xxx)
+        node_class: The cluster's node role, subnets and security group, from
+            :func:`resolve_auto_mode_node_class_inputs`
+        instance_types: List of instance types (if None, any amd64 type the
+            reservation offers)
+        max_nodes: Maximum number of nodes
+        fallback_on_demand: Whether to fall back to on-demand if ODCR exhausted
+        efa: Whether to enable EFA support (adds EFA taint and labels)
+
+    Returns:
+        YAML manifest string for the NodeClass and NodePool
+    """
+    disruption: dict[str, Any] = {
+        "consolidationPolicy": "WhenEmptyOrUnderutilized",
+        "consolidateAfter": "30s",
+        "budgets": [{"nodes": "10%"}],
+    }
+    if efa:
+        # WhenEmpty for EFA workloads: never disrupt a long-running
+        # distributed training job to consolidate.
+        disruption = {
             "consolidationPolicy": "WhenEmpty",
             "consolidateAfter": "300s",
             "budgets": [{"nodes": "10%"}],
         }
-
-    # Generate YAML output
-    output = []
-    output.append("# ODCR-backed NodePool for GCO")
-    output.append(f"# Capacity Reservation: {capacity_reservation_id}")
-    output.append(f"# Region: {region}")
+    facts = _instance_type_facts(instance_types, region)
+    nodepool = _reservation_nodepool(
+        name,
+        facts,
+        max_nodes,
+        fallback_on_demand,
+        efa,
+        {
+            "workload-type": "reserved-capacity",
+            "project": "gco",
+            "gco.io/capacity-reservation": capacity_reservation_id,
+        },
+        disruption,
+    )
+    header = [
+        "# ODCR-backed NodePool for GCO (EKS Auto Mode)",
+        f"# Capacity Reservation: {capacity_reservation_id}",
+        f"# Region: {region}",
+    ]
     if fallback_on_demand:
-        output.append("# Fallback: on-demand (when ODCR exhausted)")
-    output.append("#")
-    output.append("# Apply with: kubectl apply -f <this-file>.yaml")
-    output.append("# See: https://karpenter.sh/docs/tasks/odcrs/")
-    output.append("---")
-    output.append(yaml.dump(ec2_node_class, default_flow_style=False, sort_keys=False))
-    output.append("---")
-    output.append(yaml.dump(nodepool, default_flow_style=False, sort_keys=False))
-
-    return "\n".join(output)
+        header.append("# Fallback: on-demand (when ODCR exhausted)")
+    return _render_reservation_manifest(
+        header,
+        name,
+        facts,
+        _reservation_node_class(
+            name, capacity_reservation_id, node_class, "gco.io/capacity-reservation"
+        ),
+        nodepool,
+    )
 
 
 def generate_capacity_block_nodepool_manifest(
     name: str,
     region: str,
     capacity_reservation_id: str,
+    *,
+    node_class: AutoModeNodeClassInputs,
     instance_types: list[str] | None = None,
     max_nodes: int = 100,
     fallback_on_demand: bool = False,
     efa: bool = False,
-    project_name: str = "gco",
 ) -> str:
     """
-    Generate a Karpenter NodePool manifest for Capacity Block-backed capacity.
+    Generate an EKS Auto Mode NodeClass and NodePool for a Capacity Block.
 
     The Capacity Block counterpart to :func:`generate_odcr_nodepool_manifest`.
     Purchasing a Capacity Block ("gco capacity reserve") yields a normal EC2
-    Capacity Reservation id (``cr-...``), which Karpenter consumes through the
+    Capacity Reservation id (``cr-...``), which Auto Mode consumes through the
     same ``capacityReservationSelectorTerms`` / ``reserved`` capacity type as an
-    ODCR. The difference is intent: a Capacity Block is prepaid for a fixed term,
-    so the generated NodePool defaults to holding that capacity (``WhenEmpty``
-    consolidation with a long delay) rather than consolidating aggressively — you
-    have already paid for the whole block and want it available for its duration.
+    ODCR; Auto Mode never uses a Capacity Block without such a selector. The
+    difference is intent: a Capacity Block is prepaid for a fixed term, so the
+    generated NodePool defaults to holding that capacity (``WhenEmpty``
+    consolidation with a long delay) rather than consolidating aggressively.
 
     Args:
-        name: Name for the NodePool.
+        name: Name for the NodePool (the NodeClass is ``<name>-nodeclass``).
         region: AWS region.
         capacity_reservation_id: Capacity Reservation ID (cr-xxx) of the purchased
             Capacity Block (from ``gco capacity reserve`` / reservation-check).
-        instance_types: List of instance types (if None, uses the reservation's type).
+        node_class: The cluster's node role, subnets and security group, from
+            :func:`resolve_auto_mode_node_class_inputs`.
+        instance_types: List of instance types (if None, any amd64 type).
         max_nodes: Maximum number of nodes.
         fallback_on_demand: Whether to fall back to on-demand when the block is
             exhausted or after it expires. Off by default — a Capacity Block is
@@ -313,143 +524,44 @@ def generate_capacity_block_nodepool_manifest(
         efa: Whether to enable EFA support (adds EFA taint and labels).
 
     Returns:
-        YAML manifest string for the NodePool and EC2NodeClass.
+        YAML manifest string for the NodeClass and NodePool.
     """
-    capacity_types = ["reserved", "on-demand"] if fallback_on_demand else ["reserved"]
-
-    ec2_node_class = {
-        "apiVersion": "karpenter.k8s.aws/v1",
-        "kind": "EC2NodeClass",
-        "metadata": {
-            "name": f"{name}-nodeclass",
-            "labels": {
-                "app.kubernetes.io/part-of": "gco",
-                "gco.io/nodepool": name,
-            },
-        },
-        "spec": {
-            "role": f"KarpenterNodeRole-{project_name}",
-            "subnetSelectorTerms": [
-                {"tags": {"karpenter.sh/discovery": f"{project_name}-{region}"}}
-            ],
-            "securityGroupSelectorTerms": [
-                {"tags": {"karpenter.sh/discovery": f"{project_name}-{region}"}}
-            ],
-            "capacityReservationSelectorTerms": [{"id": capacity_reservation_id}],
-            "tags": {
-                "Name": f"{project_name}-{name}",
-                "gco.io/nodepool": name,
-                "gco.io/capacity-block": capacity_reservation_id,
-            },
-        },
-    }
-
-    requirements: list[dict[str, Any]] = [
+    facts = _instance_type_facts(instance_types, region)
+    nodepool = _reservation_nodepool(
+        name,
+        facts,
+        max_nodes,
+        fallback_on_demand,
+        efa,
         {
-            "key": "karpenter.sh/capacity-type",
-            "operator": "In",
-            "values": capacity_types,
+            "workload-type": "capacity-block",
+            "project": "gco",
+            "gco.io/capacity-type": "capacity-block",
+            "gco.io/capacity-block": capacity_reservation_id,
         },
+        # A Capacity Block is prepaid for a fixed term — hold the nodes rather
+        # than consolidating them away, so the paid capacity stays available
+        # for the whole block.
         {
-            "key": "kubernetes.io/arch",
-            "operator": "In",
-            "values": ["amd64"],
+            "consolidationPolicy": "WhenEmpty",
+            "consolidateAfter": "600s",
+            "budgets": [{"nodes": "10%"}],
         },
-    ]
-
-    nodepool: dict[str, Any] = {
-        "apiVersion": "karpenter.sh/v1",
-        "kind": "NodePool",
-        "metadata": {
-            "name": name,
-            "labels": {
-                "app.kubernetes.io/part-of": "gco",
-            },
-        },
-        "spec": {
-            "template": {
-                "metadata": {
-                    "labels": {
-                        "workload-type": "capacity-block",
-                        "project": "gco",
-                        "gco.io/capacity-type": "capacity-block",
-                        "gco.io/capacity-block": capacity_reservation_id,
-                    },
-                },
-                "spec": {
-                    "nodeClassRef": {
-                        "group": "karpenter.k8s.aws",
-                        "kind": "EC2NodeClass",
-                        "name": f"{name}-nodeclass",
-                    },
-                    "requirements": requirements,
-                },
-            },
-            "limits": {
-                "cpu": str(calculate_cpu_limit(instance_types, max_nodes, region)),
-            },
-            # A Capacity Block is prepaid for a fixed term — hold the nodes rather
-            # than consolidating them away, so the paid capacity stays available
-            # for the whole block.
-            "disruption": {
-                "consolidationPolicy": "WhenEmpty",
-                "consolidateAfter": "600s",
-                "budgets": [{"nodes": "10%"}],
-            },
-        },
-    }
-
-    if instance_types:
-        requirements.append(
-            {
-                "key": "node.kubernetes.io/instance-type",
-                "operator": "In",
-                "values": instance_types,
-            }
-        )
-
-    gpu_families = ["p3", "p4", "p5", "p6", "g4", "g5", "g6"]
-    if instance_types and any(
-        any(it.startswith(fam) for fam in gpu_families) for it in instance_types
-    ):
-        taints = [
-            {
-                "key": "nvidia.com/gpu",
-                "value": "true",
-                "effect": "NoSchedule",
-            }
-        ]
-        if efa:
-            taints.append(
-                {
-                    "key": "vpc.amazonaws.com/efa",
-                    "value": "true",
-                    "effect": "NoSchedule",
-                }
-            )
-        nodepool["spec"]["template"]["spec"]["taints"] = taints
-
-    if efa:
-        nodepool["spec"]["template"]["metadata"]["labels"]["efa"] = "true"
-        nodepool["spec"]["template"]["metadata"]["labels"]["workload-type"] = "gpu-efa"
-
-    output = []
-    output.append("# Capacity Block-backed NodePool for GCO")
-    output.append(f"# Capacity Reservation (from Capacity Block): {capacity_reservation_id}")
-    output.append(f"# Region: {region}")
-    if fallback_on_demand:
-        output.append("# Fallback: on-demand (when Capacity Block exhausted/expired)")
-    output.append("#")
-    output.append("# Apply with: kubectl apply -f <this-file>.yaml")
-    output.append(
-        "# See: https://karpenter.sh/docs/concepts/nodeclasses/#speccapacityreservationselectorterms"
     )
-    output.append("---")
-    output.append(yaml.dump(ec2_node_class, default_flow_style=False, sort_keys=False))
-    output.append("---")
-    output.append(yaml.dump(nodepool, default_flow_style=False, sort_keys=False))
-
-    return "\n".join(output)
+    header = [
+        "# Capacity Block-backed NodePool for GCO (EKS Auto Mode)",
+        f"# Capacity Reservation (from Capacity Block): {capacity_reservation_id}",
+        f"# Region: {region}",
+    ]
+    if fallback_on_demand:
+        header.append("# Fallback: on-demand (when Capacity Block exhausted/expired)")
+    return _render_reservation_manifest(
+        header,
+        name,
+        facts,
+        _reservation_node_class(name, capacity_reservation_id, node_class, "gco.io/capacity-block"),
+        nodepool,
+    )
 
 
 def get_eks_token(cluster_name: str, region: str) -> str:
@@ -480,8 +592,20 @@ def get_eks_token(cluster_name: str, region: str) -> str:
     return f"k8s-aws-v1.{token_b64}"
 
 
-def get_k8s_client(cluster_name: str, region: str) -> CustomObjectsApi:
-    """Get configured Kubernetes client for EKS cluster."""
+def get_k8s_client(
+    cluster_name: str,
+    region: str,
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
+) -> CustomObjectsApi:
+    """Get configured Kubernetes client for EKS cluster.
+
+    ``server`` and ``tls_server_name`` point the client at an SSM tunnel to the
+    cluster's private endpoint (``gco cluster tunnel``): requests go to the
+    local tunnel address while TLS keeps the endpoint's own host name for SNI
+    and certificate verification, so the cluster CA still validates.
+    """
     from kubernetes import client
 
     eks = boto3.client("eks", region_name=region)
@@ -489,7 +613,9 @@ def get_k8s_client(cluster_name: str, region: str) -> CustomObjectsApi:
     cluster = cluster_info["cluster"]
 
     configuration = client.Configuration()
-    configuration.host = cluster["endpoint"]
+    configuration.host = server or cluster["endpoint"]
+    if tls_server_name:
+        configuration.tls_server_name = tls_server_name
     configuration.verify_ssl = True
 
     # The ApiClient reads this path throughout its lifetime. Keep the file until
@@ -529,19 +655,29 @@ def get_k8s_client(cluster_name: str, region: str) -> CustomObjectsApi:
     return custom_api
 
 
-def list_cluster_nodepools(cluster_name: str, region: str) -> list[dict[str, Any]]:
+def list_cluster_nodepools(
+    cluster_name: str,
+    region: str,
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
+) -> list[dict[str, Any]]:
     """
     List NodePools in an EKS cluster.
 
     Args:
         cluster_name: EKS cluster name
         region: AWS region
+        server: API server override (an SSM tunnel address); see :func:`get_k8s_client`
+        tls_server_name: The endpoint host name TLS verifies against through the tunnel
 
     Returns:
         List of NodePool information dictionaries
     """
     try:
-        custom_api = get_k8s_client(cluster_name, region)
+        custom_api = get_k8s_client(
+            cluster_name, region, server=server, tls_server_name=tls_server_name
+        )
 
         nodepools = custom_api.list_cluster_custom_object(
             group="karpenter.sh",
@@ -590,7 +726,12 @@ def list_cluster_nodepools(cluster_name: str, region: str) -> list[dict[str, Any
 
 
 def describe_cluster_nodepool(
-    cluster_name: str, region: str, nodepool_name: str
+    cluster_name: str,
+    region: str,
+    nodepool_name: str,
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Describe a specific NodePool in an EKS cluster.
@@ -599,12 +740,16 @@ def describe_cluster_nodepool(
         cluster_name: EKS cluster name
         region: AWS region
         nodepool_name: Name of the NodePool
+        server: API server override (an SSM tunnel address); see :func:`get_k8s_client`
+        tls_server_name: The endpoint host name TLS verifies against through the tunnel
 
     Returns:
         NodePool details or None if not found
     """
     try:
-        custom_api = get_k8s_client(cluster_name, region)
+        custom_api = get_k8s_client(
+            cluster_name, region, server=server, tls_server_name=tls_server_name
+        )
 
         nodepool = custom_api.get_cluster_custom_object(
             group="karpenter.sh",
@@ -623,27 +768,38 @@ def describe_cluster_nodepool(
         raise RuntimeError(f"Failed to describe NodePool: {e}") from e
 
 
-def delete_cluster_nodepool(cluster_name: str, region: str, nodepool_name: str) -> dict[str, Any]:
+def delete_cluster_nodepool(
+    cluster_name: str,
+    region: str,
+    nodepool_name: str,
+    *,
+    server: str | None = None,
+    tls_server_name: str | None = None,
+) -> dict[str, Any]:
     """
-    Delete a NodePool (and its paired EC2NodeClass) from an EKS cluster.
+    Delete a NodePool (and its paired NodeClass) from an EKS cluster.
 
-    Deletes the Karpenter NodePool ``nodepool_name`` and, when present, the
-    EC2NodeClass named ``<nodepool_name>-nodeclass`` that the GCO manifest
-    generators create alongside it. Karpenter drains and terminates any nodes
-    the NodePool provisioned once it is removed. A missing EC2NodeClass (custom
-    name, or already deleted) is not treated as an error.
+    Deletes the NodePool ``nodepool_name`` and, when present, the Auto Mode
+    NodeClass named ``<nodepool_name>-nodeclass`` that the GCO manifest
+    generators create alongside it. EKS Auto Mode drains and terminates any
+    nodes the NodePool provisioned once it is removed. A missing NodeClass
+    (custom name, or already deleted) is not treated as an error.
 
     Args:
         cluster_name: EKS cluster name
         region: AWS region
         nodepool_name: Name of the NodePool to delete
+        server: API server override (an SSM tunnel address); see :func:`get_k8s_client`
+        tls_server_name: The endpoint host name TLS verifies against through the tunnel
 
     Returns:
         Dict describing what was deleted: ``{"nodepool": <name>,
-        "ec2nodeclass": <name-or-None>}``.
+        "nodeclass": <name-or-None>}``.
     """
     try:
-        custom_api = get_k8s_client(cluster_name, region)
+        custom_api = get_k8s_client(
+            cluster_name, region, server=server, tls_server_name=tls_server_name
+        )
 
         custom_api.delete_cluster_custom_object(
             group="karpenter.sh",
@@ -651,20 +807,20 @@ def delete_cluster_nodepool(cluster_name: str, region: str, nodepool_name: str) 
             plural="nodepools",
             name=nodepool_name,
         )
-        deleted: dict[str, Any] = {"nodepool": nodepool_name, "ec2nodeclass": None}
+        deleted: dict[str, Any] = {"nodepool": nodepool_name, "nodeclass": None}
 
         nodeclass_name = f"{nodepool_name}-nodeclass"
         try:
             custom_api.delete_cluster_custom_object(
-                group="karpenter.k8s.aws",
-                version="v1",
-                plural="ec2nodeclasses",
+                group=AUTO_MODE_NODECLASS_GROUP,
+                version=AUTO_MODE_NODECLASS_VERSION,
+                plural=AUTO_MODE_NODECLASS_PLURAL,
                 name=nodeclass_name,
             )
-            deleted["ec2nodeclass"] = nodeclass_name
+            deleted["nodeclass"] = nodeclass_name
         except Exception as e:  # best effort; the NodePool is the primary target
             if "404" not in str(e):
-                logger.warning("Could not delete EC2NodeClass %s: %s", nodeclass_name, e)
+                logger.warning("Could not delete NodeClass %s: %s", nodeclass_name, e)
 
         return deleted
 

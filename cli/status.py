@@ -820,8 +820,8 @@ def _gather_nodepools(config: GCOConfig, requested: bool, workload: list[str]) -
                 "cluster": cluster,
                 "reachable": False,
                 "note": (
-                    f"cluster endpoint is private; open a tunnel with "
-                    f"`gco cluster tunnel --region {region}`"
+                    f"cluster endpoint is private; list through an SSM tunnel with "
+                    f"`gco nodepools list -r {region} --via-ssm auto`"
                 ),
             }
             continue
@@ -862,8 +862,8 @@ def _gather_nodepools(config: GCOConfig, requested: bool, workload: list[str]) -
             status=STATUS_UNAVAILABLE,
             data=data,
             reason=(
-                "no cluster endpoint is publicly reachable; open a tunnel with "
-                "`gco cluster tunnel` and use `gco nodepools list` through it"
+                "no cluster endpoint is publicly reachable; run "
+                "`gco nodepools list -r <region> --via-ssm auto` to list through an SSM tunnel"
             ),
             errors=errors,
         )

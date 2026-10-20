@@ -25,8 +25,8 @@ from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-08T19:00:07Z
-# Generated from Git commit: 231725d929e3dfd3c3768eba41d413effef39d67
+# Generated at (UTC): 2026-10-19T22:20:25Z
+# Generated from Git commit: 1e12649419409f142742b0222f7f7e0096467f45
 # Flowchart(s) generated from this file:
 #   * ``InferenceManager.deploy`` -> ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.html``
 #     (PNG: ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.png``)
@@ -521,9 +521,11 @@ class InferenceManager:
             target_regions: Regions to deploy to (default: all deployed regions)
             replicas: Number of replicas per region
             gpu_count: GPUs per replica
-            gpu_type: GPU instance type hint for node selector
+            gpu_type: Preferred instance type, rendered as a preferred node
+                affinity (a hint, not a requirement)
             port: Container port
-            model_path: EFS path for model weights
+            model_path: Mounts the inference namespace's EFS volume at
+                ``/models`` without syncing anything
             health_check_path: Health check endpoint path
             env: Environment variables
             namespace: Kubernetes namespace
