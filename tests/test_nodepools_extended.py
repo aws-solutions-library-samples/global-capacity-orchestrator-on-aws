@@ -5,8 +5,10 @@ Covers EFA-specific NodePool manifest generation: WhenEmpty
 consolidation (vs WhenEmptyOrUnderutilized for non-EFA pools), the
 efa=true label and workload-type=gpu-efa marker, dual taints for
 nvidia.com/gpu plus vpc.amazonaws.com/efa. Also exercises non-GPU
-instance types (no GPU taints emitted), NodePoolInfo construction,
-and calculate_cpu_limit edge cases.
+instance types (no GPU taints emitted), the Auto Mode NodeClass and its
+cluster lookup, NodePoolInfo construction, and calculate_cpu_limit edge
+cases. EC2 is the record table in tests/_ec2_instance_types.py behind a
+fake boto3 client.
 """
 
 from unittest.mock import patch
@@ -15,12 +17,15 @@ import pytest
 import yaml
 
 from cli.nodepools import (
+    FACTS_SOURCE_EC2,
     AutoModeNodeClassInputs,
+    InstanceTypeFacts,
     NodePoolInfo,
     calculate_cpu_limit,
     generate_odcr_nodepool_manifest,
     resolve_auto_mode_node_class_inputs,
 )
+from tests._ec2_instance_types import fake_ec2_client
 
 #: What resolve_auto_mode_node_class_inputs returns for a GCO cluster.
 NODE_CLASS = AutoModeNodeClassInputs(
@@ -30,11 +35,17 @@ NODE_CLASS = AutoModeNodeClassInputs(
 )
 
 
+@pytest.fixture(autouse=True)
+def _ec2_answers_from_the_table():
+    """Every ``boto3.client`` in the module is the fake EC2 unless a test patches its own."""
+    with patch("cli.nodepools.boto3.client", side_effect=fake_ec2_client):
+        yield
+
+
 class TestGenerateOdcrManifestEfa:
     """Tests for generate_odcr_nodepool_manifest with EFA."""
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_efa_sets_when_empty_consolidation(self, mock_vcpus):
+    def test_efa_sets_when_empty_consolidation(self):
         """EFA nodepools should use WhenEmpty consolidation for long-running jobs."""
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
@@ -49,8 +60,7 @@ class TestGenerateOdcrManifestEfa:
         assert nodepool["spec"]["disruption"]["consolidationPolicy"] == "WhenEmpty"
         assert nodepool["spec"]["disruption"]["consolidateAfter"] == "300s"
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_efa_adds_efa_label(self, mock_vcpus):
+    def test_efa_adds_efa_label(self):
         """EFA nodepools should have efa=true label."""
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
@@ -66,8 +76,7 @@ class TestGenerateOdcrManifestEfa:
         assert labels["efa"] == "true"
         assert labels["workload-type"] == "gpu-efa"
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_efa_adds_efa_taint(self, mock_vcpus):
+    def test_efa_adds_efa_taint(self):
         """EFA nodepools with GPU instances should have both GPU and EFA taints."""
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
@@ -84,8 +93,7 @@ class TestGenerateOdcrManifestEfa:
         assert "nvidia.com/gpu" in taint_keys
         assert "vpc.amazonaws.com/efa" in taint_keys
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=72)
-    def test_efa_on_a_cpu_type_labels_without_tainting(self, mock_vcpus):
+    def test_efa_on_a_cpu_type_labels_without_tainting(self):
         """EFA alone adds no taint; the EFA taint only accompanies an
         accelerator (GPU or Neuron) taint."""
         manifest = generate_odcr_nodepool_manifest(
@@ -101,8 +109,7 @@ class TestGenerateOdcrManifestEfa:
         assert nodepool["spec"]["template"]["metadata"]["labels"]["efa"] == "true"
         assert "taints" not in nodepool["spec"]["template"]["spec"]
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_non_efa_uses_underutilized_consolidation(self, mock_vcpus):
+    def test_non_efa_uses_underutilized_consolidation(self):
         """Non-EFA nodepools should use WhenEmptyOrUnderutilized."""
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
@@ -120,8 +127,7 @@ class TestGenerateOdcrManifestEfa:
 class TestGenerateOdcrManifestNonGpu:
     """Tests for non-GPU instance types."""
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=8)
-    def test_non_gpu_instance_no_taints(self, mock_vcpus):
+    def test_non_gpu_instance_no_taints(self):
         """Non-GPU instances should not have GPU taints."""
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
@@ -134,8 +140,7 @@ class TestGenerateOdcrManifestNonGpu:
         nodepool = next(d for d in docs if d and d.get("kind") == "NodePool")
         assert "taints" not in nodepool["spec"]["template"]["spec"]
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=8)
-    def test_non_gpu_instance_has_reserved_label(self, mock_vcpus):
+    def test_non_gpu_instance_has_reserved_label(self):
         """Non-GPU instances should still have reserved-capacity label."""
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
@@ -153,8 +158,7 @@ class TestGenerateOdcrManifestNonGpu:
 class TestGenerateOdcrManifestNodeClass:
     """The Auto Mode NodeClass in generated manifests."""
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_node_class_binds_the_capacity_reservation(self, mock_vcpus):
+    def test_node_class_binds_the_capacity_reservation(self):
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
             name="test-pool",
@@ -165,8 +169,7 @@ class TestGenerateOdcrManifestNodeClass:
         nodeclass = next(d for d in docs if d and d.get("kind") == "NodeClass")
         assert nodeclass["spec"]["capacityReservationSelectorTerms"] == [{"id": "cr-abc123"}]
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_node_class_reuses_the_clusters_role_subnets_and_security_group(self, mock_vcpus):
+    def test_node_class_reuses_the_clusters_role_subnets_and_security_group(self):
         """The built-in NodeClass's role already has the EC2 access entry nodes join with.
 
         Selecting by ID (not by a ``karpenter.sh/discovery`` tag nothing sets)
@@ -197,10 +200,7 @@ class TestGenerateOdcrManifestNodeClass:
             ("inf2.xlarge", "aws.amazon.com/neuron"),
         ],
     )
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=8)
-    def test_accelerator_reservations_carry_the_shipped_pools_taint(
-        self, mock_vcpus, instance_type, taint
-    ):
+    def test_accelerator_reservations_carry_the_shipped_pools_taint(self, instance_type, taint):
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
             name="acc-pool",
@@ -212,8 +212,7 @@ class TestGenerateOdcrManifestNodeClass:
         taints = nodepool["spec"]["template"]["spec"]["taints"]
         assert [t["key"] for t in taints] == [taint]
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=8)
-    def test_instance_types_pin_the_architecture_so_arm_reservations_work(self, mock_vcpus):
+    def test_instance_types_pin_the_architecture_so_arm_reservations_work(self):
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
             name="arm-pool",
@@ -313,8 +312,7 @@ class TestResolveAutoModeNodeClassInputs:
 class TestGenerateOdcrManifestComments:
     """Tests for manifest comment headers."""
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_manifest_has_comment_header(self, mock_vcpus):
+    def test_manifest_has_comment_header(self):
         """Generated manifest should have descriptive comments."""
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
@@ -326,8 +324,7 @@ class TestGenerateOdcrManifestComments:
         assert "cr-123" in manifest
         assert "us-east-1" in manifest
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_fallback_comment_present(self, mock_vcpus):
+    def test_fallback_comment_present(self):
         """Fallback comment should appear when fallback_on_demand is True."""
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
@@ -338,8 +335,7 @@ class TestGenerateOdcrManifestComments:
         )
         assert "Fallback: on-demand" in manifest
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_no_fallback_comment_when_disabled(self, mock_vcpus):
+    def test_no_fallback_comment_when_disabled(self):
         """Fallback comment should not appear when fallback_on_demand is False."""
         manifest = generate_odcr_nodepool_manifest(
             node_class=NODE_CLASS,
@@ -385,28 +381,25 @@ class TestNodePoolInfoDataclass:
         assert info.max_nodes is None
 
 
+def _facts(instance_type: str, vcpus: int) -> InstanceTypeFacts:
+    return InstanceTypeFacts(instance_type, vcpus, None, FACTS_SOURCE_EC2)
+
+
 class TestCalculateCpuLimitEdgeCases:
     """Tests for calculate_cpu_limit edge cases."""
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type", return_value=96)
-    def test_single_large_instance(self, mock_vcpus):
-        result = calculate_cpu_limit(["p4d.24xlarge"], max_nodes=10)
-        assert result == 960
+    def test_single_large_instance(self):
+        assert calculate_cpu_limit([_facts("p4d.24xlarge", 96)], max_nodes=10) == 960
 
-    @patch("cli.nodepools.get_vcpus_for_instance_type")
-    def test_uses_max_vcpus_across_types(self, mock_vcpus):
+    def test_uses_max_vcpus_across_types(self):
         """Should use the maximum vCPU count when multiple types given."""
-        mock_vcpus.side_effect = [8, 96, 32]
-        result = calculate_cpu_limit(["m5.2xlarge", "p4d.24xlarge", "g5.8xlarge"], max_nodes=5)
-        assert result == 480  # 5 * 96
+        facts = [_facts("m5.2xlarge", 8), _facts("p4d.24xlarge", 96), _facts("g5.8xlarge", 32)]
+        assert calculate_cpu_limit(facts, max_nodes=5) == 480  # 5 * 96
 
-    def test_none_instance_types_uses_default(self):
-        """None instance_types should use default vCPU count."""
-        result = calculate_cpu_limit(None, max_nodes=10)
-        # DEFAULT_VCPUS_PER_NODE = 96
-        assert result == 960
+    def test_no_instance_types_uses_default(self):
+        """Without instance types the default vCPU count stands in for the largest type."""
+        assert calculate_cpu_limit((), max_nodes=10) == 960  # DEFAULT_VCPUS_PER_NODE = 96
 
     def test_max_nodes_one(self):
         """Single node should return vCPUs for one instance."""
-        result = calculate_cpu_limit(None, max_nodes=1)
-        assert result == 96
+        assert calculate_cpu_limit((), max_nodes=1) == 96

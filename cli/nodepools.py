@@ -8,6 +8,10 @@ Key Features:
 - Generate NodeClass + NodePool manifests for ODCR- and Capacity Block-backed
   capacity, bound through the Auto Mode NodeClass's
   ``capacityReservationSelectorTerms``
+- Taint reserved GPU and Neuron nodes the way the shipped NodePools do, with
+  each instance type's accelerator class read from EC2 (``DescribeInstanceTypes``)
+  and, when that lookup fails, from the reviewed accelerator catalog the
+  monthly dependency scan keeps current
 - List, describe and delete NodePools in EKS clusters
 - Support for fallback to on-demand when the reservation is exhausted
 
@@ -15,10 +19,14 @@ See: https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html
 """
 
 import base64
+import functools
+import importlib.resources
+import json
 import logging
 import os
 import tempfile
 import weakref
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +39,132 @@ logger = logging.getLogger(__name__)
 
 # Default vCPU count when instance type lookup fails (conservative estimate)
 DEFAULT_VCPUS_PER_NODE = 96
+
+#: Where an instance type's accelerator class came from (``InstanceTypeFacts.source``).
+FACTS_SOURCE_EC2 = "ec2"
+FACTS_SOURCE_CATALOG = "catalog"
+FACTS_SOURCE_UNKNOWN = "unknown"
+
+#: The reviewed accelerator catalog, shipped inside the ``gco.config`` package.
+#: The monthly dependency scan compares its families with EC2 and the
+#: maintainer refreshes it (docs/MAINTENANCE.md), so it is the offline answer
+#: to "does this family carry an NVIDIA GPU or Neuron devices" and nothing in
+#: this module keeps its own list of families.
+_ACCELERATOR_CATALOG_RESOURCE = "accelerator_catalog.json"
+_ACCELERATOR_CLASSES = frozenset({"nvidia", "neuron"})
+
+
+@dataclass(frozen=True)
+class InstanceTypeFacts:
+    """What the NodePool generator needs to know about one EC2 instance type.
+
+    ``accelerator`` is ``"nvidia"``, ``"neuron"`` or ``None``; ``source`` says
+    whether it was read live from EC2, from the reviewed catalog because the
+    EC2 lookup failed, or could not be determined at all.
+    """
+
+    instance_type: str
+    vcpus: int
+    accelerator: str | None
+    source: str
+
+    @property
+    def family(self) -> str:
+        return self.instance_type.partition(".")[0]
+
+    def describe(self) -> str:
+        """One manifest-comment line: the class, the vCPUs and where they came from."""
+        if self.accelerator == "nvidia":
+            hardware = "NVIDIA GPU"
+        elif self.accelerator == "neuron":
+            hardware = "AWS Neuron"
+        elif self.source == FACTS_SOURCE_UNKNOWN:
+            hardware = "accelerator unknown"
+        else:
+            hardware = "no accelerator"
+        provenance = {
+            FACTS_SOURCE_EC2: "EC2 DescribeInstanceTypes",
+            FACTS_SOURCE_CATALOG: "reviewed catalog; EC2 lookup failed",
+        }.get(
+            self.source,
+            "EC2 lookup failed and the family is not in the reviewed catalog; no accelerator taint",
+        )
+        return f"# {self.instance_type}: {hardware}, {self.vcpus} vCPUs ({provenance})"
+
+
+def accelerator_from_ec2_record(record: Mapping[str, Any]) -> str | None:
+    """Classify one ``DescribeInstanceTypes`` record the way the accelerator catalog does.
+
+    An NVIDIA GPU (``GpuInfo.Gpus[].Manufacturer``) wins over Neuron devices;
+    AMD GPUs, FPGAs and media accelerators are not accelerators GCO schedules.
+    """
+    gpu_info = record.get("GpuInfo")
+    gpus = gpu_info.get("Gpus") if isinstance(gpu_info, Mapping) else None
+    for gpu in gpus if isinstance(gpus, list) else []:
+        manufacturer = gpu.get("Manufacturer") if isinstance(gpu, Mapping) else None
+        if isinstance(manufacturer, str) and manufacturer.casefold() == "nvidia":
+            return "nvidia"
+    neuron_info = record.get("NeuronInfo")
+    devices = neuron_info.get("NeuronDevices") if isinstance(neuron_info, Mapping) else None
+    if isinstance(devices, list) and devices:
+        return "neuron"
+    return None
+
+
+@functools.cache
+def _catalog_family_accelerators() -> dict[str, str]:
+    """``family -> accelerator`` from the reviewed catalog; empty when it can't be read."""
+    try:
+        resource = importlib.resources.files("gco.config") / _ACCELERATOR_CATALOG_RESOURCE
+        parsed = json.loads(resource.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        logger.debug("Reviewed accelerator catalog unavailable: %s", exc)
+        return {}
+    families = parsed.get("families") if isinstance(parsed, dict) else None
+    if not isinstance(families, dict):
+        return {}
+    return {
+        str(name): str(policy["accelerator"])
+        for name, policy in families.items()
+        if isinstance(policy, dict) and policy.get("accelerator") in _ACCELERATOR_CLASSES
+    }
+
+
+def accelerator_from_catalog(instance_type: str) -> str | None:
+    """The reviewed catalog's accelerator class for an instance type's family, if any."""
+    return _catalog_family_accelerators().get(instance_type.partition(".")[0])
+
+
+def describe_instance_type(instance_type: str, region: str = "us-east-1") -> InstanceTypeFacts:
+    """Read an instance type's vCPUs and accelerator class from EC2, with fallbacks.
+
+    One ``DescribeInstanceTypes`` call answers both. When it fails (no
+    credentials, an unknown type in this Region, throttling) the vCPU count
+    falls back to :data:`DEFAULT_VCPUS_PER_NODE` and the accelerator class to
+    the reviewed catalog's entry for the family.
+    """
+    try:
+        ec2 = boto3.client("ec2", region_name=region)
+        response = ec2.describe_instance_types(InstanceTypes=[instance_type])
+        records = response.get("InstanceTypes") or []
+        if records:
+            record = records[0]
+            return InstanceTypeFacts(
+                instance_type=instance_type,
+                vcpus=int(record["VCpuInfo"]["DefaultVCpus"]),
+                accelerator=accelerator_from_ec2_record(record),
+                source=FACTS_SOURCE_EC2,
+            )
+        logger.debug("EC2 returned no record for instance type %s in %s", instance_type, region)
+    except Exception as exc:
+        logger.debug("Failed to describe instance type %s in %s: %s", instance_type, region, exc)
+    accelerator = accelerator_from_catalog(instance_type)
+    return InstanceTypeFacts(
+        instance_type=instance_type,
+        vcpus=DEFAULT_VCPUS_PER_NODE,
+        accelerator=accelerator,
+        source=FACTS_SOURCE_CATALOG if accelerator is not None else FACTS_SOURCE_UNKNOWN,
+    )
 
 
 def _unlink_temp_ca_cert(path: str) -> None:
@@ -45,54 +179,15 @@ def _unlink_temp_ca_cert(path: str) -> None:
         logger.debug("Failed to remove temporary Kubernetes CA certificate %s: %s", path, exc)
 
 
-def get_vcpus_for_instance_type(instance_type: str, region: str = "us-east-1") -> int:
+def calculate_cpu_limit(facts: Sequence[InstanceTypeFacts], max_nodes: int) -> int:
+    """The NodePool CPU limit: ``max_nodes`` times the largest instance type's vCPUs.
+
+    Without instance types (any type the reservation offers) the conservative
+    :data:`DEFAULT_VCPUS_PER_NODE` stands in for the largest type.
     """
-    Get the vCPU count for an instance type from EC2 API.
-
-    Args:
-        instance_type: EC2 instance type (e.g., "p4d.24xlarge")
-        region: AWS region for API calls
-
-    Returns:
-        Number of vCPUs for the instance type, or DEFAULT_VCPUS_PER_NODE if lookup fails
-    """
-    try:
-        ec2 = boto3.client("ec2", region_name=region)
-        response = ec2.describe_instance_types(InstanceTypes=[instance_type])
-        if response["InstanceTypes"]:
-            return int(response["InstanceTypes"][0]["VCpuInfo"]["DefaultVCpus"])
-    except Exception as e:
-        logger.debug("Failed to get vCPU count for %s: %s", instance_type, e)
-
-    return DEFAULT_VCPUS_PER_NODE
-
-
-def calculate_cpu_limit(
-    instance_types: list[str] | None, max_nodes: int, region: str = "us-east-1"
-) -> int:
-    """
-    Calculate the CPU limit for a NodePool based on instance types.
-
-    If multiple instance types are specified, uses the maximum vCPU count
-    to ensure the limit can accommodate the largest instances.
-
-    Args:
-        instance_types: List of instance types (None means any)
-        max_nodes: Maximum number of nodes in the pool
-        region: AWS region for API calls
-
-    Returns:
-        Total CPU limit (max_nodes * max_vcpus_per_instance)
-    """
-    if not instance_types:
-        # No specific instance types - use conservative default
+    if not facts:
         return max_nodes * DEFAULT_VCPUS_PER_NODE
-
-    # Get vCPU count for each instance type and use the maximum
-    vcpu_counts = [get_vcpus_for_instance_type(it, region) for it in instance_types]
-    max_vcpus = max(vcpu_counts) if vcpu_counts else DEFAULT_VCPUS_PER_NODE
-
-    return max_nodes * max_vcpus
+    return max_nodes * max(fact.vcpus for fact in facts)
 
 
 @dataclass
@@ -115,12 +210,6 @@ AUTO_MODE_NODECLASS_GROUP = "eks.amazonaws.com"
 AUTO_MODE_NODECLASS_VERSION = "v1"
 AUTO_MODE_NODECLASS_KIND = "NodeClass"
 AUTO_MODE_NODECLASS_PLURAL = "nodeclasses"
-
-#: Instance-family prefixes whose reserved nodes get the same NoSchedule taint
-#: the shipped GPU and Neuron NodePools carry, so only pods that tolerate it
-#: (the workloads the reservation was bought for) consume them.
-_NVIDIA_FAMILY_PREFIXES = ("p3", "p4", "p5", "p6", "g4", "g5", "g6", "g7", "gr6")
-_NEURON_FAMILY_PREFIXES = ("trn", "inf")
 
 #: Header lines every generated reservation manifest carries.
 _RESERVATION_MANIFEST_NOTES = (
@@ -217,33 +306,43 @@ def _reservation_node_class(
 
 def _reservation_nodepool(
     name: str,
-    region: str,
-    instance_types: list[str] | None,
+    facts: Sequence[InstanceTypeFacts],
     max_nodes: int,
     fallback_on_demand: bool,
     efa: bool,
     template_labels: dict[str, str],
     disruption: dict[str, Any],
 ) -> dict[str, Any]:
-    """The NodePool that launches reserved capacity through ``<name>-nodeclass``."""
+    """The NodePool that launches reserved capacity through ``<name>-nodeclass``.
+
+    Reserved nodes get the same NoSchedule taint the shipped GPU and Neuron
+    NodePools carry, so only pods that tolerate it (the workloads the
+    reservation was bought for) consume them. Which taint follows from each
+    instance type's accelerator class in ``facts``, read from EC2 or the
+    reviewed catalog; no family list is kept here.
+    """
     capacity_types = ["reserved", "on-demand"] if fallback_on_demand else ["reserved"]
     requirements: list[dict[str, Any]] = [
         {"key": "karpenter.sh/capacity-type", "operator": "In", "values": capacity_types},
     ]
-    if instance_types:
+    if facts:
         # The reservation's instance types pin the architecture, Arm included.
         requirements.append(
-            {"key": "node.kubernetes.io/instance-type", "operator": "In", "values": instance_types}
+            {
+                "key": "node.kubernetes.io/instance-type",
+                "operator": "In",
+                "values": [fact.instance_type for fact in facts],
+            }
         )
     else:
         requirements.append({"key": "kubernetes.io/arch", "operator": "In", "values": ["amd64"]})
 
     labels = dict(template_labels)
     taints: list[dict[str, str]] = []
-    types = instance_types or []
-    if any(it.startswith(_NVIDIA_FAMILY_PREFIXES) for it in types):
+    accelerators = {fact.accelerator for fact in facts}
+    if "nvidia" in accelerators:
         taints.append({"key": "nvidia.com/gpu", "value": "true", "effect": "NoSchedule"})
-    if any(it.startswith(_NEURON_FAMILY_PREFIXES) for it in types):
+    if "neuron" in accelerators:
         taints.append({"key": "aws.amazon.com/neuron", "value": "true", "effect": "NoSchedule"})
     if efa:
         labels["efa"] = "true"
@@ -268,16 +367,22 @@ def _reservation_nodepool(
         "metadata": {"name": name, "labels": {"app.kubernetes.io/part-of": "gco"}},
         "spec": {
             "template": {"metadata": {"labels": labels}, "spec": template_spec},
-            "limits": {"cpu": str(calculate_cpu_limit(instance_types, max_nodes, region))},
+            "limits": {"cpu": str(calculate_cpu_limit(facts, max_nodes))},
             "disruption": disruption,
         },
     }
 
 
 def _render_reservation_manifest(
-    header: list[str], name: str, node_class: dict[str, Any], nodepool: dict[str, Any]
+    header: list[str],
+    name: str,
+    facts: Sequence[InstanceTypeFacts],
+    node_class: dict[str, Any],
+    nodepool: dict[str, Any],
 ) -> str:
     notes = [line.format(name=name) for line in _RESERVATION_MANIFEST_NOTES]
+    if facts:
+        notes = ["# Instance types:", *(fact.describe() for fact in facts), *notes]
     return "\n".join(
         [
             *header,
@@ -288,6 +393,12 @@ def _render_reservation_manifest(
             yaml.dump(nodepool, default_flow_style=False, sort_keys=False),
         ]
     )
+
+
+def _instance_type_facts(
+    instance_types: Sequence[str] | None, region: str
+) -> tuple[InstanceTypeFacts, ...]:
+    return tuple(describe_instance_type(item, region) for item in instance_types or ())
 
 
 def generate_odcr_nodepool_manifest(
@@ -337,10 +448,10 @@ def generate_odcr_nodepool_manifest(
             "consolidateAfter": "300s",
             "budgets": [{"nodes": "10%"}],
         }
+    facts = _instance_type_facts(instance_types, region)
     nodepool = _reservation_nodepool(
         name,
-        region,
-        instance_types,
+        facts,
         max_nodes,
         fallback_on_demand,
         efa,
@@ -361,6 +472,7 @@ def generate_odcr_nodepool_manifest(
     return _render_reservation_manifest(
         header,
         name,
+        facts,
         _reservation_node_class(
             name, capacity_reservation_id, node_class, "gco.io/capacity-reservation"
         ),
@@ -409,10 +521,10 @@ def generate_capacity_block_nodepool_manifest(
     Returns:
         YAML manifest string for the NodeClass and NodePool.
     """
+    facts = _instance_type_facts(instance_types, region)
     nodepool = _reservation_nodepool(
         name,
-        region,
-        instance_types,
+        facts,
         max_nodes,
         fallback_on_demand,
         efa,
@@ -441,6 +553,7 @@ def generate_capacity_block_nodepool_manifest(
     return _render_reservation_manifest(
         header,
         name,
+        facts,
         _reservation_node_class(name, capacity_reservation_id, node_class, "gco.io/capacity-block"),
         nodepool,
     )

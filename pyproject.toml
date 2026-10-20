@@ -23,6 +23,13 @@ namespaces = true
 [tool.setuptools.data-files]
 "share/gco" = ["cdk.json"]
 
+[tool.setuptools.package-data]
+# The reviewed accelerator catalog rides inside the wheel: cli/nodepools.py
+# reads it (importlib.resources) to classify an instance type's accelerator
+# when the live EC2 lookup fails, so an installed gco answers the same way a
+# checkout does.
+"gco.config" = ["accelerator_catalog.json"]
+
 [tool.setuptools.dynamic]
 version = {attr = "gco._version.__version__"}
 

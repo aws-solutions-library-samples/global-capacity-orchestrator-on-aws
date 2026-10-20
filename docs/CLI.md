@@ -4342,7 +4342,7 @@ gco cluster tunnel --via-ssm auto                  # keep this running
 kubectl <printed flags> apply -f nodepool.yaml     # in another shell
 ```
 
-Pods reach the pool with `nodeSelector: {karpenter.sh/nodepool: <name>}`, plus a toleration for the pool's taint when it has one: GPU instance types get `nvidia.com/gpu`, Trainium and Inferentia types get `aws.amazon.com/neuron`, and `--efa` adds `vpc.amazonaws.com/efa` alongside either. Nodes launched into the reservation carry the `eks.amazonaws.com/capacity-reservation-id` label. Once any NodeClass in a cluster selects capacity reservations, EKS Auto Mode stops launching into open ODCRs on its own for every NodeClass in that cluster.
+Pods reach the pool with `nodeSelector: {karpenter.sh/nodepool: <name>}`, plus a toleration for the pool's taint when it has one: types with an NVIDIA GPU get `nvidia.com/gpu`, Trainium and Inferentia types get `aws.amazon.com/neuron`, and `--efa` adds `vpc.amazonaws.com/efa` alongside either. Which taint applies is read from EC2 (`ec2:DescribeInstanceTypes`, the same call that sizes the pool's CPU limit) rather than from a list of families, so a new family needs no GCO release; when that lookup fails, the reviewed accelerator catalog the monthly dependency scan maintains answers instead. The manifest header names each instance type's class, vCPUs and which of the two answered. Nodes launched into the reservation carry the `eks.amazonaws.com/capacity-reservation-id` label. Once any NodeClass in a cluster selects capacity reservations, EKS Auto Mode stops launching into open ODCRs on its own for every NodeClass in that cluster.
 
 ```bash
 gco nodepools create-odcr [OPTIONS]
