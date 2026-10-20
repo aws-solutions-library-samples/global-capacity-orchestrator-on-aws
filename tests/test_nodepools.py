@@ -233,11 +233,10 @@ class TestAcceleratorClassification:
 
     def test_catalog_classification_covers_every_reviewed_family(self):
         """The fallback is the catalog itself, so a new reviewed family needs no code change."""
-        catalog = json.loads(
-            (
-                nodepools.importlib.resources.files("gco.config") / "accelerator_catalog.json"
-            ).read_text(encoding="utf-8")
-        )
+        catalog = json.loads(nodepools._ACCELERATOR_CATALOG_PATH.read_text(encoding="utf-8"))
+        # The path is the package file, so an installed wheel and a checkout read the same copy.
+        assert nodepools._ACCELERATOR_CATALOG_PATH.name == "accelerator_catalog.json"
+        assert nodepools._ACCELERATOR_CATALOG_PATH.parent.name == "config"
         families = catalog["families"]
         assert len(families) >= 20
         for family, policy in families.items():
@@ -261,53 +260,46 @@ class TestAcceleratorClassification:
                     f"{pool.location}: {family}"
                 )
 
-    @pytest.mark.parametrize(
-        "broken",
-        [
-            OSError("no such resource"),
-            ValueError("not json"),
-            TypeError("not a traversable"),
-        ],
-    )
-    def test_an_unreadable_catalog_classifies_nothing(self, broken):
+    def test_an_unreadable_catalog_classifies_nothing(self, tmp_path):
         nodepools._catalog_family_accelerators.cache_clear()
         try:
-            with patch("cli.nodepools.importlib.resources.files", side_effect=broken):
+            with patch.object(nodepools, "_ACCELERATOR_CATALOG_PATH", tmp_path / "missing.json"):
                 assert nodepools._catalog_family_accelerators() == {}
                 assert accelerator_from_catalog("p4d.24xlarge") is None
         finally:
             nodepools._catalog_family_accelerators.cache_clear()
 
-    @pytest.mark.parametrize("payload", ['["not", "a", "mapping"]', '{"families": "none"}'])
-    def test_a_malformed_catalog_classifies_nothing(self, payload):
-        resource = MagicMock()
-        resource.read_text.return_value = payload
-        files = MagicMock()
-        files.__truediv__.return_value = resource
+    @pytest.mark.parametrize(
+        "payload", ["not json", '["not", "a", "mapping"]', '{"families": "none"}']
+    )
+    def test_a_malformed_catalog_classifies_nothing(self, tmp_path, payload):
+        catalog = tmp_path / "accelerator_catalog.json"
+        catalog.write_text(payload, encoding="utf-8")
         nodepools._catalog_family_accelerators.cache_clear()
         try:
-            with patch("cli.nodepools.importlib.resources.files", return_value=files):
+            with patch.object(nodepools, "_ACCELERATOR_CATALOG_PATH", catalog):
                 assert nodepools._catalog_family_accelerators() == {}
         finally:
             nodepools._catalog_family_accelerators.cache_clear()
 
-    def test_only_reviewed_accelerator_classes_are_kept(self):
-        resource = MagicMock()
-        resource.read_text.return_value = json.dumps(
-            {
-                "families": {
-                    "p5": {"accelerator": "nvidia"},
-                    "inf2": {"accelerator": "neuron"},
-                    "x9": {"accelerator": "fpga"},
-                    "y9": "not a policy",
+    def test_only_reviewed_accelerator_classes_are_kept(self, tmp_path):
+        catalog = tmp_path / "accelerator_catalog.json"
+        catalog.write_text(
+            json.dumps(
+                {
+                    "families": {
+                        "p5": {"accelerator": "nvidia"},
+                        "inf2": {"accelerator": "neuron"},
+                        "x9": {"accelerator": "fpga"},
+                        "y9": "not a policy",
+                    }
                 }
-            }
+            ),
+            encoding="utf-8",
         )
-        files = MagicMock()
-        files.__truediv__.return_value = resource
         nodepools._catalog_family_accelerators.cache_clear()
         try:
-            with patch("cli.nodepools.importlib.resources.files", return_value=files):
+            with patch.object(nodepools, "_ACCELERATOR_CATALOG_PATH", catalog):
                 assert nodepools._catalog_family_accelerators() == {
                     "p5": "nvidia",
                     "inf2": "neuron",

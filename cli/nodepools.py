@@ -20,7 +20,6 @@ See: https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html
 
 import base64
 import functools
-import importlib.resources
 import json
 import logging
 import os
@@ -29,11 +28,14 @@ import weakref
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import boto3
 import yaml
 from kubernetes.client import CustomObjectsApi
+
+import gco
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +47,16 @@ FACTS_SOURCE_EC2 = "ec2"
 FACTS_SOURCE_CATALOG = "catalog"
 FACTS_SOURCE_UNKNOWN = "unknown"
 
-#: The reviewed accelerator catalog, shipped inside the ``gco.config`` package.
-#: The monthly dependency scan compares its families with EC2 and the
-#: maintainer refreshes it (docs/MAINTENANCE.md), so it is the offline answer
-#: to "does this family carry an NVIDIA GPU or Neuron devices" and nothing in
-#: this module keeps its own list of families.
-_ACCELERATOR_CATALOG_RESOURCE = "accelerator_catalog.json"
+#: The reviewed accelerator catalog, shipped inside the ``gco.config`` package
+#: (pyproject's package-data). The monthly dependency scan compares its
+#: families with EC2 and the maintainer refreshes it (docs/MAINTENANCE.md), so
+#: it is the offline answer to "does this family carry an NVIDIA GPU or Neuron
+#: devices" and nothing in this module keeps its own list of families. Located
+#: from the ``gco`` package directory rather than imported through
+#: ``gco.config``, whose ``__init__`` pulls in the CDK (an optional extra).
+_ACCELERATOR_CATALOG_PATH = (
+    Path(gco.__file__).resolve().parent / "config" / "accelerator_catalog.json"
+)
 _ACCELERATOR_CLASSES = frozenset({"nvidia", "neuron"})
 
 
@@ -115,9 +121,8 @@ def accelerator_from_ec2_record(record: Mapping[str, Any]) -> str | None:
 def _catalog_family_accelerators() -> dict[str, str]:
     """``family -> accelerator`` from the reviewed catalog; empty when it can't be read."""
     try:
-        resource = importlib.resources.files("gco.config") / _ACCELERATOR_CATALOG_RESOURCE
-        parsed = json.loads(resource.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError) as exc:
+        parsed = json.loads(_ACCELERATOR_CATALOG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
         logger.debug("Reviewed accelerator catalog unavailable: %s", exc)
         return {}
     families = parsed.get("families") if isinstance(parsed, dict) else None
