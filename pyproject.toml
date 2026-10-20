@@ -292,7 +292,7 @@ test = [
     "httpx==0.28.1",
     # Structural diagram tests verify every committed PNG can be parsed in a
     # targeted ``.[test]`` environment; keep this aligned with ``security``.
-    "pillow==12.3.0",
+    "pillow==13.0.0",
     # The admission-policy suites compile and run the shipped
     # ValidatingAdmissionPolicies' CEL (tests/_cel.py) with the CEL project's
     # Python binding of cel-cpp. It has no Python dependencies of its own.
@@ -302,7 +302,7 @@ security = [
     "bandit==1.9.4",
     # Fully decode tracked demo GIFs under strict resource ceilings so malformed
     # or disguised media fails in the read-only security workflow.
-    "pillow==12.3.0",
+    "pillow==13.0.0",
     "pip-tools==7.6.2",
 ]
 docs = [
