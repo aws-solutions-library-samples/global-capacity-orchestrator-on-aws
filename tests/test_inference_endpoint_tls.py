@@ -56,6 +56,7 @@ from gco.services.inference_monitor import (
     INTERNAL_CA_KEY,
     INTERNAL_CA_VOLUME,
     MODEL_POD_TERMINATION_GRACE_SECONDS,
+    MOONCAKE_CONFIG_DIGEST_ANNOTATION,
     PD_PROXY_CA_FILE,
     PD_PROXY_PORT,
     SKIP_CONTAINERS_ANNOTATION,
@@ -1122,6 +1123,144 @@ def test_role_deployment_gains_the_sidecar_in_place(monitor: InferenceMonitor) -
     assert template["spec"]["volumes"] == _wire(list(expected.volumes))
     # Already at its topology count: the sidecar patch is the only write.
     assert monitor.apps_v1.patch_namespaced_deployment.call_count == 1
+
+
+def _role_deployment_with_sidecar(
+    name: str, *, extra_annotations: dict[str, str] | None = None, replicas: int = 1
+) -> client.V1Deployment:
+    """A role Deployment already carrying the current sidecar, as the API returns it."""
+    sidecar = build_endpoint_tls_proxy(8000, TLS_PROXY_CONFIG_MAP)
+    return _live_deployment(
+        name,
+        containers=[_model_container(8000), sidecar.container],
+        annotations={
+            ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: sidecar.digest,
+            **(extra_annotations or {}),
+        },
+        replicas=replicas,
+        ready_replicas=replicas,
+    )
+
+
+def test_role_deployment_rolls_onto_a_rerendered_mooncake_config(
+    monitor: InferenceMonitor,
+) -> None:
+    """A changed ``mooncake.json`` digest patches the pod template so the role rolls.
+
+    The connectors read the mounted file once at start-up, so after
+    ``configure-store`` the re-rendered ConfigMap alone never reached running
+    pods. The digest annotation is the only change in the patch and the write is
+    a compare-and-swap on the observed resourceVersion.
+    """
+    spec = {
+        "image": MODEL_IMAGE,
+        "port": 8000,
+        "mooncake": {"mode": "store", "store": {"enabled": True}},
+    }
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {
+            "chat": _role_deployment_with_sidecar(
+                "chat", extra_annotations={MOONCAKE_CONFIG_DIGEST_ANNOTATION: "a" * 64}
+            )
+        }
+    )
+
+    assert monitor._ensure_role_deployment(
+        "chat", NAMESPACE, spec, "single", config_digest="b" * 64
+    ) == (1, 1, False)
+
+    body = _deployment_patch(monitor, "chat")
+    assert body == {
+        "metadata": {"resourceVersion": "7"},
+        "spec": {
+            "template": {"metadata": {"annotations": {MOONCAKE_CONFIG_DIGEST_ANNOTATION: "b" * 64}}}
+        },
+    }
+    assert monitor.apps_v1.patch_namespaced_deployment.call_count == 1
+
+
+def test_role_deployment_created_before_the_digest_is_stamped_once(
+    monitor: InferenceMonitor,
+) -> None:
+    """A pre-existing role without the annotation is rolled once onto the current file."""
+    spec = {
+        "image": MODEL_IMAGE,
+        "port": 8000,
+        "mooncake": {"mode": "store", "store": {"enabled": True}},
+    }
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {"chat": _role_deployment_with_sidecar("chat")}
+    )
+
+    monitor._ensure_role_deployment("chat", NAMESPACE, spec, "single", config_digest="c" * 64)
+
+    template = _deployment_patch(monitor, "chat")["spec"]["template"]
+    assert template["metadata"]["annotations"] == {MOONCAKE_CONFIG_DIGEST_ANNOTATION: "c" * 64}
+
+
+def test_role_deployment_on_the_current_mooncake_config_is_left_alone(
+    monitor: InferenceMonitor,
+) -> None:
+    """Matching digest, matching sidecar: no write at all."""
+    spec = {
+        "image": MODEL_IMAGE,
+        "port": 8000,
+        "mooncake": {"mode": "store", "store": {"enabled": True}},
+    }
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {
+            "chat": _role_deployment_with_sidecar(
+                "chat", extra_annotations={MOONCAKE_CONFIG_DIGEST_ANNOTATION: "d" * 64}
+            )
+        }
+    )
+
+    monitor._ensure_role_deployment("chat", NAMESPACE, spec, "single", config_digest="d" * 64)
+
+    monitor.apps_v1.patch_namespaced_deployment.assert_not_called()
+
+
+def test_sidecar_patch_defers_the_mooncake_digest_to_the_next_pass(
+    monitor: InferenceMonitor,
+) -> None:
+    """Two template patches in one pass would race on resourceVersion; only the sidecar lands."""
+    spec = {
+        "image": MODEL_IMAGE,
+        "port": 8000,
+        "mooncake": {"mode": "disaggregated", "topology": {"prefill": 1, "decode": 1}},
+    }
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {"chat-prefill": _live_deployment("chat-prefill", containers=[_model_container(8100)])}
+    )
+
+    monitor._ensure_role_deployment("chat", NAMESPACE, spec, "prefill", config_digest="e" * 64)
+
+    template = _deployment_patch(monitor, "chat-prefill")["spec"]["template"]
+    assert ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION in template["metadata"]["annotations"]
+    assert MOONCAKE_CONFIG_DIGEST_ANNOTATION not in template["metadata"]["annotations"]
+    assert monitor.apps_v1.patch_namespaced_deployment.call_count == 1
+
+
+def test_new_role_deployment_is_created_with_the_mooncake_digest(
+    monitor: InferenceMonitor,
+) -> None:
+    """A fresh role Deployment starts stamped, so its first pass does not roll it."""
+    spec = {
+        "image": MODEL_IMAGE,
+        "port": 8000,
+        "mooncake": {"mode": "store", "store": {"enabled": True}},
+    }
+    monitor.apps_v1.read_namespaced_deployment.side_effect = ApiException(status=404)
+    monitor._confirm_created_resource = MagicMock()  # type: ignore[method-assign]
+
+    assert monitor._ensure_role_deployment(
+        "chat", NAMESPACE, spec, "single", config_digest="f" * 64
+    ) == (0, 1, False)
+
+    [created] = monitor.apps_v1.create_namespaced_deployment.call_args_list
+    annotations = created.args[1].spec.template.metadata.annotations
+    assert annotations[MOONCAKE_CONFIG_DIGEST_ANNOTATION] == "f" * 64
+    assert ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION in annotations
 
 
 def test_existing_canary_is_moved_onto_tls_with_its_endpoint_program(

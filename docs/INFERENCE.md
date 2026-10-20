@@ -670,7 +670,7 @@ gco inference configure-store my-llm --cold-tier
 gco inference configure-store my-llm --offload cpu --local-buffer-size 2147483648
 ```
 
-`configure-store` merges onto the endpoint's existing store settings and re-triggers reconciliation, so changing one field leaves the others intact.
+`configure-store` merges onto the endpoint's existing store settings and re-triggers reconciliation, so changing one field leaves the others intact. Because the Mooncake connectors read `mooncake.json` once at start-up, the monitor stamps a digest of the rendered file on each role pod template and rolls the role pods whenever it changes; a `configure-store` call therefore costs one rolling restart per region.
 
 ### Populating the KV Cache (Cold Tier)
 

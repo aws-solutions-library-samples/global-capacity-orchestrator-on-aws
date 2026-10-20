@@ -1565,7 +1565,7 @@ def inference_configure_store(
             formatter.print_success(f"Endpoint '{endpoint_name}' store configuration updated")
             formatter.print_info(
                 "The inference_monitor will re-render the KV-cache store "
-                "configuration in each region."
+                "configuration in each region and roll the role pods onto it."
             )
             if config.output_format != "table":
                 formatter.print(result)

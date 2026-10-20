@@ -26,6 +26,8 @@ from gco.services.inference_monitor import (
     RegionServicesResolution,
     ResourceCleanupResult,
     build_endpoint_tls_proxy,
+    mooncake_config_digest,
+    render_mooncake_config,
 )
 
 NAMESPACE = "gco-inference"
@@ -617,7 +619,7 @@ async def test_reconcile_mooncake_orders_roles_autoscalers_and_front_end() -> No
         events.append("status")
         return "running"
 
-    def ensure_role(_name, _ns, _spec, role):
+    def ensure_role(_name, _ns, _spec, role, **_kwargs):
         events.append(f"role:{role}")
         return 0, 1, False
 
@@ -692,7 +694,7 @@ async def test_mooncake_delayed_keda_hpa_blocks_proxy_across_reconcile_passes() 
     monitor._ensure_mooncake_configmap = MagicMock()  # type: ignore[method-assign]
     pass_number = {"value": 0}
 
-    def ensure_role(_name, _namespace, _spec, role):
+    def ensure_role(_name, _namespace, _spec, role, **_kwargs):
         restarted = role == "prefill" and pass_number["value"] == 0
         return 0, 2 if role == "prefill" else 1, restarted
 
@@ -869,6 +871,8 @@ async def test_reconcile_mooncake_passes_unresolved_cold_tier_reason_to_status()
     rendered = monitor._ensure_mooncake_configmap.call_args.args[2]
     assert rendered["master_server_address"] == REGION_SERVICES["master_server_address"]
     assert "cold_tier_s3_uri" not in rendered
+    # ... the degraded render is not rolled onto the pods ...
+    assert monitor._ensure_role_deployment.call_args.kwargs == {"config_digest": None}
     # ... and the status write carries the reason the cold tier is off.
     assert monitor._report_role_status.call_args.kwargs["cold_tier_error"] == (
         "general-purpose regional bucket for region us-east-1 could not be resolved"
@@ -916,7 +920,15 @@ async def test_reconcile_mooncake_store_mode_uses_direct_service_front_end() -> 
     action = await monitor._reconcile_mooncake("chat", NAMESPACE, spec, endpoint)
 
     assert action == {"action": "reconcile_mooncake", "endpoint": "chat", "state": "running"}
-    monitor._ensure_role_deployment.assert_called_once_with("chat", NAMESPACE, spec, "single")
+    monitor._ensure_role_deployment.assert_called_once_with(
+        "chat",
+        NAMESPACE,
+        spec,
+        "single",
+        config_digest=mooncake_config_digest(
+            render_mooncake_config(spec["mooncake"], REGION_SERVICES)
+        ),
+    )
     monitor._create_service.assert_called_once_with("chat", NAMESPACE, spec)
     monitor._create_role_service.assert_not_called()
     monitor._create_pd_proxy.assert_not_called()

@@ -454,6 +454,13 @@ SKIP_CONTAINERS_ANNOTATION = "eks.amazonaws.com/skip-containers"
 # unchanged templates on every pass.
 ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION = "gco.io/endpoint-tls-proxy-digest"
 
+# Digest of the rendered ``mooncake.json``, stamped on every Mooncake role pod
+# template. The connectors read the file once at start-up, so re-rendering the
+# ConfigMap alone (``configure-store``, a transport change) would leave running
+# pods on the old configuration; a differing digest patches the template and
+# rolls the role, the same way the sidecar digest does.
+MOONCAKE_CONFIG_DIGEST_ANNOTATION = "gco.io/mooncake-config-digest"
+
 
 @dataclass
 class RegionServicesResolution:
@@ -818,6 +825,17 @@ def render_mooncake_config(
         if store.get("cold_tier_enabled") is True and cold_tier_s3_uri:
             cfg["cold_tier_s3_uri"] = cold_tier_s3_uri
     return cfg
+
+
+def mooncake_config_digest(cfg: dict[str, Any]) -> str:
+    """Return the stable digest of a rendered ``mooncake.json``.
+
+    Keys are sorted and separators fixed so the same configuration always
+    hashes identically across passes and monitor replicas; the value is what
+    :data:`MOONCAKE_CONFIG_DIGEST_ANNOTATION` carries on role pod templates.
+    """
+    encoded = json.dumps(cfg, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -> None:
@@ -2566,13 +2584,26 @@ class InferenceMonitor:
             logger.info("Updated mooncake config map %s/%s", ns, cm_name)
 
     def _ensure_role_deployment(
-        self, name: str, ns: str, spec: dict[str, Any], role: str
+        self,
+        name: str,
+        ns: str,
+        spec: dict[str, Any],
+        role: str,
+        *,
+        config_digest: str | None = None,
     ) -> tuple[int, int, bool]:
         """Ensure one role target has its static or restart-seed capacity.
 
         Existing autoscaled targets normally retain controller ownership, but a
         manually stopped zero target is seeded to the role minimum before its
         autoscaler is reapplied. Static roles always converge to topology.
+
+        Args:
+            config_digest: Digest of the ``mooncake.json`` the role must run
+                with (see :func:`mooncake_config_digest`). A new Deployment is
+                stamped with it; an existing one whose pod template carries a
+                different digest is patched so its pods roll onto the
+                re-rendered configuration. ``None`` leaves the template alone.
         """
         mooncake = spec.get("mooncake") or {}
         deploy_name = name if role == "single" else f"{name}-{role}"
@@ -2580,18 +2611,22 @@ class InferenceMonitor:
 
         deployment = self._get_deployment(deploy_name, ns)
         if deployment is None:
-            self._create_role_deployment(name, ns, spec, role)
+            self._create_role_deployment(name, ns, spec, role, config_digest=config_digest)
             return 0, desired, False
 
         # Role Deployments created before the TLS sidecar existed gain it in
         # place (the PD proxy and kube-proxy only reach the role through it).
-        self._converge_endpoint_tls_proxy(
+        sidecar_patched = self._converge_endpoint_tls_proxy(
             deploy_name,
             ns,
             deployment,
             config_map_name=_tls_proxy_config_map_name(name),
             fallback_port=spec.get("port", 8000),
         )
+        # One compare-and-swap per pass: the sidecar patch above already moved
+        # the resourceVersion, so a config digest change waits for the next pass.
+        if config_digest is not None and not sidecar_patched:
+            self._converge_mooncake_config_digest(deploy_name, ns, deployment, config_digest)
 
         autoscaling = mooncake.get("autoscaling") or {}
         role_autoscaling = autoscaling.get(role)
@@ -2837,6 +2872,11 @@ class InferenceMonitor:
         cfg = render_mooncake_config(mooncake, region_services)
         self._ensure_mooncake_configmap(name, ns, cfg)
         self._ensure_tls_proxy_configmap(name, ns)
+        # Role pods start with the file they mount, so a re-render must roll
+        # them (digest stamped on the pod template). A degraded render — the
+        # cold tier dropped because its bucket did not resolve this pass — is
+        # not rolled out: that would flap pods on a transient lookup failure.
+        config_digest = None if services.cold_tier_unresolved else mooncake_config_digest(cfg)
 
         # Steps 5-6: converge ownership before creating/scaling any role
         # Deployment. This is the same recreate/handoff barrier used by classic
@@ -2901,7 +2941,9 @@ class InferenceMonitor:
         role_ready_total = 0
         role_desired_total = 0
         for role in desired_roles:
-            ready, desired, _restarted = self._ensure_role_deployment(name, ns, spec, role)
+            ready, desired, _restarted = self._ensure_role_deployment(
+                name, ns, spec, role, config_digest=config_digest
+            )
             role_ready_total += ready
             role_desired_total += desired
 
@@ -4361,7 +4403,15 @@ class InferenceMonitor:
         # Single store instance: kv_both runs as one replica.
         return 1
 
-    def _create_role_deployment(self, name: str, ns: str, spec: dict[str, Any], role: str) -> None:
+    def _create_role_deployment(
+        self,
+        name: str,
+        ns: str,
+        spec: dict[str, Any],
+        role: str,
+        *,
+        config_digest: str | None = None,
+    ) -> None:
         """Materialize one role Deployment for a Mooncake endpoint.
 
         Disaggregated and ``both`` modes split work across ``{name}-prefill``
@@ -4377,6 +4427,10 @@ class InferenceMonitor:
             spec: The endpoint spec; ``spec["mooncake"]`` selects the mode and
                 topology.
             role: One of ``"prefill"``, ``"decode"``, or ``"single"``.
+            config_digest: Digest of the rendered ``mooncake.json`` the pods
+                start with, stamped on the pod template as
+                :data:`MOONCAKE_CONFIG_DIGEST_ANNOTATION` so a later
+                re-render is detected and rolled out.
         """
         mooncake = spec.get("mooncake") or {}
 
@@ -4401,6 +4455,12 @@ class InferenceMonitor:
         # Land role pods on the EFA fabric when KV transfer runs over RDMA,
         # preserving the GPU asks already built into the pod.
         apply_efa_scheduling(mooncake, deployment.spec.template.spec)
+        if config_digest is not None:
+            template_metadata = deployment.spec.template.metadata
+            template_metadata.annotations = {
+                **(template_metadata.annotations or {}),
+                MOONCAKE_CONFIG_DIGEST_ANNOTATION: config_digest,
+            }
 
         self._assert_mutation_authority()
         self.apps_v1.create_namespaced_deployment(
@@ -5290,6 +5350,57 @@ class InferenceMonitor:
             _request_timeout=self._k8s_timeout,
         )
         logger.info("Rolled the TLS sidecar into deployment %s/%s", namespace, deploy_name)
+        return True
+
+    def _converge_mooncake_config_digest(
+        self,
+        deploy_name: str,
+        namespace: str,
+        deployment: Any,
+        config_digest: str,
+    ) -> bool:
+        """Roll a Mooncake role Deployment onto a re-rendered ``mooncake.json``.
+
+        The connectors read the mounted configuration once at start-up, so a
+        ConfigMap re-render after ``configure-store`` (or any transport change)
+        would otherwise never reach running pods. When the pod template's
+        :data:`MOONCAKE_CONFIG_DIGEST_ANNOTATION` differs from ``config_digest``
+        (including Deployments created before the annotation existed) the
+        template annotation is patched, which starts an ordinary rolling update
+        onto pods that mount the current file. The observed resourceVersion makes
+        the patch a compare-and-swap.
+
+        Returns:
+            ``True`` when the Deployment was patched.
+        """
+        template = getattr(getattr(deployment, "spec", None), "template", None)
+        raw_annotations = getattr(getattr(template, "metadata", None), "annotations", None)
+        annotations = dict(raw_annotations) if isinstance(raw_annotations, dict) else {}
+        if annotations.get(MOONCAKE_CONFIG_DIGEST_ANNOTATION) == config_digest:
+            return False
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(deployment)
+        body: dict[str, Any] = {
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": {MOONCAKE_CONFIG_DIGEST_ANNOTATION: config_digest}}
+                }
+            }
+        }
+        if resource_version:
+            body["metadata"] = {"resourceVersion": resource_version}
+        self._assert_mutation_authority()
+        self.apps_v1.patch_namespaced_deployment(
+            deploy_name,
+            namespace,
+            body=body,
+            _request_timeout=self._k8s_timeout,
+        )
+        logger.info(
+            "Rolled deployment %s/%s onto re-rendered mooncake.json (%s)",
+            namespace,
+            deploy_name,
+            config_digest[:12],
+        )
         return True
 
     def _create_proxy_service(self, proxy_name: str, namespace: str) -> None:

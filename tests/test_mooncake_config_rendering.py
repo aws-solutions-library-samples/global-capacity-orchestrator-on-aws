@@ -26,6 +26,7 @@ import pytest
 
 from gco.services.inference_monitor import (
     build_kv_transfer_config,
+    mooncake_config_digest,
     render_mooncake_config,
 )
 
@@ -215,6 +216,19 @@ def test_cold_tier_uri_present_only_when_cold_tier_enabled_is_true() -> None:
         _region_services(),
     )
     assert "cold_tier_s3_uri" not in off
+
+
+def test_config_digest_is_stable_and_tracks_every_rendered_field() -> None:
+    """The digest ignores key order but changes when the cold tier joins the file."""
+    hot = render_mooncake_config({"store": {"enabled": True}}, _region_services())
+    reordered = dict(reversed(list(hot.items())))
+    with_cold_tier = render_mooncake_config(
+        {"store": {"enabled": True, "cold_tier_enabled": True}}, _region_services()
+    )
+
+    assert mooncake_config_digest(hot) == mooncake_config_digest(reordered)
+    assert len(mooncake_config_digest(hot)) == 64
+    assert mooncake_config_digest(hot) != mooncake_config_digest(with_cold_tier)
 
 
 def test_unresolved_cold_tier_uri_keeps_hot_store_and_drops_cold_tier() -> None:
