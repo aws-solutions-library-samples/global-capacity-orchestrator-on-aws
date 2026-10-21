@@ -2651,7 +2651,7 @@ Manage multi-region inference endpoints. Endpoints are stored in DynamoDB and re
 See [Inference Guide](INFERENCE.md) for architecture details and workflows.
 
 <details>
-<summary>All <code>gco inference</code> commands (17) — click to expand</summary>
+<summary>All <code>gco inference</code> commands (19) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -2661,6 +2661,8 @@ See [Inference Guide](INFERENCE.md) for architecture details and workflows.
 | [`gco inference scale`](#gco-inference-scale) | Scale a static inference endpoint; autoscaler-owned endpoints are rejected with bounds guidance. |
 | [`gco inference stop`](#gco-inference-stop) | Stop an inference endpoint (scales to zero, keeps configuration). |
 | [`gco inference start`](#gco-inference-start) | Start a stopped inference endpoint. |
+| [`gco inference add-region`](#gco-inference-add-region) | Add a deployed Region to an existing endpoint. |
+| [`gco inference remove-region`](#gco-inference-remove-region) | Remove a Region from an endpoint; it keeps serving from its other Regions. |
 | [`gco inference delete`](#gco-inference-delete) | Delete an inference endpoint from all regions. |
 | [`gco inference update-image`](#gco-inference-update-image) | Update the container image for an endpoint. |
 | [`gco inference invoke`](#gco-inference-invoke) | Send a request to an inference endpoint via the API Gateway. |
@@ -2837,6 +2839,41 @@ gco inference start ENDPOINT_NAME
 
 ```bash
 gco inference start my-llm
+```
+
+#### `gco inference add-region`
+
+Add a Region to an existing inference endpoint. An endpoint keeps the Region list it was deployed with, so a Region added to the deployment later (`gco stacks regions add`, then `gco stacks deploy-all`) does not run it until you add the Region here. The inference monitor in that Region then creates the endpoint from its stored spec. The Region must already run a GCO regional stack; adding a Region the endpoint already targets is a reported no-op. A warning names any deployed Region the endpoint still leaves out, because Global Accelerator can route a request there and get a 404.
+
+```bash
+gco inference add-region ENDPOINT_NAME REGION
+```
+
+**Example:**
+
+```bash
+gco inference add-region my-llm us-west-2
+gco inference status my-llm   # one row per Region once us-west-2 syncs
+```
+
+#### `gco inference remove-region`
+
+Remove a Region from an inference endpoint. The inference monitor in that Region deletes the endpoint's resources there, and the endpoint keeps serving from its other Regions; `add-region` brings it back. Removing the endpoint's last Region is refused — use `stop` or `delete` instead — and removing a Region it does not target is a reported no-op.
+
+```bash
+gco inference remove-region ENDPOINT_NAME REGION [OPTIONS]
+```
+
+**Options:**
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--yes` | `-y` | Skip confirmation |
+
+**Example:**
+
+```bash
+gco inference remove-region my-llm us-west-2 -y
 ```
 
 #### `gco inference delete`
@@ -4990,7 +5027,7 @@ gco stacks capabilities status --all-regions --output json          # one docume
 
 #### `gco stacks regions`
 
-Manage workload deployment Regions in cdk.json (`context.deployment_regions.regional`) through the managed-config engine: every edit is validated against the same rules CDK synth enforces (SDK-known Regions, one AWS partition), written atomically, idempotent, and audited. Config-only — run `gco stacks deploy` afterwards to apply, and note that removing a Region never destroys its deployed stack.
+Manage workload deployment Regions in cdk.json (`context.deployment_regions.regional`) through the managed-config engine: every edit is validated against the same rules CDK synth enforces (SDK-known Regions, one AWS partition), written atomically, idempotent, and audited. Config-only — run `gco stacks deploy-all` afterwards to apply (deploying only the new `<project>-<region>` stack skips its regional API bridge and the monitoring update). Removing a Region never destroys its deployed stack, and once the Region leaves cdk.json `gco stacks destroy` can no longer reach that stack, so retire a deployed Region first (see [Removing a Region](CUSTOMIZATION.md#removing-a-region)). Existing inference endpoints keep their Region lists; add a new Region to one with [`gco inference add-region`](#gco-inference-add-region).
 
 ```bash
 gco stacks regions COMMAND [OPTIONS]

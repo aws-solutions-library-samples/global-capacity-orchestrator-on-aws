@@ -195,7 +195,12 @@ Every step reports what it did, and the command tells you where it stopped.
   first CloudFormation call, so no stack has changed, even though the message
   arrives as `Upgrade failed during the stack cycle`; the checkout and local
   install are on the new release. Run the `npm install --global npm@X` the
-  message names, then `gco upgrade --skip-checkout`.
+  message names, then `gco upgrade --skip-checkout`. If you run `gco` through
+  the dev container, the message names the image rebuild instead: the npm it
+  checks comes from the `gco-dev` image, and although the upgrade rebuilt that
+  image, the run that failed was still using the previous one. Rerun
+  `./scripts/setup-dev-alias.sh` (it reuses the cached layers) and then
+  `gco upgrade --skip-checkout`.
 - **During the stack cycle**: the checkout and local install are on the new
   release. The failing stack is named; `gco stacks status <stack> -r <region>`
   and the CloudFormation console show why. An error that interrupts the cycle

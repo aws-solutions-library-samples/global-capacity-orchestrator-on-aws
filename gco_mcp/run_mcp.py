@@ -178,6 +178,7 @@ from tools.images import (  # noqa: E402, F401
     images_uri,
 )
 from tools.inference import (  # noqa: E402, F401
+    add_inference_region,
     canary_deploy,
     chat_inference,
     configure_mooncake_store,
@@ -191,6 +192,7 @@ from tools.inference import (  # noqa: E402, F401
     mooncake_topology_status,
     populate_kv_cache,
     promote_canary,
+    remove_inference_region,
     rollback_canary,
     scale_inference,
     set_mooncake_topology,

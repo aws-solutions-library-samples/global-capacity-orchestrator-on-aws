@@ -338,10 +338,12 @@ def deploy_all_orchestrated(
 ) -> None:
     """Deploy all stacks in the correct order.
 
-    Deploys in three phases:
+    Deploys in four phases:
     1. Global stacks (gco-global, gco-api-gateway)
     2. Regional stacks (gco-us-east-1, etc.) - can be parallelized
-    3. Monitoring stack (gco-monitoring) - depends on regional stacks
+    3. Regional API bridges (gco-regional-api-us-east-1, etc.) - depend on
+       their regional stacks
+    4. Monitoring stack (gco-monitoring) - depends on regional stacks
 
     Use --parallel to deploy regional stacks concurrently, which can
     significantly reduce total deployment time when deploying to
@@ -1270,8 +1272,9 @@ def regions_add(config: Any, region: Any, config_path: Any, yes: Any) -> None:
     if report.changed:
         formatter.print_success(report.summary())
         formatter.print_info(
-            "Config only — no stacks were deployed. "
-            f"Run 'gco stacks deploy {config.project_name}-{region}' (or 'gco stacks deploy-all') to apply"
+            "Config only — no stacks were deployed. Run 'gco stacks deploy-all' to apply: "
+            f"deploying only '{config.project_name}-{region}' skips the Region's API bridge "
+            "and the monitoring update"
         )
     else:
         formatter.print_info(report.summary())
@@ -1304,7 +1307,9 @@ def regions_remove(config: Any, region: Any, config_path: Any, yes: Any) -> None
     if not yes:
         formatter.print_warning(
             f"This only edits cdk.json — a deployed {config.project_name}-{region} "
-            "stack is NOT destroyed by this change."
+            "stack is NOT destroyed by this change, and once the Region leaves cdk.json "
+            "it is no longer part of the CDK app. Retire a deployed Region first: see "
+            "'Removing a Region' in docs/CUSTOMIZATION.md."
         )
         confirm(f"Remove {region} from deployment_regions.regional in cdk.json?", abort=True)
 
@@ -1317,8 +1322,10 @@ def regions_remove(config: Any, region: Any, config_path: Any, yes: Any) -> None
     if report.changed:
         formatter.print_success(report.summary())
         formatter.print_info(
-            f"Config only — if {config.project_name}-{region} is deployed, destroy it "
-            f"explicitly with 'gco stacks destroy {config.project_name}-{region}'"
+            f"Config only — {config.project_name}-{region} was not destroyed. If it is still "
+            "deployed it is now outside the CDK app, where 'gco stacks destroy' cannot reach "
+            f"it: add the Region back with 'gco stacks regions add {region} -y' and follow "
+            "'Removing a Region' in docs/CUSTOMIZATION.md"
         )
         if not report.new:
             formatter.print_warning(

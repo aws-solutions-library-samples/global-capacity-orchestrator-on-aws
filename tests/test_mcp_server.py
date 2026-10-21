@@ -187,8 +187,9 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 142 read-only or low-risk
-        # tools (139 before the platform add-on status trio
+        # The default registry intentionally contains 144 read-only or low-risk
+        # tools (142 before add_inference_region + remove_inference_region;
+        # 139 before the platform add-on status trio
         # eks_capabilities_status + gitops_status + crossplane_status; 138
         # before deps_scan; 134 before fleet_status; 125 before the cost
         # allocation/k8s/report family added 9). Optional families add 58
@@ -197,8 +198,8 @@ class TestToolRegistration:
         # infrastructure deploy (4), infrastructure destroy (2), local metrics
         # (1), semantic progress (1), local storage sync (1), config
         # management (11), Mission (10), and Swarm (6). The all-flags ceiling
-        # is therefore 200.
-        base_count = 142
+        # is therefore 202.
+        base_count = 144
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -290,6 +291,8 @@ class TestToolRegistration:
             "update_inference_image",
             "stop_inference",
             "start_inference",
+            "add_inference_region",
+            "remove_inference_region",
             "canary_deploy",
             "promote_canary",
             "rollback_canary",
@@ -1101,6 +1104,31 @@ class TestInferenceTools:
             run_mcp.start_inference("my-llm")
             cmd = mock.call_args[0][0]
             assert "start" in cmd
+
+    def test_add_inference_region(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.add_inference_region("my-llm", "us-west-2")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("inference") :][:4] == [
+                "inference",
+                "add-region",
+                "my-llm",
+                "us-west-2",
+            ]
+
+    def test_remove_inference_region(self):
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            run_mcp.remove_inference_region("my-llm", "us-west-2")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("inference") :][:5] == [
+                "inference",
+                "remove-region",
+                "my-llm",
+                "us-west-2",
+                "-y",
+            ]
 
     def test_configure_mooncake_store(self):
         with patch("cli_runner.subprocess.run") as mock:

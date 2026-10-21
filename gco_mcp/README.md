@@ -71,7 +71,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 142 tools by default (up to 200 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 144 tools by default (up to 202 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -709,6 +709,8 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `update_inference_image` | Rolling update to a new container image | low-risk | — |
 | `stop_inference` | Stop an endpoint (scales to zero, keeps config) | low-risk | — |
 | `start_inference` | Start a stopped endpoint | low-risk | — |
+| `add_inference_region` | Add a deployed Region to an existing endpoint | low-risk | — |
+| `remove_inference_region` | Remove a Region from an endpoint; it keeps serving from its other Regions | low-risk | — |
 | `canary_deploy` | A/B test a new image version with weighted traffic | low-risk | — |
 | `promote_canary` | Promote canary to primary (100% traffic) | low-risk | — |
 | `rollback_canary` | Rollback canary (100% traffic to primary) | low-risk | — |

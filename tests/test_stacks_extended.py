@@ -2276,6 +2276,80 @@ class TestInferenceStreamingProxyBuild:
         with pytest.raises(RuntimeError, match="must pin an exact npm version"):
             manager._build_inference_streaming_proxy_lambda()
 
+    def _mismatch_message(self, tmp_path: Path) -> str:
+        manager = self._manager(tmp_path)
+        version = subprocess.CompletedProcess(
+            args=["/test/npm", "--version"], returncode=0, stdout="10.9.4\n", stderr=""
+        )
+        with (
+            patch("cli.stacks.shutil.which", return_value="/test/npm"),
+            patch("cli.stacks.subprocess.run", return_value=version),
+            pytest.raises(RuntimeError) as excinfo,
+        ):
+            manager._build_inference_streaming_proxy_lambda()
+        return str(excinfo.value)
+
+    def test_host_mismatch_names_the_npm_install(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("GCO_DEV_CONTAINER", raising=False)
+        monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+        message = self._mismatch_message(tmp_path)
+        assert message.endswith("Run: npm install --global npm@11.18.0")
+        assert "setup-dev-alias.sh" not in message
+
+    @pytest.mark.parametrize(
+        "environment",
+        [
+            {"GCO_DEV_CONTAINER": "1"},
+            # Images built before the marker carry only the npm prefix.
+            {"NPM_CONFIG_PREFIX": "/root/.npm-global"},
+        ],
+    )
+    def test_dev_container_mismatch_names_the_image_rebuild(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        environment: dict[str, str],
+    ) -> None:
+        monkeypatch.delenv("GCO_DEV_CONTAINER", raising=False)
+        monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+        for key, value in environment.items():
+            monkeypatch.setenv(key, value)
+        message = self._mismatch_message(tmp_path)
+        assert message.startswith(
+            "npm 11.18.0 is required to package the inference streaming Lambda; found 10.9.4."
+        )
+        assert "./scripts/setup-dev-alias.sh" in message
+        assert "npm install --global" not in message
+
+    @pytest.mark.parametrize(
+        "environment",
+        [{"GCO_DEV_CONTAINER": "0"}, {"NPM_CONFIG_PREFIX": "/home/dev/.npm-global"}],
+    )
+    def test_other_environments_are_not_mistaken_for_the_dev_container(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        environment: dict[str, str],
+    ) -> None:
+        from cli.stacks import _running_in_dev_container
+
+        monkeypatch.delenv("GCO_DEV_CONTAINER", raising=False)
+        monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+        for key, value in environment.items():
+            monkeypatch.setenv(key, value)
+        assert _running_in_dev_container() is False
+
+    def test_dev_container_signals_match_dockerfile_dev(self) -> None:
+        """Both detection signals must stay what Dockerfile.dev actually sets."""
+        from cli.stacks import DEV_CONTAINER_ENV_VAR, DEV_CONTAINER_NPM_PREFIX
+
+        dockerfile = (Path(__file__).resolve().parent.parent / "Dockerfile.dev").read_text(
+            encoding="utf-8"
+        )
+        assert f"ENV {DEV_CONTAINER_ENV_VAR}=1\n" in dockerfile
+        assert f"ENV NPM_CONFIG_PREFIX={DEV_CONTAINER_NPM_PREFIX} " in dockerfile
+
 
 class TestGlobalStackMissionsTable:
     """Synthesis-level assertions for the ``MissionsTable`` resource."""

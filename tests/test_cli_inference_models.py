@@ -511,6 +511,215 @@ class TestInferenceStart:
 
 
 # =============================================================================
+# inference add-region / remove-region
+# =============================================================================
+
+
+def _region_client(*regions: str) -> MagicMock:
+    client = MagicMock()
+    client.discover_regional_stacks.return_value = {region: {} for region in regions}
+    return client
+
+
+class TestInferenceAddRegion:
+    def _invoke(self, runner, mgr, client, *extra):
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mgr),
+            patch("cli.aws_client.get_aws_client", return_value=client),
+        ):
+            return runner.invoke(cli, [*extra, "inference", "add-region", "ep", "us-west-2"])
+
+    def test_adds_a_deployed_region(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1"]}
+        mgr.add_region.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        result = self._invoke(runner, mgr, _region_client("us-east-1", "us-west-2"))
+        assert result.exit_code == 0, result.output
+        mgr.add_region.assert_called_once_with("ep", "us-west-2")
+        assert "now targets: us-east-1, us-west-2" in result.output
+        assert "gco inference status ep" in result.output
+        assert "NOT deployed" not in result.output
+
+    def test_warns_about_deployed_regions_still_left_out(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1"]}
+        mgr.add_region.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        client = _region_client("us-east-1", "us-west-2", "eu-west-1")
+        result = self._invoke(runner, mgr, client)
+        assert result.exit_code == 0, result.output
+        assert "NOT deployed to: eu-west-1" in result.output
+        assert "gco inference add-region" in result.output
+
+    def test_machine_output_prints_the_updated_record(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1"]}
+        mgr.add_region.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        result = self._invoke(runner, mgr, _region_client("us-east-1", "us-west-2"), "-o", "json")
+        assert result.exit_code == 0, result.output
+        assert '"us-west-2"' in result.output
+
+    def test_an_already_targeted_region_is_a_no_op(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        client = _region_client("us-east-1", "us-west-2")
+        result = self._invoke(runner, mgr, client)
+        assert result.exit_code == 0, result.output
+        assert "already targets us-west-2" in result.output
+        mgr.add_region.assert_not_called()
+        client.discover_regional_stacks.assert_not_called()
+
+    def test_refuses_a_region_without_a_regional_stack(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1"]}
+        result = self._invoke(runner, mgr, _region_client("us-east-1"))
+        assert result.exit_code == 1
+        assert "No GCO regional stack is deployed in us-west-2" in result.output
+        assert "gco stacks regions add us-west-2 -y" in result.output
+        mgr.add_region.assert_not_called()
+
+    def test_unknown_endpoint(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = None
+        result = self._invoke(runner, mgr, _region_client("us-east-1", "us-west-2"))
+        assert result.exit_code == 1
+        assert "Endpoint 'ep' not found" in result.output
+
+    def test_endpoint_that_disappears_before_the_write(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1"]}
+        mgr.add_region.return_value = None
+        result = self._invoke(runner, mgr, _region_client("us-east-1", "us-west-2"))
+        assert result.exit_code == 1
+        assert "Endpoint 'ep' not found" in result.output
+
+    def test_a_deleted_endpoint_reports_the_lifecycle_error(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1"]}
+        mgr.add_region.side_effect = ValueError("Endpoint 'ep' is deleted")
+        result = self._invoke(runner, mgr, _region_client("us-east-1", "us-west-2"))
+        assert result.exit_code == 1
+        assert "Endpoint 'ep' is deleted" in result.output
+
+    def test_a_failed_region_lookup_is_reported(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1"]}
+        client = MagicMock()
+        client.discover_regional_stacks.side_effect = RuntimeError("throttled")
+        result = self._invoke(runner, mgr, client)
+        assert result.exit_code == 1
+        assert "Failed to add us-west-2 to endpoint 'ep': throttled" in result.output
+
+
+class TestInferenceRemoveRegion:
+    def _invoke(self, runner, mgr, client, *args, input=None):
+        with (
+            patch("cli.inference.get_inference_manager", return_value=mgr),
+            patch("cli.aws_client.get_aws_client", return_value=client),
+        ):
+            return runner.invoke(cli, list(args), input=input)
+
+    def _command(self, *extra):
+        return ["inference", "remove-region", "ep", "us-west-2", *extra]
+
+    def test_removes_a_region_and_warns_about_routing(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        mgr.remove_region.return_value = {"target_regions": ["us-east-1"]}
+        client = _region_client("us-east-1", "us-west-2")
+        result = self._invoke(runner, mgr, client, *self._command("-y"))
+        assert result.exit_code == 0, result.output
+        mgr.remove_region.assert_called_once_with("ep", "us-west-2")
+        assert "now targets: us-east-1" in result.output
+        assert "NOT deployed to: us-west-2" in result.output
+
+    def test_confirmation_can_decline(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        client = _region_client("us-east-1", "us-west-2")
+        result = self._invoke(runner, mgr, client, *self._command(), input="n\n")
+        assert result.exit_code == 1
+        assert "Aborted" in result.output
+        assert "Failed to remove" not in result.output
+        mgr.remove_region.assert_not_called()
+
+    def test_confirmation_can_accept(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        mgr.remove_region.return_value = {"target_regions": ["us-east-1"]}
+        client = _region_client("us-east-1")
+        result = self._invoke(runner, mgr, client, *self._command(), input="y\n")
+        assert result.exit_code == 0, result.output
+        assert "Its resources in us-west-2 are deleted" in result.output
+        mgr.remove_region.assert_called_once_with("ep", "us-west-2")
+
+    def test_machine_output_prints_the_updated_record(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        mgr.remove_region.return_value = {"target_regions": ["us-east-1"], "endpoint_name": "ep"}
+        client = _region_client("us-east-1")
+        result = self._invoke(runner, mgr, client, "-o", "json", *self._command("-y"))
+        assert result.exit_code == 0, result.output
+        assert '"endpoint_name": "ep"' in result.output
+
+    def test_a_region_the_endpoint_does_not_target_is_a_no_op(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1"]}
+        result = self._invoke(runner, mgr, _region_client("us-east-1"), *self._command("-y"))
+        assert result.exit_code == 0, result.output
+        assert "does not target us-west-2" in result.output
+        mgr.remove_region.assert_not_called()
+
+    def test_refuses_to_remove_the_last_region(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-west-2"]}
+        result = self._invoke(runner, mgr, _region_client("us-west-2"), *self._command("-y"))
+        assert result.exit_code == 1
+        assert "only Region" in result.output
+        assert "gco inference stop ep" in result.output
+        mgr.remove_region.assert_not_called()
+
+    def test_unknown_endpoint(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = None
+        result = self._invoke(runner, mgr, _region_client("us-east-1"), *self._command("-y"))
+        assert result.exit_code == 1
+        assert "Endpoint 'ep' not found" in result.output
+
+    def test_endpoint_that_disappears_before_the_write(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        mgr.remove_region.return_value = None
+        result = self._invoke(runner, mgr, _region_client("us-east-1"), *self._command("-y"))
+        assert result.exit_code == 1
+        assert "Endpoint 'ep' not found" in result.output
+
+    def test_a_deleted_endpoint_reports_the_lifecycle_error(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        mgr.remove_region.side_effect = ValueError("Endpoint 'ep' is deleted")
+        result = self._invoke(runner, mgr, _region_client("us-east-1"), *self._command("-y"))
+        assert result.exit_code == 1
+        assert "Endpoint 'ep' is deleted" in result.output
+
+    def test_an_unexpected_failure_is_reported(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.side_effect = RuntimeError("table unavailable")
+        result = self._invoke(runner, mgr, _region_client("us-east-1"), *self._command("-y"))
+        assert result.exit_code == 1
+        assert "Failed to remove us-west-2 from endpoint 'ep': table unavailable" in result.output
+
+    def test_a_failed_region_lookup_after_removal_only_warns(self, runner):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = {"target_regions": ["us-east-1", "us-west-2"]}
+        mgr.remove_region.return_value = {"target_regions": ["us-east-1"]}
+        client = MagicMock()
+        client.discover_regional_stacks.side_effect = RuntimeError("throttled")
+        result = self._invoke(runner, mgr, client, *self._command("-y"))
+        assert result.exit_code == 0, result.output
+        assert "Could not list the deployed Regions (throttled)" in result.output
+
+
+# =============================================================================
 # inference delete
 # =============================================================================
 

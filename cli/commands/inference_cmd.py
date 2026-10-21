@@ -657,6 +657,163 @@ def inference_start(config: Any, endpoint_name: Any) -> None:
         sys.exit(1)
 
 
+def _warn_missing_regions(
+    formatter: Any,
+    endpoint_name: str,
+    target_regions: list[str],
+    deployed_regions: set[str],
+) -> None:
+    """Warn when deployed Regions are left out of an endpoint's Region list.
+
+    Global Accelerator routes each request to the closest healthy Region, so a
+    request for this endpoint can land in a Region that does not serve it and
+    get a 404 there.
+    """
+    missing = sorted(deployed_regions - set(target_regions))
+    if missing:
+        formatter.print_warning(
+            f"Endpoint '{endpoint_name}' is NOT deployed to: {', '.join(missing)}. "
+            "Global Accelerator may route users to those regions where the endpoint "
+            "won't exist. Add them with 'gco inference add-region'."
+        )
+
+
+@inference.command("add-region")
+@click.argument("endpoint_name")
+@click.argument("region")
+@pass_config
+def inference_add_region(config: Any, endpoint_name: Any, region: Any) -> None:
+    """Add a Region to an existing inference endpoint.
+
+    An endpoint keeps the Region list it was deployed with, so a Region added to
+    the deployment later does not run it. This command adds REGION to that list;
+    the inference monitor in REGION then creates the endpoint from its stored
+    spec on its next pass. REGION must already run a GCO regional stack.
+
+    Examples:
+        gco inference add-region my-llm us-west-2
+    """
+    from ..aws_client import get_aws_client
+    from ..inference import get_inference_manager
+
+    formatter = get_output_formatter(config)
+
+    try:
+        manager = get_inference_manager(config)
+        endpoint = manager.get_endpoint(endpoint_name)
+        if endpoint is None:
+            formatter.print_error(f"Endpoint '{endpoint_name}' not found")
+            sys.exit(1)
+        current = list(endpoint.get("target_regions") or [])
+        if region in current:
+            formatter.print_info(
+                f"Endpoint '{endpoint_name}' already targets {region}: {', '.join(current)}"
+            )
+            return
+        deployed = set(get_aws_client(config).discover_regional_stacks())
+        if region not in deployed:
+            formatter.print_error(
+                f"No GCO regional stack is deployed in {region}. Deploy it first with "
+                f"'gco stacks regions add {region} -y' and 'gco stacks deploy-all -y'."
+            )
+            sys.exit(1)
+        result = manager.add_region(endpoint_name, region)
+        if result is None:
+            formatter.print_error(f"Endpoint '{endpoint_name}' not found")
+            sys.exit(1)
+        targets = list(result.get("target_regions") or [])
+        formatter.print_success(f"Endpoint '{endpoint_name}' now targets: {', '.join(targets)}")
+        formatter.print_info(
+            f"The inference monitor in {region} creates the endpoint's resources. "
+            f"Use 'gco inference status {endpoint_name}' to track progress."
+        )
+        _warn_missing_regions(formatter, endpoint_name, targets, deployed)
+        if config.output_format != "table":
+            formatter.print(result)
+    except ValueError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        formatter.print_error(f"Failed to add {region} to endpoint '{endpoint_name}': {e}")
+        sys.exit(1)
+
+
+@inference.command("remove-region")
+@click.argument("endpoint_name")
+@click.argument("region")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def inference_remove_region(config: Any, endpoint_name: Any, region: Any, yes: Any) -> None:
+    """Remove a Region from an inference endpoint.
+
+    The inference monitor in REGION deletes the endpoint's resources there, and
+    the endpoint keeps serving from its other Regions. Removing the endpoint's
+    last Region is refused; use 'gco inference stop' or 'gco inference delete'
+    instead.
+
+    Examples:
+        gco inference remove-region my-llm us-west-2 -y
+    """
+    from ..aws_client import get_aws_client
+    from ..inference import get_inference_manager
+
+    formatter = get_output_formatter(config)
+
+    try:
+        manager = get_inference_manager(config)
+        endpoint = manager.get_endpoint(endpoint_name)
+        if endpoint is None:
+            formatter.print_error(f"Endpoint '{endpoint_name}' not found")
+            sys.exit(1)
+        current = list(endpoint.get("target_regions") or [])
+        if region not in current:
+            formatter.print_info(
+                f"Endpoint '{endpoint_name}' does not target {region}: {', '.join(current)}"
+            )
+            return
+        if current == [region]:
+            formatter.print_error(
+                f"{region} is the only Region endpoint '{endpoint_name}' runs in. Use "
+                f"'gco inference stop {endpoint_name}' or 'gco inference delete "
+                f"{endpoint_name}' instead."
+            )
+            sys.exit(1)
+        if not yes:
+            confirm(
+                f"Remove {region} from endpoint '{endpoint_name}'? Its resources in "
+                f"{region} are deleted.",
+                abort=True,
+            )
+        result = manager.remove_region(endpoint_name, region)
+        if result is None:
+            formatter.print_error(f"Endpoint '{endpoint_name}' not found")
+            sys.exit(1)
+        targets = list(result.get("target_regions") or [])
+        formatter.print_success(f"Endpoint '{endpoint_name}' now targets: {', '.join(targets)}")
+        formatter.print_info(
+            f"The inference monitor in {region} deletes the endpoint's resources there."
+        )
+        try:
+            deployed = set(get_aws_client(config).discover_regional_stacks())
+        except Exception as lookup_error:
+            formatter.print_warning(
+                f"Could not list the deployed Regions ({lookup_error}); requests that "
+                f"Global Accelerator sends to {region} for this endpoint get a 404."
+            )
+        else:
+            _warn_missing_regions(formatter, endpoint_name, targets, deployed)
+        if config.output_format != "table":
+            formatter.print(result)
+    except click.Abort:
+        raise
+    except ValueError as e:
+        formatter.print_error(str(e))
+        sys.exit(1)
+    except Exception as e:
+        formatter.print_error(f"Failed to remove {region} from endpoint '{endpoint_name}': {e}")
+        sys.exit(1)
+
+
 @inference.command("delete")
 @click.argument("endpoint_name")
 @click.option(

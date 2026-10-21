@@ -583,7 +583,7 @@ if is_enabled(FLAG_INFRASTRUCTURE_DESTROY):
 # These tools edit cdk.json on the MCP host through the managed-config
 # engine (cli/managed_config.py): validated against the same rules CDK
 # synth enforces, atomic, idempotent, and audited. They never deploy —
-# an explicit deploy_stack / deploy_all_stacks call (separately gated by
+# an explicit deploy_stack / deploy_all call (separately gated by
 # GCO_ENABLE_INFRASTRUCTURE_DEPLOY) is still required for a topology
 # change to reach AWS. Installed (uvx/pip) servers resolve a read-only
 # packaged cdk.json; the engine refuses those with guidance rather than
@@ -615,7 +615,10 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
         Config-only and idempotent: the Region must be SDK-known and share
         the AWS partition of the already-configured Regions; re-adding a
         present Region is a reported no-op. No stack is deployed — follow
-        up with deploy_stack / deploy_all_stacks to apply the topology.
+        up with deploy_all to apply the topology (a deploy_stack of
+        only the new regional stack skips its API bridge and the monitoring
+        update). Existing inference endpoints keep their Region lists; add
+        the new Region to one with add_inference_region.
 
         Args:
             region: AWS Region name to add (e.g. us-west-2).
@@ -634,8 +637,10 @@ if is_enabled(FLAG_CONFIG_MANAGEMENT):
         Region is allowed and leaves a control-plane-only topology (global,
         API Gateway, and monitoring stacks with no workload cluster);
         removing an absent Region is a reported no-op.
-        A deployed stack for the removed Region is NOT destroyed — that
-        requires an explicit destroy_stack call (separately gated).
+        A deployed stack for the removed Region is NOT destroyed, and once
+        the Region leaves cdk.json it is outside the CDK app, where
+        destroy_stack cannot reach it. Retire a deployed Region first with the
+        procedure in docs/CUSTOMIZATION.md (Removing a Region).
 
         Args:
             region: AWS Region name to remove (e.g. us-west-2).

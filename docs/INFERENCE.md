@@ -781,6 +781,18 @@ gco inference start my-llm
 
 Starting a stopped endpoint preserves its lifecycle identity. Deletion is terminal for that lifecycle: wait for the record to be purged, then deploy the same name again to create a fresh lifecycle. A deleted record cannot be restarted in place.
 
+### Add or Remove a Region
+
+```bash
+# Serve an existing endpoint from a Region added to the deployment after it was deployed
+gco inference add-region my-llm us-west-2
+
+# Stop serving it from one Region; the other Regions keep serving
+gco inference remove-region my-llm us-west-2 -y
+```
+
+See [Adding or Removing a Region on an Endpoint](#adding-or-removing-a-region-on-an-endpoint).
+
 ### Delete
 
 ```bash
@@ -1072,6 +1084,18 @@ gco inference deploy my-llm \
 ```
 
 > **Routing caveat:** In `aws`, Global Accelerator may route users to a Region where a subset deployment does not exist; the CLI warns about this. Outside `aws`, callers must select a deployed regional endpoint. For production inference, deploy to every configured Region or ensure clients use only Regions where the endpoint exists.
+
+### Adding or Removing a Region on an Endpoint
+
+An endpoint keeps the Region list it was deployed with. `gco inference deploy` without `-r` targets the Regions deployed at that moment, so a Region you add to the deployment later ([Adding Regions](CUSTOMIZATION.md#adding-regions)) does not run the endpoints you already have. Add the Region to an endpoint, or take one away, without redeploying it:
+
+```bash
+gco inference add-region my-llm us-west-2        # the us-west-2 monitor creates the endpoint from its stored spec
+gco inference status my-llm                      # one row per Region once us-west-2 syncs
+gco inference remove-region my-llm us-west-2 -y  # the us-west-2 monitor deletes it there; other Regions keep serving
+```
+
+`add-region` requires a deployed GCO regional stack in the Region. Both commands warn when the endpoint still leaves out a deployed Region, for the routing reason above. `remove-region` refuses to remove an endpoint's last Region; use `stop` or `delete` for that. `remove-region` keeps the Region in the endpoint's cleanup history: deleting an endpoint waits until every Region it ever ran in confirms its resources are gone, so delete the endpoints that ran in a Region before you retire that Region ([Removing a Region](CUSTOMIZATION.md#removing-a-region)).
 
 ### Authenticated Global Routing
 

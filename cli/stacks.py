@@ -1212,6 +1212,42 @@ def _detect_container_runtime() -> str | None:
     return _container_runtime_cache
 
 
+#: Environment marker ``Dockerfile.dev`` sets in the ``gco-dev`` image that
+#: ``scripts/setup-dev-alias.sh`` builds and its ``gco`` shell function runs.
+DEV_CONTAINER_ENV_VAR = "GCO_DEV_CONTAINER"
+
+#: Runtime npm prefix ``Dockerfile.dev`` has set since v5.4.0. It identifies a
+#: ``gco-dev`` image built before :data:`DEV_CONTAINER_ENV_VAR` existed, which
+#: is exactly the stale image a toolchain-pin error is most likely to come from.
+DEV_CONTAINER_NPM_PREFIX = "/root/.npm-global"
+
+
+def _running_in_dev_container() -> bool:
+    """Return whether this CLI runs inside the ``gco-dev`` container.
+
+    The shell function from ``scripts/setup-dev-alias.sh`` runs the CLI in the
+    ``gco-dev`` image, so the toolchain a pin check sees (npm, the CDK CLI,
+    kubectl) is the image's rather than the host's. Installing a tool on the
+    host never changes it; rebuilding the image does.
+    """
+    if os.environ.get(DEV_CONTAINER_ENV_VAR) == "1":
+        return True
+    return os.environ.get("NPM_CONFIG_PREFIX") == DEV_CONTAINER_NPM_PREFIX
+
+
+def _npm_pin_remedy(required_npm: str) -> str:
+    """Return how to get the npm the inference streaming Lambda pins."""
+    if _running_in_dev_container():
+        return (
+            "This command runs in the gco-dev container, whose npm comes from the image, "
+            "so installing npm on the host does not change it. The image was built from a "
+            "different release than this checkout: rebuild it by running "
+            "./scripts/setup-dev-alias.sh from the repository root on the host, then rerun "
+            "the command."
+        )
+    return f"Run: npm install --global npm@{required_npm}"
+
+
 def prepare_cdk_assets(project_root: str | Path) -> None:
     """Prepare every ignored Lambda asset consumed by the CDK application.
 
@@ -1802,7 +1838,8 @@ class StackManager:
             if npm is None:
                 raise RuntimeError(
                     f"npm {required_npm} is required to package the inference streaming Lambda; "
-                    "install the Node.js version pinned in .nvmrc"
+                    "install the Node.js version pinned in .nvmrc, or run gco from the dev "
+                    "container (see QUICKSTART.md), which ships the pinned npm"
                 )
             try:
                 version_result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - resolved executable and project-owned cwd
@@ -1820,7 +1857,7 @@ class StackManager:
                 found = actual_npm or "unavailable"
                 raise RuntimeError(
                     f"npm {required_npm} is required to package the inference streaming Lambda; "
-                    f"found {found}. Run: npm install --global npm@{required_npm}"
+                    f"found {found}. {_npm_pin_remedy(required_npm)}"
                 )
 
             for name in package_files:
