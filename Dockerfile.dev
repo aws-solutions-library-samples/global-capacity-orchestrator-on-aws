@@ -286,6 +286,14 @@ ENV NPM_CONFIG_PREFIX=/root/.npm-global \
     PATH="/root/.npm-global/bin:${PATH}"
 RUN mkdir -p /root/.npm-global/bin /root/.local/share/opencode
 
+# Marks the CLI as running inside this image. Toolchain pin errors (the npm
+# the inference streaming Lambda packages with, for example) then tell the
+# user to rebuild the image with scripts/setup-dev-alias.sh instead of
+# installing the tool on the host, which never reaches the container. Images
+# built before this marker are recognized by the NPM_CONFIG_PREFIX above;
+# cli/stacks.py reads both, and tests/test_stacks_extended.py pins them here.
+ENV GCO_DEV_CONTAINER=1
+
 # Set working directory
 WORKDIR /workspace
 

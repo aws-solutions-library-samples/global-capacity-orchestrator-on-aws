@@ -7,6 +7,7 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
 - [Deployment Regions](#deployment-regions)
   - [Understanding Stack Regions](#understanding-stack-regions)
   - [Configuring Deployment Regions](#configuring-deployment-regions)
+  - [Scaling to zero workload Regions](#scaling-to-zero-workload-regions)
   - [Environment Variables](#environment-variables)
 - [Running Multiple Deployments in One Account and Region](#running-multiple-deployments-in-one-account-and-region)
   - [What project_name scopes](#what-project_name-scopes)
@@ -16,6 +17,8 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [1. Update CDK Configuration](#1-update-cdk-configuration)
   - [2. Deploy to New Region](#2-deploy-to-new-region)
   - [3. Verify Regional Routing](#3-verify-regional-routing)
+  - [4. Run Existing Inference Endpoints in the New Region](#4-run-existing-inference-endpoints-in-the-new-region)
+- [Removing a Region](#removing-a-region)
 - [EKS Cluster Configuration](#eks-cluster-configuration)
   - [Endpoint Access Modes](#endpoint-access-modes)
   - [Configuring Endpoint Access](#configuring-endpoint-access)
@@ -345,7 +348,7 @@ job).
 
 ### 1. Update CDK Configuration
 
-Edit `cdk.json` to add new regional deployments:
+Run `gco stacks regions add <region> -y`, which validates the Region and edits `cdk.json` for you, or edit `cdk.json` directly to add new regional deployments:
 
 ```json
 {
@@ -373,6 +376,8 @@ CDK bootstrap runs automatically during deploy if the new region hasn't been boo
 gco stacks deploy-all -y
 ```
 
+`deploy-all` creates the Region's regional stack and its regional API bridge, and updates the global stack (the Global Accelerator endpoint group), the API Gateway stack and the monitoring stack. Deploying only `gco-<region>` skips the bridge and the monitoring update. Expect 30–45 minutes for the EKS cluster, then 10–30 minutes while its add-ons converge (`gco stacks addons status -r <region>`). Check the new Region's EC2 vCPU quotas for the instance families you plan to run there before you deploy.
+
 If you prefer to bootstrap manually first:
 
 ```bash
@@ -392,6 +397,36 @@ aws globalaccelerator list-endpoint-groups \
 ```
 
 In every other partition, no accelerator resources or outputs are created. Verify the new `<project>-regional-api-<region>` stack and its `RegionalApiEndpoint` output instead; that IAM-authenticated bridge is the supported workload ingress.
+
+`gco capacity traffic-dial show` also lists every Region's endpoint group with its endpoint health, so a healthy new Region shows `1/1 healthy`.
+
+### 4. Run Existing Inference Endpoints in the New Region
+
+An inference endpoint keeps the Region list it was deployed with, so the new Region does not run the endpoints you already have. Add it to each endpoint that should serve from there:
+
+```bash
+gco inference add-region my-llm ap-southeast-1
+```
+
+Endpoints you deploy from now on without `-r` target every deployed Region, the new one included. See [Adding or Removing a Region on an Endpoint](INFERENCE.md#adding-or-removing-a-region-on-an-endpoint).
+
+## Removing a Region
+
+A workload Region cannot yet be retired on its own while the others keep running. The monitoring stack and the Region's API bridge import values that the regional stack exports, so CloudFormation refuses to delete `<project>-<region>` while they still reference it, and once the Region leaves `cdk.json` the stack is no longer part of the CDK app, where `gco stacks destroy` cannot reach it. Inference endpoints add a second constraint: an endpoint keeps every Region it ran in as cleanup history, and deleting it waits until each of those Regions confirms its resources are gone, so an endpoint that ran in a Region that no longer exists can never finish deleting.
+
+Retire a Region through the [scale-to-zero](#scaling-to-zero-workload-regions) teardown, which rebuilds the Regions you keep:
+
+1. Delete every inference endpoint that has run in the Region you are retiring, and wait until `gco inference list` no longer shows it.
+2. Back up the data that lives in the regional stacks (EFS and FSx file systems, Valkey, Aurora, the regional-shared buckets), as described in [Scaling to zero workload Regions](#scaling-to-zero-workload-regions). The teardown removes it in every Region, not only the retired one.
+3. Tear down the workload tier, remove the Region, and rebuild the rest:
+
+```bash
+gco stacks destroy-all --keep-control-plane -y
+gco stacks regions remove us-west-2 -y
+gco stacks deploy-all -y   # recreates the remaining Regions; restore their data and endpoints afterwards
+```
+
+If you already removed a deployed Region from `cdk.json`, add it back first (`gco stacks regions add <region> -y`) so the teardown can find its stacks.
 
 ## EKS Cluster Configuration
 

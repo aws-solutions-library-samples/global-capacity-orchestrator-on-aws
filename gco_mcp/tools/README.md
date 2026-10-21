@@ -13,8 +13,8 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 142 tools; with every flag enabled the
-ceiling is 200. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 144 tools; with every flag enabled the
+ceiling is 202. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -31,7 +31,7 @@ flag-to-tool mapping.
 | `examples.py` | 1 | `find_examples` (example-manifest discovery) |
 | `gitops.py` | 1 | `gitops_status` (the self-managed Argo CD, read-only) |
 | `images.py` | 20 | `images_list`, `images_tags`, `images_describe`, `images_uri`, `images_replication_get`, `images_replication_status`, `images_orphans`, `images_mirror_plan`, `images_mirror_status`, `images_init`, `images_lifecycle_get`, `images_lifecycle_set`, `images_replication_sync`, `images_build` (gated), `images_push` (gated), `images_mirror` (gated), `images_delete_tag` (gated), `images_delete_repo` (gated), `images_cleanup` (gated), `images_prune` (gated) |
-| `inference.py` | 20 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `configure_mooncake_store`, `mooncake_topology_status`, `populate_kv_cache` |
+| `inference.py` | 22 | `deploy_inference`, `list_inference_endpoints`, `inference_status`, `scale_inference`, `update_inference_image`, `stop_inference`, `start_inference`, `add_inference_region`, `remove_inference_region`, `delete_inference` (gated), `canary_deploy`, `promote_canary`, `rollback_canary`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models`, `deploy_disaggregated_inference`, `set_mooncake_topology`, `configure_mooncake_store`, `mooncake_topology_status`, `populate_kv_cache` |
 | `jobs.py` | 15 | `list_jobs`, `submit_job_sqs`, `submit_job_api`, `get_job`, `get_job_logs`, `get_job_events`, `get_job_pods`, `get_pod_logs`, `get_job_metrics`, `retry_job`, `delete_job` (gated), `cluster_health`, `queue_status`, `get_job_validation_policy`, `check_job_policy` |
 | `metrics.py` | 4 | `metrics_cloudwatch_get`, `metrics_from_job_logs`, `metrics_from_shared_storage_file` (default-on); `metrics_from_local_file` (gated by `GCO_ENABLE_LOCAL_METRICS`, default-off) — all `safe` |
 | `mission.py` | 10 | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`, `mission_memory_search` — all gated by `GCO_ENABLE_MISSION` |
@@ -185,6 +185,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
+| `add_inference_region` | Add a Region to an existing inference endpoint. |
 | `canary_deploy` | Start a canary deployment (A/B test a new image version). |
 | `chat_inference` | Send a buffered multi-turn chat conversation to an inference endpoint. |
 | `configure_mooncake_store` | Update a Mooncake endpoint's shared KV-cache store configuration. |
@@ -199,6 +200,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `mooncake_topology_status` | Show a disaggregated endpoint's per-role topology status. |
 | `populate_kv_cache` | `gco inference populate-kv` — upload data into an endpoint's KV-cache cold tier. |
 | `promote_canary` | Promote canary to primary (100% traffic to new version). |
+| `remove_inference_region` | Remove a Region from an inference endpoint. |
 | `rollback_canary` | Rollback canary (remove canary, 100% traffic to primary). |
 | `scale_inference` | Scale an inference endpoint. |
 | `set_mooncake_topology` | Resize a disaggregated endpoint's prefill/decode topology. |

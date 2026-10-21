@@ -11,6 +11,7 @@ Common issues and their solutions.
   - [Stack Creation Fails](#stack-creation-fails)
   - [Deploy Fails on Image Mirror or linux/amd64 Asset Build (Apple Silicon)](#deploy-fails-on-image-mirror-or-linuxamd64-asset-build-apple-silicon)
   - [Deploy Refuses Owner-Only Sources (Restrictive umask)](#deploy-refuses-owner-only-sources-restrictive-umask)
+  - [Deploy Asks for a Different npm (Inference Streaming Lambda)](#deploy-asks-for-a-different-npm-inference-streaming-lambda)
   - [Stack Stuck in REVIEW_IN_PROGRESS](#stack-stuck-in-review_in_progress)
   - [Stack Stuck in DELETE_FAILED](#stack-stuck-in-delete_failed)
   - [Lambda or State-Machine Custom Resource Timeout](#lambda-or-state-machine-custom-resource-timeout)
@@ -213,6 +214,25 @@ The umask of the shell you deploy from does not matter. CDK copies every asset i
 A deploy made by an older CLI may already have uploaded owner-only code; its functions fail with `Permission denied` or `Unable to import module`. Because the asset hash ignores modes, the next deploy reuses that object. Find the asset's `objectKey` in `cdk.out/<stack>.assets.json`, delete that object from the Region's `cdk-*-assets-*` bootstrap bucket, and deploy again so CDK uploads a readable copy.
 
 A container image an older CLI pushed from owner-only files, such as the TLS certificate manager's or the Helm installer's, is reused the same way. Find its `imageTag` under `dockerImages` in the same file, delete that tag from the Region's `cdk-*-container-assets-*` repository, and remove the local image `cdkasset-<imageTag>` (for example `docker image rm cdkasset-<imageTag>`, or the same with `finch` or `podman`) before you deploy again. Deleting only the repository tag is not enough: CDK pushes a local `cdkasset-` image that is already there instead of building a new one.
+
+### Deploy Asks for a Different npm (Inference Streaming Lambda)
+
+**Symptom**: `gco stacks deploy`, `deploy-all`, `synth` or `gco upgrade` stops with `npm X is required to package the inference streaming Lambda; found Y`, typically right after a `git pull` or a release upgrade.
+
+**Cause**: The streaming Lambda's `package.json` pins an exact npm in its `packageManager` field, and the CLI packages the Lambda only with that version. Packaging runs before the first CloudFormation call, so no stack has changed. When `gco` is the dev-container shell function from `scripts/setup-dev-alias.sh`, the npm it checks belongs to the `gco-dev` image, not to your host: `git pull` updates the checkout but not the image, and installing npm on the host never reaches the container. The message tells you which case you are in.
+
+**Solution**: In the dev container, rebuild the image from the repository root on the host, then rerun the command:
+
+```bash
+./scripts/setup-dev-alias.sh            # rebuilds gco-dev from the checkout's Dockerfile.dev
+docker run --rm gco-dev npm --version   # prints the pinned version
+```
+
+With Finch, run the same check with `finch` in place of `docker`. Podman stores the image as `localhost/gco-dev`, so run `podman run --rm localhost/gco-dev npm --version`.
+
+The rebuild also brings the Python dependencies, CDK CLI and kubectl up to what the checkout expects. If the image reports the right version but the error persists, an npm installed into the `gco-dev-tools` volume, which comes first on the container's `PATH`, is shadowing it. `docker volume rm gco-dev-tools` (or the same with `finch` or `podman`) clears it, and `gco autopilot` reinstalls its engines on next use.
+
+On a host install, install the pinned version with `npm install --global npm@X`.
 
 ### Stack Stuck in REVIEW_IN_PROGRESS
 

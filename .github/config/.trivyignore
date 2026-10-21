@@ -310,3 +310,99 @@ CVE-2026-78669 exp:2026-12-14
 # pass.
 # Advisory: https://pkg.go.dev/vuln/GO-2026-6629
 CVE-2026-56851 exp:2026-12-14
+
+# -----------------------------------------------------------------------------
+# GHSA-6q48-6c7w-9gw2: certifi before 2026.10.18 bundles emSign ECC Root CA -
+# G3, and eight eMudhra intermediates that chain to it have compromised keys
+# (the CA has revoked them). certifi 2026.10.19 drops that root. Reported by
+# security:trivy:container-scan against the dev image and both Lambda images
+# built on public.ecr.aws/lambda/python:3.14 (helm-installer,
+# tls-certificate-manager), as certifi 2026.6.17 under the pathless
+# "Python (python-pkg)" target.
+#
+# Provenance, established 2026-10-21: the same mechanism as the two pip
+# vendor.txt entries above. pip 26.2.1 vendors certifi and records it in
+# pip/_vendor/vendor.txt as `certifi==2026.6.17`. Reproduced on the
+# unmodified bases: python:3.14.8-slim (rebuilt 2026-10-21) and
+# public.ecr.aws/lambda/python:3.14 (rebuilt 2026-10-20) both ship pip
+# 26.2.1, which is also the pip their ensurepip bundles. Our own certifi is
+# 2026.10.19 (requirements-lock.txt since #470), and the dev image's
+# certifi-2026.10.19.dist-info scans clean in the same report; the Lambda
+# images install no certifi of their own.
+#
+# Not introduced by any change of ours: the advisory was published
+# 2026-10-20T19:35Z, and the Security run on main at 879bec75 (started
+# 2026-10-20T21:56Z) still scanned all three images clean.
+#
+# Not clearable by a pin we hold: pip 26.2.2 (2026-10-20) re-vendors certifi
+# 2026.10.19 and changes nothing else in vendor.txt, but neither base ships it
+# yet, and the images take pip from their base rather than pinning one.
+#
+# Low runtime risk: pip trusts the vendored bundle alongside the system store
+# while it talks to a package index, which the Lambda images do only at build
+# time and the dev image only while a contributor installs packages.
+# Exploiting it needs an on-path position on that connection plus one of the
+# revoked intermediate keys.
+#
+# Clears when both bases ship pip >= 26.2.2: confirm with `trivy image` on
+# each base alone, then drop the id. Upgrading pip inside the three images
+# would clear it sooner, at the cost of a pin no scan tracks.
+# Advisory: https://github.com/advisories/GHSA-6q48-6c7w-9gw2
+GHSA-6q48-6c7w-9gw2 exp:2026-11-21
+
+# -----------------------------------------------------------------------------
+# CVE-2026-111943 (GO-2026-6809): Go 1.26.10 and 1.27.3 add a denylist to
+# crypto/x509, so Certificate.Verify rejects a chain through any of eight
+# revoked eMudhra intermediates (the keys behind the certifi entry above).
+# Trivy reports it as `stdlib` under each Go binary's gobinary target in
+# security:trivy:container-scan:
+#   * Dockerfile.dev: the Docker CLI 29.9.1 (go1.26.9), kubectl v1.37.1
+#     (go1.26.8) and the docker-buildx plugin v0.38.0 (go1.26.8)
+#   * lambda/helm-installer: helm v4.3.1 (go1.27.2), kubectl v1.37.1 and the
+#     base image's aws-lambda-rie (go1.26.9)
+#   * lambda/tls-certificate-manager: the base image's aws-lambda-rie
+# The kubectl and helm release artifacts, matched to the sha256 anchors in
+# lambda/helm-installer/Dockerfile, carry the toolchains above, and so does
+# the aws-lambda-rie in public.ecr.aws/lambda/python:3.14 as rebuilt on
+# 2026-10-20. That rebuild moved the RIE from go1.26.7 to go1.26.9, which the
+# 2026-10-08 entry above names as fixed; kubectl and buildx still hold that
+# entry open.
+#
+# Not introduced by any change of ours: the Go advisory was published
+# 2026-10-21T00:27Z, and the Security run on main at 879bec75 (started
+# 2026-10-20T21:56Z) still scanned all three images clean.
+#
+# Not clearable by a pin bump, re-checked 2026-10-21: kubectl v1.37.1 is still
+# the newest Kubernetes 1.37 patch, helm v4.3.1 (2026-10-15) is the newest
+# Helm 4 release, and the newest upstream RIE, v1.37 (2026-08-31), predates
+# the fix. Docker 29.9.2 and Buildx v0.38.1 (both 2026-10-20) are built with
+# go1.26.10, but this id is suppressed in every image at once, so moving those
+# two pins alone clears nothing; take them with the bump that clears the rest.
+#
+# Low runtime risk: the denylist matters only when a binary verifies a server
+# chain against a trust store that still holds the root those intermediates
+# chain to, and an on-path attacker holds one of the revoked keys.
+#   * kubectl, and helm's Kubernetes calls, verify the EKS API against the
+#     cluster CA in the kubeconfig's certificate-authority-data, not against
+#     the system store.
+#   * helm's chart downloads in the helm-installer Lambda do use the system
+#     store, and Amazon Linux 2023's ca-certificates
+#     (2025.2.76-1.0.amzn2023.0.3, the newest in its repository on
+#     2026-10-21) still carries emSign ECC Root CA - G3. That is the one
+#     exposed path, from private subnets through the VPC's NAT gateways.
+#   * python:3.14.8-slim as rebuilt on 2026-10-21 ships Debian's
+#     ca-certificates 20250419+deb13u1, which no longer carries that root,
+#     so the dev image's Docker CLI, buildx and kubectl cannot build such a
+#     chain. The dev image is a contributor/CI tool that is never deployed
+#     to a cluster.
+#   * aws-lambda-rie runs only when AWS_LAMBDA_RUNTIME_API is unset, which
+#     means local emulation; deployed functions never start it.
+#
+# Clears when kubectl, helm and the Lambda base's aws-lambda-rie are built
+# with Go >= 1.26.10 (or >= 1.27.3) and DOCKER_VERSION and BUILDX_VERSION in
+# Dockerfile.dev move to releases built with a fixed Go (29.9.2 and v0.38.1
+# already are). Confirm each binary's toolchain (or run `trivy image`), then
+# drop the id.
+# Advisories: https://pkg.go.dev/vuln/GO-2026-6809
+#             https://go.dev/issue/82345
+CVE-2026-111943 exp:2026-11-21

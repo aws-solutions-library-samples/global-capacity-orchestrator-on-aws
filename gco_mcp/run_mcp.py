@@ -178,6 +178,7 @@ from tools.images import (  # noqa: E402, F401
     images_uri,
 )
 from tools.inference import (  # noqa: E402, F401
+    add_inference_region,
     canary_deploy,
     chat_inference,
     configure_mooncake_store,
@@ -191,6 +192,7 @@ from tools.inference import (  # noqa: E402, F401
     mooncake_topology_status,
     populate_kv_cache,
     promote_canary,
+    remove_inference_region,
     rollback_canary,
     scale_inference,
     set_mooncake_topology,
@@ -617,6 +619,7 @@ _PUBLIC_EXPORTS = [
     "_PROJECT_VERSION",
     "_sanitize_arguments",
     "add_deployment_region",
+    "add_inference_region",
     "addons_install",
     "addons_status",
     "ai_recommend",
@@ -777,6 +780,7 @@ _PUBLIC_EXPORTS = [
     "recommend_capacity",
     "recommend_region",
     "remove_deployment_region",
+    "remove_inference_region",
     "reservation_check",
     "reserve_capacity",
     "retry_job",

@@ -193,6 +193,39 @@ def start_inference(name: str) -> str:
 
 @mcp.tool(tags={"low-risk", "inference"})
 @audit_logged
+def add_inference_region(name: str, region: str) -> str:
+    """Add a Region to an existing inference endpoint.
+
+    An endpoint keeps the Region list it was deployed with, so a Region added
+    to the deployment later does not run it until it is added here. The
+    inference monitor in that Region then creates the endpoint from its stored
+    spec. The Region must already run a GCO regional stack.
+
+    Args:
+        name: Endpoint name.
+        region: Deployed GCO Region to add (e.g. ``us-west-2``).
+    """
+    return cli_runner._run_cli("inference", "add-region", name, region)
+
+
+@mcp.tool(tags={"low-risk", "inference"})
+@audit_logged
+def remove_inference_region(name: str, region: str) -> str:
+    """Remove a Region from an inference endpoint.
+
+    The inference monitor in that Region deletes the endpoint's resources
+    there; the endpoint keeps serving from its other Regions and the Region can
+    be added back. Removing the endpoint's last Region is refused.
+
+    Args:
+        name: Endpoint name.
+        region: Region to remove.
+    """
+    return cli_runner._run_cli("inference", "remove-region", name, region, "-y")
+
+
+@mcp.tool(tags={"low-risk", "inference"})
+@audit_logged
 def deploy_disaggregated_inference(
     name: str,
     image: str | None = None,

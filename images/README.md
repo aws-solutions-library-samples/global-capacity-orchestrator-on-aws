@@ -30,6 +30,9 @@ and preserve the platform story at three levels. They are retained rendered
 artifacts: **their editable source is not present in this repository**, and no
 in-repository generator is claimed for them. Do not substitute the generated
 CDK views or invent a draw.io/PowerPoint/SVG provenance when refreshing them.
+When the code moves on, correct the labels on the rendered PNG itself at the
+same size and fonts (Arial 18 px), and keep the numbered steps under each
+figure in the top-level README in step with its badges.
 
 | Asset | View | Provenance / update path |
 |-------|------|--------------------------|
