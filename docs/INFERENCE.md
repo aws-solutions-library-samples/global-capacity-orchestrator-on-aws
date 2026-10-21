@@ -1097,6 +1097,8 @@ gco inference remove-region my-llm us-west-2 -y  # the us-west-2 monitor deletes
 
 `add-region` requires a deployed GCO regional stack in the Region. Both commands warn when the endpoint still leaves out a deployed Region, for the routing reason above. `remove-region` refuses to remove an endpoint's last Region; use `stop` or `delete` for that. `remove-region` keeps the Region in the endpoint's cleanup history: deleting an endpoint waits until every Region it ever ran in confirms its resources are gone, so delete the endpoints that ran in a Region before you retire that Region ([Removing a Region](CUSTOMIZATION.md#removing-a-region)).
 
+For an ECR image, `deploy` records an in-Region replica URI for each Region it deploys to. `add-region` does not record one, so the added Region pulls the image URI the endpoint was deployed with, from the Region that URI names.
+
 ### Authenticated Global Routing
 
 Use the API Gateway stack's `ApiEndpoint` output as the endpoint base URL:
