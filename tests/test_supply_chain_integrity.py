@@ -1844,10 +1844,11 @@ def test_npm_audit_retries_a_registry_operational_error() -> None:
 #: it to. Both are under markdownlint-cli2 0.23.3, which pins every dependency
 #: exactly: smol-toml 1.8.0 (GHSA-r4xh-jqrq-34v2, fixed in 1.9.0) and
 #: markdown-it 15.0.1 (GHSA-r7fv-28h4-cvq7, quadratic smartquotes, fixed in
-#: 15.0.2).
+#: 15.0.2; GHSA-gfr2-rv44-r23c and GHSA-vfgh-jcmw-g37q, quadratic link
+#: reference and inline HTML parsing, fixed in 15.0.3).
 _ROOT_NPM_OVERRIDES: dict[str, tuple[str, tuple[int, int, int]]] = {
     "smol-toml": ("markdownlint-cli2", (1, 9, 0)),
-    "markdown-it": ("markdownlint-cli2", (15, 0, 2)),
+    "markdown-it": ("markdownlint-cli2", (15, 0, 3)),
 }
 
 

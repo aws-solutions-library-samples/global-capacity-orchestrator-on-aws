@@ -136,7 +136,7 @@ cyclopts==4.11.0
     # via fastmcp-slim
 deepmerge==3.0.1
     # via zensical
-distlib==0.4.0
+distlib==0.4.3
     # via virtualenv
 dnspython==2.8.0
     # via email-validator
@@ -378,13 +378,14 @@ opentelemetry-util-http==0.66b1
     #   opentelemetry-instrumentation-asgi
     #   opentelemetry-instrumentation-fastapi
     #   opentelemetry-instrumentation-httpx
-packaging==26.2
+packaging==26.3
     # via
     #   build
     #   fastmcp-slim
     #   opentelemetry-instrumentation
     #   pytest
     #   tensorboard
+    #   virtualenv
     #   wheel
 pandas==3.0.6
     # via
@@ -707,7 +708,7 @@ uvloop==0.23.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-virtualenv==21.7.13
+virtualenv==21.14.9
     # via pre-commit
 watchfiles==1.1.1
     # via fastmcp-slim
