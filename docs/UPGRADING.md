@@ -197,9 +197,9 @@ Every step reports what it did, and the command tells you where it stopped.
   install are on the new release. Run the `npm install --global npm@X` the
   message names, then `gco upgrade --skip-checkout`. If you run `gco` through
   the dev container, the message names the image rebuild instead: the npm it
-  checks comes from the `gco-dev` image, and although the upgrade rebuilt that
-  image, the run that failed was still using the previous one. Rerun
-  `./scripts/setup-dev-alias.sh` (it reuses the cached layers) and then
+  checks comes from the `gco-dev` image the failing run started in, and
+  rebuilding the image during the upgrade does not change a container that is
+  already running. Run `./scripts/setup-dev-alias.sh` on the host, then
   `gco upgrade --skip-checkout`.
 - **During the stack cycle**: the checkout and local install are on the new
   release. The failing stack is named; `gco stacks status <stack> -r <region>`

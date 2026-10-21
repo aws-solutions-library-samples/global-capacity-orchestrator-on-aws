@@ -225,10 +225,12 @@ A container image an older CLI pushed from owner-only files, such as the TLS cer
 
 ```bash
 ./scripts/setup-dev-alias.sh            # rebuilds gco-dev from the checkout's Dockerfile.dev
-docker run --rm gco-dev npm --version   # the pinned version (use finch or podman if that is your runtime)
+docker run --rm gco-dev npm --version   # prints the pinned version
 ```
 
-The rebuild also brings the Python dependencies, CDK CLI and kubectl up to what the checkout expects. If the image reports the right version but the error persists, an npm installed into the `gco-dev-tools` volume, which comes first on the container's `PATH`, is shadowing it; `docker volume rm gco-dev-tools` clears it, and `gco autopilot` reinstalls its engines on next use.
+With Finch, run the same check with `finch` in place of `docker`. Podman stores the image as `localhost/gco-dev`, so run `podman run --rm localhost/gco-dev npm --version`.
+
+The rebuild also brings the Python dependencies, CDK CLI and kubectl up to what the checkout expects. If the image reports the right version but the error persists, an npm installed into the `gco-dev-tools` volume, which comes first on the container's `PATH`, is shadowing it. `docker volume rm gco-dev-tools` (or the same with `finch` or `podman`) clears it, and `gco autopilot` reinstalls its engines on next use.
 
 On a host install, install the pinned version with `npm install --global npm@X`.
 
