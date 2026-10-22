@@ -227,9 +227,9 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "lambda/ga-registration/handler.py": {
-      "digest": "0c8e3c4d5e5cd229b7b8d8a8018646c8203ee857c3d08d57e2c0633ccdd06994",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "02f505392ee33a939675b2ebd083767123daf5b345ba5687d905023726b84102",
+      "generated_at": "2026-10-22T03:05:59Z",
+      "source_commit": "503e80ca9adfd5d217fe28b2f27f74fdcdb775a0"
     },
     "lambda/helm-installer/handler.py": {
       "digest": "5ca0b60bcbe0ade494e6704fa5cf786d5bdc1c2fb89d9bf2c09d4c777699dc0b",
