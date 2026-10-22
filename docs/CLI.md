@@ -5170,6 +5170,8 @@ gco stacks addons COMMAND [OPTIONS]
 | `--region` | `-r` | AWS region (default: first deployment region) |
 | `--all-regions` | `-A` | Apply across all deployment regions |
 
+`status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply.
+
 **Example:**
 
 ```bash

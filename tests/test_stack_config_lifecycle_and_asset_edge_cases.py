@@ -1015,6 +1015,52 @@ def test_addons_status_formats_input_invalid_empty_and_success_rows() -> None:
     assert "No add-on status" in formatter.print_info.call_args.args[0]
 
 
+def test_addons_status_skips_bookkeeping_treats_validated_as_healthy_and_keeps_failures_whole() -> (
+    None
+):
+    """_execution is not a status row, validators' "validated" is success, and a
+    failed phase prints every failed resource instead of the first 80 chars."""
+    from cli.commands import stacks_cmd
+
+    failed_resources = ",".join(
+        f"3{i}-svc.yaml:Deployment/svc-{i},3{i}-svc.yaml:PodDisruptionBudget/svc-{i}"
+        for i in range(4)
+    )
+    healthy_message = "x" * 200
+    paginator = MagicMock()
+    paginator.paginate.return_value = [
+        {
+            "Parameters": [
+                {
+                    "Name": "/gco/addons/us-east-1/_execution",
+                    "Value": json.dumps({"execution_arn": "arn:aws:states:x"}),
+                },
+                {
+                    "Name": "/gco/addons/us-east-1/manifest-validation",
+                    "Value": json.dumps({"status": "validated", "message": healthy_message}),
+                },
+                {
+                    "Name": "/gco/addons/us-east-1/base-manifests",
+                    "Value": json.dumps({"status": "failed", "message": failed_resources}),
+                },
+            ]
+        }
+    ]
+    client = MagicMock()
+    client.get_paginator.return_value = paginator
+    formatter = MagicMock()
+
+    with patch("boto3.client", return_value=client):
+        stacks_cmd._addons_status_one(formatter, "gco", "us-east-1")
+
+    successes = [item.args[0] for item in formatter.print_success.call_args_list]
+    errors = [item.args[0] for item in formatter.print_error.call_args_list]
+    assert len(successes) == 1 and "manifest-validation" in successes[0]
+    assert "x" * 80 in successes[0] and "x" * 81 not in successes[0]
+    assert len(errors) == 1 and failed_resources in errors[0]
+    assert not any("_execution" in line for line in successes + errors)
+
+
 def test_decode_addon_replay_input_decodes_compressed_value() -> None:
     from cli.commands.stacks_cmd import _decode_addon_replay_input
 
