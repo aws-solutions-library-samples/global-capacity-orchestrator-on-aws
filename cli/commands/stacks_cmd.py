@@ -2151,6 +2151,13 @@ def addons_status(config: Any, region: Any, all_regions: bool) -> None:
         _addons_status_one(formatter, project, target)
 
 
+# Terminal states the installer, kubectl applier and validators record when a
+# phase succeeded ("validated" is what both release/manifest validators write).
+_ADDON_HEALTHY_STATUSES = frozenset({"installed", "uninstalled", "absent", "applied", "validated"})
+# SSM parameters under /<project>/addons/<region>/ that are not status records.
+_ADDON_BOOKKEEPING_PARAMS = frozenset({"_input", "_execution"})
+
+
 def _addons_status_one(formatter: Any, project: str, region: str) -> None:
     """Print the add-on status table for a single region."""
     import json
@@ -2172,7 +2179,9 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
     rows = []
     for p in params:
         name = p["Name"].rsplit("/", 1)[-1]
-        if name == "_input":
+        # _input (replay input) and _execution (orchestrator run metadata)
+        # are bookkeeping, not add-on status records.
+        if name in _ADDON_BOOKKEEPING_PARAMS:
             continue
         try:
             data = json.loads(p["Value"])
@@ -2182,7 +2191,11 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
             data = {"status": "unknown", "message": p.get("Value", "")}
         status = str(data.get("status", "unknown"))
         message = str(data.get("message", ""))
-        rows.append((name, status, message[:80]))
+        # Healthy rows stay one line; a failure keeps its full message, since
+        # the list of failed resources is the part needed to debug it.
+        if status in _ADDON_HEALTHY_STATUSES:
+            message = message[:80]
+        rows.append((name, status, message))
 
     if not rows:
         formatter.print_info(
@@ -2195,7 +2208,7 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
     formatter.print_info(f"Add-on status for {project} in {region}:")
     for name, status, message in rows:
         line = f"  {name:<28} {status:<12} {message}"
-        if status in ("installed", "uninstalled", "absent", "applied"):
+        if status in _ADDON_HEALTHY_STATUSES:
             formatter.print_success(line)
         else:
             formatter.print_error(line)

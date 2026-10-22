@@ -20,6 +20,7 @@ DEV_PIN_NAMES = (
     "DOCKER_VERSION",
     "BUILDX_VERSION",
     "UV_VERSION",
+    "SESSION_MANAGER_PLUGIN_VERSION",
 )
 
 
@@ -150,6 +151,12 @@ def verify_dev_image(
         ),
         ("uv", "UV_VERSION", ("uv", "--version"), r"^uv (\d+\.\d+\.\d+)\b"),
         ("uvx", "UV_VERSION", ("uvx", "--version"), r"^uvx (\d+\.\d+\.\d+)\b"),
+        (
+            "Session Manager plugin",
+            "SESSION_MANAGER_PLUGIN_VERSION",
+            ("session-manager-plugin", "--version"),
+            r"^(\d+\.\d+\.\d+\.\d+)\b",
+        ),
     )
     actual_versions: dict[str, str] = {}
     for tool, pin_name, command, pattern in checks:

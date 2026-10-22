@@ -49,8 +49,8 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-08T19:00:07Z
-# Generated from Git commit: 231725d929e3dfd3c3768eba41d413effef39d67
+# Generated at (UTC): 2026-10-22T19:28:31Z
+# Generated from Git commit: 4bf364cf47c121622976303e41177a06fa1e9a5f
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -647,20 +647,85 @@ def plan_manifests(
     }
 
 
+def _hpa_owns_replicas(document: dict[str, Any]) -> bool:
+    """Whether a Deployment manifest hands its replica count to an HPA."""
+    metadata = document.get("metadata")
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+    return (
+        isinstance(annotations, dict)
+        and annotations.get(_HPA_REPLICA_OWNERSHIP_ANNOTATION) == "true"
+    )
+
+
 def _deployment_patch_body(document: dict[str, Any]) -> dict[str, Any]:
     """Copy a Deployment update without replicas when its HPA owns scale."""
     patch_body = copy.deepcopy(document)
-    metadata = patch_body.get("metadata")
-    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
-    if not isinstance(annotations, dict) or (
-        annotations.get(_HPA_REPLICA_OWNERSHIP_ANNOTATION) != "true"
-    ):
+    if not _hpa_owns_replicas(patch_body):
         return patch_body
 
     spec = patch_body.get("spec")
     if isinstance(spec, dict):
         spec.pop("replicas", None)
     return patch_body
+
+
+def _patch_or_replace(
+    api: Any,
+    resource: str,
+    name: str,
+    namespace: str,
+    document: dict[str, Any],
+    *,
+    patch_body: dict[str, Any] | None = None,
+    keep_live_replicas: bool = False,
+) -> None:
+    """Strategic-merge-patch an existing object, replacing it when the merge is invalid.
+
+    A strategic merge keeps every live field the manifest no longer sets. For
+    fields that are mutually exclusive that produces an object the API server
+    rejects with 422, so an older install can never be patched forward:
+
+    - a container probe that moved from ``httpGet`` to ``exec`` ends up with
+      both handlers ("may not specify more than 1 handler type");
+    - a PodDisruptionBudget that moved from ``minAvailable`` to
+      ``maxUnavailable`` ends up with both.
+
+    On 422 the manifest is the whole desired state, so this replaces the object
+    with it at the live ``resourceVersion`` (an optimistic-concurrency update,
+    not a delete). An HPA-owned Deployment keeps its live replica count.
+
+    ``resource`` is the client method suffix, e.g. ``namespaced_deployment``
+    for ``patch_/read_/replace_namespaced_deployment``.
+    """
+    try:
+        getattr(api, f"patch_{resource}")(
+            name, namespace, body=document if patch_body is None else patch_body
+        )
+        return
+    except ApiException as exc:
+        if exc.status != 422:
+            raise
+        patch_error = exc
+
+    live = getattr(api, f"read_{resource}")(name, namespace)
+    body = copy.deepcopy(document)
+    metadata = body.setdefault("metadata", {})
+    metadata["resourceVersion"] = live.metadata.resource_version
+    if keep_live_replicas:
+        live_replicas = getattr(getattr(live, "spec", None), "replicas", None)
+        spec = body.setdefault("spec", {})
+        if live_replicas is None:
+            spec.pop("replicas", None)
+        else:
+            spec["replicas"] = live_replicas
+    logger.warning(
+        "Strategic merge of %s %s/%s was rejected (%s); replacing it with the manifest",
+        resource,
+        namespace,
+        name,
+        patch_error.reason,
+    )
+    getattr(api, f"replace_{resource}")(name, namespace, body=body)
 
 
 # Exact resources owned by optional features. Keys include the apply phase so
@@ -1487,10 +1552,14 @@ def apply_manifests(
                             apps_v1.create_namespaced_deployment(namespace, body=doc)
                         except ApiException as e:
                             if e.status == 409:
-                                apps_v1.patch_namespaced_deployment(
+                                _patch_or_replace(
+                                    apps_v1,
+                                    "namespaced_deployment",
                                     name,
                                     namespace,
-                                    body=_deployment_patch_body(doc),
+                                    doc,
+                                    patch_body=_deployment_patch_body(doc),
+                                    keep_live_replicas=_hpa_owns_replicas(doc),
                                 )
                             else:
                                 raise
@@ -1554,8 +1623,12 @@ def apply_manifests(
                             policy_v1.create_namespaced_pod_disruption_budget(namespace, body=doc)
                         except ApiException as e:
                             if e.status == 409:
-                                policy_v1.patch_namespaced_pod_disruption_budget(
-                                    name, namespace, body=doc
+                                _patch_or_replace(
+                                    policy_v1,
+                                    "namespaced_pod_disruption_budget",
+                                    name,
+                                    namespace,
+                                    doc,
                                 )
                             else:
                                 raise

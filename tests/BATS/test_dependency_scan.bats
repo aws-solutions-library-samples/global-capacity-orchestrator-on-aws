@@ -908,6 +908,7 @@ EOF
     [[ "$output" == *"DOCKER_VERSION|"* ]]
     [[ "$output" == *"BUILDX_VERSION|"* ]]
     [[ "$output" == *"UV_VERSION|"* ]]
+    [[ "$output" == *"SESSION_MANAGER_PLUGIN_VERSION|"* ]]
 }
 
 @test "extract_dockerfile_pins: UV_VERSION is a bare semver (no v prefix)" {

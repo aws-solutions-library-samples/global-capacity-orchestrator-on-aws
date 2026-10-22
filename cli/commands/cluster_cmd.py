@@ -14,6 +14,7 @@ already have your own SSM instance.
 
 from __future__ import annotations
 
+import socket
 import sys
 import time
 from typing import Any
@@ -130,11 +131,8 @@ def tunnel_cmd(
                 formatter.print_success(
                     f"SSM tunnel open: {session.server} → {session.plan.endpoint} (Ctrl-C to stop)"
                 )
-                formatter.print_info(
-                    "Run kubectl in another shell with:\n    kubectl "
-                    + " ".join(session.plan.kubectl_flags())
-                    + " get nodes"
-                )
+                kubectl_command = "kubectl " + " ".join(session.plan.kubectl_flags()) + " get nodes"
+                formatter.print_info(_kubectl_hint(kubectl_command))
                 _block_until_interrupt()
             elif session.route == ROUTE_DIRECT:
                 formatter.print_success(
@@ -197,6 +195,28 @@ def _echo_plan_human(payload: dict[str, Any]) -> None:
         if payload.get("note"):
             lines.append("# " + payload["note"])
     click.echo("\n".join(lines))
+
+
+def _kubectl_hint(kubectl_command: str) -> str:
+    """Say where to run kubectl so it actually reaches the tunnel.
+
+    The tunnel listens on 127.0.0.1 of the process that opened it. Inside the
+    ``gco-dev`` container (the ``gco`` shell function from
+    ``scripts/setup-dev-alias.sh``) that is the container's own loopback, which
+    neither the host nor a second ``gco`` invocation (a fresh container) can
+    reach, so kubectl has to run in this same container.
+    """
+    from ..stacks import _running_in_dev_container
+
+    if not _running_in_dev_container():
+        return f"Run kubectl in another shell with:\n    {kubectl_command}"
+    container = socket.gethostname()
+    return (
+        "This tunnel listens inside the gco-dev container, so kubectl on the host or in "
+        "another `gco` call cannot reach it. From another shell, run kubectl in this "
+        "container (use finch or podman instead of docker if that is your runtime):\n"
+        f"    docker exec -it {container} {kubectl_command}"
+    )
 
 
 def _block_until_interrupt() -> None:  # pragma: no cover - interactive wait

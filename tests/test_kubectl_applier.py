@@ -1893,6 +1893,130 @@ class TestHorizontalPodAutoscalerApply:
         assert patch_body["spec"]["template"] == document["spec"]["template"]
         assert document["spec"]["replicas"] == 3
 
+    @staticmethod
+    def _api_platform_documents() -> tuple[dict, dict]:
+        """An HPA-owned Deployment (exec probe) and its maxUnavailable PDB."""
+        deployment = {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": "health-monitor",
+                "namespace": "gco-system",
+                "annotations": {"gco.aws/hpa-controls-replicas": "true"},
+            },
+            "spec": {
+                "replicas": 2,
+                "selector": {"matchLabels": {"app": "health-monitor"}},
+                "template": {
+                    "metadata": {"labels": {"app": "health-monitor"}},
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "health-monitor",
+                                "image": "example.invalid/hm:test",
+                                "livenessProbe": {"exec": {"command": ["true"]}},
+                            }
+                        ]
+                    },
+                },
+            },
+        }
+        pdb = {
+            "apiVersion": "policy/v1",
+            "kind": "PodDisruptionBudget",
+            "metadata": {"name": "health-monitor-pdb", "namespace": "gco-system"},
+            "spec": {
+                "maxUnavailable": 1,
+                "selector": {"matchLabels": {"app": "health-monitor"}},
+            },
+        }
+        return deployment, pdb
+
+    def test_invalid_strategic_merge_replaces_deployment_and_pdb(self, handler_module, tmp_path):
+        """An install from before the httpGet->exec probe and minAvailable->
+        maxUnavailable changes rejects the merged patch with 422; the applier
+        then replaces each object with the manifest at its live resourceVersion,
+        keeping the HPA's live replica count."""
+        from kubernetes.client.rest import ApiException
+
+        deployment, pdb = self._api_platform_documents()
+        (tmp_path / "30-health-monitor.yaml").write_text(yaml.safe_dump_all([deployment, pdb]))
+
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            apps = mock_client.AppsV1Api.return_value
+            apps.create_namespaced_deployment.side_effect = ApiException(status=409)
+            apps.patch_namespaced_deployment.side_effect = ApiException(
+                status=422, reason="Unprocessable Entity"
+            )
+            live_deployment = MagicMock()
+            live_deployment.metadata.resource_version = "4242"
+            live_deployment.spec.replicas = 5
+            apps.read_namespaced_deployment.return_value = live_deployment
+
+            policy = mock_client.PolicyV1Api.return_value
+            policy.create_namespaced_pod_disruption_budget.side_effect = ApiException(status=409)
+            policy.patch_namespaced_pod_disruption_budget.side_effect = ApiException(
+                status=422, reason="Unprocessable Entity"
+            )
+            live_pdb = MagicMock()
+            live_pdb.metadata.resource_version = "77"
+            policy.read_namespaced_pod_disruption_budget.return_value = live_pdb
+
+            result = self._apply(handler_module, tmp_path, mock_client)
+
+        assert result["FailedCount"] == 0, result
+        assert result["AppliedCount"] == 2
+
+        apps.read_namespaced_deployment.assert_called_once_with("health-monitor", "gco-system")
+        replaced = apps.replace_namespaced_deployment.call_args
+        assert replaced.args == ("health-monitor", "gco-system")
+        body = replaced.kwargs["body"]
+        assert body["metadata"]["resourceVersion"] == "4242"
+        assert body["spec"]["replicas"] == 5
+        assert body["spec"]["template"] == deployment["spec"]["template"]
+        assert "resourceVersion" not in deployment["metadata"]
+
+        policy.read_namespaced_pod_disruption_budget.assert_called_once_with(
+            "health-monitor-pdb", "gco-system"
+        )
+        pdb_body = policy.replace_namespaced_pod_disruption_budget.call_args.kwargs["body"]
+        assert pdb_body["metadata"]["resourceVersion"] == "77"
+        assert pdb_body["spec"] == pdb["spec"]
+
+    def test_patch_or_replace_reraises_non_422_and_handles_missing_live_replicas(
+        self, handler_module
+    ):
+        """Only an invalid merge falls back; an HPA-owned Deployment with no
+        live replica count is replaced without one so the API server defaults it."""
+        from kubernetes.client.rest import ApiException
+
+        api = MagicMock()
+        api.patch_namespaced_deployment.side_effect = ApiException(status=500)
+        with pytest.raises(ApiException) as raised:
+            handler_module._patch_or_replace(api, "namespaced_deployment", "x", "ns", {})
+        assert raised.value.status == 500
+        api.read_namespaced_deployment.assert_not_called()
+        api.replace_namespaced_deployment.assert_not_called()
+
+        api = MagicMock()
+        api.patch_namespaced_deployment.side_effect = ApiException(status=422)
+        api.read_namespaced_deployment.return_value.metadata.resource_version = "9"
+        api.read_namespaced_deployment.return_value.spec.replicas = None
+        handler_module._patch_or_replace(
+            api,
+            "namespaced_deployment",
+            "x",
+            "ns",
+            {"spec": {"replicas": 3}},
+            keep_live_replicas=True,
+        )
+        api.replace_namespaced_deployment.assert_called_once_with(
+            "x", "ns", body={"metadata": {"resourceVersion": "9"}, "spec": {}}
+        )
+
     def test_deployment_update_retains_replicas_without_hpa_ownership(self, handler_module):
         """Ordinary Deployment updates continue to reconcile manifest replicas."""
         document = {

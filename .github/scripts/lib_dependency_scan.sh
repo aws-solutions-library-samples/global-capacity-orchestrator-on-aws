@@ -526,6 +526,7 @@ extract_k8s_version() {
 #     AWSCLI_VERSION|2.34.42
 #     DOCKER_VERSION|29.4.2
 #     BUILDX_VERSION|v0.35.0
+#     SESSION_MANAGER_PLUGIN_VERSION|1.2.896.0
 extract_dockerfile_pins() {
   local file="${1:-Dockerfile.dev}"
   [ -f "$file" ] || return 0
@@ -540,6 +541,7 @@ allowlist = {
     'DOCKER_VERSION',
     'BUILDX_VERSION',
     'UV_VERSION',
+    'SESSION_MANAGER_PLUGIN_VERSION',
 }
 with open(sys.argv[1]) as f:
     for line in f:

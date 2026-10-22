@@ -90,7 +90,7 @@ Running accelerated workloads across Regions means finding capacity, standing up
 - An AWS account you can create infrastructure in, with credentials the AWS CLI can use
 - Git and a container runtime: [Docker](https://docs.docker.com/reference/), [Finch](https://runfinch.com/) or [Podman](https://podman.io/docs) ([Colima](https://github.com/abiosoft/colima) also works)
 
-The dev container brings everything else — Python 3.14, Node.js 24, CDK, [kubectl](https://kubernetes.io/docs/reference/kubectl/), the [AWS CLI](https://aws.amazon.com/cli/), and Docker CLI + [Buildx](https://github.com/docker/buildx) — at pinned versions. A host install is possible but advanced; see *More ways to run GCO* below.
+The dev container brings everything else — Python 3.14, Node.js 24, CDK, [kubectl](https://kubernetes.io/docs/reference/kubectl/), the [AWS CLI](https://aws.amazon.com/cli/) with the Session Manager plugin, and Docker CLI + [Buildx](https://github.com/docker/buildx) — at pinned versions. A host install is possible but advanced; see *More ways to run GCO* below.
 
 ### Deploy
 
