@@ -38,8 +38,8 @@ import urllib3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-10-22T03:05:59Z
+# Generated from Git commit: 503e80ca9adfd5d217fe28b2f27f74fdcdb775a0
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/ga-registration/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/ga-registration/handler.lambda_handler.png``)
@@ -452,6 +452,18 @@ def ensure_https_health_check(
             if endpoint.get("EndpointId")
             and (expected_alb_arn is None or endpoint.get("EndpointId") == expected_alb_arn)
         ]
+        # EndpointConfigurations replaces the group's endpoint list. Right after
+        # AddEndpoints the description can still omit the ALB this run just
+        # registered, and sending the filtered list as-is would then remove
+        # every endpoint and leave the Region out of Global Accelerator.
+        if expected_alb_arn is not None and not existing_endpoints:
+            existing_endpoints = [
+                {
+                    "EndpointId": expected_alb_arn,
+                    "Weight": 100,
+                    "ClientIPPreservationEnabled": True,
+                }
+            ]
         ga_client.update_endpoint_group(
             EndpointGroupArn=endpoint_group_arn,
             HealthCheckPort=443,

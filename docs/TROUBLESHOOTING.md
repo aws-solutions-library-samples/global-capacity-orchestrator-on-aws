@@ -24,6 +24,9 @@ Common issues and their solutions.
   - [Pods Stuck in ContainerCreating](#pods-stuck-in-containercreating)
   - [Pods CrashLoopBackOff](#pods-crashloopbackoff)
   - [Service Account Issues](#service-account-issues)
+- [Inference Issues](#inference-issues)
+  - [Invoke Says the Model Does Not Exist](#invoke-says-the-model-does-not-exist)
+  - [Invoke Returns an HTML 504 Gateway Time-out](#invoke-returns-an-html-504-gateway-time-out)
 - [Lambda Issues](#lambda-issues)
   - [Lambda Timeout](#lambda-timeout)
   - [Lambda 401 Unauthorized](#lambda-401-unauthorized)
@@ -522,6 +525,42 @@ kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
 kubectl rollout restart deployment/health-monitor -n gco-system
 kubectl rollout restart deployment/manifest-processor -n gco-system
 ```
+
+## Inference Issues
+
+### Invoke Says the Model Does Not Exist
+
+**Symptom**: `gco inference invoke` on a vLLM endpoint fails with `HTTP 404` and vLLM's `NotFoundError` ("The model ... does not exist."), and `gco inference models <endpoint>` lists a different model.
+
+**Cause**: vLLM never reads the `MODEL` environment variable. Before v8.12.0, a vLLM endpoint deployed with `-e MODEL=...` was started without it and served vLLM's built-in default model (`Qwen/Qwen3-0.6B` for v0.31.0), while `invoke` asked for the `MODEL` name. From v8.12.0 the inference monitor starts vLLM with `--model $(MODEL)`, but only when it creates the Deployment: an endpoint created before your clusters ran v8.12.0 keeps serving the default after an upgrade. `invoke` names the served model when this happens.
+
+**Solution**: Recreate the endpoint once its Regions run v8.12.0 or later, or name the model in the server arguments, which works on every version:
+
+```bash
+gco inference delete my-llm -y
+# once it no longer shows in `gco inference list`:
+gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1 \
+  --extra-args=--model --extra-args Qwen/Qwen2.5-1.5B-Instruct
+```
+
+To call the model the endpoint serves without recreating it, send the request body yourself: `gco inference invoke my-llm -d '{"model": "<served model>", "prompt": "Hello", "max_tokens": 50}'`.
+
+### Invoke Returns an HTML 504 Gateway Time-out
+
+**Symptom**: `gco inference invoke ... --region <region>` prints an HTML page (`<center><h1>504 Gateway Time-out</h1></center>`), or `gco inference health ... -r <region>` stops with `Read timed out. (read timeout=30)`, while the same commands work in another Region.
+
+**Cause**: The HTML page is the Region's internal ALB's own error, passed through the regional API: GCO's services and Lambdas answer errors as JSON. The ALB could not connect to its inference-proxy target within 10 seconds, or got no answer within its 300-second idle timeout. A `health` call is retried three times on a 504, which together outlast the CLI's 30-second read timeout. `gco capacity traffic-dial show` often reports the same Region with `no endpoints` at the same time, because the step that registers the ALB with Global Accelerator runs only after the Region's add-on convergence succeeds.
+
+**Solution**: Check the Region's convergence, then the ALB's targets:
+
+```bash
+gco stacks addons status -r <region>      # did the last convergence finish, and where did it stop?
+gco jobs health -r <region>               # a non-inference route through the same ALB
+kubectl -n gco-system get gateway gco-gateway -o jsonpath='{.status.addresses[*].value}'
+kubectl -n gco-system get pods -l app=inference-proxy -o wide
+```
+
+Compare the Gateway address with the `/<project>/alb-hostname-<region>` SSM parameter and inspect the ALB's target health as described in [ALB Not Routing Traffic](#alb-not-routing-traffic). Once the cause is fixed, `gco stacks addons install -r <region>` re-runs the convergence, which also re-registers the ALB with Global Accelerator; see [RUNBOOKS.md → Global Accelerator Stops Routing to a Region](RUNBOOKS.md#global-accelerator-stops-routing-to-a-region).
 
 ## Lambda Issues
 

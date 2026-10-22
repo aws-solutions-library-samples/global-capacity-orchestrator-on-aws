@@ -1065,7 +1065,10 @@ gco capacity traffic-dial [COMMAND]
 Show each region's current dial, endpoint health, any manual override, and
 the scheduled controller's last decision (reason plus the observed healthy
 percent). The controller line reports its mode (`monitor` or `enforce`) and
-last run time.
+last run time. A region whose endpoint group is empty (`no endpoints`) gets no
+global traffic at any dial; the command warns and names the
+`gco stacks addons status` and `install` commands that check and re-run the
+registration.
 
 ```bash
 gco capacity traffic-dial show
@@ -2918,7 +2921,7 @@ gco inference update-image my-llm -i vllm/vllm-openai:v0.31.0
 
 #### `gco inference invoke`
 
-Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, SGLang, Triton) and builds the appropriate request body: OpenAI-compatible `/v1/completions` for vLLM and unknown images (a prompt sent to a `--path` ending in `/chat/completions` becomes one user message), and SGLang's native `/generate` with `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`. The OpenAI `model` field is the name the server answers to: `--served-model-name` from the deploy's `--extra-args`, else the model they name, else `MODEL`, else (for vLLM) the first entry of `/v1/models`. Triton takes input tensors rather than a prompt, so a Triton endpoint needs `--path /v2/models/<model>/infer` and `--data` with a KServe v2 inference request; without them, or with a prompt for a `/v2/` path, the command exits with that hint.
+Send a request to an inference endpoint via the API Gateway. Auto-detects the framework (vLLM, SGLang, Triton) and builds the appropriate request body: OpenAI-compatible `/v1/completions` for vLLM and unknown images (a prompt sent to a `--path` ending in `/chat/completions` becomes one user message), and SGLang's native `/generate` with `{"text": ..., "sampling_params": {"max_new_tokens": ...}}`. The OpenAI `model` field is the name the server answers to: `--served-model-name` from the deploy's `--extra-args`, else the model they name, else `MODEL`, else (for vLLM) the first entry of `/v1/models`. When the server answers 404 and its `/v1/models` doesn't list the requested model, the command names the models it does serve and how to call one ([Invoke Says the Model Does Not Exist](TROUBLESHOOTING.md#invoke-says-the-model-does-not-exist)). Triton takes input tensors rather than a prompt, so a Triton endpoint needs `--path /v2/models/<model>/infer` and `--data` with a KServe v2 inference request; without them, or with a prompt for a `/v2/` path, the command exits with that hint.
 
 ```bash
 gco inference invoke ENDPOINT_NAME [OPTIONS]

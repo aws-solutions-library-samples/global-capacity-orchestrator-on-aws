@@ -1,6 +1,7 @@
 """Inference endpoint commands."""
 
 import codecs
+import json
 import sys
 from email.message import Message
 from typing import Any
@@ -985,6 +986,65 @@ def _openai_request_model(spec: dict[str, Any], *, vllm: bool) -> str | None:
     return str(model) if model else None
 
 
+def _model_named_only_by_env(spec: Any, model: str) -> bool:
+    """True when ``model`` comes from the spec's ``MODEL`` alone, not its args."""
+    if not isinstance(spec, dict) or (spec.get("env") or {}).get("MODEL") != model:
+        return False
+    args = [str(arg) for arg in spec.get("args") or []]
+    if args and not args[0].startswith("-"):
+        return False
+    return all(_flag_value(args, flag) is None for flag in ("--served-model-name", "--model"))
+
+
+def _served_model_hint(
+    client: Any,
+    *,
+    endpoint_name: str,
+    endpoint_path: str,
+    requested_model: str,
+    region: str | None,
+    spec: Any,
+) -> str | None:
+    """Explain a 404 for a model the endpoint does not serve, or return None.
+
+    Asks the endpoint's ``/v1/models`` which models it serves. The hint is
+    given only when that inventory answers and leaves out the requested model,
+    so a 404 with any other cause keeps the server's own message alone.
+    """
+    try:
+        response = client.make_authenticated_request(
+            method="GET",
+            path=f"{endpoint_path}/v1/models",
+            target_region=region,
+        )
+        if not response.ok:
+            return None
+        data = response.json().get("data", [])
+        served = [str(item["id"]) for item in data if isinstance(item, dict) and item.get("id")]
+    except Exception:  # nosec B110  # the hint is best-effort
+        return None
+    if not served or requested_model in served:
+        return None
+
+    region_flag = f" -r {region}" if region else ""
+    example = json.dumps(
+        {"model": served[0], "prompt": "Hello", "max_tokens": 50}, separators=(", ", ": ")
+    )
+    lines = [f"{endpoint_name} serves {', '.join(served)}, not {requested_model}."]
+    if _model_named_only_by_env(spec, requested_model):
+        lines.append(
+            "vLLM does not read MODEL. Endpoints deployed with -e MODEL before v8.12.0 "
+            "were started without it and serve vLLM's default model, and an upgrade does "
+            f"not change a running endpoint. Recreate it to serve {requested_model}; see "
+            "'Invoke Says the Model Does Not Exist' in docs/TROUBLESHOOTING.md."
+        )
+    lines.append(
+        f"To call the served model now: gco inference invoke {endpoint_name}{region_flag} "
+        f"-d '{example}'"
+    )
+    return "\n".join(lines)
+
+
 _SGLANG_SERVER_INFO_IDENTITY_KEYS = (
     "model_path",
     "served_model_name",
@@ -1144,6 +1204,25 @@ def inference_invoke(
                 else:
                     body["prompt"] = prompt
 
+        # The OpenAI-compatible model name this request asks for, if any. A
+        # 404 for it is checked against what the endpoint actually serves.
+        requested_model = body.get("model") if resolved_framework in ("vllm", "openai") else None
+
+        def _report_http_error() -> None:
+            formatter.print_error(f"HTTP {response.status_code}: {response.text[:500]}")
+            if response.status_code == 404 and isinstance(requested_model, str):
+                hint = _served_model_hint(
+                    client,
+                    endpoint_name=endpoint_name,
+                    endpoint_path=endpoint_path,
+                    requested_model=requested_model,
+                    region=region,
+                    spec=spec,
+                )
+                if hint:
+                    formatter.print_info(hint)
+            sys.exit(1)
+
         if stream_response:
             # Keep streamed stdout byte-for-byte pipeline-friendly; request
             # metadata belongs on stderr when the response itself is streamed.
@@ -1165,8 +1244,7 @@ def inference_invoke(
         if stream_response:
             try:
                 if not response.ok:
-                    formatter.print_error(f"HTTP {response.status_code}: {response.text[:500]}")
-                    sys.exit(1)
+                    _report_http_error()
 
                 # Requests assumes ISO-8859-1 for text/* without a declared
                 # charset. Model token streams are UTF-8 in practice, so honor
@@ -1229,8 +1307,7 @@ def inference_invoke(
             except _json.JSONDecodeError:
                 print(response.text)
         else:
-            formatter.print_error(f"HTTP {response.status_code}: {response.text[:500]}")
-            sys.exit(1)
+            _report_http_error()
 
     except Exception as e:
         formatter.print_error(f"Failed to invoke endpoint: {e}")

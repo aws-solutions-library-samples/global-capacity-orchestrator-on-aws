@@ -791,6 +791,37 @@ class TestGlobalAcceleratorConvergence:
             ],
         )
 
+    def test_health_update_keeps_the_expected_alb_the_description_still_lacks(self, ga_module):
+        """EndpointConfigurations replaces the endpoint list, so it is never empty.
+
+        Right after AddEndpoints the description can still omit the ALB this
+        run registered. Sending the filtered (empty) list would remove every
+        endpoint from the group.
+        """
+        handler, _, _ = ga_module
+        ga = MagicMock()
+        ga.describe_endpoint_group.return_value = {
+            "EndpointGroup": {
+                "HealthCheckProtocol": "TCP",
+                "HealthCheckPort": 80,
+                "EndpointDescriptions": [{"EndpointId": STALE_ALB_ARN, "Weight": 50}],
+            }
+        }
+
+        handler.ensure_https_health_check(
+            ga,
+            ENDPOINT_GROUP_ARN,
+            expected_alb_arn=PLATFORM_ALB_ARN,
+        )
+
+        assert ga.update_endpoint_group.call_args.kwargs["EndpointConfigurations"] == [
+            {
+                "EndpointId": PLATFORM_ALB_ARN,
+                "Weight": 100,
+                "ClientIPPreservationEnabled": True,
+            }
+        ]
+
     def test_skips_health_update_when_contract_already_matches(self, ga_module):
         handler, _, _ = ga_module
         ga = MagicMock()

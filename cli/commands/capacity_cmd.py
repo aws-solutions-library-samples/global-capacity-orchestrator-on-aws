@@ -1703,6 +1703,18 @@ def traffic_dial_show(config: Any) -> None:
             "controller_reason",
         ],
     )
+    for status in statuses:
+        if status.endpoint_health == "no endpoints":
+            # An empty endpoint group gets no global traffic at any dial. The
+            # region's last convergence never published its Gateway ALB.
+            formatter.print_warning(
+                f"{status.region} has no endpoint in its Global Accelerator endpoint group, "
+                "so global requests never reach it. The ALB is registered by the last step "
+                "of the Region's add-on convergence: check it with 'gco stacks addons status "
+                f"-r {status.region}' and re-run it with 'gco stacks addons install -r "
+                f"{status.region}'. See 'Global Accelerator Stops Routing to a Region' in "
+                "docs/RUNBOOKS.md."
+            )
 
 
 @traffic_dial.command("set")
