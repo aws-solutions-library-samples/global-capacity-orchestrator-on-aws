@@ -1186,6 +1186,14 @@ in another shell. With `--print` it instead emits the ready-to-run tunnel +
 `kubectl` commands (a connection plan) without opening anything — JSON under
 `gco --output json`, copy-paste shell commands otherwise.
 
+The tunnel needs the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html),
+which `aws ssm start-session` hands the session to; the `gco-dev` image ships a
+pinned copy. Run through the `gco` shell function, the tunnel listens on the
+container's own loopback, which neither the host nor another `gco` call can
+reach, so the printed hint is a `docker exec -it <container> kubectl ...`
+command that runs kubectl in the same container (use `finch` or `podman` in
+place of `docker` for those runtimes).
+
 ```bash
 gco cluster tunnel [OPTIONS]
 ```

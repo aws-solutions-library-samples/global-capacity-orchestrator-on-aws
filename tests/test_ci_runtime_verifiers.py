@@ -143,6 +143,7 @@ def _dev_outputs() -> dict[tuple[str, ...], str]:
         ("docker", "buildx", "version"): "github.com/docker/buildx v0.38.0 abc123",
         ("uv", "--version"): "uv 0.12.23 (abc123 2026-08-01)",
         ("uvx", "--version"): "uvx 0.12.23 (abc123 2026-08-01)",
+        ("session-manager-plugin", "--version"): "1.2.896.0",
         (
             "kubectl",
             "version",
@@ -176,6 +177,7 @@ def test_dev_verifier_accepts_only_matching_runtime_versions(container_verifier:
         "Buildx": "v0.38.0",
         "uv": "0.12.23",
         "uvx": "0.12.23",
+        "Session Manager plugin": "1.2.896.0",
         "kubectl": "v1.37.1",
     }
 

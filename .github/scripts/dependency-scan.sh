@@ -1045,6 +1045,9 @@ BEDROCK_MODEL_COUNT="$(wc -l < "$BEDROCK_MODEL_RESULTS" 2>/dev/null | tr -d ' ')
 #   DOCKER_VERSION github://moby/moby/releases/latest (``docker-v<ver>``)
 #   BUILDX_VERSION github://docker/buildx/releases/latest (v<ver>)
 #   UV_VERSION     github://astral-sh/uv/releases/latest (bare semver)
+#   SESSION_MANAGER_PLUGIN_VERSION
+#                  github://aws/session-manager-plugin/releases/latest
+#                  (bare four-part version, e.g. 1.2.896.0)
 #
 # All endpoints are public — no AWS credentials needed.
 # ---------------------------------------------------------------------------
@@ -1159,6 +1162,14 @@ if candidates:
         "https://api.github.com/repos/astral-sh/uv/releases/latest" \
         | jq -r '.tag_name // empty' 2>/dev/null)" || true
       ;;
+    SESSION_MANAGER_PLUGIN_VERSION)
+      # aws/session-manager-plugin tags releases with the bare four-part
+      # version the S3 download path embeds (1.2.896.0). Bump the two
+      # SESSION_MANAGER_PLUGIN_SHA256_* ARGs from the new .deb packages.
+      latest="$(github_api_get \
+        "https://api.github.com/repos/aws/session-manager-plugin/releases/latest" \
+        | jq -r '.tag_name // empty' 2>/dev/null)" || true
+      ;;
   esac
   # extract_dockerfile_pins only emits the names above. Should its allowlist
   # ever grow without a matching arm here, ``latest`` stays empty and the
@@ -1167,7 +1178,7 @@ if candidates:
 
   if [ -z "$latest" ]; then
     case "$name" in
-      AWSCLI_VERSION|DOCKER_VERSION|BUILDX_VERSION|UV_VERSION)
+      AWSCLI_VERSION|DOCKER_VERSION|BUILDX_VERSION|UV_VERSION|SESSION_MANAGER_PLUGIN_VERSION)
         mark_scan_incomplete "Upstream version lookup failed for Dockerfile.dev pin ${name}$(github_api_failure_hint)."
         ;;
       *)

@@ -456,6 +456,7 @@ build_catalog() {
                     DOCKER_VERSION) echo "github-release|moby/moby|docker-v$value" ;;
                     BUILDX_VERSION) echo "github-release|docker/buildx|$value" ;;
                     UV_VERSION) echo "github-release|astral-sh/uv|$value" ;;
+                    SESSION_MANAGER_PLUGIN_VERSION) echo "github-release|aws/session-manager-plugin|$value" ;;
                 esac
             done
             echo "npm|@anthropic-ai/claude-code|$(extract_claude_code_pin cli/autopilot.py)"
@@ -677,6 +678,7 @@ ARG AWSCLI_VERSION=2.36.41
 ARG DOCKER_VERSION=29.8.0
 ARG BUILDX_VERSION=v0.37.0
 ARG UV_VERSION=0.12.11
+ARG SESSION_MANAGER_PLUGIN_VERSION=1.2.896.0
 EOF
     cat > "$root/lambda/helm-installer/Dockerfile" <<EOF
 FROM public.ecr.aws/lambda/python:3.14
@@ -841,6 +843,7 @@ findings_path() {
     [[ "$output" == *"  - vector_store embedding_model_id: amazon.titan-embed-text-v2:0 -> amazon.titan-embed-text-v3:0"* ]]
     [[ "$output" == *"  - NODE_VERSION: v24.21.0 -> v25.21.0"* ]]
     [[ "$output" == *"  - UV_VERSION: 0.12.11 -> 1.12.11"* ]]
+    [[ "$output" == *"  - SESSION_MANAGER_PLUGIN_VERSION: 1.2.896.0 -> 2.2.896.0"* ]]
     [[ "$output" == *"  - CLAUDE_CODE_VERSION: 2.1.252 -> 3.1.252"* ]]
     [[ "$output" == *"  - CODEX_VERSION: 0.152.0 -> 1.152.0"* ]]
     [[ "$output" == *"  - OPENCODE_VERSION: 1.18.31 -> 2.18.31"* ]]
@@ -983,6 +986,7 @@ findings_path() {
     [[ "$output" == *"endoflife.date query failed (network or schema change)."* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy) (GitHub API: transport error)."* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin UV_VERSION (GitHub API: transport error)."* ]]
+    [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin SESSION_MANAGER_PLUGIN_VERSION (GitHub API: transport error)."* ]]
     [[ "$output" == *"INCOMPLETE: kubectl stable-version lookup failed for minor 1.37."* ]]
     [[ "$output" == *"INCOMPLETE: Container registry lookup failed for kindest/node minor 1.37."* ]]
     [[ "$output" == *"Offline accelerator validator failed operationally."* ]]
@@ -1009,8 +1013,8 @@ findings_path() {
     [ "$status" -eq 0 ]
     local why=" (GitHub API: rate limit exceeded on the anonymous 60 req/h bucket, set GITHUB_TOKEN)."
     # The eight CI-tooling releases, the two GitHub-hosted pre-commit hooks and
-    # the four GitHub-backed Dockerfile.dev pins all read api.github.com, so all
-    # fourteen go incomplete together and every line says the same thing.
+    # the five GitHub-backed Dockerfile.dev pins all read api.github.com, so all
+    # fifteen go incomplete together and every line says the same thing.
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for kind (kubernetes-sigs/kind)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Crossplane function-go-templating (post-helm-crossplane.yaml) (crossplane-contrib/function-go-templating)${why}"* ]]
@@ -1020,10 +1024,11 @@ findings_path() {
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin DOCKER_VERSION${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin BUILDX_VERSION${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin UV_VERSION${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin SESSION_MANAGER_PLUGIN_VERSION${why}"* ]]
     # Surfaces on other hosts are untouched: the npm-backed CDK pin still
     # resolves, and nothing else went incomplete.
     [[ "$output" != *"Dockerfile.dev pin CDK_VERSION"* ]]
-    [[ "$output" == *"Incomplete lookups:       14"* ]]
+    [[ "$output" == *"Incomplete lookups:       15"* ]]
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
     # No token was offered, so no request carried one.
     ! grep -q '\[bearer\]' "$CALLS"

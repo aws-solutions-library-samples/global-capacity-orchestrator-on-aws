@@ -481,6 +481,24 @@ class TestClusterTunnelInteractive:
         assert blocked.get("waited") is True
         assert proc.terminated is True
 
+    def test_kubectl_hint_names_the_container_inside_gco_dev(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Inside gco-dev the tunnel is on the container's loopback, so the hint
+        says to docker-exec into this container; on a host it is a plain command."""
+        from cli.commands import cluster_cmd
+
+        monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+        monkeypatch.delenv("GCO_DEV_CONTAINER", raising=False)
+        host_hint = cluster_cmd._kubectl_hint("kubectl get nodes")
+        assert host_hint == "Run kubectl in another shell with:\n    kubectl get nodes"
+
+        monkeypatch.setenv("GCO_DEV_CONTAINER", "1")
+        monkeypatch.setattr(cluster_cmd.socket, "gethostname", lambda: "3f2a9c1b7d4e")
+        container_hint = cluster_cmd._kubectl_hint("kubectl get nodes")
+        assert "inside the gco-dev container" in container_hint
+        assert container_hint.endswith("    docker exec -it 3f2a9c1b7d4e kubectl get nodes")
+
     def test_public_endpoint_no_tunnel_needed(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:

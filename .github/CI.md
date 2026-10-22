@@ -470,10 +470,11 @@ Images matching `gco/*` are skipped (we build those). Tags without a leading num
 
 #### GitHub API lookups
 
-Fifteen of the scan's upstream reads go to `api.github.com`: the seven CI-tooling
-releases, one tags page per GitHub-hosted pre-commit hook, and the four
+Sixteen of the scan's upstream reads go to `api.github.com`: the seven CI-tooling
+releases, one tags page per GitHub-hosted pre-commit hook, and the five
 Dockerfile.dev pins that live in GitHub repositories (`AWSCLI_VERSION`,
-`DOCKER_VERSION`, `BUILDX_VERSION`, `UV_VERSION`). All of them go through one
+`DOCKER_VERSION`, `BUILDX_VERSION`, `UV_VERSION`,
+`SESSION_MANAGER_PLUGIN_VERSION`). All of them go through one
 helper, `github_api_get` in `lib_dependency_scan.sh`, and the workflow passes
 the job's own `GITHUB_TOKEN` to the scan step so they are sent as bearer-token
 requests. That is not a permissions matter — every repository queried is

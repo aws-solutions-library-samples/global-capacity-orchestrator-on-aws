@@ -190,6 +190,28 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && rm -rf awscliv2.zip aws \
     && aws --version
 
+# Install the AWS Session Manager plugin. `gco cluster tunnel --via-ssm`,
+# `gco monitoring open --via-ssm` and the other private-endpoint tunnels run
+# `aws ssm start-session`, which hands the session to this binary; without it
+# every tunnel fails before it starts. Pinned with per-arch SHA-256s taken from
+# the published .deb packages (aws/session-manager-plugin release notes:
+# https://github.com/aws/session-manager-plugin/releases). Bump the version and
+# both checksums together.
+ARG SESSION_MANAGER_PLUGIN_VERSION=1.2.896.0
+ARG SESSION_MANAGER_PLUGIN_SHA256_AMD64=53f51fcc67314a4bf85888a38a3967cd41f8d0f28a60a9469a63acf935ba713e
+ARG SESSION_MANAGER_PLUGIN_SHA256_ARM64=914eeca87b18b55356c58be197080f73742b3ca60d3823f0a45670dc9056aa9c
+RUN case "${TARGETARCH}" in \
+        amd64)  SMP_ARCH="ubuntu_64bit"; SMP_SHA256="${SESSION_MANAGER_PLUGIN_SHA256_AMD64}" ;; \
+        arm64)  SMP_ARCH="ubuntu_arm64"; SMP_SHA256="${SESSION_MANAGER_PLUGIN_SHA256_ARM64}" ;; \
+        *)      echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/${SESSION_MANAGER_PLUGIN_VERSION}/${SMP_ARCH}/session-manager-plugin.deb" \
+      -o /tmp/session-manager-plugin.deb \
+    && echo "${SMP_SHA256}  /tmp/session-manager-plugin.deb" | sha256sum -c - \
+    && dpkg -i /tmp/session-manager-plugin.deb \
+    && rm -f /tmp/session-manager-plugin.deb \
+    && session-manager-plugin --version
+
 # Install Docker CLI (client only — no daemon).
 #
 # `cdk deploy` shells out to Docker for Lambda asset bundling. The dev
