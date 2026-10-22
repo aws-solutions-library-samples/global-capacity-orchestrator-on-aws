@@ -2636,3 +2636,192 @@ class TestInferencePopulateKv:
 
         assert result.exit_code != 0
         assert "Failed to populate KV cache: upload failed" in result.output
+
+
+# =============================================================================
+# inference invoke: naming the served model on a model-not-found 404
+# =============================================================================
+
+
+_REQUESTED = "Qwen/Qwen2.5-1.5B-Instruct"
+_SERVED = "Qwen/Qwen3-0.6B"
+_VLLM_404 = json.dumps(
+    {
+        "error": {
+            "message": f"The model `{_REQUESTED}` does not exist.",
+            "type": "NotFoundError",
+            "param": "model",
+            "code": 404,
+        }
+    }
+)
+
+
+class TestInvokeServedModelHint:
+    """A vLLM 404 for the requested model names the model the endpoint serves."""
+
+    @staticmethod
+    def _endpoint(image="vllm/vllm-openai:v0.31.0", env=None, args=None, framework=None):
+        spec = {"image": image, "env": {"MODEL": _REQUESTED} if env is None else env}
+        if args is not None:
+            spec["args"] = args
+        if framework is not None:
+            spec["framework"] = framework
+        return {"endpoint_name": "ep", "ingress_path": "/inference/ep", "spec": spec}
+
+    @staticmethod
+    def _client(*, post_status=404, post_text=_VLLM_404, models=None, models_ok=True):
+        client = MagicMock()
+        post = MagicMock(ok=post_status < 400, status_code=post_status, text=post_text)
+        models_resp = MagicMock(ok=models_ok)
+        models_resp.json.return_value = {
+            "data": [{"id": model} for model in ([_SERVED] if models is None else models)]
+        }
+
+        def request(*, method, path, **_kwargs):
+            if method == "GET":
+                assert path == "/inference/ep/v1/models"
+                return models_resp
+            return post
+
+        client.make_authenticated_request.side_effect = request
+        return client
+
+    @staticmethod
+    def _invoke(runner, endpoint, client, *extra):
+        manager = MagicMock()
+        manager.get_endpoint.return_value = endpoint
+        with (
+            patch("cli.inference.get_inference_manager", return_value=manager),
+            patch("cli.aws_client.get_aws_client", return_value=client),
+        ):
+            return runner.invoke(cli, ["inference", "invoke", "ep", *extra])
+
+    @staticmethod
+    def _get_calls(client):
+        return [
+            call
+            for call in client.make_authenticated_request.call_args_list
+            if call.kwargs["method"] == "GET"
+        ]
+
+    def test_names_the_served_model_and_the_model_env_cause(self, runner):
+        client = self._client()
+        result = self._invoke(runner, self._endpoint(), client, "-p", "hi")
+
+        assert result.exit_code == 1
+        assert "HTTP 404" in result.output
+        assert f"ep serves {_SERVED}, not {_REQUESTED}." in result.output
+        assert "vLLM does not read MODEL" in result.output
+        assert "before v8.12.0" in result.output
+        assert "Invoke Says the Model Does Not Exist" in result.output
+        assert f'-d \'{{"model": "{_SERVED}", "prompt": "Hello", "max_tokens": 50}}\'' in (
+            result.output
+        )
+
+    def test_a_pinned_region_is_asked_and_kept_in_the_example(self, runner):
+        client = self._client()
+        result = self._invoke(runner, self._endpoint(), client, "-p", "hi", "-r", "us-west-2")
+
+        assert result.exit_code == 1
+        assert "gco inference invoke ep -r us-west-2 -d" in result.output
+        assert self._get_calls(client)[0].kwargs["target_region"] == "us-west-2"
+
+    def test_a_streamed_request_gets_the_same_hint(self, runner):
+        client = self._client()
+        result = self._invoke(runner, self._endpoint(), client, "-p", "hi", "--stream")
+
+        assert result.exit_code == 1
+        assert f"ep serves {_SERVED}" in result.output
+
+    def test_raw_data_naming_another_model_gets_the_served_model_only(self, runner):
+        client = self._client()
+        body = json.dumps({"model": "my/other-model", "prompt": "hi"})
+        result = self._invoke(runner, self._endpoint(), client, "-d", body)
+
+        assert result.exit_code == 1
+        assert f"ep serves {_SERVED}, not my/other-model." in result.output
+        assert "vLLM does not read MODEL" not in result.output
+
+    def test_a_model_named_in_the_args_is_not_blamed_on_model_env(self, runner):
+        client = self._client()
+        endpoint = self._endpoint(env={}, args=["--model", _REQUESTED])
+        result = self._invoke(runner, endpoint, client, "-p", "hi")
+
+        assert result.exit_code == 1
+        assert f"ep serves {_SERVED}, not {_REQUESTED}." in result.output
+        assert "vLLM does not read MODEL" not in result.output
+
+    def test_no_hint_when_the_requested_model_is_served(self, runner):
+        client = self._client(models=[_REQUESTED])
+        result = self._invoke(runner, self._endpoint(), client, "-p", "hi")
+
+        assert result.exit_code == 1
+        assert "HTTP 404" in result.output
+        assert "serves" not in result.output
+
+    @pytest.mark.parametrize(
+        ("models", "models_ok"),
+        [([], True), ([_SERVED], False)],
+        ids=["empty-inventory", "inventory-error-status"],
+    )
+    def test_no_hint_without_a_usable_inventory(self, runner, models, models_ok):
+        client = self._client(models=models, models_ok=models_ok)
+        result = self._invoke(runner, self._endpoint(), client, "-p", "hi")
+
+        assert result.exit_code == 1
+        assert "serves" not in result.output
+
+    def test_no_hint_when_the_inventory_request_fails(self, runner):
+        client = self._client()
+        post = MagicMock(ok=False, status_code=404, text=_VLLM_404)
+
+        def request(*, method, **_kwargs):
+            if method == "GET":
+                raise RuntimeError("connection reset")
+            return post
+
+        client.make_authenticated_request.side_effect = request
+        result = self._invoke(runner, self._endpoint(), client, "-p", "hi")
+
+        assert result.exit_code == 1
+        assert "HTTP 404" in result.output
+        assert "serves" not in result.output
+
+    def test_other_errors_do_not_query_the_inventory(self, runner):
+        client = self._client(post_status=502, post_text="Bad Gateway")
+        result = self._invoke(runner, self._endpoint(), client, "-p", "hi")
+
+        assert result.exit_code == 1
+        assert "HTTP 502" in result.output
+        assert self._get_calls(client) == []
+
+    def test_sglang_requests_carry_no_model_to_check(self, runner):
+        client = self._client()
+        endpoint = self._endpoint(image="lmsysorg/sglang:v0.5.21", framework="sglang")
+        result = self._invoke(runner, endpoint, client, "-p", "hi")
+
+        assert result.exit_code == 1
+        assert self._get_calls(client) == []
+
+
+class TestModelNamedOnlyByEnv:
+    """The MODEL-env cause is claimed only when nothing else names the model."""
+
+    @pytest.mark.parametrize(
+        ("spec", "expected"),
+        [
+            ({"env": {"MODEL": _REQUESTED}}, True),
+            ({"env": {"MODEL": _REQUESTED}, "args": ["--max-model-len", "4096"]}, True),
+            ({"env": {"MODEL": "other"}}, False),
+            ({"env": {}}, False),
+            ("not-a-spec", False),
+            ({"env": {"MODEL": _REQUESTED}, "args": [_REQUESTED]}, False),
+            ({"env": {"MODEL": _REQUESTED}, "args": ["--model", _REQUESTED]}, False),
+            ({"env": {"MODEL": _REQUESTED}, "args": [f"--served-model-name={_REQUESTED}"]}, False),
+        ],
+    )
+    def test_cases(self, spec, expected):
+        from cli.commands.inference_cmd import _model_named_only_by_env
+
+        assert _model_named_only_by_env(spec, _REQUESTED) is expected

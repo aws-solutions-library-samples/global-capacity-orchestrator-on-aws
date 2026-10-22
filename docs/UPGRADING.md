@@ -26,6 +26,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
 - [Release notes for running deployments](#release-notes-for-running-deployments)
   - [In-cluster TLS and tracing](#in-cluster-tls-and-tracing)
   - [Tenant write fence and MLflow over HTTPS](#tenant-write-fence-and-mlflow-over-https)
+  - [vLLM endpoints deployed with MODEL](#vllm-endpoints-deployed-with-model)
 
 ## How an upgrade works
 
@@ -374,3 +375,20 @@ ways during an in-place redeploy:
   an older CLI already uploaded owner-only stays in the bootstrap bucket until
   its object is deleted once; see
   [TROUBLESHOOTING.md → Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask).
+
+### vLLM endpoints deployed with MODEL
+
+From v8.12.0 the inference monitor starts vLLM with `--model $(MODEL)` when an
+endpoint names its model only through `-e MODEL=...`. Earlier releases did not,
+so those endpoints serve vLLM's built-in default model (`Qwen/Qwen3-0.6B` for
+v0.31.0) and `gco inference invoke` gets a 404 for the model it asks for.
+
+- **Running endpoints keep their arguments.** The monitor renders a
+  Deployment's arguments only when it creates it, so an in-place
+  `gco stacks deploy-all` leaves an affected endpoint serving the default
+  model. Recreate it once its Regions run the new release; `gco upgrade`
+  recreates every endpoint anyway. See
+  [TROUBLESHOOTING.md → Invoke Says the Model Does Not Exist](TROUBLESHOOTING.md#invoke-says-the-model-does-not-exist).
+- **`gco inference models <endpoint>` shows what an endpoint serves.** From
+  the release after v8.13.0, `invoke` also names the served model when vLLM
+  rejects the requested one.

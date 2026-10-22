@@ -452,6 +452,18 @@ def ensure_https_health_check(
             if endpoint.get("EndpointId")
             and (expected_alb_arn is None or endpoint.get("EndpointId") == expected_alb_arn)
         ]
+        # EndpointConfigurations replaces the group's endpoint list. Right after
+        # AddEndpoints the description can still omit the ALB this run just
+        # registered, and sending the filtered list as-is would then remove
+        # every endpoint and leave the Region out of Global Accelerator.
+        if expected_alb_arn is not None and not existing_endpoints:
+            existing_endpoints = [
+                {
+                    "EndpointId": expected_alb_arn,
+                    "Weight": 100,
+                    "ClientIPPreservationEnabled": True,
+                }
+            ]
         ga_client.update_endpoint_group(
             EndpointGroupArn=endpoint_group_arn,
             HealthCheckPort=443,

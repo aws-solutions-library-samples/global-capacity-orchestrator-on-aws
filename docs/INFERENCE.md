@@ -286,7 +286,10 @@ gco inference deploy my-llm \
 itself, so for a vLLM endpoint the renderer starts the server with
 `--model $(MODEL)` (the kubelet expands it at container start) unless the
 `--extra-args` already name the model with `--model`, a positional model tag,
-or `--config`. Other vLLM settings are server flags too: pass each token as one
+or `--config`. Releases before v8.12.0 did not, and the monitor renders the
+arguments only when it creates the Deployment, so an endpoint created on an
+older release keeps serving vLLM's default model until it is recreated; see
+[Invoke Says the Model Does Not Exist](TROUBLESHOOTING.md#invoke-says-the-model-does-not-exist). Other vLLM settings are server flags too: pass each token as one
 `--extra-args` value, for example `--extra-args=--max-model-len --extra-args
 4096`. An environment variable such as `MAX_MODEL_LEN` has no effect.
 

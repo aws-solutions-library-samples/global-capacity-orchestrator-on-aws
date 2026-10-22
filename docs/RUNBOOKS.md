@@ -408,11 +408,14 @@ aws logs tail "$GA_LOG_GROUP" --since 1h --region <REGION>
 
 **Resolution:**
 
-1. **If ALB is not registered:** The GA registration Lambda runs during stack deployment. Trigger a stack update to re-register:
+1. **If ALB is not registered** (`traffic-dial show` reports `no endpoints`): the GA registration Lambda is the last step of the Region's add-on convergence, which every deploy starts in the background. It runs only after the post-Helm manifests and both validators succeed, so a convergence that stopped earlier leaves the endpoint group as it was even though the deploy reported success. The health monitor keeps the SSM hostname registry in step with the Gateway on its own, so the Region's regional API can work while Global Accelerator still has no endpoint for it. Find where the last convergence stopped, fix that, and re-run it without a stack update:
 
    ```bash
-   gco stacks deploy gco-<REGION> -y
+   gco stacks addons status -r <REGION>
+   gco stacks addons install -r <REGION>
    ```
+
+   A stack update (`gco stacks deploy gco-<REGION> -y`) starts the same convergence.
 
 2. **If ALB health checks are failing:** GA health checks hit `/api/v1/health` on the ALB. Check that the health monitor pod is running and the ALB target group has healthy targets.
 

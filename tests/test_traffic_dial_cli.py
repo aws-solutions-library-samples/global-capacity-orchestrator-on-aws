@@ -379,6 +379,23 @@ class TestCommands:
         assert "us-east-1" in result.output
         assert "degraded" in result.output
 
+    def test_show_explains_a_region_with_no_endpoints(self, mock_manager):
+        mock_manager.get_status.return_value = [
+            RegionDialStatus(region="us-east-1", traffic_dial=100, endpoint_health="no endpoints"),
+            RegionDialStatus(region="us-west-2", traffic_dial=100, endpoint_health="1/1 healthy"),
+        ]
+        mock_manager.read_controller_state.return_value = None
+
+        result = CliRunner().invoke(cli, ["capacity", "traffic-dial", "show"])
+
+        assert result.exit_code == 0, result.output
+        assert "us-east-1 has no endpoint in its Global Accelerator endpoint group" in (
+            result.output
+        )
+        assert "gco stacks addons status -r us-east-1" in result.output
+        assert "gco stacks addons install -r us-east-1" in result.output
+        assert "us-west-2 has no endpoint" not in result.output
+
     def test_show_surfaces_traffic_dial_errors(self, mock_manager):
         mock_manager.get_status.side_effect = TrafficDialError("no endpoint groups")
         result = CliRunner().invoke(cli, ["capacity", "traffic-dial", "show"])
