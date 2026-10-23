@@ -4892,7 +4892,9 @@ the regional stacks, `destroy-all` (with or without `--keep-control-plane`, and
 so also `gco upgrade`) lists each regional stack's own `AWS::IAM::Role`
 resources and removes them from any instance profile, printing each one. Only
 the role membership is removed; the instance profile itself is left for
-whoever created it.
+whoever created it. `gco upgrade` runs the teardown of the release it upgrades
+from, so an upgrade from v8.14.0 or earlier needs the manual detach in
+[UPGRADING.md → If it stops halfway](UPGRADING.md#if-it-stops-halfway).
 
 ##### Dynamically provisioned EBS volumes
 

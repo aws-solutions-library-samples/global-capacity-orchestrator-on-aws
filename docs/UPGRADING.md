@@ -67,7 +67,9 @@ release, while the control plane is updated in place and keeps its state:
    sweeps of orphaned bastions, implicit log groups and dynamically provisioned
    EBS volumes. Any of the regional stack's roles that something outside the
    stack put into an instance profile are removed from it first, so the role
-   delete cannot leave the stack in `DELETE_FAILED`.
+   delete cannot leave the stack in `DELETE_FAILED`. The teardown is the one in
+   the release you upgrade from (see [Run the upgrade](#3-run-the-upgrade)), so upgrades from v8.14.0 or
+   earlier do not get this sweep; see [If it stops halfway](#if-it-stops-halfway).
 5. **Deploy-all on the new release.** `<project>-global` and
    `<project>-api-gateway` are updated in place, the regional stacks and their
    bridges are recreated from `cdk.json`, and the monitoring stack is updated back
@@ -211,6 +213,19 @@ Every step reports what it did, and the command tells you where it stopped.
   `Upgrade failed during the stack cycle`. Either way, once fixed, rerun
   `gco upgrade --skip-checkout` — the teardown half is idempotent (already
   deleted stacks are skipped) and the deploy half is the ordinary deploy-all.
+- **A regional stack in `DELETE_FAILED` on an `AWS::IAM::Role` with "must
+  remove roles from instance profile first"**: something outside the stack put
+  that role into an instance profile. The process running the upgrade still
+  executes the previous release's CLI, so an upgrade from v8.14.0 or earlier
+  does not detach it. Find the profile and remove the role from it (the
+  profile itself is not GCO's to delete), then rerun
+  `gco upgrade --skip-checkout`, which now runs the new release's teardown:
+
+  ```bash
+  aws iam list-instance-profiles-for-role --role-name <role-physical-id>
+  aws iam remove-role-from-instance-profile --instance-profile-name <profile> --role-name <role-physical-id>
+  ```
+
 - **Container image rebuild or `npm ci` failures** are warnings, not stops: the
   stack cycle runs regardless, and `./scripts/setup-dev-alias.sh` or `npm ci`
   can be rerun afterwards.
