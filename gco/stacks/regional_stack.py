@@ -166,8 +166,8 @@ from gco.stacks.constants import (
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-20T05:48:45Z
-# Generated from Git commit: c423142917c732c00afaacd6c183bc25ce3d591e
+# Generated at (UTC): 2026-10-23T11:52:58Z
+# Generated from Git commit: 6c1b25d9046fec3666f29c38a10fbefe6b833c00
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -1737,20 +1737,11 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Create node group role
-        # role_name intentionally omitted - let CDK generate unique name
-        iam.Role(
-            self,
-            "NodeGroupRole",
-            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonEKSWorkerNodePolicy"),
-                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonEKS_CNI_Policy"),
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonEC2ContainerRegistryReadOnly"
-                ),
-            ],
-        )
+        # No separate node role is created here: EKS Auto Mode nodes use the
+        # node role the Cluster construct provisions for ``compute``. A former
+        # standalone, unreferenced "NodeGroupRole" was removed because it
+        # granted worker-node policies to nothing and, once something outside
+        # the stack placed it in an instance profile, blocked stack deletion.
 
         # Create EKS Auto Mode cluster with built-in system and general-purpose nodepools
         # Auto Mode automatically manages compute resources and comes with essential addons

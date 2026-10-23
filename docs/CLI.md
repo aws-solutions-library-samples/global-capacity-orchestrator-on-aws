@@ -4872,8 +4872,8 @@ regional stacks; CloudFormation would otherwise refuse to delete a stack whose
 exports are still consumed. The sweeps that only make sense for a full teardown
 are skipped: the image-registry preflight, the backup-vault purge, bastion IAM
 retirement, and the traffic-dial parameter purge. Per-stack sweeps (orphaned
-bastions, implicit log groups, dynamically provisioned EBS volumes) still run for
-the stacks that went away.
+bastions, roles held in instance profiles, implicit log groups, dynamically
+provisioned EBS volumes) still run for the stacks that went away.
 
 Data inside the regional stacks (EFS and FSx file systems, Valkey, Aurora,
 in-cluster volumes) is deleted with them — back it up to the cluster-shared bucket
@@ -4881,6 +4881,20 @@ first. The next `gco stacks deploy-all` recreates the regional stacks from
 `cdk.json`; run `gco stacks regions remove <region>` first if the scale-down is
 meant to last (see [Scaling to zero workload Regions](CUSTOMIZATION.md#scaling-to-zero-workload-regions)).
 `gco upgrade` uses this same teardown before it recreates the regional stacks.
+
+##### Roles held in instance profiles
+
+IAM refuses to delete a role that is still in an instance profile ("Cannot
+delete entity, must remove roles from instance profile first"), which leaves the
+regional stack in `DELETE_FAILED`. Profiles are created outside the stack, by
+hand or by another tool, so CloudFormation never removes them. Before deleting
+the regional stacks, `destroy-all` (with or without `--keep-control-plane`, and
+so also `gco upgrade`) lists each regional stack's own `AWS::IAM::Role`
+resources and removes them from any instance profile, printing each one. Only
+the role membership is removed; the instance profile itself is left for
+whoever created it. `gco upgrade` runs the teardown of the release it upgrades
+from, so an upgrade from v8.14.0 or earlier needs the manual detach in
+[UPGRADING.md → If it stops halfway](UPGRADING.md#if-it-stops-halfway).
 
 ##### Dynamically provisioned EBS volumes
 

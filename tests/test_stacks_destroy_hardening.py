@@ -1567,3 +1567,169 @@ class TestDetachMonitoringFromRegions:
             patch.object(StackManager, "deploy", return_value=False),
         ):
             assert manager.detach_monitoring_from_regions() is False
+
+
+class TestRoleInstanceProfileDetach:
+    """Teardown removes a regional stack's own roles from instance profiles.
+
+    IAM refuses to delete a role still in an instance profile, which left
+    ``gco-<region>`` in DELETE_FAILED on NodeGroupRole during an upgrade.
+    """
+
+    @staticmethod
+    def _manager():
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        return StackManager.__new__(StackManager), config
+
+    @staticmethod
+    def _paginator(pages):
+        paginator = MagicMock()
+        paginator.paginate.return_value = pages
+        return paginator
+
+    def _run(self, cfn, iam, stacks):
+        manager, config = self._manager()
+        manager.config = config
+
+        def client(service, **kwargs):
+            if service == "cloudformation":
+                assert kwargs["region_name"] in {"us-east-1", "us-west-2"}
+                return cfn
+            assert service == "iam"
+            return iam
+
+        with patch("boto3.client", side_effect=client):
+            return manager._detach_stack_roles_from_instance_profiles(stacks)
+
+    def test_detaches_only_live_stack_roles_and_keeps_the_profile(self, capsys) -> None:
+        cfn = MagicMock()
+        cfn.get_paginator.return_value = self._paginator(
+            [
+                {
+                    "StackResourceSummaries": [
+                        {
+                            "ResourceType": "AWS::IAM::Role",
+                            "PhysicalResourceId": "gco-us-east-1-NodeGroupRole-ABC",
+                            "ResourceStatus": "CREATE_COMPLETE",
+                        },
+                        {
+                            "ResourceType": "AWS::IAM::Role",
+                            "PhysicalResourceId": "gco-us-east-1-GoneRole",
+                            "ResourceStatus": "DELETE_COMPLETE",
+                        },
+                        {
+                            "ResourceType": "AWS::S3::Bucket",
+                            "PhysicalResourceId": "bucket",
+                            "ResourceStatus": "CREATE_COMPLETE",
+                        },
+                        {"ResourceType": "AWS::IAM::Role", "ResourceStatus": "CREATE_FAILED"},
+                    ]
+                }
+            ]
+        )
+        iam = MagicMock()
+        iam.get_paginator.return_value = self._paginator(
+            [{"InstanceProfiles": [{"InstanceProfileName": "external-profile"}]}]
+        )
+
+        outcome = self._run(cfn, iam, ["gco-us-east-1"])
+
+        assert outcome == {
+            "detached": [
+                {
+                    "stack": "gco-us-east-1",
+                    "role": "gco-us-east-1-NodeGroupRole-ABC",
+                    "instance_profile": "external-profile",
+                }
+            ],
+            "errors": [],
+        }
+        iam.get_paginator.return_value.paginate.assert_called_once_with(
+            RoleName="gco-us-east-1-NodeGroupRole-ABC"
+        )
+        iam.remove_role_from_instance_profile.assert_called_once_with(
+            InstanceProfileName="external-profile", RoleName="gco-us-east-1-NodeGroupRole-ABC"
+        )
+        iam.delete_instance_profile.assert_not_called()
+        assert "the profile is kept" in capsys.readouterr().out
+
+    def test_missing_stacks_roles_and_profiles_are_quiet_and_other_errors_recorded(self) -> None:
+        def cfn_error(code, message):
+            return ClientError({"Error": {"Code": code, "Message": message}}, "ListStackResources")
+
+        cfn = MagicMock()
+        stack_pages = {
+            "gco-us-east-1": cfn_error(
+                "ValidationError", "Stack with id gco-us-east-1 does not exist"
+            ),
+            "gco-us-west-2": [
+                {
+                    "StackResourceSummaries": [
+                        {
+                            "ResourceType": "AWS::IAM::Role",
+                            "PhysicalResourceId": name,
+                            "ResourceStatus": "CREATE_COMPLETE",
+                        }
+                        for name in ("gone-role", "denied-role", "racing-role", "stuck-role")
+                    ]
+                }
+            ],
+        }
+
+        def paginate(StackName):
+            pages = stack_pages[StackName]
+            if isinstance(pages, Exception):
+                raise pages
+            return pages
+
+        cfn.get_paginator.return_value.paginate.side_effect = paginate
+
+        def iam_error(code):
+            return ClientError({"Error": {"Code": code, "Message": code}}, "op")
+
+        def list_profiles(RoleName):
+            if RoleName == "gone-role":
+                raise iam_error("NoSuchEntity")
+            if RoleName == "denied-role":
+                raise iam_error("AccessDenied")
+            return [{"InstanceProfiles": [{"InstanceProfileName": f"{RoleName}-profile"}]}]
+
+        iam = MagicMock()
+        iam.get_paginator.return_value.paginate.side_effect = list_profiles
+
+        def remove(InstanceProfileName, RoleName):
+            if RoleName == "racing-role":
+                raise iam_error("NoSuchEntity")
+            raise iam_error("LimitExceeded")
+
+        iam.remove_role_from_instance_profile.side_effect = remove
+
+        outcome = self._run(cfn, iam, ["gco-us-east-1", "gco-us-west-2"])
+
+        assert outcome["detached"] == []
+        assert len(outcome["errors"]) == 2
+        assert outcome["errors"][0].startswith("denied-role: ")
+        assert outcome["errors"][1].startswith("stuck-role in stuck-role-profile: ")
+
+    def test_stack_lookup_failures_are_recorded_and_empty_input_is_a_no_op(self) -> None:
+        manager, config = self._manager()
+        manager.config = config
+        with patch("boto3.client") as client:
+            assert manager._detach_stack_roles_from_instance_profiles([]) == {
+                "detached": [],
+                "errors": [],
+            }
+        client.assert_not_called()
+
+        cfn = MagicMock()
+        cfn.get_paginator.return_value.paginate.side_effect = [
+            ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "ListStackResources"),
+            RuntimeError("boom"),
+        ]
+        outcome = self._run(cfn, MagicMock(), ["gco-us-east-1", "gco-us-west-2"])
+        assert outcome["detached"] == []
+        assert outcome["errors"][0].startswith("gco-us-east-1: ")
+        assert outcome["errors"][1] == "gco-us-west-2: RuntimeError: boom"

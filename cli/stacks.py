@@ -75,8 +75,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-21T18:48:59Z
-# Generated from Git commit: 811e7b6e446f30a9addbb0ee3f4391c99ca59a2e
+# Generated at (UTC): 2026-10-23T11:52:58Z
+# Generated from Git commit: 6c1b25d9046fec3666f29c38a10fbefe6b833c00
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -5115,6 +5115,16 @@ class StackManager:
         if not strict_identity and not keep_control_plane:
             record_cleanup("bastion-iam", self._cleanup_bastion_iam())
 
+        # A regional stack's role that something outside the stack put into an
+        # instance profile makes IAM refuse the role delete, leaving the stack
+        # DELETE_FAILED. Detach those memberships first. Runs for upgrades
+        # (keep_control_plane) too, since they delete every regional stack.
+        if not strict_identity:
+            record_cleanup(
+                "role-instance-profiles",
+                self._detach_stack_roles_from_instance_profiles(list(regional_stacks)),
+            )
+
         # The backup vault belongs to the global stack. When that stack stays,
         # so do its recovery points: they are the EFS backups an operator may
         # restore from once the regional stacks are recreated.
@@ -6036,6 +6046,87 @@ class StackManager:
             print("  Removed the ephemeral-bastion IAM role and instance profile.")
         for failure in outcome["errors"]:
             logger.warning("Bastion IAM teardown step failed: %s", failure)
+        return outcome
+
+    def _detach_stack_roles_from_instance_profiles(
+        self, regional_stacks: list[str]
+    ) -> dict[str, Any]:
+        """Remove each regional stack's own IAM roles from any instance profile.
+
+        IAM refuses to delete a role that is still in an instance profile
+        (``DeleteConflict``: "must remove roles from instance profile first"),
+        and CloudFormation then leaves the stack in ``DELETE_FAILED``. Profiles
+        are created outside the stack (by hand, by another tool, or by a
+        service), so the stack never models them. Only roles the stack itself
+        owns (``AWS::IAM::Role`` resources) are touched, and only the role
+        membership is removed; the profile is left for whoever created it.
+        Best-effort: failures are recorded and the stack delete still runs.
+        """
+        import boto3
+
+        outcome: dict[str, Any] = {"detached": [], "errors": []}
+        if not regional_stacks:
+            return outcome
+        project_name = self.config.project_name
+        iam = boto3.client("iam")
+        for stack_name in regional_stacks:
+            region = stack_name.replace(f"{project_name}-", "", 1)
+            try:
+                cfn = boto3.client("cloudformation", region_name=region)
+                role_names: list[str] = []
+                for page in cfn.get_paginator("list_stack_resources").paginate(
+                    StackName=stack_name
+                ):
+                    for resource in page.get("StackResourceSummaries", []):
+                        if resource.get("ResourceType") != "AWS::IAM::Role":
+                            continue
+                        if resource.get("ResourceStatus") == "DELETE_COMPLETE":
+                            continue
+                        physical_id = resource.get("PhysicalResourceId")
+                        if physical_id:
+                            role_names.append(str(physical_id))
+            except ClientError as exc:
+                if "does not exist" in str(exc):
+                    continue
+                outcome["errors"].append(f"{stack_name}: {exc}")
+                continue
+            except Exception as exc:  # best-effort cleanup
+                outcome["errors"].append(f"{stack_name}: {type(exc).__name__}: {exc}")
+                continue
+
+            for role_name in role_names:
+                try:
+                    profiles = [
+                        profile["InstanceProfileName"]
+                        for page in iam.get_paginator("list_instance_profiles_for_role").paginate(
+                            RoleName=role_name
+                        )
+                        for profile in page.get("InstanceProfiles", [])
+                    ]
+                except ClientError as exc:
+                    if exc.response.get("Error", {}).get("Code") == "NoSuchEntity":
+                        continue
+                    outcome["errors"].append(f"{role_name}: {exc}")
+                    continue
+                for profile_name in profiles:
+                    try:
+                        iam.remove_role_from_instance_profile(
+                            InstanceProfileName=profile_name, RoleName=role_name
+                        )
+                    except ClientError as exc:
+                        if exc.response.get("Error", {}).get("Code") == "NoSuchEntity":
+                            continue
+                        outcome["errors"].append(f"{role_name} in {profile_name}: {exc}")
+                        continue
+                    outcome["detached"].append(
+                        {"stack": stack_name, "role": role_name, "instance_profile": profile_name}
+                    )
+                    print(
+                        f"  Removed {stack_name} role {role_name} from instance profile "
+                        f"{profile_name} so the stack can delete it (the profile is kept)."
+                    )
+        for failure in outcome["errors"]:
+            logger.warning("Instance-profile detach before stack deletion failed: %s", failure)
         return outcome
 
     def cleanup_eks_security_groups(self) -> None:

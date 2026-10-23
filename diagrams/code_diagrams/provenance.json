@@ -42,9 +42,9 @@
       "source_commit": "42cc3f2094423b3f8056fbc5c20652e222b0650f"
     },
     "cli/stacks.py": {
-      "digest": "fec85d4c69e526f36359daeaadd355cb84e424a38319a2ceeadb74a2ade82fb7",
-      "generated_at": "2026-10-21T18:48:59Z",
-      "source_commit": "811e7b6e446f30a9addbb0ee3f4391c99ca59a2e"
+      "digest": "9791a007e729498980831b69571a547e23f2f1f62552d7d921ac76cd7fe040cd",
+      "generated_at": "2026-10-23T11:52:58Z",
+      "source_commit": "6c1b25d9046fec3666f29c38a10fbefe6b833c00"
     },
     "cli/upgrade.py": {
       "digest": "250666b92297af33ca69a20ac036804aad5c06234d609bce2a3044b0da689f3c",
@@ -142,9 +142,9 @@
       "source_commit": "3458f76ef1541be718c00458b8ecc8f7c770c6ad"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "53a1a115b5727a530765e0bbca7662feb58ebc646e389e397f978f79c285c9b5",
-      "generated_at": "2026-10-20T05:48:45Z",
-      "source_commit": "c423142917c732c00afaacd6c183bc25ce3d591e"
+      "digest": "2291c0677a79553d63caff5c31fd53ab7b364900ae012b49e0301f1c5c3eb863",
+      "generated_at": "2026-10-23T11:52:58Z",
+      "source_commit": "6c1b25d9046fec3666f29c38a10fbefe6b833c00"
     },
     "gco_mcp/audit.py": {
       "digest": "c085762d44c367b22fdf200ee1764c38d26056111aa7f7fa87429b810695b689",
