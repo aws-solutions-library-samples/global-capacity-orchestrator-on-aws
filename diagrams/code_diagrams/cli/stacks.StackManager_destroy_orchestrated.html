@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-10-21T18:48:59Z">
-        <meta name="gco-source-commit" content="811e7b6e446f30a9addbb0ee3f4391c99ca59a2e">
-        <meta name="gco-flow-digest" content="bc4c39dc094a67ae">
+        <meta name="gco-generated-at" content="2026-10-23T11:52:58Z">
+        <meta name="gco-source-commit" content="6c1b25d9046fec3666f29c38a10fbefe6b833c00">
+        <meta name="gco-flow-digest" content="92e23137ffcb482c">
         <title>gco stacks destroy-all — orchestrated multi-stack destroy</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -255,22 +255,23 @@ op716=>operation: bastion_targets = {name: details for name, details in strict_r
 op718=>operation: bastions = self.cleanup_orphaned_bastions(stacks, parallel=parallel, resource_targets=bastion_targets if strict_identity else None)
 sub720=>subroutine: record_cleanup('bastions', {'terminated_instances': bastions})
 cond723=>operation: record_cleanup('bastion-iam', self._cleanup_bastion_iam()) if  not strict_identity and (not keep_control_plane)
-cond734=>condition: if not keep_control_plane
-op738=>operation: global_stack_name = f'{project_name}-global'
-op740=>operation: backup = self._cleanup_backup_vault(expected_stack_id=(expected_stack_ids or {}).get(global_stack_name), authorize_stack=authorize_stack, require_expected_identity=strict_identity)
-sub742=>subroutine: record_cleanup('backup-vault', backup)
-cond745=>operation: raise RuntimeError('Strict backup-vault cleanup failed before stack deletion: ' + json.dumps(backup['errors'], sort_keys=True)) if  strict_identity and backup.get('errors')
-op758=>operation: successful: list[str] = []
-op760=>operation: failed: list[str] = []
-op762=>operation: implicit_log_groups: dict[str, dict[str, Any]] = {}
-cond765=>operation: implicit_log_groups = self._collect_implicit_log_groups(stacks) if  not strict_identity
-st776=>start: start finish
-io778=>inputoutput: input: overall
-op781=>operation: 'Funnel every exit through the teardown sweeps.\n\n            Called at each return point so a partially failed teardown\n            still cleans up the stacks that DID delete (implicit log\n            groups), while the success-only sweeps (runtime traffic-dial\n            parameters) run exactly when everything is gone. New exit\n            paths must return through here as well.\n            '
-cond784=>operation: record_cleanup('implicit-log-groups', self._cleanup_implicit_log_groups(implicit_log_groups, successful)) if  implicit_log_groups
-cond795=>operation: record_cleanup('traffic-dial-parameters', self._cleanup_traffic_dial_parameters()) if  overall and (not keep_control_plane)
-io808=>inputoutput: output: (overall, successful, failed)
-e806=>end: end function return
+cond734=>operation: record_cleanup('role-instance-profiles', self._detach_stack_roles_from_instance_profiles(list(regional_stacks))) if  not strict_identity
+cond745=>condition: if not keep_control_plane
+op749=>operation: global_stack_name = f'{project_name}-global'
+op751=>operation: backup = self._cleanup_backup_vault(expected_stack_id=(expected_stack_ids or {}).get(global_stack_name), authorize_stack=authorize_stack, require_expected_identity=strict_identity)
+sub753=>subroutine: record_cleanup('backup-vault', backup)
+cond756=>operation: raise RuntimeError('Strict backup-vault cleanup failed before stack deletion: ' + json.dumps(backup['errors'], sort_keys=True)) if  strict_identity and backup.get('errors')
+op769=>operation: successful: list[str] = []
+op771=>operation: failed: list[str] = []
+op773=>operation: implicit_log_groups: dict[str, dict[str, Any]] = {}
+cond776=>operation: implicit_log_groups = self._collect_implicit_log_groups(stacks) if  not strict_identity
+st787=>start: start finish
+io789=>inputoutput: input: overall
+op792=>operation: 'Funnel every exit through the teardown sweeps.\n\n            Called at each return point so a partially failed teardown\n            still cleans up the stacks that DID delete (implicit log\n            groups), while the success-only sweeps (runtime traffic-dial\n            parameters) run exactly when everything is gone. New exit\n            paths must return through here as well.\n            '
+cond795=>operation: record_cleanup('implicit-log-groups', self._cleanup_implicit_log_groups(implicit_log_groups, successful)) if  implicit_log_groups
+cond806=>operation: record_cleanup('traffic-dial-parameters', self._cleanup_traffic_dial_parameters()) if  overall and (not keep_control_plane)
+io819=>inputoutput: output: (overall, successful, failed)
+e817=>end: end function return
 
 op504->op506
 op506->op508
@@ -320,22 +321,23 @@ op716->op718
 op718->sub720
 sub720->cond723
 cond723->cond734
-cond734(yes)->op738
-op738->op740
-op740->sub742
-sub742->cond745
-cond745->op758
-op758->op760
-op760->op762
-op762->cond765
-cond765->st776
-st776->io778
-io778->op781
-op781->cond784
-cond784->cond795
-cond795->io808
-io808->e806
-cond734(no)->op758
+cond734->cond745
+cond745(yes)->op749
+op749->op751
+op751->sub753
+sub753->cond756
+cond756->op769
+op769->op771
+op771->op773
+op773->cond776
+cond776->st787
+st787->io789
+io789->op792
+op792->cond795
+cond795->cond806
+cond806->io819
+io819->e817
+cond745(no)->op769
 cond667(no)->op680
 cond635(no)->op664
 cond605(no)->op630
@@ -350,17 +352,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-10-21T18:48:59Z -->
-        <!-- Generated from Git commit: 811e7b6e446f30a9addbb0ee3f4391c99ca59a2e -->
+        <!-- Generated at (UTC): 2026-10-23T11:52:58Z -->
+        <!-- Generated from Git commit: 6c1b25d9046fec3666f29c38a10fbefe6b833c00 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-10-21T18:48:59Z">2026-10-21T18:48:59Z</time>
+            Generated at (UTC): <time datetime="2026-10-23T11:52:58Z">2026-10-23T11:52:58Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>811e7b6e446f30a9addbb0ee3f4391c99ca59a2e</code>
+            Source commit: <code>6c1b25d9046fec3666f29c38a10fbefe6b833c00</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>bc4c39dc094a67ae</code>
+            Flow content SHA-256: <code>92e23137ffcb482c</code>
           </p>
           <div id="canvas"></div>
         </div>
