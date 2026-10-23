@@ -1737,20 +1737,11 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Create node group role
-        # role_name intentionally omitted - let CDK generate unique name
-        iam.Role(
-            self,
-            "NodeGroupRole",
-            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonEKSWorkerNodePolicy"),
-                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonEKS_CNI_Policy"),
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonEC2ContainerRegistryReadOnly"
-                ),
-            ],
-        )
+        # No separate node role is created here: EKS Auto Mode nodes use the
+        # node role the Cluster construct provisions for ``compute``. A former
+        # standalone, unreferenced "NodeGroupRole" was removed because it
+        # granted worker-node policies to nothing and, once something outside
+        # the stack placed it in an instance profile, blocked stack deletion.
 
         # Create EKS Auto Mode cluster with built-in system and general-purpose nodepools
         # Auto Mode automatically manages compute resources and comes with essential addons

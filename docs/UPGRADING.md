@@ -65,7 +65,9 @@ release, while the control plane is updated in place and keeps its state:
    regional stack is destroyed — the same teardown as
    `gco stacks destroy-all --keep-control-plane`, with its retry loop and its
    sweeps of orphaned bastions, implicit log groups and dynamically provisioned
-   EBS volumes.
+   EBS volumes. Any of the regional stack's roles that something outside the
+   stack put into an instance profile are removed from it first, so the role
+   delete cannot leave the stack in `DELETE_FAILED`.
 5. **Deploy-all on the new release.** `<project>-global` and
    `<project>-api-gateway` are updated in place, the regional stacks and their
    bridges are recreated from `cdk.json`, and the monitoring stack is updated back

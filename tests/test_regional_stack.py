@@ -1284,8 +1284,15 @@ class TestRegionalStackSynthesis:
             )
 
             template = assertions.Template.from_stack(stack)
-            # Should have multiple IAM roles (cluster admin, node group, service account, etc.)
+            # Should have multiple IAM roles (cluster admin, service accounts, etc.)
             template.has_resource("AWS::IAM::Role", {})
+            # The unreferenced standalone node-group role is gone: Auto Mode
+            # nodes use the Cluster construct's own node role, and the orphan
+            # blocked stack deletion once it was placed in an instance profile.
+            roles = template.find_resources("AWS::IAM::Role")
+            assert not [
+                logical_id for logical_id in roles if logical_id.startswith("NodeGroupRole")
+            ]
 
     def test_health_monitor_ssm_repair_policy_is_exact(self):
         """Health self-healing gets only Get/Put on its one global-region parameter."""

@@ -266,6 +266,7 @@ _DESTROY_CLEANUP_STUBS: dict[str, object] = {
     "_collect_implicit_log_groups": {},
     "_cleanup_implicit_log_groups": {"deleted": [], "missing": [], "errors": []},
     "_cleanup_bastion_iam": {"completed_steps": 0, "absent_steps": 0, "errors": []},
+    "_detach_stack_roles_from_instance_profiles": {"detached": [], "errors": []},
     "_cleanup_traffic_dial_parameters": {"deleted": [], "errors": []},
     # The post-regional EBS sweep calls EC2 DeleteVolume. Left real, an
     # orchestration test that names a live regional stack would destroy that
@@ -294,6 +295,7 @@ _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
         {"_collect_implicit_log_groups", "_cleanup_implicit_log_groups"}
     ),
     "TestBastionIamCleanup": frozenset({"_cleanup_bastion_iam"}),
+    "TestRoleInstanceProfileDetach": frozenset({"_detach_stack_roles_from_instance_profiles"}),
     "TestTrafficDialParameterCleanup": frozenset({"_cleanup_traffic_dial_parameters"}),
     "TestClusterVolumeCleanup": frozenset({"_cleanup_cluster_volumes"}),
     # Floci layer: drives the real method against the local emulator, so the
