@@ -1422,7 +1422,7 @@ def test_new_authenticated_pins_are_in_monthly_drift_inventory() -> None:
     # digest-pinned image (AWS CLI runtime + live-validation smoke images)
     # gets the same committed-vs-published comparison.
     library = _read(".github/scripts/lib_dependency_scan.sh")
-    assert "skopeo inspect --raw" in library
+    assert 'skopeo inspect "${SCAN_SKOPEO_RETRY[@]}" --raw' in library
     assert "split_pinned_image_ref" in library
     assert "published_manifest_digest" in library
     assert "check_pinned_digest" in scanner
