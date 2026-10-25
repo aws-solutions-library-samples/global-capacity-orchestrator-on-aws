@@ -25,8 +25,8 @@ from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-19T22:20:25Z
-# Generated from Git commit: 1e12649419409f142742b0222f7f7e0096467f45
+# Generated at (UTC): 2026-10-25T13:00:05Z
+# Generated from Git commit: de508a874e7ac267180e26a4c6fc56c1cd0878c2
 # Flowchart(s) generated from this file:
 #   * ``InferenceManager.deploy`` -> ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.html``
 #     (PNG: ``diagrams/code_diagrams/cli/inference.InferenceManager_deploy.png``)
