@@ -96,8 +96,8 @@ from collections.abc import Iterable
 from typing import Final, NoReturn
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-10-25T14:01:08Z
+# Generated from Git commit: eab745982edd984ebc1ea0f81a9df2ac3f67c4cd
 # Flowchart(s) generated from this file:
 #   * ``validate_script_ast`` -> ``diagrams/code_diagrams/gco_mcp/mission/sandbox.validate_script_ast.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/sandbox.validate_script_ast.png``)

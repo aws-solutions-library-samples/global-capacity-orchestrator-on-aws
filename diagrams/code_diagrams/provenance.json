@@ -182,9 +182,9 @@
       "source_commit": "c28a947089a90cba72adeefc0fa4debf25662e9d"
     },
     "gco_mcp/mission/sandbox.py": {
-      "digest": "7d78a34a54200d073d9cb9a43ce253665aa5495c29d6ca83a9319704f9762d23",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "a7a8d40b2d78125af99e6e6209ecf8744b822d03f7b3bd7b825112c1c7ae19bc",
+      "generated_at": "2026-10-25T14:01:08Z",
+      "source_commit": "eab745982edd984ebc1ea0f81a9df2ac3f67c4cd"
     },
     "gco_mcp/mission/swarm_runner.py": {
       "digest": "1747f0fb18d33601c8e86305e274fd59e944764244f6046c5879ead2ba25637a",
