@@ -31,7 +31,7 @@ def inference(config: Any) -> None:
     "--image",
     "-i",
     default=None,
-    help="Container image (e.g. vllm/vllm-openai:v0.31.0). Optional with "
+    help="Container image (e.g. vllm/vllm-openai:v0.32.0). Optional with "
     "--mooncake-mode: falls back to the default upstream Mooncake-enabled vLLM image.",
 )
 @click.option(
@@ -220,15 +220,15 @@ def inference_deploy(
     in each target region creates the Kubernetes resources automatically.
 
     Examples:
-        gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0
+        gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0
 
         gco inference deploy qwen \\
-            -i vllm/vllm-openai:v0.31.0 \\
+            -i vllm/vllm-openai:v0.32.0 \\
             -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \\
             --extra-args=--max-model-len --extra-args 4096
 
         gco inference deploy llama3-70b \\
-            -i vllm/vllm-openai:v0.31.0 \\
+            -i vllm/vllm-openai:v0.32.0 \\
             -r us-east-1 -r eu-west-1 \\
             --replicas 2 --gpu-count 4 \\
             --model-source $(gco models uri llama3-70b) \\
@@ -905,7 +905,7 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
     Triggers a rolling update across all target regions.
 
     Examples:
-        gco inference update-image my-llm -i vllm/vllm-openai:v0.31.0
+        gco inference update-image my-llm -i vllm/vllm-openai:v0.32.0
     """
     from ..inference import get_inference_manager
 
@@ -1094,6 +1094,9 @@ def inference_invoke(
         gco inference invoke my-llm -d '{"prompt": "Hello", "max_tokens": 50}'
 
         gco inference invoke my-llm -p "Explain K8s" --path /v1/completions
+
+        gco inference invoke d1-decisions --path /v1/systemone \\
+            -d '{"state": "Shipped 9 days late", "questions": {"late": {"type": "noul"}}}'
     """
     import json as _json
 
@@ -1338,7 +1341,7 @@ def inference_canary(
     the new primary, or 'rollback' to remove it.
 
     Examples:
-        gco inference canary my-llm -i vllm/vllm-openai:v0.31.0 --weight 10
+        gco inference canary my-llm -i vllm/vllm-openai:v0.32.0 --weight 10
         gco inference canary my-llm -i new-image:latest -w 25 -r 2
     """
     from ..inference import get_inference_manager

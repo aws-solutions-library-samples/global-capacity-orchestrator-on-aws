@@ -2270,7 +2270,7 @@ def _inference_argv(*extra: str) -> list[str]:
         "--inference-vllm-image",
         "registry.example/vllm@sha256:" + "b" * 64,
         "--inference-vllm-model-id",
-        "publisher/vllm-model",
+        "publisher/qwen3-vllm-model",
         "--inference-vllm-model-revision",
         "c" * 40,
         "--inference-sglang-image",
@@ -2710,7 +2710,7 @@ class TestInferenceContractValidation:
         # Both launchers share GCO's ``MODEL`` environment convention; each
         # receives the immutable model on argv under its own flag. Triton takes
         # no environment and is started with its command and repository.
-        assert settings.framework_env(vllm) == {"MODEL": "test/vllm-model"}
+        assert settings.framework_env(vllm) == {"MODEL": "test/qwen3-vllm-model"}
         assert settings.framework_env(sglang) == {"MODEL": "test/sglang-model"}
         assert settings.framework_env(triton) == {}
         assert settings.deploy_extra_args(triton, endpoint_name="ep") == (
@@ -2723,9 +2723,12 @@ class TestInferenceContractValidation:
         )
         assert settings.deploy_extra_args(vllm) == (
             "--model",
-            "test/vllm-model",
+            "test/qwen3-vllm-model",
             "--revision",
             "c" * 40,
+            # /v1/systemone needs real log probabilities for label_mass.
+            "--logprobs-mode",
+            "raw_logprobs",
         )
         assert settings.deploy_extra_args(sglang) == (
             "--model-path",
@@ -2743,7 +2746,7 @@ class TestInferenceContractValidation:
         }
         assert settings.request_body(vllm) == {
             "max_tokens": settings.request_max_tokens,
-            "model": "test/vllm-model",
+            "model": "test/qwen3-vllm-model",
             "prompt": settings.request_prompt,
             "stream": False,
             "temperature": 0,

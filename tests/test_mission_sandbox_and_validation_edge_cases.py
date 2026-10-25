@@ -175,7 +175,7 @@ def test_sandbox_observation_shape_loops_and_runtime_snapshot(
 
     class Provider:
         def __init__(self, *, limits: dict[str, Any]) -> None:
-            assert set(limits) == {"max_duration_secs", "max_memory"}
+            assert set(limits) == {"max_feed_duration_secs", "max_memory"}
 
     monkeypatch.setattr(sandbox, "_import_provider", lambda: (Provider, RuntimeError))
     session = {

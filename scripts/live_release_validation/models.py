@@ -29,6 +29,8 @@ from .inference_contract import (
     INFERENCE_OWNER_LABEL,
     MOONCAKE_CONFIG_DIGEST_ANNOTATION,
     MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES,
+    STRUCTURED_DECISION_PATH,
+    STRUCTURED_DECISION_QUESTIONS,
     TRITON_INPUT_DATA,
     TRITON_MODEL_NAME,
     TRITON_MODEL_VERSION,
@@ -42,6 +44,7 @@ from .inference_contract import (
     inference_identity_fields,
     inference_mooncake_block,
     inference_request_body,
+    inference_structured_decision_body,
     validate_inference_settings,
     write_triton_model_repository,
 )
@@ -51,6 +54,8 @@ __all__ = [
     "INFERENCE_OWNER_LABEL",
     "MOONCAKE_CONFIG_DIGEST_ANNOTATION",
     "MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES",
+    "STRUCTURED_DECISION_PATH",
+    "STRUCTURED_DECISION_QUESTIONS",
     "TRITON_INPUT_DATA",
     "TRITON_MODEL_NAME",
     "TRITON_MODEL_VERSION",
@@ -223,6 +228,11 @@ class RunSettings:
     def request_body(self, runtime: InferenceRuntimeSpec) -> dict[str, Any]:
         """Return the deterministic body for one runtime in the matrix."""
         return inference_request_body(self, runtime)
+
+    @staticmethod
+    def structured_decision_body(runtime: InferenceRuntimeSpec) -> dict[str, Any]:
+        """Return the ``/v1/systemone`` body the vLLM baseline scenario sends."""
+        return inference_structured_decision_body(runtime)
 
     @staticmethod
     def framework_env(runtime: InferenceRuntimeSpec) -> dict[str, str]:

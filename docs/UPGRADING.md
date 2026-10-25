@@ -398,7 +398,7 @@ ways during an in-place redeploy:
 From v8.12.0 the inference monitor starts vLLM with `--model $(MODEL)` when an
 endpoint names its model only through `-e MODEL=...`. Earlier releases did not,
 so those endpoints serve vLLM's built-in default model (`Qwen/Qwen3-0.6B` for
-v0.31.0) and `gco inference invoke` gets a 404 for the model it asks for.
+v0.31.0 and v0.32.0) and `gco inference invoke` gets a 404 for the model it asks for.
 
 - **Running endpoints keep their arguments.** The monitor renders a
   Deployment's arguments only when it creates it, so an in-place

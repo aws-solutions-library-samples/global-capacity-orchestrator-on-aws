@@ -87,7 +87,7 @@ dependencies = [
     # ``fastmcp.experimental.transforms.code_mode`` dependencies (the
     # MontySandboxProvider runtime + the GetTags/Search/GetSchemas
     # discovery tools) used when GCO_MCP_TOOL_SEARCH=code_mode.
-    "fastmcp[tasks,code-mode]==4.0.11",
+    "fastmcp[tasks,code-mode]==4.1.2",
     # BM25 ranking backend for FastMCP's tool-search transform when
     # GCO_MCP_TOOL_SEARCH=bm25.
     "rank-bm25==0.2.2",
@@ -247,7 +247,7 @@ mcp = [
     # so the documented ``pip install -e ".[mcp]"`` install path keeps
     # working. Pinned to match the base ``dependencies`` entry exactly to
     # avoid resolver thrash.
-    "fastmcp[tasks,code-mode]==4.0.11",
+    "fastmcp[tasks,code-mode]==4.1.2",
 ]
 lint = [
     "ruff==0.16.10",

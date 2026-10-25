@@ -156,17 +156,17 @@ fastapi==0.143.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp==4.0.11
+fastmcp==4.1.2
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-fastmcp-slim==4.0.11
+fastmcp-slim==4.1.2
     # via
     #   fastmcp
     #   fastmcp-tasks
-fastmcp-tasks==4.0.11
+fastmcp-tasks==4.1.2
     # via fastmcp
-filelock==3.29.0
+filelock==4.2.1
     # via
     #   python-discovery
     #   virtualenv
@@ -316,7 +316,7 @@ numpy==2.4.6
     #   tensorboard
 oauthlib==4.0.0
     # via requests-oauthlib
-openapi-pydantic==0.5.1
+openapi-pydantic==0.6.0
     # via fastmcp-slim
 openapi-schema-validator==0.9.0
     # via openapi-spec-validator
@@ -472,11 +472,11 @@ pydantic==2.14.0
     #   pydantic-settings
 pydantic-core==2.50.0
     # via pydantic
-pydantic-monty==0.0.21
+pydantic-monty==1.1.0
     # via fastmcp-slim
-pydantic-monty-client==0.0.21
+pydantic-monty-client==1.1.0
     # via pydantic-monty
-pydantic-monty-runtime==0.0.21
+pydantic-monty-runtime==1.1.0
     # via pydantic-monty
 pydantic-settings==2.14.2
     # via
@@ -708,7 +708,7 @@ uvloop==0.23.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-virtualenv==21.14.9
+virtualenv==21.14.10
     # via pre-commit
 watchfiles==1.1.1
     # via fastmcp-slim

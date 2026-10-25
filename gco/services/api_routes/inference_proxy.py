@@ -47,8 +47,8 @@ from gco.services import internal_tls, tracing
 from gco.services.inference_store import InferenceEndpointStore, get_inference_endpoint_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-20T06:22:48Z
-# Generated from Git commit: a0b4465d48d14210d1b329dd2edb938b6440df52
+# Generated at (UTC): 2026-10-25T13:00:05Z
+# Generated from Git commit: de508a874e7ac267180e26a4c6fc56c1cd0878c2
 # Flowchart(s) generated from this file:
 #   * ``_resolve_upstream`` -> ``diagrams/code_diagrams/gco/services/api_routes/inference_proxy._resolve_upstream.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/api_routes/inference_proxy._resolve_upstream.png``)
@@ -95,7 +95,12 @@ _BLOCKED_PATH_SEGMENTS = frozenset(
     {"admin", "debug", "docs", "instances", "metrics", "openapi.json"}
 )
 _V1_MODELS_RE = re.compile(r"^v1/models(?:/[^/]+)?$")
-_V1_GENERATION_RE = re.compile(r"^v1/(?:chat/completions|completions|embeddings|responses)$")
+# ``systemone`` is vLLM's structured decisions API (v0.32.0+): typed choice,
+# noul and score questions over a state, answered from the model's label
+# probabilities. Like the generation calls it is POST-only.
+_V1_GENERATION_RE = re.compile(
+    r"^v1/(?:chat/completions|completions|embeddings|responses|systemone)$"
+)
 _V2_MODELS_RE = re.compile(r"^v2/models(?:/[^/]+(?:/(?:config|infer|ready|stats))?)?$")
 
 

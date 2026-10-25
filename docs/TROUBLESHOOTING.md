@@ -532,14 +532,14 @@ kubectl rollout restart deployment/manifest-processor -n gco-system
 
 **Symptom**: `gco inference invoke` on a vLLM endpoint fails with `HTTP 404` and vLLM's `NotFoundError` ("The model ... does not exist."), and `gco inference models <endpoint>` lists a different model.
 
-**Cause**: vLLM never reads the `MODEL` environment variable. Before v8.12.0, a vLLM endpoint deployed with `-e MODEL=...` was started without it and served vLLM's built-in default model (`Qwen/Qwen3-0.6B` for v0.31.0), while `invoke` asked for the `MODEL` name. From v8.12.0 the inference monitor starts vLLM with `--model $(MODEL)`, but only when it creates the Deployment: an endpoint created before your clusters ran v8.12.0 keeps serving the default after an upgrade. `invoke` names the served model when this happens.
+**Cause**: vLLM never reads the `MODEL` environment variable. Before v8.12.0, a vLLM endpoint deployed with `-e MODEL=...` was started without it and served vLLM's built-in default model (`Qwen/Qwen3-0.6B` for v0.31.0 and v0.32.0), while `invoke` asked for the `MODEL` name. From v8.12.0 the inference monitor starts vLLM with `--model $(MODEL)`, but only when it creates the Deployment: an endpoint created before your clusters ran v8.12.0 keeps serving the default after an upgrade. `invoke` names the served model when this happens.
 
 **Solution**: Recreate the endpoint once its Regions run v8.12.0 or later, or name the model in the server arguments, which works on every version:
 
 ```bash
 gco inference delete my-llm -y
 # once it no longer shows in `gco inference list`:
-gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1 \
+gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 \
   --extra-args=--model --extra-args Qwen/Qwen2.5-1.5B-Instruct
 ```
 

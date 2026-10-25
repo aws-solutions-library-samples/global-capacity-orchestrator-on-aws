@@ -27,14 +27,14 @@
       "source_commit": "e43f6110f7bed86e6c879a3f03c1f1ca34674311"
     },
     "cli/images.py": {
-      "digest": "564ef4e4dac1ff23f9668d1c2c3a319d1e976e6326a2e23c58642503ae26c52b",
-      "generated_at": "2026-10-08T19:00:07Z",
-      "source_commit": "231725d929e3dfd3c3768eba41d413effef39d67"
+      "digest": "d6b4a56dddcbf6670e5be9b3a3c1434643b30b952b1de0feb32086218a33ee88",
+      "generated_at": "2026-10-25T13:00:05Z",
+      "source_commit": "de508a874e7ac267180e26a4c6fc56c1cd0878c2"
     },
     "cli/inference.py": {
-      "digest": "b4b832318c91b466f25265283d236c00d350d47db7d2435f07e4155c12a8acdd",
-      "generated_at": "2026-10-19T22:20:25Z",
-      "source_commit": "1e12649419409f142742b0222f7f7e0096467f45"
+      "digest": "eca0c1c41187b8c0641af4c3bb6ab650d7822757ff62af73f554725ed063a443",
+      "generated_at": "2026-10-25T13:00:05Z",
+      "source_commit": "de508a874e7ac267180e26a4c6fc56c1cd0878c2"
     },
     "cli/jobs.py": {
       "digest": "962680ef2d65b61f9950ab8b1d1fb347be9e01bb2c8ef5ed05d4dc4e426f742d",
@@ -52,9 +52,9 @@
       "source_commit": "a081fbf678ca3f3fa3f7edb74687de923efe6657"
     },
     "gco/services/api_routes/inference_proxy.py": {
-      "digest": "7e106901ae18125e034334ffd7fc59814de8aa9b48aa1f962711fca1dc1efd7a",
-      "generated_at": "2026-10-20T06:22:48Z",
-      "source_commit": "a0b4465d48d14210d1b329dd2edb938b6440df52"
+      "digest": "55a41885e09609dd5525a787ca9857e08273bdaa196289514d7d1ee24b9daf63",
+      "generated_at": "2026-10-25T13:00:05Z",
+      "source_commit": "de508a874e7ac267180e26a4c6fc56c1cd0878c2"
     },
     "gco/services/auth_middleware.py": {
       "digest": "df1109f10799c56726a5a0fd581d3071055166a7ded5faf553d1e5df86312a2f",
@@ -182,9 +182,9 @@
       "source_commit": "c28a947089a90cba72adeefc0fa4debf25662e9d"
     },
     "gco_mcp/mission/sandbox.py": {
-      "digest": "7d78a34a54200d073d9cb9a43ce253665aa5495c29d6ca83a9319704f9762d23",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "a7a8d40b2d78125af99e6e6209ecf8744b822d03f7b3bd7b825112c1c7ae19bc",
+      "generated_at": "2026-10-25T14:01:08Z",
+      "source_commit": "eab745982edd984ebc1ea0f81a9df2ac3f67c4cd"
     },
     "gco_mcp/mission/swarm_runner.py": {
       "digest": "1747f0fb18d33601c8e86305e274fd59e944764244f6046c5879ead2ba25637a",

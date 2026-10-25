@@ -32,7 +32,9 @@ from .inference_commands import (
     build_model_upload_command,
     build_model_uri_command,
     build_models_command,
+    build_structured_decision_command,
     extract_generated_text,
+    extract_structured_decision,
 )
 from .inference_common import (
     InferenceCommandFailure as _CommandFailure,
@@ -61,7 +63,9 @@ __all__ = [
     "build_model_upload_command",
     "build_model_uri_command",
     "build_models_command",
+    "build_structured_decision_command",
     "extract_generated_text",
+    "extract_structured_decision",
     "initialize_run_state",
 ]
 
@@ -816,6 +820,7 @@ class ManagedInferenceLifecycle(
             "tunnel_heartbeats",
             "invoke_evidence",
             "invoke_journal",
+            "structured_decision",
             "hpa_stability_observations",
             "last_hpa_replica_observation",
             "last_readiness",
@@ -860,6 +865,8 @@ class ManagedInferenceLifecycle(
             self.verify_hpa_stability(plan, record)
         self.verify_backend_probes(plan, record)
         self.invoke(plan, record)
+        # The vLLM baseline then asks /v1/systemone through the same path.
+        self.verify_structured_decision(plan, record)
         # The store scenario then changes its configuration and must roll
         # onto it; the rolled pods are what the restart audit below sees.
         self.verify_store_reconfigure(plan, record)
@@ -1006,6 +1013,7 @@ class ManagedInferenceLifecycle(
         frameworks: dict[str, dict[str, Any]] = {}
         model_registry = {"uploaded": 0, "removed": 0}
         mooncake_store = {"cold_tier_verified": 0, "reconfigure_rolled": 0}
+        structured_decisions = {"required": 0, "verified": 0}
         for plan, record in zip(self.plans, self.records, strict=True):
             framework = frameworks.setdefault(
                 plan.runtime.framework,
@@ -1021,6 +1029,12 @@ class ManagedInferenceLifecycle(
             if isinstance(repository, dict):
                 model_registry["uploaded"] += repository.get("phase") == "uploaded"
                 model_registry["removed"] += repository.get("cleanup") == "absent"
+            if plan.structured_decision:
+                structured_decisions["required"] += 1
+                decision = record.get("structured_decision")
+                structured_decisions["verified"] += (
+                    isinstance(decision, dict) and decision.get("phase") == "verified"
+                )
             if plan.mooncake_store:
                 mooncake_store["cold_tier_verified"] += record.get("cold_tier_verified") is True
                 reconfigure = record.get("store_reconfigure")
@@ -1036,6 +1050,7 @@ class ManagedInferenceLifecycle(
             "frameworks": frameworks,
             "model_registry": model_registry,
             "mooncake_store": mooncake_store,
+            "structured_decisions": structured_decisions,
             "shared_proxy_autoscaling_verified": (
                 isinstance(shared_proxy, dict) and shared_proxy.get("phase") == "verified"
             ),

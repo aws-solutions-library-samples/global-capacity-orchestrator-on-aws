@@ -5074,7 +5074,7 @@ class TestLocalOnlyRuntime:
                 "--inference-vllm-image",
                 "registry.example/vllm@sha256:" + "b" * 64,
                 "--inference-vllm-model-id",
-                "publisher/vllm-model",
+                "publisher/qwen3-vllm-model",
                 "--inference-vllm-model-revision",
                 "c" * 40,
                 "--inference-sglang-image",
@@ -5122,10 +5122,10 @@ class TestLocalOnlyRuntime:
             "sglang",
             "triton",
         ]
-        assert identity["contract_version"] == 4
+        assert identity["contract_version"] == 5
         assert identity["runtimes"][0]["image"].endswith("b" * 64)
         assert identity["runtimes"][0]["model"] == {
-            "id": "publisher/vllm-model",
+            "id": "publisher/qwen3-vllm-model",
             "revision": "c" * 40,
         }
         assert identity["runtimes"][1]["image"].endswith("d" * 64)
@@ -5200,7 +5200,7 @@ class TestLocalOnlyRuntime:
                 "--inference-vllm-image",
                 "registry.example/vllm@sha256:" + "b" * 64,
                 "--inference-vllm-model-id",
-                "publisher/vllm-model",
+                "publisher/qwen3-vllm-model",
                 "--inference-vllm-model-revision",
                 "c" * 40,
                 "--inference-sglang-image",

@@ -276,7 +276,7 @@ This happens automatically in every target region, so model weights are always l
 ```bash
 # Deploy vLLM serving a model (downloads from Hugging Face at startup)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --gpu-count 1 \
   -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```
@@ -307,7 +307,7 @@ gco models upload ./llama3-weights/ --name llama3-8b
 
 # Deploy with model sync from S3
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b) \
   -e MODEL=/models/my-llm
@@ -386,7 +386,7 @@ GCO works with any containerized inference server. These frameworks have example
 
 | Framework | Image Example | Default Port | Health Path | Use Case |
 |-----------|--------------|-------------|-------------|----------|
-| [vLLM](https://docs.vllm.ai/en/latest/) ([example](../examples/inference-vllm.yaml)) | `vllm/vllm-openai:v0.31.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
+| [vLLM](https://docs.vllm.ai/en/latest/) ([example](../examples/inference-vllm.yaml)) | `vllm/vllm-openai:v0.32.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
 | [SGLang](https://docs.sglang.ai/) ([example](../examples/inference-sglang.yaml)) | `lmsysorg/sglang:v0.5.21` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
 | [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](../examples/inference-triton.yaml)) | `nvcr.io/nvidia/tritonserver:26.09-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
 
@@ -422,7 +422,7 @@ has to be redeployed with `--framework sglang` or `vllm`.
 
 ```bash
 gco inference deploy vllm-qwen \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --gpu-count 1 \
   -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \
   --extra-args=--max-model-len --extra-args 4096
@@ -433,6 +433,81 @@ The renderer starts vLLM with `--model $(MODEL)` (see
 name the server answers to: `--served-model-name` when the arguments set it,
 otherwise the model the arguments or `MODEL` name, otherwise the first entry of
 `/v1/models`.
+
+### Structured decisions (`/v1/systemone`)
+
+vLLM v0.32.0 adds `POST /v1/systemone`, which answers typed questions about a
+state from the model's label probabilities instead of generating free text.
+Each question is a `choice` (pick one named option), a `noul` (yes or no), or a
+`score` (a position on an ordered scale), and every answer comes back with its
+probabilities and a `diagnostics` entry whose `label_mass` says how much of the
+model's probability went to the labels at all. The authenticated inference
+proxy forwards `POST` on this path (see
+[API.md → Allowed Upstream Paths](API.md#allowed-upstream-paths)); vLLM
+v0.32.0 has no other decision route.
+
+vLLM serves the endpoint only for architectures with a registered read
+strategy (in v0.32.0: `LiquidAI/d1-3B`, `Cloudflare/clef-omni`,
+DiffusionGemma, and the Qwen3 / Qwen3.5 families), and generation models need
+`--logprobs-mode raw_logprobs` or `processed_logprobs`. Without either, the
+server starts normally but `/v1/systemone` answers that the model does not
+support it. `LiquidAI/d1-3B` is a 3B vision-language decision model (about
+6.3 GB of weights, under its own `lfm1.0` license) that fits a single 24 GB
+GPU:
+
+```bash
+gco inference deploy d1-decisions \
+  -i vllm/vllm-openai:v0.32.0 \
+  --gpu-count 1 \
+  -e MODEL=LiquidAI/d1-3B \
+  --extra-args=--logprobs-mode --extra-args raw_logprobs \
+  --extra-args=--max-model-len --extra-args 8192
+
+gco inference invoke d1-decisions --path /v1/systemone -d '{
+  "state": "Order 1182: 3 items, paid by card, shipped 9 days after the promised date. The customer asked for a refund twice.",
+  "questions": {
+    "topic":  {"type": "choice", "instructions": "What is this mainly about?",
+               "criteria": {"shipping": "Delivery or delays", "billing": "Payments or refunds", "product": "Item quality"}},
+    "late":   {"type": "noul", "instructions": "Did the order ship late?"},
+    "urgency": {"type": "score", "instructions": "How urgent is a reply?",
+               "criteria": ["low", "medium", "high"]}
+  }
+}'
+```
+
+`criteria` maps option names to descriptions for `choice`, is an optional
+`{"true": ..., "false": ...}` object for `noul`, and is an ordered list of at
+least two levels for `score`. A request carries at most 64 questions. The
+`state` can be text or any JSON value; `images` takes image URLs or data URLs
+for models that see, and `model` can be omitted because the endpoint serves one
+model. Each answer carries its `probabilities` and a `confidence` (the chosen
+label's probability times `label_mass`), plus one type-specific field: `choice`
+is the most likely option's name, `noul` is the probability of yes, and `score`
+is the expected level index (0-based, with a `legend` mapping indexes to the
+level names):
+
+```json
+{
+  "object": "structured_decision",
+  "model": "LiquidAI/d1-3B",
+  "answers": {
+    "topic":   {"type": "choice", "choice": "shipping", "confidence": 0.86,
+                "probabilities": {"shipping": 0.87, "billing": 0.12, "product": 0.01}},
+    "late":    {"type": "noul", "noul": 0.97, "confidence": 0.96,
+                "probabilities": {"yes": 0.97, "no": 0.03}},
+    "urgency": {"type": "score", "score": 1.62, "confidence": 0.61,
+                "legend": {"0": "low", "1": "medium", "2": "high"},
+                "probabilities": {"0": 0.03, "1": 0.32, "2": 0.65}}
+  },
+  "usage": {"input_tokens": 412, "output_tokens": 0},
+  "diagnostics": {"topic": {"label_mass": 0.99, "argmax_is_label": true}}
+}
+```
+
+(abridged: `diagnostics` has one entry per question.) On a
+[disaggregated (Mooncake)](#disaggregated-inference-mooncake) endpoint the
+prefill/decode proxy sends `/v1/systemone` straight to a decode pod with the
+body unchanged, like any other non-completion request.
 
 ### SGLang Example
 
@@ -737,14 +812,14 @@ Inference endpoints support automatic scaling based on resource utilization. Whe
 ```bash
 # Deploy with autoscaling enabled
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70 --autoscale-metric memory:80
 
 # Scale on GPU utilization (routed through KEDA + CloudWatch)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric gpu:60
@@ -769,7 +844,7 @@ The HPA respects `--min-replicas` (default: 1) and `--max-replicas` (default: 10
 
 ```bash
 # Triggers a rolling update in all target regions
-gco inference update-image my-llm -i vllm/vllm-openai:v0.31.0
+gco inference update-image my-llm -i vllm/vllm-openai:v0.32.0
 ```
 
 ### Stop and Start
@@ -813,10 +888,10 @@ Canary deployments let you test a new model version with a percentage of traffic
 
 ```bash
 # Start a canary: 10% traffic to the candidate image; 90% stays on the current primary
-gco inference canary my-llm -i vllm/vllm-openai:v0.31.0 --weight 10
+gco inference canary my-llm -i vllm/vllm-openai:v0.32.0 --weight 10
 
 # Increase canary traffic to 25%
-gco inference canary my-llm -i vllm/vllm-openai:v0.31.0 --weight 25
+gco inference canary my-llm -i vllm/vllm-openai:v0.32.0 --weight 25
 
 # Happy with the canary? Promote it to primary (100% traffic)
 gco inference promote my-llm -y
@@ -842,10 +917,10 @@ Use spot instances to reduce inference serving costs. Spot GPU instances can be 
 
 ```bash
 # Deploy on spot instances
-gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1 --capacity-type spot
+gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 --capacity-type spot
 
 # Deploy on on-demand (default, guaranteed availability)
-gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1 --capacity-type on-demand
+gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 --capacity-type on-demand
 ```
 
 When `--capacity-type spot` is set, the inference_monitor adds a `karpenter.sh/capacity-type: spot` node selector to the deployment. Karpenter then provisions spot GPU instances for those pods.
@@ -1078,11 +1153,11 @@ By default, `gco inference deploy` targets all deployed Regions. This keeps endp
 ```bash
 # Deploy to all Regions (recommended — ensures consistent availability)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0
+  -i vllm/vllm-openai:v0.32.0
 
 # Deploy to specific regions (use with caution — see note below)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   -r us-east-1 -r eu-west-1
 ```
 
@@ -1131,7 +1206,7 @@ gco inference status my-llm
   Endpoint: my-llm
   ------------------------------------------------------------
   State:     running
-  Image:     vllm/vllm-openai:v0.31.0
+  Image:     vllm/vllm-openai:v0.32.0
   Replicas:  2
   GPUs:      1
   Port:      8000
@@ -1200,7 +1275,7 @@ gco models upload ./llama3-weights/ --name llama3-8b
 
 # 3. Deploy the endpoint
 gco inference deploy vllm-llama3 \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b) \
   -e MODEL=/models/vllm-llama3 \
@@ -1217,7 +1292,7 @@ gco inference invoke vllm-llama3 \
 gco inference scale vllm-llama3 --replicas 3
 
 # 7. Update to a new version
-gco inference update-image vllm-llama3 -i vllm/vllm-openai:v0.31.0
+gco inference update-image vllm-llama3 -i vllm/vllm-openai:v0.32.0
 
 # 8. Clean up
 gco inference delete vllm-llama3 -y

@@ -58,6 +58,7 @@ from tests.test_live_validation_inference import (
     LIFECYCLE_ID,
     MODEL_SOURCE,
     OWNER_NONCE,
+    STRUCTURED_DECISION_RESPONSE,
     TRITON_ECHO,
     TRITON_STATS,
     _lifecycle,
@@ -2661,6 +2662,10 @@ class _FakeCli:
                 }
             return _completed(command, 0, "log line\n" + json.dumps(payload))
         if stage == "invoke":
+            if command[command.index("--path") + 1] == "/v1/systemone":
+                # A structured decision is its own stage in the record.
+                self.stages[-1] = f"structured-decision:{plan.ordinal}"
+                return _completed(command, 0, json.dumps(STRUCTURED_DECISION_RESPONSE))
             if framework == "vllm":
                 payload = {"choices": [{"text": " generated "}]}
             elif framework == "triton":
@@ -2876,7 +2881,7 @@ class TestItemContract:
             # arguments is not an endpoint this run deployed.
             (lambda item: item["spec"].pop("args"), "contract does not match this run"),
             (
-                lambda item: item["spec"].update(args=["--model", "test/vllm-model"]),
+                lambda item: item["spec"].update(args=["--model", "test/qwen3-vllm-model"]),
                 "contract does not match this run",
             ),
             (lambda item: item["spec"].update(env={}), "contract does not match this run"),
@@ -3423,9 +3428,16 @@ class TestExecuteMatrix:
         }
         assert evidence["model_registry"] == {"uploaded": 1, "removed": 1}
         assert evidence["mooncake_store"] == {"cold_tier_verified": 1, "reconfigure_rolled": 1}
+        assert evidence["structured_decisions"] == {"required": 1, "verified": 1}
         classic = ("deploy", "health", "models", "invoke", "delete")
         assert cli.stages == [
-            *[f"{stage}:1" for stage in classic],
+            # The vLLM baseline also asks /v1/systemone after its completion.
+            "deploy:1",
+            "health:1",
+            "models:1",
+            "invoke:1",
+            "structured-decision:1",
+            "delete:1",
             *[f"{stage}:2" for stage in classic],
             # The store scenario reconfigures itself and invokes the rolled pod.
             "deploy:3",
@@ -3446,6 +3458,9 @@ class TestExecuteMatrix:
         ]
         assert [record["phase"] for record in records] == ["complete"] * 6
         assert records[1]["hpa_stability_observations"][-1]["ready"] == 2
+        assert records[0]["structured_decision"]["phase"] == "verified"
+        assert records[0]["structured_decision"]["topic"] == "shipping"
+        assert "structured_decision" not in records[1]
         assert records[2]["store_reconfigure"]["digest_before"] == "a" * 64
         assert records[2]["store_reconfigure"]["digest_after"] == "b" * 64
         assert records[2]["store_reconfigure"]["phase"] == "verified"

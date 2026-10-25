@@ -62,7 +62,7 @@ INFERENCE = (
     "--inference-vllm-image",
     "registry.example/vllm@sha256:" + "a" * 64,
     "--inference-vllm-model-id",
-    "test/vllm-model",
+    "test/qwen3-vllm-model",
     "--inference-vllm-model-revision",
     "b" * 40,
     "--inference-sglang-image",
@@ -179,7 +179,7 @@ class TestHarnessInvocation:
         assert value_of("--actions") == "all"
         assert value_of("--inference-region") == "us-east-1"
         assert value_of("--inference-vllm-image").endswith("a" * 64)
-        assert value_of("--inference-vllm-model-id") == "test/vllm-model"
+        assert value_of("--inference-vllm-model-id") == "test/qwen3-vllm-model"
         assert value_of("--inference-vllm-model-revision") == "b" * 40
         assert value_of("--inference-sglang-image").endswith("c" * 64)
         assert value_of("--inference-sglang-model-id") == "test/sglang-model"

@@ -33,6 +33,15 @@ than discovered in production:
    name GCO actually emits is present in the image's ``KVConnectorFactory``
    registry.
 
+4. **Every vLLM path the inference proxy forwards is served by the image.**
+   The proxy's POST allowlist (``/v1/completions``, ``/v1/chat/completions``,
+   ``/v1/embeddings``, ``/v1/responses`` and the structured decisions API
+   ``/v1/systemone``) is read from its source and each path must be a POST
+   route of one of the image's API routers; ``/v1/systemone`` must be
+   registered unconditionally and have read strategies for the models GCO
+   documents (``LiquidAI/d1-3B`` and the Qwen3 family) under
+   ``--logprobs-mode raw_logprobs``.
+
 Running these:
 
 - The suite is gated behind ``GCO_MOONCAKE_IMAGE_TEST=1`` so it never runs in
@@ -47,13 +56,16 @@ Running these:
 
 from __future__ import annotations
 
+import ast
 import http.client
 import json
 import os
+import re
 import socket
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -377,3 +389,115 @@ def test_connector_names_registered_in_image(image: str) -> None:
         f"connectors GCO emits are not registered in {image}: {sorted(missing)}. "
         f"Registered: {sorted(registered)}"
     )
+
+
+# --------------------------------------------------------------------------
+# 4. Every vLLM serving path the inference proxy exposes is served by the image
+# --------------------------------------------------------------------------
+
+#: The OpenAI-compatible and structured-decision POST paths GCO's
+#: authenticated inference proxy forwards to a vLLM endpoint.
+_VLLM_POST_PATHS = (
+    "/v1/completions",
+    "/v1/chat/completions",
+    "/v1/embeddings",
+    "/v1/responses",
+    "/v1/systemone",
+)
+
+
+def _proxy_generation_pattern() -> re.Pattern[str]:
+    """The proxy's POST allowlist, read from its source without importing FastAPI."""
+    source = (_REPO_ROOT / "gco" / "services" / "api_routes" / "inference_proxy.py").read_text(
+        encoding="utf-8"
+    )
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "_V1_GENERATION_RE"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Call)
+            and node.value.args
+            and isinstance(node.value.args[0], ast.Constant)
+        ):
+            return re.compile(str(node.value.args[0].value))
+    raise AssertionError("inference_proxy._V1_GENERATION_RE not found")
+
+
+_ROUTE_PROBE = """
+import importlib, inspect, json, pkgutil
+import vllm.entrypoints as root
+routes = {}
+for info in pkgutil.walk_packages(root.__path__, root.__name__ + ".", onerror=lambda _: None):
+    if not info.name.endswith(".api_router"):
+        continue
+    try:
+        module = importlib.import_module(info.name)
+    except Exception:
+        continue
+    router = getattr(module, "router", None)
+    for route in getattr(router, "routes", []) or []:
+        path = getattr(route, "path", None)
+        if path:
+            routes.setdefault(path, set()).update(getattr(route, "methods", None) or ())
+from vllm.entrypoints.launchers.api_server import routers
+from vllm.entrypoints.generate.structured_decisions import strategies
+print("ROUTES=" + json.dumps({p: sorted(m) for p, m in routes.items()}))
+print("DECISIONS=" + json.dumps({
+    "registered": "register_structured_decisions_api_router"
+    in inspect.getsource(routers.register_api_routers),
+    "architectures": sorted(strategies.READ_STRATEGIES),
+    "logprobs_modes": sorted(strategies.LOGPROBS_MODES),
+}))
+"""
+
+
+def _probe_line(stdout: str, prefix: str) -> Any:
+    line = next((ln for ln in stdout.splitlines() if ln.startswith(prefix)), None)
+    assert line is not None, f"image probe printed no {prefix!r} line:\n{stdout}"
+    return json.loads(line[len(prefix) :])
+
+
+@pytest.fixture(scope="session")
+def image_routes(image: str) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    """The image's API routes and structured-decision registration, probed once."""
+    result = _python_in_image(image, _ROUTE_PROBE)
+    assert result.returncode == 0, f"route probe failed:\n{result.stderr[-4000:]}"
+    return _probe_line(result.stdout, "ROUTES="), _probe_line(result.stdout, "DECISIONS=")
+
+
+def test_every_proxied_vllm_post_path_is_served_by_image(
+    image: str, image_routes: tuple[dict[str, list[str]], dict[str, Any]]
+) -> None:
+    """The proxy allowlist and the pinned image agree on the serving paths.
+
+    A path the proxy forwards but the image no longer serves would turn into a
+    model-side 404; a renamed upstream route would be unreachable through GCO.
+    Both fail here on the image bump instead of in a live run.
+    """
+    pattern = _proxy_generation_pattern()
+    routes, _ = image_routes
+    for path in _VLLM_POST_PATHS:
+        assert pattern.fullmatch(path.lstrip("/")), f"inference proxy does not expose POST {path}"
+        assert "POST" in routes.get(path, []), (
+            f"{image} serves no POST {path}; routes: {sorted(routes)}"
+        )
+
+
+def test_structured_decisions_are_registered_for_gco_models(
+    image: str, image_routes: tuple[dict[str, list[str]], dict[str, Any]]
+) -> None:
+    """``/v1/systemone`` is always registered and serves the models GCO documents.
+
+    docs/INFERENCE.md deploys ``LiquidAI/d1-3B`` (``Lfm2VlForConditionalGeneration``)
+    and the live release validation's vLLM leg uses a Qwen3 model
+    (``Qwen3ForCausalLM``), both with ``--logprobs-mode raw_logprobs``.
+    """
+    _, decisions = image_routes
+    assert decisions["registered"] is True, "the API server no longer registers /v1/systemone"
+    assert {"Lfm2VlForConditionalGeneration", "Qwen3ForCausalLM"} <= set(
+        decisions["architectures"]
+    ), decisions["architectures"]
+    assert "raw_logprobs" in decisions["logprobs_modes"], decisions["logprobs_modes"]
