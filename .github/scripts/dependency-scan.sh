@@ -303,7 +303,7 @@ else
     if [ -z "$bs_name" ] || [ -z "$bs_version" ]; then
       continue
     fi
-    if ! bs_latest="$(curl -fsSL --max-time 15 \
+    if ! bs_latest="$(curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" \
       "https://pypi.org/pypi/${bs_name}/json" 2>/dev/null \
       | jq -r '.info.version // empty' 2>/dev/null)" || [ -z "$bs_latest" ]; then
       mark_scan_incomplete "PyPI lookup failed or returned an invalid version for build dependency ${bs_name}."
@@ -359,7 +359,7 @@ while IFS= read -r package_dir; do
     [ -n "$pkg_name" ] || continue
     # Scoped names carry a '/', which must be encoded in the registry URL.
     encoded_name="$(printf '%s' "$pkg_name" | sed 's|/|%2F|g')"
-    if ! pkg_latest="$(curl -fsSL --max-time 15 \
+    if ! pkg_latest="$(curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" \
       "https://registry.npmjs.org/${encoded_name}/latest" 2>/dev/null \
       | jq -r '.version // empty' 2>/dev/null)" || [ -z "$pkg_latest" ]; then
       mark_scan_incomplete "npm registry lookup failed or returned an invalid version for ${pkg_name}."
@@ -414,7 +414,7 @@ check_image() {
   # they reported "tag lookup failed" every month even though the registry
   # was fine.
   local raw_tags=""
-  if ! raw_tags="$(skopeo list-tags --retry-times 3 "docker://${registry}/${repo}" 2>/dev/null \
+  if ! raw_tags="$(skopeo list-tags "${SCAN_SKOPEO_RETRY[@]}" "docker://${registry}/${repo}" 2>/dev/null \
     | jq -r '.Tags[]' 2>/dev/null)" || [ -z "$raw_tags" ]; then
     mark_scan_incomplete "Container registry tag lookup failed for ${registry}/${repo}."
     return
@@ -581,7 +581,10 @@ if split_pinned_image_ref "$KIND_NODE_IMAGE_REF" >/dev/null; then
   check_pinned_digest "$KIND_NODE_IMAGE_REF" ".github/workflows/integration-tests.yml KIND_NODE_IMAGE" no
 fi
 
-sort -u "$ALL_IMAGES" | while read -r img; do
+# One lookup per distinct image: ``python:3.14.8-slim`` and
+# ``docker.io/library/python:3.14.8-slim`` are the same Docker Hub tag, and
+# listing them separately doubled both the report row and the registry calls.
+dedupe_image_refs < "$ALL_IMAGES" | while read -r img; do
   [ -z "$img" ] && continue
   image="$(echo "$img" | cut -d':' -f1)"
   tag="$(echo "$img" | cut -d':' -f2)"
@@ -620,17 +623,17 @@ if [ -f "$CHARTS_FILE" ]; then
 
     latest=""
     if [ "$use_oci" = "true" ]; then
-      if ! latest="$(helm show chart "${repo_url}/${chart}" 2>/dev/null | grep '^version:' | awk '{print $2}')" \
+      if ! latest="$(with_retries 3 helm show chart "${repo_url}/${chart}" 2>/dev/null | grep '^version:' | awk '{print $2}')" \
          || [ -z "$latest" ]; then
         mark_scan_incomplete "Helm OCI lookup failed for ${repo_url}/${chart}."
         continue
       fi
     else
-      if ! helm repo add "$chart_name" "$repo_url" --force-update > /dev/null 2>&1; then
+      if ! with_retries 3 helm repo add "$chart_name" "$repo_url" --force-update > /dev/null 2>&1; then
         mark_scan_incomplete "Helm repository refresh failed for ${chart_name} (${repo_url})."
         continue
       fi
-      if ! latest="$(helm search repo "${chart_name}/${chart}" --output json 2>/dev/null \
+      if ! latest="$(with_retries 3 helm search repo "${chart_name}/${chart}" --output json 2>/dev/null \
         | jq -r '.[0].version // empty')" || [ -z "$latest" ]; then
         mark_scan_incomplete "Helm chart lookup failed for ${chart_name}/${chart}."
         continue
@@ -1069,7 +1072,7 @@ check_dockerfile_pin() {
       # A new LTS line and a new patch on the current line both
       # surface as ``newer``.
       local lts_major
-      lts_major="$(curl -fsSL --max-time 15 \
+      lts_major="$(curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" \
         "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json" 2>/dev/null \
         | python3 -c '
 import sys, json, datetime
@@ -1099,13 +1102,13 @@ if candidates:
       fi
       # index.json is newest-first per line, so the first entry whose
       # version sits on the LTS major is that major's latest release.
-      latest="$(curl -fsSL --max-time 15 \
+      latest="$(curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" \
         "https://nodejs.org/dist/index.json" 2>/dev/null \
         | jq -r --arg prefix "v${lts_major}." \
           '[.[].version | select(startswith($prefix))][0] // empty' 2>/dev/null)" || true
       ;;
     CDK_VERSION)
-      latest="$(curl -fsSL --max-time 15 \
+      latest="$(curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" \
         "https://registry.npmjs.org/aws-cdk/latest" 2>/dev/null \
         | jq -r '.version // empty' 2>/dev/null)" || true
       ;;
@@ -1116,7 +1119,7 @@ if candidates:
       # specific ``npm@X.Y.Z`` to keep rebuilds reproducible (same
       # rationale as CDK_VERSION above). The canonical "latest" is the
       # ``latest`` dist-tag on npmjs.org, same source CDK uses.
-      latest="$(curl -fsSL --max-time 15 \
+      latest="$(curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" \
         "https://registry.npmjs.org/npm/latest" 2>/dev/null \
         | jq -r '.version // empty' 2>/dev/null)" || true
       ;;
@@ -1125,7 +1128,7 @@ if candidates:
       # and the EKS cluster stay within the ±1 minor skew policy.
       local k8s_minor
       k8s_minor="$(extract_k8s_version "cdk.json")"
-      latest="$(curl -fsSL --max-time 15 \
+      latest="$(curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" \
         "https://dl.k8s.io/release/stable-${k8s_minor}.txt" 2>/dev/null | tr -d '[:space:]')" || true
       ;;
     AWSCLI_VERSION)
@@ -1719,7 +1722,7 @@ check_github_tool "kind" "$KIND_PIN" "kubernetes-sigs/kind" \
 KUBECTL_WF_PIN="$(extract_helm_installer_pins lambda/helm-installer/Dockerfile | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}' | head -1)"
 if [ -n "$KUBECTL_WF_PIN" ]; then
   kubectl_minor="$(echo "${KUBECTL_WF_PIN#v}" | cut -d. -f1-2)"
-  if ! kubectl_latest="$(curl -fsSL --max-time 15 \
+  if ! kubectl_latest="$(curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" \
     "https://dl.k8s.io/release/stable-${kubectl_minor}.txt" 2>/dev/null | tr -d '[:space:]')" \
      || [ -z "$kubectl_latest" ]; then
     mark_scan_incomplete "kubectl stable-version lookup failed for minor ${kubectl_minor}."
@@ -1750,7 +1753,7 @@ if [ -n "$KIND_NODE_PIN" ]; then
     echo "kind node image (integration-tests.yml)|${KIND_NODE_PIN} is not pinned by digest; use the kindest/node:<tag>@sha256:<digest> reference from the kind release notes" >> "$CONSISTENCY_RESULTS"
   fi
   node_minor="$(echo "${node_tag#v}" | cut -d. -f1-2)"
-  if ! node_latest="$(skopeo list-tags "docker://docker.io/kindest/node" 2>/dev/null \
+  if ! node_latest="$(skopeo list-tags "${SCAN_SKOPEO_RETRY[@]}" "docker://docker.io/kindest/node" 2>/dev/null \
     | jq -r '.Tags[]' 2>/dev/null \
     | grep -E "^v?${node_minor}\.[0-9]+$" \
     | sort -V | tail -1)" || [ -z "$node_latest" ]; then

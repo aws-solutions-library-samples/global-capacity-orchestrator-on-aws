@@ -191,6 +191,30 @@ parse_image_registry() {
   echo "${registry}|${repo}"
 }
 
+# dedupe_image_refs
+#
+# Read ``image:tag`` lines on stdin and print each distinct image once, keyed
+# on the canonical ``registry/repo:tag`` from parse_image_registry, so every
+# spelling of one Docker Hub image (``python:3.14.8-slim``,
+# ``docker.io/library/python:3.14.8-slim``) is looked up and reported once.
+# The shortest spelling is kept for display (ties broken by sort order), and
+# the output is sorted. Blank lines are dropped; a line without a tag is kept
+# as-is (check_image skips it as a non-semver tag).
+dedupe_image_refs() {
+  local ref image tag parsed
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    image="${ref%%:*}"
+    tag="${ref#*:}"
+    [ "$tag" = "$ref" ] && tag=""
+    parsed="$(parse_image_registry "$image")"
+    printf '%s/%s:%s\t%d\t%s\n' "${parsed%%|*}" "${parsed#*|}" "$tag" "${#ref}" "$ref"
+  done \
+    | sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3 \
+    | awk -F '\t' '$1 != previous { print $3; previous = $1 }' \
+    | sort
+}
+
 # is_semver_tag <tag>
 #
 # Returns 0 (true) if the tag looks like a semver version (v1.2.3, 1.2, etc).
@@ -321,6 +345,43 @@ split_pinned_image_ref() {
   printf '%s|%s|%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}"
 }
 
+# Transient-failure retries for the scan's registry and HTTP lookups. A single
+# dropped connection used to mark the whole monthly scan incomplete (and fail
+# its job): 2026-10-25, one public.ecr.aws manifest read for a tag that
+# resolved fine minutes later. Every lookup now retries before it counts as a
+# failure; a lookup that still fails is reported incomplete exactly as before.
+#
+# SCAN_CURL_RETRY: curl's own retry on timeouts, refused connections, 408, 429
+# and 5xx (never on a 404 or another definite answer), bounded in total time
+# so a dead host still fails inside the job's budget.
+SCAN_CURL_RETRY=(--retry 2 --retry-connrefused --retry-max-time 30)
+# SCAN_SKOPEO_RETRY: skopeo's built-in retry for transient registry errors.
+SCAN_SKOPEO_RETRY=(--retry-times 3)
+
+# with_retries <attempts> <command...>
+#
+# Run <command> up to <attempts> times, stopping at the first success, with
+# DEPS_SCAN_RETRY_DELAY_SECONDS (default 3) between attempts. For tools that
+# have no retry option of their own (helm). The command's stdout passes
+# through only from the attempt that succeeded; a failed attempt's partial
+# output is discarded so a caller parsing it never sees a mix. Returns the
+# last attempt's exit status.
+with_retries() {
+  local attempts="$1" attempt=1 status=0 output
+  shift
+  while :; do
+    if output="$("$@")"; then
+      [ -n "$output" ] && printf '%s\n' "$output"
+      return 0
+    else
+      status=$?
+    fi
+    [ "$attempt" -ge "$attempts" ] && return "$status"
+    attempt=$((attempt + 1))
+    sleep "${DEPS_SCAN_RETRY_DELAY_SECONDS:-3}"
+  done
+}
+
 # published_manifest_digest <repository:tag>
 #
 # Print the tag's current top-level manifest digest (``sha256:<64 hex>``) as
@@ -332,7 +393,7 @@ split_pinned_image_ref() {
 published_manifest_digest() {
   local tagged_image="$1" manifest digest
   manifest="$(mktemp)"
-  if ! skopeo inspect --raw "docker://${tagged_image}" > "$manifest" 2>/dev/null; then
+  if ! skopeo inspect "${SCAN_SKOPEO_RETRY[@]}" --raw "docker://${tagged_image}" > "$manifest" 2>/dev/null; then
     rm -f "$manifest"
     return 1
   fi
@@ -874,7 +935,7 @@ if versions:
 # whatever the runner or the prebuilt toolchain resolves to.
 get_latest_endoflife_cycle() {
   local product="$1"
-  curl -fsSL --max-time 15 "https://endoflife.date/api/${product}.json" 2>/dev/null \
+  curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" "https://endoflife.date/api/${product}.json" 2>/dev/null \
     | python3 -c "
 import datetime, json, sys
 try:
@@ -2674,7 +2735,7 @@ get_registry_package_status() {
   esac
 
   body="$(mktemp)"
-  code="$(curl -sSL --max-time 15 -o "$body" -w '%{http_code}' "$url" 2>/dev/null)" || code=""
+  code="$(curl -sSL --max-time 15 "${SCAN_CURL_RETRY[@]}" -o "$body" -w '%{http_code}' "$url" 2>/dev/null)" || code=""
   if [ "$code" = "404" ]; then
     rm -f "$body"
     echo "missing|"

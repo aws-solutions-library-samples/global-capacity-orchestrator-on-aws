@@ -4191,6 +4191,118 @@ SHIM
     rm -rf "$tmpdir"
 }
 
+@test "published_manifest_digest: asks skopeo to retry transient registry errors" {
+    # 2026-10-25: one dropped public.ecr.aws read marked the whole monthly
+    # scan incomplete. skopeo's own retry absorbs that before it is a failure.
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/skopeo" <<SHIM
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "$tmpdir/argv"
+printf '{}'
+SHIM
+    chmod +x "$tmpdir/skopeo"
+    PATH="$tmpdir:$PATH" run published_manifest_digest "public.ecr.aws/example/image:1.0"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$tmpdir/argv")" = "inspect --retry-times 3 --raw docker://public.ecr.aws/example/image:1.0" ]
+    rm -rf "$tmpdir"
+}
+
+@test "scan retry flags: curl retries transient errors within a bounded time, skopeo three times" {
+    [ "${SCAN_CURL_RETRY[*]}" = "--retry 2 --retry-connrefused --retry-max-time 30" ]
+    [ "${SCAN_SKOPEO_RETRY[*]}" = "--retry-times 3" ]
+}
+
+@test "scan retry flags: every curl, skopeo and helm lookup in the scan retries" {
+    # A new lookup added without a retry would bring back the single-blip
+    # incomplete scan; this keeps every call site on the shared flags.
+    local scripts=("$REPO_ROOT/.github/scripts/dependency-scan.sh" "$LIB")
+    local bare
+    bare="$(grep -nE '(^|[ (])(curl|skopeo (inspect|list-tags)|helm (show|repo add|search)) ' "${scripts[@]}" \
+        | grep -vE ':[0-9]+:[[:space:]]*#' \
+        | grep -vE 'SCAN_CURL_RETRY|SCAN_SKOPEO_RETRY|with_retries [0-9]+ helm|--retry [0-9]' || true)"
+    [ -z "$bare" ] || { echo "lookups without a retry:"; echo "$bare"; false; }
+}
+
+@test "with_retries: returns the first success and only its output" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/flaky" <<SHIM
+#!/usr/bin/env bash
+count=\$(( \$(cat "$tmpdir/count" 2>/dev/null || echo 0) + 1 ))
+echo "\$count" > "$tmpdir/count"
+echo "attempt \$count"
+[ "\$count" -ge 2 ]
+SHIM
+    chmod +x "$tmpdir/flaky"
+    DEPS_SCAN_RETRY_DELAY_SECONDS=0 run with_retries 3 "$tmpdir/flaky"
+    [ "$status" -eq 0 ]
+    [ "$output" = "attempt 2" ]
+    [ "$(cat "$tmpdir/count")" = "2" ]
+    rm -rf "$tmpdir"
+}
+
+@test "with_retries: gives up after the attempt budget with the last status" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/down" <<SHIM
+#!/usr/bin/env bash
+echo x >> "$tmpdir/calls"
+echo partial
+exit 7
+SHIM
+    chmod +x "$tmpdir/down"
+    DEPS_SCAN_RETRY_DELAY_SECONDS=0 run with_retries 3 "$tmpdir/down"
+    [ "$status" -eq 7 ]
+    [ -z "$output" ]
+    [ "$(wc -l < "$tmpdir/calls" | tr -d ' ')" = "3" ]
+    rm -rf "$tmpdir"
+}
+
+@test "with_retries: passes arguments through unchanged" {
+    DEPS_SCAN_RETRY_DELAY_SECONDS=0 run with_retries 1 printf '%s|%s' "a b" "c"
+    [ "$status" -eq 0 ]
+    [ "$output" = "a b|c" ]
+}
+
+@test "dedupe_image_refs: one entry per canonical Docker Hub image, shortest spelling kept" {
+    # The 2026-10-25 report listed python:3.14.8-slim -> 3.15.1-slim twice,
+    # once per spelling, and looked the tag up twice.
+    run dedupe_image_refs <<'REFS'
+docker.io/library/python:3.14.8-slim
+python:3.14.8-slim
+docker.io/python:3.14.8-slim
+python:3.13.4-slim
+
+public.ecr.aws/aws-cli/aws-cli:2.37.10
+public.ecr.aws/aws-cli/aws-cli:2.37.10
+semgrep/semgrep:1.180.0
+docker.io/semgrep/semgrep:1.180.0
+REFS
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf '%s\n' \
+        public.ecr.aws/aws-cli/aws-cli:2.37.10 \
+        python:3.13.4-slim \
+        python:3.14.8-slim \
+        semgrep/semgrep:1.180.0)" ]
+}
+
+@test "dedupe_image_refs: different registries and tags stay distinct" {
+    run dedupe_image_refs <<'REFS'
+ghcr.io/mlflow/mlflow:v3.17.0-full
+mlflow/mlflow:v3.17.0-full
+mlflow/mlflow:v3.17.1-full
+REFS
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = "3" ]
+}
+
+@test "dedupe_image_refs: empty input prints nothing" {
+    run dedupe_image_refs < /dev/null
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
 @test "published_manifest_digest: fails closed on an implausible hash" {
     # A sha256sum that does not produce 64 hex characters is a broken tool,
     # not a digest; the caller must not mistake it for a moved manifest.
