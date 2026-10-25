@@ -95,7 +95,12 @@ _BLOCKED_PATH_SEGMENTS = frozenset(
     {"admin", "debug", "docs", "instances", "metrics", "openapi.json"}
 )
 _V1_MODELS_RE = re.compile(r"^v1/models(?:/[^/]+)?$")
-_V1_GENERATION_RE = re.compile(r"^v1/(?:chat/completions|completions|embeddings|responses)$")
+# ``systemone`` is vLLM's structured decisions API (v0.32.0+): typed choice,
+# noul and score questions over a state, answered from the model's label
+# probabilities. Like the generation calls it is POST-only.
+_V1_GENERATION_RE = re.compile(
+    r"^v1/(?:chat/completions|completions|embeddings|responses|systemone)$"
+)
 _V2_MODELS_RE = re.compile(r"^v2/models(?:/[^/]+(?:/(?:config|infer|ready|stats))?)?$")
 
 

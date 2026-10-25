@@ -838,6 +838,8 @@ def test_response_headers_keep_non_latin1_values_byte_for_byte() -> None:
         ("v1/completions", "POST", "/health", "v1/completions"),
         ("v1/embeddings", "POST", "/health", "v1/embeddings"),
         ("v1/responses", "POST", "/health", "v1/responses"),
+        ("v1/systemone", "POST", "/health", "v1/systemone"),
+        ("/v1/systemone/", "post", "/health", "v1/systemone"),
         ("generate", "POST", "/health", "generate"),
         ("v2/models", "GET", "/health", "v2/models"),
         ("v2/models/model-a", "HEAD", "/health", "v2/models/model-a"),
@@ -898,6 +900,13 @@ def test_validate_upstream_path_blocks_privileged_segments_before_allowlisting(
         ("V1/models", "GET", "/health"),
         ("v2/models/model/unknown", "POST", "/health"),
         ("v2/models", "DELETE", "/health"),
+        # Structured decisions are POST-only; vLLM v0.32.0 has no
+        # ``/v1/decisions`` route, and nothing below ``systemone`` exists.
+        ("v1/systemone", "GET", "/health"),
+        ("v1/systemone", "HEAD", "/health"),
+        ("v1/systemone/extra", "POST", "/health"),
+        ("v1/decisions", "POST", "/health"),
+        ("V1/systemone", "POST", "/health"),
     ],
 )
 def test_validate_upstream_path_rejects_unlisted_path_method_pairs(

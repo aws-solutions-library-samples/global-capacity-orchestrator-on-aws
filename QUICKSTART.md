@@ -266,7 +266,7 @@ GCO can also deploy long-running inference endpoints across regions. Here's a qu
 ```bash
 # Deploy a vLLM inference endpoint (an ungated model, no Hugging Face token needed)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --gpu-count 1 \
   -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \
   -r us-east-1

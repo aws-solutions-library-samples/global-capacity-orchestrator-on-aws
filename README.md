@@ -116,7 +116,7 @@ gco jobs logs hello-gco -n gco-jobs -r us-east-1                    # read its o
 Serve a model from every Region with one command:
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
+gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 gco inference status my-llm                # rollout state in every Region
 gco inference invoke my-llm -p "Hello"     # an OpenAI-compatible completion
 gco inference scale my-llm --replicas 3    # scale it out
@@ -227,7 +227,7 @@ See [Templates](docs/CLI.md#templates-commands), [DAG](docs/CLI.md#dag-commands)
 `gco inference deploy` is the main path. It records the endpoint in a global DynamoDB table, and the inference monitor in each target Region creates the Deployment, Service and optional autoscaler, keeps them reconciled, and reports their state. [vLLM](https://docs.vllm.ai/en/latest/) and [SGLang](https://docs.sglang.ai/) get a strict adapter through `--framework`; [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) and any other containerized server deploy without one. The Triton image doesn't start the server on its own, so its `--extra-args` run `tritonserver` against the model repository uploaded to the model registry:
 
 ```bash
-gco inference deploy vllm-qwen -i vllm/vllm-openai:v0.31.0 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
+gco inference deploy vllm-qwen -i vllm/vllm-openai:v0.32.0 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 gco inference deploy sglang-qwen -i lmsysorg/sglang:v0.5.21 --framework sglang --port 30000 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 gco models upload ./triton-repo --name triton-repo
 gco inference deploy triton-models -i nvcr.io/nvidia/tritonserver:26.09-py3 --health-path /v2/health/ready --gpu-count 1 \

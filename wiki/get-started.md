@@ -106,7 +106,7 @@ ready-to-submit manifest in
 
 ```bash
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --gpu-count 1 \
   -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \
   -r us-east-1

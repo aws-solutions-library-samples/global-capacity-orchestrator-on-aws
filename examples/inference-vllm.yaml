@@ -15,7 +15,7 @@
 # Usage (recommended, multi-region aware). vLLM is started with
 # --model $(MODEL); each --extra-args value is one more server argument:
 #   gco inference deploy vllm-qwen \
-#     -i vllm/vllm-openai:v0.31.0 \
+#     -i vllm/vllm-openai:v0.32.0 \
 #     --gpu-count 1 --replicas 1 \
 #     -e MODEL=Qwen/Qwen2.5-1.5B-Instruct \
 #     --extra-args=--max-model-len --extra-args 4096
@@ -23,7 +23,7 @@
 #
 # Usage with autoscaling:
 #   gco inference deploy vllm-qwen \
-#     -i vllm/vllm-openai:v0.31.0 \
+#     -i vllm/vllm-openai:v0.32.0 \
 #     --gpu-count 1 --replicas 2 \
 #     --min-replicas 1 --max-replicas 8 \
 #     --autoscale-metric cpu:70 --autoscale-metric memory:80 \
@@ -80,7 +80,7 @@ spec:
         runAsGroup: 1000
       containers:
       - name: vllm
-        image: vllm/vllm-openai:v0.31.0
+        image: vllm/vllm-openai:v0.32.0
         securityContext:
           allowPrivilegeEscalation: false
         ports:

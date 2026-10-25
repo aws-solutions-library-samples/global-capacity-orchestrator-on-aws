@@ -2738,9 +2738,9 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 **Example:**
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0
+gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0
 gco inference deploy llama3-70b \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   -r us-east-1 -r eu-west-1 \
   --replicas 2 --gpu-count 4 \
   --model-source s3://bucket/models/llama3-70b \
@@ -2748,7 +2748,7 @@ gco inference deploy llama3-70b \
 
 # Deploy with autoscaling (creates a Kubernetes HPA)
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70 --autoscale-metric memory:80
@@ -2924,7 +2924,7 @@ gco inference update-image ENDPOINT_NAME [OPTIONS]
 **Example:**
 
 ```bash
-gco inference update-image my-llm -i vllm/vllm-openai:v0.31.0
+gco inference update-image my-llm -i vllm/vllm-openai:v0.32.0
 ```
 
 #### `gco inference invoke`
@@ -2975,6 +2975,10 @@ gco inference invoke my-llm -d '{"prompt": "Hello", "stream": true}'
 
 # Explicit API path: the prompt is sent as a single chat message
 gco inference invoke my-llm -p "Hello" --path /v1/chat/completions
+
+# vLLM structured decisions (v0.32.0+; see INFERENCE.md → Structured decisions)
+gco inference invoke d1-decisions --path /v1/systemone \
+  -d '{"state": "Shipped 9 days late", "questions": {"late": {"type": "noul"}}}'
 
 # Triton: name the model and send its input tensors
 gco inference invoke triton-models --path /v2/models/identity/infer \
@@ -3058,10 +3062,10 @@ gco inference canary ENDPOINT_NAME [OPTIONS]
 
 ```bash
 # 10% traffic to new version
-gco inference canary my-llm -i vllm/vllm-openai:v0.31.0
+gco inference canary my-llm -i vllm/vllm-openai:v0.32.0
 
 # 25% traffic with 2 canary replicas
-gco inference canary my-llm -i vllm/vllm-openai:v0.31.0 -w 25 -r 2
+gco inference canary my-llm -i vllm/vllm-openai:v0.32.0 -w 25 -r 2
 ```
 
 #### `gco inference promote`
@@ -6354,7 +6358,7 @@ gco models upload ./llama3-weights/ --name llama3-8b
 
 # 2. Deploy inference endpoint
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --gpu-count 1 \
   --model-source $(gco models uri llama3-8b) \
   -e MODEL=/models/my-llm \
@@ -6368,13 +6372,13 @@ gco inference scale my-llm --replicas 3
 
 # Or enable autoscaling
 gco inference deploy my-llm \
-  -i vllm/vllm-openai:v0.31.0 \
+  -i vllm/vllm-openai:v0.32.0 \
   --replicas 2 --gpu-count 1 \
   --min-replicas 1 --max-replicas 8 \
   --autoscale-metric cpu:70
 
 # 5. Rolling update
-gco inference update-image my-llm -i vllm/vllm-openai:v0.31.0
+gco inference update-image my-llm -i vllm/vllm-openai:v0.32.0
 
 # 6. Cleanup
 gco inference delete my-llm -y

@@ -336,6 +336,41 @@ def test_dispatch_passes_non_serving_post_straight_to_decode(monkeypatch) -> Non
     client.send.assert_awaited_once()
 
 
+def test_dispatch_sends_structured_decisions_to_decode_unchanged(monkeypatch) -> None:
+    """``/v1/systemone`` is a decode passthrough with its body untouched.
+
+    A structured decision reads the label probabilities of one forward pass;
+    the completion-specific prefill priming (``max_tokens=1``, ``stream=False``,
+    ``kv_transfer_params``) would add fields the request schema does not have.
+    """
+    upstream = _FakeStreamResponse([b'{"object": "structured_decision"}'])
+    client = MagicMock()
+    client.post = AsyncMock()
+    client.build_request = MagicMock(return_value="REQ")
+    client.send = AsyncMock(return_value=upstream)
+    monkeypatch.setattr(proxy, "PREFILL_URL", "http://ep-prefill:8000")
+    monkeypatch.setattr(proxy, "DECODE_URL", "http://ep-decode:8000")
+    _install_client(monkeypatch, client)
+    body = {
+        "state": "The invoice total is 120 EUR and was paid late.",
+        "questions": {"late": {"type": "noul", "instructions": "Was it paid late?"}},
+    }
+    request = _fake_request("/inference/ep/v1/systemone", body=json.dumps(body).encode())
+
+    response, chunks = asyncio.run(_drive(proxy._dispatch("inference/ep/v1/systemone", request)))
+
+    assert not proxy._is_serving_path("/inference/ep/v1/systemone")
+    assert isinstance(response, proxy.StreamingResponse)
+    assert chunks == [b'{"object": "structured_decision"}']
+    client.post.assert_not_called()
+    client.build_request.assert_called_once_with(
+        "POST",
+        "http://ep-decode:8000/inference/ep/v1/systemone",
+        json=body,
+        headers=[],
+    )
+
+
 def test_dispatch_primes_prefill_then_streams_decode_for_serving_path(monkeypatch) -> None:
     """A serving path primes prefill first, then streams the decode response back."""
     prefill_resp = MagicMock()

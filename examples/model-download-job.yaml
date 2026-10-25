@@ -22,7 +22,7 @@
 # them to the model registry and let each Region's init container sync them:
 #   gco models upload ./Qwen2.5-0.5B-Instruct --name qwen-0-5b
 #   gco inference deploy my-model \
-#     -i vllm/vllm-openai:v0.31.0 \
+#     -i vllm/vllm-openai:v0.32.0 \
 #     --model-source $(gco models uri qwen-0-5b) \
 #     -e MODEL=/models/my-model
 #

@@ -1703,8 +1703,8 @@ class TestInferenceModels:
         ("persisted", "image", "expected"),
         [
             ("vllm", "lmsysorg/sglang:v0.5.21", "vllm"),
-            ("sglang", "vllm/vllm-openai:v0.31.0", "sglang"),
-            (None, "vllm/vllm-openai:v0.31.0", "vllm"),
+            ("sglang", "vllm/vllm-openai:v0.32.0", "sglang"),
+            (None, "vllm/vllm-openai:v0.32.0", "vllm"),
             (None, "lmsysorg/sglang:v0.5.21", "sglang"),
             (None, "nvcr.io/nvidia/tritonserver:26.09-py3", "triton"),
             (None, "registry.example/team/private-server@sha256:" + "a" * 64, "openai"),
@@ -2661,7 +2661,7 @@ class TestInvokeServedModelHint:
     """A vLLM 404 for the requested model names the model the endpoint serves."""
 
     @staticmethod
-    def _endpoint(image="vllm/vllm-openai:v0.31.0", env=None, args=None, framework=None):
+    def _endpoint(image="vllm/vllm-openai:v0.32.0", env=None, args=None, framework=None):
         spec = {"image": image, "env": {"MODEL": _REQUESTED} if env is None else env}
         if args is not None:
             spec["args"] = args

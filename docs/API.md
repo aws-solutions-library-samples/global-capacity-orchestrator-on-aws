@@ -1873,6 +1873,7 @@ the allowlist are rejected before any upstream connection is made.
 |---------|----------|
 | `v1/models` and `v1/models/{model}` | `v1/models`, `v1/models/my-llm` |
 | `v1/chat/completions`, `v1/completions`, `v1/embeddings`, `v1/responses` | OpenAI-compatible generation calls |
+| `v1/systemone` (`POST`) | vLLM's structured decisions API (v0.32.0+); see [INFERENCE.md → Structured decisions](INFERENCE.md#structured-decisions-v1systemone) |
 | `generate` (`POST`) | SGLang's native generation API; streaming is the `stream` body flag on the same path |
 | `server_info` (`GET`/`HEAD`) | SGLang's read-only identity document — the launcher arguments the running server resolved, which is how `gco inference models` reads the exact `model_path` and `revision` |
 | `v2/models/...` with optional `config`, `infer`, `ready`, `stats` | `v2/models/my-llm/infer` (Triton) |

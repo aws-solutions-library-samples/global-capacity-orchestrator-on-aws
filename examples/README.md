@@ -406,7 +406,7 @@ maintained, with no planned updates, bug fixes, or security patches.
 **Deploy via CLI (recommended for multi-region):** each example's header carries the full command, Triton's included.
 
 ```bash
-gco inference deploy my-llm -i vllm/vllm-openai:v0.31.0 --gpu-count 1 \
+gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 \
   -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 gco inference deploy my-sglang -i lmsysorg/sglang:v0.5.21 --framework sglang \
   --port 30000 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
@@ -661,7 +661,7 @@ Inference endpoints don't see this volume: `gco-inference` has its own EFS volum
 
 ```bash
 gco models upload ./Qwen2.5-0.5B-Instruct --name qwen-0-5b
-gco inference deploy my-model -i vllm/vllm-openai:v0.31.0 \
+gco inference deploy my-model -i vllm/vllm-openai:v0.32.0 \
   --model-source $(gco models uri qwen-0-5b) -e MODEL=/models/my-model
 ```
 

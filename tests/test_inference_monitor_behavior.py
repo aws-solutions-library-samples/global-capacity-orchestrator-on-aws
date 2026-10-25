@@ -2057,7 +2057,7 @@ def test_vllm_renderer_serves_the_model_env_and_keeps_root_path() -> None:
     deployment = _build_deployment(
         monitor,
         {
-            "image": "vllm/vllm-openai:v0.31.0",
+            "image": "vllm/vllm-openai:v0.32.0",
             "framework": "vllm",
             "port": 8000,
             "health_check_path": "/health",
@@ -2081,7 +2081,7 @@ def test_vllm_model_env_goes_before_operator_args_and_role_args() -> None:
     deployment = _build_deployment(
         _make_monitor(),
         {
-            "image": "vllm/vllm-openai:v0.31.0",
+            "image": "vllm/vllm-openai:v0.32.0",
             "framework": "vllm",
             "env": {"MODEL": "test/model"},
             "args": ["--max-model-len", "4096"],
@@ -2114,7 +2114,7 @@ def test_vllm_model_env_goes_before_operator_args_and_role_args() -> None:
 def test_vllm_args_that_already_name_a_model_win_over_the_model_env(args: list[str]) -> None:
     deployment = _build_deployment(
         _make_monitor(),
-        {"image": "vllm/vllm-openai:v0.31.0", "env": {"MODEL": "test/model"}, "args": args},
+        {"image": "vllm/vllm-openai:v0.32.0", "env": {"MODEL": "test/model"}, "args": args},
     )
     rendered = deployment.spec.template.spec.containers[0].args
     assert "$(MODEL)" not in rendered
@@ -2123,7 +2123,7 @@ def test_vllm_args_that_already_name_a_model_win_over_the_model_env(args: list[s
 
 def test_vllm_without_a_model_env_keeps_vllms_own_default() -> None:
     deployment = _build_deployment(
-        _make_monitor(), {"image": "vllm/vllm-openai:v0.31.0", "framework": "vllm"}
+        _make_monitor(), {"image": "vllm/vllm-openai:v0.32.0", "framework": "vllm"}
     )
     assert deployment.spec.template.spec.containers[0].args == ["--root-path", "/inference/chat"]
 
@@ -2144,7 +2144,7 @@ def _node_affinity(deployment):  # type: ignore[no-untyped-def]
 def test_gpu_type_hint_renders_a_preferred_instance_type_affinity() -> None:
     deployment = _build_deployment(
         _make_monitor(),
-        {"image": "vllm/vllm-openai:v0.31.0", "framework": "vllm", "gpu_type": " g5.xlarge "},
+        {"image": "vllm/vllm-openai:v0.32.0", "framework": "vllm", "gpu_type": " g5.xlarge "},
     )
     node_affinity = _node_affinity(deployment)
     assert node_affinity.required_during_scheduling_ignored_during_execution is None
@@ -2182,7 +2182,7 @@ def test_gpu_type_hint_composes_with_the_sglang_pre_ampere_affinity() -> None:
 def test_blank_or_malformed_gpu_type_renders_no_affinity(gpu_type: object) -> None:
     deployment = _build_deployment(
         _make_monitor(),
-        {"image": "vllm/vllm-openai:v0.31.0", "framework": "vllm", "gpu_type": gpu_type},
+        {"image": "vllm/vllm-openai:v0.32.0", "framework": "vllm", "gpu_type": gpu_type},
     )
     assert deployment.spec.template.spec.affinity is None
 
