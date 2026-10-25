@@ -201,6 +201,12 @@ parse_image_registry() {
 # the output is sorted. Blank lines are dropped; a line without a tag is kept
 # as-is (check_image skips it as a non-semver tag).
 dedupe_image_refs() {
+  _image_ref_keys | sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3 | awk -F '\t' '$1 != previous { print $3; previous = $1 }' | sort
+}
+
+# _image_ref_keys — dedupe_image_refs' first stage: one
+# ``<canonical ref>\t<length>\t<original ref>`` line per non-blank stdin line.
+_image_ref_keys() {
   local ref image tag parsed
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
@@ -209,10 +215,7 @@ dedupe_image_refs() {
     [ "$tag" = "$ref" ] && tag=""
     parsed="$(parse_image_registry "$image")"
     printf '%s/%s:%s\t%d\t%s\n' "${parsed%%|*}" "${parsed#*|}" "$tag" "${#ref}" "$ref"
-  done \
-    | sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3 \
-    | awk -F '\t' '$1 != previous { print $3; previous = $1 }' \
-    | sort
+  done
 }
 
 # is_semver_tag <tag>
