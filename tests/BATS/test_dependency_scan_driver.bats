@@ -737,7 +737,7 @@ run_scan() {
     : > "$GITHUB_STEP_SUMMARY"
     run env -u GITHUB_TOKEN -u GH_TOKEN PATH="$FAKE_BIN:$PATH" TMPDIR="$BATS_TEST_TMPDIR" \
         GITHUB_OUTPUT="$GITHUB_OUTPUT" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
-        FAKE_AWS_CDK=present "$@" \
+        FAKE_AWS_CDK=present DEPS_SCAN_RETRY_DELAY_SECONDS=0 "$@" \
         bash -c 'cd "$1" && exec bash "$2"' _ "$root" "$SCRIPT"
 }
 
@@ -795,18 +795,17 @@ findings_path() {
     grep -q '^curl https://pypi.org/pypi/setuptools/json' "$CALLS"
     grep -q '^curl https://dl.k8s.io/release/stable-1.37.txt' "$CALLS"
     grep -q '^skopeo list-tags --retry-times 3 docker://docker.io/library/busybox' "$CALLS"
-    grep -q '^skopeo inspect --raw docker://public.ecr.aws/aws-cli/aws-cli:2.36.41' "$CALLS"
+    grep -q '^skopeo inspect --retry-times 3 --raw docker://public.ecr.aws/aws-cli/aws-cli:2.36.41' "$CALLS"
     # The Crossplane Function package's digest is bound to its tag, but the
     # package stays out of the image sweep: its release drift is the GitHub
     # release check's, and the sweep would report the same release twice.
-    grep -q '^skopeo inspect --raw docker://xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5' "$CALLS"
+    grep -q '^skopeo inspect --retry-times 3 --raw docker://xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5' "$CALLS"
     ! grep -q '^skopeo list-tags .*function-go-templating' "$CALLS"
     # The kind node image likewise: its digest is bound to its tag, the tag's
-    # patch drift is the CI tooling check's own list-tags call (no --retry-times),
-    # and it stays out of the generic image sweep.
-    grep -q '^skopeo inspect --raw docker://kindest/node:v1.37.0' "$CALLS"
-    grep -q '^skopeo list-tags docker://docker.io/kindest/node' "$CALLS"
-    ! grep -q '^skopeo list-tags --retry-times 3 docker://docker.io/kindest/node' "$CALLS"
+    # patch drift is the CI tooling check's own list-tags call, and it stays
+    # out of the generic image sweep (which would list the tag a second time).
+    grep -q '^skopeo inspect --retry-times 3 --raw docker://kindest/node:v1.37.0' "$CALLS"
+    [ "$(grep -c '^skopeo list-tags --retry-times 3 docker://docker.io/kindest/node' "$CALLS")" = "1" ]
     grep -q '^helm repo add keda https://kedacore.github.io/charts --force-update' "$CALLS"
     grep -q '^helm show chart oci://registry.k8s.io/kueue/charts/kueue' "$CALLS"
     grep -q '^aws eks describe-addon-versions --addon-name metrics-server --kubernetes-version 1.37' "$CALLS"
@@ -1226,7 +1225,7 @@ YAML
     [[ "$output" == *"  - kind node image (kindest/node): v1.37.0 -> v1.37.1"* ]]
     [[ "$output" != *"INCOMPLETE: Container registry lookup failed for kindest/node"* ]]
     # No digest to bind, so no manifest lookup, and no false digest row.
-    ! grep -q '^skopeo inspect --raw docker://kindest/node' "$CALLS"
+    ! grep -q '^skopeo inspect --retry-times 3 --raw docker://kindest/node' "$CALLS"
     [[ "$output" != *"kindest/node:v1.37.0: committed digest does not match"* ]]
     # The missing digest is the finding.
     [[ "$output" == *"  - kind node image (integration-tests.yml): kindest/node:v1.37.0 is not pinned by digest"* ]]
