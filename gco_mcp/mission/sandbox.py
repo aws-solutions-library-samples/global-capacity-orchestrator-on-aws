@@ -1687,7 +1687,7 @@ class MissionSandbox:
         provider_cls, _ = _import_provider()
         self._provider = provider_cls(
             limits={
-                "max_duration_secs": _DURATION_LIMIT_SECS,
+                "max_feed_duration_secs": _DURATION_LIMIT_SECS,
                 "max_memory": _MEMORY_LIMIT_BYTES,
             }
         )

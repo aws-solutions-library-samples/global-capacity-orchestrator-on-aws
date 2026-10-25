@@ -10,7 +10,7 @@ WORKDIR ${LAMBDA_TASK_ROOT}
 
 # Pull current Amazon Linux 2023 security fixes. Bump the epoch when a newly
 # published base-layer patch must invalidate the container build cache.
-ARG DNF_SECURITY_EPOCH=2026-09-16
+ARG DNF_SECURITY_EPOCH=2026-10-25
 # hadolint ignore=DL3041
 RUN echo "dnf security epoch ${DNF_SECURITY_EPOCH}" \
     && dnf upgrade -y --releasever=latest \

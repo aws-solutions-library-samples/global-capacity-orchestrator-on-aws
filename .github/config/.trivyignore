@@ -95,6 +95,32 @@ CVE-2026-102276 exp:2026-11-21
 CVE-2026-102278 exp:2026-11-21
 CVE-2026-19534 exp:2026-11-21
 
+# CVE-2026-109869 (GHSA-xjj6-f33q-929c): undici does not handle an error on a
+# response body stream, so a server that breaks the stream mid-body can crash
+# the client process. Fixed upstream in undici 6.29.1, 7.30.1 and 8.12.2.
+# Present only as the undici 6.28.0 vendored inside npm's own node_modules in
+# the dev image (the same copy as CVE-2026-19534 above), surfaced by
+# security:trivy:container-scan on Dockerfile.dev.
+#
+# Not introduced by any change of ours: published 2026-10-23T22:14Z. The
+# Security workflow was green on main at 42721a63 (2026-10-23T12:51Z) and
+# first failed on PR #484, whose diff does not touch the dev image's npm.
+#
+# Not clearable by a pin bump: checked 2026-10-25 by reading
+# node_modules/undici/package.json inside each published npm 12.x tarball.
+# npm 12.2.0 (the pinned ARG NPM_VERSION) vendors undici 6.28.0 and npm 12.2.1
+# (2026-10-15, the latest release) vendors 6.29.0, both below the fix.
+#
+# Low runtime risk: npm uses undici's fetch only for node-gyp downloading Node
+# headers from the official dist server; the impact is availability of a
+# contributor/CI command, and the dev image is never deployed to a cluster.
+#
+# Clears when npm ships a release that re-vendors undici >= 6.29.1: bump ARG
+# NPM_VERSION in Dockerfile.dev together with the packageManager pins and drop
+# this entry along with CVE-2026-19534.
+# Advisory: https://github.com/advisories/GHSA-xjj6-f33q-929c
+CVE-2026-109869 exp:2026-11-25
+
 # CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
 # (msgpack 1.1.2, fixed 1.2.1) — reported by security:trivy:container-scan
 # against the built dev image, under its python-pkg target.

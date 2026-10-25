@@ -456,7 +456,7 @@ def test_code_mode_sandbox_default_limits() -> None:
         f"expected MontySandboxProvider, got {type(cm.sandbox_provider).__name__}"
     )
     assert cm.sandbox_provider.limits == {
-        "max_duration_secs": 30.0,
+        "max_feed_duration_secs": 30.0,
         "max_memory": 200_000_000,
     }
 
@@ -473,7 +473,7 @@ def test_code_mode_sandbox_limits_from_env() -> None:
         cm = _get_attached_code_mode()
 
     assert cm.sandbox_provider.limits == {
-        "max_duration_secs": 5.0,
+        "max_feed_duration_secs": 5.0,
         "max_memory": 50_000_000,
     }
 
@@ -490,7 +490,7 @@ def test_code_mode_sandbox_limits_invalid_env_falls_back() -> None:
         cm = _get_attached_code_mode()
 
     assert cm.sandbox_provider.limits == {
-        "max_duration_secs": 30.0,
+        "max_feed_duration_secs": 30.0,
         "max_memory": 200_000_000,
     }
 
