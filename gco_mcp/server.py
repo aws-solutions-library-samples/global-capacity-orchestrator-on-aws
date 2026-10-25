@@ -144,7 +144,9 @@ elif _TOOL_SEARCH == "code_mode":
             discovery_tools=[GetTags(), Search(), GetSchemas()],
             sandbox_provider=MontySandboxProvider(
                 limits={
-                    "max_feed_duration_secs": _float_env("GCO_MCP_CODE_MODE_MAX_DURATION_SECS", 30.0),
+                    "max_feed_duration_secs": _float_env(
+                        "GCO_MCP_CODE_MODE_MAX_DURATION_SECS", 30.0
+                    ),
                     "max_memory": _int_env("GCO_MCP_CODE_MODE_MAX_MEMORY", 200_000_000),
                 },
             ),
