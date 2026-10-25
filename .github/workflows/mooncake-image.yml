@@ -18,6 +18,10 @@
 #      MooncakeStoreConfig loader (embedded mode rejects global_segment_size=0).
 #   3. The connector names GCO emits (MooncakeConnector / MooncakeStoreConnector
 #      / MultiConnector) are registered in the image's KVConnectorFactory.
+#   4. Every vLLM POST path the inference proxy forwards (/v1/completions,
+#      /v1/chat/completions, /v1/embeddings, /v1/responses, /v1/systemone) is
+#      a route the image serves, and /v1/systemone is registered with read
+#      strategies for d1-3B and Qwen3 under --logprobs-mode raw_logprobs.
 #
 # We do NOT Trivy/CVE-scan this image: it is upstream and we can't patch it, so
 # vulnerability findings aren't actionable here. Version drift (a newer tag is

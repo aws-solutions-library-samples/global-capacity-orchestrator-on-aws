@@ -1702,3 +1702,63 @@ def test_router_operation_ids_are_unique_per_method() -> None:
     assert len(set(operation_ids)) == len(operation_ids), (
         f"duplicate operationIds generated: {sorted(operation_ids)}"
     )
+
+
+async def test_proxy_forwards_a_structured_decision_post_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vLLM's ``/v1/systemone`` reaches the model's TLS sidecar with its body intact."""
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("d1-decisions", "gco-inference", "/health")),
+    )
+    body = (
+        b'{"state":"Shipped 9 days late","questions":'
+        b'{"late":{"type":"noul","instructions":"Late?"}}}'
+    )
+    upstream = _FakeUpstreamResponse(chunks=(b'{"object":"structured_decision"}',))
+    client = _FakeHTTPClient(upstream)
+    _install_http_client(monkeypatch, client)
+    request = _request(
+        "POST",
+        path="/inference/d1-decisions/v1/systemone",
+        headers=[("content-type", "application/json")],
+        body=body,
+    )
+
+    streamed = await proxy._proxy(request, "d1-decisions", "v1/systemone")
+
+    assert client.build_args == (
+        "POST",
+        "https://d1-decisions.gco-inference.svc.cluster.local:8443/v1/systemone",
+    )
+    assert client.build_kwargs is not None
+    assert client.build_kwargs["content"] == body
+    assert [chunk async for chunk in streamed.body_iterator] == [
+        b'{"object":"structured_decision"}'
+    ]
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "v1/systemone"), ("POST", "v1/decisions"), ("POST", "v1/systemone/batch")],
+)
+async def test_proxy_refuses_other_decision_shapes_before_any_upstream(
+    monkeypatch: pytest.MonkeyPatch, method: str, path: str
+) -> None:
+    """Only ``POST v1/systemone`` is exposed; the rest never opens an upstream client."""
+    monkeypatch.setattr(
+        proxy,
+        "_resolve_upstream",
+        AsyncMock(return_value=("d1-decisions", "gco-inference", "/health")),
+    )
+    factory = Mock(side_effect=AssertionError("no upstream client may be created"))
+    monkeypatch.setattr(proxy, "_new_upstream_client", factory)
+
+    with pytest.raises(HTTPException) as raised:
+        await proxy._proxy(_request(method), "d1-decisions", path)
+
+    assert raised.value.status_code == 404
+    assert raised.value.detail == "Inference path is not exposed"
+    factory.assert_not_called()
