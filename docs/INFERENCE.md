@@ -477,25 +477,34 @@ gco inference invoke d1-decisions --path /v1/systemone -d '{
 
 `criteria` maps option names to descriptions for `choice`, is an optional
 `{"true": ..., "false": ...}` object for `noul`, and is an ordered list of at
-least two levels for `score` (the answer is the expected level index). The
+least two levels for `score`. A request carries at most 64 questions. The
 `state` can be text or any JSON value; `images` takes image URLs or data URLs
 for models that see, and `model` can be omitted because the endpoint serves one
-model. The answer looks like:
+model. Each answer carries its `probabilities` and a `confidence` (the chosen
+label's probability times `label_mass`), plus one type-specific field: `choice`
+is the most likely option's name, `noul` is the probability of yes, and `score`
+is the expected level index (0-based, with a `legend` mapping indexes to the
+level names):
 
 ```json
 {
   "object": "structured_decision",
   "model": "LiquidAI/d1-3B",
   "answers": {
-    "topic":   {"choice": "shipping", "probs": {"shipping": 0.71, "billing": 0.27, "product": 0.02}},
-    "late":    {"noul": 0.98},
-    "urgency": {"score": 1.6}
+    "topic":   {"type": "choice", "choice": "shipping", "confidence": 0.86,
+                "probabilities": {"shipping": 0.87, "billing": 0.12, "product": 0.01}},
+    "late":    {"type": "noul", "noul": 0.97, "confidence": 0.96,
+                "probabilities": {"yes": 0.97, "no": 0.03}},
+    "urgency": {"type": "score", "score": 1.62, "confidence": 0.61,
+                "legend": {"0": "low", "1": "medium", "2": "high"},
+                "probabilities": {"0": 0.03, "1": 0.32, "2": 0.65}}
   },
+  "usage": {"input_tokens": 412, "output_tokens": 0},
   "diagnostics": {"topic": {"label_mass": 0.99, "argmax_is_label": true}}
 }
 ```
 
-(abridged; the exact `answers` fields per question type are vLLM's.) On a
+(abridged: `diagnostics` has one entry per question.) On a
 [disaggregated (Mooncake)](#disaggregated-inference-mooncake) endpoint the
 prefill/decode proxy sends `/v1/systemone` straight to a decode pod with the
 body unchanged, like any other non-completion request.
