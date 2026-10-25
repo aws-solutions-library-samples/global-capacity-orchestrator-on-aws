@@ -42,12 +42,18 @@ from scripts.live_release_validation.checks.inference import (
     build_model_upload_command,
     build_model_uri_command,
     build_models_command,
+    build_structured_decision_command,
     extract_generated_text,
+    extract_structured_decision,
     initialize_run_state,
 )
 from scripts.live_release_validation.inference_contract import (
+    INFERENCE_CONTRACT_VERSION,
     MOONCAKE_CONFIG_DIGEST_ANNOTATION,
     MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES,
+    STRUCTURED_DECISION_PATH,
+    STRUCTURED_DECISION_QUESTIONS,
+    STRUCTURED_DECISION_STATE,
     TRITON_MODEL_NAME,
     TRITON_MODEL_REPOSITORY_FILES,
     TRITON_MODEL_VERSION,
@@ -83,6 +89,41 @@ TRITON_ECHO = {
     "model_name": TRITON_MODEL_NAME,
     "outputs": [{"name": "OUTPUT0", "datatype": "FP32", "shape": [3], "data": [1.0, 2.0, 3.0]}],
 }
+#: vLLM v0.32.0's /v1/systemone answer to the harness's three questions, in the
+#: shape vllm/entrypoints/generate/structured_decisions/question_types.py builds.
+STRUCTURED_DECISION_RESPONSE: dict[str, Any] = {
+    "id": "decision-1",
+    "object": "structured_decision",
+    "created": 1,
+    "model": "test/qwen3-vllm-model",
+    "answers": {
+        "topic": {
+            "type": "choice",
+            "choice": "shipping",
+            "probabilities": {"shipping": 0.97, "weather": 0.03},
+            "confidence": 0.95,
+        },
+        "late": {
+            "type": "noul",
+            "noul": 0.98,
+            "probabilities": {"yes": 0.98, "no": 0.02},
+            "confidence": 0.96,
+        },
+        "urgency": {
+            "type": "score",
+            "score": 1.6,
+            "legend": {"0": "low", "1": "medium", "2": "high"},
+            "probabilities": {"0": 0.05, "1": 0.3, "2": 0.65},
+            "confidence": 0.6,
+        },
+    },
+    "usage": {"input_tokens": 120, "output_tokens": 0},
+    "diagnostics": {
+        "topic": {"label_mass": 0.98, "argmax_is_label": True},
+        "late": {"label_mass": 0.97, "argmax_is_label": True},
+        "urgency": {"label_mass": 0.92, "argmax_is_label": True},
+    },
+}
 
 
 def _runtime(
@@ -96,7 +137,7 @@ def _runtime(
         return InferenceRuntimeSpec(
             framework="vllm",
             image=image or VLLM_IMAGE,
-            model_id=model_id or "test/vllm-model",
+            model_id=model_id or "test/qwen3-vllm-model",
             model_revision=revision or VLLM_REVISION,
             port=8000,
         )
@@ -291,7 +332,7 @@ class TestStrictSettings:
             ),
             (
                 "inference_runtimes",
-                _runtime_matrix(vllm=_runtime("vllm", model_id="other/model")),
+                _runtime_matrix(vllm=_runtime("vllm", model_id="other/qwen3-model")),
             ),
             (
                 "inference_runtimes",
@@ -449,7 +490,7 @@ class TestStrictSettings:
         assert vllm.request_path == "/v1/completions"
         assert settings.request_body(vllm) == {
             "max_tokens": 8,
-            "model": "test/vllm-model",
+            "model": "test/qwen3-vllm-model",
             "prompt": "Reply with a short deterministic validation response.",
             "stream": False,
             "temperature": 0,
@@ -665,7 +706,7 @@ class TestCommandsAndResponses:
         assert "--mooncake-cold-tier" in store_command
         assert "--autoscale-metric" not in store_command
         assert store_command[store_command.index("--replicas") + 1] == "1"
-        assert "MODEL=test/vllm-model" in store_command
+        assert "MODEL=test/qwen3-vllm-model" in store_command
         # Triton has no --framework; it serves the uploaded repository from the
         # registry with the tritonserver command and its own readiness path.
         assert "--framework" not in triton_command
@@ -720,10 +761,10 @@ class TestCommandsAndResponses:
         assert hpa_command[hpa_command.index("--min-replicas") + 1] == "2"
         assert hpa_command[hpa_command.index("--max-replicas") + 1] == "2"
         assert baseline_command[baseline_command.index("--port") + 1] == "8000"
-        assert "MODEL=test/vllm-model" in baseline_command
+        assert "MODEL=test/qwen3-vllm-model" in baseline_command
         assert baseline_command[baseline_command.index("--extra-args=--model") + 1 :][:5] == [
             "--extra-args",
-            "test/vllm-model",
+            "test/qwen3-vllm-model",
             "--extra-args=--revision",
             "--extra-args",
             VLLM_REVISION,
@@ -3851,3 +3892,307 @@ class TestRestartAudit:
             "verify_no_container_restarts",
         ]
         assert records[1]["validation_steps_complete"] is True
+
+
+def _decision(**changes: Any) -> dict[str, Any]:
+    """A deep copy of the canned decision with top-level or nested overrides applied."""
+    payload = json.loads(json.dumps(STRUCTURED_DECISION_RESPONSE))
+    for path, value in changes.items():
+        target = payload
+        keys = path.split("__")
+        for key in keys[:-1]:
+            target = target[key]
+        if value is _DELETE:
+            del target[keys[-1]]
+        else:
+            target[keys[-1]] = value
+    return payload
+
+
+_DELETE = object()
+
+
+class TestStructuredDecisionContract:
+    """vLLM v0.32.0's /v1/systemone through the authenticated invoke path."""
+
+    def test_only_the_vllm_baseline_runs_the_decision(self, tmp_path: Path) -> None:
+        plans = build_endpoint_plans(_settings(tmp_path), OWNER_NONCE)
+        assert [
+            (plan.runtime.framework, plan.role) for plan in plans if plan.structured_decision
+        ] == [("vllm", "baseline")]
+
+    def test_every_vllm_scenario_starts_with_raw_logprobs(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        for plan in build_endpoint_plans(settings, OWNER_NONCE):
+            args = list(settings.deploy_extra_args(plan.runtime))
+            if plan.runtime.framework == "vllm":
+                assert args[args.index("--logprobs-mode") + 1] == "raw_logprobs"
+            else:
+                assert "--logprobs-mode" not in args
+
+    def test_identity_carries_the_decision_contract_for_vllm_only(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        identity = settings.identity()["inference"]
+        assert identity["contract_version"] == INFERENCE_CONTRACT_VERSION == 5
+        contracts = {
+            runtime["framework"]: runtime["structured_decision_contract"]
+            for runtime in identity["runtimes"]
+        }
+        assert contracts["sglang"] is None
+        assert contracts["triton"] is None
+        vllm = contracts["vllm"]
+        assert vllm["path"] == STRUCTURED_DECISION_PATH == "/v1/systemone"
+        assert vllm["roles"] == ["baseline"]
+        assert vllm["body"] == {
+            "model": "test/qwen3-vllm-model",
+            "state": STRUCTURED_DECISION_STATE,
+            "questions": STRUCTURED_DECISION_QUESTIONS,
+        }
+        assert "structured_decision" in vllm["response"]
+
+    def test_decision_body_is_an_independent_copy(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        body = settings.structured_decision_body(settings.inference_runtimes[0])
+        body["questions"]["topic"]["criteria"]["other"] = "mutated"
+        assert "other" not in STRUCTURED_DECISION_QUESTIONS["topic"]["criteria"]
+
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            "Qwen/Qwen3-0.6B",
+            "Qwen/Qwen3.5-4B",
+            "LiquidAI/d1-3B",
+            "Cloudflare/clef-omni",
+            "qwen3-local-mirror",
+        ],
+    )
+    def test_decision_capable_models_are_accepted(self, tmp_path: Path, model_id: str) -> None:
+        settings = _settings(
+            tmp_path, inference_runtimes=_runtime_matrix(vllm=_runtime("vllm", model_id=model_id))
+        )
+        assert settings.inference_runtimes[0].model_id == model_id
+
+    @pytest.mark.parametrize(
+        "model_id", ["facebook/opt-125m", "Qwen/Qwen2.5-1.5B-Instruct", "meta-llama/Llama-3.2-1B"]
+    )
+    def test_models_without_a_read_strategy_are_refused_up_front(
+        self, tmp_path: Path, model_id: str
+    ) -> None:
+        with pytest.raises(ValueError, match="/v1/systemone"):
+            _settings(
+                tmp_path,
+                inference_runtimes=_runtime_matrix(vllm=_runtime("vllm", model_id=model_id)),
+            )
+
+    def test_command_is_an_exact_argument_array(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        plan = build_endpoint_plans(settings, OWNER_NONCE)[0]
+        command = build_structured_decision_command(settings, plan)
+        assert command == [
+            sys.executable,
+            "-m",
+            "cli.main",
+            "--output",
+            "json",
+            "inference",
+            "invoke",
+            plan.name,
+            "--data",
+            json.dumps(
+                settings.structured_decision_body(plan.runtime),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "--path",
+            "/v1/systemone",
+            "--region",
+            settings.selected_region,
+        ]
+
+    def test_real_invoke_cli_posts_the_decision_body_to_systemone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings(tmp_path)
+        plan = build_endpoint_plans(settings, OWNER_NONCE)[0]
+        captured: dict[str, Any] = {}
+
+        class Manager:
+            def get_endpoint(self, endpoint_name: str) -> dict[str, Any]:
+                return {
+                    "endpoint_name": endpoint_name,
+                    "ingress_path": f"/inference/{endpoint_name}",
+                    "spec": {"image": plan.runtime.image, "framework": "vllm"},
+                }
+
+        class Response:
+            ok = True
+            status_code = 200
+            text = ""
+
+            @staticmethod
+            def json() -> Any:
+                return STRUCTURED_DECISION_RESPONSE
+
+        class Client:
+            def make_authenticated_request(self, **kwargs: Any) -> Response:
+                captured.update(kwargs)
+                return Response()
+
+        monkeypatch.setattr("cli.inference.get_inference_manager", lambda config: Manager())
+        monkeypatch.setattr("cli.aws_client.get_aws_client", lambda config: Client())
+        command = build_structured_decision_command(settings, plan)
+        result = CliRunner().invoke(cli, command[3:])
+
+        assert result.exit_code == 0, result.output
+        assert captured["method"] == "POST"
+        assert captured["path"] == f"/inference/{plan.name}/v1/systemone"
+        assert captured["body"] == settings.structured_decision_body(plan.runtime)
+        assert captured["stream"] is False
+        assert extract_structured_decision(result.output)["topic"] == "shipping"
+
+    def test_valid_answer_yields_sanitized_evidence(self) -> None:
+        output = "log line\n" + json.dumps(STRUCTURED_DECISION_RESPONSE)
+        assert extract_structured_decision(output) == {
+            "object": "structured_decision",
+            "questions": 3,
+            "types": ["choice", "noul", "score"],
+            "topic": "shipping",
+            "late_probability": 0.98,
+            "urgency_score": 1.6,
+            "min_label_mass": 0.92,
+        }
+
+    @pytest.mark.parametrize(
+        ("changes", "reason"),
+        [
+            ({"object": "text_completion"}, "object"),
+            ({"answers__late": _DELETE}, "answers do not cover"),
+            ({"answers__extra": {"type": "noul"}}, "answers do not cover"),
+            ({"diagnostics__urgency": _DELETE}, "diagnostics do not cover"),
+            ({"answers__topic__type": "noul"}, "topic is not a choice"),
+            ({"answers__topic__probabilities__other": 0.0}, "topic probabilities"),
+            ({"answers__topic__probabilities__shipping": 0.5}, "not a distribution"),
+            ({"answers__late__probabilities__yes": True}, "not a distribution"),
+            ({"answers__topic__confidence": 1.5}, "confidence"),
+            ({"answers__topic__choice": "billing"}, "not one of its options"),
+            ({"answers__late__noul": "yes"}, "late noul"),
+            ({"answers__urgency__score": 3.0}, "outside its scale"),
+            ({"answers__urgency__score": False}, "outside its scale"),
+            ({"answers__urgency__probabilities": {"0": 0.5, "1": 0.5}}, "urgency probabilities"),
+            ({"diagnostics__topic__label_mass": -0.1}, "label_mass"),
+            ({"diagnostics__late": "bad"}, "label_mass"),
+            (
+                {
+                    "answers__topic__choice": "weather",
+                    "answers__topic__probabilities": {"shipping": 0.1, "weather": 0.9},
+                },
+                "topic was not answered as shipping",
+            ),
+            (
+                {
+                    "answers__late__noul": 0.2,
+                    "answers__late__probabilities": {"yes": 0.2, "no": 0.8},
+                },
+                "late was not answered yes",
+            ),
+        ],
+    )
+    def test_malformed_or_implausible_answers_are_rejected(
+        self, changes: dict[str, Any], reason: str
+    ) -> None:
+        with pytest.raises(ManagedInferenceValidationError, match=re.escape(reason)):
+            extract_structured_decision(json.dumps(_decision(**changes)))
+
+    def test_a_completion_payload_is_not_a_decision(self) -> None:
+        with pytest.raises(ManagedInferenceValidationError, match="structured_decision"):
+            extract_structured_decision(json.dumps({"choices": [{"text": "ok"}]}))
+
+    def test_verify_records_evidence_for_the_vllm_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        calls: list[tuple[str, list[str]]] = []
+
+        def run_command(record: dict[str, Any], stage: str, command: list[str], **_: Any) -> str:
+            calls.append((stage, command))
+            return json.dumps(STRUCTURED_DECISION_RESPONSE)
+
+        monkeypatch.setattr(runner, "_run_command", run_command)
+        runner.verify_structured_decision(plans[0], records[0])
+
+        assert calls == [
+            ("structured-decision", build_structured_decision_command(runner.settings, plans[0]))
+        ]
+        assert records[0]["structured_decision"]["phase"] == "verified"
+        assert records[0]["phase"] == "structured-decision-verified"
+
+    def test_verify_is_a_no_op_for_every_other_scenario(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        monkeypatch.setattr(
+            runner,
+            "_run_command",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no request expected")),
+        )
+        for plan, record in list(zip(plans, records, strict=True))[1:]:
+            runner.verify_structured_decision(plan, record)
+            assert "structured_decision" not in record
+
+    def test_verify_fails_closed_and_records_the_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        monkeypatch.setattr(
+            runner,
+            "_run_command",
+            lambda *args, **kwargs: json.dumps(
+                {"error": {"message": "The model does not support the structured decision API"}}
+            ),
+        )
+        with pytest.raises(ManagedInferenceValidationError, match="structured decision failed"):
+            runner.verify_structured_decision(plans[0], records[0])
+        assert "structured_decision" not in records[0]
+        assert records[0]["failures"][-1]["stage"] == "structured-decision"
+        assert records[0]["last_failed_phase"] == "structured-decision"
+
+    def test_run_endpoint_asks_the_decision_between_invoke_and_restart_audit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        order: list[str] = []
+        for step in (
+            "ensure_owned_endpoint",
+            "wait_for_ddb_running",
+            "wait_for_kubernetes_ready",
+            "verify_backend_probes",
+            "invoke",
+            "verify_structured_decision",
+            "verify_store_reconfigure",
+            "verify_no_container_restarts",
+        ):
+            monkeypatch.setattr(runner, step, lambda plan, record, _step=step: order.append(_step))
+        assert runner.run_endpoint(plans[0], records[0]) is True
+        assert order.index("invoke") < order.index("verify_structured_decision")
+        assert order.index("verify_structured_decision") < order.index(
+            "verify_no_container_restarts"
+        )
+
+    def test_incarnation_rotation_drops_decision_evidence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        record = records[0]
+        record.update(
+            {
+                "cleanup_phase": "absent",
+                "lifecycle_id": LIFECYCLE_ID,
+                "structured_decision": {"phase": "verified"},
+            }
+        )
+        monkeypatch.setattr(
+            runner, "prove_absence", lambda record: {"stable_absence_observations": 2}
+        )
+        runner._prepare_incarnation_for_resume(plans[0], record)
+        assert record["incarnation"] == 2
+        assert "structured_decision" not in record

@@ -138,7 +138,7 @@ export REPORT_DIR="$HOME/gco-live-release-validation-reports/$RUN_ID"
 # each model revision is the full 40-hex Hugging Face commit, not a branch/tag.
 export INFERENCE_REGION="us-east-1"
 export INFERENCE_VLLM_IMAGE="registry.example/vllm@sha256:<64-lowercase-hex-digest>"
-export INFERENCE_VLLM_MODEL_ID="publisher/vllm-model"
+export INFERENCE_VLLM_MODEL_ID="publisher/qwen3-vllm-model"
 export INFERENCE_VLLM_MODEL_REVISION="<40-lowercase-hex-model-commit>"
 export INFERENCE_SGLANG_IMAGE="registry.example/sglang@sha256:<64-lowercase-hex-digest>"
 export INFERENCE_SGLANG_MODEL_ID="publisher/sglang-model"

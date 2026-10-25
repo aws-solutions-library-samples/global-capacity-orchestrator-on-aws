@@ -37,7 +37,9 @@ from .inference_commands import (
     build_model_list_command,
     build_model_upload_command,
     build_model_uri_command,
+    build_structured_decision_command,
     extract_generated_text,
+    extract_structured_decision,
 )
 from .inference_common import InferenceCommandFailure as _CommandFailure
 from .inference_common import ManagedInferenceValidationError
@@ -220,6 +222,36 @@ class InferenceScenarioMixin:
             and int(status.get("replicas") or 0) == desired
         )
         return (digest if isinstance(digest, str) else None), complete
+
+    def verify_structured_decision(
+        self,
+        plan: EndpointPlan,
+        record: dict[str, Any],
+    ) -> None:
+        """Ask vLLM's ``/v1/systemone`` one typed question of each kind and check the answers.
+
+        The request goes through ``gco inference invoke --path /v1/systemone``,
+        so it proves the authenticated inference proxy forwards the path, the
+        pinned image serves it for the matrix model under ``--logprobs-mode
+        raw_logprobs``, and the answer comes back typed. A structured decision
+        reads label probabilities and changes nothing, so a resume may repeat it.
+        """
+        if not plan.structured_decision:
+            return
+        try:
+            output = self._run_command(
+                record,
+                "structured-decision",
+                build_structured_decision_command(self.settings, plan),
+            )
+            evidence = extract_structured_decision(output)
+        except (ManagedInferenceValidationError, _CommandFailure) as exc:
+            self._record_failure(record, "structured-decision", exc)
+            raise ManagedInferenceValidationError(
+                "managed vLLM structured decision failed its response contract"
+            ) from None
+        record["structured_decision"] = {**evidence, "phase": "verified"}
+        self._set_phase(record, "structured-decision-verified")
 
     def verify_store_reconfigure(
         self,

@@ -4651,7 +4651,7 @@ gco release validate --expected-account 123456789012 \
   --confirm-kms-key-deletion \
   --inference-region us-east-1 \
   --inference-vllm-image 'registry.example/vllm@sha256:<64-lowercase-hex-digest>' \
-  --inference-vllm-model-id publisher/vllm-model \
+  --inference-vllm-model-id publisher/qwen3-vllm-model \
   --inference-vllm-model-revision '<40-lowercase-hex-model-commit>' \
   --inference-sglang-image 'registry.example/sglang@sha256:<64-lowercase-hex-digest>' \
   --inference-sglang-model-id publisher/sglang-model \
