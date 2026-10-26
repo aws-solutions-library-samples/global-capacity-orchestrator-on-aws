@@ -458,7 +458,7 @@ Each workflow file has a comment header documenting triggers and per-job purpose
 | `.github/workflows/cve-scan.yml` | Weekly + manual | Re-run Trivy against current CVE databases |
 | `.github/workflows/pages.yml` | Successful Unit Tests run on `main` | Publish the strict Zensical site, coverage report, and badge JSON |
 | `.github/workflows/mooncake-image.yml` | `main`, PR, manual | Validate the pinned upstream Mooncake image contract |
-| `.github/workflows/pr-type-label.yml` | PR opened/edited/reopened/ready | Sync the declared type-of-change checkbox to its release-note label |
+| `.github/workflows/pr-type-label.yml` | PR opened/edited/reopened/ready/synchronize | Sync the declared type-of-change checkbox to its release-note label; label PRs that change a deployed path `live-validation-required` |
 | `.github/workflows/grafana-dashboards.yml` | `main`, PR, manual | Provision curated dashboards into the real Grafana image resolved from the pinned chart |
 
 #### Published coverage reports and badges

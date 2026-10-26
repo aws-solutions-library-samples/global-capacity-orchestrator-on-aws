@@ -5,8 +5,19 @@
 # The monthly `deps-scan` workflow tracks language/runtime drift (including
 # Lambda Python and Node.js), while weekly CVE scanning covers locked graphs.
 #
-# One pull request per week. Every entry below joins the `all-dependencies`
-# multi-ecosystem group, so Dependabot opens a single PR across all ecosystems
+# Two batches, split by blast radius:
+#
+#   * `ci-tooling` (weekly): GitHub Actions, the root npm tooling graph and the
+#     CI-only Ruby graph. CI exercises everything in it, so the PR can merge on
+#     green.
+#   * `runtime` (monthly, on the 1st, the same day the deps-scan issue opens):
+#     the inference streaming Lambda's npm graph and every Docker base image.
+#     These ship in a deployment, so the PR carries the
+#     `live-validation-required` label and is folded into the monthly
+#     dependency PR and its one live release validation run
+#     (docs/LIVE_RELEASE_VALIDATION.md) instead of merging on green.
+#
+# Inside each batch Dependabot opens a single PR across its ecosystems
 # instead of one per dependency. `main` requires a branch to be up to date
 # before it merges and each PR runs the full ~100-check suite, so N separate
 # PRs cost N sequential CI runs plus a rebase of every sibling after each
@@ -16,7 +27,8 @@
 # once arrived as #287/#284), and tests/test_python_base_image_consistency.py
 # wants one python tag across Dockerfile.dev and the service Dockerfiles (a
 # bump used to arrive as one PR for "/" and another for "/dockerfiles"). Split
-# across PRs, neither half can pass CI.
+# across PRs, neither half can pass CI, which is why each ecosystem sits whole
+# inside one group.
 #
 # The trade-off is that one bad update holds back the batch. Hold it back with
 # an `ignore` entry here, where the rule stays reviewable; Dependabot re-runs
@@ -29,12 +41,13 @@
 # (Settings > Advanced Security) batches them into one PR per ecosystem,
 # including Python, which this file deliberately leaves out. That setting lives
 # outside this file, so a fork has to enable it, along with Dependabot version
-# updates; see docs/FORKING.md.
+# updates; see docs/FORKING.md. A security update to a runtime dependency keeps
+# that urgency and merges on its own; it still needs a live run afterwards.
 
 version: 2
 
 multi-ecosystem-groups:
-  all-dependencies:
+  ci-tooling:
     # Monday morning US Eastern, so the batch and its CI run are ready at the
     # start of the week.
     schedule:
@@ -49,8 +62,21 @@ multi-ecosystem-groups:
     commit-message:
       prefix: "chore"
       include: "scope"
+  runtime:
+    # Monthly runs on the 1st, the day deps-scan.yml opens its drift issue, so
+    # both land together and go out in one validated dependency PR.
+    schedule:
+      interval: "monthly"
+      time: "06:00"
+      timezone: "America/New_York"
+    labels:
+      - "dependencies"
+      - "live-validation-required"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
 
-# Every entry joins the group, so each one needs `patterns` ("*" = all of its
+# Every entry joins one of the two groups, so each one needs `patterns` ("*" = all of its
 # dependencies) and none sets its own `schedule` or `groups`. `cooldown` stays
 # per entry: wait a week after a release before proposing it, so a freshly
 # published (possibly compromised or broken) version isn't pulled in
@@ -71,7 +97,7 @@ updates:
     directories:
       - "/"
       - "/.github/actions/*"
-    multi-ecosystem-group: "all-dependencies"
+    multi-ecosystem-group: "ci-tooling"
     patterns: ["*"]
     cooldown:
       default-days: 7
@@ -79,8 +105,12 @@ updates:
       - "dependencies"
       - "github-actions"
 
-  # Locked repository tooling (AWS CDK CLI, cdk-dia, markdownlint-cli2,
-  # swagger-ui-dist).
+  # Locked repository tooling (cdk-dia, markdownlint-cli2, swagger-ui-dist).
+  #
+  # The AWS CDK CLI lives in this graph too, but it synthesizes and deploys
+  # every stack, so it is held out of the weekly batch. Its pin moves together
+  # with Dockerfile.dev's CDK_VERSION and the version-consistency check in
+  # the monthly deps-scan report, as part of the validated dependency PR.
   #
   # The two npm graphs keep one entry each with a singular `directory`:
   # check_npm_package_management (.github/scripts/lib_dependency_scan.sh, run
@@ -88,10 +118,12 @@ updates:
   # for every repository-owned package.json.
   - package-ecosystem: "npm"
     directory: "/"
-    multi-ecosystem-group: "all-dependencies"
+    multi-ecosystem-group: "ci-tooling"
     patterns: ["*"]
     cooldown:
       default-days: 7
+    ignore:
+      - dependency-name: "aws-cdk"
     labels:
       - "dependencies"
 
@@ -101,12 +133,15 @@ updates:
   # invalidating the others' package-lock.json).
   - package-ecosystem: "npm"
     directory: "/lambda/inference-streaming-proxy"
-    multi-ecosystem-group: "all-dependencies"
+    multi-ecosystem-group: "runtime"
     patterns: ["*"]
     cooldown:
       default-days: 7
+    # Repeated on the entry, not only the group: entry labels also reach the
+    # security updates Dependabot raises for this graph outside the schedule.
     labels:
       - "dependencies"
+      - "live-validation-required"
 
   # Base images: the service images, the dev container (Dockerfile.dev at the
   # repository root), and both Lambda container images.
@@ -126,7 +161,7 @@ updates:
       - "/dockerfiles"
       - "/lambda/helm-installer"
       - "/lambda/tls-certificate-manager"
-    multi-ecosystem-group: "all-dependencies"
+    multi-ecosystem-group: "runtime"
     patterns: ["*"]
     cooldown:
       default-days: 7
@@ -139,6 +174,7 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+      - "live-validation-required"
 
   # CI-only Ruby tooling: bashcov (shell line coverage for the BATS suite) and
   # bundler-audit (advisory scanning for this graph). Nothing shipped depends
@@ -149,7 +185,7 @@ updates:
   # CHECKSUMS block in Gemfile.lock would otherwise freeze silently.
   - package-ecosystem: "bundler"
     directory: "/"
-    multi-ecosystem-group: "all-dependencies"
+    multi-ecosystem-group: "ci-tooling"
     patterns: ["*"]
     cooldown:
       default-days: 7

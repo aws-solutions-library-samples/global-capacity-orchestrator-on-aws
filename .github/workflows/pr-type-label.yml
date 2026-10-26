@@ -1,5 +1,6 @@
 # =============================================================================
-# pr-type-label.yml — Sync the type label to the declared "Type of change"
+# pr-type-label.yml — Sync the type label to the declared "Type of change",
+# and flag pull requests that touch a deployed path
 # =============================================================================
 #
 # `.github/pull_request_template.md` asks every author to tick one "Type of
@@ -14,6 +15,15 @@
 # remember. `.github/scripts/apply_pr_type_labels.py` owns the logic and is
 # covered by `tests/test_pr_type_labels.py`; this file only decides when it runs
 # and with what privilege.
+#
+# A second job, `pr:live-validation-label`, adds `live-validation-required`
+# when the PR changes a path that ships in a deployment, so the live release
+# validation decision is in front of the reviewer before merge (see
+# docs/LIVE_RELEASE_VALIDATION.md). `.github/scripts/apply_live_validation_label.py`
+# owns that logic and is covered by `tests/test_live_validation_label.py`. It
+# needs the changed files, so it also runs on `synchronize`. Dependabot PRs
+# are skipped: their `pull_request` token is read-only, and the `runtime`
+# group in `.github/dependabot.yml` applies the label itself.
 #
 # Two deliberate constraints, both from tests/test_workflow_security_contract.py:
 #
@@ -35,7 +45,11 @@ on:
     # `edited` is the load-bearing trigger: authors routinely open a PR and
     # tick the box afterwards, and without it the label would only ever reflect
     # the body as first submitted.
-    types: [opened, edited, reopened, ready_for_review]
+    #
+    # `synchronize` (a new push) only matters to the live-validation job, whose
+    # input is the changed-file list; the type sync is cheap and idempotent, so
+    # it runs on it too rather than splitting the trigger into two workflows.
+    types: [opened, edited, reopened, ready_for_review, synchronize]
 
 # `edited` fires on every title or body tweak, so without this a burst of
 # wording edits leaves a queue of runs that all compute the same final label.
@@ -78,3 +92,29 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python .github/scripts/apply_pr_type_labels.py --pr "$PR_NUMBER"
+
+  live-validation:
+    name: "pr:live-validation-label"
+    runs-on: ubuntu-26.04
+    # Same fork rule as above, plus Dependabot: its token is read-only too.
+    if: >-
+      github.event.pull_request.head.repo.fork == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    permissions:
+      contents: read
+      pull-requests: write
+    timeout-minutes: 5
+    steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Flag changes to a deployed path
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python .github/scripts/apply_live_validation_label.py --pr "$PR_NUMBER"
