@@ -198,10 +198,15 @@ copyright alongside rather than replacing what is there.
 - **Actions secrets and variables** the workflows expect, notably the AWS role
   ARN the OIDC login step assumes.
 - **Branch protection** rules, which forks do not inherit.
+- **The `live-validation-required` label.** Dependabot's `runtime` group and
+  the `pr:live-validation-label` job both apply it, and Dependabot silently
+  skips a label the repository does not define, so create it once
+  (`gh label create live-validation-required`).
 - **Dependabot**, under **Settings > Advanced Security**:
   - **Dependabot version updates.** [`.github/dependabot.yml`](../.github/dependabot.yml)
     works as-is, but GitHub does not act on it in a fork until this is
-    enabled. Once it is, Dependabot opens the same single weekly pull request it
+    enabled. Once it is, Dependabot opens the same weekly `ci-tooling` and monthly
+    `runtime` pull requests it
     opens upstream.
   - **Dependabot alerts** and **Dependabot security updates**, which the next
     setting needs, along with the dependency graph.

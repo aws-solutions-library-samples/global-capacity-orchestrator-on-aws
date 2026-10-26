@@ -715,8 +715,11 @@ expiring entry — see [Renewing CVE suppressions](#renewing-cve-suppressions).
 
 **Automated updates.** Dependabot is scoped to **GitHub Actions, Docker, both
 repository-owned npm graphs, and the CI-only RubyGems graph**
-(`.github/dependabot.yml`) and opens one grouped pull request a week for all of
-them; Python stays on
+(`.github/dependabot.yml`) in two grouped pull requests: a weekly `ci-tooling`
+batch that merges on green, and a monthly `runtime` batch (the streaming
+Lambda's npm graph and the Docker base images) labeled
+`live-validation-required`, which goes out with the monthly dependency PR and
+its live release validation run. Python stays on
 the deliberate `pip-compile` path above. The security workflow runs
 `npm audit` independently in every discovered graph, and Advanced Setup CodeQL
 analyzes both Python and JavaScript. See
