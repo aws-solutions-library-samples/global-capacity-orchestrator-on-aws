@@ -18,8 +18,9 @@
 #
 # A second job, `pr:live-validation-label`, adds `live-validation-required`
 # when the PR changes a path that ships in a deployment, so the live release
-# validation decision is in front of the reviewer before merge (see
-# docs/LIVE_RELEASE_VALIDATION.md). `.github/scripts/apply_live_validation_label.py`
+# validation decision is in front of the reviewer before merge. The job only
+# labels; the run itself stays local and outside GitHub Actions (.github/CI.md).
+# `.github/scripts/apply_live_validation_label.py`
 # owns that logic and is covered by `tests/test_live_validation_label.py`. It
 # needs the changed files, so it also runs on `synchronize`. Dependabot PRs
 # are skipped: their `pull_request` token is read-only, and the `runtime`
