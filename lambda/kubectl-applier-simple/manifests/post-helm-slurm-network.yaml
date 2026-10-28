@@ -1,27 +1,42 @@
-# NetworkPolicies that make the Slinky Slurm cluster functional inside the
-# zero-trust gco-jobs namespace.
+# NetworkPolicies for the Slinky Slurm cluster in the zero-trust gco-jobs
+# namespace.
 #
-# 03-network-policies.yaml default-denies all ingress in gco-jobs and limits
-# egress to DNS and HTTPS-to-VPC-endpoints for every pod. The Slinky charts
-# ship no NetworkPolicies of their own, so without these rules slurmctld,
-# slurmd, and slurmrestd cannot reach each other (cluster never converges)
-# and no job pod can call the Slurm REST API. Slurm was off by default and
-# never live-validated, so this gap stayed invisible until the 2026-09 live
-# release validation exercised it. Follows the ray-cluster exemption
-# precedent: scope pod-to-pod allowances by label, never namespace-wide.
+# 03-network-policies.yaml default-denies ingress into gco-jobs from any other
+# namespace and admits everything between gco-jobs pods (allow-same-namespace).
+# The Slinky charts ship no NetworkPolicies of their own, so every path that
+# crosses the namespace boundary is written here, and the pod-to-pod
+# allowances Slurm needs are also spelled out by label (the ray-cluster
+# precedent) so the cluster keeps working if the namespace-wide rule is ever
+# narrowed.
+#
+# Cross-namespace paths (the ones that matter today):
+#   * slurm-operator -> slurmrestd:6820 — the operator reconciles NodeSets
+#     through the REST API (reads node and reservation state, drains workers
+#     before their pods go away); without it every reconcile timed out and
+#     every job stayed PENDING on the first live run with enforcement on.
+#   * monitoring/prometheus -> slurmctld:6817 — Slurm 26.05 serves its
+#     OpenMetrics endpoints (/metrics/jobs, /nodes, /partitions, /scheduler) on
+#     slurmctld's own port; the gco-slurm-controller ServiceMonitor scrapes
+#     them and the KEDA autoscaler reads them back from Prometheus.
+#   * gco-system/manifest-processor <-> slurmrestd:6820 — the GCO API's
+#     /api/v1/slurm routes (submit, queue, cancel, accounting) talk to Slurm
+#     through slurmrestd; gco-system is egress-restricted as well, so the pair
+#     below opens both ends.
 #
 # Every Slinky-managed pod carries the chart-stamped
-# `app.kubernetes.io/part-of: slurm` label; client pods opt in with
-# `gco.aws/slurm-client: "true"` (see examples/slurm-cluster-job.yaml).
+# `app.kubernetes.io/part-of: slurm` label and the operator's
+# `app.kubernetes.io/name: <component>` label (slurmctld, slurmrestd, slurmd,
+# slurmdbd, login); client pods opt in with `gco.aws/slurm-client: "true"`
+# (see examples/slurm-cluster-job.yaml).
 #
 # Gated on {{SLURM_ENABLED}}: substituted by GCORegionalStack only when the
 # cdk.json helm.slurm toggle (or a helm_enabled_overrides context override)
 # enables the Slinky charts; otherwise the applier skips this file and
 # _FEATURE_RESOURCE_INVENTORY prunes the policies on a later disable.
 ---
-# Slurm daemons talk on 6817 (slurmctld), 6818 (slurmd), 6820 (slurmrestd),
-# plus ephemeral srun ports. Permit all protocols only among Slurm pods —
-# no other gco-jobs pod is selected or admitted (ray-cluster precedent).
+# Slurm daemons talk on 6817 (slurmctld), 6818 (slurmd), 6819 (slurmdbd),
+# 6820 (slurmrestd), 3306 (the accounting database), plus ephemeral srun
+# ports. Permit all protocols among Slurm pods by label.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -72,8 +87,7 @@ spec:
         - protocol: TCP
           port: 6820
 ---
-# The default gco-jobs egress policy only opens DNS and 443-to-VPC-endpoints;
-# client pods additionally need egress to the REST API port.
+# Client pods' egress to the REST API port, spelled out for the same reason.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -99,13 +113,8 @@ spec:
 ---
 # The Slinky operator lives in its own namespace (charts.yaml
 # slinky-slurm-operator.namespace) and reconciles NodeSets through the Slurm
-# REST API: it reads node and reservation state and drains workers before
-# their pods go away. gco-jobs default-denies ingress from other namespaces,
-# so without this rule every NodeSet reconcile fails with an i/o timeout on
-# slurmrestd:6820, the workers never converge, and every submitted job stays
-# PENDING — observed on the first live run with enforcement on. The operator
-# namespace is admitted on the REST port only; it holds nothing but the
-# operator and its webhook, both installed by GCO.
+# REST API. The operator namespace is admitted on the REST port only; it holds
+# nothing but the operator and its webhook, both installed by GCO.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -125,6 +134,104 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: slurm-operator
+      ports:
+        - protocol: TCP
+          port: 6820
+---
+# Prometheus (kube-prometheus-stack, monitoring namespace) scrapes slurmctld's
+# OpenMetrics endpoints on the controller port. Scoped to the Prometheus pods
+# and to slurmctld; nothing else in monitoring reaches the controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-to-slurm-controller
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: slurm
+      app.kubernetes.io/name: slurmctld
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 6817
+---
+# The GCO API (manifest-processor, gco-system) submits and inspects Slurm jobs
+# through slurmrestd. Ingress side: only the manifest-processor pods, only the
+# REST port, only the slurmrestd pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-manifest-processor-to-slurm-restapi
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: slurm
+      app.kubernetes.io/name: slurmrestd
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gco-system
+          podSelector:
+            matchLabels:
+              app: manifest-processor
+      ports:
+        - protocol: TCP
+          port: 6820
+---
+# Egress side of the same path. gco-system pods may otherwise leave only for
+# DNS, HTTPS and the Pod Identity Agent (03-network-policies.yaml), so the
+# plaintext REST port in gco-jobs needs its own rule.
+#
+# The API dials the slinky-slurm-restapi Service, and the VPC CNI's network
+# policy controller resolves an egress peer to pod IPs PLUS the ClusterIP of
+# any Service whose selector the peer's podSelector matches label-for-label.
+# This podSelector is therefore exactly the chart's Service selector
+# (app.kubernetes.io/name + app.kubernetes.io/instance); with the extra
+# part-of label the ClusterIP was left out and every API call to Slurm timed
+# out while a direct pod-IP connection worked (observed live, 2026-10-27).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-manifest-processor-to-slurm-restapi
+  namespace: gco-system
+  labels:
+    project: gco
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app: manifest-processor
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gco-jobs
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: slurmrestd
+              app.kubernetes.io/instance: slinky-slurm
       ports:
         - protocol: TCP
           port: 6820

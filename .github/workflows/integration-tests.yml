@@ -2166,6 +2166,10 @@ jobs:
               # at startup, rendered the way the regional stack renders them.
               "{{TRACING_ENABLED}}": "false",
               "{{TRACING_SAMPLE_RATIO}}": "0.05",
+              # No Slinky cluster in this kind run: the API's /api/v1/slurm/*
+              # routes answer 404 with the enablement remedy, as they do in a
+              # region deployed without helm.slurm.
+              "{{SLURM_API_ENABLED}}": "false",
           }
           opaque = {
               "AUTH_SECRET_ARN",

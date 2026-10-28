@@ -23,6 +23,7 @@ CloudFormation Properties:
 
 import base64
 import contextlib
+import copy
 import hashlib
 import json
 import logging
@@ -114,11 +115,19 @@ CROSSPLANE_API_GROUPS = (
 #: nothing can clear, wedging CRD deletion (kueue: caught live by release
 #: validation run sched241-350ffc7d, where the default gco-cluster-queue /
 #: gco-default-flavor objects deadlocked teardown).
+#: Slinky: the slurm chart is nothing but custom resources (Controller,
+#: NodeSet, RestApi, LoginSet, Accounting, Token). The operator drains a
+#: NodeSet's Slurm nodes and clears the finalizers it holds on them only while
+#: it runs, and the worker PDBs it creates would otherwise outlive the
+#: release; the operator chart itself (slinky-slurm-operator) installs later
+#: in teardown order and needs nothing.
+SLINKY_API_GROUPS = ("slinky.slurm.net",)
 CHART_CUSTOM_RESOURCE_API_GROUPS: dict[str, tuple[str, ...]] = {
     "keda": KEDA_API_GROUPS,
     "kueue": KUEUE_API_GROUPS,
     "argocd": ARGOCD_API_GROUPS,
     "crossplane": CROSSPLANE_API_GROUPS,
+    "slinky-slurm": SLINKY_API_GROUPS,
 }
 #: Resource types (``plural.group``) or whole API groups that a chart's
 #: cleanup deletes in a pass of their own, once every other type of the same
@@ -457,6 +466,99 @@ def run_helm(
     return result.returncode, result.stdout, result.stderr
 
 
+def _autoscaled_scale_targets(values: dict[str, Any]) -> set[tuple[str, str]]:
+    """Return ``(kind, name)`` of every KEDA ScaledObject target in ``extraObjects``."""
+    targets: set[tuple[str, str]] = set()
+    extra_objects = values.get("extraObjects")
+    if not isinstance(extra_objects, list):
+        return targets
+    for obj in extra_objects:
+        if not isinstance(obj, dict) or obj.get("kind") != "ScaledObject":
+            continue
+        spec = obj.get("spec")
+        ref = spec.get("scaleTargetRef") if isinstance(spec, dict) else None
+        if isinstance(ref, dict) and ref.get("name"):
+            targets.add((str(ref.get("kind", "")), str(ref["name"])))
+    return targets
+
+
+def _carry_live_autoscaled_replicas(
+    config: dict[str, Any], values: dict[str, Any], namespace: str, kubeconfig: str
+) -> dict[str, Any]:
+    """Return the chart values with each autoscaled object's live ``spec.replicas``.
+
+    Helm applies server-side. A field another field manager has set to a
+    different value is a conflict, and one conflict fails the whole upgrade:
+    with the Slurm cluster scaled up by KEDA, a deploy died on ``conflict with
+    "keda" with subresource "scale" ... .spec.replicas`` (observed live,
+    2026-10-28). The chart renders ``replicas`` unconditionally and the CRD
+    defaults it to 1, so leaving the field out is not an option; applying the
+    live value is — it is what the autoscaler decided, nothing is scaled in or
+    out by the deploy, and the two managers share the field without conflict.
+
+    The chart entry declares what to carry under ``autoscaled_replicas``:
+    ``kind``/``resource`` of the scaled object, ``values_key`` (the values map
+    whose entries carry ``replicas``) and ``object_name`` (the live object's
+    name for a map key, ``{name}`` substituted). Only entries that are the
+    target of a KEDA ScaledObject among the values' ``extraObjects`` are
+    touched: a partition with autoscaling off keeps Helm as the owner of
+    ``replicas``, so a changed ``min_nodes`` still applies. Objects that do not
+    exist yet (first install, a new partition) and lookup failures keep the
+    rendered value; a failure is logged, and the upgrade then either succeeds
+    (nobody else owns the field) or fails loudly on the conflict.
+
+    ``values`` is not modified: ``deep_merge`` shares nested maps with its
+    inputs, so writing into them would reach back into the event's overrides.
+    """
+    rule = config.get("autoscaled_replicas")
+    if not rule:
+        return values
+    entries = values.get(rule["values_key"])
+    if not isinstance(entries, dict):
+        return values
+    values = copy.deepcopy(values)
+    entries = values[rule["values_key"]]
+    targets = _autoscaled_scale_targets(values)
+    for key, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        object_name = str(rule["object_name"]).format(name=key)
+        if (rule["kind"], object_name) not in targets:
+            continue
+        code, stdout, stderr = run_kubectl(
+            [
+                "get",
+                rule["resource"],
+                object_name,
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={.spec.replicas}",
+                "--ignore-not-found",
+            ],
+            kubeconfig,
+            log_output=False,
+        )
+        live = stdout.strip()
+        if code != 0 or not live.isdigit():
+            if code != 0 or live:
+                logger.warning(
+                    f"Could not read live replicas of {rule['kind']} {namespace}/{object_name} "
+                    f"(exit {code}, {_bounded_diagnostic(stderr or stdout, 512)!r}); "
+                    f"applying the rendered value {entry.get('replicas')!r}"
+                )
+            continue
+        live_replicas = int(live)
+        if entry.get("replicas") != live_replicas:
+            logger.info(
+                f"{rule['kind']} {namespace}/{object_name} is autoscaled: carrying its live "
+                f"replicas={live_replicas} into values.{rule['values_key']}.{key}.replicas "
+                f"(rendered {entry.get('replicas')!r})"
+            )
+        entry["replicas"] = live_replicas
+    return values
+
+
 def _clear_stuck_release(chart_name: str, namespace: str, kubeconfig: str) -> bool:
     """Delete release secrets for revisions stuck in ``pending-*`` state.
 
@@ -599,6 +701,10 @@ def install_chart(
     # Merge value overrides
     if value_overrides:
         values = deep_merge(values, value_overrides)
+
+    # Fields an in-cluster autoscaler owns keep their live value (see
+    # _carry_live_autoscaled_replicas).
+    values = _carry_live_autoscaled_replicas(config, values, namespace, kubeconfig)
 
     # For OCI registries, we don't need to add a repo
     if not use_oci:

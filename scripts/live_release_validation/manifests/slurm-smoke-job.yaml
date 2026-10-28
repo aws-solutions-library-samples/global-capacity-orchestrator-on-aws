@@ -54,61 +54,55 @@ spec:
           args:
             - |
               # Strict Slurm REST probe: submit a real batch job through the
-              # Slinky slurmrestd Service and require COMPLETED. Any failure
+              # Slinky slurmrestd Service, require COMPLETED, then require
+              # slurmdbd to have recorded it with its comment. Any failure
               # exits nonzero so the validation Job fails; the marker prints
               # only after Slurm itself ran the work to completion.
-              import base64, hashlib, hmac, json, sys, time
+              import json, sys, time
               import urllib.error, urllib.request
-
               RESTAPI = "http://slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820"
               API_VER = "v0.0.44"
-
-              # slurmctld loads the HS256 key as the raw file bytes (auth/jwt
-              # mmaps it), and the chart generates it with randAscii, which
-              # may begin or end with a space. Stripping whitespace here
-              # produced tokens slurmctld could not decode on about one
-              # cluster in fifty; use the bytes exactly as they are.
-              with open("/etc/slurm-jwt/jwt.key", "rb") as handle:
-                  key = handle.read()
-
-              def b64(data: bytes) -> bytes:
-                  return base64.urlsafe_b64encode(data).rstrip(b"=")
-
-              def make_jwt(user="slurm", lifespan=900) -> str:
-                  header = b64(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
-                  now = int(time.time())
-                  payload = b64(json.dumps({"exp": now + lifespan, "iat": now, "sun": user}).encode())
-                  sig = b64(hmac.new(key, header + b"." + payload, hashlib.sha256).digest())
-                  return (header + b"." + payload + b"." + sig).decode()
-
-              def api_call(path, data=None, method="GET"):
+              # The credential is the client token the slurm-operator mints
+              # and rotates for in-cluster clients (Secret
+              # slinky-slurm-client-token, from the Token in
+              # post-helm-slurm-api-access.yaml). The probe never sees the
+              # cluster's JWT signing key; re-reading the projected file on
+              # every call picks up a rotation mid-run.
+              def token() -> str:
+                  with open("/etc/slurm-client/auth-token") as handle:
+                      return handle.read().strip()
+              def api_call(path, data=None, method="GET", base="slurm"):
                   request = urllib.request.Request(
-                      f"{RESTAPI}/slurm/{API_VER}/{path}",
+                      f"{RESTAPI}/{base}/{API_VER}/{path}",
                       data=data,
                       headers={
                           "X-SLURM-USER-NAME": "slurm",
-                          "X-SLURM-USER-TOKEN": make_jwt(),
+                          "X-SLURM-USER-TOKEN": token(),
                           "Content-Type": "application/json",
                       },
                       method=method,
                   )
                   with urllib.request.urlopen(request, timeout=20) as response:
-                      return json.loads(response.read())
-
+                      payload = json.loads(response.read())
+                  if payload.get("errors"):
+                      raise RuntimeError(f"{path}: {payload['errors']}")
+                  return payload
               def fail(message: str) -> None:
                   print(f"SLURM PROBE FAILED: {message}")
                   sys.exit(1)
-
               submission = json.dumps({
                   "job": {
                       "name": "gco-live-validation",
-                      "current_working_directory": "/tmp",
-                      "standard_output": "/tmp/gco-live-validation.out",
-                      "environment": ["PATH=/usr/bin:/bin"],
+                      # The slurm user's home on the shared filesystem: the
+                      # default working directory of API submissions, so the
+                      # probe also proves the worker mounts it.
+                      "current_working_directory": "/home/slurm",
+                      "environment": ["PATH=/usr/local/bin:/usr/bin:/bin"],
+                      "time_limit": {"set": True, "number": 10},
+                      "comment": "gco:live-release-validation",
                   },
                   "script": "#!/bin/bash\nhostname\necho slurm-ran-this\n",
               }).encode()
-
               # Fresh clusters take a while to register slurmd nodes; retry the
               # submission window before declaring the control plane unreachable.
               job_id = None
@@ -126,10 +120,10 @@ spec:
               if not job_id:
                   fail(f"job submission never succeeded: {submit_error}")
               print(f"submitted slurm job {job_id}")
-
-              # Nodes may still be powering up; allow the queue time to run it.
+              # The default partition scales from zero: KEDA adds a worker and
+              # Karpenter provisions its node first. Allow the queue that time.
               state: list = []
-              deadline = time.time() + 600
+              deadline = time.time() + 720
               while time.time() < deadline:
                   time.sleep(10)
                   try:
@@ -143,6 +137,25 @@ spec:
               if "COMPLETED" not in state:
                   fail(f"slurm job {job_id} finished in state {state or 'unknown'}")
               print(f"slurm job {job_id} COMPLETED")
+              # Accounting (on by default) must hold the record with its
+              # comment intact: gco slurm accounting and the GCO API's caller
+              # attribution both rest on that.
+              record = None
+              for attempt in range(12):
+                  try:
+                      rows = api_call("jobs", base="slurmdb").get("jobs", [])
+                  except Exception:  # noqa: BLE001 - slurmdbd may lag the controller
+                      rows = []
+                  record = next((row for row in rows if row.get("job_id") == job_id), None)
+                  if record and "COMPLETED" in record.get("state", {}).get("current", []):
+                      break
+                  time.sleep(5)
+              if record is None:
+                  fail(f"slurm job {job_id} has no accounting record")
+              comment = record.get("comment", {}).get("job")
+              if comment != "gco:live-release-validation":
+                  fail(f"slurm job {job_id} accounting comment is {comment!r}")
+              print(f"slurm job {job_id} accounted (comment {comment!r})")
               print("GCO_LIVE_SLURM___RUN_TOKEN__")
           securityContext:
             allowPrivilegeEscalation: false
@@ -157,10 +170,10 @@ spec:
               cpu: 200m
               memory: 128Mi
           volumeMounts:
-            - name: slurm-jwt
-              mountPath: /etc/slurm-jwt
+            - name: slurm-client-token
+              mountPath: /etc/slurm-client
               readOnly: true
       volumes:
-        - name: slurm-jwt
+        - name: slurm-client-token
           secret:
-            secretName: slinky-slurm-auth-jwt
+            secretName: slinky-slurm-client-token

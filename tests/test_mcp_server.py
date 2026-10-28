@@ -187,19 +187,21 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 144 read-only or low-risk
-        # tools (142 before add_inference_region + remove_inference_region;
+        # The default registry intentionally contains 151 read-only or low-risk
+        # tools (144 before the seven Slurm tools slurm_status / partitions /
+        # nodes / queue / job / accounting / submit; 142 before
+        # add_inference_region + remove_inference_region;
         # 139 before the platform add-on status trio
         # eks_capabilities_status + gitops_status + crossplane_status; 138
         # before deps_scan; 134 before fleet_status; 125 before the cost
         # allocation/k8s/report family added 9). Optional families add 58
         # more when every flag is enabled: capacity purchase (2), image
-        # publish (3), destructive operations (15), model upload (2),
+        # publish (3), destructive operations (16), model upload (2),
         # infrastructure deploy (4), infrastructure destroy (2), local metrics
         # (1), semantic progress (1), local storage sync (1), config
         # management (11), Mission (10), and Swarm (6). The all-flags ceiling
-        # is therefore 202.
-        base_count = 144
+        # is therefore 210.
+        base_count = 151
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -212,8 +214,9 @@ class TestToolRegistration:
             expected += 1  # images_mirror (also GCO_ENABLE_IMAGE_PUBLISH-gated)
         if "delete_job" in tool_names:
             # The destructive-gated non-image tools register together with the
-            # four destructive image variants, including local task-history prune.
-            expected += 15
+            # four destructive image variants, including local task-history
+            # prune and the Slurm scancel.
+            expected += 16
         if "models_upload" in tool_names:
             expected += 2  # central + regional upload tools share the model-upload gate
         if "deploy_stack" in tool_names:
@@ -355,6 +358,14 @@ class TestToolRegistration:
             "eks_capabilities_status",
             "gitops_status",
             "crossplane_status",
+            # Slurm (the Slinky cluster through /api/v1/slurm/*)
+            "slurm_status",
+            "slurm_partitions",
+            "slurm_nodes",
+            "slurm_queue",
+            "slurm_job",
+            "slurm_accounting",
+            "slurm_submit",
             # Stacks mutating (cdk.json toggles)
             "enable_fsx",
             "disable_fsx",
@@ -484,6 +495,7 @@ class TestToolRegistration:
                     "cancel_queue_job",
                     "cancel_reservation",
                     "task_prune",
+                    "slurm_cancel",
                 }
             )
         # Model-upload gated tools register together under GCO_ENABLE_MODEL_UPLOAD.

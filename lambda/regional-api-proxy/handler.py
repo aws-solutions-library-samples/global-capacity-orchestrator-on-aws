@@ -38,6 +38,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from proxy_utils import (
     build_signed_headers,
     build_target_url,
+    caller_identity_headers,
     forward_request,
     get_secret_token,
     sanitize_request_headers,
@@ -240,6 +241,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     target_url = build_target_url(alb_endpoint, path, query_string)
     headers = sanitize_request_headers(headers)
+    headers.update(caller_identity_headers(event))
     headers.update(build_signed_headers(signing_key, http_method, target_url, body))
 
     return forward_request(

@@ -113,6 +113,8 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "set_opencode_default_model": FLAG_CONFIG_MANAGEMENT,
     # Other destructive module-level gates
     "delete_job": FLAG_DESTRUCTIVE_OPERATIONS,
+    # gco_mcp/tools/slurm.py — scancel
+    "slurm_cancel": FLAG_DESTRUCTIVE_OPERATIONS,
     "delete_inference": FLAG_DESTRUCTIVE_OPERATIONS,
     "delete_template": FLAG_DESTRUCTIVE_OPERATIONS,
     "delete_webhook": FLAG_DESTRUCTIVE_OPERATIONS,

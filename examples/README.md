@@ -735,7 +735,7 @@ kubectl logs job/hello-gco
 
 **File:** `slurm-cluster-job.yaml`
 
-A self-contained Kubernetes Job that writes a Slurm batch script into the login pod, submits it via `sbatch`, waits for completion, and prints the output.
+A self-contained Kubernetes Job that submits a batch job to the Slurm cluster through slurmrestd (authenticating with the operator-minted client token), waits for it to complete on an autoscaled worker, and checks its accounting record; it exits non-zero on any failed step. From outside the cluster use `gco slurm submit SCRIPT -r REGION` instead.
 
 **Usage:**
 
@@ -744,7 +744,7 @@ kubectl apply -f examples/slurm-cluster-job.yaml
 kubectl logs job/slurm-test -n gco-jobs -f
 ```
 
-**Requirements:** Slinky Slurm Operator + Slurm cluster (opt-in — enable in `cdk.json`: `"helm": { "slurm": { "enabled": true } }`), cert-manager (installed by default). See [Slurm docs](../docs/SLURM_OPERATOR.md).
+**Requirements:** Slurm enabled (`cdk.json`: `"helm": { "slurm": { "enabled": true } }`, or `gco stacks deploy-all --enable slurm`); the default `cpu` partition scales from zero, so the first job waits two to four minutes for a worker. See [Slurm docs](../docs/SLURM_OPERATOR.md).
 
 **When to use:** HPC workloads needing Slurm's deterministic scheduling, teams migrating from on-premises Slurm clusters.
 

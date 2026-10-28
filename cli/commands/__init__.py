@@ -26,6 +26,7 @@ from .monitoring_cmd import monitoring
 from .nodepools_cmd import nodepools
 from .queue_cmd import queue
 from .release_cmd import release
+from .slurm_cmd import slurm
 from .stacks_cmd import stacks
 from .status_cmd import status
 from .storage_cmd import storage
@@ -58,6 +59,7 @@ __all__ = [
     "nodepools",
     "queue",
     "release",
+    "slurm",
     "stacks",
     "status",
     "storage",

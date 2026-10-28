@@ -1,0 +1,240 @@
+# The Slurm accounting database: a single MariaDB behind slurmdbd.
+#
+# Slurm accounting (sacct, fairshare, QoS and job limits) needs a MySQL-family
+# database, and the Slinky chart ships none: its Accounting custom resource
+# runs slurmdbd and points it at a host and a password Secret
+# (helm.slurm.accounting -> gco.slurm_config.slurm_chart_values). This file is
+# that database for the default, in-cluster case; an operator who runs the
+# database elsewhere sets helm.slurm.accounting.external and this whole file
+# stays unapplied.
+#
+# Durability is one gp3 volume (gco-slurm-gp3, 28-storage-slurm-gp3.yaml) plus
+# the nightly logical dumps post-helm-slurm-accounting-backup.yaml ships to the
+# regional shared bucket. slurmctld and slurmdbd buffer accounting records
+# while the database is away, so a pod reschedule (EBS re-attaches in the same
+# AZ) loses nothing; the pod is pinned to on-demand, non-accelerator nodes and
+# marked do-not-disrupt so consolidation never moves it voluntarily. The
+# StatefulSet deletes its data claim with itself: disabling accounting removes
+# the database and its volume while the dumps in S3 remain (the same stance as
+# the MLflow claim).
+#
+# This is a base-pass manifest on purpose: it needs nothing from Helm, and
+# slurmctld's very first start refuses to run until slurmdbd answers
+# ("slurmdbd must be up at slurmctld start time"). With the database applied
+# before the Slinky chart, slurmdbd connects as soon as it starts and the
+# controller comes up on its first attempt instead of crash-looping until the
+# post-Helm pass (observed live: seven restarts over ten minutes).
+#
+# The password Secret ships no data. The kubectl-applier generates the two
+# listed keys when it first creates the Secret (gco.io/generate-keys) and
+# never overwrites them afterwards, so the credential exists only inside the
+# cluster: not in this repository, not in the Step Functions input, not in a
+# log. MariaDB's entrypoint reads them to create the slurm_acct_db database
+# and the slurm user on first start; slurmdbd reads the same `password` key.
+#
+# Gated on {{SLURM_ACCOUNTING_DB_ENABLED}} (plus the storage size token):
+# rendered by GCORegionalStack only while Slurm is on and accounting uses the
+# in-cluster database; otherwise the applier skips this file and
+# _FEATURE_RESOURCE_INVENTORY prunes these objects on a later disable.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: slinky-slurm-mariadb
+  namespace: gco-jobs
+  labels:
+    project: gco
+    app.kubernetes.io/part-of: slurm
+    app.kubernetes.io/name: mariadb
+    app.kubernetes.io/instance: slinky-slurm-mariadb
+  annotations:
+    gco.io/slurm-accounting-db-enabled: "{{SLURM_ACCOUNTING_DB_ENABLED}}"
+    # Filled with random values by the applier on creation; see the header.
+    gco.io/generate-keys: "password,root-password"
+type: Opaque
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slinky-slurm-mariadb
+  namespace: gco-jobs
+  labels:
+    project: gco
+    app.kubernetes.io/part-of: slurm
+    app.kubernetes.io/name: mariadb
+    app.kubernetes.io/instance: slinky-slurm-mariadb
+  annotations:
+    gco.io/slurm-accounting-db-enabled: "{{SLURM_ACCOUNTING_DB_ENABLED}}"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mariadb
+    app.kubernetes.io/instance: slinky-slurm-mariadb
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: slinky-slurm-mariadb
+  namespace: gco-jobs
+  labels:
+    project: gco
+    app.kubernetes.io/part-of: slurm
+    app.kubernetes.io/name: mariadb
+    app.kubernetes.io/instance: slinky-slurm-mariadb
+  annotations:
+    gco.io/slurm-accounting-db-enabled: "{{SLURM_ACCOUNTING_DB_ENABLED}}"
+    checkov.io/skip1: CKV_K8S_43=MariaDB is published by version tag on ECR Public; the pinned tag is preferred over a digest for maintainability
+    checkov.io/skip2: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the image on restart
+    checkov.io/skip3: CKV_K8S_40=The image's mysql user is UID 999; the data directory and the entrypoint's permission checks are tied to it
+spec:
+  serviceName: slinky-slurm-mariadb
+  replicas: 1
+  # The data claim goes with the StatefulSet (feature disabled, accounting
+  # moved to an external database); a scale-to-zero keeps it.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mariadb
+      app.kubernetes.io/instance: slinky-slurm-mariadb
+  template:
+    metadata:
+      labels:
+        project: gco
+        app.kubernetes.io/part-of: slurm
+        app.kubernetes.io/name: mariadb
+        app.kubernetes.io/instance: slinky-slurm-mariadb
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      priorityClassName: gco-platform-critical
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      # The placement every non-worker Slurm pod shares
+      # (gco.slurm_config.PLATFORM_POD_NODE_SELECTOR / PLATFORM_POD_AFFINITY):
+      # on-demand, amd64, and never an accelerator pool. The gco-jobs
+      # LimitRange defaults containers to nvidia.com/gpu: 0, which admission
+      # turns into a toleration of the GPU taint, and Karpenter then placed
+      # the Slurm controller on a g4dn; workload-type is the label every GCO
+      # accelerator and job pool carries and the general-purpose pool lacks.
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: amd64
+        karpenter.sh/capacity-type: on-demand
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload-type
+                    operator: DoesNotExist
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mariadb
+          image: public.ecr.aws/docker/library/mariadb:11.8.9
+          imagePullPolicy: IfNotPresent
+          # Sized for slurmdbd (SchedMD's accounting guidance): a dedicated
+          # buffer pool, redo log room for job-step bursts, and a long lock
+          # wait so slurmdbd's archive/purge transactions are not killed.
+          args:
+            - --innodb-buffer-pool-size=512M
+            - --innodb-log-file-size=128M
+            - --innodb-lock-wait-timeout=900
+            - --max-allowed-packet=64M
+            - --skip-name-resolve
+          env:
+            - name: MARIADB_DATABASE
+              value: slurm_acct_db
+            - name: MARIADB_USER
+              value: slurm
+            - name: MARIADB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: slinky-slurm-mariadb
+                  key: password
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: slinky-slurm-mariadb
+                  key: root-password
+            - name: MARIADB_AUTO_UPGRADE
+              value: "1"
+          ports:
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # TCP probes, run by the kubelet outside the container's CPU quota:
+          # MariaDB binds 3306 only after InnoDB (and crash recovery) has
+          # initialised, so an open port is the readiness signal the image's
+          # healthcheck.sh --innodb_initialized would give, without an exec
+          # probe competing with the server for CPU (the repo's probe timing
+          # contract, tests/test_workload_probe_timing_contract.py). The
+          # startup window covers a long crash recovery; liveness restarts
+          # only after a minute and a half of refused connections.
+          startupProbe:
+            tcpSocket:
+              port: mysql
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: mysql
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: mysql
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: run
+              mountPath: /run/mysqld
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          project: gco
+          app.kubernetes.io/part-of: slurm
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: gco-slurm-gp3
+        resources:
+          requests:
+            storage: {{SLURM_ACCOUNTING_DB_STORAGE_SIZE}}

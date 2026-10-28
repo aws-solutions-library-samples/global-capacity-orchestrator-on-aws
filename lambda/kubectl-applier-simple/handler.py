@@ -160,6 +160,25 @@ _TRUST_MANAGER_CUSTOM_OBJECTS: dict[str, tuple[str, str, str, bool]] = {
     "Bundle": ("trust.cert-manager.io", "v1alpha1", "bundles", True),
 }
 
+# Prometheus Operator kinds (monitoring.coreos.com) the applier creates or
+# patches through the custom-objects API, with their resource plurals.
+_MONITORING_CUSTOM_OBJECT_PLURALS: dict[str, str] = {
+    "ServiceMonitor": "servicemonitors",
+    "PodMonitor": "podmonitors",
+    "PrometheusRule": "prometheusrules",
+}
+
+# A Secret annotated with this marker names (comma-separated) the data keys
+# the applier fills with a fresh random value when it CREATES the Secret. An
+# existing Secret is never overwritten: the generated values are credentials
+# other objects already hold (a database's password), so a later apply only
+# adds keys the Secret is missing. The manifest itself carries no data for
+# those keys, so no credential ever appears in the repository, the Step
+# Functions input or the applier's logs. Used for the Slurm accounting
+# database (29-slurm-accounting-db.yaml).
+_GENERATE_SECRET_KEYS_ANNOTATION = "gco.io/generate-keys"
+_GENERATED_SECRET_BYTES = 32
+
 # Services annotated with this marker are validated for exact existence only;
 # a ready EndpointSlice endpoint is not required. Reserved for Services whose
 # backends schedule exclusively onto accelerator nodes that a fresh cluster
@@ -208,6 +227,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "PodDisruptionBudget",
         "PodMonitor",
         "PriorityClass",
+        "PrometheusRule",
         "ResourceFlavor",
         "ResourceQuota",
         "Role",
@@ -221,6 +241,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "StatefulSet",
         "StorageClass",
         "TargetGroupConfiguration",
+        "Token",
         "ValidatingAdmissionPolicy",
         "ValidatingAdmissionPolicyBinding",
     }
@@ -657,6 +678,84 @@ def _hpa_owns_replicas(document: dict[str, Any]) -> bool:
     )
 
 
+def _generated_secret_keys(document: dict[str, Any]) -> list[str]:
+    """The data keys a Secret manifest asks the applier to generate, if any.
+
+    Read from the ``gco.io/generate-keys`` annotation (comma-separated). A
+    manifest that lists a key AND ships a value for it is contradictory and
+    fails planning-time-equivalent here, before any Kubernetes call.
+    """
+    metadata = document.get("metadata")
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+    raw = (
+        annotations.get(_GENERATE_SECRET_KEYS_ANNOTATION) if isinstance(annotations, dict) else None
+    )
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    keys = [part.strip() for part in raw.split(",") if part.strip()]
+    shipped: set[str] = set()
+    for field in ("data", "stringData"):
+        values = document.get(field)
+        if isinstance(values, dict):
+            shipped.update(str(key) for key in values)
+    conflicting = sorted(set(keys) & shipped)
+    if conflicting:
+        name = metadata.get("name") if isinstance(metadata, dict) else None
+        raise ValueError(
+            f"Secret {name!r} lists generated key(s) {conflicting} in "
+            f"{_GENERATE_SECRET_KEYS_ANNOTATION} but also ships a value for them"
+        )
+    return keys
+
+
+def _apply_generated_secret(
+    v1: Any,
+    document: dict[str, Any],
+    namespace: str,
+    name: str,
+    generated_keys: list[str],
+) -> None:
+    """Create a Secret with fresh random values for its generated keys.
+
+    When the Secret already exists only the generated keys it lacks are
+    added, never replacing a value: the consumers (the Slurm accounting
+    database and slurmdbd) hold the current one, and rotating it is an
+    operator action, not a side effect of a redeploy. Values are URL-safe
+    random strings of ``_GENERATED_SECRET_BYTES`` bytes of entropy and are
+    never logged.
+    """
+    import secrets
+
+    try:
+        existing = v1.read_namespaced_secret(name, namespace)
+    except ApiException as e:
+        if e.status != 404:
+            raise
+        existing = None
+
+    if existing is None:
+        body = copy.deepcopy(document)
+        string_data = body.setdefault("stringData", {})
+        for key in generated_keys:
+            string_data[key] = secrets.token_urlsafe(_GENERATED_SECRET_BYTES)
+        v1.create_namespaced_secret(namespace, body=body)
+        logger.info(
+            "Generated %d key(s) for new Secret %s/%s", len(generated_keys), namespace, name
+        )
+        return
+
+    present = set((getattr(existing, "data", None) or {}).keys())
+    missing = [key for key in generated_keys if key not in present]
+    if not missing:
+        logger.info(
+            "Secret %s/%s already carries its generated keys; left unchanged", namespace, name
+        )
+        return
+    patch = {"stringData": {key: secrets.token_urlsafe(_GENERATED_SECRET_BYTES) for key in missing}}
+    v1.patch_namespaced_secret(name, namespace, body=patch)
+    logger.info("Added %d missing generated key(s) to Secret %s/%s", len(missing), namespace, name)
+
+
 def _deployment_patch_body(document: dict[str, Any]) -> dict[str, Any]:
     """Copy a Deployment update without replicas when its HPA owns scale."""
     patch_body = copy.deepcopy(document)
@@ -667,6 +766,27 @@ def _deployment_patch_body(document: dict[str, Any]) -> dict[str, Any]:
     if isinstance(spec, dict):
         spec.pop("replicas", None)
     return patch_body
+
+
+def _api_error_detail(exc: ApiException) -> str:
+    """Return the API server's own message for a failed call, as a log suffix.
+
+    ``ApiException.reason`` is only the HTTP phrase ("Unprocessable Entity");
+    the field-level cause ("spec.template.spec.containers[0].livenessProbe
+    .tcpSocket: Forbidden: may not specify more than 1 handler type") is the
+    ``message`` of the Status object in the response body. Without it a
+    rejected manifest is a dead end in the convergence log. Returns "" when
+    the body is absent or not a Status document.
+    """
+    body = getattr(exc, "body", None)
+    if not body:
+        return ""
+    try:
+        status = json.loads(body)
+    except TypeError, ValueError:
+        return ""
+    message = status.get("message") if isinstance(status, dict) else None
+    return f": {message}" if message else ""
 
 
 def _patch_or_replace(
@@ -685,14 +805,18 @@ def _patch_or_replace(
     fields that are mutually exclusive that produces an object the API server
     rejects with 422, so an older install can never be patched forward:
 
-    - a container probe that moved from ``httpGet`` to ``exec`` ends up with
-      both handlers ("may not specify more than 1 handler type");
+    - a container probe that moved from ``httpGet`` to ``exec`` (or, for the
+      Slurm accounting MariaDB StatefulSet, from ``exec`` to ``tcpSocket``)
+      ends up with both handlers ("may not specify more than 1 handler type");
     - a PodDisruptionBudget that moved from ``minAvailable`` to
       ``maxUnavailable`` ends up with both.
 
     On 422 the manifest is the whole desired state, so this replaces the object
     with it at the live ``resourceVersion`` (an optimistic-concurrency update,
-    not a delete). An HPA-owned Deployment keeps its live replica count.
+    not a delete). An HPA-owned Deployment keeps its live replica count. A
+    StatefulSet replace is still bound by the API server's immutability rules
+    (``selector``, ``serviceName``, ``volumeClaimTemplates`` ...): a manifest
+    that changes one of those fails loudly here, as it should.
 
     ``resource`` is the client method suffix, e.g. ``namespaced_deployment``
     for ``patch_/read_/replace_namespaced_deployment``.
@@ -732,6 +856,14 @@ def _patch_or_replace(
 # disabling one feature cannot delete similarly named or unrelated resources.
 # Tuples are (apiVersion, kind, namespace-or-None, name); order is deliberate
 # for dependent resources such as FSx claims before volumes before the class.
+# post-helm-slurm-observability.yaml carries both the Slurm and the
+# observability gate, so it applies only when both are on and is pruned when
+# either is turned off: the same identities appear under both inventory keys.
+_SLURM_OBSERVABILITY_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
+    ("v1", "ConfigMap", "monitoring", "gco-dashboard-slurm"),
+    ("monitoring.coreos.com/v1", "PrometheusRule", "monitoring", "gco-slurm-alerts"),
+)
+
 _FEATURE_RESOURCE_INVENTORY: dict[
     tuple[str, bool], tuple[tuple[str, str, str | None, str], ...]
 ] = {
@@ -783,8 +915,10 @@ _FEATURE_RESOURCE_INVENTORY: dict[
                 "gco-kuberay",
                 "gco-yunikorn",
                 "gco-dcgm-exporter",
+                "gco-slurm-controller",
             )
         ),
+        *_SLURM_OBSERVABILITY_RESOURCES,
         *tuple(
             ("monitoring.coreos.com/v1", "PodMonitor", "monitoring", name)
             for name in (
@@ -825,11 +959,70 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("kueue.x-k8s.io/v1beta2", "ClusterQueue", None, "gco-cluster-queue"),
         ("kueue.x-k8s.io/v1beta2", "ResourceFlavor", None, "gco-default-flavor"),
     ),
+    # Slurm (cdk.json helm.slurm). The base pass owns the gp3 StorageClass the
+    # controller's state volume and the accounting database bind to; the
+    # post-Helm pass owns the NetworkPolicies, the GCO API's Slurm credential,
+    # the metrics ServiceMonitor and the observability objects
+    # (28-storage-slurm-gp3.yaml, post-helm-slurm-network.yaml,
+    # post-helm-slurm-api-access.yaml, post-helm-slurm-observability.yaml).
+    ("{{SLURM_ENABLED}}", False): (("storage.k8s.io/v1", "StorageClass", None, "gco-slurm-gp3"),),
     ("{{SLURM_ENABLED}}", True): (
+        # The API's credential first: the binding before the role it names,
+        # then the Token. The Secret the operator minted from the Token is
+        # owned by the chart's JWT key Secret rather than by the Token, so it
+        # is listed here explicitly instead of relying on garbage collection.
+        (
+            "rbac.authorization.k8s.io/v1",
+            "RoleBinding",
+            "gco-jobs",
+            "gco-manifest-processor-slurm-token",
+        ),
+        ("rbac.authorization.k8s.io/v1", "Role", "gco-jobs", "gco-manifest-processor-slurm-token"),
+        ("slinky.slurm.net/v1beta1", "Token", "gco-jobs", "slinky-slurm-token-gco-api"),
+        ("v1", "Secret", "gco-jobs", "slinky-slurm-token-gco-api"),
+        ("slinky.slurm.net/v1beta1", "Token", "gco-jobs", "slinky-slurm-token-client"),
+        ("v1", "Secret", "gco-jobs", "slinky-slurm-client-token"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-cluster-internal"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-to-restapi"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-client-egress"),
         ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-slurm-operator-to-restapi"),
+        (
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+            "gco-jobs",
+            "allow-prometheus-to-slurm-controller",
+        ),
+        (
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+            "gco-jobs",
+            "allow-manifest-processor-to-slurm-restapi",
+        ),
+        (
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+            "gco-system",
+            "allow-manifest-processor-to-slurm-restapi",
+        ),
+        *_SLURM_OBSERVABILITY_RESOURCES,
+    ),
+    # The in-cluster accounting database (29-slurm-accounting-db.yaml, base
+    # pass so MariaDB is up before the Slinky chart starts slurmdbd and
+    # slurmctld, whose first boot refuses to run without the dbd) and its
+    # backup CronJob (post-helm-slurm-accounting-backup.yaml), each on its own
+    # gate so an external database or backups-off keeps the rest. The
+    # StatefulSet's persistentVolumeClaimRetentionPolicy deletes the data
+    # claim with it: the nightly dumps in the regional bucket are the record,
+    # exactly as the MLflow claim below is pruned while its artifacts stay in
+    # S3. The password Secret is generated in-cluster by the applier
+    # (gco.io/generate-keys) and goes with the database.
+    ("{{SLURM_ACCOUNTING_DB_ENABLED}}", False): (
+        ("apps/v1", "StatefulSet", "gco-jobs", "slinky-slurm-mariadb"),
+        ("v1", "Service", "gco-jobs", "slinky-slurm-mariadb"),
+        ("v1", "Secret", "gco-jobs", "slinky-slurm-mariadb"),
+    ),
+    ("{{SLURM_ACCOUNTING_BACKUP_ENABLED}}", True): (
+        ("batch/v1", "CronJob", "gco-jobs", "slinky-slurm-accounting-backup"),
     ),
     ("{{KUBEFLOW_TRAINER_ENABLED}}", True): (
         ("trainer.kubeflow.org/v1alpha1", "ClusterTrainingRuntime", None, "torch-distributed"),
@@ -1569,7 +1762,9 @@ def apply_manifests(
                             apps_v1.create_namespaced_stateful_set(namespace, body=doc)
                         except ApiException as e:
                             if e.status == 409:
-                                apps_v1.patch_namespaced_stateful_set(name, namespace, body=doc)
+                                _patch_or_replace(
+                                    apps_v1, "namespaced_stateful_set", name, namespace, doc
+                                )
                             else:
                                 raise
 
@@ -1578,7 +1773,9 @@ def apply_manifests(
                             apps_v1.create_namespaced_daemon_set(namespace, body=doc)
                         except ApiException as e:
                             if e.status == 409:
-                                apps_v1.patch_namespaced_daemon_set(name, namespace, body=doc)
+                                _patch_or_replace(
+                                    apps_v1, "namespaced_daemon_set", name, namespace, doc
+                                )
                             else:
                                 raise
 
@@ -1661,13 +1858,17 @@ def apply_manifests(
                                 raise
 
                     elif kind == "Secret":
-                        try:
-                            v1.create_namespaced_secret(namespace, body=doc)
-                        except ApiException as e:
-                            if e.status == 409:
-                                v1.patch_namespaced_secret(name, namespace, body=doc)
-                            else:
-                                raise
+                        generated_keys = _generated_secret_keys(doc)
+                        if generated_keys:
+                            _apply_generated_secret(v1, doc, namespace, name, generated_keys)
+                        else:
+                            try:
+                                v1.create_namespaced_secret(namespace, body=doc)
+                            except ApiException as e:
+                                if e.status == 409:
+                                    v1.patch_namespaced_secret(name, namespace, body=doc)
+                                else:
+                                    raise
 
                     elif (
                         kind in _GATEWAY_CUSTOM_OBJECTS
@@ -1926,6 +2127,26 @@ def apply_manifests(
                                 )
                             else:
                                 raise
+                    elif kind == "Token":
+                        # slurm-operator Token: the operator mints a Slurm
+                        # auth/jwt token into a Secret and refreshes it
+                        # (post-helm-slurm-api-access.yaml). The CRD is
+                        # registered by the slinky-slurm-operator chart, so
+                        # Tokens land in the post-Helm pass.
+                        group = "slinky.slurm.net"
+                        version = api_version.split("/")[-1] if "/" in api_version else "v1beta1"
+                        plural = "tokens"
+                        try:
+                            custom_api.create_namespaced_custom_object(
+                                group, version, namespace, plural, body=doc
+                            )
+                        except ApiException as e:
+                            if e.status == 409:
+                                custom_api.patch_namespaced_custom_object(
+                                    group, version, namespace, plural, name, body=doc
+                                )
+                            else:
+                                raise
                     elif kind == "ClusterTrainingRuntime":
                         # Kubeflow Trainer v2 runtime blueprint (cluster-scoped;
                         # the CRD is registered by the kubeflow-trainer chart, so
@@ -2009,15 +2230,16 @@ def apply_manifests(
                             else:
                                 raise
 
-                    elif kind in ("ServiceMonitor", "PodMonitor"):
+                    elif kind in _MONITORING_CUSTOM_OBJECT_PLURALS:
                         # Prometheus Operator CRDs registered by the
                         # kube-prometheus-stack chart, so these land in the
                         # post-Helm pass. GCO uses ServiceMonitors for
-                        # components fronted by a Service (schedulers, DCGM)
-                        # and PodMonitors for its own multi-replica services.
+                        # components fronted by a Service (schedulers, DCGM,
+                        # slurmctld), PodMonitors for its own multi-replica
+                        # services, and PrometheusRules for alerting rules.
                         group = "monitoring.coreos.com"
                         version = api_version.split("/")[-1] if "/" in api_version else "v1"
-                        plural = "servicemonitors" if kind == "ServiceMonitor" else "podmonitors"
+                        plural = _MONITORING_CUSTOM_OBJECT_PLURALS[kind]
                         try:
                             custom_api.create_namespaced_custom_object(
                                 group, version, namespace, plural, body=doc
@@ -2038,7 +2260,10 @@ def apply_manifests(
                     logger.info(f"✓ Applied {kind}/{name}")
 
                 except ApiException as e:
-                    logger.error(f"API error applying {kind}/{name}: {e.status} - {e.reason}")
+                    logger.error(
+                        f"API error applying {kind}/{name}: {e.status} - {e.reason}"
+                        f"{_api_error_detail(e)}"
+                    )
                     failed.append(f"{filename}:{kind}/{name}")
 
         except Exception as e:

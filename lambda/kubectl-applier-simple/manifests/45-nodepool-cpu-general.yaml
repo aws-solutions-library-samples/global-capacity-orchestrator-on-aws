@@ -33,10 +33,13 @@ spec:
         - key: "karpenter.sh/capacity-type"
           operator: In
           values: ["spot", "on-demand"]
-        # Exclude GPU instances from this pool
+        # Exclude GPU instances from this pool. Karpenter sets the GPU-count
+        # label only on instance types that have GPUs, so `In ["0"]` matched
+        # nothing and the pool could never launch a node (observed live:
+        # every workload-type=cpu pod stayed Pending); DoesNotExist is how
+        # "no GPU" is expressed.
         - key: "eks.amazonaws.com/instance-gpu-count"
-          operator: In
-          values: ["0"]
+          operator: DoesNotExist
   limits:
     cpu: "2000"
     memory: 8000Gi

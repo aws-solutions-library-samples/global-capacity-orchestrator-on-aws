@@ -1605,3 +1605,206 @@ def test_task_prune_accepts_zero_and_returns_cli_value() -> None:
             {},
             ("tasks", "prune", "--keep", "0", "--yes"),
         )
+
+
+# ---------------------------------------------------------------------------
+# tools/slurm.py — the Slinky cluster through `gco slurm`
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("function_name", "args", "kwargs", "expected_argv"),
+    [
+        ("slurm_status", ("us-east-1",), {}, ("slurm", "status", "-r", "us-east-1")),
+        ("slurm_partitions", ("us-east-1",), {}, ("slurm", "partitions", "-r", "us-east-1")),
+        ("slurm_nodes", ("us-east-1",), {}, ("slurm", "nodes", "-r", "us-east-1")),
+        (
+            "slurm_nodes",
+            ("us-east-1",),
+            {"partition": "gpu"},
+            ("slurm", "nodes", "-r", "us-east-1", "--partition", "gpu"),
+        ),
+        ("slurm_queue", ("us-east-1",), {}, ("slurm", "queue", "-r", "us-east-1")),
+        (
+            "slurm_queue",
+            ("us-east-1",),
+            {"state": "PENDING", "partition": "gpu", "name": "train", "limit": 5},
+            (
+                "slurm",
+                "queue",
+                "-r",
+                "us-east-1",
+                "--state",
+                "PENDING",
+                "--partition",
+                "gpu",
+                "--name",
+                "train",
+                "--limit",
+                "5",
+            ),
+        ),
+        ("slurm_job", ("us-east-1", 42), {}, ("slurm", "job", "42", "-r", "us-east-1")),
+        ("slurm_accounting", ("us-east-1",), {}, ("slurm", "accounting", "-r", "us-east-1")),
+        (
+            "slurm_accounting",
+            ("us-east-1",),
+            {
+                "since": "7d",
+                "start": "2026-10-01",
+                "end": "now",
+                "user": "slurm",
+                "partition": "gpu",
+                "state": "COMPLETED,FAILED",
+                "name": "train",
+                "limit": 10,
+            },
+            (
+                "slurm",
+                "accounting",
+                "-r",
+                "us-east-1",
+                "--since",
+                "7d",
+                "--start",
+                "2026-10-01",
+                "--end",
+                "now",
+                "--user",
+                "slurm",
+                "--partition",
+                "gpu",
+                "--state",
+                "COMPLETED,FAILED",
+                "--name",
+                "train",
+                "--limit",
+                "10",
+            ),
+        ),
+        (
+            "slurm_submit",
+            ("us-east-1", "/tmp/train.sbatch"),
+            {},
+            ("slurm", "submit", "/tmp/train.sbatch", "-r", "us-east-1"),
+        ),
+        (
+            "slurm_submit",
+            ("us-east-1", "/tmp/train.sbatch"),
+            {
+                "name": "train",
+                "partition": "gpu",
+                "nodes": 2,
+                "tasks": 16,
+                "cpus_per_task": 4,
+                "gpus_per_node": 8,
+                "memory": "64G",
+                "time_limit": "04:00:00",
+                "working_directory": "/home/slurm/run",
+                "environment": ["A=1", "B=2"],
+                "comment": "nightly",
+                "exclusive": True,
+            },
+            (
+                "slurm",
+                "submit",
+                "/tmp/train.sbatch",
+                "-r",
+                "us-east-1",
+                "--name",
+                "train",
+                "--partition",
+                "gpu",
+                "--mem",
+                "64G",
+                "--time",
+                "04:00:00",
+                "--chdir",
+                "/home/slurm/run",
+                "--comment",
+                "nightly",
+                "--nodes",
+                "2",
+                "--tasks",
+                "16",
+                "--cpus-per-task",
+                "4",
+                "--gpus-per-node",
+                "8",
+                "--env",
+                "A=1",
+                "--env",
+                "B=2",
+                "--exclusive",
+            ),
+        ),
+        (
+            "slurm_submit",
+            ("us-east-1", "/tmp/zero.sbatch"),
+            {"gpus_per_node": 0, "nodes": 1},
+            (
+                "slurm",
+                "submit",
+                "/tmp/zero.sbatch",
+                "-r",
+                "us-east-1",
+                "--nodes",
+                "1",
+                "--gpus-per-node",
+                "0",
+            ),
+        ),
+    ],
+)
+def test_slurm_wrapper_matrix(
+    function_name: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    expected_argv: tuple[str, ...],
+) -> None:
+    with _isolated_tool_module("slurm") as loaded:
+        _assert_cli_call(loaded, function_name, args, kwargs, expected_argv)
+
+
+def test_slurm_cancel_is_absent_without_the_destructive_flag() -> None:
+    with _isolated_tool_module("slurm") as loaded:
+        assert not hasattr(loaded.module, "slurm_cancel")
+
+
+def test_slurm_gated_cancel_warns_and_passes_the_signal() -> None:
+    with _isolated_tool_module("slurm", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
+        loaded.module._ctx_warning = AsyncMock()
+        _assert_cli_call(
+            loaded,
+            "slurm_cancel",
+            ("us-east-1", 42),
+            {"signal": "SIGUSR1"},
+            ("slurm", "cancel", "42", "-r", "us-east-1", "-y", "--signal", "SIGUSR1"),
+        )
+        loaded.module._ctx_warning.assert_awaited_once_with(
+            "Cancelling Slurm job 42 in us-east-1 — its work is lost."
+        )
+        loaded.module._ctx_warning = AsyncMock()
+        _assert_cli_call(
+            loaded,
+            "slurm_cancel",
+            ("us-east-1", 7),
+            {},
+            ("slurm", "cancel", "7", "-r", "us-east-1", "-y"),
+        )
+
+
+def test_slurm_context_warning_paths() -> None:
+    with _isolated_tool_module("slurm", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
+        # No MCP context: the stubbed get_context raises and the helper is a no-op.
+        assert asyncio.run(loaded.module._ctx_warning("careful")) is None
+        # A context that accepts the warning.
+        context = Mock()
+        context.warning = AsyncMock()
+        loaded.dependencies.get_context.side_effect = None
+        loaded.dependencies.get_context.return_value = context
+        assert asyncio.run(loaded.module._ctx_warning("careful")) is None
+        context.warning.assert_awaited_once_with("careful")
+        # A context whose warning fails is swallowed.
+        context.warning = AsyncMock(side_effect=RuntimeError("closed"))
+        assert asyncio.run(loaded.module._ctx_warning("careful")) is None

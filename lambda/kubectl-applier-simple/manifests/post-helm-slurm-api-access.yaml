@@ -1,0 +1,111 @@
+# The GCO API's Slurm credential: a slurm-operator Token and the scoped read.
+#
+# /api/v1/slurm/* (gco/services/api_routes/slurm.py) talks to slurmrestd with
+# Slurm's auth/jwt. Rather than mounting the cluster's JWT signing key (which
+# would make the API pod able to mint any token), the Token custom resource
+# below asks the operator to mint a JWT for the ``slurm`` user into the Secret
+# slinky-slurm-token-gco-api and to re-issue it before it expires (80% of the
+# lifetime). The manifest-processor reads that one Secret through the Role
+# and RoleBinding here — `get` on exactly this Secret, nothing else in
+# gco-jobs — and re-reads it every few minutes or on a 401
+# (gco/services/slurm_client.py).
+#
+# The Token lives in gco-jobs because the operator resolves both the signing
+# key (slinky-slurm-auth-jwt) and the output Secret in the Token's own
+# namespace. The network path is allow-manifest-processor-to-slurm-restapi
+# (post-helm-slurm-network.yaml).
+#
+# A second Token mints the in-cluster client credential
+# (slinky-slurm-client-token): job pods labeled gco.aws/slurm-client that call
+# slurmrestd directly (examples/slurm-cluster-job.yaml) mount that Secret
+# instead of the chart's signing key, which would let them mint tokens for any
+# user forever. Any pod in gco-jobs can mount a gco-jobs Secret, so this is
+# the namespace's trust level, not per-pod authorization; multi-tenant
+# submission belongs behind the GCO API.
+#
+# Gated on {{SLURM_ENABLED}} like every Slurm manifest; the Token CRD comes
+# from the slinky-slurm-operator chart, hence the post-Helm pass.
+---
+apiVersion: slinky.slurm.net/v1beta1
+kind: Token
+metadata:
+  name: slinky-slurm-token-gco-api
+  namespace: gco-jobs
+  labels:
+    project: gco
+    app.kubernetes.io/part-of: slurm
+    app.kubernetes.io/name: api-token
+  annotations:
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  username: slurm
+  lifetime: 1h
+  refresh: true
+  jwtKeyRef:
+    name: slinky-slurm-auth-jwt
+    key: jwt.key
+  secretRef:
+    name: slinky-slurm-token-gco-api
+    key: auth-token
+---
+apiVersion: slinky.slurm.net/v1beta1
+kind: Token
+metadata:
+  name: slinky-slurm-token-client
+  namespace: gco-jobs
+  labels:
+    project: gco
+    app.kubernetes.io/part-of: slurm
+    app.kubernetes.io/name: client-token
+  annotations:
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  username: slurm
+  lifetime: 1h
+  refresh: true
+  jwtKeyRef:
+    name: slinky-slurm-auth-jwt
+    key: jwt.key
+  secretRef:
+    name: slinky-slurm-client-token
+    key: auth-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gco-manifest-processor-slurm-token
+  namespace: gco-jobs
+  labels:
+    app: manifest-processor
+    project: gco
+    app.kubernetes.io/part-of: slurm
+  annotations:
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+rules:
+  # Exactly the API's own token Secret, by name. The cluster's signing key
+  # (slinky-slurm-auth-jwt) and every other Secret in gco-jobs stay out of
+  # reach of the API pod.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["slinky-slurm-token-gco-api"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gco-manifest-processor-slurm-token
+  namespace: gco-jobs
+  labels:
+    app: manifest-processor
+    project: gco
+    app.kubernetes.io/part-of: slurm
+  annotations:
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gco-manifest-processor-slurm-token
+subjects:
+  - kind: ServiceAccount
+    name: gco-manifest-processor-sa
+    namespace: gco-system

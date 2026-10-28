@@ -21,7 +21,7 @@ Runtime services and shared support modules used by the in-cluster GCO control p
 | `inference_store.py` | DynamoDB-backed persistence for inference endpoint specifications and per-region status. |
 | `internal_tls.py` | Trust for GCO's in-cluster HTTPS clients: an `ssl.SSLContext` that trusts only the GCO internal CA (`GCO_INTERNAL_CA_FILE`, default `/var/run/gco/ca/ca.crt`), verifies the host name, requires TLS 1.2+, is cached per CA file identity so a rotated bundle is picked up, and raises `InternalTLSError` instead of falling back to another trust store. |
 | `leader_lease.py` | Kubernetes `coordination.k8s.io` Lease acquisition shared by the health monitor's ALB sync and webhook delivery leaders. |
-| `manifest_api.py` | Authenticated control-plane FastAPI app for manifests, jobs, policy, queues, templates, webhooks, and costs; traced as `manifest-processor`. |
+| `manifest_api.py` | Authenticated control-plane FastAPI app for manifests, jobs, policy, queues, templates, webhooks, costs, and Slurm; traced as `manifest-processor`. |
 | `manifest_processor.py` | Validates and applies Kubernetes manifests with namespace, resource, placement, and security policy enforcement. |
 | `metrics_publisher.py` | Publishes GCO health and workload metrics to CloudWatch. |
 | `mooncake_pd_proxy.py` | Standalone Mooncake prefill/decode proxy mounted into disaggregated inference endpoint pods; binds `PD_PROXY_HOST` (loopback behind the pod's TLS sidecar), dials prefill/decode over HTTPS trusting only `PD_PROXY_CA_FILE` through a new client per call (the CA re-read when the file changes, so a rotated CA needs no restart; keep-alive off), relays header values byte for byte, and uses `httpx2` when the vLLM image has it, else the image's `httpx`; it must parse as Python 3.12. |
@@ -29,6 +29,7 @@ Runtime services and shared support modules used by the in-cluster GCO control p
 | `request_context.py` | Binds server-generated request IDs to responses, generic errors, and correlated log records. |
 | `request_size_middleware.py` | Enforces request-body limits before authentication while replaying the exact bytes downstream. |
 | `service_metrics.py` | Prometheus request instrumentation and collectors shared by HTTP and loop-based services; `start_metrics_server(..., host=)` lets the inference monitor bind its plaintext listener to loopback behind a TLS sidecar. |
+| `slurm_client.py` | slurmrestd client behind `/api/v1/slurm/*`: reads the slurm-operator-minted JWT from the `slinky-slurm-token-gco-api` Secret in `gco-jobs` (cached, re-read every five minutes and on a 401), sends it as Slurm's `slurm` user over plain HTTP inside the namespace boundary, and maps Slurm's failures to the API's 404/400/502/503 answers; inert (`SlurmDisabledError`) unless `GCO_SLURM_ENABLED=true`. |
 | `spot_price_gate.py` | TTL-cached spot-price lookup and per-job dispatch decisions for price-capped central queue records. |
 | `structured_logging.py` | JSON logging and safe operational-context formatting for service processes; adds `trace_id`, `span_id`, and `trace_sampled` to lines logged inside a traced request. |
 | `template_store.py` | DynamoDB-backed job templates, webhook registrations, and central queue lifecycle records. |
@@ -48,6 +49,7 @@ The `api_routes/` package splits the manifest and inference applications into fo
 | `jobs.py` | Job listing, status, logs, events, pods, metrics, retry, and deletion. |
 | `manifests.py` | Manifest submission and validation. |
 | `queue.py` | Idempotent global queue submission, listing, cancellation, pagination, and status polling. |
+| `slurm.py` | Authenticated `/api/v1/slurm/*` front for the Slinky Slurm cluster (status, partitions, nodes, queue, `sbatch` submit, job, `scancel`, `sacct` history) proxied to slurmrestd through `slurm_client`; the caller's identity is stamped into each job's `comment`, and a region without Slurm answers 404 with the enablement remedy. |
 | `templates.py` | Reusable template CRUD. |
 | `webhooks.py` | Webhook registration, deletion, and delivery testing. |
 

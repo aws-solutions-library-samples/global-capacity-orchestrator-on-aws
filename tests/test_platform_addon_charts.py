@@ -308,7 +308,12 @@ class TestChartSelection:
 
 class TestStackDeleteBudgets:
     def test_custom_resource_charts_get_longer_uninstall_tasks(self) -> None:
-        assert rs._UNINSTALL_TIMEOUT_MINUTES == {"keda": 4, "argocd": 4, "crossplane": 6}
+        assert rs._UNINSTALL_TIMEOUT_MINUTES == {
+            "keda": 4,
+            "argocd": 4,
+            "crossplane": 6,
+            "slinky-slurm": 4,
+        }
 
     def test_every_extended_budget_belongs_to_a_cleanup_chart(self, helm_handler: Any) -> None:
         assert set(rs._UNINSTALL_TIMEOUT_MINUTES) <= set(

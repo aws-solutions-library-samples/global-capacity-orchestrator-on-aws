@@ -18,6 +18,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -1986,6 +1987,100 @@ class TestHorizontalPodAutoscalerApply:
         assert pdb_body["metadata"]["resourceVersion"] == "77"
         assert pdb_body["spec"] == pdb["spec"]
 
+    def test_invalid_strategic_merge_replaces_statefulset_and_daemonset(
+        self, handler_module, tmp_path
+    ):
+        """The Slurm accounting MariaDB StatefulSet moved its probes from
+        ``exec`` to ``tcpSocket``; against an install carrying the old probes
+        the merged patch has both handlers and the API server answers 422.
+        StatefulSets and DaemonSets take the same replace-at-live-resourceVersion
+        path as Deployments and PodDisruptionBudgets."""
+        from kubernetes.client.rest import ApiException
+
+        statefulset = {
+            "apiVersion": "apps/v1",
+            "kind": "StatefulSet",
+            "metadata": {"name": "slinky-slurm-mariadb", "namespace": "gco-jobs"},
+            "spec": {
+                "serviceName": "slinky-slurm-mariadb",
+                "replicas": 1,
+                "selector": {"matchLabels": {"app": "mariadb"}},
+                "template": {
+                    "metadata": {"labels": {"app": "mariadb"}},
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "mariadb",
+                                "image": "example.invalid/mariadb:test",
+                                "readinessProbe": {"tcpSocket": {"port": "mysql"}},
+                            }
+                        ]
+                    },
+                },
+            },
+        }
+        daemonset = {
+            "apiVersion": "apps/v1",
+            "kind": "DaemonSet",
+            "metadata": {"name": "node-agent", "namespace": "gco-system"},
+            "spec": {
+                "selector": {"matchLabels": {"app": "node-agent"}},
+                "template": {
+                    "metadata": {"labels": {"app": "node-agent"}},
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "agent",
+                                "image": "example.invalid/agent:test",
+                                "livenessProbe": {"tcpSocket": {"port": 9000}},
+                            }
+                        ]
+                    },
+                },
+            },
+        }
+        (tmp_path / "29-slurm-accounting-db.yaml").write_text(yaml.safe_dump(statefulset))
+        (tmp_path / "40-node-agent.yaml").write_text(yaml.safe_dump(daemonset))
+
+        with (
+            patch.object(handler_module, "configure_k8s_client"),
+            patch("handler.client") as mock_client,
+        ):
+            apps = mock_client.AppsV1Api.return_value
+            apps.create_namespaced_stateful_set.side_effect = ApiException(status=409)
+            apps.patch_namespaced_stateful_set.side_effect = ApiException(
+                status=422, reason="Unprocessable Entity"
+            )
+            apps.read_namespaced_stateful_set.return_value.metadata.resource_version = "314"
+            apps.create_namespaced_daemon_set.side_effect = ApiException(status=409)
+            apps.patch_namespaced_daemon_set.side_effect = ApiException(
+                status=422, reason="Unprocessable Entity"
+            )
+            apps.read_namespaced_daemon_set.return_value.metadata.resource_version = "27"
+
+            result = self._apply(handler_module, tmp_path, mock_client)
+
+        assert result["FailedCount"] == 0, result
+        assert result["AppliedCount"] == 2
+
+        apps.patch_namespaced_stateful_set.assert_called_once_with(
+            "slinky-slurm-mariadb", "gco-jobs", body=statefulset
+        )
+        apps.read_namespaced_stateful_set.assert_called_once_with(
+            "slinky-slurm-mariadb", "gco-jobs"
+        )
+        replaced = apps.replace_namespaced_stateful_set.call_args
+        assert replaced.args == ("slinky-slurm-mariadb", "gco-jobs")
+        body = replaced.kwargs["body"]
+        assert body["metadata"]["resourceVersion"] == "314"
+        assert body["spec"] == statefulset["spec"]
+        assert "resourceVersion" not in statefulset["metadata"]
+
+        apps.read_namespaced_daemon_set.assert_called_once_with("node-agent", "gco-system")
+        daemonset_body = apps.replace_namespaced_daemon_set.call_args.kwargs["body"]
+        assert daemonset_body["metadata"]["resourceVersion"] == "27"
+        assert daemonset_body["spec"] == daemonset["spec"]
+
     def test_patch_or_replace_reraises_non_422_and_handles_missing_live_replicas(
         self, handler_module
     ):
@@ -2584,10 +2679,12 @@ class TestAuthoritativeManifestPlanner:
             "_ARGOCD_CUSTOM_OBJECTS",
             "_CROSSPLANE_CUSTOM_OBJECTS",
             "_TRUST_MANAGER_CUSTOM_OBJECTS",
+            "_MONITORING_CUSTOM_OBJECT_PLURALS",
         ):
             assert f"kind in {map_name}" in source, (
                 f"table-driven custom-object dispatch omitted {map_name}; update the apply loop"
             )
+        dispatched.update(handler_module._MONITORING_CUSTOM_OBJECT_PLURALS)
         dispatched.update(handler_module._GATEWAY_CUSTOM_OBJECTS)
         dispatched.update(handler_module._QUEUEING_CUSTOM_OBJECTS)
         dispatched.update(handler_module._CERT_MANAGER_CUSTOM_OBJECTS)
@@ -3368,18 +3465,173 @@ class TestQueueingCustomObjectMapConsistency:
         pruned = {(api_version, kind, name) for api_version, kind, _ns, name in inventory}
         assert pruned == expected
 
-    def test_slurm_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
+    @staticmethod
+    def _identities(*filenames: str) -> set[tuple[str, str, str | None, str]]:
         manifests_dir = (
             Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
         )
-        gated = manifests_dir / "post-helm-slurm-network.yaml"
-        expected = {
-            (str(doc.get("apiVersion")), str(doc.get("kind")), str(doc["metadata"]["name"]))
-            for doc in _parse_manifest_documents(gated)
+        return {
+            (
+                str(doc["apiVersion"]),
+                str(doc["kind"]),
+                doc["metadata"].get("namespace"),
+                str(doc["metadata"]["name"]),
+            )
+            for filename in filenames
+            for doc in _parse_manifest_documents(manifests_dir / filename)
         }
-        inventory = handler_module._FEATURE_RESOURCE_INVENTORY[("{{SLURM_ENABLED}}", True)]
-        pruned = {(api_version, kind, name) for api_version, kind, _ns, name in inventory}
-        assert pruned == expected
+
+    def test_slurm_prune_inventory_matches_the_gated_manifests(self, handler_module) -> None:
+        """Every object a {{SLURM_ENABLED}} manifest applies is pruned on disable.
+
+        The post-Helm key covers the network policies, the API's Slurm
+        credential (plus the Secret the operator mints from the Token, which
+        the Token does not own) and the observability objects (which carry the
+        observability gate too and therefore also sit under that key); the
+        base key covers the gp3 StorageClass.
+        """
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY
+        minted_secret = ("v1", "Secret", "gco-jobs", "slinky-slurm-token-gco-api")
+        client_secret = ("v1", "Secret", "gco-jobs", "slinky-slurm-client-token")
+        assert set(inventory[("{{SLURM_ENABLED}}", True)]) == self._identities(
+            "post-helm-slurm-network.yaml",
+            "post-helm-slurm-api-access.yaml",
+            "post-helm-slurm-observability.yaml",
+        ) | {minted_secret, client_secret}
+        post_helm = list(inventory[("{{SLURM_ENABLED}}", True)])
+        role_binding = (
+            "rbac.authorization.k8s.io/v1",
+            "RoleBinding",
+            "gco-jobs",
+            "gco-manifest-processor-slurm-token",
+        )
+        role = (
+            "rbac.authorization.k8s.io/v1",
+            "Role",
+            "gco-jobs",
+            "gco-manifest-processor-slurm-token",
+        )
+        token = ("slinky.slurm.net/v1beta1", "Token", "gco-jobs", "slinky-slurm-token-gco-api")
+        assert post_helm.index(role_binding) < post_helm.index(role)
+        assert post_helm.index(token) < post_helm.index(minted_secret)
+        assert set(inventory[("{{SLURM_ENABLED}}", False)]) == self._identities(
+            "28-storage-slurm-gp3.yaml"
+        )
+        observability = set(inventory[("{{CLUSTER_OBSERVABILITY_ENABLED}}", True)])
+        assert self._identities("post-helm-slurm-observability.yaml") <= observability
+
+    def test_slurm_accounting_prune_inventories_match_their_manifests(self, handler_module) -> None:
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY
+        assert set(inventory[("{{SLURM_ACCOUNTING_DB_ENABLED}}", False)]) == self._identities(
+            "29-slurm-accounting-db.yaml"
+        )
+        assert set(inventory[("{{SLURM_ACCOUNTING_BACKUP_ENABLED}}", True)]) == self._identities(
+            "post-helm-slurm-accounting-backup.yaml"
+        )
+
+    def test_slurm_api_token_matches_the_operator_crd_and_the_client(self, handler_module) -> None:
+        """The API's Token is shaped for the slurm-operator 1.2.3 CRD and the client.
+
+        The datreeio catalog carries no slinky.slurm.net schema (the GVK is in
+        validate_k8s_manifests.py's SCHEMA_UNAVAILABLE_SKIPS), so the spec keys
+        are pinned here against the v1.2.3 ``tokens`` CRD: ``username`` is the
+        only required field, ``jwtKeyRef`` is the current name of the signing
+        key reference (``jwtHs256KeyRef`` is deprecated), and ``secretRef``
+        names the Secret the operator writes. The Secret name and key must be
+        the ones slurm_client reads, the signing key the chart's
+        ``<release>-auth-jwt`` Secret, and the Role must grant ``get`` on
+        exactly the minted Secret.
+        """
+        from gco import slurm_config as sc
+        from gco.services import slurm_client
+
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        documents = _parse_manifest_documents(manifests_dir / "post-helm-slurm-api-access.yaml")
+        tokens = {doc["metadata"]["name"]: doc for doc in documents if doc["kind"] == "Token"}
+        assert set(tokens) == {"slinky-slurm-token-gco-api", "slinky-slurm-token-client"}
+        token = tokens["slinky-slurm-token-gco-api"]
+        client = tokens["slinky-slurm-token-client"]
+        assert client["spec"] == {
+            **token["spec"],
+            "secretRef": {"name": "slinky-slurm-client-token", "key": "auth-token"},
+        }
+        (role,) = [doc for doc in documents if doc["kind"] == "Role"]
+        (binding,) = [doc for doc in documents if doc["kind"] == "RoleBinding"]
+
+        assert token["apiVersion"] == "slinky.slurm.net/v1beta1"
+        assert token["metadata"]["namespace"] == sc.SLURM_NAMESPACE
+        assert token["metadata"]["name"] == slurm_client.SLURM_API_TOKEN_NAME
+        spec = token["spec"]
+        assert set(spec) <= {
+            "jwtKeyRef",
+            "jwtHs256KeyRef",
+            "lifetime",
+            "refresh",
+            "secretRef",
+            "username",
+        }
+        assert "jwtHs256KeyRef" not in spec, "deprecated in slurm-operator 1.2.x"
+        assert spec["username"] == slurm_client.SLURM_API_USER
+        assert spec["refresh"] is True
+        assert spec["jwtKeyRef"] == {
+            "name": f"{sc.SLURM_CLUSTER_CHART_NAME}-auth-jwt",
+            "key": "jwt.key",
+        }
+        assert spec["secretRef"] == {
+            "name": slurm_client.SLURM_API_TOKEN_SECRET,
+            "key": slurm_client.SLURM_API_TOKEN_KEY,
+        }
+        # A token that outlives the client's re-read window by a wide margin,
+        # so a refresh at 80% of the lifetime always lands before a re-read.
+        assert spec["lifetime"] == "1h"
+        assert slurm_client.TOKEN_REFRESH_SECONDS < 0.8 * 3600
+
+        assert role["rules"] == [
+            {
+                "apiGroups": [""],
+                "resources": ["secrets"],
+                "resourceNames": [slurm_client.SLURM_API_TOKEN_SECRET],
+                "verbs": ["get"],
+            }
+        ]
+        assert binding["roleRef"]["name"] == role["metadata"]["name"]
+        assert binding["subjects"] == [
+            {
+                "kind": "ServiceAccount",
+                "name": "gco-manifest-processor-sa",
+                "namespace": "gco-system",
+            }
+        ]
+
+    def test_slurm_gated_manifests_carry_only_registered_tokens(self, handler_module) -> None:
+        """Each Slurm manifest resolves with the regional stack's replacements."""
+        from gco import slurm_config as sc
+
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        config = sc.validate_slurm_config({"enabled": True})
+        replacements = {
+            "{{SLURM_ENABLED}}": "true",
+            "{{CLUSTER_OBSERVABILITY_ENABLED}}": "true",
+            "{{REGIONAL_SHARED_BUCKET}}": "bucket",
+            "{{REGIONAL_SHARED_BUCKET_REGION}}": "us-east-1",
+            **sc.compute_slurm_replacements(config, enabled=True),
+        }
+        for filename in (
+            "28-storage-slurm-gp3.yaml",
+            "post-helm-slurm-network.yaml",
+            "post-helm-slurm-api-access.yaml",
+            "post-helm-slurm-observability.yaml",
+            "29-slurm-accounting-db.yaml",
+            "post-helm-slurm-accounting-backup.yaml",
+        ):
+            text = (manifests_dir / filename).read_text(encoding="utf-8")
+            for token, value in replacements.items():
+                text = text.replace(token, value)
+            assert not handler_module._UNRESOLVED_PLACEHOLDER_RE.findall(text), filename
 
     def test_vector_store_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
         """Every ConfigMap in the gated vector-store manifest is pruned on disable.
@@ -4995,6 +5247,8 @@ _APPLY_DISPATCH = [
     _namespaced_custom("ScaledObject", "keda.sh/v1alpha1", "scaledobjects"),
     _namespaced_custom("ServiceMonitor", "monitoring.coreos.com/v1", "servicemonitors"),
     _namespaced_custom("PodMonitor", "monitoring.coreos.com/v1", "podmonitors"),
+    _namespaced_custom("PrometheusRule", "monitoring.coreos.com/v1", "prometheusrules"),
+    _namespaced_custom("Token", "slinky.slurm.net/v1beta1", "tokens"),
 ]
 
 _APPLY_DISPATCH_PARAMS = (
@@ -5118,6 +5372,55 @@ class TestApplyDispatchTable:
         assert result["Failed"] == f"10-obj.yaml:{kind}/{_APPLY_NAME}"
         getattr(api, patch_method).assert_not_called()
         assert f"API error applying {kind}/{_APPLY_NAME}: 403 - Forbidden" in caplog.text
+
+    def test_rejected_manifest_logs_the_api_servers_message(self, handler_module, tmp_path, caplog):
+        """A 422 names the offending field, not just the HTTP phrase.
+
+        The Slurm accounting StatefulSet probe change surfaced in the convergence
+        log as a bare "422 - Unprocessable Entity"; the Status message in the
+        response body ("may not specify more than 1 handler type") is what an
+        operator needs, so it is appended when present.
+        """
+        _write_apply_manifest(tmp_path, "StatefulSet", "apps/v1", handler_module)
+        status = json.dumps(
+            {
+                "kind": "Status",
+                "message": (
+                    'StatefulSet.apps "obj" is invalid: spec.template.spec.containers[0]'
+                    ".livenessProbe.tcpSocket: Forbidden: may not specify more than 1 handler type"
+                ),
+            }
+        )
+
+        with patch("handler.client") as mock_client, caplog.at_level(logging.ERROR):
+            api = mock_client.AppsV1Api.return_value
+            api.create_namespaced_stateful_set.side_effect = handler_module.ApiException(
+                status=422, reason="Unprocessable Entity"
+            )
+            api.create_namespaced_stateful_set.side_effect.body = status
+            result = _apply_base_pass(handler_module, tmp_path)
+
+        assert (result["AppliedCount"], result["FailedCount"]) == (0, 1)
+        assert (
+            f"API error applying StatefulSet/{_APPLY_NAME}: 422 - Unprocessable Entity: "
+            'StatefulSet.apps "obj" is invalid: spec.template.spec.containers[0]'
+            ".livenessProbe.tcpSocket: Forbidden: may not specify more than 1 handler type"
+        ) in caplog.text
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            None,
+            "",
+            "<html>bad gateway</html>",
+            json.dumps(["not", "a", "status"]),
+            json.dumps({"kind": "Status", "message": ""}),
+        ],
+    )
+    def test_api_error_detail_is_empty_without_a_status_message(self, handler_module, body):
+        exc = handler_module.ApiException(status=500, reason="Internal Server Error")
+        exc.body = body
+        assert handler_module._api_error_detail(exc) == ""
 
 
 class TestStorageClassApply:
@@ -6355,3 +6658,138 @@ class TestLambdaHandlerDelete:
             event["PhysicalResourceId"],
             "Unsupported RequestType: Read",
         )
+
+
+from kubernetes.client.rest import ApiException  # noqa: E402  (test-local import, see above)
+
+
+class TestGeneratedSecrets:
+    """Secrets annotated gco.io/generate-keys get in-cluster random values.
+
+    The Slurm accounting database password
+    (29-slurm-accounting-db.yaml) is the first consumer: the manifest
+    ships no data for the listed keys, the applier fills them when it creates
+    the Secret, and a redeploy never rotates them behind the database's back.
+    """
+
+    @staticmethod
+    def _secret(keys: str | None, **fields):
+        document = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "db-creds", "namespace": _APPLY_NAMESPACE, "annotations": {}},
+            "type": "Opaque",
+            **fields,
+        }
+        if keys is not None:
+            document["metadata"]["annotations"]["gco.io/generate-keys"] = keys
+        return document
+
+    def test_unannotated_secret_lists_no_generated_keys(self, handler_module):
+        assert handler_module._generated_secret_keys(self._secret(None)) == []
+        assert handler_module._generated_secret_keys({"kind": "Secret"}) == []
+        assert handler_module._generated_secret_keys(self._secret("  ")) == []
+        assert handler_module._generated_secret_keys(
+            self._secret(" password , root-password ,")
+        ) == [
+            "password",
+            "root-password",
+        ]
+
+    def test_shipping_a_value_for_a_generated_key_is_rejected(self, handler_module):
+        with pytest.raises(ValueError, match=r"generated key\(s\) \['password'\].*also ships"):
+            handler_module._generated_secret_keys(
+                self._secret("password", stringData={"password": "x"})
+            )
+        with pytest.raises(ValueError, match=r"\['root-password'\]"):
+            handler_module._generated_secret_keys(
+                self._secret("password,root-password", data={"root-password": "eA=="})
+            )
+
+    def test_new_secret_is_created_with_random_values(self, handler_module, tmp_path):
+        document = self._secret("password,root-password")
+        (tmp_path / "10-secret.yaml").write_text(yaml.safe_dump(document))
+        with patch("handler.client") as mock_client:
+            api = mock_client.CoreV1Api.return_value
+            api.read_namespaced_secret.side_effect = ApiException(status=404)
+            result = _apply_base_pass(handler_module, tmp_path)
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        ((namespace,), kwargs) = api.create_namespaced_secret.call_args
+        assert namespace == _APPLY_NAMESPACE
+        body = kwargs["body"]
+        generated = body["stringData"]
+        assert set(generated) == {"password", "root-password"}
+        assert all(len(value) >= 40 for value in generated.values())
+        assert generated["password"] != generated["root-password"]
+        # The manifest itself stays credential-free.
+        assert "stringData" not in document
+        api.patch_namespaced_secret.assert_not_called()
+
+    def test_existing_secret_is_left_untouched(self, handler_module, tmp_path):
+        document = self._secret("password,root-password")
+        (tmp_path / "10-secret.yaml").write_text(yaml.safe_dump(document))
+        with patch("handler.client") as mock_client:
+            api = mock_client.CoreV1Api.return_value
+            api.read_namespaced_secret.return_value = SimpleNamespace(
+                data={"password": "YQ==", "root-password": "Yg=="}
+            )
+            result = _apply_base_pass(handler_module, tmp_path)
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        api.create_namespaced_secret.assert_not_called()
+        api.patch_namespaced_secret.assert_not_called()
+
+    def test_only_missing_generated_keys_are_added(self, handler_module, tmp_path):
+        document = self._secret("password,root-password")
+        (tmp_path / "10-secret.yaml").write_text(yaml.safe_dump(document))
+        with patch("handler.client") as mock_client:
+            api = mock_client.CoreV1Api.return_value
+            api.read_namespaced_secret.return_value = SimpleNamespace(data={"password": "YQ=="})
+            result = _apply_base_pass(handler_module, tmp_path)
+        assert (result["AppliedCount"], result["FailedCount"]) == (1, 0)
+        api.create_namespaced_secret.assert_not_called()
+        ((name, namespace), kwargs) = api.patch_namespaced_secret.call_args
+        assert (name, namespace) == ("db-creds", _APPLY_NAMESPACE)
+        assert set(kwargs["body"]["stringData"]) == {"root-password"}
+
+    def test_existing_secret_without_data_gets_every_key(self, handler_module):
+        api = MagicMock()
+        api.read_namespaced_secret.return_value = SimpleNamespace(data=None)
+        handler_module._apply_generated_secret(
+            api, self._secret("password"), _APPLY_NAMESPACE, "db-creds", ["password"]
+        )
+        assert set(api.patch_namespaced_secret.call_args.kwargs["body"]["stringData"]) == {
+            "password"
+        }
+
+    def test_read_errors_other_than_not_found_propagate(self, handler_module, tmp_path):
+        document = self._secret("password")
+        (tmp_path / "10-secret.yaml").write_text(yaml.safe_dump(document))
+        with patch("handler.client") as mock_client:
+            api = mock_client.CoreV1Api.return_value
+            api.read_namespaced_secret.side_effect = ApiException(status=500)
+            result = _apply_base_pass(handler_module, tmp_path)
+        assert (result["AppliedCount"], result["FailedCount"]) == (0, 1)
+        api.create_namespaced_secret.assert_not_called()
+
+    def test_accounting_db_manifest_generates_both_database_passwords(self, handler_module):
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        documents = _parse_manifest_documents(manifests_dir / "29-slurm-accounting-db.yaml")
+        (secret,) = [doc for doc in documents if doc["kind"] == "Secret"]
+        assert handler_module._generated_secret_keys(secret) == ["password", "root-password"]
+        assert "data" not in secret and "stringData" not in secret
+        (statefulset,) = [doc for doc in documents if doc["kind"] == "StatefulSet"]
+        env = statefulset["spec"]["template"]["spec"]["containers"][0]["env"]
+        refs = {
+            item["name"]: item["valueFrom"]["secretKeyRef"] for item in env if "valueFrom" in item
+        }
+        assert refs["MARIADB_PASSWORD"] == {"name": secret["metadata"]["name"], "key": "password"}
+        assert refs["MARIADB_ROOT_PASSWORD"] == {
+            "name": secret["metadata"]["name"],
+            "key": "root-password",
+        }
+        assert statefulset["spec"]["persistentVolumeClaimRetentionPolicy"] == {
+            "whenDeleted": "Delete",
+            "whenScaled": "Retain",
+        }

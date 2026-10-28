@@ -46,6 +46,7 @@ registered groups; this table only says what each module owns.
 | `nodepools_cmd.py` | `gco nodepools ...` | Manage Karpenter NodePools with ODCR/Capacity Reservation support. | [reference](../../docs/CLI.md#nodepools-commands) |
 | `queue_cmd.py` | `gco queue ...` | Manage the global job queue (DynamoDB-backed). | [reference](../../docs/CLI.md#queue-commands) |
 | `release_cmd.py` | `gco release ...` | Release validation lifecycle. | [reference](../../docs/CLI.md#release-commands) |
+| `slurm_cmd.py` | `gco slurm ...` | Slurm cluster (cdk.json helm.slurm): queue, submit, accounting, login shell. | [reference](../../docs/CLI.md#slurm-commands) |
 | `stacks_cmd.py` | `gco stacks ...` | Deploy and manage GCO CDK stacks. | [reference](../../docs/CLI.md#stacks-commands) |
 | `status_cmd.py` | `gco status` | Show fleet-wide deployment status across configured regions. | [reference](../../docs/CLI.md#status-commands) |
 | `storage_cmd.py` | `gco storage ...` | Discover and sync user-facing GCO S3 buckets. | [reference](../../docs/CLI.md#storage-commands) |

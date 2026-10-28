@@ -21,7 +21,7 @@ GCO ships with seven scheduling and orchestration tools, each designed for diffe
 | [KubeRay](KUBERAY.md) | Ray operator | Yes | Distributed computing, hyperparameter tuning, Ray Serve |
 | [KEDA](KEDA.md) | Event-driven autoscaler | Yes (mandatory) | Scale-to-zero, SQS triggers, metric-based scaling |
 | [Kubeflow Trainer](DISTRIBUTED_TRAINING.md) | Training operator | Yes | Multi-node PyTorch `TrainJob`s against platform-shipped runtimes |
-| [Slurm (Slinky)](SLURM_OPERATOR.md) | HPC scheduler | Opt-in | sbatch/srun workflows, HPC migration, deterministic scheduling |
+| [Slurm (Slinky)](SLURM_OPERATOR.md) | HPC scheduler | Opt-in | sbatch/srun/sacct workflows, HPC migration, whole-node GPU jobs, accounting; autoscaled partitions from zero |
 | [YuniKorn](YUNIKORN.md) | App-aware scheduler | Opt-in | Multi-tenant queues, hierarchical quotas, fair sharing |
 
 > **Warning:** If you enable multiple schedulers with GPU quotas (Kueue ClusterQueues, Volcano Queues, YuniKorn queues, Slurm GPU NodeSets), ensure the total doesn't exceed your physical GPU count. See [GPU Quota Coordination](#gpu-quota-coordination) below — misconfiguration can deadlock your cluster.
@@ -92,8 +92,8 @@ Use **KubeRay**. It manages Ray clusters with autoscaling worker groups.
 
 ### "My team uses Slurm and I want to keep sbatch/srun"
 
-Use **Slurm (Slinky)**. Enable it (`helm.slurm.enabled` in `cdk.json`) and GCO deploys a ready-to-use Slurm cluster.
-→ `examples/slurm-cluster-job.yaml`
+Use **Slurm (Slinky)**. Enable it (`helm.slurm.enabled` in `cdk.json`) and GCO deploys a production Slurm cluster: autoscaled CPU and GPU partitions, accounting with backups, a login pod, metrics and alerts, and `sbatch`/`squeue`/`sacct` through the GCO API (`gco slurm ...`).
+→ `examples/slurm-cluster-job.yaml`, [SLURM_OPERATOR.md](SLURM_OPERATOR.md)
 
 ### "I need multi-tenant fair sharing with a web UI"
 
@@ -109,7 +109,7 @@ Common combinations:
 | Kueue + Volcano | Quota-controlled gang-scheduled training jobs |
 | KEDA + Kueue | Event-triggered jobs with quota admission control |
 | KubeRay + Kueue | Ray clusters with resource quota management |
-| Slurm + KEDA | Slurm workers that autoscale based on queue depth |
+| Slurm + KEDA | Slurm worker NodeSets that autoscale from zero on slurmctld's pending-job metrics (shipped) |
 | Volcano + KEDA | Gang-scheduled jobs triggered by external events |
 
 ## Scheduler Coexistence
@@ -143,7 +143,7 @@ This is the most important thing to get right. GPU quotas are defined independen
 | YuniKorn | Queue `max` resources | Pods scheduled by YuniKorn |
 | Kueue | ClusterQueue `nominalQuota` | Jobs admitted by Kueue |
 | Volcano | Queue `capability` | Volcano Jobs only |
-| Slurm | NodeSet `replicas` × GPU per worker | Slurm jobs only |
+| Slurm | `helm.slurm.partitions.<name>.max_nodes` × `gpus` per worker (checked against `resource_quota` at synth) | Slurm jobs only |
 
 **The quotas don't talk to each other.** If you configure 8 GPUs in YuniKorn queues, 8 in Kueue ClusterQueues, 4 in Volcano Queues, and 2 in Slurm GPU workers, you've promised 22 GPUs across systems — but you might only have 8 physical GPUs.
 
@@ -151,7 +151,7 @@ This is the most important thing to get right. GPU quotas are defined independen
 
 ```text
 Example: 8 physical GPUs
-├── Slurm GPU workers: 0 (CPU-only by default, no GPU conflict)
+├── Slurm gpu partition: 0–4 workers × 1 GPU, held only while Slurm has GPU work (min_nodes 0)
 ├── Volcano Queue cap: 4 GPUs (for gang-scheduled training)
 ├── Kueue ClusterQueue: 4 GPUs (for standard batch jobs)
 └── YuniKorn queue max: 8 GPUs (YuniKorn sees all pods, so set to total)

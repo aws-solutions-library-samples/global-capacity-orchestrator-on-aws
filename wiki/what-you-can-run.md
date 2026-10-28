@@ -22,7 +22,7 @@ and Kueue enabled by default, Slurm (Slinky) and YuniKorn opt-in:
   ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/ray-cluster.yaml))
 - **KEDA** — event-driven autoscaling and scale-to-zero (SQS and 60+ sources)
   ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/keda-scaled-job.yaml))
-- **Slurm (Slinky)** — sbatch/srun workflows and HPC migration
+- **Slurm (Slinky)** — sbatch/srun/sacct workflows and HPC migration: autoscaled CPU and GPU partitions, accounting, a login shell and the `gco slurm` CLI
   ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/slurm-cluster-job.yaml))
 - **YuniKorn** — multi-tenant queues and hierarchical quotas
   ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/yunikorn-job.yaml))

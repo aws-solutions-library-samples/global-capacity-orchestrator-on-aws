@@ -830,7 +830,7 @@ class TestGatewayLockstepValidation:
 
 
 class TestSlinkySlurmValuesShape:
-    """Pin the slinky-slurm values in the LIVE charts.yaml to the chart's schema.
+    """Pin the DEPLOYED slinky-slurm values to the chart's schema.
 
     Helm merges unknown value keys silently, so a misspelled key deploys a
     half-configured cluster with no error anywhere. Both shapes below were
@@ -841,18 +841,46 @@ class TestSlinkySlurmValuesShape:
     partition-less submission (``sbatch --wrap``, the REST probe,
     ``examples/slurm-cluster-job.yaml``) failed with rc 2001.
 
+    The deployed values are the static charts.yaml layer (pins and sizing)
+    deep-merged with what ``gco.slurm_config.slurm_chart_values`` renders from
+    ``helm.slurm`` — the same merge the helm installer performs — so the
+    assertions run against the result of that merge for the shipped defaults.
+
     Chart schema reference: ``helm show values oci://ghcr.io/slinkyproject/charts/slurm``
     — ``nodesets`` is a lowercase MAP keyed by NodeSet name; ``partitions`` is
-    a map whose entries carry ``enabled`` + ``configMap``.
+    a map whose entries carry ``enabled`` + ``configMap``, and every NodeSet
+    may also carry its own ``partition`` block.
     """
 
     @pytest.fixture(scope="class")
     @staticmethod
-    def slinky_values() -> dict:
+    def static_values() -> dict:
         import yaml
 
         charts = yaml.safe_load(LIVE_CHARTS.read_text(encoding="utf-8"))["charts"]
         return charts["slinky-slurm"]["values"]
+
+    @pytest.fixture(scope="class")
+    @staticmethod
+    def slinky_values(static_values: dict) -> dict:
+        from gco import slurm_config as sc
+        from tests._lambda_imports import load_lambda_module
+
+        installer = load_lambda_module("helm-installer")
+        rendered = sc.slurm_chart_values(
+            sc.validate_slurm_config({"enabled": True}), fsx_enabled=False
+        )
+        return installer.deep_merge(static_values, rendered)
+
+    def test_static_layer_leaves_nodesets_and_loginsets_to_the_rendered_layer(
+        self, static_values: dict
+    ) -> None:
+        # A static NodeSet would survive the deep merge beside the rendered
+        # partitions and come up as an unconfigured, unscaled worker pool.
+        assert static_values["nodesets"] == {}
+        assert static_values["loginsets"] == {}
+        assert static_values["partitions"] == {"all": {"enabled": False}}
+        assert static_values["accounting"]["enabled"] is False
 
     def test_no_camelcase_nodesets_key(self, slinky_values: dict) -> None:
         assert "nodeSets" not in slinky_values, (
@@ -873,30 +901,73 @@ class TestSlinkySlurmValuesShape:
                 f"nodesets.{name} carries a 'name' key — that's the list shape; "
                 "the map key IS the NodeSet name"
             )
+            assert spec["enabled"] is True
+            assert spec["partition"]["enabled"] is True
 
-    def test_default_partition_exists_and_spans_nodesets(self, slinky_values: dict) -> None:
-        partitions = slinky_values.get("partitions")
-        assert isinstance(partitions, dict) and partitions, (
-            "slinky-slurm values must define 'partitions' — without one, "
-            "slurmctld has no default partition and every partition-less "
-            "submission fails with rc 2001"
-        )
-        enabled = {
-            name: spec
-            for name, spec in partitions.items()
-            if isinstance(spec, dict) and spec.get("enabled")
+    def test_autoscaled_replicas_rule_names_the_rendered_nodesets(
+        self, slinky_values: dict
+    ) -> None:
+        """The installer's live-replicas carry-over must find the NodeSets the
+        rendered ScaledObjects target: the rule's ``object_name`` is
+        ``gco.slurm_config.nodeset_name``, its ``kind`` the ScaledObject
+        target kind, and every autoscaled partition is a key of ``nodesets``."""
+        import yaml
+
+        from gco import slurm_config as sc
+
+        charts = yaml.safe_load(LIVE_CHARTS.read_text(encoding="utf-8"))["charts"]
+        rule = charts["slinky-slurm"]["autoscaled_replicas"]
+        assert rule["values_key"] == "nodesets"
+        assert rule["resource"] == "nodesets.slinky.slurm.net"
+        for name in slinky_values["nodesets"]:
+            assert rule["object_name"].format(name=name) == sc.nodeset_name(name)
+        targets = {
+            (obj["spec"]["scaleTargetRef"]["kind"], obj["spec"]["scaleTargetRef"]["name"])
+            for obj in slinky_values["extraObjects"]
+            if obj["kind"] == "ScaledObject"
         }
-        assert enabled, "at least one partitions entry must set enabled: true"
+        assert targets, "the shipped defaults autoscale at least one partition"
+        assert {kind for kind, _ in targets} == {rule["kind"]}
+        assert targets <= {
+            (rule["kind"], rule["object_name"].format(name=name))
+            for name in slinky_values["nodesets"]
+        }
+
+    def test_exactly_one_default_partition(self, slinky_values: dict) -> None:
+        """One NodeSet partition carries Default=YES; the chart's catch-all is off."""
+        assert slinky_values["partitions"] == {"all": {"enabled": False}}
         defaults = [
             name
-            for name, spec in enabled.items()
-            if str((spec.get("configMap") or {}).get("Default", "")).upper() == "YES"
+            for name, spec in slinky_values["nodesets"].items()
+            if str(spec["partition"]["configMap"].get("Default", "")).upper() == "YES"
         ]
-        assert defaults, (
-            "exactly one enabled partition must carry configMap.Default: 'YES' so "
-            "sbatch/REST submissions without an explicit partition are accepted"
+        assert defaults == ["cpu"], (
+            "exactly one NodeSet partition must be Slurm's default; without one "
+            "every partition-less submission fails with rc 2001"
         )
-        assert len(defaults) == 1, f"multiple default partitions defined: {defaults}"
+
+    def test_every_image_tag_is_pinned_in_lockstep(self, slinky_values: dict) -> None:
+        """Every Slinky image carries the one Slurm tag; sidecars are pinned too."""
+        from gco import slurm_config as sc
+
+        slurm_images = {
+            "controller.slurmctld": slinky_values["controller"]["slurmctld"]["image"],
+            "controller.reconfigure": slinky_values["controller"]["reconfigure"]["image"],
+            "restapi.slurmrestd": slinky_values["restapi"]["slurmrestd"]["image"],
+            "accounting.slurmdbd": slinky_values["accounting"]["slurmdbd"]["image"],
+            "nodesetDefaults.slurmd": slinky_values["nodesetDefaults"]["slurmd"]["image"],
+            "loginsetDefaults.login": slinky_values["loginsetDefaults"]["login"]["image"],
+        }
+        for path, image in slurm_images.items():
+            assert image["repository"].startswith("ghcr.io/slinkyproject/"), path
+            assert image["tag"] == sc.SLURM_IMAGE_TAG, path
+        for path, image in {
+            "controller.logfile": slinky_values["controller"]["logfile"]["image"],
+            "nodesetDefaults.logfile": slinky_values["nodesetDefaults"]["logfile"]["image"],
+            "loginsetDefaults.initconf": slinky_values["loginsetDefaults"]["initconf"]["image"],
+        }.items():
+            assert image == sc.SLURM_SIDECAR_IMAGE, f"{path} must be the pinned sidecar image"
+            assert image["tag"] != "latest"
 
 
 # ── bounded re-pass over failed charts (offline) ──────────────────────────────

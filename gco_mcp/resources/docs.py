@@ -466,11 +466,11 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
     },
     "slurm-cluster-job": {
         "category": "Schedulers",
-        "summary": "Slinky Slurm Operator — sbatch submission on Kubernetes for HPC workloads.",
+        "summary": "Slurm on GCO — an in-cluster client submits through slurmrestd with the operator-minted token, waits on an autoscaled worker and checks the accounting record.",
         "gpu": "no",
         "opt_in": 'Slurm ("helm": {"slurm": {"enabled": true}} in cdk.json)',
         "submission": "kubectl apply -f examples/slurm-cluster-job.yaml",
-        "keywords": ["slurm", "hpc", "sbatch", "slinky"],
+        "keywords": ["slurm", "hpc", "sbatch", "slinky", "slurmrestd", "sacct"],
         "instance_types": [],
         "use_cases": [
             "submit sbatch jobs on Kubernetes",
@@ -1331,7 +1331,7 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         "related": ["VOLCANO", "KUEUE", "KUBERAY"],
     },
     "SLURM_OPERATOR": {
-        "summary": "Slinky Slurm Operator integration — runs sbatch, srun, and salloc inside an EKS cluster for HPC workflows.",
+        "summary": "Slurm on GCO (Slinky) — autoscaled CPU/GPU/EFA partitions from zero, accounting with S3 backups, a login pod, metrics and alerts, the /api/v1/slurm API and gco slurm CLI, and a comparison with AWS PCS.",
         "topics": ["schedulers", "jobs", "hpc"],
         "keywords": [
             "slurm",
@@ -1342,6 +1342,11 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
             "hpc",
             "scientific computing",
             "mpi",
+            "sacct",
+            "accounting",
+            "pcs",
+            "autoscaling",
+            "partition",
         ],
         "related": ["SCHEDULERS", "VOLCANO"],
     },

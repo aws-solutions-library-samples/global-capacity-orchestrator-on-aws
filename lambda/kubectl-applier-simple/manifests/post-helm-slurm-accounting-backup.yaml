@@ -1,0 +1,180 @@
+# Nightly logical backup of the Slurm accounting database to S3.
+#
+# The in-cluster accounting database (29-slurm-accounting-db.yaml) is
+# one gp3 volume; this CronJob is its durability. On the configured schedule
+# (helm.slurm.accounting.backup.schedule) an init container runs mariadb-dump
+# against the database into a shared scratch volume and the main container
+# uploads the compressed dump to this region's always-on general-purpose
+# bucket (27-storage-regional-shared-bucket.yaml) under
+#   slurm/accounting-backups/<cluster name>/<UTC timestamp>.sql.gz
+# The bucket's default KMS encryption covers the object, and a lifecycle rule
+# the regional stack adds for that prefix expires dumps after
+# helm.slurm.accounting.backup.retention_days. Restore: `mariadb slurm_acct_db
+# < dump.sql` against the database Service with the root password from the
+# slinky-slurm-mariadb Secret (docs/SLURM_OPERATOR.md, "Accounting").
+#
+# Identity is gco-service-account (01-serviceaccounts.yaml): its EKS Pod
+# Identity association grants read/write on exactly the regional bucket and
+# use of its KMS key, and nothing else. The database password reaches
+# mariadb-dump through MYSQL_PWD, never a command-line argument, so it is not
+# visible in the process list. Egress needs nothing new: the database is in
+# the namespace, S3 is HTTPS, and the Pod Identity Agent rule exists.
+#
+# Gated on {{SLURM_ACCOUNTING_BACKUP_ENABLED}} and the schedule token:
+# rendered only while Slurm is on, accounting uses the in-cluster database and
+# backups are enabled; otherwise skipped and pruned.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: slinky-slurm-accounting-backup
+  namespace: gco-jobs
+  labels:
+    project: gco
+    app.kubernetes.io/part-of: slurm
+    app.kubernetes.io/name: accounting-backup
+  annotations:
+    gco.io/slurm-accounting-backup-enabled: "{{SLURM_ACCOUNTING_BACKUP_ENABLED}}"
+    checkov.io/skip1: CKV_K8S_43=MariaDB and the AWS CLI are published by version tag on ECR Public; pinned tags are preferred over digests for maintainability
+    checkov.io/skip2: CKV_K8S_15=Pinned immutable tags; IfNotPresent avoids re-pulling the images on every run
+    checkov.io/skip3: CKV_K8S_40=The MariaDB image's mysql user is UID 999 and the dump runs as it; the uploader runs as a high UID
+spec:
+  schedule: "{{SLURM_ACCOUNTING_BACKUP_SCHEDULE}}"
+  timeZone: Etc/UTC
+  # Never overlap two dumps; a run that cannot start within an hour is skipped
+  # rather than piled onto the next one.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      ttlSecondsAfterFinished: 172800
+      template:
+        metadata:
+          labels:
+            project: gco
+            app.kubernetes.io/part-of: slurm
+            app.kubernetes.io/name: accounting-backup
+          annotations:
+            karpenter.sh/do-not-disrupt: "true"
+        spec:
+          serviceAccountName: gco-service-account
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          # Same placement as the database (29-slurm-accounting-db.yaml): never
+          # an accelerator pool, which the gco-jobs LimitRange's nvidia.com/gpu
+          # default would otherwise make eligible.
+          nodeSelector:
+            kubernetes.io/os: linux
+            kubernetes.io/arch: amd64
+            karpenter.sh/capacity-type: on-demand
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: workload-type
+                        operator: DoesNotExist
+          securityContext:
+            runAsNonRoot: true
+            fsGroup: 10000
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: dump
+              image: public.ecr.aws/docker/library/mariadb:11.8.9
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  mariadb-dump --host="${DB_HOST}" --port="${DB_PORT}" --user="${DB_USER}" \
+                    --single-transaction --quick --routines --events --triggers \
+                    "${DB_NAME}" | gzip -9 > /backup/slurm_acct_db.sql.gz
+                  echo "dumped ${DB_NAME}: $(stat -c %s /backup/slurm_acct_db.sql.gz) bytes"
+              env:
+                - name: DB_HOST
+                  value: slinky-slurm-mariadb
+                - name: DB_PORT
+                  value: "3306"
+                - name: DB_NAME
+                  value: slurm_acct_db
+                - name: DB_USER
+                  value: slurm
+                - name: MYSQL_PWD
+                  valueFrom:
+                    secretKeyRef:
+                      name: slinky-slurm-mariadb
+                      key: password
+              securityContext:
+                runAsUser: 999
+                runAsGroup: 999
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 256Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                - name: tmp
+                  mountPath: /tmp
+          containers:
+            - name: upload
+              image: public.ecr.aws/aws-cli/aws-cli:2.39.0
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                  key="slurm/accounting-backups/${SLURM_CLUSTER_NAME}/${stamp}.sql.gz"
+                  aws s3 cp /backup/slurm_acct_db.sql.gz "s3://${BACKUP_BUCKET}/${key}" --only-show-errors
+                  echo "GCO_SLURM_ACCOUNTING_BACKUP s3://${BACKUP_BUCKET}/${key} $(stat -c %s /backup/slurm_acct_db.sql.gz) bytes"
+              env:
+                - name: BACKUP_BUCKET
+                  value: "{{REGIONAL_SHARED_BUCKET}}"
+                - name: SLURM_CLUSTER_NAME
+                  value: "{{SLURM_CLUSTER_NAME}}"
+                - name: AWS_REGION
+                  value: "{{REGIONAL_SHARED_BUCKET_REGION}}"
+                # The CLI caches under $HOME; the root filesystem is read-only.
+                - name: HOME
+                  value: /tmp
+              securityContext:
+                runAsUser: 10000
+                runAsGroup: 10000
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backup
+              emptyDir:
+                sizeLimit: 20Gi
+            - name: tmp
+              emptyDir: {}

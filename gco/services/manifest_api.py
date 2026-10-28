@@ -236,6 +236,7 @@ from gco.services.api_routes.cost import router as cost_router  # noqa: E402
 from gco.services.api_routes.jobs import router as jobs_router  # noqa: E402
 from gco.services.api_routes.manifests import router as manifests_router  # noqa: E402
 from gco.services.api_routes.queue import router as queue_router  # noqa: E402
+from gco.services.api_routes.slurm import router as slurm_router  # noqa: E402
 from gco.services.api_routes.templates import router as templates_router  # noqa: E402
 from gco.services.api_routes.webhooks import router as webhooks_router  # noqa: E402
 
@@ -245,6 +246,7 @@ app.include_router(templates_router)
 app.include_router(webhooks_router)
 app.include_router(queue_router)
 app.include_router(cost_router)
+app.include_router(slurm_router)
 
 
 # =============================================================================

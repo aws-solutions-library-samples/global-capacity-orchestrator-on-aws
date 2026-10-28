@@ -131,6 +131,12 @@ spec:
               value: "{{TRACING_ENABLED}}"
             - name: GCO_TRACING_SAMPLE_RATIO
               value: "{{TRACING_SAMPLE_RATIO}}"
+            # The /api/v1/slurm/* routes (gco/services/api_routes/slurm.py)
+            # proxy to slurmrestd in gco-jobs with the operator-minted token
+            # from post-helm-slurm-api-access.yaml; "false" turns them into
+            # a 404 with the enablement remedy. Always rendered, like tracing.
+            - name: GCO_SLURM_ENABLED
+              value: "{{SLURM_API_ENABLED}}"
             - name: POD_NAME
               valueFrom:
                 fieldRef:

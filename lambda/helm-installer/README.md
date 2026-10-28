@@ -57,7 +57,12 @@ Grafana and `mlflow-tls-proxy` in MLflow (both run from the manifest-processor
 image) and `opencost-tls-proxy` in OpenCost (run from the cost-monitor image),
 each with an amd64 node selector because those images are amd64-only; Grafana
 rolls out with the `Recreate` strategy because its one replica owns a
-ReadWriteOnce volume. In install order:
+ReadWriteOnce volume. A chart entry may declare `autoscaled_replicas` (kind,
+resource, the values map and the live object's name pattern): before every
+upgrade the installer reads the live `spec.replicas` of each object a KEDA
+ScaledObject in the values' `extraObjects` targets and applies that value, so
+Helm's server-side apply never conflicts with the autoscaler's field ownership
+(the Slinky Slurm cluster's NodeSets use this). In install order:
 
 | Chart | Namespace | Shipped default |
 |-------|-----------|-----------------|
