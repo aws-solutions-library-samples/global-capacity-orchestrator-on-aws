@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-10-05T01:20:02Z">
-        <meta name="gco-source-commit" content="d0400a273ab7af4345ee9b4ee7c1900474019901">
-        <meta name="gco-flow-digest" content="618d395585831bb5">
+        <meta name="gco-generated-at" content="2026-08-30T12:00:00Z">
+        <meta name="gco-source-commit" content="8cb8e766461f5b7f35205e12db980988598cf6d5">
+        <meta name="gco-flow-digest" content="e5afcae47f834a11">
         <title>API Gateway Proxy Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -231,9 +231,10 @@ cond65=>condition: except (KeyError, ValueError)
 io72=>inputoutput: output: _error_response(503, 'Global backend routing is temporarily unavailable')
 e70=>end: end function return
 op78=>operation: headers = sanitize_request_headers(headers)
-sub80=>subroutine: headers.update(build_signed_headers(signing_key, http_method, target_url, body))
-io85=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context))
-e83=>end: end function return
+sub80=>subroutine: headers.update(caller_identity_headers(event))
+sub82=>subroutine: headers.update(build_signed_headers(signing_key, http_method, target_url, body))
+io87=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context))
+e85=>end: end function return
 
 op2->op7
 op7->cond4
@@ -258,8 +259,9 @@ cond65(yes)->io72
 io72->e70
 cond65(no)->op78
 op78->sub80
-sub80->io85
-io85->e83
+sub80->sub82
+sub82->io87
+io87->e85
 cond60(no)->op78
 cond4(no)->op22
 </textarea></div>
@@ -271,17 +273,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-10-05T01:20:02Z -->
-        <!-- Generated from Git commit: d0400a273ab7af4345ee9b4ee7c1900474019901 -->
+        <!-- Generated at (UTC): 2026-08-30T12:00:00Z -->
+        <!-- Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-10-05T01:20:02Z">2026-10-05T01:20:02Z</time>
+            Generated at (UTC): <time datetime="2026-08-30T12:00:00Z">2026-08-30T12:00:00Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>d0400a273ab7af4345ee9b4ee7c1900474019901</code>
+            Source commit: <code>8cb8e766461f5b7f35205e12db980988598cf6d5</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>618d395585831bb5</code>
+            Flow content SHA-256: <code>e5afcae47f834a11</code>
           </p>
           <div id="canvas"></div>
         </div>
