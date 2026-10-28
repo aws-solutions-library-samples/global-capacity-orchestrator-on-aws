@@ -105,6 +105,11 @@ def _stub(context: dict[str, Any], *, enabled: bool, observability: dict[str, An
     stub._opencost_chart_values = lambda: RS._opencost_chart_values(stub)
     stub._mlflow_active = lambda: RS._mlflow_active(stub)
     stub._mlflow_chart_values = lambda: RS._mlflow_chart_values(stub)
+    # The Slurm chart values ride the same override builder when helm.slurm
+    # is on (the context strategy may enable it).
+    stub._slurm_config = lambda: RS._slurm_config(stub)
+    stub._slurm_fsx_enabled = lambda: RS._slurm_fsx_enabled(stub)
+    stub._slurm_charts_enabled = lambda: RS._slurm_charts_enabled(stub)
     return stub
 
 

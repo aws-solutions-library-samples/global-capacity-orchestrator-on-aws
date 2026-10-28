@@ -359,6 +359,23 @@ class TestApiGatewayProxyHandler:
         assert target_url.endswith("?tag=first+value&tag=second%26value")
         assert "tag=last" not in target_url
 
+    def test_forwards_the_sigv4_principal(self, api_gw_proxy_module):
+        handler, _, mock_pool = api_gw_proxy_module
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {}
+        mock_response.data = b"OK"
+        mock_pool.request.return_value = mock_response
+        arn = "arn:aws:iam::123456789012:user/alice"
+
+        event = self._make_event(headers={"x-gco-caller": "arn:aws:iam::1:user/mallory"})
+        event["requestContext"] = {"identity": {"userArn": arn}}
+        handler.lambda_handler(event, None)
+
+        call_args = mock_pool.request.call_args
+        forwarded = call_args[1]["headers"] if "headers" in call_args[1] else call_args[0][2]
+        assert forwarded["x-gco-caller"] == arn
+
     def test_target_region_header_fails_closed(self, api_gw_proxy_module):
         handler, _, mock_pool = api_gw_proxy_module
 
@@ -538,6 +555,76 @@ class TestRegionalApiProxyHandler:
         assert forwarded_headers["x-gco-signature-version"] == "v1"
         assert len(forwarded_headers["x-gco-signature"]) == 64
         assert len(forwarded_headers["x-gco-nonce"]) == 32
+
+    def test_forwards_the_sigv4_principal_and_drops_a_spoofed_one(self, regional_proxy_module):
+        """The caller's ARN comes from API Gateway's request context only.
+
+        The Slurm routes stamp it into each job's comment for accounting, so
+        a client must not be able to pick its own: a client-supplied
+        ``x-gco-caller`` is dropped by the allowlist and replaced by the
+        authenticated identity (or by nothing when the context has none).
+        """
+        handler, _, mock_pool = regional_proxy_module
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {}
+        mock_response.data = b"OK"
+        mock_pool.request.return_value = mock_response
+        arn = "arn:aws:sts::123456789012:assumed-role/Admin/alice"
+
+        event = self._make_event(headers={"x-gco-caller": "arn:aws:iam::1:user/mallory"})
+        event["requestContext"] = {"identity": {"userArn": arn}}
+        handler.lambda_handler(event, None)
+        call_args = mock_pool.request.call_args
+        forwarded = call_args[1]["headers"] if "headers" in call_args[1] else call_args[0][2]
+        assert forwarded["x-gco-caller"] == arn
+
+        event = self._make_event(headers={"X-GCO-Caller": "arn:aws:iam::1:user/mallory"})
+        handler.lambda_handler(event, None)
+        call_args = mock_pool.request.call_args
+        forwarded = call_args[1]["headers"] if "headers" in call_args[1] else call_args[0][2]
+        assert "x-gco-caller" not in forwarded
+
+
+class TestCallerIdentityHeaders:
+    @pytest.mark.parametrize(
+        "arn",
+        [
+            "arn:aws:iam::123456789012:user/alice",
+            "arn:aws:sts::123456789012:assumed-role/Admin/alice@example.com",
+            "arn:aws-us-gov:iam::123456789012:user/alice",
+            "arn:aws-cn:sts::123456789012:assumed-role/r/s",
+        ],
+    )
+    def test_well_formed_principals_are_forwarded(self, proxy_utils_module, arn):
+        proxy_utils, _, _ = proxy_utils_module
+        event = {"requestContext": {"identity": {"userArn": arn}}}
+        assert proxy_utils.caller_identity_headers(event) == {"x-gco-caller": arn}
+        assert "x-gco-caller" in proxy_utils._INTERNAL_SIGNATURE_HEADERS
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {},
+            {"requestContext": None},
+            {"requestContext": "junk"},
+            {"requestContext": {"identity": None}},
+            {"requestContext": {"identity": {"userArn": None}}},
+            {"requestContext": {"identity": {"userArn": ""}}},
+            {"requestContext": {"identity": {"userArn": "alice"}}},
+            {"requestContext": {"identity": {"userArn": "arn:aws:s3:::bucket"}}},
+            {"requestContext": {"identity": {"userArn": "arn:aws:iam::12:user/short-account"}}},
+            {"requestContext": {"identity": {"userArn": "arn:aws:iam::123456789012:user/a b"}}},
+            {
+                "requestContext": {
+                    "identity": {"userArn": "arn:aws:iam::123456789012:user/" + "x" * 300}
+                }
+            },
+        ],
+    )
+    def test_anything_else_yields_no_header(self, proxy_utils_module, event):
+        proxy_utils, _, _ = proxy_utils_module
+        assert proxy_utils.caller_identity_headers(event) == {}
 
 
 # ============================================================================

@@ -30,6 +30,17 @@ Applies a case-insensitive allowlist at the [API Gateway](https://docs.aws.amazo
 supplied authorization, forwarding, hop-by-hop, and internal signature headers
 are not forwarded.
 
+### `caller_identity_headers(event)`
+
+Returns the `x-gco-caller` header carrying the IAM user or STS assumed-role
+ARN API Gateway resolved from the request's SigV4 signature
+(`requestContext.identity.userArn`), or nothing when the context holds no
+well-formed IAM/STS ARN. Only the proxy sets it: a caller-supplied
+`x-gco-caller` is dropped by `sanitize_request_headers`, and the cluster API
+reads it only from requests whose HMAC envelope verifies. The manifest
+processor's `/api/v1/slurm` routes record it in each Slurm job's comment for
+accounting attribution.
+
 ### `build_signed_headers(signing_key, http_method, target_url, body)`
 
 Creates the short-lived HMAC envelope over version, timestamp, random nonce,

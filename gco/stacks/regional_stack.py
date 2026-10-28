@@ -141,6 +141,14 @@ from gco.inference_proxy_config import (
 )
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.service_images import discover_service_dockerfiles, service_dockerfile
+from gco.slurm_config import (
+    SLURM_ACCOUNTING_BACKUP_PREFIX,
+    SLURM_CLUSTER_CHART_NAME,
+    accounting_in_cluster,
+    compute_slurm_replacements,
+    slurm_chart_values,
+    validate_slurm_config,
+)
 from gco.stacks.aws_load_balancer_controller_policy import (
     aws_load_balancer_controller_policy_document,
 )
@@ -166,8 +174,8 @@ from gco.stacks.constants import (
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-23T11:52:58Z
-# Generated from Git commit: 6c1b25d9046fec3666f29c38a10fbefe6b833c00
+# Generated at (UTC): 2026-08-30T12:00:00Z
+# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)
@@ -486,7 +494,16 @@ _OFF_BY_DEFAULT_CHART_KEYS = frozenset({"argocd", "crossplane"})
 #: installer first deletes their custom resources (every discovered type,
 #: namespaced then cluster-scoped, with a finalizer-strip retry) before the
 #: ``helm uninstall`` itself. Every other non-LBC chart gets two minutes.
-_UNINSTALL_TIMEOUT_MINUTES: dict[str, int] = {"keda": 4, "argocd": 4, "crossplane": 6}
+_UNINSTALL_TIMEOUT_MINUTES: dict[str, int] = {
+    "keda": 4,
+    "argocd": 4,
+    "crossplane": 6,
+    # The Slinky cluster's NodeSets drain their Slurm nodes and carry
+    # job-protection PDBs; the installer deletes every slinky.slurm.net
+    # resource before `helm uninstall` so the controller is still there to
+    # clear the finalizers.
+    SLURM_CLUSTER_CHART_NAME: 4,
+}
 
 
 #: (container ceiling, namespace ceiling) pairs the resource-quota invariant
@@ -1990,6 +2007,26 @@ class GCORegionalStack(Stack):
         if not isinstance(raw, dict):
             return validate_argocd_config(None)
         return raw
+
+    def _slurm_config(self) -> dict[str, Any]:
+        """The validated ``helm.slurm`` block, or the all-default block.
+
+        Same optional-accessor posture as :meth:`_argocd_config`: config
+        doubles without ``get_slurm_config`` (or a ``MagicMock`` returning a
+        non-dict) read as the shipped default (Slurm off; when forced on by a
+        run-scoped override, the shipped partitions).
+        """
+        getter = getattr(self.config, "get_slurm_config", None)
+        raw = getter() if callable(getter) else None
+        if not isinstance(raw, dict):
+            return validate_slurm_config(None)
+        return raw
+
+    def _slurm_fsx_enabled(self) -> bool:
+        """Whether this region's cluster has the FSx for Lustre claim Slurm can mount."""
+        getter = getattr(self.config, "get_fsx_lustre_config", None)
+        fsx = getter(self.deployment_region) if callable(getter) else None
+        return bool(fsx.get("enabled")) if isinstance(fsx, dict) else False
 
     def _tracing_config(self) -> dict[str, Any]:
         """The validated ``tracing`` block (``enabled``, ``sample_ratio``, ...).
@@ -3772,6 +3809,43 @@ class GCORegionalStack(Stack):
         # scopes to, so the role's regional-bucket access stays exactly as wide
         # as this one bucket and its key.
         self._grant_regional_shared_bucket_to_service_account()
+        self._add_slurm_accounting_backup_lifecycle_rule()
+
+    def _slurm_charts_enabled(self) -> bool:
+        """Effective Slurm enablement: the cdk.json toggle or a run-scoped override."""
+        helm_config = self.node.try_get_context("helm") or {}
+        overrides = _parse_helm_enabled_overrides(
+            self.node.try_get_context(_HELM_OVERRIDE_CONTEXT_KEY)
+        )
+        return _helm_chart_enabled(helm_config, overrides, "slurm")
+
+    def _add_slurm_accounting_backup_lifecycle_rule(self) -> None:
+        """Expire Slurm accounting dumps after ``helm.slurm.accounting.backup.retention_days``.
+
+        The backup CronJob (post-helm-slurm-accounting-backup.yaml) writes one
+        compressed ``mariadb-dump`` per run under
+        ``slurm/accounting-backups/<cluster>/`` in this bucket. Retention is a
+        prefix-scoped lifecycle rule rather than a delete loop in the job, so
+        it holds even when the job stops running; the bucket is versioned, so
+        the rule also clears the non-current versions a delete marker leaves
+        behind. Added only while Slurm runs the in-cluster database with
+        backups on; otherwise the prefix is never written.
+        """
+        slurm = self._slurm_config()
+        if not (
+            self._slurm_charts_enabled()
+            and accounting_in_cluster(slurm)
+            and slurm["accounting"]["backup"]["enabled"]
+        ):
+            return
+        retention_days = int(slurm["accounting"]["backup"]["retention_days"])
+        self.regional_shared_bucket.add_lifecycle_rule(
+            id="ExpireSlurmAccountingBackups",
+            enabled=True,
+            prefix=SLURM_ACCOUNTING_BACKUP_PREFIX,
+            expiration=Duration.days(retention_days),
+            noncurrent_version_expiration=Duration.days(1),
+        )
 
     def _grant_regional_shared_bucket_to_service_account(self) -> None:
         """Attach RW + KMS + discovery permissions on the regional bucket to the pod role.
@@ -4328,6 +4402,15 @@ class GCORegionalStack(Stack):
         )
         if _helm_chart_enabled(_helm_config, _helm_overrides, "crossplane"):
             image_replacements["{{CROSSPLANE_ENABLED}}"] = "true"
+        # Slurm: the accounting database, its backup CronJob and the cluster
+        # identity render only while the Slinky charts install (the same
+        # enablement that resolves {{SLURM_ENABLED}} above).
+        image_replacements.update(
+            compute_slurm_replacements(
+                self._slurm_config(),
+                enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "slurm"),
+            )
+        )
 
         # Cost monitoring (on by default): gate the cost-monitor Deployment
         # and the Grafana cost dashboard on the toggle via the same
@@ -5302,6 +5385,17 @@ class GCORegionalStack(Stack):
         )
         if _helm_chart_enabled(helm_config, enabled_overrides, "argocd"):
             overrides["argocd"] = {"values": argocd_chart_values(self._argocd_config())}
+
+        # The Slurm cluster: every deployment-specific value (partitions as
+        # NodeSets, accounting, storage, metrics, login, the ScaledObjects) is
+        # rendered from helm.slurm; charts.yaml keeps only pins and sizing.
+        # The FSx scratch mount follows this region's own fsx_lustre toggle.
+        if _helm_chart_enabled(helm_config, enabled_overrides, "slurm"):
+            overrides[SLURM_CLUSTER_CHART_NAME] = {
+                "values": slurm_chart_values(
+                    self._slurm_config(), fsx_enabled=self._slurm_fsx_enabled()
+                )
+            }
 
         return overrides
 

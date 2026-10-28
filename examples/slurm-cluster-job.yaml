@@ -1,27 +1,35 @@
 # Slurm Job Example
 #
-# Submits a batch job to the GCO-hosted Slurm cluster via the Slurm REST API.
-# Generates a JWT token from the Slurm auth secret, submits via sbatch, waits
-# for completion, and prints the output. Works from kubectl or the GCO API
-# Gateway (the Slurm REST API is reachable in-cluster, not from the Internet).
+# Submits a batch job to the GCO-hosted Slurm cluster through slurmrestd from
+# inside the cluster, waits for it to complete on an autoscaled worker, and
+# checks its accounting record. Fails (non-zero exit) on any step that does
+# not happen, so the example doubles as a release check.
+#
+# The pod authenticates with the in-cluster client token the slurm-operator
+# mints and rotates for it (Secret slinky-slurm-client-token, from the Token
+# in post-helm-slurm-api-access.yaml) — never with the cluster's JWT signing
+# key. From outside the cluster use the GCO API instead:
+#
+#   gco slurm submit hello.sbatch -r REGION      # sbatch through the API
+#   gco slurm queue -r REGION                    # squeue
+#   gco slurm accounting -r REGION --since 1d    # sacct
+#   gco slurm shell -r REGION --via-ssm auto -y  # a shell on the login pod
 #
 # Prerequisites:
 #   - Slurm enabled in cdk.json:
 #       "helm": { "slurm": { "enabled": true } }
 #   - Deploy: gco stacks deploy-all -y
-#   - Verify: kubectl get pods -n gco-jobs -l app.kubernetes.io/part-of=slurm
+#   - Verify: gco slurm status -r REGION
 #
 # Usage:
 #   kubectl apply -f examples/slurm-cluster-job.yaml
 #   kubectl logs job/slurm-test -n gco-jobs -f
 #
-# Notes:
-#   - For interactive Slurm access:
-#       kubectl exec -it -n gco-jobs deploy/slinky-slurm-controller -- bash
-#       sinfo && srun hostname && sbatch --wrap="echo Hello"
+# The default cpu partition scales from zero: the first submission waits for
+# KEDA to add a worker and Karpenter to provision its node (two to four
+# minutes), which this example allows for.
 #
 # Docs: ../docs/SLURM_OPERATOR.md
-
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -34,6 +42,8 @@ metadata:
     gco.aws/slurm-client: "true"
 spec:
   ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
   template:
     metadata:
       labels:
@@ -43,122 +53,96 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: slurm-test
         image: python:3.14.8-slim
         command: ["python3", "-c"]
         args:
         - |
-          import base64, hashlib, hmac, json, time, socket
+          import json, sys, time
           import urllib.request, urllib.error
-
           RESTAPI = "http://slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820"
           API_VER = "v0.0.44"
-
+          WAIT_SECONDS = 720
           print("=== GCO Slurm Integration Test ===")
           print(f"Date: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
-          print()
-
-          # Generate JWT token from the mounted secret key. slurmctld loads
-          # the key as raw file bytes, and the chart-generated key may begin
-          # or end with a space, so never strip or re-encode it.
-          with open("/etc/slurm-jwt/jwt.key", "rb") as f:
-              key = f.read()
-
-          def make_jwt(user="slurm", lifespan=600):
-              header = base64.urlsafe_b64encode(json.dumps(
-                  {"alg": "HS256", "typ": "JWT"}).encode()).rstrip(b"=")
-              now = int(time.time())
-              payload = base64.urlsafe_b64encode(json.dumps(
-                  {"exp": now + lifespan, "iat": now, "sun": user}).encode()).rstrip(b"=")
-              sig = base64.urlsafe_b64encode(hmac.new(
-                  key, header + b"." + payload, hashlib.sha256).digest()).rstrip(b"=")
-              return (header + b"." + payload + b"." + sig).decode()
-
-          token = make_jwt()
+          with open("/etc/slurm-client/auth-token") as f:
+              token = f.read().strip()
           headers = {
               "X-SLURM-USER-NAME": "slurm",
               "X-SLURM-USER-TOKEN": token,
               "Content-Type": "application/json",
           }
-
-          def api_call(path, data=None, method="GET"):
+          def api(path, data=None, method="GET", base="slurm"):
               req = urllib.request.Request(
-                  f"{RESTAPI}/slurm/{API_VER}/{path}",
-                  data=data, headers=headers, method=method)
-              resp = urllib.request.urlopen(req, timeout=15)
-              return json.loads(resp.read())
-
-          # 1. Check cluster status
-          print("=== Cluster Status ===")
-          try:
-              nodes = api_call("nodes/")
-              for n in nodes.get("nodes", []):
-                  name = n.get("name", "?")
-                  state = n.get("state", ["?"])
-                  cpus = n.get("cpus", 0)
-                  print(f"  Node: {name}  State: {state}  CPUs: {cpus}")
-          except Exception as e:
-              print(f"  Could not get nodes: {e}")
-
-          # 2. Submit a job
-          print()
-          print("=== Submitting Job ===")
-          job_data = json.dumps({
+                  f"{RESTAPI}/{base}/{API_VER}/{path}", data=data, headers=headers, method=method)
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  payload = json.loads(resp.read())
+              if payload.get("errors"):
+                  raise RuntimeError(f"{path}: {payload['errors']}")
+              return payload
+          def fail(message):
+              print(f"FAIL: {message}")
+              sys.exit(1)
+          # 1. The controller answers.
+          ping = api("ping")
+          up = [p for p in ping.get("pings", []) if p.get("responding") or p.get("pinged") == "UP"]
+          if not up:
+              fail(f"no responding controller: {ping.get('pings')}")
+          print(f"controller: {[p.get('hostname') for p in up]} (Slurm {ping['meta']['slurm']['release']})")
+          partitions = [p["name"] for p in api("partitions").get("partitions", [])]
+          print(f"partitions: {partitions}")
+          # 2. Submit to the default partition. The job writes to /home/slurm,
+          #    the shared home every worker and the login pod mount.
+          submitted = api("job/submit", method="POST", data=json.dumps({
               "job": {
-                  "name": "gco-hello",
-                  "current_working_directory": "/tmp",
-                  "standard_output": "/tmp/gco-hello.out",
-                  "environment": ["PATH=/usr/bin:/bin"],
+                  "name": "gco-example",
+                  "current_working_directory": "/home/slurm",
+                  "environment": ["PATH=/usr/local/bin:/usr/bin:/bin"],
+                  "time_limit": {"set": True, "number": 10},
+                  "comment": "gco:examples/slurm-cluster-job",
               },
-              "script": "#!/bin/bash\necho 'Hello from Slurm on GCO!'\nhostname\ndate\necho 'Job completed'",
-          }).encode()
-
-          try:
-              result = api_call("job/submit", data=job_data, method="POST")
-              job_id = result.get("job_id")
-              print(f"  Job submitted! ID: {job_id}")
-          except urllib.error.HTTPError as e:
-              print(f"  Submit failed ({e.code}): {e.read().decode()[:200]}")
-              job_id = None
-          except Exception as e:
-              print(f"  Submit failed: {e}")
-              job_id = None
-
-          # 3. Wait and check result
-          if job_id:
-              print()
-              print("=== Waiting for Job ===")
-              for attempt in range(6):
-                  time.sleep(5)
-                  try:
-                      status = api_call(f"job/{job_id}")
-                      jobs = status.get("jobs", [])
-                      if jobs:
-                          state = jobs[0].get("job_state", [])
-                          if "COMPLETED" in state or "FAILED" in state:
-                              break
-                  except Exception:
-                      pass
-
-              print()
-              print("=== Job Result ===")
-              try:
-                  status = api_call(f"job/{job_id}")
-                  jobs = status.get("jobs", [])
-                  if jobs:
-                      j = jobs[0]
-                      print(f"  Name:      {j.get('name', '?')}")
-                      print(f"  State:     {j.get('job_state', ['unknown'])}")
-                      print(f"  Node:      {j.get('nodes', 'pending')}")
-                      print(f"  Exit code: {j.get('exit_code', {}).get('return_code', {}).get('number', '?')}")
-                      print(f"  Output:    {j.get('standard_output', '?')}")
-                  else:
-                      print("  Job not found")
-              except Exception as e:
-                  print(f"  Could not check status: {e}")
-
-          print()
+              "script": "#!/bin/bash\necho 'Hello from Slurm on GCO!'\nhostname\ndate\nnproc\necho 'Job completed'\n",
+          }).encode())
+          job_id = submitted.get("job_id")
+          if not job_id:
+              fail(f"submit returned no job id: {submitted}")
+          print(f"submitted job {job_id}")
+          # 3. Wait for it: the worker may have to be created first.
+          deadline = time.monotonic() + WAIT_SECONDS
+          state, reason, node = [], "", ""
+          while time.monotonic() < deadline:
+              job = api(f"job/{job_id}")["jobs"][0]
+              state = job.get("job_state", [])
+              reason = job.get("state_reason", "")
+              node = job.get("nodes", "")
+              print(f"  {int(deadline - time.monotonic()):4d}s left  state={state} reason={reason} nodes={node or '-'}")
+              if {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"} & set(state):
+                  break
+              time.sleep(15)
+          if "COMPLETED" not in state:
+              fail(f"job {job_id} ended in {state} (reason {reason!r}) on {node or 'no node'}")
+          job = api(f"job/{job_id}")["jobs"][0]
+          rc = job.get("exit_code", {}).get("return_code", {}).get("number")
+          if rc != 0:
+              fail(f"job {job_id} exit code {rc}")
+          print(f"job {job_id} COMPLETED on {node} rc=0 tres={job.get('tres_alloc_str')}")
+          # 4. Accounting recorded it (slurmdbd), with the comment intact.
+          record = None
+          for _ in range(12):
+              rows = api("jobs", base="slurmdb").get("jobs", [])
+              record = next((r for r in rows if r.get("job_id") == job_id), None)
+              if record and "COMPLETED" in record.get("state", {}).get("current", []):
+                  break
+              time.sleep(5)
+          if record is None:
+              fail(f"job {job_id} has no accounting record")
+          comment = record.get("comment", {}).get("job", "")
+          if comment != "gco:examples/slurm-cluster-job":
+              fail(f"accounting comment is {comment!r}")
+          print(f"accounting: state={record['state']['current']} elapsed={record['time']['elapsed']}s comment={comment!r}")
           print("=== Test Complete ===")
         securityContext:
           allowPrivilegeEscalation: false
@@ -174,12 +158,11 @@ spec:
             cpu: "200m"
             memory: "128Mi"
         volumeMounts:
-        - name: slurm-jwt
-          mountPath: /etc/slurm-jwt
+        - name: slurm-client-token
+          mountPath: /etc/slurm-client
           readOnly: true
       volumes:
-      - name: slurm-jwt
+      - name: slurm-client-token
         secret:
-          secretName: slinky-slurm-auth-jwt
+          secretName: slinky-slurm-client-token
       restartPolicy: Never
-  backoffLimit: 2

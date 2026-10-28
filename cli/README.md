@@ -76,6 +76,7 @@ Click command definitions that wire CLI flags to the business logic above.
 | `nodepools_cmd.py` | `gco nodepools ...` |
 | `queue_cmd.py` | `gco queue ...` |
 | `release_cmd.py` | `gco release ...` |
+| `slurm_cmd.py` | `gco slurm ...` |
 | `stacks_cmd.py` | `gco stacks ...` |
 | `status_cmd.py` | `gco status` |
 | `storage_cmd.py` | `gco storage ...` |

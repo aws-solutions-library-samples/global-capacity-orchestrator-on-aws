@@ -100,6 +100,8 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `25-storage-observability-gp3.yaml` | `gco-observability-gp3` `StorageClass` backing Prometheus/Grafana/Alertmanager PVCs — **pruned when observability is disabled** |
 | `26-storage-vector-store.yaml` | `gco-vector-store` `ConfigMap` (table/index/embedding-model/region) in all namespaces, pointing pods at their local global-table replica — **pruned when the vector store is disabled** |
 | `27-storage-regional-shared-bucket.yaml` | `gco-regional-shared-bucket` `ConfigMap` (name/ARN/region) in all namespaces, pointing pods at their own region's always-on general-purpose bucket — always present |
+| `28-storage-slurm-gp3.yaml` | `gco-slurm-gp3` gp3 `StorageClass` for the Slurm controller's state claim (created by the Slinky chart from `helm.slurm.controller.state_storage_size`) and the in-cluster accounting database — **skipped and pruned when Slurm is disabled** |
+| `29-slurm-accounting-db.yaml` | The Slurm accounting database: `Secret` `slinky-slurm-mariadb` (its two keys generated in-cluster by the applier via `gco.io/generate-keys`, never shipped), `Service` and single-replica `StatefulSet` `slinky-slurm-mariadb` (MariaDB 11.8 on a `gco-slurm-gp3` claim it deletes with itself, on-demand nodes, do-not-disrupt, platform priority) that slurmdbd (the Slinky `Accounting` CR) connects to; applied before the Slinky chart so slurmctld's first boot finds its dbd — **skipped and pruned when Slurm is disabled or accounting uses an external database** |
 
 ### System Services (30–39)
 
@@ -176,9 +178,12 @@ here from upgraded clusters.
 | `post-helm-mlflow-network.yaml` | `NetworkPolicy` pair: the tracking server's own posture (ingress on 5000 and the TLS sidecar's 5443 from in-cluster pods and the VPC CIDRs, which covers the kubelet's probes) and the egress that lets pods labelled `gco.io/mlflow-client` in `gco-jobs` reach its HTTPS port (5443) through the namespace's default-deny posture — **skipped and pruned when MLflow is disabled** |
 | `post-helm-mlflow-tls.yaml` | MLflow's TLS: the `mlflow-tls` leaf + `Service` (5443 → the `mlflow-tls-proxy` sidecar the regional stack adds to the MLflow pod), the `gco-internal-ca-source` leaf in the `trust-manager` namespace (nothing serves it; its `ca.crt` is the internal CA), and the trust-manager `Bundle` `gco-internal-ca` that publishes that certificate as the ConfigMap `gco-jobs/gco-internal-ca` for MLflow's clients — **skipped and pruned when MLflow is disabled** (the prune also removes the leaves' Secrets and the ConfigMap) |
 | `post-helm-monitoring-kueue-rbac.yaml` | `ClusterRoleBinding` letting Prometheus scrape Kueue's authenticated metrics endpoint — **skipped when observability disabled** |
-| `post-helm-monitoring-servicemonitors.yaml` | `ServiceMonitor`s (schedulers/operators + DCGM) and `PodMonitor`s for health-monitor, manifest-processor, inference-proxy, and inference-monitor, each scraped over HTTPS verified against the `gco-monitoring-trust` CA with the Service name as `serverName` — **skipped when observability disabled** |
+| `post-helm-monitoring-servicemonitors.yaml` | `ServiceMonitor`s (schedulers/operators, slurmctld's OpenMetrics endpoints on the controller Service, DCGM) and `PodMonitor`s for health-monitor, manifest-processor, inference-proxy, and inference-monitor, each scraped over HTTPS verified against the `gco-monitoring-trust` CA with the Service name as `serverName` — **skipped when observability disabled** |
 | `post-helm-monitoring-tls.yaml` | The monitoring namespace's TLS: `gco-monitoring-trust` (a leaf nothing serves, whose `ca.crt` delivers the internal CA to Prometheus and the Grafana rotator) and the `grafana-tls` leaf + `Service` (3443 → the `grafana-tls-proxy` sidecar the regional stack adds to the Grafana pod) — **skipped and pruned when observability is disabled** |
-| `post-helm-slurm-network.yaml` | `NetworkPolicy` rules that let slurmctld/slurmd/slurmrestd reach each other, let client pods call the Slurm REST API, and admit the Slinky operator's namespace to that API (it reconciles NodeSets through slurmrestd) inside zero-trust `gco-jobs` (the Slinky charts ship none) — **skipped and pruned when Slurm is disabled** |
+| `post-helm-slurm-accounting-backup.yaml` | `CronJob` `slinky-slurm-accounting-backup` (gco-jobs): on `helm.slurm.accounting.backup.schedule` an init container `mariadb-dump`s `slurm_acct_db` and the main container uploads the gzip to the regional shared bucket under `slurm/accounting-backups/<cluster>/`, as `gco-service-account` (Pod Identity); retention is the regional stack's lifecycle rule on that prefix — **skipped and pruned when Slurm, the in-cluster database or backups are disabled** |
+| `post-helm-slurm-api-access.yaml` | Slurm credentials minted by the slurm-operator, so nothing but the chart ever reads the signing key: `Token` `slinky-slurm-token-gco-api` (gco-jobs) mints a 1-hour `auth/jwt` token for the `slurm` user into the Secret of the same name and refreshes it at 80% of its lifetime, with the `Role`/`RoleBinding` `gco-manifest-processor-slurm-token` granting `gco-system/gco-manifest-processor-sa` `get` on exactly that Secret (the GCO API's credential); `Token` `slinky-slurm-token-client` mints the same kind of token into `slinky-slurm-client-token` for in-cluster client pods labeled `gco.aws/slurm-client` (the Slurm example) — **skipped and pruned when Slurm is disabled** (the prune also removes both minted Secrets, which the chart's JWT key Secret owns rather than the Tokens) |
+| `post-helm-slurm-network.yaml` | `NetworkPolicy` rules for the Slinky Slurm cluster: the Slurm pods' own pod-to-pod allowances by label, client pods to the REST API, the Slinky operator's namespace to the REST API (it reconciles NodeSets through slurmrestd), Prometheus to slurmctld's OpenMetrics port (6817), and the manifest-processor to slurmrestd (6820) on both the `gco-jobs` ingress and `gco-system` egress side for the GCO API's `/api/v1/slurm` routes — **skipped and pruned when Slurm is disabled** |
+| `post-helm-slurm-observability.yaml` | The *GCO Slurm* Grafana dashboard `ConfigMap` (pending/running jobs and largest pending job per partition, node states, worker pods per NodeSet, allocated CPUs/GPUs, scheduler cycle times, control-plane status) and the `PrometheusRule` `gco-slurm-alerts` (controller not scraped, no slurmrestd replica, accounting not ready, DOWN nodes, stalled queue, state volume filling) — **skipped and pruned when Slurm or observability is disabled** |
 | `post-helm-sqs-consumer.yaml` | KEDA `ScaledJob` for the [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) queue processor, with separate projected AWS STS and Kubernetes API service-account tokens — **skipped when queue_processor disabled** |
 
 ## Platform Workload Contract
@@ -212,7 +217,8 @@ placeholders are automatically skipped — the mechanism that conditionally
 enables FSx, Valkey, Aurora pgvector, cluster observability, and the queue
 processor. Typed tokens must keep their shape in the YAML: quantity tokens are
 quoted (`{{INFERENCE_PROXY_TLS_CPU_REQUEST}}`, `{{MP_CPU_LIMIT}}`,
-`{{MP_MEMORY_LIMIT}}`) and integer tokens are unquoted
+`{{MP_MEMORY_LIMIT}}`; `{{SLURM_ACCOUNTING_DB_STORAGE_SIZE}}` sits bare in a
+`volumeClaimTemplate`) and integer tokens are unquoted
 (`{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}`,
 `{{INFERENCE_PROXY_MIN_REPLICAS}}`, `{{INFERENCE_PROXY_MAX_REPLICAS}}`,
 `{{MP_REPLICAS}}`, `{{MP_HPA_MAX_REPLICAS}}`,
@@ -255,3 +261,10 @@ check matches only `UPPER_SNAKE`, so those are applied verbatim.
   the `post-helm-` prefix.
 - **Optional feature**: gate it with a template variable that is left
   unreplaced (and therefore skips the file) when the feature is disabled.
+- **Generated credential**: a `Secret` annotated
+  `gco.io/generate-keys: "key1,key2"` ships no data for those keys; the
+  applier fills each with a fresh random value when it creates the Secret and
+  never overwrites an existing one (a later apply only adds keys the Secret
+  lacks). The value exists only inside the cluster — never in this repository,
+  the Step Functions input or a log. `29-slurm-accounting-db.yaml` is
+  the precedent.

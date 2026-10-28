@@ -28,6 +28,13 @@ Applies Kubernetes manifests to [EKS](https://docs.aws.amazon.com/eks/latest/use
    retain their manifest `spec.replicas` seed; deployments carrying the
    `gco.aws/hpa-controls-replicas: "true"` ownership annotation omit that field
    from update patches so the HPA's scale-subresource decision is not reset.
+   When the API server rejects a strategic merge with `422` because the live
+   object and the manifest set mutually exclusive fields (a probe that moved
+   between `httpGet`, `exec` and `tcpSocket`; a PodDisruptionBudget that moved
+   from `minAvailable` to `maxUnavailable`), Deployments, StatefulSets,
+   DaemonSets and PodDisruptionBudgets are replaced with the manifest at the
+   live `resourceVersion` instead. The log line for any rejected resource
+   carries the server's own Status message, not just the HTTP phrase.
 5. Restarts key deployments in `gco-system` to pick up new images
 
 ### Delete

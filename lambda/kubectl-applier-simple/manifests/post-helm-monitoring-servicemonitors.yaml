@@ -148,6 +148,48 @@ spec:
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
+  name: gco-slurm-controller
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+spec:
+  namespaceSelector:
+    matchNames:
+      - gco-jobs
+  selector:
+    matchLabels:
+      # The operator labels the controller Service (slinky-slurm-controller)
+      # with the component and the Controller CR's name.
+      app.kubernetes.io/name: slurmctld
+      app.kubernetes.io/instance: slinky-slurm
+  endpoints:
+    # Slurm 26.05 serves OpenMetrics from slurmctld's own port (6817, the
+    # Service port named slurmctld), one endpoint per category. Plain HTTP
+    # inside the namespace; allow-prometheus-to-slurm-controller admits the
+    # scrape. Off (no targets, no error) when Slurm is disabled.
+    - port: slurmctld
+      path: /metrics/jobs
+      interval: 30s
+      scrapeTimeout: 25s
+    - port: slurmctld
+      path: /metrics/nodes
+      interval: 30s
+      scrapeTimeout: 25s
+    - port: slurmctld
+      path: /metrics/partitions
+      interval: 30s
+      scrapeTimeout: 25s
+    - port: slurmctld
+      path: /metrics/scheduler
+      interval: 30s
+      scrapeTimeout: 25s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
   name: gco-dcgm-exporter
   namespace: monitoring
   labels:

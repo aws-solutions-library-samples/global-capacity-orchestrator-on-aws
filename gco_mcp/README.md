@@ -31,6 +31,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
   - [Model Weights](#model-weights)
   - [Templates](#templates)
   - [Webhooks](#webhooks)
+  - [Slurm](#slurm)
   - [DAG Pipelines](#dag-pipelines)
   - [NodePools](#nodepools)
   - [Analytics](#analytics)
@@ -71,7 +72,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 144 tools by default (up to 202 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 151 tools by default (up to 210 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -497,7 +498,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | `GCO_ENABLE_IMAGE_PUBLISH` | `false` | `images_build`, `images_push`, `images_mirror` | Builds, publishes, and mirrors container images to ECR. `images_build` / `images_push` run a long-running build (FastMCP background task) and push binaries that get replicated across every deployed region; `images_mirror` copies third-party images (Volcano's docker.io images) into the project's `gco/*` ECR. |
 | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk`, `addons_install` | Creates or updates [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) stacks or starts Helm add-on re-convergence. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
-| `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `monitoring_user_remove`, `cancel_queue_job`, `cancel_reservation`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo`, `task_prune` | Delete operations are irreversible — once data, jobs, models, images, capacity reservations, or local task history are removed they can't be recovered without a backup. |
+| `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` | `false` | `delete_job`, `delete_inference`, `delete_template`, `delete_webhook`, `delete_model`, `delete_nodepool`, `analytics_user_remove`, `monitoring_user_remove`, `cancel_queue_job`, `cancel_reservation`, `images_cleanup`, `images_prune`, `images_delete_tag`, `images_delete_repo`, `task_prune`, `slurm_cancel` | Delete operations are irreversible — once data, jobs, models, images, capacity reservations, or local task history are removed they can't be recovered without a backup. |
 | `GCO_ENABLE_MISSION` | `false` | `mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`, `mission_memory_search` | Runs an autonomous goal-directed loop that can call any tool in its allowlist. Gated to prevent unattended autonomous execution. |
 | `GCO_ENABLE_SWARM` | `false` | `swarm_start`, `swarm_iterate`, `swarm_status`, `swarm_abort`, `swarm_list`, `swarm_plan` | One orchestrator Mission session spawning and supervising concurrent child Mission sessions under hard rails (fleet cap, pooled iteration budget, finite child budgets). Gated because loop-spawning-loops multiplies the blast radius of whatever other flags are enabled. Recommended together with `GCO_ENABLE_MISSION` so children are inspectable via `mission_status`. See [`docs/SWARM.md`](../docs/SWARM.md). |
 | `GCO_ENABLE_LOCAL_METRICS` | `false` | `metrics_from_local_file` | Reads a metric file from the MCP host beneath `GCO_METRICS_LOCAL_ROOT`; disabled by default to prevent unintended host-file access. |
@@ -899,6 +900,21 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 | `webhooks_create` | Register a new webhook | low-risk | — |
 | `delete_webhook` | Delete a webhook (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
+### Slurm
+
+The [Slinky](../docs/SLURM_OPERATOR.md) Slurm cluster deployed when `cdk.json` `helm.slurm.enabled` is on, reached through the GCO API's `/api/v1/slurm/*` routes; every tool takes the region whose cluster it addresses. The interactive `gco slurm shell` and the streaming `gco slurm output --follow` have no tool.
+
+| Tool | Description | Risk Tier | Gated By |
+|------|-------------|-----------|----------|
+| `slurm_status` | Controller reachability, partitions, node and job counts | safe | — |
+| `slurm_partitions` | Partitions with state, time limit and node counts (`sinfo`) | safe | — |
+| `slurm_nodes` | Slurm nodes (slurmd worker pods) with state, resources and gres | safe | — |
+| `slurm_queue` | The live queue (`squeue`), filterable by state, partition and name | safe | — |
+| `slurm_job` | One job in full, including its stdout/stderr paths | safe | — |
+| `slurm_accounting` | Job history from slurmdbd (`sacct`) over a window | safe | — |
+| `slurm_submit` | Submit a local batch script (`sbatch`); allocates compute | low-risk | — |
+| `slurm_cancel` | Cancel a job (`scancel`); a running job's work is lost | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
+
 ### DAG Pipelines
 
 | Tool | Description | Risk Tier | Gated By |
@@ -1273,6 +1289,7 @@ gco_mcp/
 │   ├── images.py          — Image registry (build/push/lifecycle/replication/cleanup)
 │   ├── templates.py       — Job templates
 │   ├── webhooks.py        — Lifecycle webhooks
+│   ├── slurm.py           — Slurm cluster: queue, submit, accounting (scancel gated)
 │   ├── dag.py             — DAG pipeline validation and submission
 │   ├── nodepools.py       — Karpenter NodePool management
 │   ├── analytics.py       — Analytics environment status and management

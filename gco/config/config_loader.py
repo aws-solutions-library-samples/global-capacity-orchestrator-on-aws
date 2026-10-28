@@ -55,6 +55,7 @@ from gco.inference_proxy_config import (
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.models import ClusterConfig, ResourceThresholds
 from gco.resource_governance import parse_k8s_quantity
+from gco.slurm_config import SlurmConfigError, validate_slurm_config
 from gco.stacks.constants import (
     CONTROL_PLANE_ONLY_CONTEXT_KEY,
     DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -357,6 +358,8 @@ class ConfigLoader:
         self._validate_eks_capabilities_config()
         # Validate the self-managed Argo CD block (helm.argocd)
         self._validate_argocd_config()
+        # Validate the Slurm cluster block (helm.slurm)
+        self._validate_slurm_config()
 
         # Validate analytics environment config (optional block)
         self._validate_analytics_environment_config()
@@ -1001,6 +1004,74 @@ class ConfigLoader:
         try:
             return validate_argocd_config(self._raw_argocd_config())
         except ArgoCdConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def _raw_slurm_config(self) -> object:
+        """The cdk.json ``helm.slurm`` block, or ``None`` when absent."""
+        helm = self.app.node.try_get_context("helm")
+        return helm.get("slurm") if isinstance(helm, dict) else None
+
+    def _slurm_fsx_available_everywhere(self) -> bool:
+        """True when every regional cluster gets an FSx for Lustre filesystem.
+
+        ``helm.slurm.storage.scratch: fsx`` asks for the FSx claim on every
+        Slurm worker and login pod, and FSx is a per-region toggle, so the
+        strict setting is only valid when each region has it. (``auto``
+        resolves per region in the regional stack and never needs this.)
+
+        Consulted only when the block actually says ``scratch: fsx``: the FSx
+        lookup validates the run-scoped ``feature_enabled_overrides`` as a
+        side effect, and a Slurm block that never asked for FSx must not turn
+        an unrelated override typo into a construction-time Slurm error.
+        """
+        raw = self._raw_slurm_config()
+        storage = raw.get("storage") if isinstance(raw, dict) else None
+        if not isinstance(storage, dict) or storage.get("scratch") != "fsx":
+            return False
+        regions = self.get_regions()
+        return bool(regions) and all(
+            bool(self.get_fsx_lustre_config(region)["enabled"]) for region in regions
+        )
+
+    def _validate_slurm_config(self) -> None:
+        """Validate the optional Slurm cluster block (``helm.slurm``).
+
+        Slurm is off by default, so an absent block is valid. When present,
+        the shape rules live in :mod:`gco.slurm_config`: unknown keys fail by
+        name, every partition must target a known node pool with a coherent
+        accelerator request and fit the ``gco-jobs`` resource quota, exactly
+        one enabled partition is the default, autoscaled partitions need
+        ``cluster_observability`` (their metrics come through Prometheus), and
+        ``storage.scratch: fsx`` needs FSx in every region.
+        """
+        try:
+            validate_slurm_config(
+                self._raw_slurm_config(),
+                resource_quota=self.app.node.try_get_context("resource_quota") or {},
+                observability_enabled=self.get_cluster_observability_enabled(),
+                fsx_enabled=self._slurm_fsx_available_everywhere(),
+            )
+        except SlurmConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def get_slurm_config(self) -> dict[str, Any]:
+        """Return the ``helm.slurm`` block with defaults merged in.
+
+        Keys: ``enabled``, ``cluster_name``, ``controller``, ``restapi``,
+        ``accounting``, ``metrics``, ``login``, ``autoscaling``,
+        ``partitions``, ``storage``, ``slurm_conf``, ``slurmdbd_conf`` (see
+        :data:`gco.slurm_config.SLURM_DEFAULTS`). Whether the charts actually
+        install also honors the run-scoped ``helm_enabled_overrides`` context,
+        which the regional stack resolves.
+        """
+        try:
+            return validate_slurm_config(
+                self._raw_slurm_config(),
+                resource_quota=self.app.node.try_get_context("resource_quota") or {},
+                observability_enabled=self.get_cluster_observability_enabled(),
+                fsx_enabled=self._slurm_fsx_available_everywhere(),
+            )
+        except SlurmConfigError as exc:
             raise ConfigValidationError(str(exc)) from exc
 
     def get_eks_capabilities_config(self) -> dict[str, Any]:

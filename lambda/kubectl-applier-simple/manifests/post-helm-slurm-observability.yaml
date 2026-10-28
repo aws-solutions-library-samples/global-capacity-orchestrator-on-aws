@@ -1,0 +1,232 @@
+# Slurm observability: the Grafana dashboard and the alerting rules.
+#
+# Metrics come from slurmctld itself (Slurm 26.05 MetricsType=metrics/openmetrics,
+# enabled by helm.slurm.metrics), scraped by the gco-slurm-controller
+# ServiceMonitor in post-helm-monitoring-servicemonitors.yaml. Every series is
+# prefixed slurm_ and is a gauge; the per-partition series carry a
+# partition="<name>" label (https://slurm.schedmd.com/metrics.html). The KEDA
+# autoscaler the chart renders per partition reads the same two queue series
+# the dashboard's first row shows.
+#
+# The dashboard ConfigMap carries the grafana_dashboard="1" label the
+# kube-prometheus-stack Grafana sidecar watches; the PrometheusRule is
+# discovered by the chart's Prometheus (ruleSelectorNilUsesHelmValues=false)
+# and routed by its Alertmanager. The Kubernetes-side rules use
+# kube-state-metrics and kubelet series for the control-plane workloads the
+# operator creates; a disabled component (an external accounting database, say)
+# simply has no series and never fires.
+#
+# Both gates are in this file, so it applies only when Slurm AND observability
+# are on and is pruned by _FEATURE_RESOURCE_INVENTORY when either is turned off.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-dashboard-slurm
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    project: gco
+    app: gco-observability
+    app.kubernetes.io/part-of: slurm
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+data:
+  gco-slurm.json: |
+    {
+      "title": "GCO Slurm",
+      "uid": "gco-slurm",
+      "tags": ["gco", "scheduler", "slurm"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "time": {"from": "now-6h", "to": "now"},
+      "panels": [
+        {
+          "id": 1,
+          "title": "Pending jobs by partition",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "sum by (partition) (slurm_partition_jobs_pending)", "legendFormat": "{{partition}}"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Running jobs by partition",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+          "targets": [
+            {"expr": "sum by (partition) (slurm_partition_jobs_running)", "legendFormat": "{{partition}}"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Largest pending job (nodes) by partition",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+          "targets": [
+            {"expr": "max by (partition) (slurm_partition_jobs_max_job_nodes_nohold)", "legendFormat": "{{partition}}"}
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Nodes by state",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "sum(slurm_nodes_idle)", "legendFormat": "idle"},
+            {"expr": "sum(slurm_nodes_alloc)", "legendFormat": "allocated"},
+            {"expr": "sum(slurm_nodes_mixed)", "legendFormat": "mixed"},
+            {"expr": "sum(slurm_nodes_down)", "legendFormat": "down"},
+            {"expr": "sum(slurm_nodes_drain)", "legendFormat": "drain"}
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Worker pods by NodeSet",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {"expr": "count by (created_by_name) (kube_pod_info{namespace=\"gco-jobs\", created_by_kind=\"NodeSet\"})",
+             "legendFormat": "{{created_by_name}}"}
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Allocated CPUs and GPUs",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "targets": [
+            {"expr": "sum(slurm_jobs_cpus_alloc)", "legendFormat": "cpus"},
+            {"expr": "sum(slurm_jobs_gpus_alloc)", "legendFormat": "gpus"}
+          ]
+        },
+        {
+          "id": 7,
+          "title": "Scheduler cycle time (last, µs)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "targets": [
+            {"expr": "slurm_schedule_cycle_last", "legendFormat": "main scheduler"},
+            {"expr": "slurm_bf_cycle_last", "legendFormat": "backfill"}
+          ]
+        },
+        {
+          "id": 8,
+          "title": "Control plane",
+          "type": "stat",
+          "gridPos": {"h": 6, "w": 24, "x": 0, "y": 24},
+          "targets": [
+            {"expr": "max(up{job=\"slinky-slurm-controller\"})", "legendFormat": "slurmctld scraped"},
+            {"expr": "sum(kube_deployment_status_replicas_available{namespace=\"gco-jobs\", deployment=\"slinky-slurm-restapi\"})",
+             "legendFormat": "slurmrestd replicas"},
+            {"expr": "sum(kube_statefulset_status_replicas_ready{namespace=\"gco-jobs\", statefulset=\"slinky-slurm-accounting\"})",
+             "legendFormat": "slurmdbd ready"},
+            {"expr": "sum(kube_statefulset_status_replicas_ready{namespace=\"gco-jobs\", statefulset=\"slinky-slurm-mariadb\"})",
+             "legendFormat": "accounting db ready"}
+          ]
+        }
+      ]
+    }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gco-slurm-alerts
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+    app.kubernetes.io/part-of: slurm
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+spec:
+  groups:
+    - name: gco-slurm
+      rules:
+        - alert: SlurmControllerDown
+          # No successful scrape of slurmctld for five minutes: the controller
+          # is down, unreachable, or has stopped serving metrics.
+          expr: max(up{job="slinky-slurm-controller"}) == 0 or absent(up{job="slinky-slurm-controller"})
+          for: 5m
+          labels:
+            severity: critical
+            component: slurm
+          annotations:
+            summary: "Slurm controller is not being scraped"
+            description: >-
+              slurmctld (gco-jobs/slinky-slurm-controller) has had no successful metrics
+              scrape for 5 minutes. Jobs cannot be scheduled or submitted while it is down.
+        - alert: SlurmRestApiUnavailable
+          expr: sum(kube_deployment_status_replicas_available{namespace="gco-jobs", deployment="slinky-slurm-restapi"}) < 1
+          for: 5m
+          labels:
+            severity: critical
+            component: slurm
+          annotations:
+            summary: "No slurmrestd replica is available"
+            description: >-
+              The slinky-slurm-restapi Deployment has no available replica. The GCO API's
+              /api/v1/slurm routes and the operator's NodeSet reconciliation both depend on it.
+        - alert: SlurmAccountingDown
+          expr: |
+            sum(kube_statefulset_status_replicas_ready{namespace="gco-jobs", statefulset=~"slinky-slurm-accounting|slinky-slurm-mariadb"})
+              < count(kube_statefulset_replicas{namespace="gco-jobs", statefulset=~"slinky-slurm-accounting|slinky-slurm-mariadb"})
+          for: 10m
+          labels:
+            severity: warning
+            component: slurm
+          annotations:
+            summary: "Slurm accounting (slurmdbd or its database) is not ready"
+            description: >-
+              slurmdbd or the accounting database has not been ready for 10 minutes. slurmctld
+              buffers accounting records meanwhile; sacct and job limits are unavailable.
+        - alert: SlurmNodesDown
+          # A worker that scaled to zero stays in slurmctld as DOWN+DRAIN with
+          # the operator's "Pod is terminating" reason (StatefulSet-mode
+          # NodeSets keep their records), and that pair is what "drained"
+          # counts; a DOWN node that is not drained lost its slurmd without
+          # the operator asking (observed live, 2026-10-28).
+          expr: (sum(slurm_nodes_down) - sum(slurm_nodes_drained)) > 0
+          for: 15m
+          labels:
+            severity: warning
+            component: slurm
+          annotations:
+            summary: "Slurm reports DOWN nodes that were not drained for scale-in"
+            description: >-
+              {{ $value }} Slurm node(s) have been DOWN without a drain for 15 minutes: a
+              worker pod that lost its slurmd, or a node that re-registered with a
+              configuration slurmctld rejected (check `sinfo -R`; scaled-in workers are
+              DOWN+DRAIN and expected).
+        - alert: SlurmQueueStalled
+          # Work is waiting and nothing is running: the autoscaler is not
+          # adding nodes (quota, capacity, or a partition at max_nodes).
+          expr: sum(slurm_jobs_pending) > 0 and sum(slurm_jobs_running) == 0
+          for: 30m
+          labels:
+            severity: warning
+            component: slurm
+          annotations:
+            summary: "Slurm jobs have been pending with nothing running for 30 minutes"
+            description: >-
+              {{ $value }} job(s) pending and none running. Check the partition's max_nodes,
+              the gco-jobs ResourceQuota, Karpenter capacity for the node pool, and
+              `squeue --start`.
+        - alert: SlurmControllerStateVolumeFilling
+          expr: |
+            kubelet_volume_stats_available_bytes{namespace="gco-jobs", persistentvolumeclaim=~".*slinky-slurm-controller.*"}
+              / kubelet_volume_stats_capacity_bytes{namespace="gco-jobs", persistentvolumeclaim=~".*slinky-slurm-controller.*"}
+              < 0.1
+          for: 10m
+          labels:
+            severity: warning
+            component: slurm
+          annotations:
+            summary: "slurmctld state volume is over 90% full"
+            description: >-
+              The controller's StateSaveLocation volume has less than 10% free. Raise
+              helm.slurm.controller.state_storage_size (gp3 claims expand online) before
+              slurmctld fails to save state.

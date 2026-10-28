@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-10-05T01:20:02Z">
-        <meta name="gco-source-commit" content="d0400a273ab7af4345ee9b4ee7c1900474019901">
-        <meta name="gco-flow-digest" content="03715903a1aedcd5">
+        <meta name="gco-generated-at" content="2026-08-30T12:00:00Z">
+        <meta name="gco-source-commit" content="8cb8e766461f5b7f35205e12db980988598cf6d5">
+        <meta name="gco-flow-digest" content="0955ad9c392d9a09">
         <title>Regional API Gateway Proxy Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,58 +208,60 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op90=>operation: 'Proxy one IAM-authenticated API Gateway request to the internal ALB.'
-op95=>operation: signing_key = get_secret_token()
-cond92=>condition: exception raised?
-cond97=>condition: except _BACKEND_AUTH_ERRORS
-io104=>inputoutput: output: _error_response(503, 'Backend authentication is temporarily unavailable')
-e102=>end: end function return
-op113=>operation: alb_endpoint = _resolve_registered_endpoint()
-cond110=>condition: exception raised?
-cond115=>condition: except RuntimeError as exc
-sub119=>subroutine: _LOGGER.warning('Regional backend resolution failed: %s', exc)
-io124=>inputoutput: output: _error_response(502, 'Regional backend is temporarily unavailable')
-e122=>end: end function return
-op130=>operation: http_method = event['httpMethod']
-op132=>operation: path = event['path']
-op134=>operation: query_string = event.get('multiValueQueryStringParameters') or event.get('queryStringParameters') or {}
-op136=>operation: headers = dict(event.get('headers') or {})
-op138=>operation: body = event.get('body') or ''
-cond141=>condition: if event.get('isBase64Encoded')
-io148=>inputoutput: output: _error_response(415, 'Base64-encoded request bodies are not supported')
-e146=>end: end function return
-op154=>operation: target_url = build_target_url(alb_endpoint, path, query_string)
-op156=>operation: headers = sanitize_request_headers(headers)
-sub158=>subroutine: headers.update(build_signed_headers(signing_key, http_method, target_url, body))
-io163=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context))
-e161=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op92=>operation: 'Proxy one IAM-authenticated API Gateway request to the internal ALB.'
+op97=>operation: signing_key = get_secret_token()
+cond94=>condition: exception raised?
+cond99=>condition: except _BACKEND_AUTH_ERRORS
+io106=>inputoutput: output: _error_response(503, 'Backend authentication is temporarily unavailable')
+e104=>end: end function return
+op115=>operation: alb_endpoint = _resolve_registered_endpoint()
+cond112=>condition: exception raised?
+cond117=>condition: except RuntimeError as exc
+sub121=>subroutine: _LOGGER.warning('Regional backend resolution failed: %s', exc)
+io126=>inputoutput: output: _error_response(502, 'Regional backend is temporarily unavailable')
+e124=>end: end function return
+op132=>operation: http_method = event['httpMethod']
+op134=>operation: path = event['path']
+op136=>operation: query_string = event.get('multiValueQueryStringParameters') or event.get('queryStringParameters') or {}
+op138=>operation: headers = dict(event.get('headers') or {})
+op140=>operation: body = event.get('body') or ''
+cond143=>condition: if event.get('isBase64Encoded')
+io150=>inputoutput: output: _error_response(415, 'Base64-encoded request bodies are not supported')
+e148=>end: end function return
+op156=>operation: target_url = build_target_url(alb_endpoint, path, query_string)
+op158=>operation: headers = sanitize_request_headers(headers)
+sub160=>subroutine: headers.update(caller_identity_headers(event))
+sub162=>subroutine: headers.update(build_signed_headers(signing_key, http_method, target_url, body))
+io167=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context))
+e165=>end: end function return
 
-op90->op95
-op95->cond92
-cond92(yes)->cond97
-cond97(yes)->io104
-io104->e102
-cond97(no)->op113
-op113->cond110
-cond110(yes)->cond115
-cond115(yes)->sub119
-sub119->io124
-io124->e122
-cond115(no)->op130
-op130->op132
+op92->op97
+op97->cond94
+cond94(yes)->cond99
+cond99(yes)->io106
+io106->e104
+cond99(no)->op115
+op115->cond112
+cond112(yes)->cond117
+cond117(yes)->sub121
+sub121->io126
+io126->e124
+cond117(no)->op132
 op132->op134
 op134->op136
 op136->op138
-op138->cond141
-cond141(yes)->io148
-io148->e146
-cond141(no)->op154
-op154->op156
-op156->sub158
-sub158->io163
-io163->e161
-cond110(no)->op130
-cond92(no)->op113
+op138->op140
+op140->cond143
+cond143(yes)->io150
+io150->e148
+cond143(no)->op156
+op156->op158
+op158->sub160
+sub160->sub162
+sub162->io167
+io167->e165
+cond112(no)->op132
+cond94(no)->op115
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -269,17 +271,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-10-05T01:20:02Z -->
-        <!-- Generated from Git commit: d0400a273ab7af4345ee9b4ee7c1900474019901 -->
+        <!-- Generated at (UTC): 2026-08-30T12:00:00Z -->
+        <!-- Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-10-05T01:20:02Z">2026-10-05T01:20:02Z</time>
+            Generated at (UTC): <time datetime="2026-08-30T12:00:00Z">2026-08-30T12:00:00Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>d0400a273ab7af4345ee9b4ee7c1900474019901</code>
+            Source commit: <code>8cb8e766461f5b7f35205e12db980988598cf6d5</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>03715903a1aedcd5</code>
+            Flow content SHA-256: <code>0955ad9c392d9a09</code>
           </p>
           <div id="canvas"></div>
         </div>

@@ -988,6 +988,61 @@ get_latest_ruby_release() {
   get_latest_endoflife_cycle ruby
 }
 
+# ubuntu_variant_release <image_tag>
+#
+# Prints the Ubuntu release an ``-ubuntuXX.YY`` image-tag variant names
+# (``26.05.5-ubuntu24.04`` → ``24.04``), nothing for any other tag. Slinky
+# publishes every Slurm image per base distribution, so the Ubuntu release is
+# the part of ``SLURM_IMAGE_TAG`` the LTS check in dependency-scan.sh reasons
+# about; a Rocky-based or bare tag is "not an Ubuntu variant", not an error.
+ubuntu_variant_release() {
+  printf '%s\n' "${1:-}" | sed -nE 's/^.*-ubuntu([0-9]{2}\.[0-9]{2})$/\1/p'
+}
+
+# get_latest_ubuntu_lts
+#
+# Prints the newest Ubuntu LTS cycle (``26.04``) that has shipped its first
+# point release and is still supported, from endoflife.date. Interim
+# (non-LTS) releases are never candidates, and a brand-new LTS stays out
+# until its ``.1`` point release: that is the conventional "ready to adopt"
+# marker (it is also when ``do-release-upgrade`` starts offering LTS→LTS),
+# so the scan does not nag about a base the ecosystem has not settled on.
+# Empty output on network failure or schema change — the caller treats that
+# as a skip, not drift.
+get_latest_ubuntu_lts() {
+  curl -fsSL --max-time 15 "${SCAN_CURL_RETRY[@]}" "https://endoflife.date/api/ubuntu.json" 2>/dev/null \
+    | python3 -c "
+import datetime, json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+today = datetime.date.today().isoformat()
+candidates = []
+for entry in data:
+    cycle = str(entry.get('cycle', '') or '')
+    latest = str(entry.get('latest', '') or '')
+    release = entry.get('releaseDate', '') or ''
+    eol = entry.get('eol', '')
+    if entry.get('lts') is not True or '.' not in cycle:
+        continue
+    if isinstance(release, str) and release > today:
+        continue
+    if isinstance(eol, str) and eol and eol < today:
+        continue
+    # First point release out: ``latest`` reads ``<cycle>.N``.
+    if not latest.startswith(cycle + '.'):
+        continue
+    try:
+        parts = tuple(int(p) for p in cycle.split('.'))
+    except ValueError:
+        continue
+    candidates.append((parts, cycle))
+if candidates:
+    print(max(candidates)[1])
+" 2>/dev/null
+}
+
 # read_ruby_version_pin [version_file]
 #
 # Prints the committed Ruby series from .ruby-version (comments and blank

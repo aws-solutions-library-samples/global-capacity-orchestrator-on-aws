@@ -1559,6 +1559,66 @@ RUBY_RELEASE_COUNT="$(wc -l < "$RUBY_RELEASE_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$RUBY_RELEASE_COUNT" ] && RUBY_RELEASE_COUNT=0
 
 # ---------------------------------------------------------------------------
+# Ubuntu LTS base (Slinky Slurm images)
+#
+# Slinky publishes every Slurm image per Ubuntu LTS base
+# (``<slurm>-ubuntu24.04``, ``<slurm>-ubuntu26.04``) and GCO pins one base
+# through SLURM_IMAGE_TAG in gco/slurm_config.py. The image sweep above
+# deliberately compares within a tag's variant family — a newer Slurm patch
+# on the same base is drift there, a newer base never is — so without this
+# section the pin could ride an Ubuntu release towards end of life with
+# nothing in the report saying so. The cue fires once the newest LTS has
+# shipped its first point release (get_latest_ubuntu_lts) and the registry
+# carries the pinned Slurm version on that base; until upstream publishes
+# that variant there is nothing to move to, and the section says so without
+# a finding. Informational: changing base is a deliberate move (re-run the
+# live Slurm validation), not a security patch.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking Ubuntu LTS base (Slurm images) ==="
+
+UBUNTU_LTS_RESULTS="$(mktemp)"
+UBUNTU_LTS_SKIP_REASON=""
+
+SLURM_IMAGE_TAG_CURRENT="$(extract_python_string_constant SLURM_IMAGE_TAG gco/slurm_config.py)"
+SLURM_IMAGE_UBUNTU="$(ubuntu_variant_release "$SLURM_IMAGE_TAG_CURRENT")"
+# The registry probe uses slurmd: every Slinky daemon image shares the one
+# tag, and the chart-values walk above already yielded its repository.
+SLURMD_REPOSITORY="$(printf '%s\n' "${CHART_VALUE_IMAGES:-}" | sed -nE 's#^([^|]*/slurmd):.*$#\1#p' | head -1)"
+if [ -z "$SLURM_IMAGE_TAG_CURRENT" ]; then
+  UBUNTU_LTS_SKIP_REASON="Could not parse SLURM_IMAGE_TAG from gco/slurm_config.py for the Ubuntu LTS comparison."
+  echo "  $UBUNTU_LTS_SKIP_REASON"
+elif [ -z "$SLURM_IMAGE_UBUNTU" ]; then
+  echo "  SLURM_IMAGE_TAG ${SLURM_IMAGE_TAG_CURRENT} is not an Ubuntu variant; nothing to compare."
+else
+  LATEST_UBUNTU_LTS="$(get_latest_ubuntu_lts)"
+  if [ -z "$LATEST_UBUNTU_LTS" ]; then
+    UBUNTU_LTS_SKIP_REASON="endoflife.date query failed (network or schema change)."
+    echo "  $UBUNTU_LTS_SKIP_REASON"
+  elif [ "$(compare_semver "$SLURM_IMAGE_UBUNTU" "$LATEST_UBUNTU_LTS")" != "newer" ]; then
+    echo "  Slurm images are on ubuntu${SLURM_IMAGE_UBUNTU}; newest adoptable Ubuntu LTS is ${LATEST_UBUNTU_LTS}."
+  elif [ -z "$SLURMD_REPOSITORY" ]; then
+    UBUNTU_LTS_SKIP_REASON="Could not find the slurmd image repository in lambda/helm-installer/charts.yaml for the Ubuntu LTS comparison."
+    echo "  $UBUNTU_LTS_SKIP_REASON"
+  else
+    UBUNTU_LTS_CANDIDATE="${SLURM_IMAGE_TAG_CURRENT%-ubuntu*}-ubuntu${LATEST_UBUNTU_LTS}"
+    slurmd_tags=""
+    if ! slurmd_tags="$(skopeo list-tags "${SCAN_SKOPEO_RETRY[@]}" "docker://${SLURMD_REPOSITORY}" 2>/dev/null \
+      | jq -r '.Tags[]' 2>/dev/null)" || [ -z "$slurmd_tags" ]; then
+      mark_scan_incomplete "Container registry tag lookup failed for ${SLURMD_REPOSITORY} (Ubuntu LTS comparison)."
+    elif tag_listed "$UBUNTU_LTS_CANDIDATE" "$slurmd_tags"; then
+      echo "  - SLURM_IMAGE_TAG (gco/slurm_config.py): ${SLURM_IMAGE_TAG_CURRENT} -> ${UBUNTU_LTS_CANDIDATE} (Ubuntu ${LATEST_UBUNTU_LTS} LTS)"
+      echo "SLURM_IMAGE_TAG (gco/slurm_config.py)|${SLURM_IMAGE_TAG_CURRENT}|${UBUNTU_LTS_CANDIDATE}" >> "$UBUNTU_LTS_RESULTS"
+    else
+      echo "  Ubuntu ${LATEST_UBUNTU_LTS} LTS is adoptable, but ${SLURMD_REPOSITORY} does not publish ${UBUNTU_LTS_CANDIDATE} yet; nothing to move to."
+    fi
+  fi
+fi
+
+UBUNTU_LTS_COUNT="$(wc -l < "$UBUNTU_LTS_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$UBUNTU_LTS_COUNT" ] && UBUNTU_LTS_COUNT=0
+
+# ---------------------------------------------------------------------------
 # Runner images
 #
 # `runs-on: ubuntu-latest` is not a version pin, so Dependabot has nothing to
@@ -2299,6 +2359,11 @@ if [ -n "$RUBY_RELEASE_SKIP_REASON" ]; then
 else
   echo "Ruby release:             $RUBY_RELEASE_COUNT"
 fi
+if [ -n "$UBUNTU_LTS_SKIP_REASON" ]; then
+  echo "Ubuntu LTS base:          (skipped)"
+else
+  echo "Ubuntu LTS base:          $UBUNTU_LTS_COUNT"
+fi
 if [ -n "$RUNNER_IMAGE_SKIP_REASON" ]; then
   echo "Runner images:            (skipped)"
 else
@@ -2330,6 +2395,7 @@ if ! dependency_scan_is_complete \
   "$CDK_ENUM_SKIP_REASON" \
   "$PYTHON_RELEASE_SKIP_REASON" \
   "$RUBY_RELEASE_SKIP_REASON" \
+  "$UBUNTU_LTS_SKIP_REASON" \
   "$RUNNER_IMAGE_SKIP_REASON"; then
   SCAN_COMPLETE=false
 fi
@@ -2359,6 +2425,7 @@ findings_surface "Pre-commit Hooks"         "routine" "$PRECOMMIT_COUNT"      ""
 findings_surface "CDK Enum Constants"       "routine" "$CDK_ENUM_COUNT"       "$CDK_ENUM_SKIP_REASON"      "constant|enum_class|current|latest" "$CDK_ENUM_RESULTS"
 findings_surface "Python Release"           "informational" "$PYTHON_RELEASE_COUNT" "$PYTHON_RELEASE_SKIP_REASON" "surface|current|latest" "$PYTHON_RELEASE_RESULTS"
 findings_surface "Ruby Release"             "informational" "$RUBY_RELEASE_COUNT" "$RUBY_RELEASE_SKIP_REASON" "surface|current|latest" "$RUBY_RELEASE_RESULTS"
+findings_surface "Ubuntu LTS Base"          "informational" "$UBUNTU_LTS_COUNT"   "$UBUNTU_LTS_SKIP_REASON"   "surface|current|latest" "$UBUNTU_LTS_RESULTS"
 findings_surface "Runner Images"            "act soon" "$RUNNER_IMAGE_COUNT"  "$RUNNER_IMAGE_SKIP_REASON"  "label|current|latest" "$RUNNER_IMAGE_RESULTS"
 findings_surface "CI Tooling"               "act soon" "$CI_TOOLING_COUNT"    ""                           "tool|current|latest|url" "$CI_TOOLING_RESULTS"
 findings_surface "Version Consistency"      "routine" "$CONSISTENCY_COUNT"    ""                           "what|pinned_values" "$CONSISTENCY_RESULTS"
@@ -2376,6 +2443,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
    && [ "$CDK_ENUM_COUNT" -eq 0 ] \
    && [ "$PYTHON_RELEASE_COUNT" -eq 0 ] \
    && [ "$RUBY_RELEASE_COUNT" -eq 0 ] \
+   && [ "$UBUNTU_LTS_COUNT" -eq 0 ] \
    && [ "$RUNNER_IMAGE_COUNT" -eq 0 ] \
    && [ "$BEDROCK_MODEL_COUNT" -eq 0 ] \
    && [ "$ACCELERATOR_COUNT" -eq 0 ] \
@@ -2425,6 +2493,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Ruby release skipped: $RUBY_RELEASE_SKIP_REASON"
   fi
+  if [ -n "$UBUNTU_LTS_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}Ubuntu LTS base skipped: $UBUNTU_LTS_SKIP_REASON"
+  fi
   if [ -n "$RUNNER_IMAGE_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Runner images skipped: $RUNNER_IMAGE_SKIP_REASON"
@@ -2441,7 +2513,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
   echo "$STATUS_MESSAGE"
   write_findings_document "$FINDINGS_FILE" "$SCAN_COMPLETE" false "$INCOMPLETE_REASONS_FILE"
   rm -f "$FINDINGS_SURFACES"
-  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
@@ -2535,6 +2607,7 @@ rm -f "$FINDINGS_SURFACES"
   summary_row "CDK Enum Constants"       "$CDK_ENUM_COUNT"       "$CDK_ENUM_SKIP_REASON"     "routine"
   summary_row "Python Release"           "$PYTHON_RELEASE_COUNT" "$PYTHON_RELEASE_SKIP_REASON" "informational"
   summary_row "Ruby Release"             "$RUBY_RELEASE_COUNT"   "$RUBY_RELEASE_SKIP_REASON" "informational"
+  summary_row "Ubuntu LTS Base"          "$UBUNTU_LTS_COUNT"     "$UBUNTU_LTS_SKIP_REASON"   "informational"
   summary_row "Runner Images"            "$RUNNER_IMAGE_COUNT"   "$RUNNER_IMAGE_SKIP_REASON" "act soon"
   summary_row "CI Tooling"               "$CI_TOOLING_COUNT"     ""                          "act soon"
   summary_row "Version Consistency"      "$CONSISTENCY_COUNT"    ""                          "routine"
@@ -2785,6 +2858,23 @@ rm -f "$FINDINGS_SURFACES"
     echo ""
   fi
 
+  if [ "$UBUNTU_LTS_COUNT" -gt 0 ]; then
+    echo "## Ubuntu LTS Base"
+    echo ""
+    echo "The Slinky Slurm images are pinned to an older Ubuntu LTS base than the"
+    echo "newest one that has shipped its first point release, and the registry"
+    echo "already publishes the pinned Slurm version on the newer base. The image"
+    echo "sweep never suggests this move because it compares within a tag's variant"
+    echo "family; changing base is a deliberate step: update \`SLURM_IMAGE_TAG\` in"
+    echo "\`gco/slurm_config.py\` and every image tag in \`lambda/helm-installer/charts.yaml\`"
+    echo "together (the unit suite holds them in lockstep), then re-run the live Slurm"
+    echo "validation before shipping. See <https://endoflife.date/ubuntu> and"
+    echo "<https://github.com/orgs/SlinkyProject/packages>."
+    echo ""
+    emit_md_table "Surface|Current|Latest" "$UBUNTU_LTS_RESULTS"
+    echo ""
+  fi
+
   # ----- New coverage surfaces -----
 
   if [ "$CI_TOOLING_COUNT" -gt 0 ]; then
@@ -2861,7 +2951,7 @@ rm -f "$FINDINGS_SURFACES"
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}" ] \
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${UBUNTU_LTS_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}" ] \
      || [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
@@ -2876,6 +2966,7 @@ rm -f "$FINDINGS_SURFACES"
     [ -n "$CDK_ENUM_SKIP_REASON" ]      && echo "- **CDK Enum Constants:** $CDK_ENUM_SKIP_REASON"
     [ -n "$PYTHON_RELEASE_SKIP_REASON" ] && echo "- **Python Release:** $PYTHON_RELEASE_SKIP_REASON"
     [ -n "$RUBY_RELEASE_SKIP_REASON" ] && echo "- **Ruby Release:** $RUBY_RELEASE_SKIP_REASON"
+    [ -n "$UBUNTU_LTS_SKIP_REASON" ] && echo "- **Ubuntu LTS Base:** $UBUNTU_LTS_SKIP_REASON"
     [ -n "$RUNNER_IMAGE_SKIP_REASON" ] && echo "- **Runner Images:** $RUNNER_IMAGE_SKIP_REASON"
     if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
       while IFS= read -r incomplete_reason; do
@@ -2909,7 +3000,7 @@ rm -f "$FINDINGS_SURFACES"
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {

@@ -17,7 +17,10 @@ Two tiers:
   no ``helm`` binary — these run in the normal unit job.
 * **Online** (opt-in): gated behind ``GCO_HELM_CHART_VALIDATION=1`` *and* a
   ``helm`` binary on ``PATH``, so the ~30s network pass never runs in the
-  normal unit job. The dedicated CI job sets the env var.
+  normal unit job. The dedicated CI job sets the env var. The Slurm API
+  version test in that tier additionally runs the pinned slurmrestd image
+  through ``GCO_CONTAINER_RUNTIME`` (``docker`` by default) and skips when
+  that runtime is missing.
 """
 
 from __future__ import annotations
@@ -516,6 +519,20 @@ class TestLiveChartsOnline:
         errors = validator.validate_trainer_runtime_lockstep(charts, online=True)
         assert errors == [], "Trainer runtime lockstep failed:\n" + "\n".join(errors)
 
+    def test_pinned_slurmrestd_image_serves_the_api_version_pin(self) -> None:
+        # Pulls and runs the pinned slurmrestd image (`slurmrestd -d list`):
+        # the plugin version every GCO surface addresses must be one it ships.
+        # The runtime follows the repo-wide GCO_CONTAINER_RUNTIME override
+        # (docker by default; finch/podman locally).
+        runtime = os.environ.get("GCO_CONTAINER_RUNTIME", "docker")
+        if shutil.which(runtime) is None:
+            pytest.skip(f"needs {runtime!r} on PATH to run the pinned slurmrestd image")
+        charts = validator.load_charts(LIVE_CHARTS)
+        errors = validator.validate_slurm_api_version_lockstep(
+            charts, online=True, container_runtime=runtime
+        )
+        assert errors == [], "Slurm API version lockstep failed:\n" + "\n".join(errors)
+
     def test_online_detects_a_bogus_version(self) -> None:
         # Give the check a version that cannot exist and confirm it fails —
         # proves the online gate has teeth against a mistyped pin.
@@ -830,7 +847,7 @@ class TestGatewayLockstepValidation:
 
 
 class TestSlinkySlurmValuesShape:
-    """Pin the slinky-slurm values in the LIVE charts.yaml to the chart's schema.
+    """Pin the DEPLOYED slinky-slurm values to the chart's schema.
 
     Helm merges unknown value keys silently, so a misspelled key deploys a
     half-configured cluster with no error anywhere. Both shapes below were
@@ -841,18 +858,46 @@ class TestSlinkySlurmValuesShape:
     partition-less submission (``sbatch --wrap``, the REST probe,
     ``examples/slurm-cluster-job.yaml``) failed with rc 2001.
 
+    The deployed values are the static charts.yaml layer (pins and sizing)
+    deep-merged with what ``gco.slurm_config.slurm_chart_values`` renders from
+    ``helm.slurm`` — the same merge the helm installer performs — so the
+    assertions run against the result of that merge for the shipped defaults.
+
     Chart schema reference: ``helm show values oci://ghcr.io/slinkyproject/charts/slurm``
     — ``nodesets`` is a lowercase MAP keyed by NodeSet name; ``partitions`` is
-    a map whose entries carry ``enabled`` + ``configMap``.
+    a map whose entries carry ``enabled`` + ``configMap``, and every NodeSet
+    may also carry its own ``partition`` block.
     """
 
     @pytest.fixture(scope="class")
     @staticmethod
-    def slinky_values() -> dict:
+    def static_values() -> dict:
         import yaml
 
         charts = yaml.safe_load(LIVE_CHARTS.read_text(encoding="utf-8"))["charts"]
         return charts["slinky-slurm"]["values"]
+
+    @pytest.fixture(scope="class")
+    @staticmethod
+    def slinky_values(static_values: dict) -> dict:
+        from gco import slurm_config as sc
+        from tests._lambda_imports import load_lambda_module
+
+        installer = load_lambda_module("helm-installer")
+        rendered = sc.slurm_chart_values(
+            sc.validate_slurm_config({"enabled": True}), fsx_enabled=False
+        )
+        return installer.deep_merge(static_values, rendered)
+
+    def test_static_layer_leaves_nodesets_and_loginsets_to_the_rendered_layer(
+        self, static_values: dict
+    ) -> None:
+        # A static NodeSet would survive the deep merge beside the rendered
+        # partitions and come up as an unconfigured, unscaled worker pool.
+        assert static_values["nodesets"] == {}
+        assert static_values["loginsets"] == {}
+        assert static_values["partitions"] == {"all": {"enabled": False}}
+        assert static_values["accounting"]["enabled"] is False
 
     def test_no_camelcase_nodesets_key(self, slinky_values: dict) -> None:
         assert "nodeSets" not in slinky_values, (
@@ -873,30 +918,73 @@ class TestSlinkySlurmValuesShape:
                 f"nodesets.{name} carries a 'name' key — that's the list shape; "
                 "the map key IS the NodeSet name"
             )
+            assert spec["enabled"] is True
+            assert spec["partition"]["enabled"] is True
 
-    def test_default_partition_exists_and_spans_nodesets(self, slinky_values: dict) -> None:
-        partitions = slinky_values.get("partitions")
-        assert isinstance(partitions, dict) and partitions, (
-            "slinky-slurm values must define 'partitions' — without one, "
-            "slurmctld has no default partition and every partition-less "
-            "submission fails with rc 2001"
-        )
-        enabled = {
-            name: spec
-            for name, spec in partitions.items()
-            if isinstance(spec, dict) and spec.get("enabled")
+    def test_autoscaled_replicas_rule_names_the_rendered_nodesets(
+        self, slinky_values: dict
+    ) -> None:
+        """The installer's live-replicas carry-over must find the NodeSets the
+        rendered ScaledObjects target: the rule's ``object_name`` is
+        ``gco.slurm_config.nodeset_name``, its ``kind`` the ScaledObject
+        target kind, and every autoscaled partition is a key of ``nodesets``."""
+        import yaml
+
+        from gco import slurm_config as sc
+
+        charts = yaml.safe_load(LIVE_CHARTS.read_text(encoding="utf-8"))["charts"]
+        rule = charts["slinky-slurm"]["autoscaled_replicas"]
+        assert rule["values_key"] == "nodesets"
+        assert rule["resource"] == "nodesets.slinky.slurm.net"
+        for name in slinky_values["nodesets"]:
+            assert rule["object_name"].format(name=name) == sc.nodeset_name(name)
+        targets = {
+            (obj["spec"]["scaleTargetRef"]["kind"], obj["spec"]["scaleTargetRef"]["name"])
+            for obj in slinky_values["extraObjects"]
+            if obj["kind"] == "ScaledObject"
         }
-        assert enabled, "at least one partitions entry must set enabled: true"
+        assert targets, "the shipped defaults autoscale at least one partition"
+        assert {kind for kind, _ in targets} == {rule["kind"]}
+        assert targets <= {
+            (rule["kind"], rule["object_name"].format(name=name))
+            for name in slinky_values["nodesets"]
+        }
+
+    def test_exactly_one_default_partition(self, slinky_values: dict) -> None:
+        """One NodeSet partition carries Default=YES; the chart's catch-all is off."""
+        assert slinky_values["partitions"] == {"all": {"enabled": False}}
         defaults = [
             name
-            for name, spec in enabled.items()
-            if str((spec.get("configMap") or {}).get("Default", "")).upper() == "YES"
+            for name, spec in slinky_values["nodesets"].items()
+            if str(spec["partition"]["configMap"].get("Default", "")).upper() == "YES"
         ]
-        assert defaults, (
-            "exactly one enabled partition must carry configMap.Default: 'YES' so "
-            "sbatch/REST submissions without an explicit partition are accepted"
+        assert defaults == ["cpu"], (
+            "exactly one NodeSet partition must be Slurm's default; without one "
+            "every partition-less submission fails with rc 2001"
         )
-        assert len(defaults) == 1, f"multiple default partitions defined: {defaults}"
+
+    def test_every_image_tag_is_pinned_in_lockstep(self, slinky_values: dict) -> None:
+        """Every Slinky image carries the one Slurm tag; sidecars are pinned too."""
+        from gco import slurm_config as sc
+
+        slurm_images = {
+            "controller.slurmctld": slinky_values["controller"]["slurmctld"]["image"],
+            "controller.reconfigure": slinky_values["controller"]["reconfigure"]["image"],
+            "restapi.slurmrestd": slinky_values["restapi"]["slurmrestd"]["image"],
+            "accounting.slurmdbd": slinky_values["accounting"]["slurmdbd"]["image"],
+            "nodesetDefaults.slurmd": slinky_values["nodesetDefaults"]["slurmd"]["image"],
+            "loginsetDefaults.login": slinky_values["loginsetDefaults"]["login"]["image"],
+        }
+        for path, image in slurm_images.items():
+            assert image["repository"].startswith("ghcr.io/slinkyproject/"), path
+            assert image["tag"] == sc.SLURM_IMAGE_TAG, path
+        for path, image in {
+            "controller.logfile": slinky_values["controller"]["logfile"]["image"],
+            "nodesetDefaults.logfile": slinky_values["nodesetDefaults"]["logfile"]["image"],
+            "loginsetDefaults.initconf": slinky_values["loginsetDefaults"]["initconf"]["image"],
+        }.items():
+            assert image == sc.SLURM_SIDECAR_IMAGE, f"{path} must be the pinned sidecar image"
+            assert image["tag"] != "latest"
 
 
 # ── bounded re-pass over failed charts (offline) ──────────────────────────────
@@ -1276,6 +1364,553 @@ class TestTrainerLockstepValidation:
         errors = _lockstep(online=True, runtime_fetcher=_boom)
         assert len(errors) == 1
         assert "registry down" in errors[0]
+
+
+# ── Slurm REST API version lockstep ──────────────────────────────────────────
+#
+# ``SLURM_API_VERSION`` (gco/slurm_config.py) is the slurmrestd plugin version
+# every GCO surface addresses. Offline: the example job, the live-validation
+# probe, the API doc and the route module's shape note must repeat it exactly.
+# Online: the slurmrestd image pinned in charts.yaml must serve it
+# (``slurmrestd -d list``). All offline here: the image run is faked at the
+# fetcher seam, exactly as the trainer check fakes its chart render.
+
+_SLURM_PIN = "v0.0.44"
+_SLURMRESTD_IMAGE = "ghcr.io/slinkyproject/slurmrestd:26.05.5-ubuntu24.04"
+_SLURM_CONFIG_FIXTURE = (
+    "#: Image pins GCO keeps in lockstep with the chart version in charts.yaml.\n"
+    'SLURM_IMAGE_TAG = "26.05.5-ubuntu24.04"\n'
+    "\n"
+    "#: The slurmrestd OpenAPI plugin version every GCO surface addresses.\n"
+    'SLURM_API_VERSION = "v0.0.44"\n'
+)
+_SLURM_SURFACES_FIXTURE = {
+    "examples/slurm-cluster-job.yaml": (
+        '          RESTAPI = "http://slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820"\n'
+        '          API_VER = "v0.0.44"\n'
+    ),
+    "docs/API.md": '  "jobs": {"total": 1},\n  "api_version": "v0.0.44"\n',
+    "gco/services/api_routes/slurm.py": "    # slurmrestd's job_desc_msg (v0.0.44): ...\n",
+}
+# Verbatim ``slurmrestd -d list`` output from the pinned image (unordered upstream).
+_SLURMRESTD_LISTING = (
+    "Possible data_parser plugins:\n"
+    "data_parser/v0.0.45\n"
+    "data_parser/v0.0.43\n"
+    "data_parser/v0.0.44\n"
+    "data_parser/v0.0.42\n"
+)
+
+
+_SLURMRESTD_IMAGE_PIN = {
+    "repository": "ghcr.io/slinkyproject/slurmrestd",
+    "tag": "26.05.5-ubuntu24.04",
+}
+
+
+def _slurm_charts(*, image: object = _SLURMRESTD_IMAGE_PIN) -> dict:
+    """A ``slinky-slurm`` entry; ``image=None`` drops the slurmrestd image pin."""
+    values: dict = {"restapi": {"replicas": 2, "slurmrestd": {}}}
+    if image is not None:
+        values["restapi"]["slurmrestd"]["image"] = image
+    return {
+        "slinky-slurm": _oci(
+            enabled=False,
+            repo_url="oci://ghcr.io/slinkyproject/charts",
+            chart="slurm",
+            version="1.2.3",
+            namespace="gco-jobs",
+            values=values,
+        )
+    }
+
+
+def _slurm_lockstep(charts: dict | None = None, **overrides) -> list[str]:
+    kwargs = {
+        "config_source": _SLURM_CONFIG_FIXTURE,
+        "surface_texts": dict(_SLURM_SURFACES_FIXTURE),
+        "online": False,
+    }
+    kwargs.update(overrides)
+    return validator.validate_slurm_api_version_lockstep(
+        _slurm_charts() if charts is None else charts, **kwargs
+    )
+
+
+class TestSlurmApiVersionParsers:
+    def test_parses_the_pin(self) -> None:
+        assert validator.parse_slurm_api_version(_SLURM_CONFIG_FIXTURE) == _SLURM_PIN
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'SLURM_REST_VERSION = "v0.0.44"\n',  # renamed
+            'SLURM_API_VERSION = os.getenv("X", "v0.0.44")\n',  # no longer a literal
+            '    SLURM_API_VERSION = "v0.0.44"\n',  # indented: not the module constant
+            "",
+        ],
+    )
+    def test_a_renamed_or_non_literal_pin_is_none(self, source: str) -> None:
+        assert validator.parse_slurm_api_version(source) is None
+
+    def test_mentions_carry_line_numbers_and_every_token(self) -> None:
+        text = "x\nAPI_VER = 'v0.0.44'  # was v0.0.43\n\nnothing\nv0.0.45\n"
+        assert validator.slurm_api_version_mentions(text) == [
+            (2, "v0.0.44"),
+            (2, "v0.0.43"),
+            (5, "v0.0.45"),
+        ]
+
+    def test_mentions_ignore_other_version_shapes(self) -> None:
+        assert validator.slurm_api_version_mentions("v1.0.44 0.0.44 av0.0.44 v0.0.44x") == []
+
+    def test_served_versions_parsed_from_the_listing(self) -> None:
+        assert validator.parse_served_slurm_api_versions(_SLURMRESTD_LISTING) == {
+            "v0.0.42",
+            "v0.0.43",
+            "v0.0.44",
+            "v0.0.45",
+        }
+        assert validator.parse_served_slurm_api_versions("slurmrestd: no plugins\n") == set()
+
+    def test_slurmrestd_image_is_repository_colon_tag(self) -> None:
+        assert validator.slurmrestd_image(_slurm_charts()["slinky-slurm"]) == _SLURMRESTD_IMAGE
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            _oci(),  # no values at all
+            _slurm_charts(image=None)["slinky-slurm"],
+            _slurm_charts(image={"repository": "ghcr.io/slinkyproject/slurmrestd"})["slinky-slurm"],
+            _slurm_charts(image={"tag": "26.05.5-ubuntu24.04"})["slinky-slurm"],
+            _slurm_charts(image="ghcr.io/slinkyproject/slurmrestd:26.05.5")["slinky-slurm"],
+        ],
+        ids=["no-values", "no-image", "no-tag", "no-repository", "string-image"],
+    )
+    def test_slurmrestd_image_requires_repository_and_tag(self, entry: dict) -> None:
+        assert validator.slurmrestd_image(entry) is None
+
+    def test_real_repo_is_in_lockstep_offline(self) -> None:
+        # The committed example, probe, doc and route note must all repeat the
+        # committed pin — the always-on (network-free) half of the gate.
+        charts = validator.load_charts(validator._DEFAULT_CHARTS)
+        assert validator.validate_slurm_api_version_lockstep(charts, online=False) == []
+
+    def test_real_repo_pin_parses_to_the_importable_constant(self) -> None:
+        # The regex must see exactly what Python sees, or the script would
+        # hold the surfaces to a different version than the API uses.
+        from gco import slurm_config
+
+        source = validator._SLURM_CONFIG_MODULE.read_text(encoding="utf-8")
+        assert validator.parse_slurm_api_version(source) == slurm_config.SLURM_API_VERSION
+
+    def test_real_repo_pins_the_slurmrestd_image_the_check_runs(self) -> None:
+        from gco import slurm_config
+
+        charts = validator.load_charts(validator._DEFAULT_CHARTS)
+        image = validator.slurmrestd_image(charts["slinky-slurm"])
+        assert image == f"ghcr.io/slinkyproject/slurmrestd:{slurm_config.SLURM_IMAGE_TAG}"
+
+
+class TestSlurmApiVersionLockstepValidation:
+    def test_everything_in_sync_passes_offline(self) -> None:
+        assert _slurm_lockstep() == []
+
+    def test_surface_drift_names_the_file_line_and_both_versions(self) -> None:
+        surfaces = dict(_SLURM_SURFACES_FIXTURE)
+        surfaces["examples/slurm-cluster-job.yaml"] = surfaces[
+            "examples/slurm-cluster-job.yaml"
+        ].replace("v0.0.44", "v0.0.45")
+
+        errors = _slurm_lockstep(surface_texts=surfaces)
+
+        assert len(errors) == 1
+        assert errors[0].startswith("slurm api lockstep: examples/slurm-cluster-job.yaml:2 ")
+        assert "names slurmrestd v0.0.45" in errors[0]
+        assert "SLURM_API_VERSION in gco/slurm_config.py is v0.0.44" in errors[0]
+
+    def test_every_stale_mention_is_reported(self) -> None:
+        surfaces = {"docs/API.md": "v0.0.43 here\nfine v0.0.44\nand v0.0.45 there\n"}
+
+        errors = _slurm_lockstep(surface_texts=surfaces)
+
+        assert [e.split(" ")[3] for e in errors] == ["docs/API.md:1", "docs/API.md:3"]
+
+    def test_a_surface_without_mentions_is_unconstrained(self) -> None:
+        assert _slurm_lockstep(surface_texts={"docs/API.md": "# prose only\n"}) == []
+
+    def test_a_renamed_pin_fails_loudly(self) -> None:
+        errors = _slurm_lockstep(config_source='SLURM_REST_VERSION = "v0.0.44"\n')
+        assert len(errors) == 1
+        assert "no longer defines SLURM_API_VERSION" in errors[0]
+        assert "update this check" in errors[0]
+
+    def test_missing_chart_entry_is_an_error_for_the_real_charts_file(self) -> None:
+        errors = _slurm_lockstep(charts={}, require_entry=True)
+        assert errors == [
+            "slurm api lockstep: no 'slinky-slurm' entry with a version in charts.yaml"
+        ]
+
+    def test_missing_chart_entry_is_skipped_for_fixture_files(self) -> None:
+        assert _slurm_lockstep(charts={}, require_entry=False) == []
+        assert _slurm_lockstep(charts={"slinky-slurm": "junk"}, require_entry=False) == []
+
+    def test_offline_mode_never_runs_the_image(self) -> None:
+        errors = _slurm_lockstep(
+            versions_fetcher=lambda image, runtime: pytest.fail("offline must not run the image"),
+        )
+        assert errors == []
+
+    def test_served_pin_passes_online_and_notes_newer_versions(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        errors = _slurm_lockstep(
+            online=True,
+            versions_fetcher=lambda image, runtime: {"v0.0.45", "v0.0.43", "v0.0.44", "v0.0.42"},
+        )
+
+        assert errors == []
+        out = capsys.readouterr().out
+        assert out.startswith(f"note: {_SLURMRESTD_IMAGE} serves SLURM_API_VERSION v0.0.44")
+        assert "newer plugin version(s) v0.0.45;" in out
+        assert "not required now" in out
+
+    def test_newer_versions_are_listed_in_order(self, capsys: pytest.CaptureFixture[str]) -> None:
+        _slurm_lockstep(
+            online=True,
+            versions_fetcher=lambda image, runtime: {"v0.0.46", "v0.0.44", "v0.0.45", "v0.0.100"},
+        )
+        assert "version(s) v0.0.45, v0.0.46, v0.0.100;" in capsys.readouterr().out
+
+    def test_served_pin_as_the_newest_prints_no_note(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        errors = _slurm_lockstep(
+            online=True, versions_fetcher=lambda image, runtime: {"v0.0.41", "v0.0.44"}
+        )
+        assert errors == []
+        assert capsys.readouterr().out == ""
+
+    def test_unserved_pin_fails_online_with_the_served_list(self) -> None:
+        errors = _slurm_lockstep(
+            online=True,
+            versions_fetcher=lambda image, runtime: {"v0.0.47", "v0.0.45", "v0.0.46"},
+        )
+
+        assert len(errors) == 1
+        assert (
+            f"slurm api lockstep: {_SLURMRESTD_IMAGE} serves data_parser plugin version(s) "
+            "v0.0.45, v0.0.46, v0.0.47 but SLURM_API_VERSION is v0.0.44"
+        ) in errors[0]
+        assert "404 for every Slurm request" in errors[0]
+        assert "gco/slurm_config.py" in errors[0]
+
+    def test_offline_drift_and_online_mismatch_are_both_reported(self) -> None:
+        errors = _slurm_lockstep(
+            surface_texts={"docs/API.md": "v0.0.43\n"},
+            online=True,
+            versions_fetcher=lambda image, runtime: {"v0.0.45"},
+        )
+        assert len(errors) == 2
+        assert "docs/API.md:1" in errors[0]
+        assert "serves data_parser plugin version(s) v0.0.45" in errors[1]
+
+    def test_fetcher_receives_the_pinned_image_and_the_chosen_runtime(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def record(image: str, runtime: str) -> set[str]:
+            calls.append((image, runtime))
+            return {_SLURM_PIN}
+
+        assert (
+            _slurm_lockstep(online=True, versions_fetcher=record, container_runtime="finch") == []
+        )
+        assert calls == [(_SLURMRESTD_IMAGE, "finch")]
+
+    def test_fetcher_failure_is_reported_not_swallowed(self) -> None:
+        def _boom(image: str, runtime: str) -> set[str]:
+            raise RuntimeError(f"docker run {image} (slurmrestd -d list) failed: pull timed out")
+
+        errors = _slurm_lockstep(online=True, versions_fetcher=_boom)
+        assert errors == [
+            f"slurm api lockstep: docker run {_SLURMRESTD_IMAGE} (slurmrestd -d list) failed: "
+            "pull timed out"
+        ]
+
+    def test_a_restructured_image_pin_fails_online_only(self) -> None:
+        charts = _slurm_charts(image=None)
+        assert _slurm_lockstep(charts) == []
+
+        errors = _slurm_lockstep(
+            charts,
+            online=True,
+            versions_fetcher=lambda image, runtime: pytest.fail("nothing to run"),
+        )
+
+        assert len(errors) == 1
+        assert "slinky-slurm.values.restapi.slurmrestd.image" in errors[0]
+        assert "update this check" in errors[0]
+
+
+class TestFetchServedSlurmApiVersions:
+    """The image run, with the retry ladder faked so no container ever starts."""
+
+    def test_runs_the_image_without_network_and_parses_stdout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict = {}
+
+        def fake_retry(cmd, env, **kwargs):
+            seen["cmd"] = cmd
+            seen["kwargs"] = kwargs
+            return (0, _SLURMRESTD_LISTING, "")
+
+        monkeypatch.setattr(validator, "_run_with_retry", fake_retry)
+
+        served = validator.fetch_served_slurm_api_versions(_SLURMRESTD_IMAGE, "finch")
+
+        assert served == {"v0.0.42", "v0.0.43", "v0.0.44", "v0.0.45"}
+        assert seen["cmd"] == [
+            "finch",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "slurmrestd",
+            _SLURMRESTD_IMAGE,
+            "-d",
+            "list",
+        ]
+        assert seen["kwargs"]["timeout"] == 600
+        assert seen["kwargs"]["description"] == f"finch run {_SLURMRESTD_IMAGE} slurmrestd -d list"
+
+    def test_defaults_to_docker_and_accepts_the_listing_on_stderr(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[list[str]] = []
+        monkeypatch.setattr(
+            validator,
+            "_run_with_retry",
+            lambda cmd, env, **k: (seen.append(cmd), (0, "", _SLURMRESTD_LISTING))[1],
+        )
+
+        served = validator.fetch_served_slurm_api_versions(_SLURMRESTD_IMAGE)
+
+        assert served == {"v0.0.42", "v0.0.43", "v0.0.44", "v0.0.45"}
+        assert seen[0][0] == "docker"
+
+    def test_a_failed_run_is_a_runtime_error_with_the_tail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            validator,
+            "_run_with_retry",
+            lambda cmd, env, **k: (125, "", "Error: manifest unknown: 26.05.5-ubuntu24.04"),
+        )
+
+        with pytest.raises(RuntimeError, match="manifest unknown") as excinfo:
+            validator.fetch_served_slurm_api_versions(_SLURMRESTD_IMAGE)
+
+        assert str(excinfo.value).startswith(
+            f"docker run {_SLURMRESTD_IMAGE} (slurmrestd -d list) failed: "
+        )
+
+    def test_a_failed_run_with_only_stdout_reports_that(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (1, "fatal: no such user", "")
+        )
+
+        with pytest.raises(RuntimeError, match="fatal: no such user"):
+            validator.fetch_served_slurm_api_versions(_SLURMRESTD_IMAGE)
+
+    def test_a_listing_without_plugins_is_a_runtime_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "Possible plugins:\n", "")
+        )
+
+        with pytest.raises(RuntimeError, match=r"printed no data_parser/vX\.Y\.Z plugin lines"):
+            validator.fetch_served_slurm_api_versions(_SLURMRESTD_IMAGE)
+
+
+class TestSlurmApiVersionLockstepFileFallbacks:
+    def test_an_unreadable_config_module_is_reported_not_raised(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(validator, "_SLURM_CONFIG_MODULE", tmp_path / "missing.py")
+
+        errors = validator.validate_slurm_api_version_lockstep(_slurm_charts())
+
+        assert len(errors) == 1
+        assert errors[0].startswith("slurm api lockstep: cannot read")
+        assert "missing.py" in errors[0]
+
+    def test_an_unreadable_surface_is_reported_not_raised(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(validator, "_SLURM_API_VERSION_SURFACES", (tmp_path / "gone.yaml",))
+
+        errors = validator.validate_slurm_api_version_lockstep(
+            _slurm_charts(), config_source=_SLURM_CONFIG_FIXTURE
+        )
+
+        assert len(errors) == 1
+        assert errors[0].startswith("slurm api lockstep: cannot read")
+        assert "gone.yaml" in errors[0]
+
+    def test_surfaces_default_to_the_files_on_disk(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A surface outside the repo root is displayed by its full path.
+        stale = tmp_path / "probe.yaml"
+        stale.write_text('API_VER = "v0.0.41"\n', encoding="utf-8")
+        monkeypatch.setattr(validator, "_SLURM_API_VERSION_SURFACES", (stale,))
+
+        errors = validator.validate_slurm_api_version_lockstep(
+            _slurm_charts(), config_source=_SLURM_CONFIG_FIXTURE
+        )
+
+        assert len(errors) == 1
+        assert f"slurm api lockstep: {stale}:1 names slurmrestd v0.0.41" in errors[0]
+
+    def test_repo_relative_display_for_in_repo_paths(self) -> None:
+        assert validator._repo_relative(validator._SLURM_CONFIG_MODULE) == "gco/slurm_config.py"
+
+
+class TestMainSlurmLockstepWiring:
+    """``main()`` plumbing for the container-runtime half of the Slurm check."""
+
+    @pytest.fixture(autouse=True)
+    def _default_runtime(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A developer's own GCO_CONTAINER_RUNTIME must not change what these assert.
+        monkeypatch.delenv("GCO_CONTAINER_RUNTIME", raising=False)
+
+    @staticmethod
+    def _charts_file(tmp_path: Path) -> Path:
+        path = tmp_path / "charts.yaml"
+        path.write_text(yaml.safe_dump({"charts": _slurm_charts()}), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _which(available: set[str]):
+        return lambda name: f"/usr/bin/{name}" if name in available else None
+
+    def test_online_mode_without_a_container_runtime_is_exit_two(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(validator.shutil, "which", self._which({"helm"}))
+        monkeypatch.setattr(
+            validator,
+            "fetch_served_slurm_api_versions",
+            lambda image, runtime: pytest.fail("must not run without a runtime"),
+        )
+
+        rc = validator.main(["--charts", str(self._charts_file(tmp_path)), "--mode", "online"])
+
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "--mode online requires the 'docker' binary on PATH" in err
+        assert "--container-runtime podman|finch" in err
+
+    def test_auto_mode_without_a_container_runtime_notes_and_skips_that_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(validator.shutil, "which", self._which({"helm"}))
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "version: 1.2.3\n", "")
+        )
+        monkeypatch.setattr(
+            validator,
+            "fetch_served_slurm_api_versions",
+            lambda image, runtime: pytest.fail("auto mode must skip the image run"),
+        )
+
+        rc = validator.main(["--charts", str(self._charts_file(tmp_path)), "--mode", "auto"])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "note: 'docker' not found on PATH; skipping the online slurmrestd" in out
+        assert "resolvable + rendered" in out
+
+    def test_online_mode_runs_the_image_with_the_chosen_runtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(validator.shutil, "which", self._which({"helm", "finch"}))
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "version: 1.2.3\n", "")
+        )
+        calls: list[tuple[str, str]] = []
+
+        def fake_fetch(image: str, runtime: str) -> set[str]:
+            calls.append((image, runtime))
+            return {"v0.0.44"}
+
+        monkeypatch.setattr(validator, "fetch_served_slurm_api_versions", fake_fetch)
+
+        rc = validator.main(
+            [
+                "--charts",
+                str(self._charts_file(tmp_path)),
+                "--mode",
+                "online",
+                "--container-runtime",
+                "finch",
+            ]
+        )
+
+        assert rc == 0
+        assert calls == [(_SLURMRESTD_IMAGE, "finch")]
+        assert "note:" not in capsys.readouterr().out
+
+    def test_the_repo_wide_runtime_variable_sets_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GCO_CONTAINER_RUNTIME", "podman")
+        monkeypatch.setattr(validator.shutil, "which", self._which({"helm", "podman"}))
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "version: 1.2.3\n", "")
+        )
+        calls: list[str] = []
+        monkeypatch.setattr(
+            validator,
+            "fetch_served_slurm_api_versions",
+            lambda image, runtime: (calls.append(runtime), {"v0.0.44"})[1],
+        )
+
+        rc = validator.main(["--charts", str(self._charts_file(tmp_path)), "--mode", "online"])
+
+        assert rc == 0
+        assert calls == ["podman"]
+
+    def test_online_mismatch_fails_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(validator.shutil, "which", self._which({"helm", "docker"}))
+        monkeypatch.setattr(
+            validator, "_run_with_retry", lambda cmd, env, **k: (0, "version: 1.2.3\n", "")
+        )
+        monkeypatch.setattr(
+            validator, "fetch_served_slurm_api_versions", lambda image, runtime: {"v0.0.45"}
+        )
+
+        rc = validator.main(["--charts", str(self._charts_file(tmp_path)), "--mode", "online"])
+
+        assert rc == 1
+        assert "but SLURM_API_VERSION is v0.0.44" in capsys.readouterr().out
+
+    def test_offline_mode_never_looks_for_a_container_runtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(validator.shutil, "which", self._which(set()))
+
+        rc = validator.main(["--charts", str(self._charts_file(tmp_path)), "--mode", "offline"])
+
+        assert rc == 0
+        assert "docker" not in capsys.readouterr().out
 
 
 # ── Remaining branches ────────────────────────────────────────────────────────

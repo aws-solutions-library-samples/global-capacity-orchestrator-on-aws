@@ -127,6 +127,12 @@ SCHEMA_UNAVAILABLE_SKIPS = (
     # stronger than the catalog lookup this skip bypasses.
     "gateway.k8s.aws/v1/LoadBalancerConfiguration",
     "gateway.k8s.aws/v1/TargetGroupConfiguration",
+    # Slinky slurm-operator Token (post-helm-slurm-api-access.yaml) — the
+    # catalog carries no slinky.slurm.net schemas. The manifest's spec keys
+    # are pinned against the v1.2.3 CRD by tests/test_kubectl_applier.py
+    # (TestSlurmApiAccessManifest), and the live Slurm validation action
+    # applies it to a real API server serving that CRD.
+    "slinky.slurm.net/v1beta1/Token",
     # The example-defined BatchJob APIs. No catalog can carry them: their
     # schemas are the companion examples themselves (the Crossplane XRD in
     # crossplane-batch-api.yaml, the kro RGD in kro-batch-api.yaml), which ARE
@@ -254,6 +260,9 @@ _QUANTITY_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
         "{{QUOTA_MAX_CPU}}",
         "{{QUOTA_MAX_MEMORY}}",
         "{{QUOTA_MAX_GPU}}",
+        # The Slurm accounting database's volumeClaimTemplate size
+        # (29-slurm-accounting-db.yaml).
+        "{{SLURM_ACCOUNTING_DB_STORAGE_SIZE}}",
     }
 )
 

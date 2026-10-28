@@ -51,8 +51,8 @@ from gco.services.template_store import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-26T23:26:19Z
-# Generated from Git commit: f3be7366f66f942f857b581eaf47f75a14c29d81
+# Generated at (UTC): 2026-08-30T12:00:00Z
+# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
 # Flowchart(s) generated from this file:
 #   * ``lifespan`` -> ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_api.lifespan.png``)
@@ -236,6 +236,7 @@ from gco.services.api_routes.cost import router as cost_router  # noqa: E402
 from gco.services.api_routes.jobs import router as jobs_router  # noqa: E402
 from gco.services.api_routes.manifests import router as manifests_router  # noqa: E402
 from gco.services.api_routes.queue import router as queue_router  # noqa: E402
+from gco.services.api_routes.slurm import router as slurm_router  # noqa: E402
 from gco.services.api_routes.templates import router as templates_router  # noqa: E402
 from gco.services.api_routes.webhooks import router as webhooks_router  # noqa: E402
 
@@ -245,6 +246,7 @@ app.include_router(templates_router)
 app.include_router(webhooks_router)
 app.include_router(queue_router)
 app.include_router(cost_router)
+app.include_router(slurm_router)
 
 
 # =============================================================================

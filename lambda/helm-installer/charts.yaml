@@ -444,9 +444,20 @@ charts:
         enabled: true
 
   # Slinky Slurm Cluster - Deploys a ready-to-use Slurm cluster on Kubernetes
-  # Installs after the operator and creates controller, workers, login, and REST API pods.
-  # Users can immediately submit jobs via sbatch/srun from the login pod.
+  # Installs after the operator and creates the controller, REST API, login,
+  # accounting and worker pods as Slinky custom resources.
   # https://github.com/SlinkyProject/slurm-operator/tree/main/helm/slurm
+  #
+  # Only the static layer lives here: image pins (kept in lockstep with the
+  # chart version — the chart defaults to a different Slurm image tag and to
+  # alpine:latest for its sidecars) and the control-plane container sizes.
+  # Everything that varies per deployment — the cluster name, every
+  # partition/NodeSet, accounting and its database connection, the state
+  # volume, metrics, the login pod, the shared-storage mounts, the extra
+  # slurm.conf lines and one KEDA ScaledObject per autoscaled partition — is
+  # rendered by gco.slurm_config.slurm_chart_values from cdk.json helm.slurm
+  # and deep-merged over these values by the installer. See
+  # docs/SLURM_OPERATOR.md.
   slinky-slurm:
     enabled: false
     repo_name: slinky-oci
@@ -456,79 +467,56 @@ charts:
     namespace: gco-jobs
     create_namespace: false
     use_oci: true
+    # KEDA owns spec.replicas of every autoscaled NodeSet after install (one
+    # ScaledObject per autoscaled partition rides in extraObjects). Helm
+    # applies server-side, and a field another manager holds at a different
+    # value is a conflict that fails the whole upgrade — observed live
+    # (2026-10-28) as "conflict with keda with subresource scale ...
+    # .spec.replicas" on a deploy while a partition was scaled up. Before every
+    # upgrade the installer reads each autoscaled NodeSet's live replicas and
+    # writes it into values.nodesets.<partition>.replicas, so the applied value
+    # is the live one and nothing is scaled in or out by a deploy. NodeSets
+    # that do not exist yet (first install, a new partition) and partitions
+    # without a ScaledObject keep the rendered value (min_nodes).
+    autoscaled_replicas:
+      kind: NodeSet
+      resource: nodesets.slinky.slurm.net
+      values_key: nodesets
+      object_name: "slinky-slurm-worker-{name}"
     values:
-      # Slurm cluster name
+      imagePullPolicy: IfNotPresent
+      # Slurm ClusterName (overridden by helm.slurm.cluster_name).
       clusterName: gco-slurm
-      # Controller (slurmctld) — head node
+      # Controller (slurmctld): the one head pod. Its state directory is a
+      # dedicated gp3 claim on the gated gco-slurm-gp3 StorageClass
+      # (28-storage-slurm-gp3.yaml); the size comes from
+      # helm.slurm.controller.state_storage_size.
       controller:
-        # Use the pre-provisioned EFS PVC for controller state persistence.
-        # This avoids dynamic EFS provisioning which requires additional IAM permissions.
         persistence:
-          existingClaim: gco-shared-storage
+          enabled: true
+          storageClassName: gco-slurm-gp3
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 20Gi
         slurmctld:
           image:
             repository: ghcr.io/slinkyproject/slurmctld
-            tag: "26.05.4-ubuntu24.04"
+            tag: "26.05.5-ubuntu24.04"
           resources:
             requests:
-              cpu: 500m
-              memory: 512Mi
-            limits:
               cpu: "1"
-              memory: 1Gi
-        podSpec:
-          nodeSelector:
-            kubernetes.io/os: linux
-      # Worker nodes (slurmd). The chart's schema is a lowercase ``nodesets``
-      # MAP keyed by NodeSet name — a camelCase ``nodeSets`` list is silently
-      # ignored by Helm and the cluster comes up with zero workers (caught by
-      # the live release validation ``schedulers`` action; see
-      # tests/test_helm_charts_validation.py for the shape guard).
-      nodesets:
-        workers:
-          replicas: 2
-          slurmd:
-            image:
-              repository: ghcr.io/slinkyproject/slurmd
-              tag: "26.05.4-ubuntu24.04"
-            resources:
-              requests:
-                cpu: "1"
-                memory: 2Gi
-              limits:
-                cpu: "2"
-                memory: 4Gi
-          podSpec:
-            nodeSelector:
-              kubernetes.io/os: linux
-      # Slurm partitions. Without an enabled partition carrying
-      # ``Default: "YES"`` slurmctld has no default partition and every
-      # partition-less submission (sbatch --wrap, the REST probe,
-      # examples/slurm-cluster-job.yaml) fails with rc 2001
-      # ("No partition specified or system default partition").
-      partitions:
-        all:
-          enabled: true
-          nodesets:
-            - ALL
-          configMap:
-            Default: "YES"
-            State: UP
-            MaxTime: UNLIMITED
-      # Login pods are disabled by default. GCO submits Slurm jobs via the
-      # Kubernetes API (gco jobs submit-direct), not via SSH. Enabling the
-      # login set creates a separate LoadBalancer (NLB), which adds cost and is
-      # not part of the GCO API path; GA registration explicitly ignores it.
-      # For interactive access, use: kubectl exec -it <controller-pod> -- bash
-      loginsets:
-        slinky:
-          enabled: false
-      # REST API (slurmrestd) — used by operator for lifecycle management
-      restapi:
-        slurmrestd:
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+        # The reconfigure sidecar runs the same slurmctld image; the chart
+        # defaults it to a different tag, so pin it alongside.
+        reconfigure:
           image:
-            repository: ghcr.io/slinkyproject/slurmrestd
-            tag: "26.05.4-ubuntu24.04"
+            repository: ghcr.io/slinkyproject/slurmctld
+            tag: "26.05.5-ubuntu24.04"
           resources:
             requests:
               cpu: 100m
@@ -536,12 +524,122 @@ charts:
             limits:
               cpu: 500m
               memory: 256Mi
+        logfile:
+          image:
+            repository: public.ecr.aws/docker/library/alpine
+            tag: "3.24.3"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
         podSpec:
           nodeSelector:
             kubernetes.io/os: linux
-      # Disable accounting (MariaDB) by default
+      # REST API (slurmrestd): the operator's and the GCO API's path into
+      # Slurm. Replica count and PDB come from helm.slurm.restapi.
+      restapi:
+        replicas: 2
+        slurmrestd:
+          image:
+            repository: ghcr.io/slinkyproject/slurmrestd
+            tag: "26.05.5-ubuntu24.04"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+        podSpec:
+          nodeSelector:
+            kubernetes.io/os: linux
+      # Accounting (slurmdbd). Enabled and pointed at its database by
+      # helm.slurm.accounting; the database itself is the in-cluster MariaDB
+      # from 29-slurm-accounting-db.yaml or an operator-provided one.
       accounting:
         enabled: false
+        slurmdbd:
+          image:
+            repository: ghcr.io/slinkyproject/slurmdbd
+            tag: "26.05.5-ubuntu24.04"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+        podSpec:
+          nodeSelector:
+            kubernetes.io/os: linux
+      # Worker (slurmd) defaults applied to every NodeSet. The NodeSets
+      # themselves — one per helm.slurm.partitions entry, each with its pod
+      # size, node pool, tolerations and Slurm partition line — are rendered
+      # by gco.slurm_config; the chart's schema is a lowercase ``nodesets``
+      # MAP keyed by NodeSet name (a camelCase ``nodeSets`` list is silently
+      # ignored by Helm and the cluster comes up with zero workers;
+      # tests/test_slurm_config.py guards the rendered shape).
+      nodesetDefaults:
+        slurmd:
+          image:
+            repository: ghcr.io/slinkyproject/slurmd
+            tag: "26.05.5-ubuntu24.04"
+        logfile:
+          image:
+            repository: public.ecr.aws/docker/library/alpine
+            tag: "3.24.3"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+        # A PodDisruptionBudget shields a worker that is running Slurm jobs
+        # from voluntary eviction (node consolidation, drains).
+        workloadDisruptionProtection: true
+      nodesets: {}
+      # Login (sackd + sshd) defaults. The ``gco`` LoginSet rendered from
+      # helm.slurm.login is a ClusterIP Service: reached with `gco slurm
+      # shell` over the cluster tunnel, never through a load balancer (the
+      # chart default is a LoadBalancer Service).
+      loginsetDefaults:
+        login:
+          image:
+            repository: ghcr.io/slinkyproject/login
+            tag: "26.05.5-ubuntu24.04"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+        initconf:
+          image:
+            repository: public.ecr.aws/docker/library/alpine
+            tag: "3.24.3"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+        service:
+          spec:
+            type: ClusterIP
+      loginsets: {}
+      # Partitions are one per NodeSet (rendered with them). The chart's
+      # catch-all ``all`` partition stays off so exactly one declared
+      # partition carries Default=YES; slurmctld with no default partition
+      # rejects every partition-less submission with rc 2001.
+      partitions:
+        all:
+          enabled: false
 
   # Apache YuniKorn - Universal resource scheduler for Kubernetes
   # Provides app-aware scheduling, hierarchical queues, resource quotas,

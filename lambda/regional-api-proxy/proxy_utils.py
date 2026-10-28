@@ -18,8 +18,8 @@ import urllib3
 from backend_tls import get_backend_http_pool
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-05T01:20:02Z
-# Generated from Git commit: d0400a273ab7af4345ee9b4ee7c1900474019901
+# Generated at (UTC): 2026-08-30T12:00:00Z
+# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
 # Flowchart(s) generated from this file:
 #   * ``build_signed_headers`` -> ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/proxy-shared/proxy_utils.build_signed_headers.png``)
@@ -59,6 +59,16 @@ _ALLOWED_REQUEST_HEADERS = frozenset(
         "x-request-id",
     }
 )
+#: The SigV4 principal API Gateway authenticated, forwarded so the cluster API
+#: can attribute work to a caller (the Slurm routes record it in each job's
+#: comment). Only this proxy sets it, from the request context: a client
+#: sending its own ``x-gco-caller`` loses it in ``sanitize_request_headers``
+#: (not an allowed inbound header), and the service trusts the header only
+#: inside a request whose HMAC envelope verifies.
+CALLER_IDENTITY_HEADER = "x-gco-caller"
+_CALLER_ARN_PATTERN = re.compile(
+    r"^arn:aws[a-zA-Z-]*:(?:iam|sts)::\d{12}:[A-Za-z0-9._/@+=,:-]{1,256}$"
+)
 _INTERNAL_SIGNATURE_HEADERS = frozenset(
     {
         "x-gco-signature-version",
@@ -66,6 +76,7 @@ _INTERNAL_SIGNATURE_HEADERS = frozenset(
         "x-gco-timestamp",
         "x-gco-nonce",
         "x-gco-content-sha256",
+        CALLER_IDENTITY_HEADER,
     }
 )
 _RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
@@ -259,6 +270,22 @@ def build_signed_headers(
         "x-gco-nonce": nonce,
         "x-gco-content-sha256": content_hash,
     }
+
+
+def caller_identity_headers(event: Mapping[str, Any]) -> dict[str, str]:
+    """The ``x-gco-caller`` header for the principal API Gateway authenticated.
+
+    Reads ``requestContext.identity.userArn`` (the IAM user or assumed-role
+    session ARN API Gateway resolved from the SigV4 signature). Anything that
+    is not a well-formed IAM/STS ARN yields no header, so the service falls
+    back to attributing the work to the API itself rather than to a guess.
+    """
+    context = event.get("requestContext")
+    identity = context.get("identity") if isinstance(context, Mapping) else None
+    arn = identity.get("userArn") if isinstance(identity, Mapping) else None
+    if isinstance(arn, str) and _CALLER_ARN_PATTERN.fullmatch(arn):
+        return {CALLER_IDENTITY_HEADER: arn}
+    return {}
 
 
 def _outbound_headers(headers: dict[str, Any]) -> dict[str, str]:

@@ -236,6 +236,15 @@ from tools.nodepools import (  # noqa: E402, F401
     nodepools_list,
 )
 from tools.queue import queue_get, queue_list, queue_stats, queue_submit  # noqa: E402, F401
+from tools.slurm import (  # noqa: E402, F401
+    slurm_accounting,
+    slurm_job,
+    slurm_nodes,
+    slurm_partitions,
+    slurm_queue,
+    slurm_status,
+    slurm_submit,
+)
 from tools.stacks import (  # noqa: E402, F401
     addons_status,
     aurora_status,
@@ -326,6 +335,9 @@ with _contextlib.suppress(ImportError):
 
 with _contextlib.suppress(ImportError):
     from tools.webhooks import delete_webhook  # noqa: F401
+
+with _contextlib.suppress(ImportError):
+    from tools.slurm import slurm_cancel  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.models import delete_model  # noqa: F401
@@ -511,6 +523,11 @@ if _IS_RELOAD and _DESTRUCTIVE_FLAG_ON:
 
     _importlib.reload(_tasks_mod)
     globals()["task_prune"] = _tasks_mod.task_prune
+
+    from tools import slurm as _slurm_mod
+
+    _importlib.reload(_slurm_mod)
+    globals()["slurm_cancel"] = _slurm_mod.slurm_cancel
 
 # tools.models is reloaded if either the destructive flag (delete_model)
 # or the model-upload flag (models_upload) is set, so do it once here
@@ -797,6 +814,14 @@ _PUBLIC_EXPORTS = [
     "set_mooncake_topology",
     "set_opencode_default_model",
     "setup_cluster_access",
+    "slurm_accounting",
+    "slurm_cancel",
+    "slurm_job",
+    "slurm_nodes",
+    "slurm_partitions",
+    "slurm_queue",
+    "slurm_status",
+    "slurm_submit",
     "spot_prices",
     "stack_diff",
     "stack_outputs",

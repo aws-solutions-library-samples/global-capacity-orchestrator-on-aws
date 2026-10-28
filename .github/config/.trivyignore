@@ -121,6 +121,73 @@ CVE-2026-19534 exp:2026-11-21
 # Advisory: https://github.com/advisories/GHSA-xjj6-f33q-929c
 CVE-2026-109869 exp:2026-11-25
 
+# CVE-2026-109383: undici's Agent dispatcher deep-clones its constructor
+# options through JSON before handing them to each per-origin pool, which
+# silently drops a caller-supplied tls.checkServerIdentity callback, so a
+# client that relies on it to validate certificates loses that check.
+# CVE-2026-87018: the client process crashes when a TLS 1.2 server
+# renegotiates and presents a different, CA-trusted certificate whose
+# hostname does not match the request. Both fixed upstream in undici 6.29.1,
+# 7.30.1 and 8.12.2. Present only as the undici 6.28.0 vendored inside npm's
+# own node_modules in the dev image (the same copy as CVE-2026-19534 and
+# CVE-2026-109869 above), surfaced by security:trivy:container-scan on
+# Dockerfile.dev.
+#
+# Not introduced by any change of ours: both were published
+# 2026-10-15T19:17Z; the Security workflow was green on main at 2a318e7d
+# (2026-10-26T20:14Z), the tree PR #494 is based on, and first failed on that
+# PR, whose diff does not touch Dockerfile.dev or its npm pin — the two ids
+# reached the Trivy DB in between.
+#
+# Not clearable by a pin bump: checked 2026-10-28 by reading
+# node_modules/undici/package.json inside each published npm 12.x tarball.
+# npm 12.2.0 (the pinned ARG NPM_VERSION) vendors undici 6.28.0 and npm 12.2.1
+# (2026-10-15, still the latest release) vendors 6.29.0, both below the fix.
+#
+# Low runtime risk: npm uses undici's fetch only for node-gyp downloading Node
+# headers from the official dist server, with no custom checkServerIdentity to
+# drop and no TLS 1.2 renegotiation from that server; the dev image is a
+# contributor/CI tool that is never deployed to a cluster.
+#
+# Clears when npm ships a release that re-vendors undici >= 6.29.1: bump ARG
+# NPM_VERSION in Dockerfile.dev together with the packageManager pins and drop
+# these two along with CVE-2026-19534 and CVE-2026-109869.
+# Advisories: https://avd.aquasec.com/nvd/cve-2026-109383
+#             https://avd.aquasec.com/nvd/cve-2026-87018
+CVE-2026-109383 exp:2026-11-27
+CVE-2026-87018 exp:2026-11-27
+
+# CVE-2026-114613: the msgpack-python C extension leaks a decoded map value
+# when deserialization rejects a key under strict_map_key=True (the default),
+# so repeated malformed input grows process memory without bound. Fixed in
+# msgpack 1.2.3. The same vendored copy as GHSA-6v7p-g79w-8964 below —
+# pip/_vendor/vendor.txt in python:3.14.8-slim pins msgpack==1.1.2 — in the
+# dev image only: the Lambda images (lambda/helm-installer,
+# lambda/tls-certificate-manager) now uninstall pip after installing their
+# requirements, as the service images always have, so their scans no longer
+# see pip's vendor manifest at all (confirmed 2026-10-28 with a local build
+# and `trivy image` of each: Python target, zero findings).
+#
+# Not introduced by any change of ours: published 2026-10-22T19:17Z; the
+# Security workflow was green on main at 2a318e7d (2026-10-26T20:14Z) and
+# first failed on PR #494, whose diff does not touch Dockerfile.dev.
+#
+# Not clearable by a pin bump, checked 2026-10-28: pip 26.2.2, the newest pip
+# on PyPI, still vendors msgpack 1.1.2 (src/pip/_vendor/vendor.txt at tag
+# 26.2.2); pip's main branch has re-vendored 1.2.3, so the next pip release
+# clears it, and until then no python:3.14.x-slim rebuild can carry a fixed
+# pip. The dev image keeps pip because contributors install with it.
+#
+# Low runtime risk: the only reader is cachecontrol serialising pip's own
+# HTTP cache while pip talks to a package index — a crash of pip at worst —
+# and the dev image is never deployed to a cluster.
+#
+# Clears when pip re-vendors msgpack >= 1.2.3: pull a base image carrying that
+# pip, confirm with `trivy image` on the base alone, then drop this id (and
+# GHSA-6v7p-g79w-8964 below with it).
+# Advisory: https://avd.aquasec.com/nvd/cve-2026-114613
+CVE-2026-114613 exp:2026-11-27
+
 # CVE-2025-47273 (setuptools 70.3.0, fixed 78.1.1) and GHSA-6v7p-g79w-8964
 # (msgpack 1.1.2, fixed 1.2.1) — reported by security:trivy:container-scan
 # against the built dev image, under its python-pkg target.

@@ -189,6 +189,7 @@ class TestFeatureFlags:
                 "images_delete_tag",
                 "images_delete_repo",
                 "task_prune",
+                "slurm_cancel",
             },
             "GCO_ENABLE_MISSION": {
                 "mission_start",

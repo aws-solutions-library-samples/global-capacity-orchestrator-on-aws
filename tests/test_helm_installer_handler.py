@@ -351,6 +351,248 @@ class TestInstallChartWaitControl:
         assert args[args.index("--timeout") + 1] == "3m"
 
 
+def _scaled_object(target_name: str, *, kind: str = "NodeSet") -> dict:
+    return {
+        "apiVersion": "keda.sh/v1alpha1",
+        "kind": "ScaledObject",
+        "metadata": {"name": f"autoscale-{target_name}"},
+        "spec": {
+            "scaleTargetRef": {
+                "apiVersion": "slinky.slurm.net/v1beta1",
+                "kind": kind,
+                "name": target_name,
+            }
+        },
+    }
+
+
+class TestAutoscaledReplicasCarryOver:
+    """``install_chart`` applies an autoscaler-owned ``replicas`` at its live value.
+
+    Helm applies server-side; a field KEDA has set to another value is a
+    conflict that fails the upgrade (seen live on a scaled-up Slurm NodeSet).
+    The chart entry declares the objects under ``autoscaled_replicas``.
+    """
+
+    RULE = {
+        "kind": "NodeSet",
+        "resource": "nodesets.slinky.slurm.net",
+        "values_key": "nodesets",
+        "object_name": "slinky-slurm-worker-{name}",
+    }
+
+    def _config(self, values, **overrides):
+        config = {
+            "repo_name": "slinky-oci",
+            "repo_url": "oci://ghcr.io/slinkyproject/charts",
+            "chart": "slurm",
+            "version": "1.2.3",
+            "namespace": "gco-jobs",
+            "create_namespace": False,
+            "use_oci": True,
+            "autoscaled_replicas": dict(self.RULE),
+            "values": values,
+        }
+        config.update(overrides)
+        return config
+
+    @staticmethod
+    def _values(*autoscaled: str) -> dict:
+        return {
+            "nodesets": {
+                "cpu": {"enabled": True, "replicas": 0},
+                "gpu": {"enabled": True, "replicas": 0},
+                "static": {"enabled": True, "replicas": 2},
+            },
+            "extraObjects": [_scaled_object(f"slinky-slurm-worker-{name}") for name in autoscaled],
+        }
+
+    @staticmethod
+    def _kubectl(live: dict[str, tuple[int, str, str]]):
+        """``run_kubectl`` stand-in keyed by object name; records every call."""
+        calls: list[list[str]] = []
+
+        def _run(args, _kubeconfig, **_kwargs):
+            calls.append(args)
+            assert args[:2] == ["get", "nodesets.slinky.slurm.net"]
+            assert args[3:] == [
+                "-n",
+                "gco-jobs",
+                "-o",
+                "jsonpath={.spec.replicas}",
+                "--ignore-not-found",
+            ]
+            return live[args[2]]
+
+        return _run, calls
+
+    def _install(self, config, kubectl):
+        """Run ``install_chart`` and return the values Helm was handed."""
+        captured: dict = {}
+
+        def _helm(args, _kubeconfig, **_kwargs):
+            if args[0] == "upgrade":
+                captured["values"] = yaml.safe_load(
+                    Path(args[args.index("--values") + 1]).read_text(encoding="utf-8")
+                )
+            return 0, "ok", ""
+
+        with (
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler, "run_kubectl", side_effect=kubectl),
+            patch.object(helm_handler, "run_helm", side_effect=_helm),
+        ):
+            ok, message = helm_handler.install_chart("slinky-slurm", config, "/tmp/kube", None)
+        assert (ok, message) == (True, "Successfully installed slinky-slurm")
+        return captured["values"]
+
+    def test_live_replicas_of_autoscaled_targets_replace_the_rendered_value(self, caplog):
+        """cpu is scaled up by KEDA (live 3) and gpu is idle (live 0); the
+        statically sized NodeSet has no ScaledObject and is never looked up."""
+        kubectl, calls = self._kubectl(
+            {
+                "slinky-slurm-worker-cpu": (0, "3", ""),
+                "slinky-slurm-worker-gpu": (0, "0", ""),
+            }
+        )
+        with caplog.at_level(logging.INFO):
+            values = self._install(self._config(self._values("cpu", "gpu")), kubectl)
+
+        assert values["nodesets"]["cpu"]["replicas"] == 3
+        assert values["nodesets"]["gpu"]["replicas"] == 0
+        assert values["nodesets"]["static"]["replicas"] == 2
+        assert sorted(call[2] for call in calls) == [
+            "slinky-slurm-worker-cpu",
+            "slinky-slurm-worker-gpu",
+        ]
+        assert (
+            "NodeSet gco-jobs/slinky-slurm-worker-cpu is autoscaled: carrying its live "
+            "replicas=3 into values.nodesets.cpu.replicas (rendered 0)"
+        ) in caplog.text
+        assert "slinky-slurm-worker-gpu is autoscaled" not in caplog.text
+
+    def test_value_overrides_are_merged_before_the_live_lookup(self):
+        """The stack's rendered nodesets arrive as value overrides; the carry-over
+        sees the merged result, exactly what Helm would otherwise apply."""
+        kubectl, calls = self._kubectl({"slinky-slurm-worker-cpu": (0, "2", "")})
+        config = self._config({"imagePullPolicy": "IfNotPresent", "nodesets": {}})
+        captured: dict = {}
+
+        def _helm(args, _kubeconfig, **_kwargs):
+            if args[0] == "upgrade":
+                captured["values"] = yaml.safe_load(
+                    Path(args[args.index("--values") + 1]).read_text(encoding="utf-8")
+                )
+            return 0, "ok", ""
+
+        with (
+            patch.object(helm_handler, "_clear_stuck_release"),
+            patch.object(helm_handler, "run_kubectl", side_effect=kubectl),
+            patch.object(helm_handler, "run_helm", side_effect=_helm),
+        ):
+            ok, _ = helm_handler.install_chart(
+                "slinky-slurm", config, "/tmp/kube", self._values("cpu")
+            )
+
+        assert ok is True
+        assert [call[2] for call in calls] == ["slinky-slurm-worker-cpu"]
+        assert captured["values"]["nodesets"]["cpu"]["replicas"] == 2
+        assert captured["values"]["imagePullPolicy"] == "IfNotPresent"
+
+    def test_missing_object_keeps_the_rendered_value_silently(self, caplog):
+        """First install or a new partition: ``--ignore-not-found`` returns nothing."""
+        kubectl, _ = self._kubectl({"slinky-slurm-worker-cpu": (0, "", "")})
+        with caplog.at_level(logging.INFO):
+            values = self._install(self._config(self._values("cpu")), kubectl)
+        assert values["nodesets"]["cpu"]["replicas"] == 0
+        assert "Could not read live replicas" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("result", "detail"),
+        [
+            ((1, "", "Unable to connect to the server"), "Unable to connect to the server"),
+            ((-1, "", "timeout: kubectl command exceeded 120s"), "timeout: kubectl"),
+            ((0, "lots", ""), "'lots'"),
+        ],
+    )
+    def test_lookup_failures_keep_the_rendered_value_and_warn(self, caplog, result, detail):
+        kubectl, _ = self._kubectl({"slinky-slurm-worker-cpu": result})
+        with caplog.at_level(logging.WARNING):
+            values = self._install(self._config(self._values("cpu")), kubectl)
+        assert values["nodesets"]["cpu"]["replicas"] == 0
+        assert (
+            "Could not read live replicas of NodeSet gco-jobs/slinky-slurm-worker-cpu"
+        ) in caplog.text
+        assert detail in caplog.text
+        assert "applying the rendered value 0" in caplog.text
+
+    def test_charts_without_the_rule_never_touch_kubectl(self):
+        config = self._config(self._values("cpu"))
+        del config["autoscaled_replicas"]
+        with patch.object(helm_handler, "run_kubectl") as mock_kubectl:
+            values = self._install(config, mock_kubectl)
+        mock_kubectl.assert_not_called()
+        assert values["nodesets"]["cpu"]["replicas"] == 0
+
+    def test_rule_without_a_values_map_or_targets_is_a_no_op(self):
+        kubectl = MagicMock()
+        # values_key absent, then not a map, then entries that are not maps.
+        for values in (
+            {},
+            {"nodesets": ["cpu"]},
+            {"nodesets": {"cpu": "oops"}, "extraObjects": [_scaled_object("x")]},
+        ):
+            with patch.object(helm_handler, "run_kubectl", kubectl):
+                result = helm_handler._carry_live_autoscaled_replicas(
+                    {"autoscaled_replicas": dict(self.RULE)}, values, "gco-jobs", "/tmp/kube"
+                )
+            assert result == values
+        kubectl.assert_not_called()
+
+    def test_the_callers_values_are_left_untouched(self):
+        """deep_merge shares nested maps with the event's overrides, so the
+        carry-over works on a copy rather than writing through to them."""
+        kubectl, _ = self._kubectl({"slinky-slurm-worker-cpu": (0, "4", "")})
+        values = self._values("cpu")
+        with patch.object(helm_handler, "run_kubectl", side_effect=kubectl):
+            result = helm_handler._carry_live_autoscaled_replicas(
+                {"autoscaled_replicas": dict(self.RULE)}, values, "gco-jobs", "/tmp/kube"
+            )
+        assert result["nodesets"]["cpu"]["replicas"] == 4
+        assert values["nodesets"]["cpu"]["replicas"] == 0
+        assert result is not values
+
+    def test_scale_targets_ignore_malformed_and_foreign_objects(self):
+        values = {
+            "extraObjects": [
+                "not-a-mapping",
+                {"kind": "ConfigMap", "metadata": {"name": "x"}},
+                {"kind": "ScaledObject", "spec": "oops"},
+                {"kind": "ScaledObject", "spec": {"scaleTargetRef": {"kind": "NodeSet"}}},
+                _scaled_object("slinky-slurm-worker-cpu"),
+                _scaled_object("web", kind="Deployment"),
+            ]
+        }
+        assert helm_handler._autoscaled_scale_targets(values) == {
+            ("NodeSet", "slinky-slurm-worker-cpu"),
+            ("Deployment", "web"),
+        }
+        assert helm_handler._autoscaled_scale_targets({"extraObjects": "oops"}) == set()
+        assert helm_handler._autoscaled_scale_targets({}) == set()
+
+    def test_target_of_another_kind_with_the_same_name_is_not_carried(self):
+        """The rule's kind must match the ScaledObject's target kind."""
+        values = self._values()
+        values["extraObjects"] = [_scaled_object("slinky-slurm-worker-cpu", kind="Deployment")]
+        kubectl = MagicMock()
+        with patch.object(helm_handler, "run_kubectl", kubectl):
+            result = helm_handler._carry_live_autoscaled_replicas(
+                {"autoscaled_replicas": dict(self.RULE)}, values, "gco-jobs", "/tmp/kube"
+            )
+        kubectl.assert_not_called()
+        assert result["nodesets"]["cpu"]["replicas"] == 0
+
+
 class TestKedaCustomResourceCleanup:
     """KEDA instances must disappear while its finalizer controller is live."""
 

@@ -41,13 +41,26 @@ By default *every* chart in the file is validated, including entries with
 ``enabled: false``: those are toggled on via ``cdk.json``, so their pinned
 ``(name, version)`` must be valid too.
 
+Three lockstep contracts ride along (each with an offline half that always
+runs and an online half): the AWS Load Balancer Controller chart against the
+Gateway API CRD bundles the helm-installer pins, the Kubeflow Trainer chart
+against the shipped ``torch-distributed`` runtime, and the ``slinky-slurm``
+slurmrestd image against ``SLURM_API_VERSION`` in ``gco/slurm_config.py``
+(the online half runs ``slurmrestd -d list`` inside the pinned image, so it
+needs a container runtime: ``docker`` by default, ``--container-runtime``
+for podman/finch).
+
 Usage::
 
     # Structural only (no helm needed):
     python3 .github/scripts/validate_helm_charts.py --mode offline
 
-    # Full check (requires helm on PATH + network) — the CI gate:
+    # Full check (requires helm + docker on PATH, and network) — the CI gate:
     python3 .github/scripts/validate_helm_charts.py --mode online
+
+    # Same, with another container runtime for the slurmrestd image (the
+    # repo-wide GCO_CONTAINER_RUNTIME variable sets the default):
+    python3 .github/scripts/validate_helm_charts.py --mode online --container-runtime finch
 
     # Auto: structural always, online when helm happens to be installed:
     python3 .github/scripts/validate_helm_charts.py
@@ -67,7 +80,7 @@ Exit codes::
        + renderable at their pinned versions)
     1  one or more charts failed validation
     2  unexpected I/O / argument error (charts.yaml missing or unparseable,
-       or --mode online requested without a helm binary)
+       or --mode online requested without a helm binary or container runtime)
 
 The module is importable from the test suite — call ``validate_structure()``,
 ``build_refs()`` or ``validate_online()`` directly to exercise the logic
@@ -1079,6 +1092,238 @@ def validate_trainer_runtime_lockstep(
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Slurm REST API version lockstep
+#
+# Every GCO surface that talks to slurmrestd addresses one OpenAPI plugin
+# version (``/slurm/<version>/...``): the API client behind ``/api/v1/slurm``,
+# the ``gco slurm`` CLI through it, ``examples/slurm-cluster-job.yaml`` and the
+# live-validation probe (both call slurmrestd directly from inside the
+# cluster) and the API doc's sample payload. The pin is
+# ``SLURM_API_VERSION`` in ``gco/slurm_config.py``, beside the image tag it
+# moves with.
+#
+# The version is a property of the Slurm release the ``slinky-slurm`` images
+# are built from: each release ships its newest ``data_parser`` plugin plus
+# the three before it and drops the oldest, so bumping the image tag in
+# charts.yaml without re-checking the pin eventually leaves the API addressing
+# a version the image no longer serves — every request 404s. Negotiating the
+# version at runtime is deliberately not the fix: request and response bodies
+# differ between plugin versions, so the client is written against exactly
+# one. These checks encode the contract so the drift fails CI instead:
+#
+#   offline: every surface that repeats the pin names the same version as
+#     ``gco/slurm_config.py``.
+#   online: ``slurmrestd -d list`` inside the pinned slurmrestd image names
+#     the plugin versions it ships; the pin must be one of them. Needs a
+#     container runtime (``docker`` on the CI runner; ``--container-runtime``
+#     for podman/finch). A newer served version is noted, not an error:
+#     moving to it is a deliberate re-check of the body shapes.
+# ---------------------------------------------------------------------------
+
+_SLURM_CHART_KEY = "slinky-slurm"
+_SLURM_CONFIG_MODULE = _REPO_ROOT / "gco" / "slurm_config.py"
+# The files that repeat the pin outside gco/slurm_config.py. The route module
+# is included for the comment that records which version's job_desc_msg shape
+# the submission body was written against.
+_SLURM_API_VERSION_SURFACES: tuple[Path, ...] = (
+    _REPO_ROOT / "examples" / "slurm-cluster-job.yaml",
+    _REPO_ROOT / "scripts" / "live_release_validation" / "manifests" / "slurm-smoke-job.yaml",
+    _REPO_ROOT / "docs" / "API.md",
+    _REPO_ROOT / "gco" / "services" / "api_routes" / "slurm.py",
+)
+_SLURM_API_VERSION_PIN_RE = re.compile(r'^SLURM_API_VERSION\s*=\s*"(v\d+\.\d+\.\d+)"', re.MULTILINE)
+# slurmrestd plugin versions are v0.0.NN; any such token in a Slurm surface is
+# a repeat of the pin (nothing else in those files is versioned that way).
+_SLURM_API_VERSION_MENTION_RE = re.compile(r"\bv0\.0\.\d+\b")
+# One line per plugin in the ``slurmrestd -d list`` output ("data_parser/v0.0.44").
+_SLURMRESTD_PLUGIN_RE = re.compile(r"data_parser/(v\d+\.\d+\.\d+)")
+
+
+def parse_slurm_api_version(config_source: str) -> str | None:
+    """Return the ``SLURM_API_VERSION`` pin from ``gco/slurm_config.py`` source."""
+    match = _SLURM_API_VERSION_PIN_RE.search(config_source)
+    return match.group(1) if match else None
+
+
+def slurm_api_version_mentions(text: str) -> list[tuple[int, str]]:
+    """Return ``(line_number, version)`` for every slurmrestd version token in ``text``."""
+    return [
+        (number, match.group(0))
+        for number, line in enumerate(text.splitlines(), start=1)
+        for match in _SLURM_API_VERSION_MENTION_RE.finditer(line)
+    ]
+
+
+def parse_served_slurm_api_versions(listing: str) -> set[str]:
+    """Return the data_parser plugin versions a ``slurmrestd -d list`` listing names."""
+    return set(_SLURMRESTD_PLUGIN_RE.findall(listing))
+
+
+def slurmrestd_image(entry: dict[str, Any]) -> str | None:
+    """Return ``repository:tag`` of the slurmrestd image a ``slinky-slurm`` entry pins."""
+    values = entry.get("values") or {}
+    restapi = values.get("restapi") or {}
+    image = (restapi.get("slurmrestd") or {}).get("image")
+    if not isinstance(image, dict) or not image.get("repository") or not image.get("tag"):
+        return None
+    return f"{image['repository']}:{image['tag']}"
+
+
+def _plugin_sort_key(version: str) -> tuple[int, ...]:
+    return _version_tuple(version.lstrip("v"))
+
+
+def _repo_relative(path: Path) -> str:
+    """Display form of a surface path: repo-relative when under the repo root."""
+    try:
+        return str(path.relative_to(_REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def fetch_served_slurm_api_versions(image: str, container_runtime: str = "docker") -> set[str]:
+    """Run ``slurmrestd -d list`` inside the pinned image; return the versions it ships.
+
+    The pull + run rides the shared retry ladder so a registry blip does not
+    fail the job. The container gets no network (the listing is local to the
+    binary). Raises ``RuntimeError`` with an actionable message when the image
+    cannot run or no longer prints a plugin listing where this check expects
+    it.
+    """
+    cmd = [
+        container_runtime,
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--entrypoint",
+        "slurmrestd",
+        image,
+        "-d",
+        "list",
+    ]
+    rc, out, err = _run_with_retry(
+        cmd,
+        os.environ.copy(),
+        timeout=600,
+        description=f"{container_runtime} run {image} slurmrestd -d list",
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"{container_runtime} run {image} (slurmrestd -d list) failed: {_tail(err or out)}"
+        )
+    versions = parse_served_slurm_api_versions(out + "\n" + err)
+    if not versions:
+        raise RuntimeError(
+            f"slurmrestd -d list in {image} printed no data_parser/vX.Y.Z plugin lines — "
+            "upstream output changed; update this check alongside the new format"
+        )
+    return versions
+
+
+def validate_slurm_api_version_lockstep(
+    charts: dict[str, Any],
+    *,
+    config_source: str | None = None,
+    surface_texts: dict[str, str] | None = None,
+    online: bool = False,
+    versions_fetcher: Any = None,
+    container_runtime: str = "docker",
+    require_entry: bool = True,
+) -> list[str]:
+    """Check the slurmrestd API version lockstep; return error strings.
+
+    Offline: every surface that repeats ``SLURM_API_VERSION`` (the example
+    job, the live-validation probe, the API doc and the route module's shape
+    note) names the version pinned in ``gco/slurm_config.py``. Online (adds
+    one image pull + run): the slurmrestd image pinned in charts.yaml must
+    serve that version. With ``require_entry`` (the default, used for the
+    repository's real charts.yaml) a missing chart entry is reported rather
+    than skipped; ``main()`` disables it for ``--charts`` fixture files.
+    ``surface_texts`` maps a display name to file text (tests); ``None``
+    reads the repository files.
+    """
+    errors: list[str] = []
+    entry = charts.get(_SLURM_CHART_KEY)
+    if not isinstance(entry, dict) or not entry.get("version"):
+        if require_entry:
+            return [
+                f"slurm api lockstep: no {_SLURM_CHART_KEY!r} entry with a version in charts.yaml"
+            ]
+        return []
+
+    if config_source is None:
+        try:
+            config_source = _SLURM_CONFIG_MODULE.read_text(encoding="utf-8")
+        except OSError as exc:
+            return [f"slurm api lockstep: cannot read {_SLURM_CONFIG_MODULE}: {exc}"]
+    pin = parse_slurm_api_version(config_source)
+    if pin is None:
+        return [
+            'slurm api lockstep: gco/slurm_config.py no longer defines SLURM_API_VERSION = "vX.Y.Z"; '
+            "update this check alongside any rename"
+        ]
+
+    if surface_texts is None:
+        surface_texts = {}
+        for path in _SLURM_API_VERSION_SURFACES:
+            try:
+                surface_texts[_repo_relative(path)] = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                return [f"slurm api lockstep: cannot read {path}: {exc}"]
+    for name, text in surface_texts.items():
+        for line, version in slurm_api_version_mentions(text):
+            if version != pin:
+                errors.append(
+                    f"slurm api lockstep: {name}:{line} names slurmrestd {version} but "
+                    f"SLURM_API_VERSION in gco/slurm_config.py is {pin} — every surface "
+                    "addresses one plugin version; update them in the same change"
+                )
+
+    if not online:
+        return errors
+
+    image = slurmrestd_image(entry)
+    if image is None:
+        errors.append(
+            f"slurm api lockstep: charts.yaml {_SLURM_CHART_KEY}.values.restapi.slurmrestd.image "
+            "no longer pins a repository and tag; update this check alongside any restructure"
+        )
+        return errors
+
+    fetcher = versions_fetcher or fetch_served_slurm_api_versions
+    try:
+        served = fetcher(image, container_runtime)
+    except RuntimeError as exc:
+        errors.append(f"slurm api lockstep: {exc}")
+        return errors
+
+    served_list = ", ".join(sorted(served, key=_plugin_sort_key))
+    if pin not in served:
+        errors.append(
+            f"slurm api lockstep: {image} serves data_parser plugin version(s) {served_list} "
+            f"but SLURM_API_VERSION is {pin} — the GCO API would get 404 for every Slurm "
+            "request. Bump SLURM_API_VERSION in gco/slurm_config.py (and the surfaces that "
+            "repeat it) to a version the image ships, re-checking the request and response "
+            "shapes gco/services/slurm_client.py and api_routes/slurm.py rely on"
+        )
+        return errors
+
+    newer = [
+        v
+        for v in sorted(served, key=_plugin_sort_key)
+        if _plugin_sort_key(v) > _plugin_sort_key(pin)
+    ]
+    if newer:
+        print(
+            f"note: {image} serves SLURM_API_VERSION {pin} and also newer plugin version(s) "
+            f"{', '.join(newer)}; the newest stays supported longest across Slurm releases, "
+            "moving to it is a deliberate re-check of the body shapes (not required now)."
+        )
+    return errors
+
+
 def emit_chart_ref(charts: dict[str, Any], chart_name: str) -> tuple[str, str]:
     """Return ``(text, error)`` for --emit-ref.
 
@@ -1159,6 +1404,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Helm executable to use (default: 'helm' on PATH).",
     )
     parser.add_argument(
+        "--container-runtime",
+        default=os.environ.get("GCO_CONTAINER_RUNTIME", "docker"),
+        help=(
+            "Container CLI used by the online slurmrestd API-version check to run the "
+            "pinned slurmrestd image (default: $GCO_CONTAINER_RUNTIME or 'docker'; podman "
+            "and finch work too). Required by --mode online; auto mode skips that one check "
+            "when it is missing."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -1225,8 +1480,29 @@ def main(argv: list[str] | None = None) -> int:
                 "Pass --mode online in CI to require the resolve/render checks."
             )
 
+    # The slurmrestd API-version check runs the pinned image, so its online
+    # half additionally needs a container runtime: required alongside helm in
+    # --mode online, skipped with a note in auto mode.
+    run_slurm_online = run_online
+    if run_online and shutil.which(args.container_runtime) is None:
+        if args.mode == "online":
+            print(
+                f"ERROR: --mode online requires the '{args.container_runtime}' binary on PATH "
+                "(the slurmrestd API-version check runs the pinned slurmrestd image; pass "
+                "--container-runtime podman|finch for another runtime).",
+                file=sys.stderr,
+            )
+            return 2
+        run_slurm_online = False
+        print(
+            f"note: '{args.container_runtime}' not found on PATH; skipping the online "
+            "slurmrestd API-version check. Pass --mode online in CI to require it "
+            "(--container-runtime selects podman/finch)."
+        )
+
     # Fixture chart files passed via --charts may legitimately omit the
-    # controller / trainer entries; the repository's real charts.yaml may not.
+    # controller / trainer / Slurm entries; the repository's real charts.yaml
+    # may not.
     is_default_charts = args.charts.resolve() == _DEFAULT_CHARTS.resolve()
     errors.extend(
         validate_gateway_lockstep(
@@ -1240,6 +1516,14 @@ def main(argv: list[str] | None = None) -> int:
             charts,
             online=run_online,
             helm_binary=args.helm_binary,
+            require_entry=is_default_charts,
+        )
+    )
+    errors.extend(
+        validate_slurm_api_version_lockstep(
+            charts,
+            online=run_slurm_online,
+            container_runtime=args.container_runtime,
             require_entry=is_default_charts,
         )
     )

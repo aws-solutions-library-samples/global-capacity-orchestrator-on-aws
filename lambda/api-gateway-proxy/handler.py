@@ -31,14 +31,15 @@ from typing import Any
 from proxy_utils import (
     build_signed_headers,
     build_target_url,
+    caller_identity_headers,
     forward_request,
     get_secret_token,
     sanitize_request_headers,
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-05T01:20:02Z
-# Generated from Git commit: d0400a273ab7af4345ee9b4ee7c1900474019901
+# Generated at (UTC): 2026-08-30T12:00:00Z
+# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.png``)
@@ -118,6 +119,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     # Only a short-lived HMAC envelope is transmitted. TLS independently
     # authenticates the ALB certificate and encrypts the complete request.
     headers = sanitize_request_headers(headers)
+    headers.update(caller_identity_headers(event))
     headers.update(build_signed_headers(signing_key, http_method, target_url, body))
 
     return forward_request(

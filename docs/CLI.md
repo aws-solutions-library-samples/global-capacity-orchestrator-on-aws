@@ -28,6 +28,7 @@ Complete command-line interface documentation for Global Capacity Orchestrator (
   - [nodepools](#nodepools-commands)
   - [queue](#queue-commands)
   - [release](#release-commands)
+  - [slurm](#slurm-commands)
   - [stacks](#stacks-commands)
   - [status](#status-commands)
   - [storage](#storage-commands)
@@ -4704,6 +4705,172 @@ gco release validate-upgrade --expected-account 123456789012 \
 | `--report-dir` | Report directory (default: `~/gco-upgrade-validation-reports/<run-id>`); the workspace goes beside it at `<report-dir>.workspace` and is removed once teardown completes. |
 | `--resume` | Resume an interrupted run; requires the original `--run-id` and `--report-dir`. |
 | `--protected-stack` | Additional non-project CloudFormation stack to preserve exactly (repeatable). |
+
+---
+
+### Slurm Commands
+
+Work with the [Slinky](https://slinky.schedmd.com/) Slurm cluster GCO deploys when `cdk.json` `helm.slurm.enabled` is on (see [SLURM_OPERATOR.md](SLURM_OPERATOR.md)). The first eight commands go through the GCO API (`/api/v1/slurm/*`, [API.md](API.md#slurm)), which proxies them to that region's slurmrestd with an operator-minted credential: you never hold a Slurm token, and every submission carries your caller identity in its `comment`. Each region runs its own cluster, so every command is pinned to one region: `--region`/`-r`, else the root `gco -r REGION` / configured default. A region deployed without Slurm answers `Slurm is not enabled in this region` with the enablement remedy.
+
+`shell` and `output` reach the login pod (`gco-jobs/slinky-slurm-login-gco`, which mounts the same `/home` EFS and `/scratch` FSx the workers do) with `kubectl exec` over the PRIVATE EKS API endpoint, through an SSM-managed instance with `--via-ssm` like `gco monitoring open`.
+
+<details>
+<summary>All <code>gco slurm</code> commands (10) — click to expand</summary>
+
+| Command | Description |
+| --- | --- |
+| [`gco slurm status`](#gco-slurm-status) | Controller reachability, partitions, node and job counts. |
+| [`gco slurm partitions`](#gco-slurm-partitions) | Partitions with their state, time limit and node counts (sinfo). |
+| [`gco slurm nodes`](#gco-slurm-nodes) | Slurm nodes (the slurmd worker pods) with state, resources and gres. |
+| [`gco slurm queue`](#gco-slurm-queue) | The live queue as slurmctld sees it (squeue). |
+| [`gco slurm job`](#gco-slurm-job) | One job as slurmctld sees it (scontrol show job). |
+| [`gco slurm submit`](#gco-slurm-submit) | Submit a batch script (sbatch) through the GCO API. |
+| [`gco slurm cancel`](#gco-slurm-cancel) | Cancel a job (scancel). |
+| [`gco slurm accounting`](#gco-slurm-accounting) | Job history from slurmdbd (sacct). |
+| [`gco slurm shell`](#gco-slurm-shell) | Open an interactive shell on the Slurm login pod. |
+| [`gco slurm output`](#gco-slurm-output) | Print a job's output file from the login pod. |
+
+</details>
+
+#### `gco slurm status`
+
+Controller reachability (`ping`), every partition with its node and CPU totals, and node and job counts by state. The default partition is marked `*`.
+
+```bash
+gco slurm status -r REGION [--output json]
+```
+
+#### `gco slurm partitions`
+
+The partition table on its own (`sinfo`-style): state, node count, CPUs, maximum wall time and node list. An autoscaled GPU partition reads `0` nodes while idle; the first pending job makes KEDA scale its NodeSet up.
+
+```bash
+gco slurm partitions -r REGION
+```
+
+#### `gco slurm nodes`
+
+Every Slurm node (one per slurmd worker pod): state, allocated/total CPUs and memory, GRES in use (`gpu:1(IDX:0)`), partitions, and the reason for a `DOWN` or `DRAIN` node.
+
+```bash
+gco slurm nodes -r REGION [--partition NAME]
+```
+
+#### `gco slurm queue`
+
+Pending, running and recently finished jobs (within `MinJobAge`), with state, node count, submit time and the pending reason or node list.
+
+```bash
+gco slurm queue -r REGION [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--state`, `-s` | Only jobs in this state (`PENDING`, `RUNNING`, `COMPLETING`, ...). |
+| `--partition`, `-p` | Only jobs in this partition. |
+| `--name`, `-n` | Only jobs with exactly this name. |
+| `--limit`, `-l` | Maximum jobs returned (default 200, up to 5000). |
+
+#### `gco slurm job`
+
+One job in full: state and reason, requested and allocated TRES, submit/start/end times, time limit, exit code, the `comment` carrying the submitter, working directory and the stdout/stderr paths `gco slurm output` reads. A finished job slurmctld has forgotten (after `MinJobAge`, ten minutes) is answered from accounting (`Source: slurmdbd`); `not found` means neither daemon knows the id.
+
+```bash
+gco slurm job JOB_ID -r REGION
+```
+
+#### `gco slurm submit`
+
+The `sbatch` equivalent: reads a local batch script (an interpreter line first, at most 64 KiB) and submits it through the API. The script's leading `#SBATCH` directives are honoured for `--job-name`, `--partition`, `--nodes`, `--ntasks`, `--cpus-per-task`, `--gpus-per-node`, `--mem`, `--time`, `--chdir`, `--comment` and `--exclusive` (slurmrestd itself does not read them); the flags below override them. The job runs as Slurm's own user; your caller identity is stamped into its `comment` as `gco:<caller>`, which `gco slurm accounting` shows.
+
+```bash
+gco slurm submit SCRIPT -r REGION [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--name`, `-J` | Job name (default: the script's `#SBATCH --job-name`, else `gco-job`). |
+| `--partition`, `-p` | Partition (default: the cluster's default partition, `cpu` as shipped). |
+| `--nodes`, `-N` | Node count. |
+| `--tasks`, `-n` | Task count (`--ntasks`). |
+| `--cpus-per-task`, `-c` | CPUs per task. |
+| `--gpus-per-node` | GPUs per node (`gres/gpu:N`); the `gpu` partitions are whole-node, so match the instance's GPU count. |
+| `--mem` | Memory per node: MiB, or a `K`/`M`/`G`/`T` suffix such as `64G`. |
+| `--time`, `-t` | Wall time: minutes, `HH:MM:SS` or `D-HH:MM:SS`. |
+| `--chdir`, `-D` | Working directory on the worker (default `/tmp`; `/home/slurm/...` is on the shared EFS). |
+| `--env`, `-e` | Extra environment variable `NAME=VALUE` (repeatable). |
+| `--comment` | Free-text comment appended after the caller identity. |
+| `--exclusive` | Whole-node allocation. |
+
+#### `gco slurm cancel`
+
+`scancel`: cancels the job after a confirmation prompt (`-y` skips it), optionally with a named signal.
+
+```bash
+gco slurm cancel JOB_ID -r REGION [--signal SIGUSR1] [--yes]
+```
+
+#### `gco slurm accounting`
+
+`sacct`: job history from slurmdbd (accounting is on by default with `helm.slurm.accounting`). The window defaults to the last day; `--since` takes a relative window rendered in Slurm's own `now-7days` form, `--start`/`--end` take Slurm times (`2026-10-01`, `2026-10-01T08:00`, `now-2days`).
+
+```bash
+gco slurm accounting -r REGION [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--since` | Relative window: `30m`, `24h`, `7d`, `2w` (default `1d` unless `--start` is given). |
+| `--start` | Window start as a Slurm time. |
+| `--end` | Window end as a Slurm time (default: now). |
+| `--user`, `-u` | Only this Slurm user (API submissions run as `slurm`; filter on the comment instead). |
+| `--partition`, `-p` | Only this partition. |
+| `--state`, `-s` | Only these states, comma-separated (`COMPLETED,FAILED,TIMEOUT`). |
+| `--name`, `-n` | Only jobs with exactly this name. |
+| `--limit`, `-l` | Maximum rows (default 200, up to 5000). |
+
+#### `gco slurm shell`
+
+`kubectl exec -it` into the login pod for an interactive session with every Slurm client (`sbatch`, `squeue`, `sacct`, `srun`, `scontrol`) and the shared filesystems. Table output only: an interactive terminal cannot be captured as JSON. The tunnel closes when the shell exits.
+
+```bash
+gco slurm shell [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
+| `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
+| `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |
+
+#### `gco slurm output`
+
+Looks the job up through the API for its stdout path (Slurm's default is `slurm-<jobid>.out` in the job's working directory) and prints that file from the login pod. `--stderr` reads the stderr file, `--tail N` the last N lines, `--follow` streams it (`tail -f`, table output only) until Ctrl-C. In JSON/YAML mode the document carries `job_id`, `region`, `path` and `content`.
+
+```bash
+gco slurm output JOB_ID -r REGION [--stderr] [--tail N] [--follow] [tunnel options]
+```
+
+**Examples:**
+
+```bash
+gco slurm status -r us-east-1
+gco slurm submit hello.sbatch -r us-east-1
+gco slurm submit train.sbatch -r us-east-1 -p gpu -N 2 --gpus-per-node 8 -t 04:00:00
+gco slurm queue -r us-east-1 --state PENDING
+gco slurm output 42 -r us-east-1 --via-ssm auto -y
+gco slurm accounting -r us-east-1 --since 7d --state COMPLETED,FAILED
+gco slurm shell -r us-east-1 --via-ssm auto -y
+```
 
 ---
 

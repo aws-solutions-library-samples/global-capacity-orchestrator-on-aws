@@ -13,8 +13,8 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 144 tools; with every flag enabled the
-ceiling is 202. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 151 tools; with every flag enabled the
+ceiling is 210. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
@@ -40,6 +40,7 @@ flag-to-tool mapping.
 | `nodepools.py` | 5 | `nodepools_list`, `nodepools_describe`, `nodepools_create_odcr`, `nodepools_create_capacity_block`, `delete_nodepool` (gated) |
 | `queue.py` | 5 | `queue_list`, `queue_get`, `queue_stats`, `queue_submit`, `cancel_queue_job` (gated) |
 | `semantic_progress.py` | 1 | `metrics_semantic_progress` (gated by `GCO_ENABLE_SEMANTIC_PROGRESS`, default-off) — `safe` LLM-as-judge progress score |
+| `slurm.py` | 8 | `slurm_status`, `slurm_partitions`, `slurm_nodes`, `slurm_queue`, `slurm_job`, `slurm_accounting`, `slurm_submit`, `slurm_cancel` (gated) |
 | `stacks.py` | 34 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `eks_capabilities_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated), `list_deployment_regions` (gated), `add_deployment_region` (gated), `remove_deployment_region` (gated), `set_deployment_region` (gated), `set_eks_endpoint_access` (gated), `set_mission_default_model` (gated), `set_capacity_advisor_default_model` (gated), `set_claude_code_default_model` (gated), `set_codex_default_model` (gated), `set_codex_reasoning_effort` (gated), `set_opencode_default_model` (gated) |
 | `status.py` | 1 | `fleet_status` |
 | `storage.py` | 8 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `s3_inventory`, `files_get`, `files_access_points`, `upload_to_regional_bucket` (gated by `GCO_ENABLE_MODEL_UPLOAD`), `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
@@ -297,6 +298,19 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | Tool | Description |
 |------|-------------|
 | `metrics_semantic_progress` | Score Mission progress. |
+
+### `slurm.py`
+
+| Tool | Description |
+|------|-------------|
+| `slurm_accounting` | `gco slurm accounting` — job history from slurmdbd (`sacct`) over a window (`since` such as `7d`, or Slurm `start`/`end` times), filtered by user, partition, state or name; each row carries the submitting caller in its comment. |
+| `slurm_cancel` | `gco slurm cancel -y` — cancel a Slurm job (`scancel`), optionally with a named signal (gated by `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`). |
+| `slurm_job` | `gco slurm job` — one job in full: state and reason, requested and allocated TRES, times, exit code, comment and the stdout/stderr paths. |
+| `slurm_nodes` | `gco slurm nodes` — the Slurm nodes (slurmd worker pods) with state, allocated/total CPUs and memory, gres in use and partitions. |
+| `slurm_partitions` | `gco slurm partitions` — partitions with state, node and CPU totals and maximum wall time (`sinfo`); an idle autoscaled partition reads zero nodes. |
+| `slurm_queue` | `gco slurm queue` — the live queue (`squeue`): pending, running and recently finished jobs, filterable by state, partition and name. |
+| `slurm_status` | `gco slurm status` — controller reachability, every partition, and node and job counts by state for one region's Slurm cluster. |
+| `slurm_submit` | `gco slurm submit` — submit a local batch script (`sbatch`); its `#SBATCH` directives apply first and the arguments override them. Allocates compute: an idle autoscaled partition scales up for the job. |
 
 ### `stacks.py`
 

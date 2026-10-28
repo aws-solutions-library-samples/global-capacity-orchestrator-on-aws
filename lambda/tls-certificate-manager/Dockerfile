@@ -26,7 +26,14 @@ RUN for attempt in 1 2 3; do \
         fi; \
         if [ "${attempt}" = "3" ]; then exit 1; fi; \
         sleep "$((attempt * 5))"; \
-    done
+    done \
+    && python -m pip uninstall -y pip
+# Nothing installs packages at runtime, so pip is uninstalled above in the
+# same layer that finishes using it, as the service images do: installer
+# tooling stays out of the deployed attack surface, and pip's vendored
+# copies of msgpack, setuptools and friends (pip/_vendor/vendor.txt, which
+# the base image ships and no pin of ours controls) stop reaching the
+# image's vulnerability scan.
 
 COPY handler.py .
 

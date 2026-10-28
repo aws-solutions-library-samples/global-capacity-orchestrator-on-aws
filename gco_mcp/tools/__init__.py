@@ -31,6 +31,7 @@ def register_all_tools() -> None:
         nodepools,
         queue,
         semantic_progress,
+        slurm,
         stacks,
         status,
         storage,

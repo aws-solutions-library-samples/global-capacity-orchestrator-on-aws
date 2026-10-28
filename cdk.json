@@ -444,7 +444,7 @@
       "cert_manager": {
         "enabled": true
       },
-      "_comment_slurm": "Slurm-on-Kubernetes via the Slinky operator. Off by default. See docs/SLURM_OPERATOR.md.",
+      "_comment_slurm": "Slurm-on-Kubernetes via the Slinky operator. Off by default. One block configures the whole cluster: partitions (merged over the shipped cpu, gpu and disabled gpu-efa templates; each is an autoscaled NodeSet on a GCO node pool, min_nodes 0 by default), accounting (on, in-cluster MariaDB with nightly S3 dumps, or accounting.external for your own database), the login pod, storage (home on EFS, scratch on FSx when enabled) and autoscaling knobs; every key is validated at synth (gco/slurm_config.py). Needs cluster_observability for autoscaling; the default partitions fit the default resource_quota, enlarging them may need a higher quota. See docs/SLURM_OPERATOR.md.",
       "slurm": {
         "enabled": false
       },

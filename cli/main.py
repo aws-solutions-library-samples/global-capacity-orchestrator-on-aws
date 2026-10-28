@@ -43,6 +43,7 @@ from .commands import (
     nodepools,
     queue,
     release,
+    slurm,
     stacks,
     status,
     storage,
@@ -171,6 +172,7 @@ cli.add_command(swarm_cmd)
 cli.add_command(vector)
 cli.add_command(status)
 cli.add_command(upgrade)
+cli.add_command(slurm)
 
 
 def main() -> None:

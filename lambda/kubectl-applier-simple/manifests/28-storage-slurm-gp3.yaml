@@ -1,0 +1,35 @@
+# gp3 block-storage StorageClass for the Slurm cluster
+#
+# Two Slurm volumes need low-latency block storage rather than the shared EFS
+# claim: slurmctld's StateSaveLocation (the chart creates that claim from
+# helm.slurm.controller.state_storage_size; every scheduling cycle writes job
+# and node state there) and the in-cluster accounting database
+# (29-slurm-accounting-db.yaml). EKS Auto Mode manages the EBS CSI
+# capability but creates no StorageClass, so this class binds those claims
+# with the Auto Mode provisioner, exactly like gco-observability-gp3 does for
+# Prometheus and Grafana. WaitForFirstConsumer lands each volume in its pod's
+# AZ.
+#
+# Base pass, so the class exists before the Slinky charts create the state
+# claim. Gated on {{SLURM_ENABLED}}: GCORegionalStack substitutes it only while
+# the Slinky charts install (cdk.json helm.slurm or a helm_enabled_overrides
+# run override); otherwise the applier skips this file and prunes the class on
+# a later disable. The name is static (a placeholder in metadata.name would
+# fail schema validation) and mirrors SLURM_STORAGE_CLASS in gco/slurm_config.py.
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gco-slurm-gp3
+  labels:
+    project: gco
+    app.kubernetes.io/part-of: slurm
+  annotations:
+    gco.io/slurm-enabled: "{{SLURM_ENABLED}}"
+provisioner: ebs.csi.eks.amazonaws.com
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+parameters:
+  type: gp3
+  encrypted: "true"

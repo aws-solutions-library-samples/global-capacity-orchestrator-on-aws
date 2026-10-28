@@ -5564,16 +5564,23 @@ class TestSchedulerValidation:
         assert "kueue.x-k8s.io/queue-name: gco-default" in kueue
         slurm = (manifests_dir / "slurm-smoke-job.yaml").read_text(encoding="utf-8")
         assert 'gco.aws/slurm-client: "true"' in slurm
-        assert "slinky-slurm-auth-jwt" in slurm
         assert "slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820" in slurm
-        # slurmctld mmaps the HS256 key file as-is and the chart generates it
-        # with randAscii, so a key may start or end with a space; a probe that
-        # stripped it signed tokens slurmctld could not decode (live, 2026-09-12).
-        assert 'open("/etc/slurm-jwt/jwt.key", "rb")' in slurm
-        assert ".strip()" not in slurm
+        # The probe and the example authenticate with the operator-minted
+        # client token (post-helm-slurm-api-access.yaml), never with the
+        # cluster's JWT signing key: a pod holding slinky-slurm-auth-jwt could
+        # mint tokens for any user for as long as it liked. Both re-read the
+        # projected token file per call so a rotation mid-run is picked up,
+        # and both require the slurmdbd record (accounting is on by default).
         example = (root / "examples" / "slurm-cluster-job.yaml").read_text(encoding="utf-8")
-        assert 'open("/etc/slurm-jwt/jwt.key", "rb")' in example
-        assert ".strip()" not in example
+        for text in (slurm, example):
+            assert "secretName: slinky-slurm-client-token" in text
+            assert "slinky-slurm-auth-jwt" not in text
+            assert "/etc/slurm-client/auth-token" in text
+            assert "hmac" not in text
+            assert '"slurmdb"' in text or 'base="slurmdb"' in text
+        assert "GCO_LIVE_SLURM___RUN_TOKEN__" in slurm.split("slurmdb")[-1], (
+            "the marker must print only after the accounting record is verified"
+        )
 
     def test_kueue_probe_queue_exists_in_the_deployed_topology(self) -> None:
         """The queue the probe names must be the queue the applier deploys."""

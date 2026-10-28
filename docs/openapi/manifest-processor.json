@@ -363,6 +363,129 @@
         "title": "QueuedJobRequest",
         "type": "object"
       },
+      "SlurmJobSubmission": {
+        "description": "Request body for ``POST /api/v1/slurm/jobs`` (the sbatch equivalent).",
+        "properties": {
+          "comment": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Free-text comment",
+            "title": "Comment"
+          },
+          "cpus_per_task": {
+            "default": 1,
+            "description": "CPUs per task (--cpus-per-task)",
+            "maximum": 1024.0,
+            "minimum": 1.0,
+            "title": "Cpus Per Task",
+            "type": "integer"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Extra environment",
+            "title": "Environment",
+            "type": "object"
+          },
+          "exclusive": {
+            "default": false,
+            "description": "Whole-node allocation (--exclusive)",
+            "title": "Exclusive",
+            "type": "boolean"
+          },
+          "gpus_per_node": {
+            "default": 0,
+            "description": "GPUs per node (--gpus-per-node)",
+            "maximum": 64.0,
+            "minimum": 0.0,
+            "title": "Gpus Per Node",
+            "type": "integer"
+          },
+          "memory_mb": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Memory per node in MiB (--mem)",
+            "title": "Memory Mb"
+          },
+          "name": {
+            "default": "gco-job",
+            "description": "Slurm job name",
+            "title": "Name",
+            "type": "string"
+          },
+          "nodes": {
+            "default": 1,
+            "description": "Node count (--nodes)",
+            "maximum": 1024.0,
+            "minimum": 1.0,
+            "title": "Nodes",
+            "type": "integer"
+          },
+          "partition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Partition (default: the cluster default)",
+            "title": "Partition"
+          },
+          "script": {
+            "description": "The batch script, starting with a #! line",
+            "title": "Script",
+            "type": "string"
+          },
+          "tasks": {
+            "default": 1,
+            "description": "Task count (--ntasks)",
+            "maximum": 65536.0,
+            "minimum": 1.0,
+            "title": "Tasks",
+            "type": "integer"
+          },
+          "time_limit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Wall time (--time), e.g. 01:00:00",
+            "title": "Time Limit"
+          },
+          "working_directory": {
+            "default": "/home/slurm",
+            "description": "Working directory on the worker (default: the slurm user's home on the shared filesystem, where slurm-<jobid>.out lands)",
+            "title": "Working Directory",
+            "type": "string"
+          }
+        },
+        "required": [
+          "script"
+        ],
+        "title": "SlurmJobSubmission",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -1985,6 +2108,481 @@
         "summary": "Get Queue Stats",
         "tags": [
           "Job Queue"
+        ]
+      }
+    },
+    "/api/v1/slurm/accounting/jobs": {
+      "get": {
+        "description": "Job history from slurmdbd (sacct); requires accounting to be enabled.\n\nAs with ``sacct -s``, a ``state`` filter without an explicit window end\nmatches only jobs in that state right now; the end defaults to ``now`` so\n``state=COMPLETED`` returns the window's completed jobs (verified live).",
+        "operationId": "slurm_accounting_jobs_api_v1_slurm_accounting_jobs_get",
+        "parameters": [
+          {
+            "description": "Start of the window (Slurm time or epoch)",
+            "in": "query",
+            "name": "start",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start of the window (Slurm time or epoch)",
+              "title": "Start"
+            }
+          },
+          {
+            "description": "End of the window",
+            "in": "query",
+            "name": "end",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End of the window",
+              "title": "End"
+            }
+          },
+          {
+            "in": "query",
+            "name": "user",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[A-Za-z0-9_.-]{1,64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "User"
+            }
+          },
+          {
+            "in": "query",
+            "name": "partition",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-z][a-z0-9-]{0,31}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Partition"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[A-Za-z_,]{1,64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "job_name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[A-Za-z0-9_.:+-]{1,128}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job Name"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 5000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Slurm Accounting Jobs",
+        "tags": [
+          "Slurm"
+        ]
+      }
+    },
+    "/api/v1/slurm/jobs": {
+      "get": {
+        "description": "The live queue as slurmctld sees it (pending, running and recently finished jobs).",
+        "operationId": "slurm_jobs_api_v1_slurm_jobs_get",
+        "parameters": [
+          {
+            "description": "Job state filter (PENDING, RUNNING, ...)",
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Job state filter (PENDING, RUNNING, ...)",
+              "title": "State"
+            }
+          },
+          {
+            "description": "Partition filter",
+            "in": "query",
+            "name": "partition",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Partition filter",
+              "title": "Partition"
+            }
+          },
+          {
+            "description": "Exact job name filter",
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exact job name filter",
+              "title": "Name"
+            }
+          },
+          {
+            "description": "Maximum jobs returned",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "description": "Maximum jobs returned",
+              "maximum": 5000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Slurm Jobs",
+        "tags": [
+          "Slurm"
+        ]
+      },
+      "post": {
+        "description": "Submit a batch script to Slurm (sbatch through slurmrestd).",
+        "operationId": "slurm_submit_api_v1_slurm_jobs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlurmJobSubmission"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Slurm Submit",
+        "tags": [
+          "Slurm"
+        ]
+      }
+    },
+    "/api/v1/slurm/jobs/{job_id}": {
+      "delete": {
+        "description": "Cancel a job (scancel), optionally with a specific signal.",
+        "operationId": "slurm_cancel_api_v1_slurm_jobs__job_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Signal name",
+            "in": "query",
+            "name": "signal",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[A-Z0-9]{1,16}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Signal name",
+              "title": "Signal"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Slurm Cancel",
+        "tags": [
+          "Slurm"
+        ]
+      },
+      "get": {
+        "description": "One job: slurmctld's live view, else slurmdbd's record once the controller forgot it.\n\nslurmctld answers \"Invalid job id\" (rc 2017) for a job older than\n``MinJobAge``; the accounting record then carries the same summary with\n``source: slurmdbd`` so ``gco slurm job`` and ``gco slurm output`` keep\nworking for finished jobs (verified live: a ten-minute-old job).",
+        "operationId": "slurm_job_api_v1_slurm_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Slurm Job",
+        "tags": [
+          "Slurm"
+        ]
+      }
+    },
+    "/api/v1/slurm/nodes": {
+      "get": {
+        "description": "Slurm nodes (the slurmd worker pods) with state, resources and gres.",
+        "operationId": "slurm_nodes_api_v1_slurm_nodes_get",
+        "parameters": [
+          {
+            "description": "Only nodes in this partition",
+            "in": "query",
+            "name": "partition",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only nodes in this partition",
+              "title": "Partition"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Slurm Nodes",
+        "tags": [
+          "Slurm"
+        ]
+      }
+    },
+    "/api/v1/slurm/partitions": {
+      "get": {
+        "description": "Every Slurm partition with its state, time limit and node count.",
+        "operationId": "slurm_partitions_api_v1_slurm_partitions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Slurm Partitions",
+        "tags": [
+          "Slurm"
+        ]
+      }
+    },
+    "/api/v1/slurm/status": {
+      "get": {
+        "description": "Controller reachability plus partition, node and job counts for this region.",
+        "operationId": "slurm_status_api_v1_slurm_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Slurm Status",
+        "tags": [
+          "Slurm"
         ]
       }
     },

@@ -59,6 +59,7 @@ Gateway exposes it, and which authentication applies.
   - [Job Templates](#job-templates)
   - [Webhooks](#webhooks)
   - [Cost Reporting (Per Region)](#cost-reporting-per-region)
+  - [Slurm (Per Region)](#slurm-per-region)
   - [Inference](#inference)
 - [Detailed Endpoint Documentation](#detailed-endpoint-documentation)
   - [Global Jobs List](#global-jobs-list)
@@ -77,6 +78,11 @@ Gateway exposes it, and which authentication applies.
   - [Get Queued Job](#get-queued-job)
   - [Cancel Queued Job](#cancel-queued-job)
   - [Queue Statistics](#queue-statistics)
+- [Slurm](#slurm)
+  - [Slurm Status](#slurm-status)
+  - [Submit a Batch Job](#submit-a-batch-job)
+  - [Queue, Job and Cancel](#queue-job-and-cancel)
+  - [Accounting History](#accounting-history)
 - [Job Templates](#job-templates-1)
   - [Create Template](#create-template)
   - [Create Job from Template](#create-job-from-template)
@@ -454,6 +460,21 @@ Available when `cost_monitoring.enabled` is on (the default). Each region's mani
 | GET | `/api/v1/cost/status` | Cost monitoring + OpenCost health | `gco costs report status` |
 | GET | `/api/v1/cost/reports` | List recent report objects | `gco costs report list` |
 | POST | `/api/v1/cost/reports` | Generate an ad-hoc cost report | `gco costs report generate` |
+
+### Slurm (Per Region)
+
+Available when `helm.slurm.enabled` is on. Each region's manifest API proxies these to its in-cluster slurmrestd with an operator-minted token; callers never hold a Slurm credential. Disabled regions answer `404` with the enablement remedy. See [SLURM_OPERATOR.md](SLURM_OPERATOR.md).
+
+| Method | Endpoint | Description | CLI Command |
+|--------|----------|-------------|-------------|
+| GET | `/api/v1/slurm/status` | Controller reachability, partitions, node and job counts | `gco slurm status -r REGION` |
+| GET | `/api/v1/slurm/partitions` | Partitions with state, time limit and node counts | `gco slurm partitions -r REGION` |
+| GET | `/api/v1/slurm/nodes` | Slurm nodes (slurmd worker pods) with state and resources | `gco slurm nodes -r REGION` |
+| GET | `/api/v1/slurm/jobs` | The live queue (filter by state, partition, name) | `gco slurm queue -r REGION` |
+| POST | `/api/v1/slurm/jobs` | Submit a batch script (`sbatch`) | `gco slurm submit SCRIPT -r REGION` |
+| GET | `/api/v1/slurm/jobs/{job_id}` | One job as slurmctld sees it | `gco slurm job ID -r REGION` |
+| DELETE | `/api/v1/slurm/jobs/{job_id}` | Cancel a job (`scancel`) | `gco slurm cancel ID -r REGION` |
+| GET | `/api/v1/slurm/accounting/jobs` | Job history from slurmdbd (`sacct`) | `gco slurm accounting -r REGION` |
 
 ### Inference
 
@@ -1522,6 +1543,129 @@ gco costs report generate -r us-east-1 --window-hours 48
 ```
 
 With `"include_rows": true` the response also carries the normalized per-namespace allocation rows. Errors map cleanly: `503` when OpenCost is unreachable (or cost monitoring is disabled in this region), `502` when the S3 write fails, `422` for an invalid window.
+
+---
+
+## Slurm
+
+Region-scoped access to the [Slinky](https://slinky.schedmd.com/) Slurm cluster deployed when `helm.slurm.enabled` is on. Each region's manifest API proxies these routes to its own slurmrestd (`slinky-slurm-restapi` in `gco-jobs`), authenticating as Slurm's own user with a JWT the slurm-operator mints into a Kubernetes Secret and rotates (`post-helm-slurm-api-access.yaml`); the API pod never sees the cluster's signing key, and callers never see a Slurm credential. The submitting caller's identity is stamped into every job's `comment` as `gco:<caller>` so accounting can attribute it: the API Gateway proxies forward the SigV4 principal's ARN (`requestContext.identity.userArn`) as `x-gco-caller`, a header callers cannot set themselves (the proxy's allowlist drops it), and `gco-api` is recorded when no principal is known. Pin requests to a region (`-r REGION` on the CLI); a region deployed without Slurm answers every route with `404` and the enablement remedy, an unreachable slurmrestd or a missing token with `503`. Cluster design, partitions, autoscaling and the interactive `gco slurm shell` are covered in [SLURM_OPERATOR.md](SLURM_OPERATOR.md).
+
+### Slurm Status
+
+```http
+GET /api/v1/slurm/status
+```
+
+**CLI:**
+
+```bash
+gco slurm status -r us-east-1
+```
+
+**Response:**
+
+```json
+{
+  "timestamp": "2026-10-27T23:40:00+00:00",
+  "enabled": true,
+  "controller": [
+    {"hostname": "slinky-slurm-controller-0", "responding": true, "latency_us": 412, "mode": "primary"}
+  ],
+  "partitions": [
+    {"name": "cpu", "state": ["UP", "DEFAULT"], "default": true, "total_nodes": 2, "node_names": "cpu-[0-1]", "max_time_minutes": 1440, "total_cpus": 8},
+    {"name": "gpu", "state": ["UP"], "default": false, "total_nodes": 0, "node_names": "", "max_time_minutes": 1440, "total_cpus": 0}
+  ],
+  "nodes": {"total": 3, "by_state": {"IDLE": 2}, "scaled_in": 1},
+  "jobs": {"total": 1, "by_state": {"RUNNING": 1}},
+  "api_version": "v0.0.44"
+}
+```
+
+`GET /api/v1/slurm/partitions` and `GET /api/v1/slurm/nodes` return the same partition and node summaries on their own (`nodes` accepts `?partition=NAME`). A GPU partition with `total_nodes: 0` is normal when it autoscales from zero: the first pending job makes KEDA scale the NodeSet up. A worker whose pod was scaled away keeps its record in slurmctld as `DOWN+DRAIN` with the operator's reason until the next scale-up re-registers it; such nodes carry `"scaled_in": true`, are counted separately in `status`, and are not a fault (the `SlurmNodesDown` alert ignores them).
+
+### Submit a Batch Job
+
+```http
+POST /api/v1/slurm/jobs
+```
+
+The `sbatch` equivalent. The script must start with an interpreter line and stay under 64 KiB; anything larger belongs in a container image or on the shared filesystem (`/home` is the cluster's EFS claim, `/scratch` the FSx for Lustre claim when enabled).
+
+**CLI:**
+
+```bash
+gco slurm submit train.sbatch -r us-east-1 --partition gpu --nodes 2 --gpus-per-node 8 --time 04:00:00
+```
+
+**Request Body:**
+
+```json
+{
+  "script": "#!/bin/bash\n#SBATCH --job-name=train\nsrun python train.py\n",
+  "name": "train",
+  "partition": "gpu",
+  "nodes": 2,
+  "tasks": 16,
+  "cpus_per_task": 6,
+  "gpus_per_node": 8,
+  "memory_mb": 1048576,
+  "time_limit": "04:00:00",
+  "working_directory": "/home/slurm/train",
+  "environment": {"OMP_NUM_THREADS": "6"},
+  "comment": "nightly run",
+  "exclusive": true
+}
+```
+
+Only `script` is required; `name` defaults to `gco-job`, `nodes`/`tasks`/`cpus_per_task` to 1, `working_directory` to `/tmp`. `time_limit` takes Slurm's forms (`90`, `HH:MM:SS`, `D-HH:MM:SS`, `UNLIMITED`), `gpus_per_node` becomes `--gpus-per-node` (`gres/gpu:N`), `exclusive` requests whole nodes.
+
+**Response (201):**
+
+```json
+{
+  "timestamp": "2026-10-27T23:41:00+00:00",
+  "job_id": 42,
+  "step_id": "batch",
+  "name": "train",
+  "partition": "gpu",
+  "submitted_by": "arn:aws:sts::123456789012:assumed-role/Admin/alice",
+  "message": ""
+}
+```
+
+Slurm's own rejections (an unknown partition, a request a partition's limits refuse) come back as `400` with slurmrestd's description; `422` is the API's own validation.
+
+### Queue, Job and Cancel
+
+```http
+GET /api/v1/slurm/jobs?state=PENDING&partition=gpu&name=train&limit=200
+GET /api/v1/slurm/jobs/{job_id}
+DELETE /api/v1/slurm/jobs/{job_id}?signal=SIGTERM
+```
+
+The queue is slurmctld's live view: pending and running jobs plus jobs finished within `MinJobAge` (anything older is in [accounting](#accounting-history)). Each job summary carries `job_id`, `name`, `user`, `account`, `partition`, `state` (a list, as Slurm reports flags such as `["PENDING", "COMPLETING"]`), `state_reason`, `nodes`, `node_count`, `cpus`, `tres_requested`/`tres_allocated`, epoch `submit_time`/`start_time`/`end_time`, `time_limit_minutes`, `exit_code`, `comment`, `working_directory`, `standard_output` and `standard_error`. `GET /api/v1/slurm/jobs/{job_id}` returns one job under `job` with `source: slurmctld`; once slurmctld has forgotten a finished job (`MinJobAge`, ten minutes) the same summary comes from the accounting record with `source: slurmdbd` and the expanded output paths, so `gco slurm job` and `gco slurm output` keep working for finished jobs; `404` only when neither daemon knows the id. `DELETE` cancels (`scancel`), optionally with a named signal, and answers `{"job_id": 42, "cancelled": true}`.
+
+**CLI:**
+
+```bash
+gco slurm queue -r us-east-1 --state PENDING
+gco slurm job 42 -r us-east-1
+gco slurm cancel 42 -r us-east-1
+```
+
+### Accounting History
+
+```http
+GET /api/v1/slurm/accounting/jobs?start=2026-10-01T00:00:00&end=now&user=slurm&partition=gpu&state=COMPLETED,FAILED&job_name=train&limit=200
+```
+
+The `sacct` equivalent, answered by slurmdbd (enabled by default with `helm.slurm.accounting`). Every filter is optional; `start`/`end` take Slurm's time forms. Each row carries `job_id`, `name`, `user`, `account`, `partition`, `cluster`, `state`, `state_reason`, `nodes`, epoch `submit_time`/`start_time`/`end_time`, `elapsed_seconds`, `time_limit_minutes`, `exit_code`, `tres_allocated` and the `comment` the submit stamped (`gco:<caller> ...`). With accounting disabled slurmrestd's "unable to contact slurmdbd" surfaces as `502`.
+
+**CLI:**
+
+```bash
+gco slurm accounting -r us-east-1 --since 7d --state COMPLETED
+```
 
 ---
 

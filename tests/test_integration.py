@@ -275,6 +275,12 @@ class TestKubernetesManifests:
             "apiregistration.k8s.io/v1",
             "keda.sh/v1alpha1",
             "monitoring.coreos.com/v1",
+            # The Slurm API's and in-cluster clients' credentials: Token custom
+            # resources the slurm-operator mints into Secrets
+            # (post-helm-slurm-api-access.yaml); the slinky-slurm-operator
+            # chart installs the CRD. Keep in lockstep with the Token kind
+            # dispatch and _FEATURE_RESOURCE_INVENTORY in the applier.
+            "slinky.slurm.net/v1beta1",
             # GCO's internal CA chain and its TLS leaves
             # (post-helm-api-workload-certificates.yaml and the gated post-helm
             # TLS files).

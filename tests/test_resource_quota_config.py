@@ -286,6 +286,10 @@ class TestManifestTemplatePlaceholderCoverage:
         # The {{ARGOCD_*}} tokens gating post-helm-argocd-access.yaml and
         # post-helm-argocd-gitops.yaml are rendered here, for the same reason.
         Path("gco/argocd_config.py"),
+        # The {{SLURM_*}} tokens gating 29-slurm-accounting-db.yaml,
+        # post-helm-slurm-accounting-backup.yaml and the manifest processor's
+        # GCO_SLURM_ENABLED env are rendered by compute_slurm_replacements.
+        Path("gco/slurm_config.py"),
     )
 
     # Placeholders that are intentionally only provided for specific
