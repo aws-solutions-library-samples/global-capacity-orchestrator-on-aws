@@ -49,8 +49,8 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-08-30T12:00:00Z
-# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
+# Generated at (UTC): 2026-10-28T14:57:12Z
+# Generated from Git commit: fdfe31c154bbf84cdfeb034fee1256e0a838d1f1
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
