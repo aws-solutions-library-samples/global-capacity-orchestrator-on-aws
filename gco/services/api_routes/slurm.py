@@ -143,9 +143,12 @@ def _raise(error: Exception, context: str) -> HTTPException:
     """
     http_error = slurm_client.http_exception_for(error, context=context)
     if http_error.status_code >= 500:
+        # ``context`` can carry a path parameter (the job id), so it is
+        # sanitized like the error text even though the router already
+        # validated it as an integer.
         logger.warning(
             "Slurm %s failed (HTTP %s): %s: %s",
-            context,
+            sanitize_log_value(context),
             http_error.status_code,
             type(error).__name__,
             sanitize_log_value(str(error)),
@@ -628,7 +631,7 @@ async def slurm_cancel(
         await client.cancel(job_id, signal=signal)
     except Exception as exc:
         raise _raise(exc, f"cancelling job {job_id}") from exc
-    logger.info("Cancelled Slurm job %s", job_id)
+    logger.info("Cancelled Slurm job %s", sanitize_log_value(job_id))
     return JSONResponse(status_code=200, content=_envelope({"job_id": job_id, "cancelled": True}))
 
 

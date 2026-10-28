@@ -11,8 +11,9 @@ window, after ``invalidate()``, and once more on a 401), the Secret failure
 modes (missing key, empty token, client error) surfacing as the token 503,
 the error decoding (non-JSON and non-object bodies -> 502, Slurm's own
 ``errors`` list -> the status it implies: 404 for an unknown job, 400 for a
-bad request, 502 otherwise), the environment knobs, and the process-wide
-client gated on ``GCO_SLURM_ENABLED``.
+bad request, 502 otherwise), a 404 on ``/ping`` surfacing as the
+image/``SLURM_API_VERSION`` drift remedy, the environment knobs, and the
+process-wide client gated on ``GCO_SLURM_ENABLED``.
 """
 
 from __future__ import annotations
@@ -130,8 +131,12 @@ class TestEnvironment:
         assert slurm_client.slurm_enabled() is False
 
     def test_defaults_name_the_chart_service_and_the_pinned_api_version(self, restd):
+        from gco import slurm_config
+
         assert slurm_client.restapi_base_url() == BASE
         assert slurm_client.api_version() == slurm_client.SLURM_API_VERSION
+        # One pin: the client re-exports the constant that lives beside the image tag.
+        assert slurm_client.SLURM_API_VERSION is slurm_config.SLURM_API_VERSION
 
     def test_overrides_are_honoured_and_a_blank_version_falls_back(self, monkeypatch):
         monkeypatch.setenv("SLURM_RESTAPI_URL", "http://localhost:6820/")
@@ -354,6 +359,57 @@ class TestRequests:
         assert restd.requests == []
 
 
+class TestApiVersionMismatch:
+    """A 404 on ``/ping`` means the image does not serve the pinned plugin version.
+
+    Every data_parser version serves ``/ping``, so slurmrestd can only answer
+    404 there when the ``/slurm/<version>/`` prefix is unknown to it — the
+    drift between the charts.yaml image and ``SLURM_API_VERSION`` that
+    ``validate_helm_charts.py`` guards in CI. The client names the cause
+    instead of letting the status route answer a bare 404.
+    """
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"json": {"errors": [{"description": "Unable to find requested URL"}]}},
+            {"content": b"Not Found"},
+        ],
+        ids=["json-errors", "plain-text"],
+    )
+    def test_a_404_on_ping_names_the_version_drift(self, restd, body):
+        client = SlurmRestClient(version="v0.0.99", token_provider=_StaticTokens())
+        restd.respond(404, **body)
+
+        with pytest.raises(SlurmUnavailableError) as excinfo:
+            _run(client.ping())
+
+        assert str(excinfo.value) == f"slurmrestd at {BASE} does not serve v0.0.99"
+        assert excinfo.value.detail == slurm_client.API_VERSION_DETAIL.format(version="v0.0.99")
+        assert "/slurm/v0.0.99/ping" in excinfo.value.detail
+        assert "SLURM_API_VERSION in gco/slurm_config.py" in excinfo.value.detail
+        assert isinstance(excinfo.value.__cause__, SlurmApiError)
+        assert excinfo.value.__cause__.http_status == 404
+
+    def test_other_ping_failures_pass_through_unchanged(self, client, restd):
+        restd.respond(500, json={"errors": [{"description": "slurmctld down"}]})
+
+        with pytest.raises(SlurmApiError) as excinfo:
+            _run(client.ping())
+
+        assert (excinfo.value.status_code, excinfo.value.http_status) == (502, 500)
+        assert excinfo.value.detail == "slurmctld down"
+
+    def test_a_404_on_other_endpoints_is_still_not_found(self, client, restd):
+        # Only /ping is version-diagnostic: an unknown job id is a real 404.
+        restd.respond(404, json={"errors": [{"description": "Invalid job id specified"}]})
+
+        with pytest.raises(SlurmApiError) as excinfo:
+            _run(client.job(99))
+
+        assert (excinfo.value.status_code, excinfo.value.http_status) == (404, 404)
+
+
 class TestDecoding:
     def test_non_json_body_is_502(self, client, restd):
         restd.respond(200, content=b"<html>")
@@ -362,6 +418,7 @@ class TestDecoding:
             _run(client.ping())
 
         assert excinfo.value.status_code == 502
+        assert excinfo.value.http_status == 200
         assert "non-JSON body (HTTP 200)" in excinfo.value.detail
 
     def test_non_object_body_is_502(self, client, restd):
@@ -371,6 +428,7 @@ class TestDecoding:
             _run(client.ping())
 
         assert excinfo.value.status_code == 502
+        assert excinfo.value.http_status == 200
 
     def test_errors_in_a_200_body_are_still_errors(self, client, restd):
         restd.respond(
@@ -442,8 +500,15 @@ class TestErrorMapping:
         token = slurm_client.http_exception_for(SlurmUnavailableError("Secret gco-jobs/x missing"))
         assert (token.status_code, token.detail) == (503, slurm_client.TOKEN_UNAVAILABLE_DETAIL)
 
+        # An explicit remedy wins over the message-based fallbacks above.
+        precise = slurm_client.http_exception_for(
+            SlurmUnavailableError("Secret-adjacent wording", detail="exact remedy")
+        )
+        assert (precise.status_code, precise.detail) == (503, "exact remedy")
+
         slurm = slurm_client.http_exception_for(SlurmApiError(400, [], "bad partition"))
         assert (slurm.status_code, slurm.detail) == (400, "bad partition")
+        assert SlurmApiError(400, [], "bad partition").http_status is None
 
         other = slurm_client.http_exception_for(ValueError("boom"), context="listing nodes")
         assert isinstance(other, HTTPException)

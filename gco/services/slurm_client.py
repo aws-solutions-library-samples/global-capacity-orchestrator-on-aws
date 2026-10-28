@@ -35,14 +35,18 @@ import httpx2
 from fastapi import HTTPException
 
 from gco.services import tracing
-from gco.slurm_config import SLURM_NAMESPACE, SLURM_RESTAPI_NAME, SLURM_RESTAPI_PORT
+from gco.slurm_config import (
+    SLURM_API_VERSION,
+    SLURM_NAMESPACE,
+    SLURM_RESTAPI_NAME,
+    SLURM_RESTAPI_PORT,
+)
 
 logger = logging.getLogger(__name__)
 
-#: The slurmrestd OpenAPI plugin version the Slurm 26.05 images serve; bump in
-#: lockstep with the image tag in charts.yaml (``slurmrestd -d list`` shows the
-#: versions an image ships).
-SLURM_API_VERSION = "v0.0.44"
+#: ``SLURM_API_VERSION`` (the slurmrestd plugin version the paths below carry)
+#: lives in :mod:`gco.slurm_config` beside the image tag it moves with; it is
+#: re-exported here because this module is where the version is used.
 
 #: The Slurm identity the API acts as. ``slurm`` is SlurmUser: it may submit,
 #: inspect and cancel any job, which is what a single authenticated front door
@@ -51,7 +55,7 @@ SLURM_API_VERSION = "v0.0.44"
 SLURM_API_USER = "slurm"
 
 #: The Token custom resource and the Secret it writes (post-helm-slurm-api-access.yaml).
-SLURM_API_TOKEN_NAME = "slinky-slurm-token-gco-api"
+SLURM_API_TOKEN_NAME = "slinky-slurm-token-gco-api"  # nosec B105  # object name, not a credential
 SLURM_API_TOKEN_SECRET = SLURM_API_TOKEN_NAME  # nosec B105  # Kubernetes Secret name
 SLURM_API_TOKEN_KEY = "auth-token"  # nosec B105  # Secret data key, not a credential
 
@@ -78,6 +82,16 @@ TOKEN_UNAVAILABLE_DETAIL = (
     "The GCO API's Slurm credential is unavailable. Check the Token "
     f"{SLURM_API_TOKEN_NAME} in gco-jobs and the slurm-operator logs."
 )
+#: slurmrestd answered 404 for ``/slurm/<version>/ping``, an endpoint every
+#: plugin version serves: the deployed image does not ship the version this
+#: API addresses (``{version}`` is filled in from the client).
+API_VERSION_DETAIL = (
+    "Slurm's REST API does not serve OpenAPI plugin version {version}: slurmrestd "
+    "answered 404 for /slurm/{version}/ping. The slurmrestd image in charts.yaml and "
+    "SLURM_API_VERSION in gco/slurm_config.py (or the SLURM_API_VERSION override on the "
+    "API pod) have drifted apart; `slurmrestd -d list` inside the image names the "
+    "versions it ships."
+)
 
 
 class SlurmDisabledError(Exception):
@@ -85,17 +99,39 @@ class SlurmDisabledError(Exception):
 
 
 class SlurmUnavailableError(Exception):
-    """slurmrestd or the API's token cannot be reached right now."""
+    """slurmrestd or the API's token cannot be reached right now.
+
+    ``detail`` is the operator-facing remedy the API answers with when the
+    cause is known precisely; :func:`http_exception_for` falls back to the
+    generic transport / credential remedies otherwise.
+    """
+
+    def __init__(self, message: str, *, detail: str | None = None) -> None:
+        super().__init__(message)
+        self.detail = detail
 
 
 class SlurmApiError(Exception):
-    """slurmrestd answered with an error for the request."""
+    """slurmrestd answered with an error for the request.
 
-    def __init__(self, status_code: int, errors: list[Any], detail: str) -> None:
+    ``status_code`` is the status the GCO API answers with (see
+    :func:`_map_slurm_status`); ``http_status`` is what slurmrestd itself
+    answered, kept for callers that need the raw transport fact.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        errors: list[Any],
+        detail: str,
+        *,
+        http_status: int | None = None,
+    ) -> None:
         super().__init__(detail)
         self.status_code = status_code
         self.errors = errors
         self.detail = detail
+        self.http_status = http_status
 
 
 def slurm_enabled() -> bool:
@@ -227,18 +263,24 @@ class SlurmRestClient:
 
     @staticmethod
     def _decode(response: httpx2.Response) -> dict[str, Any]:
+        status = response.status_code
         try:
             payload = response.json()
         except ValueError as exc:
             raise SlurmApiError(
-                502, [], f"slurmrestd returned a non-JSON body (HTTP {response.status_code})"
+                502, [], f"slurmrestd returned a non-JSON body (HTTP {status})", http_status=status
             ) from exc
         if not isinstance(payload, dict):
-            raise SlurmApiError(502, [], "slurmrestd returned an unexpected JSON shape")
-        errors = payload.get("errors") or []
-        if response.status_code >= 400 or errors:
             raise SlurmApiError(
-                _map_slurm_status(response.status_code, errors), errors, _describe_errors(errors)
+                502, [], "slurmrestd returned an unexpected JSON shape", http_status=status
+            )
+        errors = payload.get("errors") or []
+        if status >= 400 or errors:
+            raise SlurmApiError(
+                _map_slurm_status(status, errors),
+                errors,
+                _describe_errors(errors),
+                http_status=status,
             )
         return payload
 
@@ -251,7 +293,21 @@ class SlurmRestClient:
         return f"/slurmdb/{self.version}/{suffix}"
 
     async def ping(self) -> dict[str, Any]:
-        return await self.request("GET", self._slurm("ping"))
+        """``/ping`` exists in every plugin version, so a 404 here is a version mismatch.
+
+        The status route calls this first; translating the 404 into an
+        unavailable-with-remedy error is what turns a silent image/pin drift
+        into one actionable message instead of a generic "not found".
+        """
+        try:
+            return await self.request("GET", self._slurm("ping"))
+        except SlurmApiError as exc:
+            if exc.http_status == 404:
+                raise SlurmUnavailableError(
+                    f"slurmrestd at {self.base_url} does not serve {self.version}",
+                    detail=API_VERSION_DETAIL.format(version=self.version),
+                ) from exc
+            raise
 
     async def diag(self) -> dict[str, Any]:
         return await self.request("GET", self._slurm("diag"))
@@ -335,7 +391,9 @@ def http_exception_for(error: Exception, *, context: str = "talking to Slurm") -
     if isinstance(error, SlurmDisabledError):
         return HTTPException(status_code=404, detail=DISABLED_DETAIL)
     if isinstance(error, SlurmUnavailableError):
-        detail = TOKEN_UNAVAILABLE_DETAIL if "Secret" in str(error) else UNAVAILABLE_DETAIL
+        detail = error.detail or (
+            TOKEN_UNAVAILABLE_DETAIL if "Secret" in str(error) else UNAVAILABLE_DETAIL
+        )
         return HTTPException(status_code=503, detail=detail)
     if isinstance(error, SlurmApiError):
         return HTTPException(status_code=error.status_code, detail=error.detail)

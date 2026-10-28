@@ -853,6 +853,42 @@ EOF
     [[ "$output" != *$'\n'"kubeflow/trainer/trainer-controller-manager:v"* ]]
 }
 
+@test "extract_chart_value_images: every Slinky Slurm image and sidecar reaches the sweep" {
+    # The slinky-slurm chart pins five Slurm daemon images on one tag
+    # (gco/slurm_config.py SLURM_IMAGE_TAG) and the alpine sidecar
+    # (SLURM_SIDECAR_IMAGE) under several values paths — controller,
+    # restapi, accounting, nodesetDefaults, loginsetDefaults. All of them
+    # must come out of the extractor, or a charts.yaml restructure the
+    # walker cannot see would silently drop them from the monthly drift
+    # report. The tags are read from the constants so a legitimate bump
+    # does not break the test.
+    tag="$(grep -oE '^SLURM_IMAGE_TAG = "[^"]+"' gco/slurm_config.py | cut -d'"' -f2)"
+    [ -n "$tag" ]
+    alpine_tag="$(grep -oE '^SLURM_SIDECAR_IMAGE = .*"tag": "[^"]+"' gco/slurm_config.py \
+        | sed -E 's/.*"tag": "([^"]+)".*/\1/')"
+    [ -n "$alpine_tag" ]
+
+    run extract_chart_value_images "lambda/helm-installer/charts.yaml"
+    [ "$status" -eq 0 ]
+    for component in slurmctld slurmrestd slurmdbd slurmd login; do
+        [[ "$output" == *"ghcr.io/slinkyproject/${component}:${tag}"* ]]
+    done
+    # No Slurm daemon image floats on another tag.
+    other_tags="$(printf '%s\n' "$output" \
+        | grep -E '^ghcr.io/slinkyproject/(slurmctld|slurmrestd|slurmdbd|slurmd|login):' \
+        | grep -v ":${tag}\$" || true)"
+    [ -z "$other_tags" ]
+    # The sidecar is pinned (upstream defaults to alpine:latest) and emitted
+    # registry-qualified so the lookup goes to public.ecr.aws, not docker.io.
+    [[ "$output" == *"public.ecr.aws/docker/library/alpine:${alpine_tag}"* ]]
+    [[ "$output" != *"alpine:latest"* ]]
+    # Both tag shapes are ones the sweep compares within their variant
+    # (26.05.5-ubuntu24.04 stays an -ubuntu24.04 comparison), so the rows
+    # are drift checks rather than unparseable-tag skips.
+    is_semver_tag "$tag"
+    is_semver_tag "$alpine_tag"
+}
+
 @test "extract_chart_value_images: handles every pin shape in a fixture" {
     tmpfile="$(mktemp)"
     cat > "$tmpfile" <<'EOF'
@@ -4415,6 +4451,83 @@ SHIM
     run read_ruby_version_pin "$REPO_ROOT/.ruby-version"
     [ "$status" -eq 0 ]
     [[ "$output" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+}
+
+@test "ubuntu_variant_release: the Ubuntu release of a Slinky tag variant, nothing for other bases" {
+    run ubuntu_variant_release "26.05.5-ubuntu24.04"
+    [ "$status" -eq 0 ]
+    [ "$output" = "24.04" ]
+
+    run ubuntu_variant_release "26.05-ubuntu26.04"
+    [ "$output" = "26.04" ]
+
+    # Rocky, bare, a bumped-last-digit fake tag and an empty argument are
+    # all "not an Ubuntu variant".
+    for tag in "26.05.5-rockylinux9" "26.05.5" "26.05.5-ubuntu24.5" "ubuntu24.04" ""; do
+        run ubuntu_variant_release "$tag"
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+    done
+}
+
+@test "ubuntu_variant_release: the committed SLURM_IMAGE_TAG is an Ubuntu LTS variant" {
+    # The Ubuntu LTS section of the scan compares this release; if the pin
+    # ever moves to another base the section says "nothing to compare" by
+    # design, and this test is the cue to revisit it.
+    run ubuntu_variant_release "$(extract_python_string_constant SLURM_IMAGE_TAG "$REPO_ROOT/gco/slurm_config.py")"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]{2}\.04$ ]]
+}
+
+@test "get_latest_ubuntu_lts: the newest LTS whose first point release has shipped" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    # 28.04 is an LTS still waiting for 28.04.1; 27.10 is an interim release
+    # even with a point release; 20.04 is end of life; 30.04 is not out;
+    # "devel" has no numeric cycle. 26.04 is the answer.
+    make_endoflife_curl "$tmpdir" '[
+        {"cycle": "30.04", "lts": true, "latest": "30.04.1", "releaseDate": "2999-04-23", "eol": false},
+        {"cycle": "28.04", "lts": true, "latest": "28.04", "releaseDate": "2026-01-01", "eol": false},
+        {"cycle": "27.10", "lts": false, "latest": "27.10.1", "releaseDate": "2026-01-01", "eol": false},
+        {"cycle": "26.04", "lts": true, "latest": "26.04.1", "releaseDate": "2026-04-23", "eol": "2031-05-29"},
+        {"cycle": "24.04", "lts": true, "latest": "24.04.5", "releaseDate": "2024-04-25", "eol": "2029-05-31"},
+        {"cycle": "20.04", "lts": true, "latest": "20.04.6", "releaseDate": "2020-04-23", "eol": "2025-05-31"},
+        {"cycle": "devel", "lts": true, "latest": "devel.1", "releaseDate": "2020-01-01", "eol": false},
+        {"cycle": "x.04", "lts": true, "latest": "x.04.1", "releaseDate": "2020-01-01", "eol": false}
+    ]'
+    PATH="$tmpdir:$PATH" run get_latest_ubuntu_lts
+    [ "$status" -eq 0 ]
+    [ "$output" = "26.04" ]
+
+    # The ``.1`` gate alone: with every LTS still on its first release there
+    # is no adoptable cycle, and the caller skips rather than nags.
+    make_endoflife_curl "$tmpdir" '[{"cycle": "26.04", "lts": true, "latest": "26.04", "releaseDate": "2026-04-23", "eol": false}]'
+    PATH="$tmpdir:$PATH" run get_latest_ubuntu_lts
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "get_latest_ubuntu_lts: empty on an unreachable endpoint or a schema change" {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\nexit 22\n' > "$tmpdir/curl"
+    chmod +x "$tmpdir/curl"
+    PATH="$tmpdir:$PATH" run get_latest_ubuntu_lts
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    make_endoflife_curl "$tmpdir" 'not json'
+    PATH="$tmpdir:$PATH" run get_latest_ubuntu_lts
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    # The endpoint answers, but without the fields the check relies on.
+    make_endoflife_curl "$tmpdir" '[{"cycle": "26.04", "releaseDate": "2026-04-23"}]'
+    PATH="$tmpdir:$PATH" run get_latest_ubuntu_lts
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
 }
 
 # ── npm graph management and cross-source Node/npm/CDK pins ─────────────────

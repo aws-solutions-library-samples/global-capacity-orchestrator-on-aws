@@ -540,18 +540,18 @@ def slurm_output(
                 reader, server=session.server, tls_server_name=session.tls_server_name
             )
             if follow:
+                # Streams until Ctrl-C; the tunnel closes on the way out and
+                # tail's exit status is the command's (SystemExit passes the
+                # except clause below untouched).
                 formatter.print_info(f"Following {path} (Ctrl-C to stop)...")
                 code = run_foreground(cmd)
-            else:
-                text = run_capture(cmd)
-                code = 0
+                if code != 0:
+                    sys.exit(code)
+                return
+            text = run_capture(cmd)
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
         sys.exit(1)
-    if follow:
-        if code != 0:
-            sys.exit(code)
-        return
     if config.output_format != "table":
         formatter.print({"job_id": job_id, "region": target_region, "path": path, "content": text})
         return

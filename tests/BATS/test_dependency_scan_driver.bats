@@ -171,7 +171,10 @@ case "$url" in
     *endoflife.date/api/*.json)
         [ "${FAKE_ENDOFLIFE:-up}" = "down" ] && unreachable
         product="${url#*endoflife.date/api/}"; product="${product%.json}"
-        reply 200 "[{\"cycle\": \"$(answer endoflife "$product" 1.0)\", \"releaseDate\": \"2020-01-01\", \"eol\": false}]"
+        cycle="$(answer endoflife "$product" 1.0)"
+        # Every cycle is an LTS with its first point release out: the Ubuntu
+        # check requires both, the Python/Ruby checks ignore the two fields.
+        reply 200 "[{\"cycle\": \"${cycle}\", \"latest\": \"${cycle}.1\", \"lts\": true, \"releaseDate\": \"2020-01-01\", \"eol\": false}]"
         ;;
     *) reply 404 ''; exit 0 ;;
 esac
@@ -282,7 +285,9 @@ case "${1:-}" in
         ref="${argv##*docker://}"
         # FAKE_SKOPEO=unlisted: the registry answers, but with a tag list
         # that no longer carries the pinned tag and offers nothing newer.
+        # FAKE_SKOPEO=fail: the registry does not answer at all.
         [ "${FAKE_SKOPEO:-ok}" = "unlisted" ] && { echo '{"Tags": ["0.0.1"]}'; exit 0; }
+        [ "${FAKE_SKOPEO:-ok}" = "fail" ] && exit 1
         tags=()
         while IFS= read -r tag; do
             [ -n "$tag" ] || continue
@@ -291,6 +296,12 @@ case "${1:-}" in
             # sweep picks the newest same-variant tag, the kind node check
             # only looks inside the pinned minor.
             [ "${FAKE_DRIFT:-0}" = "1" ] && tags+=("$(bump "$tag")" "$(bump_last "$tag")")
+            # ...and an Ubuntu-variant tag is also published on the next
+            # Ubuntu base, which is what the Ubuntu LTS check looks for.
+            case "$tag" in
+                *-ubuntu[0-9][0-9].[0-9][0-9])
+                    [ "${FAKE_DRIFT:-0}" = "1" ] && tags+=("${tag%-ubuntu*}-ubuntu$(bump "${tag##*-ubuntu}")") ;;
+            esac
         done < <(catalog_values image "$ref" | sort -u)
         printf '{"Tags": %s}\n' "$(json_list "${tags[@]+"${tags[@]}"}")"
         ;;
@@ -502,6 +513,7 @@ PY
             echo "endoflife|python|$(extract_constant_value LAMBDA_PYTHON_RUNTIME | sed -E 's/^PYTHON_([0-9]+)_([0-9]+)$/\1.\2/')"
             ruby_pin="$(read_ruby_version_pin .ruby-version)"
             [ -n "$ruby_pin" ] && echo "endoflife|ruby|$(printf '%s' "$ruby_pin" | cut -d. -f1-2)"
+            echo "endoflife|ubuntu|$(ubuntu_variant_release "$(extract_python_string_constant SLURM_IMAGE_TAG gco/slurm_config.py)")"
             # The image sweep the scan performs, source for source.
             {
                 grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+" .github/workflows 2>/dev/null | sed 's/image: //'
@@ -657,6 +669,7 @@ LAMBDA_NODEJS_RUNTIME = "NODEJS_24_X"
 PY
     printf '# the stack reads its pins from constants.py\n' > "$root/gco/stacks/regional_stack.py"
     printf 'AWS_CLI_IMAGE = "public.ecr.aws/aws-cli/aws-cli:2.36.41@sha256:%s"\n' "$DIGEST_A" > "$root/gco/services/inference_monitor.py"
+    printf 'SLURM_IMAGE_TAG = "26.05.5-ubuntu24.04"\n' > "$root/gco/slurm_config.py"
     printf '_DISAGGREGATED_DEFAULT_IMAGE = "vllm/vllm-openai:v0.28.0"\n' > "$root/cli/images.py"
     cat > "$root/cli/autopilot.py" <<'PY'
 CLAUDE_CODE_VERSION = "2.1.252"
@@ -704,6 +717,17 @@ charts:
     chart: kueue
     version: 0.19.2
     use_oci: true
+  slinky-slurm:
+    repo_url: oci://ghcr.io/slinkyproject/charts
+    chart: slurm
+    version: 1.2.3
+    use_oci: true
+    values:
+      nodesetDefaults:
+        slurmd:
+          image:
+            repository: ghcr.io/slinkyproject/slurmd
+            tag: "26.05.5-ubuntu24.04"
 YAML
     printf 'kind: Pod\nspec:\n  containers:\n    - image: busybox:1.38.0\n    - image: gco/api:1.0.0\n' > "$root/lambda/kubectl-applier-simple/manifests/10-probe.yaml"
     printf 'kind: Function\nspec:\n  package:\n    xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5@sha256:%s\n' "$DIGEST_B" > "$root/lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml"
@@ -766,6 +790,7 @@ findings_path() {
     [[ "$output" == *"every runner label in use is the newest generally-available image."* ]]
     [[ "$output" == *"ubuntu-latest pins ubuntu-24.04; ubuntu-26.04 exists but is still in preview."* ]]
     [[ "$output" == *".ruby-version pins 4.0.1; newest supported series is 4.0."* ]]
+    [[ "$output" == *"Slurm images are on ubuntu24.04; newest adoptable Ubuntu LTS is 24.04."* ]]
     [[ "$output" == *"Offline NodePool/watch-list policy is current."* ]]
     [[ "$output" == *"Live EC2 accelerator catalog is current."* ]]
     [[ "$output" == *"Incomplete lookups:       0"* ]]
@@ -785,7 +810,7 @@ findings_path() {
     [ "$(jq -r '.schema' "$findings")" = "gco.dependency-scan.findings/1" ]
     [ "$(jq -r '.has_drift' "$findings")" = "false" ]
     [ "$(jq -r '.scan_complete' "$findings")" = "true" ]
-    [ "$(jq -r '.surfaces | length' "$findings")" = "22" ]
+    [ "$(jq -r '.surfaces | length' "$findings")" = "23" ]
     [ "$(jq -r '[.surfaces[].count] | add' "$findings")" = "0" ]
     [ "$(jq -r '[.surfaces[] | select(.skipped != null)] | length' "$findings")" = "0" ]
     # Every surface was consulted through the faked tools.
@@ -851,6 +876,11 @@ findings_path() {
     [[ "$output" == *"  - LAMBDA_NODEJS_RUNTIME: NODEJS_24_X -> NODEJS_25_X"* ]]
     [[ "$output" == *"  - python (LAMBDA_PYTHON_RUNTIME): 3.14 -> 4.14"* ]]
     [[ "$output" == *"  - ruby (.ruby-version): 4.0.1 -> 5.0"* ]]
+    # The Slurm patch on the same base is the image sweep's row; the base
+    # move is the Ubuntu LTS section's, and only because the registry
+    # publishes the pinned Slurm version on the newer base.
+    [[ "$output" == *"  - ghcr.io/slinkyproject/slurmd:26.05.5-ubuntu24.04 -> 27.05.5-ubuntu24.04"* ]]
+    [[ "$output" == *"  - SLURM_IMAGE_TAG (gco/slurm_config.py): 26.05.5-ubuntu24.04 -> 26.05.5-ubuntu25.04 (Ubuntu 25.04 LTS)"* ]]
     [[ "$output" == *"  - runner ubuntu-latest: ubuntu-22.04 -> ubuntu-24.04"* ]]
     [[ "$output" == *"  - Trivy (install-trivy action default): v0.74.0 -> v1.74.0"* ]]
     [[ "$output" == *"  - Crossplane function-go-templating (post-helm-crossplane.yaml): v0.12.5 -> v1.12.5"* ]]
@@ -869,10 +899,12 @@ findings_path() {
             "## EKS Add-ons" "## EKS Kubernetes Version" "## Aurora PostgreSQL Engine" "## EMR Serverless" \
             "## Bedrock Default Model" "## Accelerator Catalog and NodePools" "## Dockerfile.dev Pins" \
             "## GCO Autopilot Pins" "## Pre-commit Hooks" "## CDK Enum Constants" "## Python Release" \
-            "## Runner Images" "## Ruby Release" "## CI Tooling" "## Action Required"; do
+            "## Runner Images" "## Ruby Release" "## Ubuntu LTS Base" "## CI Tooling" "## Action Required"; do
         grep -qF -- "$section" "$report" || { echo "missing section: $section"; false; }
     done
     grep -qF -- "| [Python Packages](#python-packages) | 3 update(s) | routine |" "$report"
+    grep -qF -- "| [Ubuntu LTS Base](#ubuntu-lts-base) | 1 update(s) | informational |" "$report"
+    grep -qF -- "| SLURM_IMAGE_TAG (gco/slurm_config.py) | 26.05.5-ubuntu24.04 | 26.05.5-ubuntu25.04 |" "$report"
     grep -qF -- "| \`.\` | aws-cdk | 2.1140.0 | 3.1140.0 | [npm](https://www.npmjs.com/package/aws-cdk) |" "$report"
     grep -qF -- "#### Retire p2 from the GPU pool" "$report"
     ! grep -q "Skipped checks" "$report"
@@ -1292,6 +1324,8 @@ YAML
     [[ "$output" == *"INCOMPLETE: Could not parse the current or latest Lambda Node.js runtime enum."* ]]
     [[ "$output" == *"Could not parse LAMBDA_PYTHON_RUNTIME for the Python release comparison."* ]]
     [[ "$output" == *"Could not parse .ruby-version for the Ruby release comparison."* ]]
+    [[ "$output" == *"Could not parse SLURM_IMAGE_TAG from gco/slurm_config.py for the Ubuntu LTS comparison."* ]]
+    [[ "$output" == *"Ubuntu LTS base:          (skipped)"* ]]
     [[ "$output" == *"INCOMPLETE: Could not parse the committed version pin for Trivy (install-trivy action default)."* ]]
     [[ "$output" == *"INCOMPLETE: Could not parse the kubectl pin from lambda/helm-installer/Dockerfile."* ]]
     [[ "$output" == *"INCOMPLETE: Could not parse the kind node-image pin from integration-tests.yml."* ]]
@@ -1361,6 +1395,7 @@ YAML
     [[ "$output" == *"cli/autopilot.py not found."* ]]
     [[ "$output" == *"Python release:           (skipped)"* ]]
     [[ "$output" == *"Ruby release:             (skipped)"* ]]
+    [[ "$output" == *"Ubuntu LTS base:          (skipped)"* ]]
     [[ "$output" == *"GCO autopilot pins:       (skipped)"* ]]
     [[ "$output" == *"No drift was found in completed checks, but the scan is incomplete."* ]]
     grep -qx 'has_drift=false' "$GITHUB_OUTPUT"
@@ -1370,6 +1405,7 @@ YAML
     [[ "$notes" == *"CDK enums skipped: aws-cdk-lib not importable."* ]]
     [[ "$notes" == *"Python release skipped: endoflife.date query failed"* ]]
     [[ "$notes" == *"Ruby release skipped: endoflife.date query failed"* ]]
+    [[ "$notes" == *"Ubuntu LTS base skipped: endoflife.date query failed"* ]]
     [[ "$notes" == *"Runner images skipped: Could not read the actions/runner-images catalog"* ]]
     [[ "$notes" != *"Incomplete checks:"* ]]
 }
@@ -1395,6 +1431,47 @@ YAML
     [[ "$output" == *"CLAUDE_CODE_VERSION not found in cli/autopilot.py."* ]]
     [[ "$output" == *"INCOMPLETE: Could not parse hook pins from .pre-commit-config.yaml."* ]]
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+}
+
+@test "the Ubuntu LTS base check only moves to a variant the registry publishes, and says why it stays put" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    build_catalog "$root"
+
+    # A newer LTS is adoptable, but the registry does not carry the pinned
+    # Slurm version on it (FAKE_SKOPEO=unlisted answers a bare tag list):
+    # nothing to move to, so no finding and the scan stays complete here.
+    run_scan "$root" FAKE_DRIFT=1 FAKE_SKOPEO=unlisted
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Ubuntu 25.04 LTS is adoptable, but ghcr.io/slinkyproject/slurmd does not publish 26.05.5-ubuntu25.04 yet; nothing to move to."* ]]
+    [[ "$output" == *"Ubuntu LTS base:          0"* ]]
+    [[ "$output" != *"SLURM_IMAGE_TAG (gco/slurm_config.py):"* ]]
+
+    # The registry does not answer: an incomplete lookup, not a verdict.
+    run_scan "$root" FAKE_DRIFT=1 FAKE_SKOPEO=fail
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCOMPLETE: Container registry tag lookup failed for ghcr.io/slinkyproject/slurmd (Ubuntu LTS comparison)."* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+
+    # charts.yaml no longer names a slurmd image to probe: a skip by name.
+    printf 'charts:\n  keda:\n    repo_url: https://kedacore.github.io/charts\n    chart: keda\n    version: 2.20.2\n    values:\n      image:\n        registry: ghcr.io\n        repository: kedacore/keda\n        tag: 2.20.2\n' > "$root/lambda/helm-installer/charts.yaml"
+    build_catalog "$root"
+    run_scan "$root" FAKE_DRIFT=1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Could not find the slurmd image repository in lambda/helm-installer/charts.yaml for the Ubuntu LTS comparison."* ]]
+    [[ "$output" == *"Ubuntu LTS base:          (skipped)"* ]]
+    grep -q '^- \*\*Ubuntu LTS Base:\*\* Could not find the slurmd image repository' "$(report_path)"
+
+    # A Rocky-based pin is not an Ubuntu variant: nothing to compare, not a
+    # skip, and endoflife.date is not even consulted.
+    printf 'SLURM_IMAGE_TAG = "26.05.5-rockylinux9"\n' > "$root/gco/slurm_config.py"
+    build_catalog "$root"
+    : > "$CALLS"
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SLURM_IMAGE_TAG 26.05.5-rockylinux9 is not an Ubuntu variant; nothing to compare."* ]]
+    [[ "$output" == *"Ubuntu LTS base:          0"* ]]
+    ! grep -q 'curl https://endoflife.date/api/ubuntu.json' "$CALLS"
 }
 
 @test "engine packages that went unhealthy are drift; companions the registry cannot answer for are a skip" {

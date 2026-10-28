@@ -85,6 +85,11 @@ jobs:
     # manifests (`helm template`) with the values charts.yaml ships — no
     # cluster required. Every entry is checked, including enabled: false charts
     # (those are toggled on via cdk.json, so their pins must be valid too).
+    # The Slurm REST API version lockstep also runs the pinned slurmrestd image
+    # (`slurmrestd -d list`) through the runner's docker to prove it serves
+    # SLURM_API_VERSION from gco/slurm_config.py; --mode online requires that
+    # runtime, so a runner image without docker fails here with exit 2 rather
+    # than silently skipping the check.
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false

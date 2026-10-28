@@ -15,10 +15,13 @@
 #
 # Identity is gco-service-account (01-serviceaccounts.yaml): its EKS Pod
 # Identity association grants read/write on exactly the regional bucket and
-# use of its KMS key, and nothing else. The database password reaches
-# mariadb-dump through MYSQL_PWD, never a command-line argument, so it is not
-# visible in the process list. Egress needs nothing new: the database is in
-# the namespace, S3 is HTTPS, and the Pod Identity Agent rule exists.
+# use of its KMS key, and nothing else. The database password is mounted from
+# the slinky-slurm-mariadb Secret as a file (never a container env var, so it
+# is absent from the pod spec and `kubectl describe`) and reaches mariadb-dump
+# through MYSQL_PWD set for that one process (never a command-line argument,
+# so it is absent from the process list). Egress needs nothing new: the
+# database is in the namespace, S3 is HTTPS, and the Pod Identity Agent rule
+# exists.
 #
 # Gated on {{SLURM_ACCOUNTING_BACKUP_ENABLED}} and the schedule token:
 # rendered only while Slurm is on, accounting uses the in-cluster database and
@@ -35,7 +38,7 @@ metadata:
     app.kubernetes.io/name: accounting-backup
   annotations:
     gco.io/slurm-accounting-backup-enabled: "{{SLURM_ACCOUNTING_BACKUP_ENABLED}}"
-    checkov.io/skip1: CKV_K8S_43=MariaDB and the AWS CLI are published by version tag on ECR Public; pinned tags are preferred over digests for maintainability
+    checkov.io/skip1: CKV_K8S_43=MariaDB and the AWS CLI publish by version tag on ECR Public; pinned tags preferred over digests
     checkov.io/skip2: CKV_K8S_15=Pinned immutable tags; IfNotPresent avoids re-pulling the images on every run
     checkov.io/skip3: CKV_K8S_40=The MariaDB image's mysql user is UID 999 and the dump runs as it; the uploader runs as a high UID
 spec:
@@ -91,7 +94,10 @@ spec:
               args:
                 - |
                   set -euo pipefail
-                  mariadb-dump --host="${DB_HOST}" --port="${DB_PORT}" --user="${DB_USER}" \
+                  # The password is set for mariadb-dump alone, read from the
+                  # mounted Secret: not a pod env var, not an argument.
+                  MYSQL_PWD="$(cat /run/secrets/slurm-mariadb/password)" \
+                    mariadb-dump --host="${DB_HOST}" --port="${DB_PORT}" --user="${DB_USER}" \
                     --single-transaction --quick --routines --events --triggers \
                     "${DB_NAME}" | gzip -9 > /backup/slurm_acct_db.sql.gz
                   echo "dumped ${DB_NAME}: $(stat -c %s /backup/slurm_acct_db.sql.gz) bytes"
@@ -104,11 +110,6 @@ spec:
                   value: slurm_acct_db
                 - name: DB_USER
                   value: slurm
-                - name: MYSQL_PWD
-                  valueFrom:
-                    secretKeyRef:
-                      name: slinky-slurm-mariadb
-                      key: password
               securityContext:
                 runAsUser: 999
                 runAsGroup: 999
@@ -129,6 +130,9 @@ spec:
                   mountPath: /backup
                 - name: tmp
                   mountPath: /tmp
+                - name: db-credentials
+                  mountPath: /run/secrets/slurm-mariadb
+                  readOnly: true
           containers:
             - name: upload
               image: public.ecr.aws/aws-cli/aws-cli:2.39.0
@@ -178,3 +182,14 @@ spec:
                 sizeLimit: 20Gi
             - name: tmp
               emptyDir: {}
+            # Only the dump container mounts it. Owner-only mode: the kubelet
+            # adds group read for the pod's fsGroup (10000), which every
+            # container carries as a supplementary group, so the mysql user
+            # (999) in the dump container reads it and nothing else is wider.
+            - name: db-credentials
+              secret:
+                secretName: slinky-slurm-mariadb
+                defaultMode: 0400
+                items:
+                  - key: password
+                    path: password

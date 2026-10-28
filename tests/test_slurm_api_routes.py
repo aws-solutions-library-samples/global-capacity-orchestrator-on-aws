@@ -303,6 +303,19 @@ class TestStatus:
         assert result.json()["detail"] == slurm_client.UNAVAILABLE_DETAIL
         assert "Slurm reading status failed (HTTP 503): SlurmUnavailableError" in caplog.text
 
+    def test_api_version_drift_is_503_with_the_pin_remedy(self, client, stub):
+        # The client raises this when /ping answers 404 — the deployed image
+        # does not serve SLURM_API_VERSION. The route must hand the operator
+        # the precise remedy, not the generic transport one.
+        detail = slurm_client.API_VERSION_DETAIL.format(version="v0.0.44")
+        stub.errors["ping"] = SlurmUnavailableError("does not serve v0.0.44", detail=detail)
+
+        result = client.get("/api/v1/slurm/status")
+
+        assert result.status_code == 503
+        assert result.json()["detail"] == detail
+        assert "/slurm/v0.0.44/ping" in result.json()["detail"]
+
 
 class TestPartitions:
     def test_summarises_each_partition(self, client, stub):

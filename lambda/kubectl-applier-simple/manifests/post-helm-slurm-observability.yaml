@@ -88,7 +88,8 @@ data:
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
           "targets": [
-            {"expr": "count by (created_by_name) (kube_pod_info{namespace=\"gco-jobs\", created_by_kind=\"NodeSet\"})", "legendFormat": "{{created_by_name}}"}
+            {"expr": "count by (created_by_name) (kube_pod_info{namespace=\"gco-jobs\", created_by_kind=\"NodeSet\"})",
+             "legendFormat": "{{created_by_name}}"}
           ]
         },
         {
@@ -118,9 +119,12 @@ data:
           "gridPos": {"h": 6, "w": 24, "x": 0, "y": 24},
           "targets": [
             {"expr": "max(up{job=\"slinky-slurm-controller\"})", "legendFormat": "slurmctld scraped"},
-            {"expr": "sum(kube_deployment_status_replicas_available{namespace=\"gco-jobs\", deployment=\"slinky-slurm-restapi\"})", "legendFormat": "slurmrestd replicas"},
-            {"expr": "sum(kube_statefulset_status_replicas_ready{namespace=\"gco-jobs\", statefulset=\"slinky-slurm-accounting\"})", "legendFormat": "slurmdbd ready"},
-            {"expr": "sum(kube_statefulset_status_replicas_ready{namespace=\"gco-jobs\", statefulset=\"slinky-slurm-mariadb\"})", "legendFormat": "accounting db ready"}
+            {"expr": "sum(kube_deployment_status_replicas_available{namespace=\"gco-jobs\", deployment=\"slinky-slurm-restapi\"})",
+             "legendFormat": "slurmrestd replicas"},
+            {"expr": "sum(kube_statefulset_status_replicas_ready{namespace=\"gco-jobs\", statefulset=\"slinky-slurm-accounting\"})",
+             "legendFormat": "slurmdbd ready"},
+            {"expr": "sum(kube_statefulset_status_replicas_ready{namespace=\"gco-jobs\", statefulset=\"slinky-slurm-mariadb\"})",
+             "legendFormat": "accounting db ready"}
           ]
         }
       ]
@@ -152,7 +156,9 @@ spec:
             component: slurm
           annotations:
             summary: "Slurm controller is not being scraped"
-            description: "slurmctld (gco-jobs/slinky-slurm-controller) has had no successful metrics scrape for 5 minutes. Jobs cannot be scheduled or submitted while it is down."
+            description: >-
+              slurmctld (gco-jobs/slinky-slurm-controller) has had no successful metrics
+              scrape for 5 minutes. Jobs cannot be scheduled or submitted while it is down.
         - alert: SlurmRestApiUnavailable
           expr: sum(kube_deployment_status_replicas_available{namespace="gco-jobs", deployment="slinky-slurm-restapi"}) < 1
           for: 5m
@@ -161,16 +167,22 @@ spec:
             component: slurm
           annotations:
             summary: "No slurmrestd replica is available"
-            description: "The slinky-slurm-restapi Deployment has no available replica. The GCO API's /api/v1/slurm routes and the operator's NodeSet reconciliation both depend on it."
+            description: >-
+              The slinky-slurm-restapi Deployment has no available replica. The GCO API's
+              /api/v1/slurm routes and the operator's NodeSet reconciliation both depend on it.
         - alert: SlurmAccountingDown
-          expr: sum(kube_statefulset_status_replicas_ready{namespace="gco-jobs", statefulset=~"slinky-slurm-accounting|slinky-slurm-mariadb"}) < count(kube_statefulset_replicas{namespace="gco-jobs", statefulset=~"slinky-slurm-accounting|slinky-slurm-mariadb"})
+          expr: |
+            sum(kube_statefulset_status_replicas_ready{namespace="gco-jobs", statefulset=~"slinky-slurm-accounting|slinky-slurm-mariadb"})
+              < count(kube_statefulset_replicas{namespace="gco-jobs", statefulset=~"slinky-slurm-accounting|slinky-slurm-mariadb"})
           for: 10m
           labels:
             severity: warning
             component: slurm
           annotations:
             summary: "Slurm accounting (slurmdbd or its database) is not ready"
-            description: "slurmdbd or the accounting database has not been ready for 10 minutes. slurmctld buffers accounting records meanwhile; sacct and job limits are unavailable."
+            description: >-
+              slurmdbd or the accounting database has not been ready for 10 minutes. slurmctld
+              buffers accounting records meanwhile; sacct and job limits are unavailable.
         - alert: SlurmNodesDown
           # A worker that scaled to zero stays in slurmctld as DOWN+DRAIN with
           # the operator's "Pod is terminating" reason (StatefulSet-mode
@@ -184,7 +196,11 @@ spec:
             component: slurm
           annotations:
             summary: "Slurm reports DOWN nodes that were not drained for scale-in"
-            description: "{{ $value }} Slurm node(s) have been DOWN without a drain for 15 minutes: a worker pod that lost its slurmd, or a node that re-registered with a configuration slurmctld rejected (check `sinfo -R`; scaled-in workers are DOWN+DRAIN and expected)."
+            description: >-
+              {{ $value }} Slurm node(s) have been DOWN without a drain for 15 minutes: a
+              worker pod that lost its slurmd, or a node that re-registered with a
+              configuration slurmctld rejected (check `sinfo -R`; scaled-in workers are
+              DOWN+DRAIN and expected).
         - alert: SlurmQueueStalled
           # Work is waiting and nothing is running: the autoscaler is not
           # adding nodes (quota, capacity, or a partition at max_nodes).
@@ -195,13 +211,22 @@ spec:
             component: slurm
           annotations:
             summary: "Slurm jobs have been pending with nothing running for 30 minutes"
-            description: "{{ $value }} job(s) pending and none running. Check the partition's max_nodes, the gco-jobs ResourceQuota, Karpenter capacity for the node pool, and `squeue --start`."
+            description: >-
+              {{ $value }} job(s) pending and none running. Check the partition's max_nodes,
+              the gco-jobs ResourceQuota, Karpenter capacity for the node pool, and
+              `squeue --start`.
         - alert: SlurmControllerStateVolumeFilling
-          expr: kubelet_volume_stats_available_bytes{namespace="gco-jobs", persistentvolumeclaim=~".*slinky-slurm-controller.*"} / kubelet_volume_stats_capacity_bytes{namespace="gco-jobs", persistentvolumeclaim=~".*slinky-slurm-controller.*"} < 0.1
+          expr: |
+            kubelet_volume_stats_available_bytes{namespace="gco-jobs", persistentvolumeclaim=~".*slinky-slurm-controller.*"}
+              / kubelet_volume_stats_capacity_bytes{namespace="gco-jobs", persistentvolumeclaim=~".*slinky-slurm-controller.*"}
+              < 0.1
           for: 10m
           labels:
             severity: warning
             component: slurm
           annotations:
             summary: "slurmctld state volume is over 90% full"
-            description: "The controller's StateSaveLocation volume has less than 10% free. Raise helm.slurm.controller.state_storage_size (gp3 claims expand online) before slurmctld fails to save state."
+            description: >-
+              The controller's StateSaveLocation volume has less than 10% free. Raise
+              helm.slurm.controller.state_storage_size (gp3 claims expand online) before
+              slurmctld fails to save state.

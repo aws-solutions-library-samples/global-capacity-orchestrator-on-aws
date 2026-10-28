@@ -42,7 +42,7 @@ attrs==25.4.0
     #   jsonschema
     #   jsonschema-path
     #   referencing
-authlib==1.7.1
+authlib==1.9.1
     # via fastmcp-slim
 aws-cdk-asset-awscli-v1==2.2.292
     # via aws-cdk-lib
@@ -138,7 +138,7 @@ deepmerge==3.0.1
     # via zensical
 distlib==0.4.3
     # via virtualenv
-dnspython==2.8.0
+dnspython==2.9.0
     # via email-validator
 docstring-parser==0.18.0
     # via cyclopts

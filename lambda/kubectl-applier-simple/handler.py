@@ -176,7 +176,7 @@ _MONITORING_CUSTOM_OBJECT_PLURALS: dict[str, str] = {
 # those keys, so no credential ever appears in the repository, the Step
 # Functions input or the applier's logs. Used for the Slurm accounting
 # database (29-slurm-accounting-db.yaml).
-_GENERATE_SECRET_KEYS_ANNOTATION = "gco.io/generate-keys"
+_GENERATE_SECRET_KEYS_ANNOTATION = "gco.io/generate-keys"  # nosec B105  # annotation key
 _GENERATED_SECRET_BYTES = 32
 
 # Services annotated with this marker are validated for exact existence only;
@@ -733,12 +733,18 @@ def _apply_generated_secret(
             raise
         existing = None
 
+    # The three log lines below carry a targeted `nosemgrep`: the
+    # logger-credential-disclosure rule matches the word "Secret" in the
+    # message, but only the Secret's namespace/name and a key *count* are
+    # logged. The generated values go straight into the API call and are
+    # never bound to a name this function could log.
     if existing is None:
         body = copy.deepcopy(document)
         string_data = body.setdefault("stringData", {})
         for key in generated_keys:
             string_data[key] = secrets.token_urlsafe(_GENERATED_SECRET_BYTES)
         v1.create_namespaced_secret(namespace, body=body)
+        # nosemgrep: python-logger-credential-disclosure
         logger.info(
             "Generated %d key(s) for new Secret %s/%s", len(generated_keys), namespace, name
         )
@@ -747,12 +753,14 @@ def _apply_generated_secret(
     present = set((getattr(existing, "data", None) or {}).keys())
     missing = [key for key in generated_keys if key not in present]
     if not missing:
+        # nosemgrep: python-logger-credential-disclosure
         logger.info(
             "Secret %s/%s already carries its generated keys; left unchanged", namespace, name
         )
         return
     patch = {"stringData": {key: secrets.token_urlsafe(_GENERATED_SECRET_BYTES) for key in missing}}
     v1.patch_namespaced_secret(name, namespace, body=patch)
+    # nosemgrep: python-logger-credential-disclosure
     logger.info("Added %d missing generated key(s) to Secret %s/%s", len(missing), namespace, name)
 
 

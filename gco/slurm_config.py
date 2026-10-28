@@ -287,7 +287,7 @@ SLURM_DEFAULTS: dict[str, Any] = {
             "port": SLURM_ACCOUNTING_DB_PORT,
             "database": SLURM_ACCOUNTING_DATABASE,
             "username": SLURM_ACCOUNTING_USER,
-            "password_secret": "",
+            "password_secret": "",  # nosec B105  # a Secret *name*; empty = in-cluster database
             "password_key": SLURM_ACCOUNTING_DB_PASSWORD_KEY,
         },
     },
@@ -367,8 +367,22 @@ SLURM_DEFAULTS: dict[str, Any] = {
 
 #: Image pins GCO keeps in lockstep with the chart version in charts.yaml.
 #: The Slinky sidecars default to ``alpine:latest`` upstream; GCO pins them.
+#: ``tests/test_helm_charts_validation.py`` holds every charts.yaml image tag
+#: to these two constants.
 SLURM_IMAGE_TAG = "26.05.5-ubuntu24.04"
 SLURM_SIDECAR_IMAGE = {"repository": "public.ecr.aws/docker/library/alpine", "tag": "3.24.3"}
+
+#: The slurmrestd OpenAPI plugin version every GCO surface addresses
+#: (``/slurm/<version>/...``): the API client, the example job, the live
+#: validation probe and the API doc. It is a property of the Slurm release
+#: behind ``SLURM_IMAGE_TAG``: each release ships its newest ``data_parser``
+#: plugin plus the three before it and drops the oldest, so a tag bump must
+#: re-check this pin. ``validate_helm_charts.py --mode online`` does that in
+#: CI by running ``slurmrestd -d list`` inside the pinned image; the offline
+#: half holds the other surfaces to this constant. Request and response
+#: bodies differ between plugin versions, which is why the client is written
+#: against exactly one instead of negotiating at runtime.
+SLURM_API_VERSION = "v0.0.44"
 
 
 class SlurmConfigError(ValueError):

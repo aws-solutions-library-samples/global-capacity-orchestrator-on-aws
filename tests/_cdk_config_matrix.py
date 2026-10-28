@@ -347,6 +347,35 @@ CONFIGS.extend(
             },
         ),
         (
+            # The shipped gpu-efa partition template, switched on. At its
+            # defaults every enabled partition at max_nodes needs 456 CPUs
+            # (2x180 EFA, 8x8 cpu, 4x8 gpu), and the quota-fit check in
+            # gco/slurm_config.py refuses it under the shipped
+            # resource_quota.max_cpu of 400 — so this is the documented
+            # "raise the quota first" shape (docs/SLURM_OPERATOR.md, Quota).
+            # The one entry that varies resource_quota, which the loader reads
+            # for that check; the stack's own validation merges the block over
+            # its defaults, so the whole block is spelled out here.
+            "helm-slurm-gpu-efa-raised-quota",
+            {
+                "helm": {
+                    "slurm": {
+                        "enabled": True,
+                        "partitions": {"gpu-efa": {"enabled": True}},
+                    }
+                },
+                "resource_quota": {
+                    "max_cpu": "512",
+                    "max_memory": "4096Gi",
+                    "max_gpu": "32",
+                    "max_pods": "50",
+                    "container_max_cpu": "192",
+                    "container_max_memory": "2048Gi",
+                    "container_max_gpu": "8",
+                },
+            },
+        ),
+        (
             "helm-minimal",
             {
                 "helm": {

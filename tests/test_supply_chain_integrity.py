@@ -1504,6 +1504,51 @@ def test_ruby_interpreter_pin_is_covered_by_the_monthly_drift_scan() -> None:
     )
 
 
+def test_slurm_ubuntu_base_is_covered_by_the_monthly_drift_scan() -> None:
+    """The Slinky image base (``-ubuntuXX.YY``) gets an LTS currency check.
+
+    The image sweep compares within a tag's variant family on purpose, so a
+    newer Slurm patch on the same base is drift there but a newer Ubuntu LTS
+    never is. Without a dedicated section the pin could ride an Ubuntu
+    release towards end of life unremarked. The section must read the pin
+    from ``gco/slurm_config.py``, consult endoflife.date for the newest
+    adoptable LTS, probe the registry for the pinned Slurm version on that
+    base, and reach the report: counted, given a summary row, and — when a
+    lookup fails — recorded as a skip or an incomplete lookup.
+    """
+    from gco import slurm_config
+
+    assert re.fullmatch(r"\d+\.\d+(\.\d+)?-ubuntu\d{2}\.\d{2}", slurm_config.SLURM_IMAGE_TAG), (
+        "SLURM_IMAGE_TAG is expected to be an Ubuntu-based Slinky tag; if the base "
+        "moves, revisit the Ubuntu LTS section of dependency-scan.sh"
+    )
+
+    library = _read(".github/scripts/lib_dependency_scan.sh")
+    assert "ubuntu_variant_release()" in library
+    assert "get_latest_ubuntu_lts()" in library
+    assert "https://endoflife.date/api/ubuntu.json" in library
+
+    scanner = _read(".github/scripts/dependency-scan.sh")
+    assert "=== Checking Ubuntu LTS base (Slurm images) ===" in scanner
+    assert (
+        'SLURM_IMAGE_TAG_CURRENT="$(extract_python_string_constant SLURM_IMAGE_TAG gco/slurm_config.py)"'
+        in scanner
+    )
+    assert 'LATEST_UBUNTU_LTS="$(get_latest_ubuntu_lts)"' in scanner
+    assert 'skopeo list-tags "${SCAN_SKOPEO_RETRY[@]}" "docker://${SLURMD_REPOSITORY}"' in scanner
+    assert 'summary_row "Ubuntu LTS Base"' in scanner
+    assert "UBUNTU_LTS_SKIP_REASON" in _scan_completeness_arguments(scanner), (
+        "UBUNTU_LTS_SKIP_REASON must be passed to dependency_scan_is_complete, "
+        "otherwise a failed endoflife.date lookup leaves the scan claiming completeness"
+    )
+    assert '[ "$UBUNTU_LTS_COUNT" -eq 0 ]' in scanner, (
+        "the all-clear condition must include the Ubuntu LTS count"
+    )
+    assert scanner.count('"$UBUNTU_LTS_RESULTS"') >= 3, (
+        "the Ubuntu LTS results tempfile must be written, rendered and cleaned up"
+    )
+
+
 def test_ruby_version_file_is_the_only_source_of_the_ci_ruby() -> None:
     """One pin, read by the workflow — never a literal duplicated in YAML."""
     literals: list[str] = []
