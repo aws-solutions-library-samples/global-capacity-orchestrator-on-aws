@@ -311,7 +311,8 @@ class PcsLookup(Construct):
             )
             resource.node.add_dependency(self.log_group)
             self._resources[key] = resource
-        return resource.get_att_string("ImageId")
+        # str() for the CDK-less strict mypy job, where get_att_string is Any.
+        return str(resource.get_att_string("ImageId"))
 
     @property
     def lookups(self) -> Mapping[tuple[str, str], CustomResource]:
@@ -341,7 +342,7 @@ class PcsLookup(Construct):
                 properties={"ClusterId": cluster_id, "Region": Stack.of(self).region},
             )
             self.controller_lookup.node.add_dependency(self.log_group)
-        return self.controller_lookup.get_att_string("Address")
+        return str(self.controller_lookup.get_att_string("Address"))
 
     def _acknowledge_findings(self) -> None:
         acknowledge_nag_findings(

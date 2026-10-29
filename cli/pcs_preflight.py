@@ -60,7 +60,7 @@ from gco.pcs_config import (
 
 ClientFactory = Callable[..., Any]
 
-PASS = "pass"
+PASS = "pass"  # nosec B105  # a check outcome label, not a credential
 FAIL = "fail"
 WARN = "warn"
 SKIP = "skip"
