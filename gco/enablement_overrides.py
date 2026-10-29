@@ -38,7 +38,9 @@ HELM_OVERRIDE_CONTEXT_KEY = "helm_enabled_overrides"
 
 #: cdk.json blocks ``feature_enabled_overrides`` accepts. Lockstep with
 #: ``gco.config.config_loader.FEATURE_OVERRIDE_KEYS``.
-FEATURE_OVERRIDE_KEYS = frozenset({"aurora_pgvector", "valkey", "fsx_lustre", "vector_store"})
+FEATURE_OVERRIDE_KEYS = frozenset(
+    {"aurora_pgvector", "valkey", "fsx_lustre", "vector_store", "pcs"}
+)
 
 #: cdk.json ``helm`` block keys ``helm_enabled_overrides`` accepts. Lockstep
 #: with ``gco.stacks.regional_stack._HELM_CHART_CONFIG_KEYS``.
