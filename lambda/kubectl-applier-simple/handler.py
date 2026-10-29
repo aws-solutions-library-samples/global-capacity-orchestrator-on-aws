@@ -1014,6 +1014,17 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ),
         *_SLURM_OBSERVABILITY_RESOURCES,
     ),
+    # AWS PCS (cdk.json pcs): the API pod's egress to the PCS controller's
+    # slurmrestd (post-helm-pcs-network.yaml). The cluster itself is an AWS
+    # resource the regional stack owns, not a manifest.
+    ("{{PCS_ENABLED}}", True): (
+        (
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+            "gco-system",
+            "allow-manifest-processor-to-pcs-restapi",
+        ),
+    ),
     # The in-cluster accounting database (29-slurm-accounting-db.yaml, base
     # pass so MariaDB is up before the Slinky chart starts slurmdbd and
     # slurmctld, whose first boot refuses to run without the dbd) and its

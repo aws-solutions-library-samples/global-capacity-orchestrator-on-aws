@@ -132,11 +132,26 @@ spec:
             - name: GCO_TRACING_SAMPLE_RATIO
               value: "{{TRACING_SAMPLE_RATIO}}"
             # The /api/v1/slurm/* routes (gco/services/api_routes/slurm.py)
-            # proxy to slurmrestd in gco-jobs with the operator-minted token
-            # from post-helm-slurm-api-access.yaml; "false" turns them into
-            # a 404 with the enablement remedy. Always rendered, like tracing.
+            # proxy to slurmrestd. GCO_SLURM_BACKENDS names the enabled Slurm
+            # backends ("slinky", "pcs", both, or empty): Slinky in gco-jobs
+            # with the operator-minted token from
+            # post-helm-slurm-api-access.yaml, AWS PCS in the regional VPC
+            # with a token the API mints from the cluster's signing key
+            # (gco/services/pcs_backend.py; GCO_PCS_* carry the cluster id,
+            # the POSIX identity the API acts as and the default queue). An
+            # empty list turns the routes into a 404 with the enablement
+            # remedy. GCO_SLURM_ENABLED is the pre-PCS boolean, kept for the
+            # transition. All always rendered, like tracing.
             - name: GCO_SLURM_ENABLED
               value: "{{SLURM_API_ENABLED}}"
+            - name: GCO_SLURM_BACKENDS
+              value: "{{SLURM_BACKENDS}}"
+            - name: GCO_PCS_CLUSTER_ID
+              value: "{{PCS_CLUSTER_ID}}"
+            - name: GCO_PCS_IDENTITY
+              value: '{{PCS_IDENTITY_JSON}}'
+            - name: GCO_PCS_DEFAULT_PARTITION
+              value: "{{PCS_DEFAULT_PARTITION}}"
             - name: POD_NAME
               valueFrom:
                 fieldRef:

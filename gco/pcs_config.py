@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import copy
 import ipaddress
+import json
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -832,6 +833,106 @@ def enabled_slurm_backends(*, slinky: bool, pcs: bool) -> list[str]:
     if pcs:
         backends.append(PCS_BACKEND)
     return backends
+
+
+# ---------------------------------------------------------------------------
+# kubectl-applier replacements
+# ---------------------------------------------------------------------------
+
+#: Every ``{{TOKEN}}`` the PCS integration puts into the kubectl-applier
+#: manifests. Two kinds, as with the Slurm tokens:
+#:
+#: * Gated: ``{{PCS_ENABLED}}`` and ``{{PCS_RESTAPI_CIDR}}`` appear only in
+#:   post-helm-pcs-network.yaml; when PCS is off they are not emitted, the
+#:   applier skips the file and ``_FEATURE_RESOURCE_INVENTORY`` prunes the
+#:   NetworkPolicy an earlier deploy applied.
+#: * Always emitted: ``{{SLURM_BACKENDS}}``, ``{{PCS_CLUSTER_ID}}``,
+#:   ``{{PCS_IDENTITY_JSON}}`` and ``{{PCS_DEFAULT_PARTITION}}`` sit in the
+#:   core manifest-processor Deployment (31-manifest-processor.yaml), where a
+#:   leftover placeholder would make the applier skip the whole file, exactly
+#:   like ``{{SLURM_API_ENABLED}}`` and ``{{TRACING_ENABLED}}``. They are
+#:   empty strings when PCS is off. ``{{SLURM_BACKENDS}}`` is the combined
+#:   list for both backends, so it is computed from both enablement flags.
+PCS_MANIFEST_TOKENS: tuple[str, ...] = (
+    "{{PCS_ENABLED}}",
+    "{{PCS_RESTAPI_CIDR}}",
+    "{{SLURM_BACKENDS}}",
+    "{{PCS_CLUSTER_ID}}",
+    "{{PCS_IDENTITY_JSON}}",
+    "{{PCS_DEFAULT_PARTITION}}",
+)
+#: The tokens that must be emitted on every deploy (see above).
+PCS_ALWAYS_EMITTED_TOKENS: frozenset[str] = frozenset(
+    {
+        "{{SLURM_BACKENDS}}",
+        "{{PCS_CLUSTER_ID}}",
+        "{{PCS_IDENTITY_JSON}}",
+        "{{PCS_DEFAULT_PARTITION}}",
+    }
+)
+
+
+def _yaml_single_quoted_body(text: str) -> str:
+    """Escape ``text`` for the inside of a YAML single-quoted scalar.
+
+    The identity JSON carries double quotes, so the manifest wraps the
+    placeholder in single quotes; the only escape a single-quoted YAML scalar
+    needs is a doubled single quote.
+    """
+    return text.replace("'", "''")
+
+
+def compute_pcs_replacements(
+    config: Mapping[str, Any],
+    *,
+    enabled: bool,
+    slinky_enabled: bool,
+    cluster_id: str,
+    vpc_cidr: str,
+) -> dict[str, str]:
+    """Build the kubectl-applier replacements for the PCS integration.
+
+    ``enabled`` is the effective PCS enablement (cdk.json toggle or the
+    run-scoped ``feature_enabled_overrides``), ``slinky_enabled`` the
+    effective Slinky chart enablement (both feed ``{{SLURM_BACKENDS}}``).
+    ``cluster_id`` is the PCS cluster id, in managed mode a CloudFormation
+    token for the created cluster's id, so the value is passed through
+    untouched. ``vpc_cidr`` is the regional VPC's IPv4 range; ``endpoint_cidr``
+    in the block overrides it for a peered cluster.
+    """
+    backends = enabled_slurm_backends(slinky=slinky_enabled, pcs=enabled)
+    replacements = {
+        "{{SLURM_BACKENDS}}": ",".join(backends),
+        "{{PCS_CLUSTER_ID}}": "",
+        "{{PCS_IDENTITY_JSON}}": "",
+        "{{PCS_DEFAULT_PARTITION}}": "",
+    }
+    if not enabled:
+        return replacements
+    identity = config["identity"]
+    identity_json = json.dumps(
+        {
+            "name": identity["name"],
+            "uid": int(identity["uid"]),
+            "gid": int(identity["gid"]),
+            "gids": [int(gid) for gid in identity.get("gids") or []],
+            "dir": identity["dir"],
+            "shell": identity["shell"],
+            "gecos": identity.get("gecos"),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    replacements.update(
+        {
+            "{{PCS_ENABLED}}": "true",
+            "{{PCS_RESTAPI_CIDR}}": str(config.get("endpoint_cidr") or vpc_cidr),
+            "{{PCS_CLUSTER_ID}}": str(cluster_id),
+            "{{PCS_IDENTITY_JSON}}": _yaml_single_quoted_body(identity_json),
+            "{{PCS_DEFAULT_PARTITION}}": default_queue(config) if is_managed(config) else "",
+        }
+    )
+    return replacements
 
 
 def identity_claims(identity: Mapping[str, Any]) -> dict[str, Any]:

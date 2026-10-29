@@ -3317,6 +3317,11 @@ def _parse_manifest_documents(manifest: Path) -> list[dict]:
     return [doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)]
 
 
+def _parse_manifest_documents_text(text: str) -> list[dict]:
+    """Parse already-rendered manifest text (every document that is a mapping)."""
+    return [doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)]
+
+
 class TestGatewayCustomObjectMapConsistency:
     """The applier's GVK map must agree with the manifests it applies.
 
@@ -3632,6 +3637,107 @@ class TestQueueingCustomObjectMapConsistency:
             for token, value in replacements.items():
                 text = text.replace(token, value)
             assert not handler_module._UNRESOLVED_PLACEHOLDER_RE.findall(text), filename
+
+    def test_pcs_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
+        """The API's egress policy to the PCS controller is pruned when PCS is disabled."""
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY
+        assert set(inventory[("{{PCS_ENABLED}}", True)]) == self._identities(
+            "post-helm-pcs-network.yaml"
+        )
+        assert ("{{PCS_ENABLED}}", False) not in inventory
+
+    def test_pcs_manifests_resolve_with_the_regional_stack_replacements(
+        self, handler_module
+    ) -> None:
+        """The gated manifest and the API Deployment resolve with PCS on; the
+        Deployment also resolves with PCS off (its tokens are always emitted),
+        while the gated manifest is then skipped."""
+        from gco import pcs_config as pc
+
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        deployment = (manifests_dir / "31-manifest-processor.yaml").read_text(encoding="utf-8")
+        gated = (manifests_dir / "post-helm-pcs-network.yaml").read_text(encoding="utf-8")
+        for token in pc.PCS_ALWAYS_EMITTED_TOKENS:
+            assert token in deployment, token
+        assert "{{PCS_ENABLED}}" in gated
+        assert "{{PCS_RESTAPI_CIDR}}" in gated
+
+        config = pc.validate_pcs_config({"enabled": True})
+        pcs_tokens = set(pc.PCS_MANIFEST_TOKENS)
+        for enabled in (True, False):
+            replacements = pc.compute_pcs_replacements(
+                config,
+                enabled=enabled,
+                slinky_enabled=True,
+                cluster_id="pcs_abc",
+                vpc_cidr="10.0.0.0/16",
+            )
+            text = deployment
+            for token, value in replacements.items():
+                text = text.replace(token, value)
+            leftover = set(handler_module._UNRESOLVED_PLACEHOLDER_RE.findall(text))
+            assert not leftover & pcs_tokens, leftover
+            rendered_gate = gated
+            for token, value in replacements.items():
+                rendered_gate = rendered_gate.replace(token, value)
+            gate_leftover = set(handler_module._UNRESOLVED_PLACEHOLDER_RE.findall(rendered_gate))
+            if enabled:
+                assert not gate_leftover
+                [policy] = _parse_manifest_documents_text(rendered_gate)
+                assert policy["spec"]["egress"][0]["to"] == [{"ipBlock": {"cidr": "10.0.0.0/16"}}]
+                assert policy["spec"]["egress"][0]["ports"] == [{"protocol": "TCP", "port": 6820}]
+            else:
+                assert gate_leftover == {"{{PCS_ENABLED}}", "{{PCS_RESTAPI_CIDR}}"}
+
+    def test_pcs_identity_renders_as_valid_yaml_in_the_deployment(self, handler_module) -> None:
+        """The identity JSON sits in a single-quoted scalar; quotes inside it survive."""
+        import json
+
+        from gco import pcs_config as pc
+
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        text = (manifests_dir / "31-manifest-processor.yaml").read_text(encoding="utf-8")
+        config = pc.validate_pcs_config(
+            {"enabled": True, "identity": {"name": "hpc", "gecos": "O'Brien's HPC"}}
+        )
+        replacements = {
+            **pc.compute_pcs_replacements(
+                config,
+                enabled=True,
+                slinky_enabled=False,
+                cluster_id="pcs_abc",
+                vpc_cidr="10.0.0.0/16",
+            ),
+            "{{SLURM_API_ENABLED}}": "false",
+        }
+        for token, value in replacements.items():
+            text = text.replace(token, value)
+        text = handler_module._UNRESOLVED_PLACEHOLDER_RE.sub("x", text)
+        [deployment] = [
+            doc for doc in _parse_manifest_documents_text(text) if doc.get("kind") == "Deployment"
+        ]
+        [container] = [
+            c
+            for c in deployment["spec"]["template"]["spec"]["containers"]
+            if c["name"] == "manifest-processor"
+        ]
+        env = {item["name"]: item.get("value") for item in container["env"]}
+        assert env["GCO_SLURM_BACKENDS"] == "pcs"
+        assert env["GCO_PCS_CLUSTER_ID"] == "pcs_abc"
+        assert env["GCO_PCS_DEFAULT_PARTITION"] == "gco"
+        assert json.loads(env["GCO_PCS_IDENTITY"]) == {
+            "name": "hpc",
+            "uid": 1000,
+            "gid": 1000,
+            "gids": [],
+            "dir": "/home/hpc",
+            "shell": "/bin/bash",
+            "gecos": "O'Brien's HPC",
+        }
 
     def test_vector_store_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
         """Every ConfigMap in the gated vector-store manifest is pruned on disable.

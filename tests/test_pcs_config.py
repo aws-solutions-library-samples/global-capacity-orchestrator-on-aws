@@ -11,11 +11,13 @@ overlays and the run-scoped ``feature_enabled_overrides=pcs`` context.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from typing import Any
 
 import aws_cdk as cdk
 import pytest
+import yaml
 
 from gco import pcs_config as pc
 from gco.config.config_loader import ConfigLoader, ConfigValidationError
@@ -858,6 +860,97 @@ class TestDerivedViews:
         assert claims["id"]["gids"] == [2000, 3000]
         assert claims["id"]["gecos"] == "HPC"
         assert claims["id"]["dir"] == "/home/hpc"
+
+
+# ---------------------------------------------------------------------------
+# kubectl-applier replacements
+# ---------------------------------------------------------------------------
+
+
+class TestReplacements:
+    def _replacements(self, config: dict[str, Any], **kwargs: Any) -> dict[str, str]:
+        kwargs.setdefault("enabled", True)
+        kwargs.setdefault("slinky_enabled", False)
+        kwargs.setdefault("cluster_id", "pcs_abc123")
+        kwargs.setdefault("vpc_cidr", "10.0.0.0/16")
+        return pc.compute_pcs_replacements(config, **kwargs)
+
+    def test_disabled_emits_only_the_always_present_tokens_as_empty(self) -> None:
+        replacements = self._replacements(_validate(None), enabled=False)
+        assert replacements == {
+            "{{SLURM_BACKENDS}}": "",
+            "{{PCS_CLUSTER_ID}}": "",
+            "{{PCS_IDENTITY_JSON}}": "",
+            "{{PCS_DEFAULT_PARTITION}}": "",
+        }
+        assert set(replacements) == set(pc.PCS_ALWAYS_EMITTED_TOKENS)
+
+    def test_disabled_pcs_still_names_slinky_in_the_backend_list(self) -> None:
+        replacements = self._replacements(_validate(None), enabled=False, slinky_enabled=True)
+        assert replacements["{{SLURM_BACKENDS}}"] == "slinky"
+
+    def test_enabled_managed_emits_every_token(self) -> None:
+        config = _validate(_on())
+        replacements = self._replacements(config, slinky_enabled=True)
+        assert set(replacements) == set(pc.PCS_MANIFEST_TOKENS)
+        assert replacements["{{SLURM_BACKENDS}}"] == "slinky,pcs"
+        assert replacements["{{PCS_ENABLED}}"] == "true"
+        assert replacements["{{PCS_RESTAPI_CIDR}}"] == "10.0.0.0/16"
+        assert replacements["{{PCS_CLUSTER_ID}}"] == "pcs_abc123"
+        assert replacements["{{PCS_DEFAULT_PARTITION}}"] == "gco"
+        assert json.loads(replacements["{{PCS_IDENTITY_JSON}}"]) == {
+            "name": "ec2-user",
+            "uid": 1000,
+            "gid": 1000,
+            "gids": [],
+            "dir": "/home/ec2-user",
+            "shell": "/bin/bash",
+            "gecos": None,
+        }
+
+    def test_pcs_only_backend_list(self) -> None:
+        assert self._replacements(_validate(_on()))["{{SLURM_BACKENDS}}"] == "pcs"
+
+    def test_existing_mode_has_no_default_partition_and_passes_the_cluster_id_through(
+        self,
+    ) -> None:
+        config = _validate(_on(mode="existing", cluster_id="pcs_mine"))
+        replacements = self._replacements(config, cluster_id="pcs_mine")
+        assert replacements["{{PCS_DEFAULT_PARTITION}}"] == ""
+        assert replacements["{{PCS_CLUSTER_ID}}"] == "pcs_mine"
+
+    def test_endpoint_cidr_overrides_the_vpc_cidr(self) -> None:
+        config = _validate(_on(endpoint_cidr="192.168.0.0/20"))
+        assert self._replacements(config)["{{PCS_RESTAPI_CIDR}}"] == "192.168.0.0/20"
+
+    def test_the_identity_json_is_escaped_for_a_single_quoted_yaml_scalar(self) -> None:
+        config = _validate(_on(identity={"gecos": "O'Brien"}))
+        rendered = self._replacements(config)["{{PCS_IDENTITY_JSON}}"]
+        assert "''" in rendered
+        assert yaml.safe_load(f"value: '{rendered}'") == {
+            "value": json.dumps(
+                {
+                    "dir": "/home/ec2-user",
+                    "gecos": "O'Brien",
+                    "gid": 1000,
+                    "gids": [],
+                    "name": "ec2-user",
+                    "shell": "/bin/bash",
+                    "uid": 1000,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        }
+
+    def test_a_cloudformation_token_cluster_id_is_passed_through_untouched(self) -> None:
+        token = "${Token[TOKEN.123]}"
+        assert self._replacements(_validate(_on()), cluster_id=token)["{{PCS_CLUSTER_ID}}"] == token
+
+    def test_every_token_is_upper_snake(self) -> None:
+        for token in pc.PCS_MANIFEST_TOKENS:
+            assert re.fullmatch(r"\{\{[A-Z0-9_]+\}\}", token)
+        assert set(pc.PCS_MANIFEST_TOKENS) >= pc.PCS_ALWAYS_EMITTED_TOKENS
 
 
 # ---------------------------------------------------------------------------

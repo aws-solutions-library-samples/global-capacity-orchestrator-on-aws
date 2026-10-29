@@ -224,6 +224,8 @@ _PLACEHOLDER_RE = re.compile(r"\{\{[A-Za-z_]+\}\}")
 #   shape, not a string.
 _STRUCTURAL_STUBS: dict[str, str] = {
     "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
+    # The PCS controller's range in post-helm-pcs-network.yaml's ipBlock.
+    "{{PCS_RESTAPI_CIDR}}": "10.0.0.0/16",
     "{{ARGOCD_SOURCE_REPOS}}": '["https://github.com/example/*"]',
     "{{ARGOCD_GITOPS_SYNC_POLICY}}": '{"automated": {"selfHeal": true, "prune": false}}',
 }
