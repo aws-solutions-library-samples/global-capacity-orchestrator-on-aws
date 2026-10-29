@@ -72,7 +72,10 @@ data:
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
           "targets": [
-            {"expr": "max by (partition) (slurm_partition_jobs_max_job_nodes_nohold{job=\"slinky-slurm-controller\"})", "legendFormat": "{{partition}}"}
+            {
+              "expr": "max by (partition) (slurm_partition_jobs_max_job_nodes_nohold{job=\"slinky-slurm-controller\"})",
+              "legendFormat": "{{partition}}"
+            }
           ]
         },
         {

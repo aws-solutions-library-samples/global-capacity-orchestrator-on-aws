@@ -1,7 +1,7 @@
 """Tests for the ``feature_enabled_overrides`` CDK context.
 
 The override force-enables optional infrastructure features (Aurora
-pgvector, Valkey, FSx for Lustre, the vector store) for a single deploy
+pgvector, Valkey, FSx for Lustre, the vector store, AWS PCS) for a single deploy
 without editing cdk.json — the infrastructure sibling of
 ``helm_enabled_overrides``. Validation harnesses rely on it because their
 preflight requires a clean worktree, so cdk.json can never be rewritten
@@ -63,9 +63,10 @@ class TestParseFeatureEnabledOverrides:
         with pytest.raises(ConfigValidationError, match="comma-separated string"):
             parse_feature_enabled_overrides(42)
 
-    def test_override_keys_are_the_documented_four(self) -> None:
+    def test_override_keys_are_the_documented_five(self) -> None:
+        """Lockstep with the "Infrastructure features" row in docs/CUSTOMIZATION.md."""
         assert (
-            frozenset({"aurora_pgvector", "valkey", "fsx_lustre", "vector_store"})
+            frozenset({"aurora_pgvector", "valkey", "fsx_lustre", "vector_store", "pcs"})
             == FEATURE_OVERRIDE_KEYS
         )
 
