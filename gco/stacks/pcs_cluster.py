@@ -70,8 +70,18 @@ from aws_cdk import custom_resources as cr
 from constructs import Construct
 
 from gco.pcs_config import (
+    LOGIN_NODE_GROUP_NAME,
     PCS_HOME_EFS_PATH,
     PCS_HOME_MOUNT_PATH,
+    PCS_OUTPUT_CLUSTER_ID,
+    PCS_OUTPUT_CLUSTER_NAME,
+    PCS_OUTPUT_LOGIN_NODE_GROUP_ID,
+    PCS_OUTPUT_MODE,
+    PCS_OUTPUT_NODE_ROLE_ARN,
+    PCS_OUTPUT_RESTAPI_MODE,
+    PCS_OUTPUT_RESTAPI_PORT,
+    PCS_OUTPUT_SECURITY_GROUP_ID,
+    PCS_OUTPUT_SLURM_VERSION,
     PCS_RESTAPI_PORT,
     PCS_SCRATCH_MOUNT_PATH,
     is_managed,
@@ -116,8 +126,6 @@ IDENTITY_HOME_SCRIPT = (
 )
 #: Where ``configure-cloudwatch-logs.sh`` forwards to when not told otherwise.
 PCS_LIFECYCLE_LOG_GROUP = "/aws/pcs/{cluster_id}/lifecycle"
-#: The login node group's PCS name (``pcs_config`` refuses it for compute groups).
-LOGIN_NODE_GROUP_NAME = "login"
 #: The cdk-nag rules that flag an all-traffic (protocol -1) ingress rule
 #: regardless of its source; see :meth:`PcsCluster._create_security_group`.
 _SELF_ALL_TRAFFIC_RULES: tuple[str, ...] = (
@@ -1270,60 +1278,66 @@ class PcsCluster(Construct):
 
     # -- outputs ---------------------------------------------------------------
 
+    def _output(self, key: str, value: str, description: str) -> CfnOutput:
+        """A stack output under exactly ``key``.
+
+        The construct is nested, so CDK would suffix the logical id with a
+        hash; the CLI (``gco slurm shell`` / ``output`` on the PCS backend,
+        ``gco stacks pcs status``) reads these by key from ``describe-stacks``.
+        """
+        output = CfnOutput(self, key, value=value, description=description)
+        output.override_logical_id(key)
+        return output
+
     def _managed_outputs(self) -> None:
         assert self.security_group is not None and self.node_role is not None
-        CfnOutput(
-            self,
-            "PcsClusterName",
-            value=str(self.cluster_name),
-            description="Name of the AWS PCS cluster this stack manages",
+        self._output(
+            PCS_OUTPUT_CLUSTER_NAME,
+            str(self.cluster_name),
+            "Name of the AWS PCS cluster this stack manages",
         )
-        CfnOutput(
-            self,
-            "PcsSecurityGroupId",
-            value=self.security_group.security_group_id,
-            description="Security group on the PCS controller ENI and every PCS node",
+        self._output(
+            PCS_OUTPUT_SECURITY_GROUP_ID,
+            self.security_group.security_group_id,
+            "Security group on the PCS controller ENI and every PCS node",
         )
-        CfnOutput(
-            self,
-            "PcsNodeRoleArn",
-            value=self.node_role.role_arn,
-            description="IAM role the PCS compute and login nodes run as",
+        self._output(
+            PCS_OUTPUT_NODE_ROLE_ARN,
+            self.node_role.role_arn,
+            "IAM role the PCS compute and login nodes run as",
         )
         if self.login_node_group is not None:
-            CfnOutput(
-                self,
-                "PcsLoginNodeGroupId",
-                value=self.login_node_group.attr_id,
-                description="PCS compute node group of the login node (gco slurm shell / output)",
+            self._output(
+                PCS_OUTPUT_LOGIN_NODE_GROUP_ID,
+                self.login_node_group.attr_id,
+                "PCS compute node group of the login node (gco slurm shell / output)",
             )
 
     def _outputs(self) -> None:
-        CfnOutput(
-            self,
-            "PcsClusterId",
-            value=self.cluster_id,
-            description=f"AWS PCS cluster the {self.region} API fronts ({self.mode})",
+        self._output(
+            PCS_OUTPUT_CLUSTER_ID,
+            self.cluster_id,
+            f"AWS PCS cluster the {self.region} API fronts ({self.mode})",
         )
-        CfnOutput(
-            self,
-            "PcsRestApiPort",
-            value=str(PCS_RESTAPI_PORT),
-            description="Port the PCS controller serves slurmrestd on (open it from the EKS SG)",
+        self._output(
+            PCS_OUTPUT_MODE, self.mode, "How GCO relates to the PCS cluster: managed or existing"
+        )
+        self._output(
+            PCS_OUTPUT_RESTAPI_PORT,
+            str(PCS_RESTAPI_PORT),
+            "Port the PCS controller serves slurmrestd on (open it from the EKS SG)",
         )
         # What GetCluster saw at deploy time: the two facts the API's 503
         # remedies are about, visible without a console round trip.
-        CfnOutput(
-            self,
-            "PcsSlurmVersion",
-            value=self.facts.scheduler_version,
-            description="Slurm version of the PCS cluster (25.11 or 26.05 serve the API's v0.0.44)",
+        self._output(
+            PCS_OUTPUT_SLURM_VERSION,
+            self.facts.scheduler_version,
+            "Slurm version of the PCS cluster (25.11 or 26.05 serve the API's v0.0.44)",
         )
-        CfnOutput(
-            self,
-            "PcsRestApiMode",
-            value=self.facts.rest_mode,
-            description="slurmRest mode of the PCS cluster (STANDARD is required)",
+        self._output(
+            PCS_OUTPUT_RESTAPI_MODE,
+            self.facts.rest_mode,
+            "slurmRest mode of the PCS cluster (STANDARD is required)",
         )
 
     @property

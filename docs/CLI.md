@@ -4710,34 +4710,45 @@ gco release validate-upgrade --expected-account 123456789012 \
 
 ### Slurm Commands
 
-Work with the [Slinky](https://slinky.schedmd.com/) Slurm cluster GCO deploys when `cdk.json` `helm.slurm.enabled` is on (see [SLURM_OPERATOR.md](SLURM_OPERATOR.md)). The first eight commands go through the GCO API (`/api/v1/slurm/*`, [API.md](API.md#slurm)), which proxies them to that region's slurmrestd with an operator-minted credential: you never hold a Slurm token, and every submission carries your caller identity in its `comment`. Each region runs its own cluster, so every command is pinned to one region: `--region`/`-r`, else the root `gco -r REGION` / configured default. A region deployed without Slurm answers `Slurm is not enabled in this region` with the enablement remedy.
+Work with a region's Slurm cluster(s): the [Slinky](https://slinky.schedmd.com/) cluster GCO deploys on the EKS cluster when `cdk.json` `helm.slurm.enabled` is on ([SLURM_OPERATOR.md](SLURM_OPERATOR.md)), the [AWS PCS](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) cluster it manages or connects to when `pcs.enabled` is on ([PCS.md](PCS.md)), or both. The API commands go through the GCO API (`/api/v1/slurm/*`, [API.md](API.md#slurm)), which proxies them to that region's slurmrestd with an operator-minted credential: you never hold a Slurm token, and every submission carries your caller identity in its `comment`. Each region runs its own cluster(s), so every command is pinned to one region: `--region`/`-r`, else the root `gco -r REGION` / configured default. A region deployed without Slurm answers `Slurm is not enabled in this region` with the enablement remedy.
 
-`shell` and `output` reach the login pod (`gco-jobs/slinky-slurm-login-gco`, which mounts the same `/home` EFS and `/scratch` FSx the workers do) with `kubectl exec` over the PRIVATE EKS API endpoint, through an SSM-managed instance with `--via-ssm` like `gco monitoring open`.
+`--backend`/`-b slinky|pcs` names the cluster a command addresses. With one backend enabled in the region it may be left out; with both, the API (and the login commands) require it. `gco slurm backends` shows which are on.
+
+`shell` and `output` reach the backend's login node. On Slinky that is the login pod (`gco-jobs/slinky-slurm-login-gco`, which mounts the same `/home` EFS and `/scratch` FSx the workers do) with `kubectl exec` over the PRIVATE EKS API endpoint, through an SSM-managed instance with `--via-ssm` like `gco monitoring open`. On PCS it is the managed login EC2 instance, reached over an SSM session (the Session Manager plugin, no SSH key, no `--via-ssm`): the shell runs as the API's Slurm identity (`pcs.identity`, `ec2-user` by default) and a one-shot `output` read goes through `ssm:SendCommand`, so your IAM identity needs `ssm:StartSession` and `ssm:SendCommand` on the login instance plus `ssm:GetCommandInvocation`, `ec2:DescribeInstances` and `cloudformation:DescribeStacks`.
 
 <details>
-<summary>All <code>gco slurm</code> commands (10) — click to expand</summary>
+<summary>All <code>gco slurm</code> commands (11) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
+| [`gco slurm backends`](#gco-slurm-backends) | Which Slurm backends the region runs (slinky, pcs) and what each one is. |
 | [`gco slurm status`](#gco-slurm-status) | Controller reachability, partitions, node and job counts. |
 | [`gco slurm partitions`](#gco-slurm-partitions) | Partitions with their state, time limit and node counts (sinfo). |
-| [`gco slurm nodes`](#gco-slurm-nodes) | Slurm nodes (the slurmd worker pods) with state, resources and gres. |
+| [`gco slurm nodes`](#gco-slurm-nodes) | Slurm nodes (slurmd worker pods, or PCS compute instances) with state, resources and gres. |
 | [`gco slurm queue`](#gco-slurm-queue) | The live queue as slurmctld sees it (squeue). |
 | [`gco slurm job`](#gco-slurm-job) | One job as slurmctld sees it (scontrol show job). |
 | [`gco slurm submit`](#gco-slurm-submit) | Submit a batch script (sbatch) through the GCO API. |
 | [`gco slurm cancel`](#gco-slurm-cancel) | Cancel a job (scancel). |
 | [`gco slurm accounting`](#gco-slurm-accounting) | Job history from slurmdbd (sacct). |
-| [`gco slurm shell`](#gco-slurm-shell) | Open an interactive shell on the Slurm login pod. |
-| [`gco slurm output`](#gco-slurm-output) | Print a job's output file from the login pod. |
+| [`gco slurm shell`](#gco-slurm-shell) | Open an interactive shell on the Slurm login node. |
+| [`gco slurm output`](#gco-slurm-output) | Print a job's output file from the login node. |
 
 </details>
 
-#### `gco slurm status`
+#### `gco slurm backends`
 
-Controller reachability (`ping`), every partition with its node and CPU totals, and node and job counts by state. The default partition is marked `*`.
+The backends enabled in the region, from `GET /api/v1/slurm/backends`: for each, its kind and endpoint, and for PCS the cluster id, status, Slurm version, accounting mode, default partition, the Slurm identity the API submits as, and the login kind (`ssm`). The header says whether `--backend` is required (both on) or which one is the default (one on). A backend whose discovery fails is listed as `unavailable` with the reason, so one broken backend never hides the other.
 
 ```bash
-gco slurm status -r REGION [--output json]
+gco slurm backends -r REGION [--output json]
+```
+
+#### `gco slurm status`
+
+Controller reachability (`ping`), every partition with its node and CPU totals, and node and job counts by state. The default partition is marked `*`. The header names the backend that answered when the API resolved one (`[pcs]`).
+
+```bash
+gco slurm status -r REGION [--backend slinky|pcs] [--output json]
 ```
 
 #### `gco slurm partitions`
@@ -4750,7 +4761,7 @@ gco slurm partitions -r REGION
 
 #### `gco slurm nodes`
 
-Every Slurm node (one per slurmd worker pod): state, allocated/total CPUs and memory, GRES in use (`gpu:1(IDX:0)`), partitions, and the reason for a `DOWN` or `DRAIN` node.
+Every Slurm node (one per slurmd worker pod on Slinky, one per compute instance on PCS): state, allocated/total CPUs and memory, GRES in use (`gpu:1(IDX:0)`), partitions, and the reason for a `DOWN` or `DRAIN` node.
 
 ```bash
 gco slurm nodes -r REGION [--partition NAME]
@@ -4783,25 +4794,26 @@ gco slurm job JOB_ID -r REGION
 
 #### `gco slurm submit`
 
-The `sbatch` equivalent: reads a local batch script (an interpreter line first, at most 64 KiB) and submits it through the API. The script's leading `#SBATCH` directives are honoured for `--job-name`, `--partition`, `--nodes`, `--ntasks`, `--cpus-per-task`, `--gpus-per-node`, `--mem`, `--time`, `--chdir`, `--comment` and `--exclusive` (slurmrestd itself does not read them); the flags below override them. The job runs as Slurm's own user; your caller identity is stamped into its `comment` as `gco:<caller>`, which `gco slurm accounting` shows.
+The `sbatch` equivalent: reads a local batch script (an interpreter line first, at most 64 KiB) and submits it through the API. The script's leading `#SBATCH` directives are honoured for `--job-name`, `--partition`, `--nodes`, `--ntasks`, `--cpus-per-task`, `--gpus-per-node`, `--mem`, `--time`, `--chdir`, `--comment` and `--exclusive` (slurmrestd itself does not read them); the flags below override them. The job runs as the backend's Slurm identity (`slurm` on Slinky, `pcs.identity` on PCS); your caller identity is stamped into its `comment` as `gco:<caller>`, which `gco slurm accounting` shows.
 
 ```bash
-gco slurm submit SCRIPT -r REGION [OPTIONS]
+gco slurm submit SCRIPT -r REGION [--backend slinky|pcs] [OPTIONS]
 ```
 
 **Options:**
 
 | Option | Description |
 |--------|-------------|
+| `--backend`, `-b` | `slinky` or `pcs`; required when the region runs both (every API command takes it). |
 | `--name`, `-J` | Job name (default: the script's `#SBATCH --job-name`, else `gco-job`). |
-| `--partition`, `-p` | Partition (default: the cluster's default partition, `cpu` as shipped). |
+| `--partition`, `-p` | Partition (default: the cluster's default partition, `cpu` on Slinky and the `default: true` queue, `gco`, on PCS as shipped). |
 | `--nodes`, `-N` | Node count. |
 | `--tasks`, `-n` | Task count (`--ntasks`). |
 | `--cpus-per-task`, `-c` | CPUs per task. |
 | `--gpus-per-node` | GPUs per node (`gres/gpu:N`); the `gpu` partitions are whole-node, so match the instance's GPU count. |
 | `--mem` | Memory per node: MiB, or a `K`/`M`/`G`/`T` suffix such as `64G`. |
 | `--time`, `-t` | Wall time: minutes, `HH:MM:SS` or `D-HH:MM:SS`. |
-| `--chdir`, `-D` | Working directory on the worker (default `/tmp`; `/home/slurm/...` is on the shared EFS). |
+| `--chdir`, `-D` | Working directory on the worker (default `/tmp` on Slinky, where `/home/slurm/...` is on the shared EFS; the identity's home on PCS). |
 | `--env`, `-e` | Extra environment variable `NAME=VALUE` (repeatable). |
 | `--comment` | Free-text comment appended after the caller identity. |
 | `--exclusive` | Whole-node allocation. |
@@ -4837,16 +4849,17 @@ gco slurm accounting -r REGION [OPTIONS]
 
 #### `gco slurm shell`
 
-`kubectl exec -it` into the login pod for an interactive session with every Slurm client (`sbatch`, `squeue`, `sacct`, `srun`, `scontrol`) and the shared filesystems. Table output only: an interactive terminal cannot be captured as JSON. The tunnel closes when the shell exits.
+An interactive session with every Slurm client (`sbatch`, `squeue`, `sacct`, `srun`, `scontrol`) and the shared filesystems. Slinky: `kubectl exec -it` into the login pod; the tunnel closes when the shell exits. PCS: an SSM session on the managed login instance (`aws ssm start-session` with `AWS-StartInteractiveCommand`, a login shell as the API's Slurm identity); `--via-ssm` does not apply there and is refused. Table output only: an interactive terminal cannot be captured as JSON. Without `--backend` the region's single enabled backend is used; with both enabled the command asks for it.
 
 ```bash
-gco slurm shell [OPTIONS]
+gco slurm shell [--backend slinky|pcs] [OPTIONS]
 ```
 
 **Options:**
 
 | Option | Description |
 |--------|-------------|
+| `--backend`, `-b` | `slinky` (login pod) or `pcs` (login instance). |
 | `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -4854,22 +4867,29 @@ gco slurm shell [OPTIONS]
 
 #### `gco slurm output`
 
-Looks the job up through the API for its stdout path (Slurm's default is `slurm-<jobid>.out` in the job's working directory) and prints that file from the login pod. `--stderr` reads the stderr file, `--tail N` the last N lines, `--follow` streams it (`tail -f`, table output only) until Ctrl-C. In JSON/YAML mode the document carries `job_id`, `region`, `path` and `content`.
+Looks the job up through the API for its stdout path (Slurm's default is `slurm-<jobid>.out` in the job's working directory) and prints that file from the login node. `--stderr` reads the stderr file, `--tail N` the last N lines, `--follow` streams it (`tail -f`, table output only) until Ctrl-C. In JSON/YAML mode the document carries `job_id`, `region`, `backend`, `path` and `content`.
+
+On PCS a one-shot read runs through `ssm:SendCommand` (`AWS-RunShellScript`, as root, so the identity's files are readable) and SSM returns the first 24,000 characters of a file: a longer one is cut with a warning (`truncated: true` in JSON), so use `--tail N` for the end of a long log, or `--follow`, which streams an SSM session instead.
 
 ```bash
-gco slurm output JOB_ID -r REGION [--stderr] [--tail N] [--follow] [tunnel options]
+gco slurm output JOB_ID -r REGION [--backend slinky|pcs] [--stderr] [--tail N] [--follow] [tunnel options]
 ```
 
 **Examples:**
 
 ```bash
+gco slurm backends -r us-east-1
 gco slurm status -r us-east-1
+gco slurm status -r us-east-1 --backend pcs
 gco slurm submit hello.sbatch -r us-east-1
+gco slurm submit hello.sbatch -r us-east-1 --backend pcs
 gco slurm submit train.sbatch -r us-east-1 -p gpu -N 2 --gpus-per-node 8 -t 04:00:00
 gco slurm queue -r us-east-1 --state PENDING
 gco slurm output 42 -r us-east-1 --via-ssm auto -y
+gco slurm output 42 -r us-east-1 --backend pcs --tail 50
 gco slurm accounting -r us-east-1 --since 7d --state COMPLETED,FAILED
 gco slurm shell -r us-east-1 --via-ssm auto -y
+gco slurm shell -r us-east-1 --backend pcs
 ```
 
 ---

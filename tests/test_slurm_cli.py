@@ -329,6 +329,23 @@ class TestRenderings:
         assert "Jobs:  0 " in text
         assert "cpu*" in text and "1440m" in text and "infinite" in text and "cpu-[0-1]" in text
 
+    def test_status_names_the_backend_when_the_envelope_does(self):
+        assert "Slurm — us-east-1 [slinky] (slurmrestd v0.0.44)" in slurm_lib.render_status(
+            {**STATUS, "backend": "slinky"}, "us-east-1"
+        )
+        assert "[" not in slurm_lib.render_status({**STATUS, "backend": ""}, "r").splitlines()[1]
+
+    def test_backends(self):
+        both = slurm_lib.render_backends(BACKENDS_BOTH, "us-east-1")
+        assert "Slurm backends — us-east-1 (2)  pass --backend slinky|pcs to pick one" in both
+        assert "slurm: 25.11" in both and "accounting: STANDARD" in both
+        assert "endpoint: http://10.0.1.5:6820" in both
+        one = slurm_lib.render_backends(BACKENDS_SLINKY, "us-east-1")
+        assert "(1)  default: slinky" in one and "pcs" not in one
+        # Non-mapping entries are skipped; a missing list reads as none.
+        assert "(none enabled" in slurm_lib.render_backends({"backends": ["x"]}, "r")
+        assert "(none enabled" in slurm_lib.render_backends({}, "r")
+
     def test_partitions_empty(self):
         assert "(no partitions)" in slurm_lib.render_partitions([], "us-east-1")
 
@@ -887,8 +904,197 @@ def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return state
 
 
+# ---------------------------------------------------------------------------
+# Backends: the /backends answers the login commands resolve against
+# ---------------------------------------------------------------------------
+
+SLINKY_ENTRY = {
+    "name": "slinky",
+    "kind": "slinky",
+    "description": "Slinky slurm-operator cluster on the regional EKS cluster",
+    "endpoint": "http://slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820",
+    "login": {"kind": "kubectl-exec"},
+}
+PCS_ENTRY = {
+    "name": "pcs",
+    "kind": "pcs",
+    "description": "AWS Parallel Computing Service cluster in the regional VPC",
+    "cluster_id": "pcs_0a1b2c3d4e",
+    "status": "ACTIVE",
+    "slurm_version": "25.11",
+    "accounting_mode": "STANDARD",
+    "endpoint": "http://10.0.1.5:6820",
+    "identity": {"name": "ec2-user", "uid": 1000, "gid": 1000},
+    "login": {"kind": "ssm", "cluster_id": "pcs_0a1b2c3d4e"},
+    "default_partition": "gco",
+}
+BACKENDS_SLINKY = {"backends": [SLINKY_ENTRY], "default": "slinky", "selection_required": False}
+BACKENDS_PCS = {"backends": [PCS_ENTRY], "default": "pcs", "selection_required": False}
+BACKENDS_BOTH = {
+    "backends": [SLINKY_ENTRY, PCS_ENTRY],
+    "default": None,
+    "selection_required": True,
+}
+BACKENDS_NONE = {"backends": [], "default": None, "selection_required": False}
+
+
+def _route(api: MagicMock, responses: dict[str, Any]) -> None:
+    """Answer ``call_api`` per path; an exception value is raised instead."""
+
+    def respond(**kwargs: Any) -> Any:
+        answer = responses[kwargs["path"]]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    api.call_api.side_effect = respond
+
+
+def _paths(api: MagicMock) -> list[str]:
+    return [call.kwargs["path"] for call in api.call_api.call_args_list]
+
+
+@pytest.fixture
+def login_api(api: MagicMock) -> MagicMock:
+    """Slinky alone in the region, with job 42 known."""
+    _route(api, {"/api/v1/slurm/backends": BACKENDS_SLINKY, "/api/v1/slurm/jobs/42": {"job": JOB}})
+    return api
+
+
+class TestBackendOption:
+    @pytest.mark.parametrize(
+        ("args", "method", "path"),
+        [
+            (["status"], "GET", "/api/v1/slurm/status"),
+            (["partitions"], "GET", "/api/v1/slurm/partitions"),
+            (["nodes"], "GET", "/api/v1/slurm/nodes"),
+            (["queue"], "GET", "/api/v1/slurm/jobs"),
+            (["job", "42"], "GET", "/api/v1/slurm/jobs/42"),
+            (["cancel", "42", "-y"], "DELETE", "/api/v1/slurm/jobs/42"),
+            (["accounting"], "GET", "/api/v1/slurm/accounting/jobs"),
+        ],
+    )
+    def test_backend_rides_along_as_a_query_parameter(self, runner, api, args, method, path):
+        api.call_api.return_value = {"jobs": [], "total": 0, "nodes": [], "partitions": []}
+        result = runner.invoke(cli, ["slurm", *args, "-r", "us-east-1", "--backend", "pcs"])
+        assert result.exit_code == 0, result.output
+        request = _request(api)
+        assert (request["method"], request["path"]) == (method, path)
+        assert request["params"]["backend"] == "pcs"
+        # Filters the command already sent are kept beside it.
+        assert all(v is not None or k != "backend" for k, v in request["params"].items())
+
+    def test_submit_with_a_backend(self, runner, api, tmp_path):
+        api.call_api.return_value = {"job_id": 7, "name": "hello", "backend": "pcs"}
+        script = tmp_path / "hello.sbatch"
+        script.write_text("#!/bin/bash\necho hi\n")
+        result = runner.invoke(
+            cli, ["slurm", "submit", str(script), "-r", "us-east-1", "-b", "pcs"]
+        )
+        assert result.exit_code == 0, result.output
+        assert _request(api)["params"] == {"backend": "pcs"}
+        assert (
+            "Submitted job 7 (hello) to the default partition in us-east-1 (pcs)" in result.output
+        )
+
+    def test_an_unknown_backend_is_a_usage_error(self, runner, api):
+        result = runner.invoke(cli, ["slurm", "status", "-r", "us-east-1", "--backend", "lsf"])
+        assert result.exit_code == 2
+        assert "slinky" in result.output and "pcs" in result.output
+        api.call_api.assert_not_called()
+
+    def test_without_a_backend_the_api_decides(self, runner, api):
+        api.call_api.return_value = STATUS
+        result = runner.invoke(cli, ["slurm", "status", "-r", "us-east-1"])
+        assert result.exit_code == 0, result.output
+        assert "params" not in _request(api)
+        # The envelope's backend shows in the header when the API names it.
+        api.call_api.return_value = {**STATUS, "backend": "pcs"}
+        result = runner.invoke(cli, ["slurm", "status", "-r", "us-east-1"])
+        assert "Slurm — us-east-1 [pcs] (slurmrestd v0.0.44)" in result.output
+
+
+class TestBackendsCommand:
+    def test_table_lists_each_backend(self, runner, api):
+        api.call_api.return_value = BACKENDS_BOTH
+        result = runner.invoke(cli, ["slurm", "backends", "-r", "us-east-1"])
+        assert result.exit_code == 0, result.output
+        assert _request(api) == {
+            "method": "GET",
+            "path": "/api/v1/slurm/backends",
+            "region": "us-east-1",
+        }
+        assert "Slurm backends — us-east-1 (2)  pass --backend slinky|pcs to pick one" in (
+            result.output
+        )
+        assert "slinky   Slinky slurm-operator cluster" in result.output
+        assert "pcs      AWS Parallel Computing Service cluster" in result.output
+        assert "cluster: pcs_0a1b2c3d4e" in result.output
+        assert "status: ACTIVE" in result.output
+        assert "default partition: gco" in result.output
+        assert "identity: ec2-user" in result.output
+        assert "login: ssm" in result.output
+
+    def test_single_default_none_and_error_entries(self, runner, api):
+        api.call_api.return_value = BACKENDS_PCS
+        result = runner.invoke(cli, ["slurm", "backends", "-r", "us-east-1"])
+        assert "(1)  default: pcs" in result.output
+
+        api.call_api.return_value = BACKENDS_NONE
+        result = runner.invoke(cli, ["slurm", "backends", "-r", "us-east-1"])
+        assert "(none enabled: turn on helm.slurm or pcs" in result.output
+
+        api.call_api.return_value = {
+            "backends": [{"name": "pcs", "error": "cluster pcs_x is CREATING"}],
+            "default": "pcs",
+            "selection_required": False,
+        }
+        result = runner.invoke(cli, ["slurm", "backends", "-r", "us-east-1"])
+        assert "pcs      unavailable: cluster pcs_x is CREATING" in result.output
+
+    def test_json_passthrough_and_failure(self, runner, api):
+        api.call_api.return_value = BACKENDS_SLINKY
+        result = runner.invoke(cli, ["--output", "json", "slurm", "backends", "-r", "us-east-1"])
+        assert json.loads(result.stdout) == BACKENDS_SLINKY
+        api.call_api.side_effect = APIRequestError(502, "upstream down")
+        result = runner.invoke(cli, ["slurm", "backends", "-r", "us-east-1"])
+        assert result.exit_code == 1
+        assert "Failed to list Slurm backends" in result.output
+
+
+class TestLoginBackendResolution:
+    def test_both_enabled_without_a_backend_is_a_usage_error(self, runner, api, cluster):
+        api.call_api.return_value = BACKENDS_BOTH
+        result = runner.invoke(cli, ["slurm", "shell", "-r", "us-east-1"])
+        assert result.exit_code == 2
+        assert "runs both Slurm backends (pcs, slinky); pass --backend" in result.output
+        assert cluster["kubeconfig"] == []
+
+    def test_none_enabled_exits_1(self, runner, api, cluster):
+        api.call_api.return_value = BACKENDS_NONE
+        result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1"])
+        assert result.exit_code == 1
+        assert "No Slurm backend is enabled in us-east-1" in result.output
+
+    def test_an_explicit_backend_the_region_lacks_exits_1(self, runner, api, cluster):
+        api.call_api.return_value = BACKENDS_SLINKY
+        result = runner.invoke(cli, ["slurm", "shell", "-r", "us-east-1", "--backend", "pcs"])
+        assert result.exit_code == 1
+        assert "The pcs Slurm backend is not enabled in us-east-1 (enabled: slinky)" in (
+            result.output
+        )
+
+    def test_a_backends_failure_exits_1(self, runner, api, cluster):
+        api.call_api.side_effect = APIRequestError(503, "no endpoint")
+        result = runner.invoke(cli, ["slurm", "shell", "-r", "us-east-1"])
+        assert result.exit_code == 1
+        assert "Failed to list Slurm backends" in result.output
+
+
 class TestShell:
-    def test_execs_an_interactive_shell_through_the_tunnel(self, runner, cluster, monkeypatch):
+    def test_execs_an_interactive_shell_through_the_tunnel(
+        self, runner, login_api, cluster, monkeypatch
+    ):
         monkeypatch.setattr(
             slurm_lib, "run_foreground", lambda cmd: cluster["runs"].append(list(cmd)) or 0
         )
@@ -896,6 +1102,7 @@ class TestShell:
             cli, ["slurm", "shell", "-r", "us-west-2", "--via-ssm", "i-0123456789abcdef0"]
         )
         assert result.exit_code == 0, result.output
+        assert _paths(login_api) == ["/api/v1/slurm/backends"]
         assert cluster["kubeconfig"] == [("gco-us-west-2", "us-west-2")]
         assert cluster["tunnels"][0]["via_ssm"] == "i-0123456789abcdef0"
         assert cluster["tunnels"][0]["cluster"] == "gco-us-west-2"
@@ -920,7 +1127,7 @@ class TestShell:
         ]
         assert "Opening a shell on gco-jobs/slinky-slurm-login-gco in us-west-2" in result.output
 
-    def test_shell_exit_code_is_propagated(self, runner, cluster, monkeypatch):
+    def test_shell_exit_code_is_propagated(self, runner, login_api, cluster, monkeypatch):
         cluster["session"] = (None, None)
         monkeypatch.setattr(
             slurm_lib, "run_foreground", lambda cmd: cluster["runs"].append(list(cmd)) or 130
@@ -929,14 +1136,15 @@ class TestShell:
         assert result.exit_code == 130
         assert "--server" not in cluster["runs"][0]
 
-    def test_shell_refuses_machine_output(self, runner, cluster, monkeypatch):
+    def test_shell_refuses_machine_output(self, runner, api, cluster, monkeypatch):
         monkeypatch.setattr(slurm_lib, "run_foreground", lambda cmd: pytest.fail("must not run"))
         result = runner.invoke(cli, ["--output", "json", "slurm", "shell", "-r", "us-east-1"])
         assert result.exit_code == 1
         assert "interactive" in result.output
         assert cluster["kubeconfig"] == []
+        api.call_api.assert_not_called()
 
-    def test_failures_exit_1(self, runner, monkeypatch):
+    def test_failures_exit_1(self, runner, login_api, monkeypatch):
         def fail(cluster: str, region: str) -> None:
             raise RuntimeError("no such cluster")
 
@@ -946,9 +1154,120 @@ class TestShell:
         assert "no such cluster" in result.output
 
 
+@pytest.fixture
+def pcs_login(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """The PCS login node resolved without AWS, and the SSM runs recorded."""
+    from cli import pcs_login as pcs_login_lib
+
+    node = pcs_login_lib.LoginNode(
+        region="us-east-1",
+        cluster_id="pcs_0a1b2c3d4e",
+        node_group_id="pcs_login0001",
+        instance_id="i-0abcdef1234567890",
+    )
+    state: dict[str, Any] = {
+        "node": node,
+        "lookups": [],
+        "runs": [],
+        "reads": [],
+        "captured": pcs_login_lib.CapturedOutput(text="hello from pcs\n", truncated=False),
+        "lookup_error": None,
+    }
+
+    def find(region: str, stack_name: str) -> Any:
+        state["lookups"].append((region, stack_name))
+        if state["lookup_error"] is not None:
+            raise state["lookup_error"]
+        return state["node"]
+
+    def read(node: Any, reader: Any, **kwargs: Any) -> Any:
+        state["reads"].append((node, list(reader)))
+        if isinstance(state["captured"], Exception):
+            raise state["captured"]
+        return state["captured"]
+
+    monkeypatch.setattr(pcs_login_lib, "find_login_node", find)
+    monkeypatch.setattr(pcs_login_lib, "read_file", read)
+    monkeypatch.setattr(
+        slurm_lib, "run_foreground", lambda cmd: state["runs"].append(list(cmd)) or 0
+    )
+    return state
+
+
+def _ssm_session(instance: str, command: str) -> list[str]:
+    return [
+        "aws",
+        "ssm",
+        "start-session",
+        "--target",
+        instance,
+        "--region",
+        "us-east-1",
+        "--document-name",
+        "AWS-StartInteractiveCommand",
+        "--parameters",
+        json.dumps({"command": [command]}),
+    ]
+
+
+class TestPcsShell:
+    def test_opens_an_ssm_session_as_the_identity(self, runner, api, pcs_login):
+        api.call_api.return_value = BACKENDS_PCS
+        result = runner.invoke(cli, ["slurm", "shell", "-r", "us-east-1"])
+        assert result.exit_code == 0, result.output
+        # Resolved from the single enabled backend; the stack is the regional one.
+        assert pcs_login["lookups"] == [("us-east-1", "gco-us-east-1")]
+        assert pcs_login["runs"] == [_ssm_session("i-0abcdef1234567890", "sudo -iu ec2-user")]
+        assert (
+            "Opening an SSM session on the PCS login node i-0abcdef1234567890 "
+            "(cluster pcs_0a1b2c3d4e) in us-east-1 as ec2-user"
+        ) in result.output
+
+    def test_explicit_backend_with_both_enabled(self, runner, api, pcs_login, cluster):
+        api.call_api.return_value = BACKENDS_BOTH
+        result = runner.invoke(cli, ["slurm", "shell", "-r", "us-east-1", "-b", "pcs"])
+        assert result.exit_code == 0, result.output
+        assert len(pcs_login["runs"]) == 1
+        # Nothing of the Slinky route runs.
+        assert cluster["kubeconfig"] == [] and cluster["tunnels"] == []
+
+    def test_via_ssm_is_refused_for_pcs(self, runner, api, pcs_login):
+        api.call_api.return_value = BACKENDS_PCS
+        result = runner.invoke(cli, ["slurm", "shell", "-r", "us-east-1", "--via-ssm", "auto"])
+        assert result.exit_code == 2
+        assert "drop --via-ssm for --backend pcs" in result.output
+        assert pcs_login["lookups"] == [] and pcs_login["runs"] == []
+
+    def test_lookup_failures_exit_1(self, runner, api, pcs_login):
+        from cli.pcs_login import PcsLoginError
+
+        api.call_api.return_value = BACKENDS_PCS
+        pcs_login["lookup_error"] = PcsLoginError(
+            "the PCS login node in us-east-1 is not running yet"
+        )
+        result = runner.invoke(cli, ["slurm", "shell", "-r", "us-east-1"])
+        assert result.exit_code == 1
+        assert "not running yet" in result.output
+        assert pcs_login["runs"] == []
+
+    def test_exit_code_and_a_bad_identity(self, runner, api, pcs_login):
+        api.call_api.return_value = BACKENDS_PCS
+        pcs_login["runs"].clear()
+        with patch.object(slurm_lib, "run_foreground", lambda cmd: 130):
+            result = runner.invoke(cli, ["slurm", "shell", "-r", "us-east-1"])
+        assert result.exit_code == 130
+
+        api.call_api.return_value = {
+            **BACKENDS_PCS,
+            "backends": [{**PCS_ENTRY, "identity": {"name": "bad name"}}],
+        }
+        result = runner.invoke(cli, ["slurm", "shell", "-r", "us-east-1"])
+        assert result.exit_code == 1
+        assert "not a POSIX user name" in result.output
+
+
 class TestOutput:
-    def test_cats_the_stdout_file_from_the_login_pod(self, runner, api, cluster, monkeypatch):
-        api.call_api.return_value = {"job": JOB}
+    def test_cats_the_stdout_file_from_the_login_pod(self, runner, login_api, cluster, monkeypatch):
         monkeypatch.setattr(
             slurm_lib, "run_capture", lambda cmd: cluster["runs"].append(list(cmd)) or "hello world"
         )
@@ -957,10 +1276,12 @@ class TestOutput:
         )
         assert result.exit_code == 0, result.output
         assert result.output.endswith("hello world\n")
-        assert _request(api) == {
+        assert _paths(login_api) == ["/api/v1/slurm/backends", "/api/v1/slurm/jobs/42"]
+        assert _request(login_api) == {
             "method": "GET",
             "path": "/api/v1/slurm/jobs/42",
             "region": "us-east-1",
+            "params": {"backend": "slinky"},
         }
         assert cluster["tunnels"][0]["via_ssm"] == "auto"
         assert cluster["tunnels"][0]["assume_yes"] is True
@@ -983,15 +1304,13 @@ class TestOutput:
             ]
         ]
 
-    def test_an_empty_output_file_prints_nothing(self, runner, api, cluster, monkeypatch):
-        api.call_api.return_value = {"job": JOB}
+    def test_an_empty_output_file_prints_nothing(self, runner, login_api, cluster, monkeypatch):
         monkeypatch.setattr(slurm_lib, "run_capture", lambda cmd: "")
         result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1"])
         assert result.exit_code == 0, result.output
         assert result.stdout == ""
 
-    def test_stderr_tail_and_json_document(self, runner, api, cluster, monkeypatch):
-        api.call_api.return_value = {"job": JOB}
+    def test_stderr_tail_and_json_document(self, runner, login_api, cluster, monkeypatch):
         monkeypatch.setattr(
             slurm_lib, "run_capture", lambda cmd: cluster["runs"].append(list(cmd)) or "err\n"
         )
@@ -1014,13 +1333,13 @@ class TestOutput:
         assert json.loads(result.stdout) == {
             "job_id": 42,
             "region": "us-east-1",
+            "backend": "slinky",
             "path": "/home/slurm/slurm-42.err",
             "content": "err\n",
         }
         assert cluster["runs"][0][-4:] == ["tail", "-n", "20", "/home/slurm/slurm-42.err"]
 
-    def test_follow_streams_in_the_foreground(self, runner, api, cluster, monkeypatch):
-        api.call_api.return_value = {"job": JOB}
+    def test_follow_streams_in_the_foreground(self, runner, login_api, cluster, monkeypatch):
         monkeypatch.setattr(
             slurm_lib, "run_foreground", lambda cmd: cluster["runs"].append(list(cmd)) or 0
         )
@@ -1029,8 +1348,7 @@ class TestOutput:
         assert "Following /home/slurm/slurm-42.out" in result.output
         assert cluster["runs"][0][-3:] == ["tail", "-f", "/home/slurm/slurm-42.out"]
 
-    def test_follow_exit_code_is_propagated(self, runner, api, cluster, monkeypatch):
-        api.call_api.return_value = {"job": JOB}
+    def test_follow_exit_code_is_propagated(self, runner, login_api, cluster, monkeypatch):
         monkeypatch.setattr(slurm_lib, "run_foreground", lambda cmd: 130)
         result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1", "-f"])
         assert result.exit_code == 130
@@ -1044,22 +1362,32 @@ class TestOutput:
         api.call_api.assert_not_called()
 
     def test_api_failure_exits_1(self, runner, api, cluster):
-        api.call_api.side_effect = APIRequestError(404, "Slurm job 42 not found")
+        _route(
+            api,
+            {
+                "/api/v1/slurm/backends": BACKENDS_SLINKY,
+                "/api/v1/slurm/jobs/42": APIRequestError(404, "Slurm job 42 not found"),
+            },
+        )
         result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1"])
         assert result.exit_code == 1
         assert "Failed to read Slurm job 42" in result.output
         assert cluster["kubeconfig"] == []
 
     def test_unusable_path_exits_1(self, runner, api, cluster):
-        api.call_api.return_value = {"job": {**JOB, "standard_output": "slurm-%j.out"}}
+        _route(
+            api,
+            {
+                "/api/v1/slurm/backends": BACKENDS_SLINKY,
+                "/api/v1/slurm/jobs/42": {"job": {**JOB, "standard_output": "slurm-%j.out"}},
+            },
+        )
         result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1"])
         assert result.exit_code == 1
         assert "Failed to locate the standard output of job 42" in result.output
         assert cluster["kubeconfig"] == []
 
-    def test_kubectl_failure_exits_1(self, runner, api, cluster, monkeypatch):
-        api.call_api.return_value = {"job": JOB}
-
+    def test_kubectl_failure_exits_1(self, runner, login_api, cluster, monkeypatch):
         def fail(cmd: Any) -> str:
             raise RuntimeError("kubectl exec failed (1): No such file")
 
@@ -1069,10 +1397,98 @@ class TestOutput:
         assert "No such file" in result.output
 
 
+class TestPcsOutput:
+    @pytest.fixture
+    def pcs_api(self, api: MagicMock) -> MagicMock:
+        _route(api, {"/api/v1/slurm/backends": BACKENDS_PCS, "/api/v1/slurm/jobs/42": {"job": JOB}})
+        return api
+
+    def test_reads_the_file_through_an_ssm_command(self, runner, pcs_api, pcs_login):
+        result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1"])
+        assert result.exit_code == 0, result.output
+        assert result.output == "hello from pcs\n"
+        assert _request(pcs_api)["params"] == {"backend": "pcs"}
+        assert pcs_login["lookups"] == [("us-east-1", "gco-us-east-1")]
+        assert pcs_login["reads"] == [(pcs_login["node"], ["cat", "/home/slurm/slurm-42.out"])]
+        assert pcs_login["runs"] == []
+
+    def test_tail_stderr_and_the_json_document(self, runner, pcs_api, pcs_login):
+        from cli.pcs_login import CapturedOutput
+
+        pcs_login["captured"] = CapturedOutput(text="e1\ne2", truncated=False)
+        result = runner.invoke(
+            cli,
+            [
+                "--output",
+                "json",
+                "slurm",
+                "output",
+                "42",
+                "-r",
+                "us-east-1",
+                "--stderr",
+                "--tail",
+                "2",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == {
+            "job_id": 42,
+            "region": "us-east-1",
+            "backend": "pcs",
+            "path": "/home/slurm/slurm-42.err",
+            "truncated": False,
+            "content": "e1\ne2",
+        }
+        assert pcs_login["reads"][0][1] == ["tail", "-n", "2", "/home/slurm/slurm-42.err"]
+
+    def test_a_truncated_read_is_flagged(self, runner, pcs_api, pcs_login):
+        from cli.pcs_login import CapturedOutput
+
+        pcs_login["captured"] = CapturedOutput(text="partial", truncated=True)
+        result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1"])
+        assert result.exit_code == 0, result.output
+        assert result.output.startswith("partial\n")
+        assert "first 24,000 characters" in result.output and "--tail N" in result.output
+
+    def test_follow_streams_an_ssm_session(self, runner, pcs_api, pcs_login):
+        result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1", "--follow"])
+        assert result.exit_code == 0, result.output
+        assert "Following /home/slurm/slurm-42.out on the PCS login node i-0abcdef1234567890" in (
+            result.output
+        )
+        assert pcs_login["runs"] == [
+            _ssm_session("i-0abcdef1234567890", "sudo tail -f /home/slurm/slurm-42.out")
+        ]
+        assert pcs_login["reads"] == []
+
+    def test_follow_exit_code_is_propagated(self, runner, pcs_api, pcs_login):
+        with patch.object(slurm_lib, "run_foreground", lambda cmd: 130):
+            result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1", "-f"])
+        assert result.exit_code == 130
+
+    def test_via_ssm_is_refused_and_failures_exit_1(self, runner, pcs_api, pcs_login):
+        from cli.pcs_login import PcsLoginError
+
+        result = runner.invoke(
+            cli, ["slurm", "output", "42", "-r", "us-east-1", "--via-ssm", "i-0123456789abcdef0"]
+        )
+        assert result.exit_code == 2
+        assert "drop --via-ssm for --backend pcs" in result.output
+
+        pcs_login["captured"] = PcsLoginError(
+            "cat failed on the PCS login node (Failed): no such file"
+        )
+        result = runner.invoke(cli, ["slurm", "output", "42", "-r", "us-east-1"])
+        assert result.exit_code == 1
+        assert "no such file" in result.output
+
+
 def test_group_help_lists_every_command(runner) -> None:
     result = runner.invoke(cli, ["slurm", "--help"])
     assert result.exit_code == 0
     for command in (
+        "backends",
         "status",
         "partitions",
         "nodes",

@@ -40,6 +40,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `gitops.py` | The self-managed [Argo CD](../docs/GITOPS.md) behind `gco gitops`: the status document (validated `helm.argocd`, chart pin, fence, per-Region GitOps paths, repo-server scaling), the generated admin password, and the API login + session-cookie screenshot of the Applications view |
 | `crossplane.py` | The self-managed [Crossplane](../docs/CROSSPLANE.md) behind `gco crossplane`: the status document (toggle, chart pins, shipped composition functions) and the Crossview dashboard screenshot |
 | `cluster_ui.py` | Shared plumbing for the in-cluster web UIs reached through kubectl: cdk.json and charts.yaml reads, Secret-key reads, background port-forwards, headless Playwright captures, the shared tunnel options |
+| `pcs_login.py` | The AWS PCS login node behind `gco slurm shell` / `output --backend pcs`: found from the regional stack's outputs and PCS's instance tag, reached over SSM (an interactive session for the shell and `--follow`, `SendCommand` for a one-shot read) |
 | `ssm_tunnel.py` | SSM Session Manager tunnel helpers for private EKS endpoints |
 | `ephemeral_bastion.py` | Ephemeral SSM bastion lifecycle (`--via-ssm auto`) |
 | `analytics_user_mgmt.py` | Cognito user management and Studio login for the analytics environment |

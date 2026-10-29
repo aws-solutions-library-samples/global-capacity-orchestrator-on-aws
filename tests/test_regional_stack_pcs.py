@@ -418,18 +418,22 @@ class TestExistingMode:
             for logical_id, r in resources.items()
         )
 
-    def test_outputs(self, pcs_existing) -> None:
+    def test_outputs_have_stable_keys(self, pcs_existing) -> None:
         stack, resources = pcs_existing
         outputs = assertions.Template.from_stack(stack).to_json()["Outputs"]
-        pcs_outputs = {k: v for k, v in outputs.items() if k.startswith("PcsPcs")}
-        values = [v["Value"] for v in pcs_outputs.values()]
-        assert CLUSTER_ID in values
-        assert "6820" in values
-        # The deploy-time facts are surfaced too.
+        # The construct is nested, yet the keys carry no hash: the CLI reads
+        # them by name from describe-stacks.
+        pcs_outputs = {k: v["Value"] for k, v in outputs.items() if k.startswith("Pcs")}
         [(facts_id, _facts)] = _custom_resources(resources).items()
-        assert {"Fn::GetAtt": [facts_id, "cluster.scheduler.version"]} in values
-        assert {"Fn::GetAtt": [facts_id, "cluster.slurmConfiguration.slurmRest.mode"]} in values
-        assert len(pcs_outputs) == 4
+        assert pcs_outputs == {
+            "PcsClusterId": CLUSTER_ID,
+            "PcsMode": "existing",
+            "PcsRestApiPort": "6820",
+            "PcsSlurmVersion": {"Fn::GetAtt": [facts_id, "cluster.scheduler.version"]},
+            "PcsRestApiMode": {
+                "Fn::GetAtt": [facts_id, "cluster.slurmConfiguration.slurmRest.mode"]
+            },
+        }
 
     def test_the_converge_trigger_waits_for_the_facts(self, pcs_existing) -> None:
         _stack, resources = pcs_existing
@@ -557,23 +561,39 @@ class TestManagedModeCluster:
         assert secret["Resource"]["Fn::GetAtt"][0] == facts_id
 
     def test_outputs(self, pcs_managed_full) -> None:
-        stack, _resources = pcs_managed_full
-        outputs = assertions.Template.from_stack(stack).to_json()["Outputs"]
-        by_description = {
-            v["Description"]: v["Value"] for k, v in outputs.items() if k.startswith("PcsPcs")
+        stack, resources = pcs_managed_full
+        outputs = {
+            k: v["Value"]
+            for k, v in assertions.Template.from_stack(stack).to_json()["Outputs"].items()
+            if k.startswith("Pcs")
         }
-        assert by_description["Name of the AWS PCS cluster this stack manages"] == "gco-test-hpc"
-        assert "GroupId" in json.dumps(
-            by_description["Security group on the PCS controller ENI and every PCS node"]
-        )
-        assert "Arn" in json.dumps(
-            by_description["IAM role the PCS compute and login nodes run as"]
-        )
-        assert "Id" in json.dumps(
-            by_description["PCS compute node group of the login node (gco slurm shell / output)"]
-        )
-        assert by_description["AWS PCS cluster the us-east-1 API fronts (managed)"] == {
-            "Fn::GetAtt": [next(iter(_of_type(_resources, "AWS::PCS::Cluster"))), "Id"]
+        [cluster_id] = _of_type(resources, "AWS::PCS::Cluster")
+        [sg_id] = [
+            k
+            for k in _of_type(resources, "AWS::EC2::SecurityGroup")
+            if k.startswith("PcsSecurityGroup")
+        ]
+        [role_id] = [
+            k for k in _of_type(resources, "AWS::IAM::Role") if k.startswith("PcsNodeRole")
+        ]
+        assert outputs["PcsClusterName"] == "gco-test-hpc"
+        assert outputs["PcsMode"] == "managed"
+        assert outputs["PcsClusterId"] == {"Fn::GetAtt": [cluster_id, "Id"]}
+        assert outputs["PcsSecurityGroupId"] == {"Fn::GetAtt": [sg_id, "GroupId"]}
+        assert outputs["PcsNodeRoleArn"] == {"Fn::GetAtt": [role_id, "Arn"]}
+        assert outputs["PcsLoginNodeGroupId"] == {
+            "Fn::GetAtt": [_logical_id(resources, "AWS::PCS::ComputeNodeGroup", "login"), "Id"]
+        }
+        assert set(outputs) == {
+            "PcsClusterName",
+            "PcsMode",
+            "PcsClusterId",
+            "PcsSecurityGroupId",
+            "PcsNodeRoleArn",
+            "PcsLoginNodeGroupId",
+            "PcsRestApiPort",
+            "PcsSlurmVersion",
+            "PcsRestApiMode",
         }
 
 
@@ -1102,10 +1122,8 @@ class TestManagedModeMinimal:
         queues = _named(resources, "AWS::PCS::Queue")
         assert set(queues) == {"gco"}
         outputs = assertions.Template.from_stack(stack).to_json()["Outputs"]
-        descriptions = {v["Description"] for k, v in outputs.items() if k.startswith("PcsPcs")}
-        assert not any(
-            d.startswith("PCS compute node group of the login node") for d in descriptions
-        )
+        assert "PcsLoginNodeGroupId" not in outputs
+        assert outputs["PcsClusterName"]["Value"] == "gco-test-pcs"
         assert _replacements(resources)["{{PCS_DEFAULT_PARTITION}}"] == "gco"
         assert (
             json.loads(_replacements(resources)["{{PCS_IDENTITY_JSON}}"])["dir"]

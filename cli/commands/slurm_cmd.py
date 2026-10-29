@@ -1,30 +1,39 @@
-"""GCO Slurm command group — the Slinky Slurm cluster through the GCO API.
+"""GCO Slurm command group — the region's Slurm cluster(s) through the GCO API.
 
 Provides the ``gco slurm`` sub-commands:
 
+* ``backends`` — which Slurm backends the region runs: ``slinky`` (the
+  Slinky cluster on the EKS cluster, ``cdk.json`` ``helm.slurm``) and/or
+  ``pcs`` (AWS Parallel Computing Service, ``cdk.json`` ``pcs``).
 * ``status`` / ``partitions`` / ``nodes`` — the cluster as slurmctld sees it
   (``sinfo``), per region.
 * ``queue`` / ``job`` / ``submit`` / ``cancel`` — the live queue, one job, an
   ``sbatch`` submission from a local script (its ``#SBATCH`` directives are
   honoured; flags override them) and ``scancel``.
 * ``accounting`` — slurmdbd job history (``sacct``) over a time window.
-* ``shell`` / ``output`` — an interactive shell on the login pod, or a job's
-  output file read from it, over the PRIVATE EKS API endpoint
-  (``--via-ssm`` tunnels through an SSM-managed instance, like
-  ``gco monitoring open``).
+* ``shell`` / ``output`` — an interactive shell on the login node, or a job's
+  output file read from it. On Slinky that is the login pod over the PRIVATE
+  EKS API endpoint (``--via-ssm`` tunnels through an SSM-managed instance,
+  like ``gco monitoring open``); on PCS it is the managed login EC2 instance
+  over an SSM session.
 
-Every API command is pinned to one region (``--region``, else the root
+Every command is pinned to one region (``--region``, else the root
 ``--region`` / configured default) because each region runs its own Slurm
-cluster. See docs/SLURM_OPERATOR.md and docs/API.md#slurm.
+cluster(s). ``--backend`` names the cluster when a region runs both; with one
+backend on it may be left out. See docs/SLURM_OPERATOR.md, docs/PCS.md and
+docs/API.md#slurm.
 """
 
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import click
+
+from gco.pcs_config import PCS_BACKEND, SLINKY_BACKEND, SLURM_BACKENDS
 
 from .. import cluster_ui
 from ..config import GCOConfig
@@ -33,6 +42,21 @@ from ..output import confirm, get_output_formatter
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
 _REGION_HELP = "Region whose Slurm cluster to use (default: the root --region / configured default)"
+_BACKEND_HELP = (
+    "Which Slurm cluster: slinky (on the EKS cluster) or pcs (AWS PCS). "
+    "Optional when the region runs one backend; required when it runs both."
+)
+
+
+def backend_option(func: Callable[..., Any]) -> Callable[..., Any]:
+    """``--backend`` / ``-b``: the Slurm backend a command addresses."""
+    return click.option(
+        "--backend",
+        "-b",
+        type=click.Choice(list(SLURM_BACKENDS)),
+        default=None,
+        help=_BACKEND_HELP,
+    )(func)
 
 
 def _slurm_region(config: Any, region: str | None) -> str:
@@ -45,9 +69,24 @@ def _slurm_region(config: Any, region: str | None) -> str:
     return chosen.strip()
 
 
-def _call(config: Any, method: str, path: str, region: str, **kwargs: Any) -> dict[str, Any]:
+def _call(
+    config: Any,
+    method: str,
+    path: str,
+    region: str,
+    *,
+    backend: str | None = None,
+    params: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Call the regional API; ``backend`` rides along as the ``backend`` query parameter."""
     from ..aws_client import get_aws_client
 
+    query = dict(params or {})
+    if backend:
+        query["backend"] = backend
+    if query:
+        kwargs["params"] = query
     result: dict[str, Any] = get_aws_client(config).call_api(
         method=method, path=path, region=region, **kwargs
     )
@@ -59,10 +98,51 @@ def _fail(formatter: Any, verb: str, exc: Exception) -> None:
     sys.exit(1)
 
 
+def _resolve_backend(
+    config: Any, formatter: Any, region: str, backend: str | None
+) -> tuple[str, dict[str, Any]]:
+    """The backend a login command targets and its ``/backends`` entry.
+
+    An explicit ``--backend`` is checked against what the region runs; with
+    none given, the region's single enabled backend is used, and two enabled
+    backends are a usage error (the API would answer the same 400).
+    """
+    try:
+        listing = _call(config, "GET", "/api/v1/slurm/backends", region)
+    except Exception as exc:
+        _fail(formatter, "list Slurm backends", exc)
+    entries = {
+        str(entry.get("name")): entry
+        for entry in listing.get("backends") or []
+        if isinstance(entry, dict)
+    }
+    if backend is None:
+        if len(entries) == 1:
+            backend = next(iter(entries))
+        elif not entries:
+            formatter.print_error(
+                f"No Slurm backend is enabled in {region}: turn on helm.slurm (Slinky) or pcs "
+                "(AWS PCS) in cdk.json and deploy"
+            )
+            sys.exit(1)
+        else:
+            raise click.UsageError(
+                f"{region} runs both Slurm backends ({', '.join(sorted(entries))}); "
+                "pass --backend slinky or --backend pcs"
+            )
+    if backend not in entries:
+        formatter.print_error(
+            f"The {backend} Slurm backend is not enabled in {region} "
+            f"(enabled: {', '.join(sorted(entries)) or 'none'})"
+        )
+        sys.exit(1)
+    return backend, entries[backend]
+
+
 @click.group()
 @pass_config
 def slurm(config: Any) -> None:
-    """Slurm cluster (cdk.json helm.slurm): queue, submit, accounting, login shell."""
+    """Slurm clusters (Slinky via cdk.json helm.slurm, AWS PCS via pcs): queue, submit, accounting, login shell."""
 
 
 # ---------------------------------------------------------------------------
@@ -70,14 +150,40 @@ def slurm(config: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-@slurm.command("status")
+@slurm.command("backends")
 @click.option("--region", "-r", help=_REGION_HELP)
 @pass_config
-def slurm_status(config: Any, region: str | None) -> None:
+def slurm_backends(config: Any, region: str | None) -> None:
+    """Which Slurm backends the region runs (slinky, pcs) and what each one is.
+
+    Examples:
+        gco slurm backends -r us-east-1
+        gco -r us-east-1 slurm backends --output json
+    """
+    from ..slurm import render_backends
+
+    formatter = get_output_formatter(config)
+    target = _slurm_region(config, region)
+    try:
+        result = _call(config, "GET", "/api/v1/slurm/backends", target)
+    except Exception as exc:
+        _fail(formatter, "list Slurm backends", exc)
+    if config.output_format != "table":
+        formatter.print(result)
+        return
+    print(render_backends(result, target))
+
+
+@slurm.command("status")
+@click.option("--region", "-r", help=_REGION_HELP)
+@backend_option
+@pass_config
+def slurm_status(config: Any, region: str | None, backend: str | None) -> None:
     """Controller reachability, partitions, node and job counts.
 
     Examples:
         gco slurm status -r us-east-1
+        gco slurm status -r us-east-1 --backend pcs
         gco -r us-east-1 slurm status --output json
     """
     from ..slurm import render_status
@@ -85,7 +191,7 @@ def slurm_status(config: Any, region: str | None) -> None:
     formatter = get_output_formatter(config)
     target = _slurm_region(config, region)
     try:
-        result = _call(config, "GET", "/api/v1/slurm/status", target)
+        result = _call(config, "GET", "/api/v1/slurm/status", target, backend=backend)
     except Exception as exc:
         _fail(formatter, "read Slurm status", exc)
     if config.output_format != "table":
@@ -96,8 +202,9 @@ def slurm_status(config: Any, region: str | None) -> None:
 
 @slurm.command("partitions")
 @click.option("--region", "-r", help=_REGION_HELP)
+@backend_option
 @pass_config
-def slurm_partitions(config: Any, region: str | None) -> None:
+def slurm_partitions(config: Any, region: str | None, backend: str | None) -> None:
     """Partitions with their state, time limit and node counts (sinfo).
 
     Examples:
@@ -108,7 +215,7 @@ def slurm_partitions(config: Any, region: str | None) -> None:
     formatter = get_output_formatter(config)
     target = _slurm_region(config, region)
     try:
-        result = _call(config, "GET", "/api/v1/slurm/partitions", target)
+        result = _call(config, "GET", "/api/v1/slurm/partitions", target, backend=backend)
     except Exception as exc:
         _fail(formatter, "list Slurm partitions", exc)
     if config.output_format != "table":
@@ -119,10 +226,13 @@ def slurm_partitions(config: Any, region: str | None) -> None:
 
 @slurm.command("nodes")
 @click.option("--region", "-r", help=_REGION_HELP)
+@backend_option
 @click.option("--partition", "-p", help="Only nodes in this partition")
 @pass_config
-def slurm_nodes(config: Any, region: str | None, partition: str | None) -> None:
-    """Slurm nodes (the slurmd worker pods) with state, resources and gres.
+def slurm_nodes(
+    config: Any, region: str | None, backend: str | None, partition: str | None
+) -> None:
+    """Slurm nodes (slurmd worker pods, or PCS compute instances) with state, resources and gres.
 
     Examples:
         gco slurm nodes -r us-east-1
@@ -134,7 +244,12 @@ def slurm_nodes(config: Any, region: str | None, partition: str | None) -> None:
     target = _slurm_region(config, region)
     try:
         result = _call(
-            config, "GET", "/api/v1/slurm/nodes", target, params={"partition": partition}
+            config,
+            "GET",
+            "/api/v1/slurm/nodes",
+            target,
+            backend=backend,
+            params={"partition": partition},
         )
     except Exception as exc:
         _fail(formatter, "list Slurm nodes", exc)
@@ -151,6 +266,7 @@ def slurm_nodes(config: Any, region: str | None, partition: str | None) -> None:
 
 @slurm.command("queue")
 @click.option("--region", "-r", help=_REGION_HELP)
+@backend_option
 @click.option("--state", "-s", help="Only jobs in this state (PENDING, RUNNING, ...)")
 @click.option("--partition", "-p", help="Only jobs in this partition")
 @click.option("--name", "-n", help="Only jobs with exactly this name")
@@ -159,6 +275,7 @@ def slurm_nodes(config: Any, region: str | None, partition: str | None) -> None:
 def slurm_queue(
     config: Any,
     region: str | None,
+    backend: str | None,
     state: str | None,
     partition: str | None,
     name: str | None,
@@ -180,6 +297,7 @@ def slurm_queue(
             "GET",
             "/api/v1/slurm/jobs",
             target,
+            backend=backend,
             params={
                 "state": state.upper() if state else None,
                 "partition": partition,
@@ -198,8 +316,9 @@ def slurm_queue(
 @slurm.command("job")
 @click.argument("job_id", type=int)
 @click.option("--region", "-r", help=_REGION_HELP)
+@backend_option
 @pass_config
-def slurm_job(config: Any, job_id: int, region: str | None) -> None:
+def slurm_job(config: Any, job_id: int, region: str | None, backend: str | None) -> None:
     """One job as slurmctld sees it (scontrol show job).
 
     Examples:
@@ -210,7 +329,7 @@ def slurm_job(config: Any, job_id: int, region: str | None) -> None:
     formatter = get_output_formatter(config)
     target = _slurm_region(config, region)
     try:
-        result = _call(config, "GET", f"/api/v1/slurm/jobs/{job_id}", target)
+        result = _call(config, "GET", f"/api/v1/slurm/jobs/{job_id}", target, backend=backend)
     except Exception as exc:
         _fail(formatter, f"read Slurm job {job_id}", exc)
     if config.output_format != "table":
@@ -222,6 +341,7 @@ def slurm_job(config: Any, job_id: int, region: str | None) -> None:
 @slurm.command("submit")
 @click.argument("script", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--region", "-r", help=_REGION_HELP)
+@backend_option
 @click.option(
     "--name", "-J", help="Job name (default: the script's #SBATCH --job-name, else gco-job)"
 )
@@ -248,6 +368,7 @@ def slurm_submit(
     config: Any,
     script: Path,
     region: str | None,
+    backend: str | None,
     name: str | None,
     partition: str | None,
     nodes: int | None,
@@ -266,10 +387,12 @@ def slurm_submit(
     The script's leading #SBATCH directives (--job-name, --partition, --nodes,
     --ntasks, --cpus-per-task, --gpus-per-node, --mem, --time, --chdir,
     --comment, --exclusive) are applied first; flags override them. The job
-    runs as Slurm's own user with your caller identity in its comment.
+    runs as the backend's Slurm identity with your caller identity in its
+    comment.
 
     Examples:
         gco slurm submit hello.sbatch -r us-east-1
+        gco slurm submit hello.sbatch -r us-east-1 --backend pcs
         gco slurm submit train.sbatch -r us-east-1 -p gpu -N 2 --gpus-per-node 8 -t 04:00:00
     """
     from ..slurm import SlurmCliError, memory_mb, read_batch_script, submission_body
@@ -297,12 +420,13 @@ def slurm_submit(
     except SlurmCliError as exc:
         _fail(formatter, f"prepare {script.name}", exc)
     try:
-        result = _call(config, "POST", "/api/v1/slurm/jobs", target, body=body)
+        result = _call(config, "POST", "/api/v1/slurm/jobs", target, backend=backend, body=body)
     except Exception as exc:
         _fail(formatter, f"submit {script.name}", exc)
+    answered_by = f" ({result['backend']})" if result.get("backend") else ""
     formatter.print_success(
         f"Submitted job {result.get('job_id')} ({result.get('name')}) to "
-        f"{result.get('partition') or 'the default partition'} in {target}"
+        f"{result.get('partition') or 'the default partition'} in {target}{answered_by}"
     )
     if result.get("message"):
         formatter.print_info(str(result["message"]))
@@ -312,11 +436,17 @@ def slurm_submit(
 @slurm.command("cancel")
 @click.argument("job_id", type=int)
 @click.option("--region", "-r", help=_REGION_HELP)
+@backend_option
 @click.option("--signal", "-s", help="Signal to send instead of the default (e.g. SIGUSR1)")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip the confirmation prompt")
 @pass_config
 def slurm_cancel(
-    config: Any, job_id: int, region: str | None, signal: str | None, assume_yes: bool
+    config: Any,
+    job_id: int,
+    region: str | None,
+    backend: str | None,
+    signal: str | None,
+    assume_yes: bool,
 ) -> None:
     """Cancel a job (scancel).
 
@@ -334,6 +464,7 @@ def slurm_cancel(
             "DELETE",
             f"/api/v1/slurm/jobs/{job_id}",
             target,
+            backend=backend,
             params={"signal": signal.upper() if signal else None},
         )
     except Exception as exc:
@@ -344,6 +475,7 @@ def slurm_cancel(
 
 @slurm.command("accounting")
 @click.option("--region", "-r", help=_REGION_HELP)
+@backend_option
 @click.option(
     "--since", help="Relative window (30m, 24h, 7d, 2w); default 1d unless --start is given"
 )
@@ -358,6 +490,7 @@ def slurm_cancel(
 def slurm_accounting(
     config: Any,
     region: str | None,
+    backend: str | None,
     since: str | None,
     start: str | None,
     end: str | None,
@@ -388,6 +521,7 @@ def slurm_accounting(
             "GET",
             "/api/v1/slurm/accounting/jobs",
             target,
+            backend=backend,
             params={
                 **window,
                 "user": user,
@@ -406,29 +540,48 @@ def slurm_accounting(
 
 
 # ---------------------------------------------------------------------------
-# Login pod
+# Login node: the Slinky login pod (kubectl exec) or the PCS login instance (SSM)
 # ---------------------------------------------------------------------------
 
 
+def _refuse_tunnel_flags_for_pcs(via_ssm: str | None) -> None:
+    if via_ssm:
+        raise click.UsageError(
+            "--via-ssm tunnels to the EKS API endpoint for the Slinky login pod; the PCS login "
+            "node is an SSM-managed instance reached directly, so drop --via-ssm for --backend pcs"
+        )
+
+
+def _pcs_login_node(config: Any, region: str) -> Any:
+    from .. import pcs_login
+
+    return pcs_login.find_login_node(region, f"{config.regional_stack_prefix}-{region}")
+
+
 @slurm.command("shell")
+@backend_option
 @cluster_ui.tunnel_options
 @pass_config
 def slurm_shell(
     config: Any,
+    backend: str | None,
     region: str | None,
     via_ssm: str | None,
     bastion_ttl_minutes: int,
     assume_yes: bool,
 ) -> None:
-    """Open an interactive shell on the Slurm login pod (sbatch, squeue, sacct, srun).
+    """Open an interactive shell on the Slurm login node (sbatch, squeue, sacct, srun).
 
-    Runs `kubectl exec -it` against the private EKS API endpoint; the pod
-    mounts /home (EFS) and, when enabled, /scratch (FSx for Lustre). Table
-    output only: an interactive terminal cannot be captured as JSON.
+    Slinky: `kubectl exec -it` into the login pod over the private EKS API
+    endpoint; the pod mounts /home (EFS) and, when enabled, /scratch (FSx for
+    Lustre). PCS: an SSM session on the managed login instance as the API's
+    Slurm identity, with the same /home and /scratch. Table output only: an
+    interactive terminal cannot be captured as JSON.
 
     Examples:
         gco slurm shell --via-ssm auto -y
         gco slurm shell -r us-west-2 --via-ssm i-0123456789abcdef0
+        gco slurm shell -r us-east-1 --backend pcs
     """
     from ..cluster_tunnel import open_api_server_tunnel, resolve_region
     from ..kubectl_helpers import update_kubeconfig
@@ -439,6 +592,27 @@ def slurm_shell(
         formatter.print_error("gco slurm shell is interactive; run it without --output json/yaml")
         sys.exit(1)
     target_region = resolve_region(config, region)
+    backend, entry = _resolve_backend(config, formatter, target_region, backend)
+    if backend == PCS_BACKEND:
+        from .. import pcs_login
+
+        _refuse_tunnel_flags_for_pcs(via_ssm)
+        user = str((entry.get("identity") or {}).get("name") or "")
+        try:
+            node = _pcs_login_node(config, target_region)
+            cmd = pcs_login.shell_command(node, user=user)
+            formatter.print_info(
+                f"Opening an SSM session on the PCS login node {node.instance_id} "
+                f"(cluster {node.cluster_id}) in {target_region} as {user} "
+                "(exit the shell to end the session)..."
+            )
+            code = run_foreground(cmd)
+        except (RuntimeError, ValueError) as exc:
+            formatter.print_error(str(exc))
+            sys.exit(1)
+        if code != 0:
+            sys.exit(code)
+        return
     cluster = f"{config.project_name}-{target_region}"
     try:
         update_kubeconfig(cluster, target_region)
@@ -470,6 +644,7 @@ def slurm_shell(
 
 @slurm.command("output")
 @click.argument("job_id", type=int)
+@backend_option
 @cluster_ui.tunnel_options
 @click.option("--stderr", "use_stderr", is_flag=True, help="Read the job's stderr file instead")
 @click.option("--follow", "-f", is_flag=True, help="Follow the file (tail -f) until Ctrl-C")
@@ -478,6 +653,7 @@ def slurm_shell(
 def slurm_output(
     config: Any,
     job_id: int,
+    backend: str | None,
     region: str | None,
     via_ssm: str | None,
     bastion_ttl_minutes: int,
@@ -486,15 +662,18 @@ def slurm_output(
     follow: bool,
     tail_lines: int | None,
 ) -> None:
-    """Print a job's output file from the login pod.
+    """Print a job's output file from the login node.
 
     Looks the job up through the API for its stdout/stderr path (the
     default `slurm-<jobid>.out` under the job's working directory), then
-    reads it over the private EKS endpoint with `kubectl exec`.
+    reads it from the login node: `kubectl exec` over the private EKS
+    endpoint on Slinky, an SSM command (or an SSM session for --follow) on
+    the PCS login instance.
 
     Examples:
         gco slurm output 42 -r us-east-1 --via-ssm auto -y
         gco slurm output 42 -r us-east-1 --via-ssm i-0123456789abcdef0 --follow
+        gco slurm output 42 -r us-east-1 --backend pcs --tail 50
     """
     from ..cluster_tunnel import open_api_server_tunnel, resolve_region
     from ..kubectl_helpers import update_kubeconfig
@@ -511,8 +690,14 @@ def slurm_output(
         formatter.print_error("--follow streams a terminal; run it without --output json/yaml")
         sys.exit(1)
     target_region = resolve_region(config, region)
+    backend, _entry = _resolve_backend(config, formatter, target_region, backend)
     try:
-        job = _call(config, "GET", f"/api/v1/slurm/jobs/{job_id}", target_region).get("job") or {}
+        job = (
+            _call(
+                config, "GET", f"/api/v1/slurm/jobs/{job_id}", target_region, backend=backend
+            ).get("job")
+            or {}
+        )
     except Exception as exc:
         _fail(formatter, f"read Slurm job {job_id}", exc)
     key = "standard_error" if use_stderr else "standard_output"
@@ -525,6 +710,45 @@ def slurm_output(
         if follow
         else (["tail", "-n", str(tail_lines), path] if tail_lines else ["cat", path])
     )
+    document: dict[str, Any] = {
+        "job_id": job_id,
+        "region": target_region,
+        "backend": backend,
+        "path": path,
+    }
+
+    if backend == PCS_BACKEND:
+        from .. import pcs_login
+
+        _refuse_tunnel_flags_for_pcs(via_ssm)
+        try:
+            node = _pcs_login_node(config, target_region)
+            if follow:
+                formatter.print_info(
+                    f"Following {path} on the PCS login node {node.instance_id} (Ctrl-C to stop)..."
+                )
+                code = run_foreground(pcs_login.follow_command(node, path))
+                if code != 0:
+                    sys.exit(code)
+                return
+            captured = pcs_login.read_file(node, reader)
+        except (RuntimeError, ValueError) as exc:
+            formatter.print_error(str(exc))
+            sys.exit(1)
+        text = captured.text
+        if config.output_format != "table":
+            formatter.print({**document, "truncated": captured.truncated, "content": text})
+            return
+        sys.stdout.write(text)
+        if text and not text.endswith("\n"):
+            sys.stdout.write("\n")
+        if captured.truncated:
+            formatter.print_warning(
+                "SSM returns the first 24,000 characters of a file; the rest was cut. "
+                "Use --tail N for the end of the file or --follow to stream it."
+            )
+        return
+
     cluster = f"{config.project_name}-{target_region}"
     try:
         update_kubeconfig(cluster, target_region)
@@ -553,8 +777,11 @@ def slurm_output(
         formatter.print_error(str(exc))
         sys.exit(1)
     if config.output_format != "table":
-        formatter.print({"job_id": job_id, "region": target_region, "path": path, "content": text})
+        formatter.print({**document, "content": text})
         return
     sys.stdout.write(text)
     if text and not text.endswith("\n"):
         sys.stdout.write("\n")
+
+
+__all__ = ["PCS_BACKEND", "SLINKY_BACKEND", "slurm"]

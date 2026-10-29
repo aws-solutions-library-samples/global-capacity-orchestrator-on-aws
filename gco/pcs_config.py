@@ -156,6 +156,27 @@ MAX_NODES_LIMIT = 2048
 PCS_HOME_EFS_PATH = "/pcs/home"
 PCS_HOME_MOUNT_PATH = "/home"
 PCS_SCRATCH_MOUNT_PATH = "/scratch"
+#: The managed login node group's PCS name. ``gco slurm shell`` / ``output``
+#: find the login node through it (the group of that name, then the EC2
+#: instance PCS tags with the group's id), so a compute group may not take it.
+LOGIN_NODE_GROUP_NAME = "login"
+#: The EC2 tag PCS puts on every instance it launches, valued with the
+#: compute node group's id (not its name).
+PCS_NODE_GROUP_INSTANCE_TAG = "aws:pcs:compute-node-group-id"
+
+#: CloudFormation output keys the regional stack publishes for the block.
+#: ``gco/stacks/pcs_cluster.py`` pins the logical ids to exactly these
+#: strings; ``cli/pcs_login.py`` and ``gco stacks pcs status`` read them by
+#: key from ``describe-stacks``.
+PCS_OUTPUT_CLUSTER_ID = "PcsClusterId"
+PCS_OUTPUT_MODE = "PcsMode"
+PCS_OUTPUT_RESTAPI_PORT = "PcsRestApiPort"
+PCS_OUTPUT_SLURM_VERSION = "PcsSlurmVersion"
+PCS_OUTPUT_RESTAPI_MODE = "PcsRestApiMode"
+PCS_OUTPUT_CLUSTER_NAME = "PcsClusterName"
+PCS_OUTPUT_SECURITY_GROUP_ID = "PcsSecurityGroupId"
+PCS_OUTPUT_NODE_ROLE_ARN = "PcsNodeRoleArn"
+PCS_OUTPUT_LOGIN_NODE_GROUP_ID = "PcsLoginNodeGroupId"
 
 #: Per-node-group defaults for keys an operator leaves out.
 NODE_GROUP_DEFAULTS: dict[str, Any] = {
@@ -584,9 +605,10 @@ def _validate_node_groups(raw: object) -> list[dict[str, Any]]:
     names = [group["name"] for group in groups]
     if len(set(names)) != len(names):
         raise PcsConfigError(f"{path} names a node group twice")
-    if "login" in names:
+    if LOGIN_NODE_GROUP_NAME in names:
         raise PcsConfigError(
-            f"{path} must not name a group 'login'; the login node group is managed"
+            f"{path} must not name a group {LOGIN_NODE_GROUP_NAME!r}; the login node group is "
+            "managed"
         )
     return groups
 

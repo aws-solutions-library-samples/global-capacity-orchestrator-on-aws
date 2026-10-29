@@ -4,10 +4,13 @@ The command module owns the Click surface; this module owns everything that
 can be tested without a terminal: reading a batch script and its ``#SBATCH``
 directives into the API's submission body, Slurm's relative time windows,
 the human renderings of the API's answers, and the ``kubectl exec`` argv for
-the login pod (``shell`` / ``output``) that the cluster tunnel reaches.
+the Slinky login pod (``shell`` / ``output``) that the cluster tunnel
+reaches. The PCS backend's login node is an EC2 instance reached over SSM;
+:mod:`cli.pcs_login` owns that half.
 
 The API half lives in gco/services/api_routes/slurm.py; every request here
-is pinned to one region because each region runs its own Slurm cluster.
+is pinned to one region because each region runs its own Slurm cluster, and
+names a backend (``slinky`` or ``pcs``) when the region runs both.
 """
 
 from __future__ import annotations
@@ -259,8 +262,52 @@ def _join(states: Any) -> str:
     return str(states or "-")
 
 
+def _backend_suffix(payload: Mapping[str, Any]) -> str:
+    """`` [pcs]`` when the API's envelope names the backend that answered."""
+    backend = payload.get("backend")
+    return f" [{backend}]" if isinstance(backend, str) and backend else ""
+
+
+def render_backends(payload: Mapping[str, Any], region: str) -> str:
+    """The ``/api/v1/slurm/backends`` answer: what is on in the region and how to pick one."""
+    backends = [b for b in payload.get("backends") or [] if isinstance(b, Mapping)]
+    header = f"\n  Slurm backends — {region} ({len(backends)})"
+    if payload.get("selection_required"):
+        header += "  pass --backend slinky|pcs to pick one"
+    elif payload.get("default"):
+        header += f"  default: {payload['default']}"
+    lines = [header, "  " + "-" * 70]
+    if not backends:
+        lines.append("  (none enabled: turn on helm.slurm or pcs in cdk.json and deploy)")
+    for backend in backends:
+        name = str(backend.get("name") or "-")
+        if backend.get("error"):
+            lines.append(f"  {name:<8} unavailable: {backend['error']}")
+            continue
+        lines.append(f"  {name:<8} {backend.get('description') or backend.get('kind') or '-'}")
+        facts: list[tuple[str, Any]] = [
+            ("endpoint", backend.get("endpoint")),
+            ("cluster", backend.get("cluster_id")),
+            ("status", backend.get("status")),
+            ("slurm", backend.get("slurm_version")),
+            ("accounting", backend.get("accounting_mode")),
+            ("default partition", backend.get("default_partition")),
+            ("identity", (backend.get("identity") or {}).get("name")),
+            ("login", (backend.get("login") or {}).get("kind")),
+        ]
+        for label, value in facts:
+            if value not in (None, ""):
+                lines.append(f"  {'':<8} {label}: {value}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_status(status: Mapping[str, Any], region: str) -> str:
-    lines = [f"\n  Slurm — {region} (slurmrestd {status.get('api_version', '?')})", "  " + "-" * 70]
+    lines = [
+        f"\n  Slurm — {region}{_backend_suffix(status)} "
+        f"(slurmrestd {status.get('api_version', '?')})",
+        "  " + "-" * 70,
+    ]
     for controller in status.get("controller") or []:
         state = "UP" if controller.get("responding") else "DOWN"
         latency = controller.get("latency_us")
@@ -483,14 +530,18 @@ def validate_remote_path(path: str) -> str:
 
 
 def run_foreground(cmd: Sequence[str]) -> int:
-    """Run kubectl with inherited stdio (an interactive shell, a tail -f); return its exit code."""
+    """Run a tool with inherited stdio (an interactive shell, a tail -f); return its exit code.
+
+    ``cmd[0]`` is ``kubectl`` for the Slinky login pod and ``aws`` (with the
+    Session Manager plugin behind it) for the PCS login node.
+    """
     try:
-        completed = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - argv built by login_exec_command; list form, no shell=True
+        completed = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - argv built by login_exec_command / cli.pcs_login; list form, no shell=True
             list(cmd), check=False
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
-            "kubectl not found. Install kubectl and ensure it's on your PATH."
+            f"{cmd[0]} not found. Install {cmd[0]} and ensure it's on your PATH."
         ) from exc
     return int(completed.returncode)
 
