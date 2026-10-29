@@ -131,6 +131,10 @@ _GRAVITON_FAMILY_PATTERN = re.compile(r"^[a-z]+\d+g[a-z]*$")
 AVAILABILITY_ZONE_PATTERN = re.compile(r"^[a-z]{2}(-gov|-iso[a-z]?)?-[a-z]+-\d[a-z]$")
 #: POSIX user names as useradd accepts them.
 POSIX_NAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+#: Where ``identity.dir`` may point when the managed cluster mounts the
+#: shared EFS home: one directory straight under ``/home``, the one the
+#: ``ensure-identity-home`` lifecycle action creates on every node.
+EFS_HOME_DIR_PATTERN = re.compile(r"^/home/[a-z_][a-z0-9_-]{0,31}$")
 #: Slurm parameter names (``Features``, ``MaxTime``, ``Default``...).
 SLURM_PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}$")
 #: gres.conf record attributes PCS accepts in ``gresCustomSettings``.
@@ -172,10 +176,15 @@ NODE_GROUP_DEFAULTS: dict[str, Any] = {
     "availability_zones": [],
     # "sample" (PCS sample AMI), "dlami" (PCS-ready DLAMI) or an ami- id.
     "ami": "sample",
-    # Elastic Fabric Adapter interfaces on every network card (EFA-capable
-    # instance types only; preflight checks the type) and a cluster
-    # placement group for the group's instances.
+    # Elastic Fabric Adapter: one EFA interface per network card, efa_interfaces
+    # cards (p5-class instances have 32, most EFA types one; the preflight
+    # checks the type's maximum). EFA-capable instance types only, and the
+    # group must name exactly one availability zone (EFA traffic stays in
+    # one subnet).
     "efa": False,
+    "efa_interfaces": 1,
+    # A cluster placement group for the group's instances. A placement group
+    # lives in one Availability Zone, so the group must name exactly one.
     "placement_group": False,
     # Node-group level slurm.conf overrides (CpuSpecList, Features, Gres,
     # MemSpecLimit, Parameters, RealMemory, Sockets, Weight) and gres.conf
@@ -514,6 +523,15 @@ def _validate_node_group(raw: object, index: int) -> dict[str, Any]:
             f"{path}.instance_types must name exactly the Capacity Block's instance type when "
             "capacity_reservation.type is capacity_block"
         )
+    group["availability_zones"] = _validate_availability_zones(
+        group["availability_zones"], f"{path}.availability_zones"
+    )
+    if reservation and len(group["availability_zones"]) != 1:
+        raise PcsConfigError(
+            f"{path}.capacity_reservation needs exactly one availability zone in "
+            f"availability_zones (a reservation lives in one zone; the node group's subnets must "
+            f"match it), got {group['availability_zones'] or 'none'}"
+        )
     strategy = group["spot_allocation_strategy"]
     if strategy is not None:
         _require_choice(
@@ -525,12 +543,22 @@ def _validate_node_group(raw: object, index: int) -> dict[str, Any]:
                 f"(purchase_option is {purchase!r})"
             )
 
-    group["availability_zones"] = _validate_availability_zones(
-        group["availability_zones"], f"{path}.availability_zones"
-    )
     group["ami"] = _validate_ami(group["ami"], f"{path}.ami")
     _require_bool(group["efa"], f"{path}.efa")
+    _require_int(group["efa_interfaces"], (1, 64), f"{path}.efa_interfaces")
     _require_bool(group["placement_group"], f"{path}.placement_group")
+    if group["efa"] and len(group["availability_zones"]) != 1:
+        raise PcsConfigError(
+            f"{path}.efa needs exactly one availability zone in availability_zones (EFA "
+            f"OS-bypass traffic does not cross subnets, and the regional VPC has one private "
+            f"subnet per zone), got {group['availability_zones'] or 'none'}"
+        )
+    if group["placement_group"] and len(group["availability_zones"]) != 1:
+        raise PcsConfigError(
+            f"{path}.placement_group needs exactly one availability zone in "
+            f"availability_zones (a cluster placement group lives in one zone), got "
+            f"{group['availability_zones'] or 'none'}"
+        )
     group["slurm_custom_settings"] = _validate_custom_settings(
         group["slurm_custom_settings"], f"{path}.slurm_custom_settings"
     )
@@ -617,7 +645,9 @@ def _validate_queues(raw: object, node_group_names: set[str]) -> list[dict[str, 
     return queues
 
 
-def _validate_identity(raw: object, *, home_required: bool) -> dict[str, Any]:
+def _validate_identity(
+    raw: object, *, home_required: bool, home_on_efs: bool = False
+) -> dict[str, Any]:
     path = "pcs.identity"
     block = _require_object(raw, path)
     _reject_unknown_keys(block, PCS_DEFAULTS["identity"].keys(), path)
@@ -640,11 +670,17 @@ def _validate_identity(raw: object, *, home_required: bool) -> dict[str, Any]:
                 f"{path}.dir is required when pcs.managed.storage.home is 'none': without the "
                 "shared /home the default /home/<name> cannot be assumed to exist on every node"
             )
-        identity["dir"] = f"/home/{name}"
+        identity["dir"] = f"{PCS_HOME_MOUNT_PATH}/{name}"
     else:
         directory = _require_nonempty_string(identity["dir"], f"{path}.dir")
         if not directory.startswith("/"):
             raise PcsConfigError(f"{path}.dir must be an absolute path, got {directory!r}")
+        if home_on_efs and not EFS_HOME_DIR_PATTERN.match(directory):
+            raise PcsConfigError(
+                f"{path}.dir must be a directory straight under {PCS_HOME_MOUNT_PATH} (the "
+                f"shared EFS home the managed cluster mounts, where the node lifecycle action "
+                f"creates it), got {directory!r}"
+            )
         identity["dir"] = directory
     shell = _require_nonempty_string(identity["shell"], f"{path}.shell")
     if not shell.startswith("/"):
@@ -720,6 +756,11 @@ def _validate_managed(raw: object, *, fsx_enabled: bool) -> dict[str, Any]:
     _require_bool(managed["lifecycle_logs"]["enabled"], f"{path}.lifecycle_logs.enabled")
     for key in ("slurm_custom_settings", "slurmdbd_custom_settings", "cgroup_custom_settings"):
         managed[key] = _validate_custom_settings(managed[key], f"{path}.{key}")
+    if managed["slurmdbd_custom_settings"] and not accounting["enabled"]:
+        raise PcsConfigError(
+            f"{path}.slurmdbd_custom_settings needs accounting.enabled: slurmdbd only runs "
+            "with accounting on"
+        )
     _require_choice(managed["removal_policy"], ("destroy", "retain"), f"{path}.removal_policy")
     return managed
 
@@ -768,8 +809,13 @@ def validate_pcs_config(raw: object, *, fsx_enabled: bool = False) -> dict[str, 
         config["endpoint_cidr"] = str(network)
 
     config["managed"] = _validate_managed(config["managed"], fsx_enabled=fsx_enabled)
-    home_required = config["mode"] == "managed" and config["managed"]["storage"]["home"] == "none"
-    config["identity"] = _validate_identity(config["identity"], home_required=home_required)
+    home = config["managed"]["storage"]["home"]
+    managed = config["mode"] == "managed"
+    config["identity"] = _validate_identity(
+        config["identity"],
+        home_required=managed and home == "none",
+        home_on_efs=managed and home == "efs",
+    )
     return config
 
 

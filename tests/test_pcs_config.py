@@ -104,6 +104,7 @@ class TestDefaults:
         assert group["availability_zones"] == []
         assert group["ami"] == "sample"
         assert group["efa"] is False
+        assert group["efa_interfaces"] == 1
         assert group["placement_group"] is False
         assert group["slurm_custom_settings"] == {}
         assert group["gres_custom_settings"] == []
@@ -238,11 +239,27 @@ class TestIdentity:
         assert _validate({"identity": {"gids": [100, 200]}})["identity"]["gids"] == [100, 200]
 
     def test_dir_defaults_to_home_of_name_and_must_be_absolute_when_set(self) -> None:
-        assert _validate({"identity": {"dir": "/scratch/me"}})["identity"]["dir"] == "/scratch/me"
+        # The all-default block is managed mode with the EFS home, where
+        # the directory must sit straight under /home; existing mode and a
+        # managed cluster without the shared home accept any absolute path.
+        assert _validate({"identity": {"dir": "/home/me"}})["identity"]["dir"] == "/home/me"
+        existing = _on(mode="existing", cluster_id="pcs_abc", identity={"dir": "/scratch/me"})
+        assert _validate(existing)["identity"]["dir"] == "/scratch/me"
         with pytest.raises(pc.PcsConfigError, match=r"pcs\.identity\.dir must be an absolute path"):
             _validate({"identity": {"dir": "relative"}})
         with pytest.raises(pc.PcsConfigError, match=r"pcs\.identity\.dir must be a non-empty"):
             _validate({"identity": {"dir": "  "}})
+
+    def test_dir_must_sit_straight_under_home_when_the_managed_cluster_mounts_efs(self) -> None:
+        for directory in ("/scratch/me", "/home/team/me", "/home", "/home/Me"):
+            with pytest.raises(
+                pc.PcsConfigError, match=r"pcs\.identity\.dir must be a directory straight under"
+            ):
+                _validate(_managed() | {"identity": {"dir": directory}})
+        # The directory need not be named after the identity: the lifecycle
+        # action creates whatever /home/<x> the block names.
+        config = _validate(_managed() | {"identity": {"name": "hpc", "dir": "/home/shared-hpc"}})
+        assert config["identity"]["dir"] == "/home/shared-hpc"
 
     def test_dir_is_required_without_a_shared_home_in_managed_mode(self) -> None:
         with pytest.raises(pc.PcsConfigError, match=r"pcs\.identity\.dir is required"):
@@ -388,6 +405,20 @@ class TestManaged:
         assert managed["slurmdbd_custom_settings"] == {"PurgeJobAfter": "90days"}
         assert managed["cgroup_custom_settings"] == {"ConstrainCores": "yes"}
 
+    def test_slurmdbd_settings_need_accounting(self) -> None:
+        with pytest.raises(pc.PcsConfigError, match=r"slurmdbd_custom_settings needs accounting"):
+            _validate(
+                _managed(
+                    accounting={"enabled": False},
+                    slurmdbd_custom_settings={"PurgeJobAfter": "90days"},
+                )
+            )
+        # Accounting off with no slurmdbd settings is fine.
+        assert _validate(_managed(accounting={"enabled": False}))["managed"]["accounting"] == {
+            "enabled": False,
+            "purge_days": 30,
+        }
+
     def test_custom_settings_validation(self) -> None:
         with pytest.raises(pc.PcsConfigError, match=r"slurm_custom_settings must be an object"):
             _validate(_managed(slurm_custom_settings=["a=b"]))
@@ -516,7 +547,10 @@ class TestNodeGroups:
             config = _validate(
                 _managed(
                     **_groups_and_queues(
-                        _group(capacity_reservation={"type": kind, "id": "cr-0123456789abcdef0"})
+                        _group(
+                            availability_zones=["us-east-1a"],
+                            capacity_reservation={"type": kind, "id": "cr-0123456789abcdef0"},
+                        )
                     )
                 )
             )
@@ -535,6 +569,7 @@ class TestNodeGroups:
                     **_groups_and_queues(
                         _group(
                             purchase_option="ONDEMAND",
+                            availability_zones=["us-east-1a"],
                             capacity_reservation={"type": "capacity_block", "id": "cr-0123456789"},
                         )
                     )
@@ -545,6 +580,7 @@ class TestNodeGroups:
                 **_groups_and_queues(
                     _group(
                         purchase_option="ONDEMAND",
+                        availability_zones=["us-east-1a"],
                         capacity_reservation={"type": "odcr", "id": "cr-0123456789"},
                     )
                 )
@@ -711,6 +747,70 @@ class TestNodeGroups:
         with pytest.raises(pc.PcsConfigError, match=r"gco-compute\.scale_down_idle_seconds"):
             _validate(_managed(**_groups_and_queues(_group(scale_down_idle_seconds=0))))
 
+    def test_a_reservation_needs_exactly_one_availability_zone(self) -> None:
+        with pytest.raises(pc.PcsConfigError, match=r"capacity_reservation needs exactly one"):
+            _validate(
+                _managed(
+                    **_groups_and_queues(
+                        _group(capacity_reservation={"type": "odcr", "id": "cr-0123456789"})
+                    )
+                )
+            )
+        with pytest.raises(pc.PcsConfigError, match=r"capacity_reservation needs exactly one"):
+            _validate(
+                _managed(
+                    **_groups_and_queues(
+                        _group(
+                            availability_zones=["us-east-1a", "us-east-1b"],
+                            capacity_reservation={"type": "odcr", "id": "cr-0123456789"},
+                        )
+                    )
+                )
+            )
+
+    def test_a_placement_group_needs_exactly_one_availability_zone(self) -> None:
+        with pytest.raises(pc.PcsConfigError, match=r"placement_group needs exactly one"):
+            _validate(_managed(**_groups_and_queues(_group(placement_group=True))))
+        config = _validate(
+            _managed(
+                **_groups_and_queues(
+                    _group(placement_group=True, availability_zones=["us-east-1a"])
+                )
+            )
+        )
+        assert config["managed"]["node_groups"][0]["placement_group"] is True
+
+    def test_efa_needs_exactly_one_availability_zone(self) -> None:
+        with pytest.raises(pc.PcsConfigError, match=r"gco-compute\.efa needs exactly one"):
+            _validate(_managed(**_groups_and_queues(_group(efa=True))))
+        with pytest.raises(pc.PcsConfigError, match=r"gco-compute\.efa needs exactly one"):
+            _validate(
+                _managed(
+                    **_groups_and_queues(
+                        _group(efa=True, availability_zones=["us-east-1a", "us-east-1b"])
+                    )
+                )
+            )
+
+    def test_efa_interfaces(self) -> None:
+        config = _validate(
+            _managed(
+                **_groups_and_queues(
+                    _group(
+                        instance_types=["p5.48xlarge"],
+                        efa=True,
+                        efa_interfaces=32,
+                        availability_zones=["us-east-1a"],
+                    )
+                )
+            )
+        )
+        group = config["managed"]["node_groups"][0]
+        assert (group["efa"], group["efa_interfaces"]) == (True, 32)
+        assert _validate(None)["managed"]["node_groups"][0]["efa_interfaces"] == 1
+        with pytest.raises(pc.PcsConfigError, match=r"gco-compute\.efa_interfaces must be an"):
+            _validate(_managed(**_groups_and_queues(_group(efa_interfaces=0))))
+
 
 # ---------------------------------------------------------------------------
 # Queues
@@ -775,7 +875,13 @@ class TestQueues:
             _managed(
                 node_groups=[
                     _group(),
-                    _group(name="gpu", instance_types=["g6e.xlarge"], ami="dlami", efa=True),
+                    _group(
+                        name="gpu",
+                        instance_types=["g6e.xlarge"],
+                        ami="dlami",
+                        efa=True,
+                        availability_zones=["us-east-1a"],
+                    ),
                 ],
                 queues=[_queue(), _queue(name="gpu", node_groups=["gpu"], default=False)],
             )

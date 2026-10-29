@@ -140,6 +140,7 @@ from gco.inference_proxy_config import (
     compute_inference_proxy_tls_replacements as _compute_inference_proxy_tls_replacements,
 )
 from gco.manifest_security_policy import validate_manifest_security_policy
+from gco.pcs_config import compute_pcs_replacements, pcs_enabled, validate_pcs_config
 from gco.service_images import discover_service_dockerfiles, service_dockerfile
 from gco.slurm_config import (
     SLURM_ACCOUNTING_BACKUP_PREFIX,
@@ -172,6 +173,7 @@ from gco.stacks.constants import (
     regional_shared_ssm_parameter_prefix,
 )
 from gco.stacks.lambda_assets import lambda_source_code
+from gco.stacks.pcs_cluster import PcsCluster
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-08-30T12:00:00Z
@@ -1173,6 +1175,12 @@ class GCORegionalStack(Stack):
         # Create FSx for Lustre (if enabled) for high-performance storage
         self._create_fsx_lustre()
 
+        # AWS PCS (if enabled): the managed Slurm cluster GCO fronts, or the
+        # facts and grants for one the operator already runs. After EFS and
+        # FSx because managed compute nodes mount them; before the manifests
+        # because the API pod's Deployment carries the cluster id.
+        self._create_pcs()
+
         # Create Valkey Serverless cache (if enabled) for K/V caching
         self._create_valkey_cache()
 
@@ -2027,6 +2035,48 @@ class GCORegionalStack(Stack):
         getter = getattr(self.config, "get_fsx_lustre_config", None)
         fsx = getter(self.deployment_region) if callable(getter) else None
         return bool(fsx.get("enabled")) if isinstance(fsx, dict) else False
+
+    def _pcs_config(self) -> dict[str, Any]:
+        """The validated ``pcs`` block for this region, or the all-default block.
+
+        Same optional-accessor posture as :meth:`_slurm_config`: config
+        doubles without ``get_pcs_config`` (or a ``MagicMock`` returning a
+        non-dict) read as the shipped default (PCS off). The loader applies
+        this region's ``pcs_regions`` overlay and the run-scoped
+        ``feature_enabled_overrides=pcs`` context.
+        """
+        getter = getattr(self.config, "get_pcs_config", None)
+        raw = getter(self.deployment_region) if callable(getter) else None
+        if not isinstance(raw, dict):
+            return validate_pcs_config(None)
+        return raw
+
+    def _create_pcs(self) -> None:
+        """Deploy the ``pcs`` block for this region (see :mod:`gco.stacks.pcs_cluster`).
+
+        ``self.pcs`` is ``None`` when PCS is off; the manifest replacements
+        then carry the always-emitted tokens as empty strings and the API
+        pod answers ``backend=pcs`` with the enablement remedy.
+        """
+        config = self._pcs_config()
+        if not pcs_enabled(config):
+            self.pcs = None
+            return
+        self.pcs = PcsCluster(
+            self,
+            "Pcs",
+            config=config,
+            project_name=self.config.get_project_name(),
+            vpc=self.vpc,
+            eks_cluster_security_group=self.cluster.cluster_security_group,
+            api_role=self.manifest_processor_role,
+            custom_resource_role=self.aws_custom_resource_role,
+            efs_file_system=self.efs_file_system,
+            efs_security_group=self.efs_security_group,
+            fsx_file_system=self.fsx_file_system,
+            fsx_security_group=getattr(self, "fsx_security_group", None),
+            provider_log_group_removal_policy=self.provider_log_group_removal_policy,
+        )
 
     def _tracing_config(self) -> dict[str, Any]:
         """The validated ``tracing`` block (``enabled``, ``sample_ratio``, ...).
@@ -4405,10 +4455,21 @@ class GCORegionalStack(Stack):
         # Slurm: the accounting database, its backup CronJob and the cluster
         # identity render only while the Slinky charts install (the same
         # enablement that resolves {{SLURM_ENABLED}} above).
+        _slurm_enabled = _helm_chart_enabled(_helm_config, _helm_overrides, "slurm")
         image_replacements.update(
-            compute_slurm_replacements(
-                self._slurm_config(),
-                enabled=_helm_chart_enabled(_helm_config, _helm_overrides, "slurm"),
+            compute_slurm_replacements(self._slurm_config(), enabled=_slurm_enabled)
+        )
+        # AWS PCS: the API pod's backend list (both Slurm backends), the
+        # cluster id, identity and default queue (always emitted), plus the
+        # gate and CIDR for post-helm-pcs-network.yaml while PCS is on. The
+        # cluster id is a deploy-time token in managed mode.
+        image_replacements.update(
+            compute_pcs_replacements(
+                self._pcs_config(),
+                enabled=self.pcs is not None,
+                slinky_enabled=_slurm_enabled,
+                cluster_id=self.pcs.cluster_id if self.pcs is not None else "",
+                vpc_cidr=self.vpc.vpc_cidr_block,
             )
         )
 
@@ -4712,6 +4773,10 @@ class GCORegionalStack(Stack):
         converge_trigger.node.add_dependency(self.efs_file_system)
         if self.fsx_file_system:
             converge_trigger.node.add_dependency(self.fsx_file_system)
+        # The API Deployment is rendered with the PCS cluster id, and its role
+        # holds the grants the facts resource resolved; both must exist first.
+        if self.pcs is not None:
+            converge_trigger.node.add_dependency(self.pcs)
         for attr in (
             "_efs_csi_addon_role_update",
             "_fsx_csi_addon_role_update",
