@@ -354,6 +354,9 @@ class PcsBackend:
         try:
             response = self._secrets_client().get_secret_value(**kwargs)
         except Exception as exc:
+            # Only the exception's type name is logged; the message names the
+            # API call, never the key or the secret's contents.
+            # nosemgrep: python-logger-credential-disclosure
             logger.warning(
                 "secretsmanager:GetSecretValue for the PCS JWT key failed: %s", type(exc).__name__
             )
