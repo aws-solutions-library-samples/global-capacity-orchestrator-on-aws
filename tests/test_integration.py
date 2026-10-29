@@ -275,6 +275,12 @@ class TestKubernetesManifests:
             "apiregistration.k8s.io/v1",
             "keda.sh/v1alpha1",
             "monitoring.coreos.com/v1",
+            # The managed AWS PCS cluster's Slurm controller scrape
+            # (post-helm-pcs-observability.yaml): a Prometheus Operator
+            # ScrapeConfig with static targets, which the operator still
+            # serves at v1alpha1. Keep in lockstep with the ScrapeConfig kind
+            # in _MONITORING_CUSTOM_OBJECT_PLURALS in the applier.
+            "monitoring.coreos.com/v1alpha1",
             # The Slurm API's and in-cluster clients' credentials: Token custom
             # resources the slurm-operator mints into Secrets
             # (post-helm-slurm-api-access.yaml); the slinky-slurm-operator
