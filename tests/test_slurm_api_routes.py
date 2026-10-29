@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 from gco.services import slurm_client
 from gco.services.api_routes import slurm as slurm_routes
 from gco.services.api_routes.slurm import router
+from gco.services.slurm_backends import BackendDefaults
 from gco.services.slurm_client import SlurmApiError, SlurmUnavailableError
 
 
@@ -147,12 +148,28 @@ ACCOUNTING_JOB = {
 }
 
 
+class _BackendStub:
+    """The backend facts the routes read: name, submission defaults, description."""
+
+    def __init__(self, name: str = "slinky", working_directory: str = "/home/slurm") -> None:
+        self.name = name
+        self.defaults = BackendDefaults(partition=None, working_directory=working_directory)
+        self.description: dict[str, Any] = {"name": name, "kind": name, "endpoint": "http://x"}
+        self.describe_error: Exception | None = None
+
+    async def describe(self) -> dict[str, Any]:
+        if self.describe_error is not None:
+            raise self.describe_error
+        return dict(self.description)
+
+
 class _ClientStub:
     """Stands in for ``SlurmRestClient``: canned answers, recorded calls."""
 
     version = "v0.0.44"
 
-    def __init__(self) -> None:
+    def __init__(self, backend: str = "slinky") -> None:
+        self.backend = _BackendStub(backend)
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self.answers: dict[str, Any] = {
             "ping": {
@@ -213,7 +230,7 @@ class _ClientStub:
 @pytest.fixture
 def stub(monkeypatch: pytest.MonkeyPatch) -> _ClientStub:
     double = _ClientStub()
-    monkeypatch.setattr(slurm_client, "get_client", lambda: double)
+    monkeypatch.setattr(slurm_client, "get_client", lambda backend=None: double)
     return double
 
 
@@ -734,6 +751,7 @@ class TestCancel:
         assert result.status_code == 200
         assert result.json() == {
             "timestamp": result.json()["timestamp"],
+            "backend": "slinky",
             "job_id": 11,
             "cancelled": True,
         }

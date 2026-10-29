@@ -537,8 +537,9 @@ class TestProcessWideClient:
 
         assert first is second
         assert first.base_url == "http://restd:6820"
-        assert first.user == "slurm"
-        assert isinstance(first.token_provider, SecretTokenProvider)
+        assert first.backend.name == "slinky"
+        assert first.backend.user == "slurm"
+        assert isinstance(first.backend.token_provider, SecretTokenProvider)
 
         slurm_client.reset_client()
         assert slurm_client.get_client() is not first

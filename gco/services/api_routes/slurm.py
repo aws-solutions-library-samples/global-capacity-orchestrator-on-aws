@@ -2,22 +2,29 @@
 
 The manifest API is the cluster's authenticated ingress (HMAC middleware plus
 the IAM-authorized API Gateway in front), so Slurm is exposed here and
-proxied to slurmrestd inside ``gco-jobs`` through :mod:`gco.services.slurm_client`.
-Callers never reach slurmrestd or hold a Slurm credential: the API acts as
-Slurm's own user with an operator-minted token and stamps the submitting
-caller into each job's ``comment`` for accounting attribution.
+proxied to slurmrestd through :mod:`gco.services.slurm_client`. Two Slurm
+backends can stand behind the routes (:mod:`gco.services.slurm_backends`):
+the Slinky cluster on the EKS cluster (``helm.slurm``) and an AWS PCS cluster
+in the regional VPC (``pcs``). Callers never reach slurmrestd or hold a Slurm
+credential: the API acts as one fixed Slurm identity per backend and stamps
+the submitting caller into each job's ``comment`` for accounting attribution.
 
+- ``GET    /api/v1/slurm/backends``             — the enabled backends and their facts
 - ``GET    /api/v1/slurm/status``               — controller reachability, partitions, node and job counts
 - ``GET    /api/v1/slurm/partitions``           — partitions with their state, limits and node counts
-- ``GET    /api/v1/slurm/nodes``                — Slurm nodes (the slurmd worker pods) with state and resources
+- ``GET    /api/v1/slurm/nodes``                — Slurm nodes with state and resources
 - ``GET    /api/v1/slurm/jobs``                 — the queue (filter by state, partition, name)
 - ``POST   /api/v1/slurm/jobs``                 — submit a batch script (sbatch)
 - ``GET    /api/v1/slurm/jobs/{job_id}``        — one job (from slurmdbd once slurmctld forgets it)
 - ``DELETE /api/v1/slurm/jobs/{job_id}``        — cancel (scancel)
 - ``GET    /api/v1/slurm/accounting/jobs``      — slurmdbd job history (sacct)
 
-When Slurm is not deployed (``helm.slurm.enabled`` false) every route answers
-404 with the remedy; an unreachable slurmrestd or missing token answers 503.
+Every route except ``/backends`` takes an optional ``backend`` query parameter
+(``slinky`` or ``pcs``). With one backend enabled it may be omitted; with both
+enabled it is required (400 otherwise); naming a backend that is not deployed
+answers 404 with its enablement remedy. Every response carries ``backend``.
+When no backend is deployed every route answers 404 with the remedy; an
+unreachable slurmrestd or missing credential answers 503.
 """
 
 from __future__ import annotations
@@ -33,7 +40,6 @@ from pydantic import BaseModel, Field, field_validator
 
 from gco.services import slurm_client
 from gco.services.structured_logging import sanitize_log_value
-from gco.slurm_config import SLURM_DEFAULT_WORKING_DIRECTORY
 
 router = APIRouter(prefix="/api/v1/slurm", tags=["Slurm"])
 logger = logging.getLogger(__name__)
@@ -53,6 +59,15 @@ _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: knows it; otherwise the comment records the API itself.
 _CALLER_HEADERS = ("x-gco-caller", "x-gco-caller-arn")
 
+#: The ``backend`` query parameter every route but ``/backends`` takes.
+BackendParam = Query(
+    None,
+    description=(
+        "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). "
+        "Optional when one backend is enabled; required when both are."
+    ),
+)
+
 
 class SlurmJobSubmission(BaseModel):
     """Request body for ``POST /api/v1/slurm/jobs`` (the sbatch equivalent)."""
@@ -66,10 +81,10 @@ class SlurmJobSubmission(BaseModel):
     gpus_per_node: int = Field(0, ge=0, le=64, description="GPUs per node (--gpus-per-node)")
     memory_mb: int | None = Field(None, ge=1, description="Memory per node in MiB (--mem)")
     time_limit: str | None = Field(None, description="Wall time (--time), e.g. 01:00:00")
-    working_directory: str = Field(
-        SLURM_DEFAULT_WORKING_DIRECTORY,
-        description="Working directory on the worker (default: the slurm user's home on the "
-        "shared filesystem, where slurm-<jobid>.out lands)",
+    working_directory: str | None = Field(
+        None,
+        description="Working directory on the worker (default: the backend's Slurm user home on "
+        "the shared filesystem, where slurm-<jobid>.out lands)",
     )
     environment: dict[str, str] = Field(default_factory=dict, description="Extra environment")
     comment: str | None = Field(None, max_length=512, description="Free-text comment")
@@ -109,8 +124,8 @@ class SlurmJobSubmission(BaseModel):
 
     @field_validator("working_directory")
     @classmethod
-    def _cwd_shape(cls, value: str) -> str:
-        if not value.startswith("/") or "\n" in value:
+    def _cwd_shape(cls, value: str | None) -> str | None:
+        if value is not None and (not value.startswith("/") or "\n" in value):
             raise ValueError("working_directory must be an absolute path")
         return value
 
@@ -127,11 +142,15 @@ class SlurmJobSubmission(BaseModel):
         return value
 
 
-def _client() -> slurm_client.SlurmRestClient:
+def _client(backend: str | None) -> slurm_client.SlurmRestClient:
     try:
-        return slurm_client.get_client()
-    except slurm_client.SlurmDisabledError as exc:
+        return slurm_client.get_client(backend)
+    except (slurm_client.SlurmDisabledError, slurm_client.SlurmBackendSelectionError) as exc:
         raise slurm_client.http_exception_for(exc) from exc
+
+
+def _backend_name(client: slurm_client.SlurmRestClient) -> str:
+    return str(client.backend.name)
 
 
 def _raise(error: Exception, context: str) -> HTTPException:
@@ -156,8 +175,11 @@ def _raise(error: Exception, context: str) -> HTTPException:
     return http_error
 
 
-def _envelope(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"timestamp": datetime.now(UTC).isoformat(), **payload}
+def _envelope(payload: dict[str, Any], *, backend: str | None = None) -> dict[str, Any]:
+    body = {"timestamp": datetime.now(UTC).isoformat()}
+    if backend is not None:
+        body["backend"] = backend
+    return {**body, **payload}
 
 
 def _number(value: Any) -> int | None:
@@ -384,10 +406,40 @@ def _caller_identity(request: Request) -> str:
     return "gco-api"
 
 
+@router.get("/backends")
+async def slurm_backends() -> Response:
+    """The Slurm backends enabled in this region with what each one is and where.
+
+    Answers 200 with an empty list when none is deployed, so a client can tell
+    "Slurm is off here" from "the API is down" without parsing a 404. Each
+    entry's ``describe()`` is best-effort: a backend whose discovery fails
+    still appears, with the failure in ``error`` instead of its facts, so one
+    broken backend never hides the other.
+    """
+    backends: list[dict[str, Any]] = []
+    for name in slurm_client.enabled_backends():
+        try:
+            client = slurm_client.get_client(name)
+            backends.append(await client.backend.describe())
+        except Exception as exc:
+            http_error = _raise(exc, f"describing backend {name}")
+            backends.append({"name": name, "error": http_error.detail})
+    return JSONResponse(
+        status_code=200,
+        content=_envelope(
+            {
+                "backends": backends,
+                "default": backends[0]["name"] if len(backends) == 1 else None,
+                "selection_required": len(backends) > 1,
+            }
+        ),
+    )
+
+
 @router.get("/status")
-async def slurm_status() -> Response:
+async def slurm_status(backend: str | None = BackendParam) -> Response:
     """Controller reachability plus partition, node and job counts for this region."""
-    client = _client()
+    client = _client(backend)
     try:
         ping = await client.ping()
         partitions = await client.partitions()
@@ -410,11 +462,16 @@ async def slurm_status() -> Response:
         for state in _states(node.get("state")) or ["UNKNOWN"]:
             node_states[state] = node_states.get(state, 0) + 1
     pings = [p for p in ping.get("pings", []) if isinstance(p, dict)]
+    try:
+        facts = await client.backend.describe()
+    except Exception as exc:
+        raise _raise(exc, "describing backend") from exc
     return JSONResponse(
         status_code=200,
         content=_envelope(
             {
                 "enabled": True,
+                "cluster": facts,
                 "controller": [
                     {
                         "hostname": p.get("hostname"),
@@ -436,15 +493,16 @@ async def slurm_status() -> Response:
                 },
                 "jobs": {"total": len(job_items), "by_state": job_states},
                 "api_version": client.version,
-            }
+            },
+            backend=_backend_name(client),
         ),
     )
 
 
 @router.get("/partitions")
-async def slurm_partitions() -> Response:
+async def slurm_partitions(backend: str | None = BackendParam) -> Response:
     """Every Slurm partition with its state, time limit and node count."""
-    client = _client()
+    client = _client(backend)
     try:
         payload = await client.partitions()
     except Exception as exc:
@@ -458,7 +516,8 @@ async def slurm_partitions() -> Response:
                     for p in payload.get("partitions", [])
                     if isinstance(p, dict)
                 ]
-            }
+            },
+            backend=_backend_name(client),
         ),
     )
 
@@ -466,9 +525,10 @@ async def slurm_partitions() -> Response:
 @router.get("/nodes")
 async def slurm_nodes(
     partition: str | None = Query(None, description="Only nodes in this partition"),
+    backend: str | None = BackendParam,
 ) -> Response:
-    """Slurm nodes (the slurmd worker pods) with state, resources and gres."""
-    client = _client()
+    """Slurm nodes (slurmd worker pods or PCS instances) with state, resources and gres."""
+    client = _client(backend)
     try:
         payload = await client.nodes()
     except Exception as exc:
@@ -476,7 +536,9 @@ async def slurm_nodes(
     nodes = [_summarize_node(n) for n in payload.get("nodes", []) if isinstance(n, dict)]
     if partition:
         nodes = [n for n in nodes if partition in n["partitions"]]
-    return JSONResponse(status_code=200, content=_envelope({"nodes": nodes}))
+    return JSONResponse(
+        status_code=200, content=_envelope({"nodes": nodes}, backend=_backend_name(client))
+    )
 
 
 @router.get("/jobs")
@@ -485,9 +547,10 @@ async def slurm_jobs(
     partition: str | None = Query(None, description="Partition filter"),
     name: str | None = Query(None, description="Exact job name filter"),
     limit: int = Query(200, ge=1, le=5000, description="Maximum jobs returned"),
+    backend: str | None = BackendParam,
 ) -> Response:
     """The live queue as slurmctld sees it (pending, running and recently finished jobs)."""
-    client = _client()
+    client = _client(backend)
     try:
         payload = await client.jobs()
     except Exception as exc:
@@ -501,18 +564,26 @@ async def slurm_jobs(
     if name:
         jobs = [j for j in jobs if j["name"] == name]
     return JSONResponse(
-        status_code=200, content=_envelope({"jobs": jobs[:limit], "total": len(jobs)})
+        status_code=200,
+        content=_envelope(
+            {"jobs": jobs[:limit], "total": len(jobs)}, backend=_backend_name(client)
+        ),
     )
 
 
 @router.post("/jobs", status_code=201)
-async def slurm_submit(submission: SlurmJobSubmission, request: Request) -> Response:
+async def slurm_submit(
+    submission: SlurmJobSubmission, request: Request, backend: str | None = BackendParam
+) -> Response:
     """Submit a batch script to Slurm (sbatch through slurmrestd)."""
-    client = _client()
+    client = _client(backend)
     caller = _caller_identity(request)
     comment = f"gco:{caller}"
     if submission.comment:
         comment = f"{comment} {submission.comment}"
+    defaults = client.backend.defaults
+    partition = submission.partition or defaults.partition
+    working_directory = submission.working_directory or defaults.working_directory
     # slurmrestd's job_desc_msg (v0.0.44): environment is a list of NAME=VALUE
     # strings, a whole-node request is shared=none (sbatch --exclusive), and
     # PATH must be given because the batch step inherits no environment.
@@ -522,12 +593,12 @@ async def slurm_submit(submission: SlurmJobSubmission, request: Request) -> Resp
         "nodes": str(submission.nodes),
         "tasks": submission.tasks,
         "cpus_per_task": submission.cpus_per_task,
-        "current_working_directory": submission.working_directory,
+        "current_working_directory": working_directory,
         "comment": comment[:1024],
         "environment": [f"{key}={value}" for key, value in environment.items()],
     }
-    if submission.partition:
-        job["partition"] = submission.partition
+    if partition:
+        job["partition"] = partition
     if submission.gpus_per_node:
         job["tres_per_node"] = f"gres/gpu:{submission.gpus_per_node}"
     if submission.memory_mb is not None:
@@ -542,9 +613,10 @@ async def slurm_submit(submission: SlurmJobSubmission, request: Request) -> Resp
         raise _raise(exc, "submitting job") from exc
     job_id = payload.get("job_id")
     logger.info(
-        "Submitted Slurm job %s (%s) for %s",
+        "Submitted Slurm job %s (%s) to %s for %s",
         job_id,
         sanitize_log_value(submission.name),
+        _backend_name(client),
         sanitize_log_value(caller),
     )
     return JSONResponse(
@@ -554,10 +626,12 @@ async def slurm_submit(submission: SlurmJobSubmission, request: Request) -> Resp
                 "job_id": job_id,
                 "step_id": payload.get("step_id"),
                 "name": submission.name,
-                "partition": submission.partition,
+                "partition": partition,
+                "working_directory": working_directory,
                 "submitted_by": caller,
                 "message": payload.get("job_submit_user_msg") or "",
-            }
+            },
+            backend=_backend_name(client),
         ),
     )
 
@@ -587,7 +661,7 @@ def _time_limit_minutes(value: str) -> dict[str, Any]:
 
 
 @router.get("/jobs/{job_id}")
-async def slurm_job(job_id: int) -> Response:
+async def slurm_job(job_id: int, backend: str | None = BackendParam) -> Response:
     """One job: slurmctld's live view, else slurmdbd's record once the controller forgot it.
 
     slurmctld answers "Invalid job id" (rc 2017) for a job older than
@@ -595,7 +669,7 @@ async def slurm_job(job_id: int) -> Response:
     ``source: slurmdbd`` so ``gco slurm job`` and ``gco slurm output`` keep
     working for finished jobs (verified live: a ten-minute-old job).
     """
-    client = _client()
+    client = _client(backend)
     try:
         payload = await client.job(job_id)
     except slurm_client.SlurmApiError as exc:
@@ -607,7 +681,9 @@ async def slurm_job(job_id: int) -> Response:
     jobs = [j for j in payload.get("jobs", []) if isinstance(j, dict)]
     if jobs:
         job = {**_summarize_job(jobs[0]), "source": "slurmctld"}
-        return JSONResponse(status_code=200, content=_envelope({"job": job}))
+        return JSONResponse(
+            status_code=200, content=_envelope({"job": job}, backend=_backend_name(client))
+        )
     try:
         accounted = await client.accounting_job(job_id)
     except Exception as exc:
@@ -616,7 +692,10 @@ async def slurm_job(job_id: int) -> Response:
     if not records:
         raise HTTPException(status_code=404, detail=f"Slurm job {job_id} not found")
     return JSONResponse(
-        status_code=200, content=_envelope({"job": _accounting_record_as_job(records[0])})
+        status_code=200,
+        content=_envelope(
+            {"job": _accounting_record_as_job(records[0])}, backend=_backend_name(client)
+        ),
     )
 
 
@@ -624,15 +703,19 @@ async def slurm_job(job_id: int) -> Response:
 async def slurm_cancel(
     job_id: int,
     signal: str | None = Query(None, pattern=r"^[A-Z0-9]{1,16}$", description="Signal name"),
+    backend: str | None = BackendParam,
 ) -> Response:
     """Cancel a job (scancel), optionally with a specific signal."""
-    client = _client()
+    client = _client(backend)
     try:
         await client.cancel(job_id, signal=signal)
     except Exception as exc:
         raise _raise(exc, f"cancelling job {job_id}") from exc
-    logger.info("Cancelled Slurm job %s", sanitize_log_value(job_id))
-    return JSONResponse(status_code=200, content=_envelope({"job_id": job_id, "cancelled": True}))
+    logger.info("Cancelled Slurm job %s on %s", sanitize_log_value(job_id), _backend_name(client))
+    return JSONResponse(
+        status_code=200,
+        content=_envelope({"job_id": job_id, "cancelled": True}, backend=_backend_name(client)),
+    )
 
 
 @router.get("/accounting/jobs")
@@ -644,6 +727,7 @@ async def slurm_accounting_jobs(
     state: str | None = Query(None, pattern=r"^[A-Za-z_,]{1,64}$"),
     job_name: str | None = Query(None, pattern=r"^[A-Za-z0-9_.:+-]{1,128}$"),
     limit: int = Query(200, ge=1, le=5000),
+    backend: str | None = BackendParam,
 ) -> Response:
     """Job history from slurmdbd (sacct); requires accounting to be enabled.
 
@@ -651,7 +735,7 @@ async def slurm_accounting_jobs(
     matches only jobs in that state right now; the end defaults to ``now`` so
     ``state=COMPLETED`` returns the window's completed jobs (verified live).
     """
-    client = _client()
+    client = _client(backend)
     params: dict[str, str] = {}
     if start:
         params["start_time"] = start
@@ -673,5 +757,8 @@ async def slurm_accounting_jobs(
         raise _raise(exc, "reading accounting") from exc
     jobs = [_summarize_accounting_job(j) for j in payload.get("jobs", []) if isinstance(j, dict)]
     return JSONResponse(
-        status_code=200, content=_envelope({"jobs": jobs[:limit], "total": len(jobs)})
+        status_code=200,
+        content=_envelope(
+            {"jobs": jobs[:limit], "total": len(jobs)}, backend=_backend_name(client)
+        ),
     )
