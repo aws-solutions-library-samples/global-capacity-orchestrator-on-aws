@@ -252,6 +252,7 @@ rendered as spec sheets and as the interaction diagram in
   - [cert-manager](https://cert-manager.io/docs/)
   - [trust-manager](https://cert-manager.io/docs/trust/trust-manager/) when MLflow deploys (it publishes the internal CA to MLflow's clients)
   - Slurm/Slinky and [YuniKorn](https://yunikorn.apache.org/) only when their opt-in flags are enabled
+  - outside Kubernetes, an [AWS PCS](PCS.md) Slurm cluster the regional stack creates (or connects to) when `pcs.enabled` is on: the API pod reaches its controller's slurmrestd over the regional VPC, and the managed cluster's compute nodes mount the regional EFS and FSx file systems
   - kube-prometheus-stack when cluster observability is enabled
   - OpenCost when cost monitoring is enabled (after kube-prometheus-stack,
     whose [Prometheus](https://prometheus.io/docs/introduction/overview/) Operator CRDs its ServiceMonitor needs)
@@ -523,7 +524,11 @@ write `gco-jobs/gco-internal-ca`.
   policy cannot admit the probes and refuse the pods.
 - **Slurm REST** (slurmrestd, 6820) and the **Ray dashboard** (8265), which
   their upstream operators and clients drive over plain HTTP inside
-  `gco-jobs`, fenced by NetworkPolicy.
+  `gco-jobs`, fenced by NetworkPolicy. The [AWS PCS](PCS.md) controller's
+  slurmrestd is the same protocol on an ENI in the regional VPC: the API pod's
+  egress to it is fenced to `pcs.endpoint_cidr` (the VPC by default) on 6820,
+  the PCS security group admits only the EKS cluster security group, and the
+  API authenticates with a JWT it mints from the cluster's signing key.
 - **Mooncake** inside `gco-inference`: the master's metadata server (8080) and
   RPC port, the KV-cache transfer between role pods, and the model servers' own
   ports that those side channels and the kubelet's probes use.
