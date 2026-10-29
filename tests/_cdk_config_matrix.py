@@ -932,6 +932,14 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
         "validating, so it reaches the same loader path the tracing-* entries "
         "above vary; the parse and merge are pinned in tests/test_config_loader.py."
     ),
+    "pcs_overrides": (
+        "Run-scoped sibling of the pcs block, like eks_capabilities_overrides: a "
+        "JSON object the live-validation harness deep-merges over pcs (after the "
+        "pcs_regions overlay) for one deploy, so every release run exercises the "
+        "managed cluster with metrics on. _raw_pcs_config merges it before "
+        "validating, so it reaches the same loader path the pcs-* entries above "
+        "vary; the parse and merge order are pinned in tests/test_pcs_config.py."
+    ),
 }
 
 
