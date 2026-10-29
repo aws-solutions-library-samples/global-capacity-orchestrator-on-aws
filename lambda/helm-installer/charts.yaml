@@ -837,6 +837,9 @@ charts:
           podMonitorSelectorNilUsesHelmValues: false
           ruleSelectorNilUsesHelmValues: false
           probeSelectorNilUsesHelmValues: false
+          # ScrapeConfig (static targets outside the cluster): the AWS PCS
+          # controller scrape in post-helm-pcs-observability.yaml.
+          scrapeConfigSelectorNilUsesHelmValues: false
           storageSpec:
             volumeClaimTemplate:
               spec:

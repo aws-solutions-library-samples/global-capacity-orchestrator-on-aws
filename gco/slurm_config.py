@@ -960,15 +960,23 @@ GRES_CONF = "AutoDetect=nvidia\n"
 #: 1-CPU job read as idle, KEDA scaled the NodeSet to zero after the cooldown,
 #: and the operator drained the busy node while its job ran (observed live,
 #: 2026-10-28).
+#:
+#: Every selector names the scrape job (the controller Service the
+#: gco-slurm-controller ServiceMonitor targets): the AWS PCS backend's
+#: controller, when its metrics are on, serves identically named series into
+#: the same Prometheus under its own job, and an unscoped sum would scale
+#: Slinky's workers for PCS's queue.
+SLURM_METRICS_JOB = SLURM_CONTROLLER_NAME
+_PARTITION_SELECTOR = f'{{{{job="{SLURM_METRICS_JOB}", partition="{{partition}}"}}}}'
 _BUSY_NODES = (
-    '(sum(slurm_partition_nodes_alloc{{partition="{partition}"}}) or vector(0)) + '
-    '(sum(slurm_partition_nodes_mixed{{partition="{partition}"}}) or vector(0))'
+    f"(sum(slurm_partition_nodes_alloc{_PARTITION_SELECTOR}) or vector(0)) + "
+    f"(sum(slurm_partition_nodes_mixed{_PARTITION_SELECTOR}) or vector(0))"
 )
 PENDING_JOBS_QUERY = (
-    '(sum(slurm_partition_jobs_pending{{partition="{partition}"}}) or vector(0)) + ' + _BUSY_NODES
+    f"(sum(slurm_partition_jobs_pending{_PARTITION_SELECTOR}) or vector(0)) + " + _BUSY_NODES
 )
 LARGEST_PENDING_JOB_QUERY = (
-    '(max(slurm_partition_jobs_max_job_nodes_nohold{{partition="{partition}"}}) or vector(0)) + '
+    f"(max(slurm_partition_jobs_max_job_nodes_nohold{_PARTITION_SELECTOR}) or vector(0)) + "
     + _BUSY_NODES
 )
 

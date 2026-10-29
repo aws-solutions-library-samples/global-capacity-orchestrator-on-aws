@@ -11,6 +11,7 @@ GCO can run Slurm on [AWS Parallel Computing Service](https://docs.aws.amazon.co
 - [Using the Cluster](#using-the-cluster)
 - [Node Groups and Queues](#node-groups-and-queues)
 - [Storage](#storage)
+- [Monitoring](#monitoring)
 - [Security](#security)
 - [Preflight](#preflight)
 - [Compared with Slurm on EKS (Slinky)](#compared-with-slurm-on-eks-slinky)
@@ -91,7 +92,8 @@ Managed mode, per Region (`gco/stacks/pcs_cluster.py`):
 | `AWS::PCS::ComputeNodeGroup` | One per `node_groups` entry plus the `login` group; the node group's name is its `name` |
 | `AWS::PCS::Queue` | One per `queues` entry; exactly one is Slurm's default partition |
 | EFS access point | `/pcs/home` on the regional file system, owned by the identity, mounted at `/home` (`storage.home: efs`) |
-| AMI lookup | A custom-resource Lambda (`lambda/pcs-ami-lookup`) that resolves `sample` and `dlami` to the newest AMI for the cluster's Slurm version and the node group's architecture |
+| Lookups | A custom-resource Lambda (`lambda/pcs-lookup`) that resolves `sample` and `dlami` to the newest AMI for the cluster's Slurm version and the node group's architecture and, with `metrics.enabled`, the controller's address for the metrics scrape |
+| Metrics (`metrics.enabled`) | The cluster is created with `MetricsType=metrics/openmetrics` and `CommunicationParameters=enable_http`, the security group admits tcp/6817 from the EKS cluster security group, and a Prometheus `ScrapeConfig` targets the controller; see [Monitoring](#monitoring) |
 | Lifecycle actions | PCS's maintained scripts (`configure-cloudwatch-logs`, `mount-efs`, `mount-fsx-lustre`, pinned v1.0.0) and GCO's `ensure-identity-home.sh`, run on every boot |
 | Stack outputs | `PcsClusterId`, `PcsClusterName`, `PcsMode`, `PcsSlurmVersion`, `PcsRestApiMode`, `PcsRestApiPort`, `PcsSecurityGroupId`, `PcsNodeRoleArn`, `PcsLoginNodeGroupId` (the keys `gco stacks pcs status` and `gco slurm shell` read) |
 
@@ -161,6 +163,16 @@ Every key is validated at synth by `gco/pcs_config.py` with the offending path i
 - **`/scratch`** (`storage.scratch: auto`, the default): FSx for Lustre when the Region has `fsx_lustre` on, mounted by PCS's `mount-fsx-lustre` script; `fsx` requires it (synth fails without it), `none` never mounts it.
 - **Lifecycle logs** (`lifecycle_logs.enabled`, on by default): PCS's `configure-cloudwatch-logs` script forwards each node's lifecycle-action output to CloudWatch Logs under `/aws/pcs/<cluster id>/lifecycle`, the first place to look when a node fails to join.
 
+## Monitoring
+
+`pcs.managed.metrics.enabled` (off by default) scrapes the managed cluster's Slurm metrics into the in-cluster Prometheus, next to the Slinky cluster's, when `cluster_observability` is on. PCS serves Slurm's OpenMetrics endpoints (`/metrics/jobs`, `/metrics/nodes`, `/metrics/partitions`, `/metrics/scheduler`) from slurmctld's own port, 6817, on Slurm 25.11 and later once three things hold ([Slurm metrics in AWS PCS](https://docs.aws.amazon.com/pcs/latest/userguide/slurm-metrics.html)): the cluster's Slurm settings carry `MetricsType=metrics/openmetrics` and `CommunicationParameters=enable_http`, `PrivateData` is unset, and the security group admits HTTP on 6817 from the scraper. The regional stack does all three: it creates the cluster with the two settings (merging `enable_http` into any `CommunicationParameters` you set, and refusing `PrivateData` or another `MetricsType` at synth), opens tcp/6817 from the EKS cluster security group, and resolves the controller's address after the cluster is `ACTIVE` with the `Custom::PcsControllerLookup` custom resource (`GetCluster` lists the endpoints in no fixed order, so the lookup picks the `SLURMCTLD` one by type). The kubectl-applier then applies `post-helm-pcs-observability.yaml`: a Prometheus Operator `ScrapeConfig` (`gco-pcs-slurm-controller`) with the four endpoints as static targets under the `pcs-slurm-controller` job, scraped every 60 seconds as Slurm's metrics guide recommends.
+
+Slurm's series carry no cluster label, so a Region that runs both backends lands two sets of identically named `slurm_*` series in one Prometheus. The `job` label keeps them apart: every PCS dashboard panel and alert selects `job="pcs-slurm-controller"`, and the Slinky dashboard, alerts and KEDA autoscaling queries select `job="slinky-slurm-controller"`. Use the same selector in your own queries.
+
+The *GCO Slurm (AWS PCS)* Grafana dashboard shows pending and running jobs and the largest pending job per partition, node states, allocated CPUs and GPUs, scheduler cycle times and the controller's scrape status; `gco monitoring open` opens Grafana. The `gco-pcs-alerts` PrometheusRule carries `PcsSlurmControllerDown` (no successful scrape for five minutes: the cluster is not `ACTIVE`, the settings changed, or 6817 is closed), `PcsSlurmNodesDown` (DOWN nodes that were not drained for fifteen minutes; PCS scales nodes down through Slurm's power save, which leaves no DOWN record, so a DOWN node failed its lifecycle actions or lost its slurmd) and `PcsSlurmQueueStalled` (pending work and nothing running for thirty minutes: a node group at `max_nodes`, no capacity in its zones, a reservation that is not active, or instances that never register).
+
+An existing cluster (`mode: existing`) is scraped by whoever runs it; the key sits under `managed` on purpose. Metrics are unauthenticated HTTP on the controller ENI, which is why the stack admits only the EKS cluster security group.
+
 ## Security
 
 - **Credentials.** The API never holds a long-lived Slurm credential: it reads the cluster's JWT signing key from Secrets Manager (the secret PCS creates with the cluster) and mints a short-lived HS256 token for the identity before each call, re-minted at 80% of its 15-minute life. The grant is `secretsmanager:GetSecretValue` on that one secret; the cluster facts come from `pcs:GetCluster` on that one cluster ARN.
@@ -206,7 +218,7 @@ Both backends give you Slurm 25/26 with `sbatch`/`srun`/`sacct`, accounting, aut
 | `login.instance_type` / `ami` / `availability_zones` | `t3.medium` / `sample` / `[]` | The login node's instance, image and zones (`[]` = every private subnet) |
 | `node_groups` | one `gco-compute` group of `c6i.large`, 0-4 nodes | See below |
 | `queues` | one default `gco` queue on `gco-compute` | See below |
-| `metrics.enabled` | `false` | Scrape the controller's Slurm metrics into the in-cluster Prometheus |
+| `metrics.enabled` | `false` | Scrape the controller's Slurm metrics into the in-cluster Prometheus (sets `MetricsType` and `enable_http` on the cluster, opens tcp/6817 from the EKS cluster security group; `PrivateData` must stay unset); see [Monitoring](#monitoring) |
 | `lifecycle_logs.enabled` | `true` | Forward node lifecycle-action logs to CloudWatch Logs |
 | `slurm_custom_settings` / `slurmdbd_custom_settings` / `cgroup_custom_settings` | `{}` | Cluster-level `slurm.conf` / `slurmdbd.conf` / `cgroup.conf` overrides (`slurmdbd` ones need accounting) |
 | `removal_policy` | `destroy` | `destroy` or `retain` the cluster, node groups and queues on destroy |

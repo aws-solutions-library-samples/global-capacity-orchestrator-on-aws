@@ -38,7 +38,7 @@ around it (:meth:`PcsCluster._create_managed`), from the validated
   PCS node policy, SSM for ``gco slurm shell``, reads of the lifecycle
   scripts and the shared storage);
 - one **launch template** and one **compute node group** per declared
-  group, with the AMI resolved by :class:`PcsAmiLookup` (``sample`` and
+  group, with the AMI resolved by :class:`PcsLookup` (``sample`` and
   ``dlami``) or passed through (``ami-...``), EFA network interfaces, a
   cluster placement group, capacity reservation targeting, Spot options
   and node-group custom settings;
@@ -71,6 +71,7 @@ from constructs import Construct
 
 from gco.pcs_config import (
     LOGIN_NODE_GROUP_NAME,
+    PCS_CONTROLLER_PORT,
     PCS_HOME_EFS_PATH,
     PCS_HOME_MOUNT_PATH,
     PCS_OUTPUT_CLUSTER_ID,
@@ -86,6 +87,8 @@ from gco.pcs_config import (
     PCS_SCRATCH_MOUNT_PATH,
     is_managed,
     managed_cluster_name,
+    managed_slurm_custom_settings,
+    metrics_enabled,
     pcs_cluster_arn,
     scratch_backend,
 )
@@ -207,16 +210,21 @@ class PcsClusterFacts(Construct):
         return self.field("cluster.slurmConfiguration.slurmRest.mode")
 
 
-class PcsAmiLookup(Construct):
-    """Resolves the AWS-published PCS AMIs (``sample``, ``dlami``) at deploy time.
+class PcsLookup(Construct):
+    """Deploy-time PCS lookups the SDK cannot shape, through one ``cr.Provider``.
 
-    One ``cr.Provider`` (``lambda/pcs-ami-lookup``) per cluster; one custom
-    resource per distinct ``(kind, architecture)`` the node groups and the
-    login node ask for, keyed so two groups on the same AMI share a lookup.
-    The resource re-runs on every deploy (its properties carry the cluster's
-    Slurm version, so a version change forces a fresh lookup), which is how
-    a newer AMI release reaches the node groups: PCS replaces nodes on the
-    AMI change with its drain strategy.
+    One provider (``lambda/pcs-lookup``) per cluster serving two resource
+    types. ``Custom::PcsAmiLookup`` resolves the AWS-published PCS AMIs
+    (``sample``, ``dlami``): one custom resource per distinct ``(kind,
+    architecture)`` the node groups and the login node ask for, keyed so two
+    groups on the same AMI share a lookup. The resource re-runs on every
+    deploy (its properties carry the cluster's Slurm version, so a version
+    change forces a fresh lookup), which is how a newer AMI release reaches
+    the node groups: PCS replaces nodes on the AMI change with its drain
+    strategy. ``Custom::PcsControllerLookup`` resolves the controller's
+    ``SLURMCTLD`` endpoint (``ip:6817``) by type for the metrics scrape;
+    ``GetCluster`` lists endpoints in no guaranteed order, which is why
+    ``AwsCustomResource`` cannot do it.
     """
 
     def __init__(
@@ -231,17 +239,22 @@ class PcsAmiLookup(Construct):
         stack = Stack.of(self)
         self.slurm_version = slurm_version
         self._resources: dict[tuple[str, str], CustomResource] = {}
+        #: The ``Custom::PcsControllerLookup`` resource once a caller asks for it.
+        self.controller_lookup: CustomResource | None = None
 
         self.function = lambda_.Function(
             self,
             "Function",
             runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME),
             handler="handler.lambda_handler",
-            code=lambda_source_code("lambda/pcs-ami-lookup"),
+            code=lambda_source_code("lambda/pcs-lookup"),
             timeout=Duration.minutes(2),
             memory_size=256,
             tracing=lambda_.Tracing.ACTIVE,
-            description="Resolves the AWS PCS sample AMI / PCS-ready DLAMI for a node group",
+            description=(
+                "Resolves the AWS PCS sample AMI / PCS-ready DLAMI for a node group and the "
+                "cluster controller's address"
+            ),
         )
         # describe-images has no resource-level scoping; the public PCS AMI
         # parameters live under one account-less SSM path.
@@ -303,6 +316,32 @@ class PcsAmiLookup(Construct):
     @property
     def lookups(self) -> Mapping[tuple[str, str], CustomResource]:
         return dict(self._resources)
+
+    def controller_address(self, *, cluster_id: str, cluster_arn: str) -> str:
+        """The controller's ``ip:6817`` token for the cluster (one lookup per provider).
+
+        The handler needs ``pcs:GetCluster`` on exactly that cluster; the
+        grant is written against its ARN (a deploy-time token in managed
+        mode) rather than ``*``.
+        """
+        if self.controller_lookup is None:
+            self.function.add_to_role_policy(
+                iam.PolicyStatement(
+                    sid="DescribePcsCluster",
+                    effect=iam.Effect.ALLOW,
+                    actions=["pcs:GetCluster"],
+                    resources=[cluster_arn],
+                )
+            )
+            self.controller_lookup = CustomResource(
+                self,
+                "ControllerLookup",
+                service_token=self.provider.service_token,
+                resource_type="Custom::PcsControllerLookup",
+                properties={"ClusterId": cluster_id, "Region": Stack.of(self).region},
+            )
+            self.controller_lookup.node.add_dependency(self.log_group)
+        return self.controller_lookup.get_att_string("Address")
 
     def _acknowledge_findings(self) -> None:
         acknowledge_nag_findings(
@@ -397,7 +436,7 @@ class PcsCluster(Construct):
         self.instance_profile: iam.InstanceProfile | None = None
         self.home_access_point: efs.AccessPoint | None = None
         self.identity_home_asset: s3_assets.Asset | None = None
-        self.ami_lookup: PcsAmiLookup | None = None
+        self.ami_lookup: PcsLookup | None = None
         self.launch_templates: dict[str, ec2.CfnLaunchTemplate] = {}
         self.placement_groups: dict[str, ec2.CfnPlacementGroup] = {}
         self.node_groups: dict[str, pcs.CfnComputeNodeGroup] = {}
@@ -407,6 +446,11 @@ class PcsCluster(Construct):
         self.removal_policy = RemovalPolicy.DESTROY
         self.home_on_efs = False
         self.scratch = "none"
+        #: Whether the managed cluster serves Slurm metrics for the in-cluster
+        #: Prometheus (``managed.metrics.enabled``); then ``controller_address``
+        #: is the ``ip:6817`` token the ScrapeConfig targets, else ``""``.
+        self.metrics_enabled = metrics_enabled(self.config)
+        self.controller_address = ""
 
         if self.managed:
             self.cluster_resource = self._create_managed()
@@ -509,12 +553,19 @@ class PcsCluster(Construct):
                 self, "IdentityHomeScript", path=str(IDENTITY_HOME_SCRIPT)
             )
         self.node_role, self.instance_profile = self._create_instance_profile()
-        self.ami_lookup = PcsAmiLookup(
+        self.ami_lookup = PcsLookup(
             self,
             "AmiLookup",
             slurm_version=str(managed["slurm_version"]),
             log_group_removal_policy=self.provider_log_group_removal_policy,
         )
+        if self.metrics_enabled:
+            # The scrape target for post-helm-pcs-observability.yaml: the
+            # controller's slurmctld endpoint, resolved by type once the
+            # cluster is ACTIVE (the lookup's property is the cluster id token).
+            self.controller_address = self.ami_lookup.controller_address(
+                cluster_id=self.cluster_id, cluster_arn=self.cluster_arn
+            )
         self.lifecycle_actions = self._lifecycle_actions()
 
         for group in managed["node_groups"]:
@@ -559,6 +610,14 @@ class PcsCluster(Construct):
             connection=ec2.Port.tcp(PCS_RESTAPI_PORT),
             description="slurmrestd from the GCO API pods",
         )
+        if self.metrics_enabled:
+            # PCS documents the metrics prerequisite as "HTTP on 6817 from your
+            # desired sources"; the source is Prometheus in the EKS cluster.
+            security_group.add_ingress_rule(
+                peer=self.eks_cluster_security_group,
+                connection=ec2.Port.tcp(PCS_CONTROLLER_PORT),
+                description="slurmctld metrics (OpenMetrics) from the in-cluster Prometheus",
+            )
         security_group.apply_removal_policy(self.removal_policy)
         # The common-ports rules flag protocol -1 on any ingress rule, whatever
         # its source. This one admits the group itself (a security-group
@@ -631,8 +690,11 @@ class PcsCluster(Construct):
                 ),
             ),
             scale_down_idle_time_in_seconds=int(managed["scale_down_idle_seconds"]),
+            # With metrics on, the operator's settings plus MetricsType and
+            # enable_http (gco.pcs_config.managed_slurm_custom_settings).
             slurm_custom_settings=_custom_settings(
-                managed["slurm_custom_settings"], pcs.CfnCluster.SlurmCustomSettingProperty
+                managed_slurm_custom_settings(self.config),
+                pcs.CfnCluster.SlurmCustomSettingProperty,
             ),
             slurmdbd_custom_settings=_custom_settings(
                 managed["slurmdbd_custom_settings"], pcs.CfnCluster.SlurmdbdCustomSettingProperty

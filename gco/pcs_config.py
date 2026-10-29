@@ -70,6 +70,22 @@ SLURM_BACKENDS: tuple[str, ...] = (SLINKY_BACKEND, PCS_BACKEND)
 #: slurmrestd's port on the PCS controller (fixed by the service; plain HTTP,
 #: reachable only inside the cluster's VPC).
 PCS_RESTAPI_PORT = 6820
+#: slurmctld's port on the PCS controller, which also serves the OpenMetrics
+#: endpoints (``/metrics/jobs``, ``/metrics/nodes``, ``/metrics/partitions``,
+#: ``/metrics/scheduler``) once the cluster's Slurm settings enable them.
+PCS_CONTROLLER_PORT = 6817
+#: The cluster-level ``slurm.conf`` settings PCS documents for its Slurm
+#: metrics (Slurm 25.11+): the OpenMetrics plugin and slurmctld's HTTP
+#: listener, which PCS keeps off by default. ``PrivateData`` must stay unset.
+PCS_METRICS_SLURM_SETTINGS: dict[str, str] = {
+    "MetricsType": "metrics/openmetrics",
+    "CommunicationParameters": "enable_http",
+}
+#: The Prometheus ``job`` label of the managed cluster's metrics scrape (the
+#: ``ScrapeConfig``'s ``jobName``); the PCS dashboard and alerts select on
+#: it, and the Slinky ones select on theirs, so the two clusters' ``slurm_*``
+#: series never mix in a Region that runs both.
+PCS_METRICS_JOB = "pcs-slurm-controller"
 
 #: Slurm versions PCS offers whose slurmrestd serves the OpenAPI plugin
 #: version every GCO surface addresses (``gco.slurm_config.SLURM_API_VERSION``,
@@ -783,8 +799,59 @@ def _validate_managed(raw: object, *, fsx_enabled: bool) -> dict[str, Any]:
             f"{path}.slurmdbd_custom_settings needs accounting.enabled: slurmdbd only runs "
             "with accounting on"
         )
+    if managed["metrics"]["enabled"]:
+        _check_metrics_settings(managed["slurm_custom_settings"], f"{path}.slurm_custom_settings")
     _require_choice(managed["removal_policy"], ("destroy", "retain"), f"{path}.removal_policy")
     return managed
+
+
+def _check_metrics_settings(settings: Mapping[str, str], path: str) -> None:
+    """``metrics.enabled`` needs the three conditions PCS documents for Slurm metrics."""
+    if "PrivateData" in settings:
+        raise PcsConfigError(
+            f"{path}.PrivateData cannot be set with metrics.enabled: PCS serves the Slurm "
+            "metrics endpoints only when PrivateData is unset"
+        )
+    metrics_type = settings.get("MetricsType")
+    if metrics_type is not None and metrics_type != PCS_METRICS_SLURM_SETTINGS["MetricsType"]:
+        raise PcsConfigError(
+            f"{path}.MetricsType is {metrics_type!r} but metrics.enabled needs "
+            f"{PCS_METRICS_SLURM_SETTINGS['MetricsType']!r} (the only plugin Slurm ships); "
+            "drop the setting"
+        )
+
+
+def managed_slurm_custom_settings(config: Mapping[str, Any]) -> dict[str, str]:
+    """The cluster-level ``slurm.conf`` settings the managed cluster is created with.
+
+    The operator's ``managed.slurm_custom_settings`` plus, with
+    ``metrics.enabled``, the settings PCS documents for its Slurm metrics:
+    ``MetricsType`` set, and ``enable_http`` merged into whatever
+    ``CommunicationParameters`` the operator already lists (a comma-separated
+    Slurm parameter list), so a block that sets other communication flags
+    keeps them.
+    """
+    managed = config["managed"]
+    settings = dict(managed["slurm_custom_settings"])
+    if not managed["metrics"]["enabled"]:
+        return settings
+    settings["MetricsType"] = PCS_METRICS_SLURM_SETTINGS["MetricsType"]
+    flags = [
+        flag.strip()
+        for flag in str(settings.get("CommunicationParameters") or "").split(",")
+        if flag.strip()
+    ]
+    if PCS_METRICS_SLURM_SETTINGS["CommunicationParameters"] not in flags:
+        flags.append(PCS_METRICS_SLURM_SETTINGS["CommunicationParameters"])
+    settings["CommunicationParameters"] = ",".join(flags)
+    return settings
+
+
+def metrics_enabled(config: Mapping[str, Any]) -> bool:
+    """Whether the Region scrapes the managed cluster's Slurm metrics (managed mode only)."""
+    return bool(
+        pcs_enabled(config) and is_managed(config) and config["managed"]["metrics"]["enabled"]
+    )
 
 
 def validate_pcs_config(raw: object, *, fsx_enabled: bool = False) -> dict[str, Any]:
@@ -913,7 +980,9 @@ def enabled_slurm_backends(*, slinky: bool, pcs: bool) -> list[str]:
 #: * Gated: ``{{PCS_ENABLED}}`` and ``{{PCS_RESTAPI_CIDR}}`` appear only in
 #:   post-helm-pcs-network.yaml; when PCS is off they are not emitted, the
 #:   applier skips the file and ``_FEATURE_RESOURCE_INVENTORY`` prunes the
-#:   NetworkPolicy an earlier deploy applied.
+#:   NetworkPolicy an earlier deploy applied. ``{{PCS_METRICS_ENABLED}}`` and
+#:   ``{{PCS_CONTROLLER_ADDRESS}}`` gate post-helm-pcs-observability.yaml the
+#:   same way, on ``managed.metrics.enabled`` (managed mode only).
 #: * Always emitted: ``{{SLURM_BACKENDS}}``, ``{{PCS_CLUSTER_ID}}``,
 #:   ``{{PCS_IDENTITY_JSON}}`` and ``{{PCS_DEFAULT_PARTITION}}`` sit in the
 #:   core manifest-processor Deployment (31-manifest-processor.yaml), where a
@@ -924,6 +993,8 @@ def enabled_slurm_backends(*, slinky: bool, pcs: bool) -> list[str]:
 PCS_MANIFEST_TOKENS: tuple[str, ...] = (
     "{{PCS_ENABLED}}",
     "{{PCS_RESTAPI_CIDR}}",
+    "{{PCS_METRICS_ENABLED}}",
+    "{{PCS_CONTROLLER_ADDRESS}}",
     "{{SLURM_BACKENDS}}",
     "{{PCS_CLUSTER_ID}}",
     "{{PCS_IDENTITY_JSON}}",
@@ -957,6 +1028,7 @@ def compute_pcs_replacements(
     slinky_enabled: bool,
     cluster_id: str,
     vpc_cidr: str,
+    controller_address: str = "",
 ) -> dict[str, str]:
     """Build the kubectl-applier replacements for the PCS integration.
 
@@ -966,7 +1038,11 @@ def compute_pcs_replacements(
     ``cluster_id`` is the PCS cluster id, in managed mode a CloudFormation
     token for the created cluster's id, so the value is passed through
     untouched. ``vpc_cidr`` is the regional VPC's IPv4 range; ``endpoint_cidr``
-    in the block overrides it for a peered cluster.
+    in the block overrides it for a peered cluster. ``controller_address`` is
+    the controller's ``ip:6817`` (a deploy-time token from the stack's
+    controller lookup) and is only consulted when the managed cluster's
+    metrics are on; the observability manifest's tokens are then emitted so
+    the ``ScrapeConfig``, dashboard and alerts apply.
     """
     backends = enabled_slurm_backends(slinky=slinky_enabled, pcs=enabled)
     replacements = {
@@ -1000,6 +1076,14 @@ def compute_pcs_replacements(
             "{{PCS_DEFAULT_PARTITION}}": default_queue(config) if is_managed(config) else "",
         }
     )
+    if is_managed(config) and config["managed"]["metrics"]["enabled"]:
+        if not controller_address:
+            raise PcsConfigError(
+                "pcs.managed.metrics.enabled needs the controller address the stack's "
+                "controller lookup resolves; none was passed"
+            )
+        replacements["{{PCS_METRICS_ENABLED}}"] = "true"
+        replacements["{{PCS_CONTROLLER_ADDRESS}}"] = str(controller_address)
     return replacements
 
 

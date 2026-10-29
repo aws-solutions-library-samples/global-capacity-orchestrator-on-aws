@@ -1,4 +1,17 @@
-"""CloudFormation custom resource that resolves the AMI for an AWS PCS node group.
+"""CloudFormation custom resources that look up AWS PCS facts the SDK cannot shape.
+
+One ``cr.Provider`` (``gco/stacks/pcs_cluster.py`` ``PcsLookup``) serves two
+resource types, told apart by the event's ``ResourceType``:
+
+* ``Custom::PcsAmiLookup`` resolves the AMI a compute node group launches
+  (below).
+* ``Custom::PcsControllerLookup`` resolves the cluster controller's address
+  for the Prometheus scrape of its Slurm metrics: ``GetCluster`` lists the
+  controller's endpoints (``SLURMCTLD``, ``SLURMDBD``, ``SLURMRESTD``) in no
+  guaranteed order, and ``cr.AwsCustomResource`` can only address a list by
+  index, so this handler picks the ``SLURMCTLD`` entry by type. The response
+  carries ``Data.PrivateIpAddress``, ``Data.Port`` and ``Data.Address``
+  (``ip:port``). Properties: ``ClusterId``, ``Region``.
 
 A PCS compute node group launches one AMI. GCO lets the ``pcs`` block name it
 three ways (``gco/pcs_config.py`` ``ami``):
@@ -26,7 +39,7 @@ physical id is stable per node group so an unchanged lookup never replaces
 the resource; a new AMI release surfaces on the next deploy, when the
 resource re-runs.
 
-Event shape (``ResourceProperties``): ``Kind`` (``sample`` | ``dlami``),
+AMI event shape (``ResourceProperties``): ``Kind`` (``sample`` | ``dlami``),
 ``Architecture`` (``x86_64`` | ``arm64``), ``SlurmVersion`` (major.minor, used
 as the sample AMI's description filter), ``Region``, ``NodeGroup`` (for the
 physical id and the log line). The response carries ``Data.ImageId``,
@@ -51,6 +64,13 @@ DLAMI_SSM_PARAMETER = "/aws/service/pcs/ami/dlami-base-ubuntu2404/{architecture}
 KINDS = ("sample", "dlami")
 ARCHITECTURES = ("x86_64", "arm64")
 
+#: The two custom resource types this provider serves (``event["ResourceType"]``).
+AMI_RESOURCE_TYPE = "Custom::PcsAmiLookup"
+CONTROLLER_RESOURCE_TYPE = "Custom::PcsControllerLookup"
+RESOURCE_TYPES = (AMI_RESOURCE_TYPE, CONTROLLER_RESOURCE_TYPE)
+#: ``GetCluster`` endpoint type of slurmctld, whose port also serves the metrics.
+CONTROLLER_ENDPOINT_TYPE = "SLURMCTLD"
+
 _CLIENT_CONFIG = Config(
     connect_timeout=5,
     read_timeout=20,
@@ -64,6 +84,54 @@ def _ec2_client(region: str) -> Any:
 
 def _ssm_client(region: str) -> Any:
     return boto3.client("ssm", region_name=region, config=_CLIENT_CONFIG)
+
+
+def _pcs_client(region: str) -> Any:
+    return boto3.client("pcs", region_name=region, config=_CLIENT_CONFIG)
+
+
+def _resource_type(event: dict[str, Any]) -> str:
+    """The event's ``ResourceType``; absent (older events) reads as the AMI lookup."""
+    resource_type = str(event.get("ResourceType") or AMI_RESOURCE_TYPE).strip()
+    if resource_type not in RESOURCE_TYPES:
+        raise ValueError(
+            f"ResourceType must be one of {', '.join(RESOURCE_TYPES)}, got {resource_type!r}"
+        )
+    return resource_type
+
+
+def _controller_properties(event: dict[str, Any]) -> dict[str, str]:
+    raw = event.get("ResourceProperties") or {}
+    cluster_id = str(raw.get("ClusterId") or "").strip()
+    region = str(raw.get("Region") or "").strip()
+    if not cluster_id:
+        raise ValueError("ClusterId is required")
+    if not region:
+        raise ValueError("Region is required")
+    return {"ClusterId": cluster_id, "Region": region}
+
+
+def controller_endpoint(cluster: dict[str, Any]) -> dict[str, str]:
+    """The ``SLURMCTLD`` endpoint of a ``GetCluster`` document as ``ip``, ``port``, ``ip:port``."""
+    for endpoint in cluster.get("endpoints") or []:
+        if str(endpoint.get("type") or "").upper() != CONTROLLER_ENDPOINT_TYPE:
+            continue
+        address = str(endpoint.get("privateIpAddress") or "").strip()
+        port = str(endpoint.get("port") or "").strip()
+        if address and port:
+            return {"PrivateIpAddress": address, "Port": port, "Address": f"{address}:{port}"}
+    raise LookupError(
+        f"PCS cluster {cluster.get('id') or '?'} reports no {CONTROLLER_ENDPOINT_TYPE} endpoint "
+        f"with a private IP address (status {cluster.get('status') or '?'})"
+    )
+
+
+def resolve_controller(properties: dict[str, str]) -> dict[str, str]:
+    """``GetCluster`` and pick the controller endpoint by type."""
+    response = _pcs_client(properties["Region"]).get_cluster(
+        clusterIdentifier=properties["ClusterId"]
+    )
+    return controller_endpoint(dict(response.get("cluster") or {}))
 
 
 def _properties(event: dict[str, Any]) -> dict[str, str]:
@@ -191,9 +259,21 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
     """``cr.Provider`` on-event handler: resolve on Create/Update, no-op on Delete."""
     request_type = str(event.get("RequestType") or "")
     if request_type == "Delete":
-        return {"PhysicalResourceId": event.get("PhysicalResourceId") or "gco-pcs-ami-lookup"}
+        return {"PhysicalResourceId": event.get("PhysicalResourceId") or "gco-pcs-lookup"}
     if request_type not in ("Create", "Update"):
         raise ValueError(f"Unsupported RequestType: {request_type!r}")
+    if _resource_type(event) == CONTROLLER_RESOURCE_TYPE:
+        controller = _controller_properties(event)
+        data = resolve_controller(controller)
+        logger.info(
+            "PCS cluster %s controller (slurmctld) is at %s",
+            controller["ClusterId"],
+            data["Address"],
+        )
+        physical_id = (
+            event.get("PhysicalResourceId") or f"gco-pcs-controller-{controller['ClusterId']}"
+        )
+        return {"PhysicalResourceId": physical_id, "Data": data}
     properties = _properties(event)
     data = resolve(properties)
     logger.info(

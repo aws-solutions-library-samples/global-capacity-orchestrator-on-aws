@@ -8,6 +8,12 @@
 # autoscaler the chart renders per partition reads the same two queue series
 # the dashboard's first row shows.
 #
+# Every slurm_ expression selects job="slinky-slurm-controller" (the Service
+# the ServiceMonitor scrapes): a Region that also runs the AWS PCS backend
+# with its metrics on (post-helm-pcs-observability.yaml, job
+# pcs-slurm-controller) lands both clusters' identically named series in this
+# Prometheus, and an unscoped sum would mix them.
+#
 # The dashboard ConfigMap carries the grafana_dashboard="1" label the
 # kube-prometheus-stack Grafana sidecar watches; the PrometheusRule is
 # discovered by the chart's Prometheus (ruleSelectorNilUsesHelmValues=false)
@@ -48,7 +54,7 @@ data:
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
           "targets": [
-            {"expr": "sum by (partition) (slurm_partition_jobs_pending)", "legendFormat": "{{partition}}"}
+            {"expr": "sum by (partition) (slurm_partition_jobs_pending{job=\"slinky-slurm-controller\"})", "legendFormat": "{{partition}}"}
           ]
         },
         {
@@ -57,7 +63,7 @@ data:
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
           "targets": [
-            {"expr": "sum by (partition) (slurm_partition_jobs_running)", "legendFormat": "{{partition}}"}
+            {"expr": "sum by (partition) (slurm_partition_jobs_running{job=\"slinky-slurm-controller\"})", "legendFormat": "{{partition}}"}
           ]
         },
         {
@@ -66,7 +72,7 @@ data:
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
           "targets": [
-            {"expr": "max by (partition) (slurm_partition_jobs_max_job_nodes_nohold)", "legendFormat": "{{partition}}"}
+            {"expr": "max by (partition) (slurm_partition_jobs_max_job_nodes_nohold{job=\"slinky-slurm-controller\"})", "legendFormat": "{{partition}}"}
           ]
         },
         {
@@ -75,11 +81,11 @@ data:
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
           "targets": [
-            {"expr": "sum(slurm_nodes_idle)", "legendFormat": "idle"},
-            {"expr": "sum(slurm_nodes_alloc)", "legendFormat": "allocated"},
-            {"expr": "sum(slurm_nodes_mixed)", "legendFormat": "mixed"},
-            {"expr": "sum(slurm_nodes_down)", "legendFormat": "down"},
-            {"expr": "sum(slurm_nodes_drain)", "legendFormat": "drain"}
+            {"expr": "sum(slurm_nodes_idle{job=\"slinky-slurm-controller\"})", "legendFormat": "idle"},
+            {"expr": "sum(slurm_nodes_alloc{job=\"slinky-slurm-controller\"})", "legendFormat": "allocated"},
+            {"expr": "sum(slurm_nodes_mixed{job=\"slinky-slurm-controller\"})", "legendFormat": "mixed"},
+            {"expr": "sum(slurm_nodes_down{job=\"slinky-slurm-controller\"})", "legendFormat": "down"},
+            {"expr": "sum(slurm_nodes_drain{job=\"slinky-slurm-controller\"})", "legendFormat": "drain"}
           ]
         },
         {
@@ -98,8 +104,8 @@ data:
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
           "targets": [
-            {"expr": "sum(slurm_jobs_cpus_alloc)", "legendFormat": "cpus"},
-            {"expr": "sum(slurm_jobs_gpus_alloc)", "legendFormat": "gpus"}
+            {"expr": "sum(slurm_jobs_cpus_alloc{job=\"slinky-slurm-controller\"})", "legendFormat": "cpus"},
+            {"expr": "sum(slurm_jobs_gpus_alloc{job=\"slinky-slurm-controller\"})", "legendFormat": "gpus"}
           ]
         },
         {
@@ -108,8 +114,8 @@ data:
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
           "targets": [
-            {"expr": "slurm_schedule_cycle_last", "legendFormat": "main scheduler"},
-            {"expr": "slurm_bf_cycle_last", "legendFormat": "backfill"}
+            {"expr": "slurm_schedule_cycle_last{job=\"slinky-slurm-controller\"}", "legendFormat": "main scheduler"},
+            {"expr": "slurm_bf_cycle_last{job=\"slinky-slurm-controller\"}", "legendFormat": "backfill"}
           ]
         },
         {
@@ -189,7 +195,7 @@ spec:
           # NodeSets keep their records), and that pair is what "drained"
           # counts; a DOWN node that is not drained lost its slurmd without
           # the operator asking (observed live, 2026-10-28).
-          expr: (sum(slurm_nodes_down) - sum(slurm_nodes_drained)) > 0
+          expr: (sum(slurm_nodes_down{job="slinky-slurm-controller"}) - sum(slurm_nodes_drained{job="slinky-slurm-controller"})) > 0
           for: 15m
           labels:
             severity: warning
@@ -204,7 +210,7 @@ spec:
         - alert: SlurmQueueStalled
           # Work is waiting and nothing is running: the autoscaler is not
           # adding nodes (quota, capacity, or a partition at max_nodes).
-          expr: sum(slurm_jobs_pending) > 0 and sum(slurm_jobs_running) == 0
+          expr: sum(slurm_jobs_pending{job="slinky-slurm-controller"}) > 0 and sum(slurm_jobs_running{job="slinky-slurm-controller"}) == 0
           for: 30m
           labels:
             severity: warning

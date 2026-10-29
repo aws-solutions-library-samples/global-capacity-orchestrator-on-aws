@@ -165,6 +165,8 @@ Slurm 26.05 serves OpenMetrics from slurmctld itself (`MetricsType=metrics/openm
 
 The *GCO Slurm* Grafana dashboard shows pending and running jobs and the largest pending job per partition, node states, worker pods per NodeSet, allocated CPUs and GPUs, scheduler cycle times and control-plane status. The `gco-slurm-alerts` PrometheusRule carries `SlurmControllerDown`, `SlurmRestApiUnavailable`, `SlurmAccountingDown`, `SlurmNodesDown` (DOWN nodes that were not drained for scale-in), `SlurmQueueStalled` (pending work and nothing running for 30 minutes) and `SlurmControllerStateVolumeFilling`. Open Grafana with `gco monitoring open`.
 
+Every one of these queries, and the KEDA autoscaling queries, selects `job="slinky-slurm-controller"` (the controller Service the ServiceMonitor scrapes). Slurm's series carry no cluster label, and a Region that also runs the [AWS PCS backend](PCS.md#monitoring) with its metrics on lands a second set of identically named series in the same Prometheus under `job="pcs-slurm-controller"`; select on the job in your own queries too.
+
 ## Security
 
 - **No Slurm credential leaves the cluster.** The chart's JWT signing key (`slinky-slurm-auth-jwt`) is read only by slurmctld, slurmdbd and the slurm-operator. The GCO API authenticates to slurmrestd with a token the operator mints from a `Token` custom resource into `slinky-slurm-token-gco-api` (lifetime 1h, refreshed at 80%), which a Role grants the manifest-processor `get` on, and nothing else in `gco-jobs`. In-cluster clients get the same kind of token in `slinky-slurm-client-token`.

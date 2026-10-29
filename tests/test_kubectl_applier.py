@@ -3646,6 +3646,135 @@ class TestQueueingCustomObjectMapConsistency:
         )
         assert ("{{PCS_ENABLED}}", False) not in inventory
 
+    def test_pcs_observability_prune_inventory_matches_the_gated_manifest(
+        self, handler_module
+    ) -> None:
+        """The controller scrape, dashboard and alerts go when metrics or observability go.
+
+        The file carries both gates, so its identities sit under the metrics
+        key and under the observability key (the Slurm observability pattern);
+        the ScrapeConfig is deleted first, so a half-pruned state never keeps
+        scraping a controller whose dashboard is gone.
+        """
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY
+        identities = self._identities("post-helm-pcs-observability.yaml")
+        assert set(inventory[("{{PCS_METRICS_ENABLED}}", True)]) == identities
+        assert identities <= set(inventory[("{{CLUSTER_OBSERVABILITY_ENABLED}}", True)])
+        assert inventory[("{{PCS_METRICS_ENABLED}}", True)][0][1] == "ScrapeConfig"
+        assert ("{{PCS_METRICS_ENABLED}}", False) not in inventory
+
+    def test_pcs_observability_manifest_scrapes_the_controller_by_job(self, handler_module) -> None:
+        """The static-target scrape and every expression are pinned to one job label.
+
+        Slurm's series carry no cluster label, so in a Region that also runs
+        the Slinky cluster the job label is the only thing that keeps the
+        two clusters' ``slurm_*`` series apart; the Slinky manifest selects
+        on ``slinky-slurm-controller`` for the same reason.
+        """
+        import json
+
+        from gco import pcs_config as pc
+
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        raw = (manifests_dir / "post-helm-pcs-observability.yaml").read_text(encoding="utf-8")
+        assert "{{PCS_METRICS_ENABLED}}" in raw and "{{CLUSTER_OBSERVABILITY_ENABLED}}" in raw
+        config = pc.validate_pcs_config(
+            {"enabled": True, "managed": {"metrics": {"enabled": True}}}
+        )
+        replacements = {
+            "{{CLUSTER_OBSERVABILITY_ENABLED}}": "true",
+            **pc.compute_pcs_replacements(
+                config,
+                enabled=True,
+                slinky_enabled=True,
+                cluster_id="pcs_abc",
+                vpc_cidr="10.0.0.0/16",
+                controller_address="10.0.1.5:6817",
+            ),
+        }
+        text = raw
+        for token, value in replacements.items():
+            text = text.replace(token, value)
+        assert not handler_module._UNRESOLVED_PLACEHOLDER_RE.findall(text)
+        scrape, dashboard, rule = _parse_manifest_documents_text(text)
+
+        assert scrape["kind"] == "ScrapeConfig"
+        assert scrape["apiVersion"] == "monitoring.coreos.com/v1alpha1"
+        assert scrape["spec"]["jobName"] == pc.PCS_METRICS_JOB == "pcs-slurm-controller"
+        assert scrape["spec"]["scheme"] == "HTTP"
+        assert [c["targets"] for c in scrape["spec"]["staticConfigs"]] == [["10.0.1.5:6817"]] * 4
+        assert [c["labels"]["__metrics_path__"] for c in scrape["spec"]["staticConfigs"]] == [
+            "/metrics/jobs",
+            "/metrics/nodes",
+            "/metrics/partitions",
+            "/metrics/scheduler",
+        ]
+
+        selector = f'job="{pc.PCS_METRICS_JOB}"'
+        panels = json.loads(dashboard["data"]["gco-pcs.json"])["panels"]
+        expressions = [target["expr"] for panel in panels for target in panel["targets"]]
+        assert expressions and all(selector in expr for expr in expressions)
+        assert dashboard["metadata"]["labels"]["grafana_dashboard"] == "1"
+        rules = rule["spec"]["groups"][0]["rules"]
+        assert [r["alert"] for r in rules] == [
+            "PcsSlurmControllerDown",
+            "PcsSlurmNodesDown",
+            "PcsSlurmQueueStalled",
+        ]
+        for item in rules:
+            # Every selector in every expression names the job.
+            assert item["expr"].count("{") == item["expr"].count(selector)
+
+        # With metrics off the two tokens stay, so the applier skips the file.
+        off = pc.compute_pcs_replacements(
+            pc.validate_pcs_config({"enabled": True}),
+            enabled=True,
+            slinky_enabled=False,
+            cluster_id="pcs_abc",
+            vpc_cidr="10.0.0.0/16",
+        )
+        text = raw.replace("{{CLUSTER_OBSERVABILITY_ENABLED}}", "true")
+        for token, value in off.items():
+            text = text.replace(token, value)
+        assert set(handler_module._UNRESOLVED_PLACEHOLDER_RE.findall(text)) == {
+            "{{PCS_METRICS_ENABLED}}",
+            "{{PCS_CONTROLLER_ADDRESS}}",
+        }
+
+    def test_slinky_observability_expressions_select_their_own_job(self, handler_module) -> None:
+        """Every Slinky ``slurm_*`` expression names ``slinky-slurm-controller``.
+
+        The PCS backend's controller (post-helm-pcs-observability.yaml) serves
+        identically named series into the same Prometheus; an unscoped sum
+        would mix the two clusters in the Slinky dashboard and alerts.
+        """
+        import json
+
+        from gco import slurm_config as sc
+
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        dashboard, rule = _parse_manifest_documents(
+            manifests_dir / "post-helm-slurm-observability.yaml"
+        )
+        selector = f'job="{sc.SLURM_METRICS_JOB}"'
+        panels = json.loads(dashboard["data"]["gco-slurm.json"])["panels"]
+        slurm_expressions = [
+            target["expr"]
+            for panel in panels
+            for target in panel["targets"]
+            if "slurm_" in target["expr"]
+        ]
+        assert len(slurm_expressions) == 12
+        assert all(expr.count("slurm_") == expr.count(selector) for expr in slurm_expressions)
+        for item in rule["spec"]["groups"][0]["rules"]:
+            expr = item["expr"]
+            if "slurm_" in expr:
+                assert expr.count("slurm_") == expr.count(selector), item["alert"]
+
     def test_pcs_manifests_resolve_with_the_regional_stack_replacements(
         self, handler_module
     ) -> None:
@@ -5354,6 +5483,8 @@ _APPLY_DISPATCH = [
     _namespaced_custom("ServiceMonitor", "monitoring.coreos.com/v1", "servicemonitors"),
     _namespaced_custom("PodMonitor", "monitoring.coreos.com/v1", "podmonitors"),
     _namespaced_custom("PrometheusRule", "monitoring.coreos.com/v1", "prometheusrules"),
+    # v1alpha1: the version is read from the manifest's apiVersion.
+    _namespaced_custom("ScrapeConfig", "monitoring.coreos.com/v1alpha1", "scrapeconfigs"),
     _namespaced_custom("Token", "slinky.slurm.net/v1beta1", "tokens"),
 ]
 

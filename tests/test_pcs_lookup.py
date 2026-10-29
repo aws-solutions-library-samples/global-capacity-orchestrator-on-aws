@@ -1,14 +1,16 @@
-"""Tests for the AWS PCS AMI lookup custom resource handler.
+"""Tests for the AWS PCS lookup custom resource handler.
 
-``lambda/pcs-ami-lookup/handler.py`` is the ``cr.Provider`` on-event handler
-the managed PCS cluster runs once per distinct ``(ami kind, architecture)`` its
-node groups ask for. The contract: Create and Update resolve the newest
-AWS-published AMI whose description lists the cluster's Slurm version (the
-PCS sample AMI by name search; the PCS-ready DLAMI through its SSM public
-parameter first, the name search as the fallback), Delete touches nothing,
-and malformed properties fail by name. Real botocore clients run behind
-``Stubber`` so every AWS call and its exact parameters are asserted without a
-network.
+``lambda/pcs-lookup/handler.py`` is the ``cr.Provider`` on-event handler
+behind two resource types. ``Custom::PcsAmiLookup`` runs once per distinct
+``(ami kind, architecture)`` the managed cluster's node groups ask for: Create
+and Update resolve the newest AWS-published AMI whose description lists the
+cluster's Slurm version (the PCS sample AMI by name search; the PCS-ready
+DLAMI through its SSM public parameter first, the name search as the
+fallback). ``Custom::PcsControllerLookup`` resolves the controller's
+``SLURMCTLD`` endpoint by type for the metrics scrape. Delete touches
+nothing, and malformed properties fail by name. Real botocore clients run
+behind ``Stubber`` so every AWS call and its exact parameters are asserted
+without a network.
 """
 
 from __future__ import annotations
@@ -31,32 +33,29 @@ _DLAMI_PARAMETER_ARM = "/aws/service/pcs/ami/dlami-base-ubuntu2404/arm64/latest/
 
 @pytest.fixture
 def handler() -> ModuleType:
-    return load_lambda_module("pcs-ami-lookup")
+    return load_lambda_module("pcs-lookup")
 
 
 class _Clients:
-    """Stubbed EC2 and SSM clients plus the factory calls seen."""
+    """Stubbed EC2, SSM and PCS clients plus the factory calls seen."""
 
     def __init__(self) -> None:
-        self.ec2 = boto3.client(
-            "ec2",
-            region_name=_REGION,
-            aws_access_key_id="testing",
-            aws_secret_access_key="testing",  # nosec B106  # fake credentials for a stubbed client
-        )
-        self.ssm = boto3.client(
-            "ssm",
-            region_name=_REGION,
-            aws_access_key_id="testing",
-            aws_secret_access_key="testing",  # nosec B106  # fake credentials for a stubbed client
-        )
+        kwargs = {
+            "region_name": _REGION,
+            "aws_access_key_id": "testing",
+            "aws_secret_access_key": "testing",  # nosec B106  # fake credentials for stubbed clients
+        }
+        self.ec2 = boto3.client("ec2", **kwargs)
+        self.ssm = boto3.client("ssm", **kwargs)
+        self.pcs = boto3.client("pcs", **kwargs)
         self.ec2_stub = Stubber(self.ec2)
         self.ssm_stub = Stubber(self.ssm)
+        self.pcs_stub = Stubber(self.pcs)
         self.requests: list[tuple[str, dict[str, Any]]] = []
 
     def factory(self, service: str, **kwargs: Any) -> Any:
         self.requests.append((service, kwargs))
-        return {"ec2": self.ec2, "ssm": self.ssm}[service]
+        return {"ec2": self.ec2, "ssm": self.ssm, "pcs": self.pcs}[service]
 
     def expect_describe_by_name(
         self,
@@ -82,10 +81,11 @@ class _Clients:
 def clients(handler: ModuleType, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Clients]:
     stubbed = _Clients()
     monkeypatch.setattr(handler.boto3, "client", stubbed.factory)
-    with stubbed.ec2_stub, stubbed.ssm_stub:
+    with stubbed.ec2_stub, stubbed.ssm_stub, stubbed.pcs_stub:
         yield stubbed
         stubbed.ec2_stub.assert_no_pending_responses()
         stubbed.ssm_stub.assert_no_pending_responses()
+        stubbed.pcs_stub.assert_no_pending_responses()
 
 
 def _image(image_id: str, created: str, *, name: str = "", description: str = "") -> dict[str, Any]:
@@ -340,13 +340,15 @@ class TestEventValidation:
         assert handler.lambda_handler(
             {**_event("Delete"), "PhysicalResourceId": "gco-pcs-ami-gco-compute-sample-x86_64"}
         ) == {"PhysicalResourceId": "gco-pcs-ami-gco-compute-sample-x86_64"}
-        assert handler.lambda_handler(_event("Delete")) == {
-            "PhysicalResourceId": "gco-pcs-ami-lookup"
-        }
+        assert handler.lambda_handler(_event("Delete")) == {"PhysicalResourceId": "gco-pcs-lookup"}
 
     def test_unknown_request_types_are_refused(self, handler: ModuleType) -> None:
         with pytest.raises(ValueError, match=r"Unsupported RequestType: 'Read'"):
             handler.lambda_handler(_event("Read"))
+
+    def test_unknown_resource_types_are_refused(self, handler: ModuleType) -> None:
+        with pytest.raises(ValueError, match=r"ResourceType must be one of .*got 'Custom::Other'"):
+            handler.lambda_handler({**_event("Create"), "ResourceType": "Custom::Other"})
 
     def test_kind_architecture_and_region_are_validated_by_name(self, handler: ModuleType) -> None:
         with pytest.raises(ValueError, match=r"Kind must be one of sample, dlami, got 'ubuntu'"):
@@ -392,3 +394,139 @@ class TestHelpers:
         assert handler.supports_version(image, "24.11") is False
         assert handler.supports_version({}, "25.11") is False
         assert handler.supports_version({}, "") is True
+
+
+# ---------------------------------------------------------------------------
+# Custom::PcsControllerLookup
+# ---------------------------------------------------------------------------
+
+_CLUSTER_ID = "pcs_0a1b2c3d4e"
+
+
+def _controller_event(request_type: str, **properties: Any) -> dict[str, Any]:
+    resource_properties: dict[str, Any] = {
+        "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:provider",
+        "ClusterId": _CLUSTER_ID,
+        "Region": _REGION,
+    }
+    resource_properties.update(properties)
+    return {
+        "RequestType": request_type,
+        "ResourceType": "Custom::PcsControllerLookup",
+        "LogicalResourceId": "ControllerLookup",
+        "ResourceProperties": resource_properties,
+    }
+
+
+def _cluster(endpoints: list[dict[str, Any]], *, status: str = "ACTIVE") -> dict[str, Any]:
+    return {
+        "name": "gco-pcs",
+        "id": _CLUSTER_ID,
+        "arn": f"arn:aws:pcs:{_REGION}:123456789012:cluster/{_CLUSTER_ID}",
+        "status": status,
+        "createdAt": "2026-10-01T00:00:00Z",
+        "modifiedAt": "2026-10-01T00:00:00Z",
+        "scheduler": {"type": "SLURM", "version": "25.11"},
+        "size": "SMALL",
+        "networking": {"subnetIds": ["subnet-0aaa"], "securityGroupIds": ["sg-0pcs"]},
+        "endpoints": endpoints,
+    }
+
+
+class TestControllerLookup:
+    def test_create_picks_the_slurmctld_endpoint_by_type(
+        self, handler: ModuleType, clients: _Clients
+    ) -> None:
+        # The controller's entry is deliberately not first: order is not a contract.
+        clients.pcs_stub.add_response(
+            "get_cluster",
+            {
+                "cluster": _cluster(
+                    [
+                        {"type": "SLURMDBD", "privateIpAddress": "10.0.1.5", "port": "6819"},
+                        {"type": "SLURMRESTD", "privateIpAddress": "10.0.1.5", "port": "6820"},
+                        {"type": "SLURMCTLD", "privateIpAddress": "10.0.1.5", "port": "6817"},
+                    ]
+                )
+            },
+            {"clusterIdentifier": _CLUSTER_ID},
+        )
+
+        response = handler.lambda_handler(_controller_event("Create"))
+
+        assert response == {
+            "PhysicalResourceId": f"gco-pcs-controller-{_CLUSTER_ID}",
+            "Data": {"PrivateIpAddress": "10.0.1.5", "Port": "6817", "Address": "10.0.1.5:6817"},
+        }
+        assert clients.requests == [
+            ("pcs", {"region_name": _REGION, "config": handler._CLIENT_CONFIG})
+        ]
+
+    def test_update_keeps_the_physical_id(self, handler: ModuleType, clients: _Clients) -> None:
+        clients.pcs_stub.add_response(
+            "get_cluster",
+            {
+                "cluster": _cluster(
+                    [{"type": "SLURMCTLD", "privateIpAddress": "10.0.1.9", "port": "6817"}]
+                )
+            },
+            {"clusterIdentifier": _CLUSTER_ID},
+        )
+
+        response = handler.lambda_handler(
+            {**_controller_event("Update"), "PhysicalResourceId": "kept"}
+        )
+
+        assert response["PhysicalResourceId"] == "kept"
+        assert response["Data"]["Address"] == "10.0.1.9:6817"
+
+    def test_a_cluster_without_a_controller_endpoint_fails_by_name(
+        self, handler: ModuleType, clients: _Clients
+    ) -> None:
+        clients.pcs_stub.add_response(
+            "get_cluster",
+            {
+                "cluster": _cluster(
+                    [
+                        # No private address yet (the shape requires the key).
+                        {"type": "SLURMCTLD", "privateIpAddress": "", "port": "6817"},
+                        {"type": "SLURMDBD", "privateIpAddress": "10.0.1.5", "port": "6819"},
+                    ],
+                    status="CREATING",
+                )
+            },
+            {"clusterIdentifier": _CLUSTER_ID},
+        )
+
+        with pytest.raises(
+            LookupError, match=rf"{_CLUSTER_ID} reports no SLURMCTLD endpoint.*CREATING"
+        ):
+            handler.lambda_handler(_controller_event("Create"))
+
+    def test_properties_are_validated_by_name(self, handler: ModuleType) -> None:
+        with pytest.raises(ValueError, match=r"ClusterId is required"):
+            handler.lambda_handler(_controller_event("Create", ClusterId=" "))
+        with pytest.raises(ValueError, match=r"Region is required"):
+            handler.lambda_handler(_controller_event("Create", Region=""))
+
+    def test_delete_is_a_no_op(self, handler: ModuleType) -> None:
+        assert handler.lambda_handler(
+            {**_controller_event("Delete"), "PhysicalResourceId": "gco-pcs-controller-x"}
+        ) == {"PhysicalResourceId": "gco-pcs-controller-x"}
+
+    def test_pcs_errors_propagate(self, handler: ModuleType, clients: _Clients) -> None:
+        clients.pcs_stub.add_client_error(
+            "get_cluster",
+            service_error_code="ResourceNotFoundException",
+            expected_params={"clusterIdentifier": _CLUSTER_ID},
+        )
+
+        with pytest.raises(handler.ClientError):
+            handler.lambda_handler(_controller_event("Create"))
+
+    def test_controller_endpoint_helper_handles_odd_documents(self, handler: ModuleType) -> None:
+        assert handler.controller_endpoint(
+            {"endpoints": [{"type": "slurmctld", "privateIpAddress": "10.0.0.1", "port": 6817}]}
+        ) == {"PrivateIpAddress": "10.0.0.1", "Port": "6817", "Address": "10.0.0.1:6817"}
+        with pytest.raises(LookupError, match=r"cluster \? reports no SLURMCTLD endpoint"):
+            handler.controller_endpoint({})

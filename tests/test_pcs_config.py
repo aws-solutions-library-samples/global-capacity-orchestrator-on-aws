@@ -405,6 +405,59 @@ class TestManaged:
         assert managed["slurmdbd_custom_settings"] == {"PurgeJobAfter": "90days"}
         assert managed["cgroup_custom_settings"] == {"ConstrainCores": "yes"}
 
+    def test_metrics_add_the_pcs_documented_slurm_settings(self) -> None:
+        # Off: the operator's settings, untouched.
+        plain = _validate(_managed(slurm_custom_settings={"MaxJobCount": 20000}))
+        assert pc.managed_slurm_custom_settings(plain) == {"MaxJobCount": "20000"}
+        assert not pc.metrics_enabled(plain)
+        # On: MetricsType and the HTTP listener, merged into existing
+        # CommunicationParameters without duplicating enable_http.
+        config = _validate(
+            _managed(
+                metrics={"enabled": True},
+                slurm_custom_settings={
+                    "MaxJobCount": 20000,
+                    "CommunicationParameters": "block_null_hash, enable_http",
+                },
+            )
+        )
+        assert pc.metrics_enabled(config)
+        assert pc.managed_slurm_custom_settings(config) == {
+            "MaxJobCount": "20000",
+            "CommunicationParameters": "block_null_hash,enable_http",
+            "MetricsType": "metrics/openmetrics",
+        }
+        bare = _validate(_managed(metrics={"enabled": True}))
+        assert pc.managed_slurm_custom_settings(bare) == {
+            "MetricsType": "metrics/openmetrics",
+            "CommunicationParameters": "enable_http",
+        }
+        # The operator may spell the plugin out, but no other one exists.
+        spelled = _validate(
+            _managed(
+                metrics={"enabled": True},
+                slurm_custom_settings={"MetricsType": "metrics/openmetrics"},
+            )
+        )
+        assert pc.managed_slurm_custom_settings(spelled)["MetricsType"] == "metrics/openmetrics"
+        with pytest.raises(pc.PcsConfigError, match=r"MetricsType is 'metrics/other' but"):
+            _validate(
+                _managed(
+                    metrics={"enabled": True},
+                    slurm_custom_settings={"MetricsType": "metrics/other"},
+                )
+            )
+        with pytest.raises(pc.PcsConfigError, match=r"PrivateData cannot be set with metrics"):
+            _validate(
+                _managed(metrics={"enabled": True}, slurm_custom_settings={"PrivateData": "jobs"})
+            )
+        # Without metrics, PrivateData and MetricsType are the operator's business.
+        kept = _validate(
+            _managed(slurm_custom_settings={"PrivateData": "jobs", "MetricsType": "metrics/other"})
+        )
+        assert kept["managed"]["slurm_custom_settings"]["PrivateData"] == "jobs"
+        assert (pc.PCS_CONTROLLER_PORT, pc.PCS_RESTAPI_PORT) == (6817, 6820)
+
     def test_slurmdbd_settings_need_accounting(self) -> None:
         with pytest.raises(pc.PcsConfigError, match=r"slurmdbd_custom_settings needs accounting"):
             _validate(
@@ -995,10 +1048,13 @@ class TestReplacements:
         replacements = self._replacements(_validate(None), enabled=False, slinky_enabled=True)
         assert replacements["{{SLURM_BACKENDS}}"] == "slinky"
 
-    def test_enabled_managed_emits_every_token(self) -> None:
+    def test_enabled_managed_emits_every_token_but_the_metrics_gate(self) -> None:
         config = _validate(_on())
         replacements = self._replacements(config, slinky_enabled=True)
-        assert set(replacements) == set(pc.PCS_MANIFEST_TOKENS)
+        assert set(replacements) == set(pc.PCS_MANIFEST_TOKENS) - {
+            "{{PCS_METRICS_ENABLED}}",
+            "{{PCS_CONTROLLER_ADDRESS}}",
+        }
         assert replacements["{{SLURM_BACKENDS}}"] == "slinky,pcs"
         assert replacements["{{PCS_ENABLED}}"] == "true"
         assert replacements["{{PCS_RESTAPI_CIDR}}"] == "10.0.0.0/16"
@@ -1016,6 +1072,36 @@ class TestReplacements:
 
     def test_pcs_only_backend_list(self) -> None:
         assert self._replacements(_validate(_on()))["{{SLURM_BACKENDS}}"] == "pcs"
+
+    def test_metrics_on_emits_the_observability_gate_with_the_controller_address(self) -> None:
+        config = _validate(_managed(metrics={"enabled": True}))
+        replacements = self._replacements(config, controller_address="10.0.1.5:6817")
+        assert set(replacements) == set(pc.PCS_MANIFEST_TOKENS)
+        assert replacements["{{PCS_METRICS_ENABLED}}"] == "true"
+        assert replacements["{{PCS_CONTROLLER_ADDRESS}}"] == "10.0.1.5:6817"
+        # A deploy-time token passes through untouched, like the cluster id.
+        token = "${Token[TOKEN.456]}:6817"
+        assert (
+            self._replacements(config, controller_address=token)["{{PCS_CONTROLLER_ADDRESS}}"]
+            == token
+        )
+
+    def test_metrics_on_without_a_controller_address_is_a_programming_error(self) -> None:
+        config = _validate(_managed(metrics={"enabled": True}))
+        with pytest.raises(pc.PcsConfigError, match=r"needs the controller address"):
+            self._replacements(config)
+
+    def test_existing_mode_never_emits_the_metrics_gate(self) -> None:
+        # ``metrics`` lives under ``managed``: an operator-run cluster is scraped
+        # by its operator, so the gate stays closed even with the key on.
+        config = _validate(
+            _on(mode="existing", cluster_id="pcs_mine", managed={"metrics": {"enabled": True}})
+        )
+        replacements = self._replacements(
+            config, cluster_id="pcs_mine", controller_address="10.0.1.5:6817"
+        )
+        assert "{{PCS_METRICS_ENABLED}}" not in replacements
+        assert not pc.metrics_enabled(config)
 
     def test_existing_mode_has_no_default_partition_and_passes_the_cluster_id_through(
         self,

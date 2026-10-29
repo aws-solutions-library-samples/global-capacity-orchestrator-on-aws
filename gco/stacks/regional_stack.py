@@ -4470,6 +4470,7 @@ class GCORegionalStack(Stack):
                 slinky_enabled=_slurm_enabled,
                 cluster_id=self.pcs.cluster_id if self.pcs is not None else "",
                 vpc_cidr=self.vpc.vpc_cidr_block,
+                controller_address=self.pcs.controller_address if self.pcs is not None else "",
             )
         )
 

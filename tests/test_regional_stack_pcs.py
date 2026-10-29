@@ -205,7 +205,13 @@ MANAGED_FULL: dict[str, Any] = {
             {"name": "hpc", "node_groups": ["hpc", "shared"]},
         ],
         "lifecycle_logs": {"enabled": True},
-        "slurm_custom_settings": {"MaxJobCount": 20000},
+        # Metrics on, with an operator CommunicationParameters the stack must
+        # merge enable_http into rather than replace.
+        "metrics": {"enabled": True},
+        "slurm_custom_settings": {
+            "MaxJobCount": 20000,
+            "CommunicationParameters": "block_null_hash",
+        },
         "slurmdbd_custom_settings": {"PurgeJobAfter": "90days"},
         "removal_policy": "retain",
     },
@@ -514,8 +520,15 @@ class TestManagedModeCluster:
         assert slurm["SlurmRest"] == {"Mode": "STANDARD"}
         assert slurm["Accounting"] == {"Mode": "STANDARD", "DefaultPurgeTimeInDays": -1}
         assert slurm["ScaleDownIdleTimeInSeconds"] == 300
+        # The operator's settings plus the two PCS documents for its metrics,
+        # enable_http merged into the operator's CommunicationParameters.
         assert slurm["SlurmCustomSettings"] == [
-            {"ParameterName": "MaxJobCount", "ParameterValue": "20000"}
+            {"ParameterName": "MaxJobCount", "ParameterValue": "20000"},
+            {
+                "ParameterName": "CommunicationParameters",
+                "ParameterValue": "block_null_hash,enable_http",
+            },
+            {"ParameterName": "MetricsType", "ParameterValue": "metrics/openmetrics"},
         ]
         assert slurm["SlurmdbdCustomSettings"] == [
             {"ParameterName": "PurgeJobAfter", "ParameterValue": "90days"}
@@ -545,7 +558,43 @@ class TestManagedModeCluster:
         [rest] = [r for r in rules if r.get("FromPort") == 6820]
         assert rest["ToPort"] == 6820
         assert rest["SourceSecurityGroupId"]["Fn::GetAtt"][1] == "ClusterSecurityGroupId"
-        assert len(rules) == 2
+        # Metrics on: slurmctld's port from the same source, for Prometheus.
+        [metrics] = [r for r in rules if r.get("FromPort") == 6817]
+        assert metrics["ToPort"] == 6817 and metrics["IpProtocol"] == "tcp"
+        assert metrics["SourceSecurityGroupId"]["Fn::GetAtt"][1] == "ClusterSecurityGroupId"
+        assert len(rules) == 3
+
+    def test_metrics_resolve_the_controller_address_for_the_scrape(self, pcs_managed_full) -> None:
+        """``managed.metrics.enabled`` wires the ScrapeConfig's static target.
+
+        The address comes from the provider's second resource type, which
+        reads the created cluster (so it waits for ACTIVE) with a
+        ``pcs:GetCluster`` grant written against that cluster's ARN; the
+        kubectl-applier gets the gate and the address as deploy-time tokens.
+        """
+        stack, resources = pcs_managed_full
+        assert stack.pcs.metrics_enabled is True
+        [(cluster_id, _cluster)] = _of_type(resources, "AWS::PCS::Cluster").items()
+        [(lookup_id, lookup)] = _of_type(resources, "Custom::PcsControllerLookup").items()
+        assert lookup["Properties"]["ClusterId"] == {"Fn::GetAtt": [cluster_id, "Id"]}
+        assert lookup["Properties"]["Region"] == _REGION
+        # Same provider as the AMI lookups.
+        [ami_lookup] = list(_of_type(resources, "Custom::PcsAmiLookup").values())[:1]
+        assert lookup["Properties"]["ServiceToken"] == ami_lookup["Properties"]["ServiceToken"]
+        statements = _statements(resources, "PcsAmiLookupFunctionServiceRole")
+        get_cluster = _by_sid(statements, "DescribePcsCluster")
+        assert get_cluster["Action"] == "pcs:GetCluster"
+        assert get_cluster["Resource"] == {"Fn::GetAtt": [cluster_id, "Arn"]}
+        replacements = _replacements(resources)
+        assert replacements["{{PCS_METRICS_ENABLED}}"] == "true"
+        assert replacements["{{PCS_CONTROLLER_ADDRESS}}"] == {"Fn::GetAtt": [lookup_id, "Address"]}
+        assert cdk.Token.is_unresolved(stack.pcs.controller_address)
+        # One lookup per provider: asking again returns the same resource's token.
+        again = stack.pcs.ami_lookup.controller_address(
+            cluster_id=stack.pcs.cluster_id, cluster_arn=stack.pcs.cluster_arn
+        )
+        assert stack.resolve(again) == stack.resolve(stack.pcs.controller_address)
+        assert len(_of_type(resources, "Custom::PcsControllerLookup")) == 1
 
     def test_the_facts_and_api_grants_follow_the_created_cluster(self, pcs_managed_full) -> None:
         _stack, resources = pcs_managed_full
@@ -1095,6 +1144,15 @@ class TestManagedModeMinimal:
         assert len(_of_type(resources, "AWS::EC2::LaunchTemplate")) == 1
         assert len(_of_type(resources, "Custom::PcsAmiLookup")) == 1
         assert not _of_type(resources, "AWS::EC2::PlacementGroup")
+        # Metrics off (the default): no controller lookup, no 6817 rule, no
+        # observability gate, and the lookup role reads no cluster.
+        assert stack.pcs.metrics_enabled is False and stack.pcs.controller_address == ""
+        assert not _of_type(resources, "Custom::PcsControllerLookup")
+        assert "{{PCS_METRICS_ENABLED}}" not in _replacements(resources)
+        assert "{{PCS_CONTROLLER_ADDRESS}}" not in _replacements(resources)
+        assert "DescribePcsCluster" not in _sids(
+            _statements(resources, "PcsAmiLookupFunctionServiceRole")
+        )
         # No PCS access point: only the jobs one the stack always creates.
         assert [
             v["Properties"]["RootDirectory"]["Path"]

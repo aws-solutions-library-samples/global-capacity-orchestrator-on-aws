@@ -26,7 +26,7 @@ EXPECTED_HANDLER_ENTRYPOINTS = {
     "helm-orchestrator": "on_event",
     "image-lookup": "lambda_handler",
     "kubectl-applier-simple": "lambda_handler",
-    "pcs-ami-lookup": "lambda_handler",
+    "pcs-lookup": "lambda_handler",
     "regional-api-proxy": "lambda_handler",
     "secret-rotation": "lambda_handler",
     "tls-certificate-manager": "lambda_handler",

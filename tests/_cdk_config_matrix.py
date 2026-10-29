@@ -408,6 +408,9 @@ CONFIGS.extend(
                 "pcs": {
                     "enabled": True,
                     "managed": {
+                        # Metrics on: the controller lookup, the tcp/6817 rule and
+                        # the ScrapeConfig gate ride this synth and the nag run.
+                        "metrics": {"enabled": True},
                         "node_groups": [
                             {"name": "gco-compute", "instance_types": ["c6i.large"]},
                             {
