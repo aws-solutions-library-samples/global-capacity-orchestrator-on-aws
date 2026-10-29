@@ -20,11 +20,6 @@ from audit import audit_logged
 from feature_flags import FLAG_DESTRUCTIVE_OPERATIONS, is_enabled
 from server import mcp
 
-_BACKEND_HELP = (
-    "Which Slurm cluster: slinky (the cluster on the EKS cluster) or pcs (AWS PCS); "
-    "optional when the region runs one, required when it runs both."
-)
-
 
 def _args(*parts: str | None, region: str, backend: str | None = None) -> list[str]:
     """``gco slurm <parts...> -r REGION [--backend B]``, dropping omitted optional parts."""

@@ -48,7 +48,7 @@ from gco.pcs_config import (
     identity_claims,
 )
 from gco.services import slurm_client
-from gco.services.slurm_backends import BackendDefaults
+from gco.services.slurm_client import BackendDefaults
 
 logger = logging.getLogger(__name__)
 

@@ -24,7 +24,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from gco.services import slurm_client
+from gco.services import slurm_backends, slurm_client
 from gco.services.api_routes import slurm as slurm_routes
 from gco.services.api_routes.slurm import router
 from gco.services.slurm_backends import BackendDefaults
@@ -230,7 +230,7 @@ class _ClientStub:
 @pytest.fixture
 def stub(monkeypatch: pytest.MonkeyPatch) -> _ClientStub:
     double = _ClientStub()
-    monkeypatch.setattr(slurm_client, "get_client", lambda backend=None: double)
+    monkeypatch.setattr(slurm_backends, "get_client", lambda backend=None: double)
     return double
 
 
@@ -258,7 +258,7 @@ class TestDisabled:
     @pytest.mark.parametrize(("method", "path", "body"), ROUTES)
     def test_every_route_answers_404_with_the_remedy(self, client, monkeypatch, method, path, body):
         monkeypatch.setenv("GCO_SLURM_ENABLED", "false")
-        slurm_client.reset_client()
+        slurm_backends.reset_client()
 
         result = client.request(method, path, json=body)
 

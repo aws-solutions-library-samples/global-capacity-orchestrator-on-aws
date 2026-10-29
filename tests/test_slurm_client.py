@@ -514,32 +514,3 @@ class TestErrorMapping:
         assert isinstance(other, HTTPException)
         assert (other.status_code, other.detail) == (500, "Internal error while listing nodes")
         assert "boom" not in other.detail
-
-
-class TestProcessWideClient:
-    @pytest.fixture(autouse=True)
-    def _fresh(self, monkeypatch):
-        slurm_client.reset_client()
-        yield
-        slurm_client.reset_client()
-
-    def test_disabled_raises_before_building_anything(self, monkeypatch):
-        monkeypatch.setenv("GCO_SLURM_ENABLED", "false")
-        with pytest.raises(SlurmDisabledError):
-            slurm_client.get_client()
-
-    def test_enabled_builds_once_and_caches(self, monkeypatch):
-        monkeypatch.setenv("GCO_SLURM_ENABLED", "true")
-        monkeypatch.setenv("SLURM_RESTAPI_URL", "http://restd:6820")
-
-        first = slurm_client.get_client()
-        second = slurm_client.get_client()
-
-        assert first is second
-        assert first.base_url == "http://restd:6820"
-        assert first.backend.name == "slinky"
-        assert first.backend.user == "slurm"
-        assert isinstance(first.backend.token_provider, SecretTokenProvider)
-
-        slurm_client.reset_client()
-        assert slurm_client.get_client() is not first

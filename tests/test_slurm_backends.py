@@ -18,7 +18,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from gco.services import slurm_client
+from gco.services import slurm_backends, slurm_client
 from gco.services.api_routes.slurm import router
 from gco.services.slurm_backends import BackendDefaults, SlinkyBackend, build_backend
 from gco.services.slurm_client import (
@@ -45,9 +45,9 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch):
         "GCO_PCS_ENDPOINT_URL",
     ):
         monkeypatch.delenv(name, raising=False)
-    slurm_client.reset_client()
+    slurm_backends.reset_client()
     yield
-    slurm_client.reset_client()
+    slurm_backends.reset_client()
 
 
 # ---------------------------------------------------------------------------
@@ -150,27 +150,51 @@ class TestClientCache:
         monkeypatch.setenv("GCO_PCS_CLUSTER_ID", "pcs_abc")
         monkeypatch.setenv("GCO_PCS_IDENTITY", '{"name": "ec2-user", "uid": 1000, "gid": 1000}')
 
-        slinky = slurm_client.get_client("slinky")
-        pcs = slurm_client.get_client("pcs")
+        slinky = slurm_backends.get_client("slinky")
+        pcs = slurm_backends.get_client("pcs")
 
-        assert slinky is slurm_client.get_client("slinky")
-        assert pcs is slurm_client.get_client("pcs")
+        assert slinky is slurm_backends.get_client("slinky")
+        assert pcs is slurm_backends.get_client("pcs")
         assert slinky is not pcs
         assert slinky.backend.name == "slinky"
         assert pcs.backend.name == "pcs"
-        slurm_client.reset_client()
-        assert slurm_client.get_client("slinky") is not slinky
+        slurm_backends.reset_client()
+        assert slurm_backends.get_client("slinky") is not slinky
 
     def test_get_client_without_a_name_follows_the_resolution_rules(self, monkeypatch) -> None:
         monkeypatch.setenv("GCO_SLURM_BACKENDS", "slinky,pcs")
         with pytest.raises(SlurmBackendSelectionError):
-            slurm_client.get_client()
+            slurm_backends.get_client()
         monkeypatch.setenv("GCO_SLURM_BACKENDS", "slinky")
-        assert slurm_client.get_client().backend.name == "slinky"
+        assert slurm_backends.get_client().backend.name == "slinky"
 
     def test_build_backend_rejects_unknown_names(self) -> None:
         with pytest.raises(ValueError, match="unknown Slurm backend 'moab'"):
             build_backend("moab")
+
+    def test_legacy_disabled_flag_raises_before_building_anything(self, monkeypatch) -> None:
+        monkeypatch.delenv("GCO_SLURM_BACKENDS", raising=False)
+        monkeypatch.setenv("GCO_SLURM_ENABLED", "false")
+        with pytest.raises(SlurmDisabledError):
+            slurm_backends.get_client()
+
+    def test_legacy_enabled_flag_builds_the_slinky_client_once(self, monkeypatch) -> None:
+        """``GCO_SLURM_ENABLED=true`` (pre-PCS pods) still means one Slinky client."""
+        monkeypatch.delenv("GCO_SLURM_BACKENDS", raising=False)
+        monkeypatch.setenv("GCO_SLURM_ENABLED", "true")
+        monkeypatch.setenv("SLURM_RESTAPI_URL", "http://restd:6820")
+
+        first = slurm_backends.get_client()
+        second = slurm_backends.get_client()
+
+        assert first is second
+        assert first.base_url == "http://restd:6820"
+        assert isinstance(first.backend, SlinkyBackend)
+        assert first.backend.user == "slurm"
+        assert isinstance(first.backend.token_provider, slurm_client.SecretTokenProvider)
+
+        slurm_backends.reset_client()
+        assert slurm_backends.get_client() is not first
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +328,7 @@ def two_backends(monkeypatch: pytest.MonkeyPatch) -> dict[str, _Client]:
     def get_client(backend: str | None = None) -> _Client:
         return clients[slurm_client.resolve_backend(backend)]
 
-    monkeypatch.setattr(slurm_client, "get_client", get_client)
+    monkeypatch.setattr(slurm_backends, "get_client", get_client)
     return clients
 
 
@@ -332,7 +356,7 @@ class TestBackendsRoute:
 
     def test_one_backend_is_the_default(self, api, monkeypatch) -> None:
         monkeypatch.setenv("GCO_SLURM_BACKENDS", "slinky")
-        monkeypatch.setattr(slurm_client, "get_client", lambda name=None: _Client("slinky"))
+        monkeypatch.setattr(slurm_backends, "get_client", lambda name=None: _Client("slinky"))
         body = api.get("/api/v1/slurm/backends").json()
         assert [b["name"] for b in body["backends"]] == ["slinky"]
         assert body["default"] == "slinky"
@@ -353,7 +377,7 @@ class TestBackendsRoute:
             "slinky": _Client("slinky"),
             "pcs": _Client("pcs", describe_error=SlurmUnavailableError("boom", detail="fix pcs")),
         }
-        monkeypatch.setattr(slurm_client, "get_client", lambda name=None: clients[name])
+        monkeypatch.setattr(slurm_backends, "get_client", lambda name=None: clients[name])
         with caplog.at_level("WARNING"):
             body = api.get("/api/v1/slurm/backends").json()
         assert body["backends"][0]["name"] == "slinky"
@@ -366,7 +390,7 @@ class TestBackendsRoute:
         def get_client(name: str | None = None) -> _Client:
             raise SlurmUnavailableError("GCO_PCS_CLUSTER_ID is not set", detail="set it")
 
-        monkeypatch.setattr(slurm_client, "get_client", get_client)
+        monkeypatch.setattr(slurm_backends, "get_client", get_client)
         body = api.get("/api/v1/slurm/backends").json()
         assert body["backends"] == [{"name": "pcs", "error": "set it"}]
 
@@ -406,7 +430,7 @@ class TestBackendSelectionOnEveryRoute:
     def test_status_reports_a_describe_failure(self, api, monkeypatch) -> None:
         monkeypatch.setenv("GCO_SLURM_BACKENDS", "pcs")
         broken = _Client("pcs", describe_error=SlurmUnavailableError("x", detail="fix pcs"))
-        monkeypatch.setattr(slurm_client, "get_client", lambda name=None: broken)
+        monkeypatch.setattr(slurm_backends, "get_client", lambda name=None: broken)
         result = api.get("/api/v1/slurm/status")
         assert result.status_code == 503
         assert result.json()["detail"] == "fix pcs"

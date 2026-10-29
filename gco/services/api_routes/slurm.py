@@ -38,6 +38,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
+from gco.services import slurm_backends as backend_registry
 from gco.services import slurm_client
 from gco.services.structured_logging import sanitize_log_value
 
@@ -144,7 +145,7 @@ class SlurmJobSubmission(BaseModel):
 
 def _client(backend: str | None) -> slurm_client.SlurmRestClient:
     try:
-        return slurm_client.get_client(backend)
+        return backend_registry.get_client(backend)
     except (slurm_client.SlurmDisabledError, slurm_client.SlurmBackendSelectionError) as exc:
         raise slurm_client.http_exception_for(exc) from exc
 
@@ -419,7 +420,7 @@ async def slurm_backends() -> Response:
     backends: list[dict[str, Any]] = []
     for name in slurm_client.enabled_backends():
         try:
-            client = slurm_client.get_client(name)
+            client = backend_registry.get_client(name)
             backends.append(await client.backend.describe())
         except Exception as exc:
             http_error = _raise(exc, f"describing backend {name}")

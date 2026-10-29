@@ -558,6 +558,40 @@ def _pcs_login_node(config: Any, region: str) -> Any:
     return pcs_login.find_login_node(region, f"{config.regional_stack_prefix}-{region}")
 
 
+def _read_pcs_output(
+    formatter: Any,
+    config: Any,
+    region: str,
+    path: str,
+    reader: list[str],
+    *,
+    follow: bool,
+) -> Any:
+    """Read ``path`` on the PCS login node, or stream it with ``--follow``.
+
+    Returns the :class:`~cli.pcs_login.CapturedOutput` of a one-shot read, or
+    ``None`` once a ``--follow`` stream has ended. Exits the CLI when the
+    login node cannot be found or the SSM command fails.
+    """
+    from .. import pcs_login
+    from ..slurm import run_foreground
+
+    try:
+        node = _pcs_login_node(config, region)
+        if follow:
+            formatter.print_info(
+                f"Following {path} on the PCS login node {node.instance_id} (Ctrl-C to stop)..."
+            )
+            code = run_foreground(pcs_login.follow_command(node, path))
+            if code != 0:
+                sys.exit(code)
+            return None
+        return pcs_login.read_file(node, reader)
+    except (RuntimeError, ValueError) as exc:
+        formatter.print_error(str(exc))
+        sys.exit(1)
+
+
 @slurm.command("shell")
 @backend_option
 @cluster_ui.tunnel_options
@@ -718,23 +752,10 @@ def slurm_output(
     }
 
     if backend == PCS_BACKEND:
-        from .. import pcs_login
-
         _refuse_tunnel_flags_for_pcs(via_ssm)
-        try:
-            node = _pcs_login_node(config, target_region)
-            if follow:
-                formatter.print_info(
-                    f"Following {path} on the PCS login node {node.instance_id} (Ctrl-C to stop)..."
-                )
-                code = run_foreground(pcs_login.follow_command(node, path))
-                if code != 0:
-                    sys.exit(code)
-                return
-            captured = pcs_login.read_file(node, reader)
-        except (RuntimeError, ValueError) as exc:
-            formatter.print_error(str(exc))
-            sys.exit(1)
+        captured = _read_pcs_output(formatter, config, target_region, path, reader, follow=follow)
+        if captured is None:  # --follow streamed the file until Ctrl-C
+            return
         text = captured.text
         if config.output_format != "table":
             formatter.print({**document, "truncated": captured.truncated, "content": text})
