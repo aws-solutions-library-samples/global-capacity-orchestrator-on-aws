@@ -1186,6 +1186,114 @@ class TestBackupScanner:
 # ---------------------------------------------------------------------------
 
 
+class TestPcsScanner:
+    """AWS PCS clusters are owned by name or tag; their node groups and queues follow."""
+
+    _OWNED = f"arn:aws:pcs:{_REGION}:{_ACCOUNT}:cluster/pcs_owned00000"
+    _TAGGED = f"arn:aws:pcs:{_REGION}:{_ACCOUNT}:cluster/pcs_tagged0000"
+    _FOREIGN = f"arn:aws:pcs:{_REGION}:{_ACCOUNT}:cluster/pcs_foreign000"
+
+    def _client(self) -> MagicMock:
+        groups = {
+            "pcs_owned00000": [
+                {
+                    "computeNodeGroups": [
+                        {"arn": f"{self._OWNED}/computenodegroup/pcs_g1", "name": "gco-compute"},
+                        {"arn": f"{self._OWNED}/computenodegroup/pcs_g2", "name": "login"},
+                    ]
+                }
+            ],
+            "pcs_tagged0000": [{"computeNodeGroups": []}],
+        }
+        queues = {
+            "pcs_owned00000": [{"queues": [{"arn": f"{self._OWNED}/queue/pcs_q1", "name": "gco"}]}],
+            "pcs_tagged0000": [{"queues": [{"arn": f"{self._TAGGED}/queue/pcs_q2", "name": "x"}]}],
+        }
+        client = _paginated_client(
+            {
+                "list_clusters": [
+                    {
+                        "clusters": [
+                            {"id": "pcs_owned00000", "name": f"{_PROJECT}-pcs", "arn": self._OWNED},
+                            {"id": "pcs_tagged0000", "name": "hpc", "arn": self._TAGGED},
+                            {"id": "pcs_foreign000", "name": "theirs", "arn": self._FOREIGN},
+                        ]
+                    }
+                ],
+                "list_compute_node_groups": lambda **kwargs: groups[kwargs["clusterIdentifier"]],
+                "list_queues": lambda **kwargs: queues[kwargs["clusterIdentifier"]],
+            }
+        )
+        tags = {
+            self._TAGGED: {"tags": {"gco:project": _PROJECT}},
+            self._FOREIGN: {"tags": {"Project": "someone-else"}},
+        }
+        client.list_tags_for_resource.side_effect = lambda **kwargs: tags[kwargs["resourceArn"]]
+        return client
+
+    def test_owned_clusters_bring_their_node_groups_and_queues(self) -> None:
+        client = self._client()
+        session = _session_for(client, "pcs")
+
+        resources = inventory_scanners._list_project_pcs_resources(session, _REGION, _PROJECT)
+
+        assert resources == {
+            "pcs_clusters": sorted([self._OWNED, self._TAGGED]),
+            "pcs_compute_node_groups": [
+                f"{self._OWNED}/computenodegroup/pcs_g1",
+                f"{self._OWNED}/computenodegroup/pcs_g2",
+            ],
+            "pcs_queues": sorted([f"{self._OWNED}/queue/pcs_q1", f"{self._TAGGED}/queue/pcs_q2"]),
+        }
+        # The project-named cluster is owned without a tag lookup; the other
+        # two are decided by their tags, and the foreign one is never listed.
+        assert [c.kwargs["resourceArn"] for c in client.list_tags_for_resource.call_args_list] == [
+            self._TAGGED,
+            self._FOREIGN,
+        ]
+        session.client.assert_called_once_with("pcs", region_name=_REGION)
+
+    def test_missing_identities_fail_closed(self) -> None:
+        for clusters, message in (
+            ([{"id": "", "name": "x", "arn": "arn"}], "cluster without identity"),
+            ([{"id": "pcs_a", "name": f"{_PROJECT}-pcs", "arn": ""}], "cluster without identity"),
+        ):
+            client = _paginated_client({"list_clusters": [{"clusters": clusters}]})
+            with pytest.raises(RuntimeError, match=message):
+                inventory_scanners._list_project_pcs_resources(
+                    _session_for(client, "pcs"), _REGION, _PROJECT
+                )
+        owned = {"id": "pcs_a", "name": f"{_PROJECT}-pcs", "arn": self._OWNED}
+        client = _paginated_client(
+            {
+                "list_clusters": [{"clusters": [owned]}],
+                "list_compute_node_groups": [{"computeNodeGroups": [{"name": "g", "arn": ""}]}],
+                "list_queues": [{"queues": []}],
+            }
+        )
+        with pytest.raises(RuntimeError, match="compute node group without an ARN"):
+            inventory_scanners._list_project_pcs_resources(
+                _session_for(client, "pcs"), _REGION, _PROJECT
+            )
+        client = _paginated_client(
+            {
+                "list_clusters": [{"clusters": [owned]}],
+                "list_compute_node_groups": [{"computeNodeGroups": []}],
+                "list_queues": [{"queues": [{"name": "q", "arn": ""}]}],
+            }
+        )
+        with pytest.raises(RuntimeError, match="queue without an ARN"):
+            inventory_scanners._list_project_pcs_resources(
+                _session_for(client, "pcs"), _REGION, _PROJECT
+            )
+
+    def test_nothing_owned_is_an_empty_inventory(self) -> None:
+        client = _paginated_client({"list_clusters": [{"clusters": []}]})
+        assert inventory_scanners._list_project_pcs_resources(
+            _session_for(client, "pcs"), _REGION, _PROJECT
+        ) == {"pcs_clusters": [], "pcs_compute_node_groups": [], "pcs_queues": []}
+
+
 class TestStackInventory:
     _STACK_ID = f"arn:aws:cloudformation:{_REGION}:{_ACCOUNT}:stack/{_PROJECT}-global/uuid"
 
@@ -1866,14 +1974,22 @@ class TestProjectInventory:
         ]
 
     @staticmethod
-    def _session(*, backup_regions: list[str] | None = None) -> MagicMock:
+    def _session(
+        *,
+        backup_regions: list[str] | None = None,
+        pcs_regions: list[str] | None = None,
+    ) -> MagicMock:
         session = MagicMock()
         session.get_partition_for_region.return_value = "aws"
-        session.get_available_regions.side_effect = lambda service, *, partition_name: (
-            backup_regions
-            if service == "backup" and backup_regions is not None
-            else [_REGION, "us-west-2"]
-        )
+
+        def available(service: str, *, partition_name: str) -> list[str]:
+            if service == "backup" and backup_regions is not None:
+                return backup_regions
+            if service == "pcs" and pcs_regions is not None:
+                return pcs_regions
+            return [_REGION, "us-west-2"]
+
+        session.get_available_regions.side_effect = available
         return session
 
     @staticmethod
@@ -1925,6 +2041,13 @@ class TestProjectInventory:
                     "backup_recovery_points": [],
                 }
             ),
+            "_list_project_pcs_resources": MagicMock(
+                return_value={
+                    "pcs_clusters": ["pcs-cluster-arn"],
+                    "pcs_compute_node_groups": ["pcs-group-arn"],
+                    "pcs_queues": [],
+                }
+            ),
             "_list_project_s3_buckets": MagicMock(return_value=[f"{_PROJECT}-assets"]),
             "_list_project_iam_resources": MagicMock(
                 return_value={
@@ -1963,7 +2086,8 @@ class TestProjectInventory:
         session.get_available_regions.assert_not_called()
 
     def test_collection_runs_every_scanner_and_keeps_authority_separate(self) -> None:
-        session = self._session(backup_regions=[_REGION])
+        # AWS PCS, like AWS Backup here, is offered in one of the two Regions.
+        session = self._session(backup_regions=[_REGION], pcs_regions=[_REGION])
         fakes = self._scanner_fakes()
 
         with _patched_helpers(fakes):
@@ -1981,6 +2105,7 @@ class TestProjectInventory:
         assert coverage["completed_scanners"] == list(inventory_shared._PROJECT_RESOURCE_SCANNERS)
         assert coverage["enabled_regions"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["aws_backup"] == [_REGION]
+        assert coverage["scanner_regions"]["pcs"] == [_REGION]
         assert coverage["scanner_regions"]["ec2_networking"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["s3_buckets"] == ["global"]
         assert coverage["scanner_regions"]["global_accelerators"] == ["us-west-2"]
@@ -2014,6 +2139,9 @@ class TestProjectInventory:
         assert east["dynamodb_tables"] == [f"{_PROJECT}-jobs"]
         assert east["cluster_volumes"] == ["vol-1"]
         assert east["backup_vaults"] == ["vault-arn"]
+        assert east["pcs_clusters"] == ["pcs-cluster-arn"]
+        assert east["pcs_compute_node_groups"] == ["pcs-group-arn"]
+        assert east["pcs_queues"] == []
         assert east["sqs_queues"] == []
         assert inventory["s3_buckets"] == [f"{_PROJECT}-assets"]
         assert inventory["iam_roles"] == ["role-arn"]
@@ -2021,6 +2149,7 @@ class TestProjectInventory:
         fakes["_list_project_kms_keys"].assert_any_call(session, _REGION, _PROJECT, "run-123")
         fakes["_list_project_ec2_networking"].assert_any_call(session, _REGION, _PROJECT, ["i-1"])
         fakes["_list_project_backup_resources"].assert_called_once_with(session, _REGION, _PROJECT)
+        fakes["_list_project_pcs_resources"].assert_called_once_with(session, _REGION, _PROJECT)
         fakes["_list_global_accelerators"].assert_called_once_with(session, "us-west-2", _PROJECT)
         fakes["_list_instances"].assert_not_called()
 
@@ -2827,6 +2956,7 @@ class TestRetainedResourceCleanup:
             "_cleanup_new_ecr_images": MagicMock(return_value={"images": []}),
             "_cleanup_new_ecr_repositories": MagicMock(return_value={"repositories": []}),
             "_schedule_retained_kms_keys": MagicMock(return_value={"keys": []}),
+            "_wait_for_pcs_nodes_terminated": MagicMock(return_value={"regions": {}}),
             "_restore_transaction_search": MagicMock(return_value={"regions": {}, "errors": []}),
         }
         fakes.update(overrides)
@@ -2844,6 +2974,7 @@ class TestRetainedResourceCleanup:
         assert result["ecr_images"] == {"images": []}
         assert result["ecr_repositories"] == {"repositories": []}
         assert result["kms"] == {"keys": []}
+        assert result["pcs_nodes"] == {"regions": {}}
         assert result["transaction_search"] == {"regions": {}, "errors": []}
         assert result["started_at"] <= result["ended_at"]
         assert ctx.checkpoint.state["retained_cleanup_attempts"] == [result]

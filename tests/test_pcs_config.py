@@ -1219,6 +1219,53 @@ class TestConfigLoaderWiring:
         assert loader.get_pcs_config()["enabled"] is True
         assert loader.get_fsx_lustre_config("us-east-1")["enabled"] is True
 
+    def test_pcs_overrides_context_deep_merges_last(
+        self, valid_cdk_context: dict[str, Any]
+    ) -> None:
+        """``pcs_overrides`` (the live harness's knob) wins over the block and its overlays."""
+        overrides = json.dumps({"enabled": True, "managed": {"metrics": {"enabled": True}}})
+        loader = _loader(
+            valid_cdk_context,
+            pcs={"managed": {"size": "MEDIUM"}},
+            pcs_regions={"us-east-1": {"managed": {"metrics": {"enabled": False}}}},
+            pcs_overrides=overrides,
+        )
+        for region in (None, "us-east-1", "eu-west-1"):
+            config = loader.get_pcs_config(region)
+            assert config["enabled"] is True, region
+            assert config["managed"]["metrics"]["enabled"] is True, region
+            assert config["managed"]["size"] == "MEDIUM", region
+        # No block at all: the overrides are the block.
+        bare = _loader(valid_cdk_context, pcs_overrides={"enabled": True})
+        assert bare.get_pcs_config()["enabled"] is True
+        # A bad override fails at construction like a bad cdk.json.
+        with pytest.raises(ConfigValidationError, match=r"pcs_overrides must be a JSON object"):
+            _loader(valid_cdk_context, pcs_overrides="[1]")
+        with pytest.raises(ConfigValidationError, match=r"pcs\.managed\.size"):
+            _loader(valid_cdk_context, pcs_overrides='{"managed": {"size": "XL"}}')
+
+    def test_parse_and_apply_pcs_overrides(self) -> None:
+        assert pc.parse_pcs_overrides(None) == {}
+        assert pc.parse_pcs_overrides("  ") == {}
+        assert pc.parse_pcs_overrides({"enabled": True}) == {"enabled": True}
+        assert pc.parse_pcs_overrides('{"enabled": true}') == {"enabled": True}
+        with pytest.raises(pc.PcsConfigError, match=r"must be a JSON object: "):
+            pc.parse_pcs_overrides("{")
+        with pytest.raises(pc.PcsConfigError, match=r"must be a JSON object, got list"):
+            pc.parse_pcs_overrides("[]")
+        with pytest.raises(pc.PcsConfigError, match=r"JSON object string or an object, got int"):
+            pc.parse_pcs_overrides(7)
+        # Nothing to merge leaves the block alone (absent stays absent); a
+        # non-object block is left for the validator to name.
+        assert pc.apply_pcs_overrides(None, None) is None
+        assert pc.apply_pcs_overrides({"enabled": False}, "") == {"enabled": False}
+        assert pc.apply_pcs_overrides("yes", {"enabled": True}) == "yes"
+        assert pc.apply_pcs_overrides(None, {"enabled": True}) == {"enabled": True}
+        assert pc.apply_pcs_overrides(
+            {"managed": {"size": "MEDIUM"}}, {"managed": {"metrics": {"enabled": True}}}
+        ) == {"managed": {"size": "MEDIUM", "metrics": {"enabled": True}}}
+        assert pc.PCS_OVERRIDES_CONTEXT_KEY == "pcs_overrides"
+
     def test_feature_override_does_not_change_the_other_knobs(
         self, valid_cdk_context: dict[str, Any]
     ) -> None:

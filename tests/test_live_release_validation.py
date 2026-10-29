@@ -99,6 +99,10 @@ def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
         # explicitly by the preflight tests that patch ``shutil.disk_usage``.
         min_free_disk_gib=0,
         confirm_kms_key_deletion=True,
+        # No PCS override: the AWS PCS checks read cdk.json alone and find it
+        # off, as a sibling harness that sets none would.
+        pcs_overrides_json="",
+        command_timeout_seconds=300,
     )
     context = SimpleNamespace(
         checkpoint=checkpoint,
@@ -5109,11 +5113,13 @@ class TestLocalOnlyRuntime:
         assert isinstance(settings, RunSettings)
         assert settings.inference_enabled is True
         full_identity = settings.identity()
-        # The release entry point always samples every request, so the
-        # tracing override rides every CDK invocation and the resume identity.
+        # The release entry point always samples every request and deploys the
+        # AWS PCS backend, so both overrides ride every CDK invocation and the
+        # resume identity.
         assert full_identity["extra_cdk_context"] == {
             "gco_live_validation_disable_efs_automatic_backups": "true",
             "tracing_overrides": '{"sample_ratio":1.0}',
+            "pcs_overrides": '{"enabled":true,"managed":{"metrics":{"enabled":true}}}',
         }
         identity = full_identity["inference"]
         assert identity["selected_region"] == "us-east-1"
@@ -5414,11 +5420,18 @@ class TestSchedulerValidation:
         *,
         helm: dict[str, object] | None,
         optional: tuple[str, ...] = (),
+        pcs_overrides_json: str = "",
     ) -> SimpleNamespace:
         return SimpleNamespace(
             cdk_context={} if helm is None else {"helm": helm},
-            settings=SimpleNamespace(run_id="run-123", optional_schedulers=optional),
+            settings=SimpleNamespace(
+                run_id="run-123",
+                optional_schedulers=optional,
+                pcs_overrides_json=pcs_overrides_json,
+            ),
             checkpoint=SimpleNamespace(state={}),
+            deployment_regions=("us-east-1",),
+            config=SimpleNamespace(project_name="gco-live"),
             persist=MagicMock(),
         )
 
@@ -5498,12 +5511,64 @@ class TestSchedulerValidation:
         assert "--optional-schedulers" in results["yunikorn"]["reason"]
         assert "cdk.json helm.yunikorn" in results["yunikorn"]["reason"]
         assert results["slurm"]["status"] == "skipped"
+        # No pcs_overrides and no cdk.json block: PCS is off, with the source.
+        assert results["pcs"]["status"] == "skipped"
+        assert "Disabled by cdk.json pcs" in results["pcs"]["reason"]
+        assert "pcs_overrides" in results["pcs"]["reason"]
+        assert evidence["enablement"]["pcs"] == {
+            "enabled": False,
+            "source": "cdk.json pcs",
+            "mode": "managed",
+            "region": "us-east-1",
+        }
         assert results["keda"]["status"] == "derived"
         assert "sqs action" in results["keda"]["reason"]
         assert results["kuberay"]["status"] == "chart-level"
         assert "kind allowlist" in results["kuberay"]["reason"]
         assert ctx.checkpoint.state["scheduler_validation"] == evidence
         ctx.persist.assert_called_once_with()
+
+    def test_the_release_override_turns_the_pcs_probe_on(self) -> None:
+        from scripts.live_release_validation.actions import schedulers as actions_schedulers
+        from scripts.live_release_validation.checks.pcs import pcs_overrides_json
+
+        ctx = self._ctx(
+            helm={"yunikorn": {"enabled": False}, "slurm": {"enabled": False}},
+            pcs_overrides_json=pcs_overrides_json(),
+        )
+        with (
+            patch_live_validation_helper("_run_api_transport_lifecycle", return_value={}),
+            patch_live_validation_helper(
+                "probe_pcs", return_value={"region": "us-east-1", "job": {"job_id": 7}}
+            ) as probe,
+        ):
+            evidence = actions_schedulers.action_schedulers(ctx)
+
+        probe.assert_called_once_with(ctx)
+        assert evidence["schedulers"]["pcs"] == {
+            "status": "validated",
+            "source": "run-override (pcs_overrides)",
+            "region": "us-east-1",
+            "job": {"job_id": 7},
+        }
+        assert evidence["enablement"]["pcs"]["enabled"] is True
+
+    def test_a_pcs_probe_failure_fails_the_action(self) -> None:
+        from scripts.live_release_validation.actions import schedulers as actions_schedulers
+        from scripts.live_release_validation.checks.pcs import (
+            PcsValidationError,
+            pcs_overrides_json,
+        )
+
+        ctx = self._ctx(helm={}, pcs_overrides_json=pcs_overrides_json())
+        with (
+            patch_live_validation_helper("_run_api_transport_lifecycle", return_value={}),
+            patch_live_validation_helper(
+                "probe_pcs", side_effect=PcsValidationError("us-east-1: PCS job 7 ended FAILED")
+            ),
+            pytest.raises(PcsValidationError, match="ended FAILED"),
+        ):
+            actions_schedulers.action_schedulers(ctx)
 
     def test_action_runs_every_probe_when_overrides_enable_everything(self) -> None:
         from scripts.live_release_validation.actions import schedulers as actions_schedulers

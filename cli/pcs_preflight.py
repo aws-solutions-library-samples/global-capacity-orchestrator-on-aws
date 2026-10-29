@@ -147,7 +147,7 @@ def _cdk_context(cdk_json_path: Path | None) -> dict[str, Any]:
     return context if isinstance(context, dict) else {}
 
 
-def _fsx_enabled(context: Mapping[str, Any], region: str) -> bool:
+def fsx_enabled_in_region(context: Mapping[str, Any], region: str) -> bool:
     """The Region's ``fsx_lustre`` toggle, with its ``fsx_lustre_regions`` overlay."""
     block = context.get("fsx_lustre")
     enabled = bool(block.get("enabled")) if isinstance(block, Mapping) else False
@@ -179,7 +179,7 @@ def load_pcs_config(
     context = _cdk_context(cdk_json_path)
     try:
         config = validate_pcs_config(
-            raw_pcs_config(context, region), fsx_enabled=_fsx_enabled(context, region)
+            raw_pcs_config(context, region), fsx_enabled=fsx_enabled_in_region(context, region)
         )
     except PcsConfigError as exc:
         raise PcsPreflightError(f"cdk.json pcs block is invalid for {region}: {exc}") from exc

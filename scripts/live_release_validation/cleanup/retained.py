@@ -12,6 +12,7 @@ from ..cleanup.ecr import _cleanup_new_ecr_images, _cleanup_new_ecr_repositories
 from ..cleanup.log_groups import (
     _cleanup_owned_log_groups,
 )
+from ..cleanup.pcs_nodes import _wait_for_pcs_nodes_terminated
 from ..cleanup.transaction_search import (
     TransactionSearchRestoreError,
     _restore_transaction_search,
@@ -125,6 +126,13 @@ def _retained_resource_cleanup(ctx: RunContext) -> dict[str, Any]:
         result["kms"] = _schedule_retained_kms_keys(ctx)
     except Exception as exc:  # preserve partial evidence
         result["errors"].append({"phase": "kms", "error": f"{type(exc).__name__}: {exc}"})
+    # The managed PCS cluster's node groups are gone with the stack, but EC2
+    # still shows the instances PCS terminated as shutting-down for a while;
+    # the final inventory would count them as live.
+    try:
+        result["pcs_nodes"] = _wait_for_pcs_nodes_terminated(ctx)
+    except Exception as exc:  # preserve partial evidence
+        result["errors"].append({"phase": "pcs-nodes", "error": f"{type(exc).__name__}: {exc}"})
     # Account-level state the stacks' deletion never reverts: the enabler's
     # Delete is a no-op, so the run puts Transaction Search back itself.
     try:

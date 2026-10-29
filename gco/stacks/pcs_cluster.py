@@ -725,8 +725,21 @@ class PcsCluster(Construct):
         return cluster
 
     def _tags(self, **extra: str) -> dict[str, str]:
+        """Tags on every PCS resource and on the instances PCS launches.
+
+        ``gco:project`` is the ownership tag the project's inventory (the live
+        release validation's cleanup proof) recognizes on resources
+        CloudFormation did not create itself: the EC2 instances and volumes PCS
+        launches from the launch templates carry only what the templates'
+        tag specifications name.
+        """
         assert self.cluster_name is not None
-        return {"Project": self.project_name, "gco:pcs-cluster": self.cluster_name, **extra}
+        return {
+            "Project": self.project_name,
+            "gco:project": self.project_name,
+            "gco:pcs-cluster": self.cluster_name,
+            **extra,
+        }
 
     # -- storage --
 

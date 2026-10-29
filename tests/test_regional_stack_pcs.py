@@ -534,7 +534,11 @@ class TestManagedModeCluster:
             {"ParameterName": "PurgeJobAfter", "ParameterValue": "90days"}
         ]
         assert "CgroupCustomSettings" not in slurm
-        assert props["Tags"] == {"Project": "gco-test", "gco:pcs-cluster": "gco-test-hpc"}
+        assert props["Tags"] == {
+            "Project": "gco-test",
+            "gco:project": "gco-test",
+            "gco:pcs-cluster": "gco-test-hpc",
+        }
         # The cluster id and ARN the rest of the stack wires are the resource's.
         assert stack.pcs.cluster_id == stack.pcs.cluster_resource.attr_id
         assert _replacements(resources)["{{PCS_CLUSTER_ID}}"] == {"Fn::GetAtt": [cluster_id, "Id"]}
@@ -828,6 +832,10 @@ class TestManagedModeLaunchTemplates:
         assert set(tagged) == {"instance", "volume"}
         assert tagged["instance"]["Name"] == "gco-test-hpc-gco-compute"
         assert tagged["instance"]["gco:pcs-node-group"] == "gco-compute"
+        # The ownership tag the project inventory recognizes on resources
+        # CloudFormation did not create (PCS launches these instances).
+        assert tagged["instance"]["gco:project"] == "gco-test"
+        assert tagged["volume"]["gco:project"] == "gco-test"
         assert _launch_template(resources, "gco-compute")["DeletionPolicy"] == "Retain"
 
     def test_multi_card_efa_with_a_placement_group(self, pcs_managed_full) -> None:

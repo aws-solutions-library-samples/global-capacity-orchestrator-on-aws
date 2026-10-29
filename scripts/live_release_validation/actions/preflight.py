@@ -7,8 +7,11 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from cli.pcs_preflight import run_preflight, summarize
 from cli.stacks import check_asset_sources_readable
+from gco.pcs_config import pcs_enabled
 
+from ..checks.pcs import effective_pcs_config
 from ..constants import (
     _CLUSTER_TUNNEL_ACTIONS,
     _HEALTHY_STACK_STATUSES,
@@ -80,6 +83,44 @@ def _check_free_disk(settings: RunSettings) -> dict[str, float]:
     return observed
 
 
+def _pcs_preflight(ctx: RunContext) -> dict[str, Any]:
+    """Run the AWS PCS account preflight for every deployment Region with PCS on.
+
+    Returns the per-Region summaries (``cli.pcs_preflight.summarize``);
+    raises when a Region has a failure, with the failing checks named.
+    """
+    reports = []
+    for region in ctx.deployment_regions:
+        config = effective_pcs_config(ctx, region)
+        if not pcs_enabled(config):
+            continue
+        reports.append(
+            run_preflight(
+                region,
+                config,
+                project=ctx.config.project_name,
+                client_factory=ctx.session.client,
+            )
+        )
+    summary = summarize(reports)
+    summary["regions_without_pcs"] = [
+        region
+        for region in ctx.deployment_regions
+        if region not in {report.region for report in reports}
+    ]
+    if not summary["ok"]:
+        failures = [
+            f"{report.region}: {check.name}: {check.detail}"
+            for report in reports
+            for check in report.failures
+        ]
+        raise RuntimeError(
+            "AWS PCS preflight failed; the deploy would fail or the API would answer 503:\n  "
+            + "\n  ".join(failures)
+        )
+    return summary
+
+
 def action_preflight(ctx: RunContext) -> dict[str, Any]:
     """Validate exact git/AWS/config identity and prove project ownership."""
     settings = ctx.settings
@@ -120,6 +161,15 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
     free_disk_gib: dict[str, float] | None = None
     if "deploy" in selected and settings.min_free_disk_gib > 0:
         free_disk_gib = _check_free_disk(settings)
+
+    # The AWS PCS block the deploy will create (on for every release run
+    # through pcs_overrides): a Region without PCS, an instance type the
+    # Region lacks or a taken cluster name fails here, in seconds, instead of
+    # an hour into the deploy. Checked with the same code as
+    # `gco stacks pcs preflight`; its warnings never block.
+    pcs_preflight: dict[str, Any] | str = "not-required"
+    if "deploy" in selected:
+        pcs_preflight = _pcs_preflight(ctx)
 
     # A checkout made under a restrictive umask deploys Lambda code that the
     # Lambda runtime cannot read; refuse it before the stack listing below
@@ -260,5 +310,6 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
         "free_disk_gib": free_disk_gib if free_disk_gib is not None else "not-required",
         "asset_sources_readable": True if "deploy" in selected else "not-required",
         "kms_key_deletion_confirmed": settings.confirm_kms_key_deletion,
+        "pcs_preflight": pcs_preflight,
         "resume": settings.resume,
     }

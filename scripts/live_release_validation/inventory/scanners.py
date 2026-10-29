@@ -716,6 +716,65 @@ def _backup_tags(client: Any, arn: str) -> dict[str, str]:
     return _mapping_tags(client.list_tags(ResourceArn=arn).get("Tags"))
 
 
+def _pcs_tags(client: Any, arn: str) -> dict[str, str]:
+    return _mapping_tags(client.list_tags_for_resource(resourceArn=arn).get("tags"))
+
+
+def _list_project_pcs_resources(
+    session: Any,
+    region: str,
+    project_name: str,
+) -> dict[str, list[str]]:
+    """AWS PCS clusters, compute node groups and queues the project owns, by ARN.
+
+    A cluster is owned by name (``<project>-pcs`` and anything else the
+    managed block names under the project prefix) or by the ``gco:project`` /
+    CloudFormation stack tags the regional stack puts on it; every node group
+    and queue of an owned cluster is owned with it (PCS deletes them before
+    the cluster, so one left behind is exactly the residue this proves
+    absent). Clusters the project merely connects to (``pcs.mode: existing``)
+    carry neither the name nor the tags and stay out.
+    """
+    client = session.client("pcs", region_name=region)
+    resources: dict[str, set[str]] = {
+        "pcs_clusters": set(),
+        "pcs_compute_node_groups": set(),
+        "pcs_queues": set(),
+    }
+    clusters: list[dict[str, Any]] = []
+    for page in client.get_paginator("list_clusters").paginate():
+        clusters.extend(page.get("clusters", []))
+    for cluster in clusters:
+        cluster_id = str(cluster.get("id") or "")
+        name = str(cluster.get("name") or "")
+        arn = str(cluster.get("arn") or "")
+        if not cluster_id or not name or not arn:
+            raise RuntimeError(f"AWS PCS returned a cluster without identity in {region}")
+        if not (
+            _project_owned_name(name, project_name)
+            or _tags_are_project_owned(_pcs_tags(client, arn), project_name)
+        ):
+            continue
+        resources["pcs_clusters"].add(arn)
+        for page in client.get_paginator("list_compute_node_groups").paginate(
+            clusterIdentifier=cluster_id
+        ):
+            for group in page.get("computeNodeGroups", []):
+                group_arn = str(group.get("arn") or "")
+                if not group_arn:
+                    raise RuntimeError(
+                        f"AWS PCS returned a compute node group without an ARN in {region}"
+                    )
+                resources["pcs_compute_node_groups"].add(group_arn)
+        for page in client.get_paginator("list_queues").paginate(clusterIdentifier=cluster_id):
+            for queue in page.get("queues", []):
+                queue_arn = str(queue.get("arn") or "")
+                if not queue_arn:
+                    raise RuntimeError(f"AWS PCS returned a queue without an ARN in {region}")
+                resources["pcs_queues"].add(queue_arn)
+    return {key: sorted(values) for key, values in resources.items()}
+
+
 def _list_project_backup_resources(
     session: Any,
     region: str,

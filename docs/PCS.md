@@ -12,6 +12,7 @@ GCO can run Slurm on [AWS Parallel Computing Service](https://docs.aws.amazon.co
 - [Node Groups and Queues](#node-groups-and-queues)
 - [Storage](#storage)
 - [Monitoring](#monitoring)
+- [Live Validation](#live-validation)
 - [Security](#security)
 - [Preflight](#preflight)
 - [Compared with Slurm on EKS (Slinky)](#compared-with-slurm-on-eks-slinky)
@@ -172,6 +173,10 @@ Slurm's series carry no cluster label, so a Region that runs both backends lands
 The *GCO Slurm (AWS PCS)* Grafana dashboard shows pending and running jobs and the largest pending job per partition, node states, allocated CPUs and GPUs, scheduler cycle times and the controller's scrape status; `gco monitoring open` opens Grafana. The `gco-pcs-alerts` PrometheusRule carries `PcsSlurmControllerDown` (no successful scrape for five minutes: the cluster is not `ACTIVE`, the settings changed, or 6817 is closed), `PcsSlurmNodesDown` (DOWN nodes that were not drained for fifteen minutes; PCS scales nodes down through Slurm's power save, which leaves no DOWN record, so a DOWN node failed its lifecycle actions or lost its slurmd) and `PcsSlurmQueueStalled` (pending work and nothing running for thirty minutes: a node group at `max_nodes`, no capacity in its zones, a reservation that is not active, or instances that never register).
 
 An existing cluster (`mode: existing`) is scraped by whoever runs it; the key sits under `managed` on purpose. Metrics are unauthenticated HTTP on the controller ENI, which is why the stack admits only the EKS cluster security group.
+
+## Live Validation
+
+Every [live release validation](LIVE_RELEASE_VALIDATION.md) run deploys PCS in managed mode with its metrics on, whatever the checkout's `cdk.json` says (the run-scoped `pcs_overrides` CDK context, never an edit), and proves it before the release: the `preflight` action runs the same checks as `gco stacks pcs preflight` for the block the run deploys; the `schedulers` action reads `/api/v1/slurm/backends`, submits a batch job with `backend=pcs` that must reach `COMPLETED` on a node PCS launches from zero, requires its accounting record with the caller attribution, and reads the job's output file from the login node with `gco slurm output --backend pcs`; and the teardown waits for the instances PCS launched to finish terminating before the final inventory proves the account clean. A Region where PCS is not offered fails the preflight with the reason.
 
 ## Security
 

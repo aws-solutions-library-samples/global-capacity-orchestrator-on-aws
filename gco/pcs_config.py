@@ -60,6 +60,13 @@ PCS_FEATURE_KEY = "pcs"
 #: Per-region overlays: ``pcs_regions: {"us-east-1": {...}}`` deep-merges over
 #: the global block, like ``fsx_lustre_regions``.
 PCS_REGIONS_KEY = "pcs_regions"
+#: Run-scoped CDK context carrying a JSON object deep-merged over the block
+#: (after the region's overlay) for one deploy, the PCS sibling of
+#: ``tracing_overrides``: ``cdk deploy --context
+#: pcs_overrides='{"enabled":true,"managed":{"metrics":{"enabled":true}}}'``.
+#: The live release harness, whose preflight requires a clean worktree,
+#: deploys PCS on every run this way.
+PCS_OVERRIDES_CONTEXT_KEY = "pcs_overrides"
 
 #: The two Slurm backends the API can front. ``slinky`` is the in-cluster
 #: cluster from ``helm.slurm``; ``pcs`` is this block.
@@ -911,6 +918,51 @@ def validate_pcs_config(raw: object, *, fsx_enabled: bool = False) -> dict[str, 
 # ---------------------------------------------------------------------------
 # Derived views
 # ---------------------------------------------------------------------------
+
+
+def parse_pcs_overrides(raw: object) -> dict[str, Any]:
+    """Parse the ``pcs_overrides`` context value into a mapping.
+
+    Accepts a JSON object string (the only shape ``cdk --context`` can carry)
+    or a mapping (cdk.json-style); ``None`` and blank strings mean no
+    overrides. Only the shape is checked here: the merged block goes through
+    :func:`validate_pcs_config` as a whole, so an override that produces an
+    invalid block fails exactly like an invalid cdk.json does.
+    """
+    if raw is None:
+        return {}
+    if isinstance(raw, Mapping):
+        return copy.deepcopy(dict(raw))
+    if isinstance(raw, str):
+        if not raw.strip():
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise PcsConfigError(
+                f"{PCS_OVERRIDES_CONTEXT_KEY} must be a JSON object: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise PcsConfigError(
+                f"{PCS_OVERRIDES_CONTEXT_KEY} must be a JSON object, got {type(parsed).__name__}"
+            )
+        return parsed
+    raise PcsConfigError(
+        f"{PCS_OVERRIDES_CONTEXT_KEY} must be a JSON object string or an object, "
+        f"got {type(raw).__name__}"
+    )
+
+
+def apply_pcs_overrides(raw: object, overrides: object) -> object:
+    """``raw`` (the block as cdk.json has it, possibly ``None``) with the overrides merged in.
+
+    Nothing to merge returns ``raw`` untouched, so an absent block stays
+    absent; a non-object block is returned as is for the validator to name.
+    """
+    parsed = parse_pcs_overrides(overrides)
+    if not parsed or (raw is not None and not isinstance(raw, dict)):
+        return raw
+    return _deep_merge(raw or {}, parsed)
 
 
 def pcs_enabled(config: Mapping[str, Any]) -> bool:

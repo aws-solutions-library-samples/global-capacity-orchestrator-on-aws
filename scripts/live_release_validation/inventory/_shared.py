@@ -51,6 +51,9 @@ _REGIONAL_PROJECT_RESOURCE_CATEGORIES = (
     "backup_plans",
     "backup_selections",
     "backup_recovery_points",
+    "pcs_clusters",
+    "pcs_compute_node_groups",
+    "pcs_queues",
 )
 
 
@@ -91,6 +94,7 @@ _PROJECT_RESOURCE_SCANNERS = (
     "secrets_manager",
     "cluster_volumes",
     "aws_backup",
+    "pcs",
     "s3_buckets",
     "iam",
     "global_accelerators",

@@ -54,7 +54,14 @@ from gco.inference_proxy_config import (
 )
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.models import ClusterConfig, ResourceThresholds
-from gco.pcs_config import PCS_FEATURE_KEY, PCS_REGIONS_KEY, PcsConfigError, validate_pcs_config
+from gco.pcs_config import (
+    PCS_FEATURE_KEY,
+    PCS_OVERRIDES_CONTEXT_KEY,
+    PCS_REGIONS_KEY,
+    PcsConfigError,
+    apply_pcs_overrides,
+    validate_pcs_config,
+)
 from gco.resource_governance import parse_k8s_quantity
 from gco.slurm_config import SlurmConfigError, validate_slurm_config
 from gco.stacks.constants import (
@@ -1088,21 +1095,28 @@ class ConfigLoader:
         turns PCS on in that region only), merged one level at a time so an
         overlay that names one nested key keeps the global block's siblings.
         An overlay for a region is only applied when the overlay is an object;
-        anything else is reported by the validator with the region named.
+        anything else is reported by the validator with the region named. The
+        run-scoped ``pcs_overrides`` context (a JSON object) is merged last.
         """
         global_raw = self.app.node.try_get_context(PCS_FEATURE_KEY)
-        if region is None:
-            return global_raw
-        overlays = self.app.node.try_get_context(PCS_REGIONS_KEY)
-        if not isinstance(overlays, dict) or region not in overlays:
-            return global_raw
-        overlay = overlays[region]
-        if not isinstance(overlay, dict):
-            raise ConfigValidationError(
-                f"{PCS_REGIONS_KEY}.{region} must be an object, got {overlay!r}"
-            )
-        base: dict[str, Any] = global_raw if isinstance(global_raw, dict) else {}
-        return _deep_merge(base, overlay)
+        overrides = self.app.node.try_get_context(PCS_OVERRIDES_CONTEXT_KEY)
+        try:
+            if region is None:
+                return apply_pcs_overrides(global_raw, overrides)
+            overlays = self.app.node.try_get_context(PCS_REGIONS_KEY)
+            if not isinstance(overlays, dict) or region not in overlays:
+                return apply_pcs_overrides(global_raw, overrides)
+            overlay = overlays[region]
+            if not isinstance(overlay, dict):
+                raise ConfigValidationError(
+                    f"{PCS_REGIONS_KEY}.{region} must be an object, got {overlay!r}"
+                )
+            base: dict[str, Any] = global_raw if isinstance(global_raw, dict) else {}
+            # The run-scoped overrides win over the region's overlay, as the
+            # tracing and EKS-capabilities overrides win over their blocks.
+            return apply_pcs_overrides(_deep_merge(base, overlay), overrides)
+        except PcsConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
 
     def _pcs_fsx_enabled(self, region: str | None) -> bool:
         """Whether ``pcs.managed.storage.scratch: fsx`` can be honored.
