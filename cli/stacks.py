@@ -6954,6 +6954,28 @@ def update_fsx_config(settings: dict[str, Any], region: str | None = None) -> No
     _update_feature_config("fsx_lustre", settings, _FSX_DEFAULTS, region)
 
 
+_PCS_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "mode": "managed",
+    "cluster_id": None,
+    "endpoint_cidr": None,
+}
+
+
+def get_pcs_config(region: str | None = None) -> dict[str, Any]:
+    """Get the raw AWS PCS block from cdk.json (``pcs`` with the region's ``pcs_regions`` overlay).
+
+    The top-level keys only, as written; ``gco stacks pcs status`` and the
+    preflight validate the whole block through :mod:`gco.pcs_config`.
+    """
+    return _get_feature_config("pcs", _PCS_DEFAULTS, region)
+
+
+def update_pcs_config(settings: dict[str, Any], region: str | None = None) -> None:
+    """Update the AWS PCS block in cdk.json (global, or the region's overlay)."""
+    _update_feature_config("pcs", settings, _PCS_DEFAULTS, region)
+
+
 # =============================================================================
 # EKS cluster access configuration (endpoint mode + CIDR allowlist)
 # =============================================================================

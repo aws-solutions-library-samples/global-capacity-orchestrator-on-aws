@@ -57,6 +57,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [KubeRay](KUBERAY.md) | ML engineers | Ray distributed computing for training, tuning, and serving (enabled by default) |
 | [KEDA](KEDA.md) | Platform teams | Event-driven autoscaling from [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html), Prometheus, [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html), and 60+ sources (enabled by default) |
 | [Slurm (Slinky)](SLURM_OPERATOR.md) | HPC engineers | HPC-style scheduling with sbatch/srun on Kubernetes (opt-in) |
+| [Slurm (AWS PCS)](PCS.md) | HPC engineers | [AWS Parallel Computing Service](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) as a second Slurm backend behind the same API, CLI and tools: a managed cluster with EC2 node groups, EFA, placement groups and Capacity Blocks, or an existing one (opt-in) |
 | [YuniKorn](YUNIKORN.md) | Platform teams | App-aware scheduler with hierarchical queues and multi-tenant fair sharing (opt-in) |
 
 ## Supplementary

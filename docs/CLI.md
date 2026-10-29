@@ -4918,6 +4918,7 @@ Manage CDK infrastructure stacks.
 | [`gco stacks fsx`](#gco-stacks-fsx) | Manage [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) storage. |
 | [`gco stacks valkey`](#gco-stacks-valkey) | Manage [Valkey](https://valkey.io/) Serverless cache. |
 | [`gco stacks aurora`](#gco-stacks-aurora) | Manage Aurora PostgreSQL ([pgvector](https://github.com/pgvector/pgvector)) database. |
+| [`gco stacks pcs`](#gco-stacks-pcs) | Manage [AWS Parallel Computing Service](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) as a Slurm backend: the `cdk.json` block, configured vs. deployed state, and the account preflight. |
 | [`gco stacks addons`](#gco-stacks-addons) | Inspect and re-converge cluster add-ons (Helm charts) without touching CloudFormation. |
 | [`gco stacks synth`](#gco-stacks-synth) | Synthesize CloudFormation templates without deploying. |
 | [`gco stacks diff`](#gco-stacks-diff) | Show differences between deployed and local stacks. |
@@ -4975,6 +4976,11 @@ gco stacks deploy STACK_NAME [OPTIONS]
 | `--outputs-file` | `-o` | Write stack outputs to a file |
 | `--tag` | `-t` | Add a stack tag (`KEY=VALUE`), repeatable |
 | `--enable` | | Force-enable an off-by-default feature or Helm chart for this run only (`NAME[,NAME...]`, repeatable) |
+| `--skip-pcs-preflight` | | Deploy a regional stack with AWS PCS on without the [`gco stacks pcs preflight`](#gco-stacks-pcs) checks that otherwise run first |
+
+A base regional stack whose Region has AWS PCS on (in `cdk.json`, or through
+`--enable pcs`) is preflighted before CloudFormation starts; a failed check
+stops the deploy with the findings and the flag to override.
 
 **Example:**
 
@@ -5000,13 +5006,14 @@ gco stacks deploy-all [OPTIONS]
 | `--parallel` | `-p` | Deploy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
 | `--enable` | | Force-enable an off-by-default feature or Helm chart for this run only (`NAME[,NAME...]`, repeatable) |
+| `--skip-pcs-preflight` | | Deploy without the [`gco stacks pcs preflight`](#gco-stacks-pcs) checks that otherwise run for every Region with AWS PCS on |
 
 **Example:**
 
 ```bash
 gco stacks deploy-all -y
 gco stacks deploy-all -y --parallel --max-workers 8
-gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn
+gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs
 ```
 
 See [Run-scoped enablement overrides](CUSTOMIZATION.md#run-scoped-enablement-overrides)
@@ -5361,6 +5368,45 @@ gco stacks aurora COMMAND [OPTIONS]
 gco stacks aurora status
 gco stacks aurora enable --min-acu 2 --max-acu 32 --deletion-protection -y
 gco stacks aurora disable -y
+```
+
+#### `gco stacks pcs`
+
+Manage [AWS Parallel Computing Service](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) (PCS) as a Slurm backend of the regional stacks. The `cdk.json` `pcs` block has two modes: **managed** (the default), where the regional stack creates a PCS cluster from `pcs.managed` (node groups, queues, the login node, the shared EFS home and the lifecycle scripts), and **existing**, where the API fronts a cluster you already run (`pcs.cluster_id`). Either way `gco slurm ... --backend pcs` submits to it; the Slinky backend (`slurm`) can be on in the same Region.
+
+```bash
+gco stacks pcs COMMAND [OPTIONS]
+```
+
+**Subcommands:**
+
+- `status` - Configured and, once deployed, published state per Region: mode, cluster, node groups, queues, login node, identity, and the regional stack's `Pcs*` outputs (cluster id, Slurm version, REST mode, login node group)
+- `enable` - Turn PCS on in `cdk.json` (globally, or for one Region as a `pcs_regions` overlay); the merged block is validated before it is written
+- `disable` - Turn PCS off in `cdk.json`; in managed mode the next deploy deletes the cluster, node groups and queues unless `pcs.managed.removal_policy` is `retain`
+- `preflight` - Check the account before a deploy with PCS on; exits 1 when a Region has a failure
+
+**Options:**
+
+| Option | Short | Subcommands | Description |
+|--------|-------|-------------|-------------|
+| `--region` | `-r` | all | One Region (default: the first deployment Region; for `enable` / `disable`, a `pcs_regions` overlay instead of the global block) |
+| `--all-regions` | `-A` | `status`, `preflight` | Every deployment Region |
+| `--mode` | | `enable` | `managed` (GCO creates the cluster, the default) or `existing` (front a cluster you run) |
+| `--cluster-id` | | `enable` | The existing cluster's id (`pcs_...`), required for existing mode |
+| `--endpoint-cidr` | | `enable` | Existing mode: the IPv4 range the API pod may reach `slurmrestd` in, when the cluster sits in a peered VPC |
+| `--yes` | `-y` | `enable`, `disable` | Skip confirmation |
+
+`preflight` runs against the live account with the AWS APIs alone (no kubectl, no CDK). Existing mode: the cluster exists and is `ACTIVE` on a Slurm version the API speaks (25.11, 26.05) with the REST API on and a `SLURMRESTD` endpoint, its JWT signing key secret exists, its security group admits tcp/6820 from the EKS cluster security group, and it sits in the regional VPC (or `pcs.endpoint_cidr` covers the REST endpoint). Managed mode: PCS answers in the Region, the cluster name is free, every instance type exists with the architecture its name implies (and EFA on enough network cards when a node group asks for it) and is offered in the node group's zones, every capacity reservation exists, is usable and matches its node group, and the EC2 Spot service-linked role exists when a node group buys Spot. An AWS error while checking (a denied call, throttling) is a warning, never a failure: only a fact that would break the deploy or the API fails the preflight. `gco stacks deploy` and `deploy-all` run the same checks for every regional stack with PCS on; `--skip-pcs-preflight` bypasses them.
+
+**Example:**
+
+```bash
+gco stacks pcs status
+gco stacks pcs status --all-regions --output json
+gco stacks pcs enable -y
+gco stacks pcs enable --region us-east-1 --mode existing --cluster-id pcs_0123456789abcdef -y
+gco stacks pcs preflight -r us-east-1
+gco stacks pcs disable -y
 ```
 
 #### `gco stacks addons`
