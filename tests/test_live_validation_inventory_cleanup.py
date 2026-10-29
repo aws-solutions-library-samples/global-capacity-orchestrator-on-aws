@@ -3030,6 +3030,11 @@ class TestRetainedResourceCleanup:
         fakes = self._fakes(
             _cleanup_owned_log_groups=MagicMock(side_effect=RuntimeError("helper stack missing")),
             _cleanup_new_ecr_repositories=MagicMock(side_effect=RuntimeError("repo drift")),
+            # The PCS node wait sits between the KMS and Transaction Search
+            # phases; a failure there is recorded and must not stop the restore.
+            _wait_for_pcs_nodes_terminated=MagicMock(
+                side_effect=RuntimeError("DescribeInstances denied")
+            ),
             _restore_transaction_search=MagicMock(side_effect=RuntimeError("no baseline")),
         )
 
@@ -3041,13 +3046,19 @@ class TestRetainedResourceCleanup:
 
         attempt = ctx.checkpoint.state["retained_cleanup_attempts"][0]
         assert "cloudwatch_logs" not in attempt
+        assert "pcs_nodes" not in attempt
         assert "transaction_search" not in attempt
         assert [error["phase"] for error in attempt["errors"]] == [
             "cloudwatch-logs",
             "ecr-repositories",
+            "pcs-nodes",
             "transaction-search",
         ]
+        assert {"phase": "pcs-nodes", "error": "RuntimeError: DescribeInstances denied"} in attempt[
+            "errors"
+        ]
         assert attempt["kms"] == {"keys": []}
+        fakes["_restore_transaction_search"].assert_called_once_with(ctx)
 
 
 # ---------------------------------------------------------------------------
