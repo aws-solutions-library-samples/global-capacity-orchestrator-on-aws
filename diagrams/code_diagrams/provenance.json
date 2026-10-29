@@ -42,9 +42,9 @@
       "source_commit": "42cc3f2094423b3f8056fbc5c20652e222b0650f"
     },
     "cli/stacks.py": {
-      "digest": "9791a007e729498980831b69571a547e23f2f1f62552d7d921ac76cd7fe040cd",
-      "generated_at": "2026-10-23T11:52:58Z",
-      "source_commit": "6c1b25d9046fec3666f29c38a10fbefe6b833c00"
+      "digest": "6a6ca0d797f7cb712d881741f14f7587fedf8ab391ffd28464e953b5773f0cbf",
+      "generated_at": "2026-10-29T20:23:35Z",
+      "source_commit": "58e51b2b4563e9e1a4f61f565bd64ce972f41231"
     },
     "cli/upgrade.py": {
       "digest": "250666b92297af33ca69a20ac036804aad5c06234d609bce2a3044b0da689f3c",
@@ -142,9 +142,9 @@
       "source_commit": "3458f76ef1541be718c00458b8ecc8f7c770c6ad"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "44ce89dc45fa233334041dad283de81c89fad40070e89ee9ad51c65eabeed7fe",
-      "generated_at": "2026-08-30T12:00:00Z",
-      "source_commit": "8cb8e766461f5b7f35205e12db980988598cf6d5"
+      "digest": "8cfb8c31c2dec163b6215b979a6a7b53c3144e54efae4512aca476bfdf0e14f0",
+      "generated_at": "2026-10-29T20:23:35Z",
+      "source_commit": "58e51b2b4563e9e1a4f61f565bd64ce972f41231"
     },
     "gco_mcp/audit.py": {
       "digest": "c085762d44c367b22fdf200ee1764c38d26056111aa7f7fa87429b810695b689",
@@ -252,9 +252,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "lambda/kubectl-applier-simple/handler.py": {
-      "digest": "e37dab1f1848d5bed0af52e563051ad2e5c0f563ebad771a312a9ed407b8780d",
-      "generated_at": "2026-10-28T14:57:12Z",
-      "source_commit": "fdfe31c154bbf84cdfeb034fee1256e0a838d1f1"
+      "digest": "40d9139ec6b39d64c8f78ad7c0a5afa2281a693ec488969cd32e064ecbd74c31",
+      "generated_at": "2026-10-29T20:23:35Z",
+      "source_commit": "58e51b2b4563e9e1a4f61f565bd64ce972f41231"
     },
     "lambda/proxy-shared/proxy_utils.py": {
       "digest": "69c3c986d6d33faae988eebd3041b8277ef4b84d1883fbbe3e756356b01a5f09",
