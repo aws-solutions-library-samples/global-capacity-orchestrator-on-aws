@@ -183,6 +183,71 @@ class TestParseDateInput:
         with pytest.raises(ValueError, match="Invalid date"):
             blocks.parse_date_input("not-a-date")
 
+    @pytest.mark.parametrize("text", ["2026-07-10", " 2026-07-10 ", "20260710"])
+    def test_through_end_of_day_widens_a_date(self, text):
+        assert blocks.parse_date_input(text, through_end_of_day=True) == datetime(
+            2026, 7, 10, 23, 59, 59, tzinfo=UTC
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        ["2026-07-10T09:00:00Z", "2026-07-10T00:00:00", datetime(2026, 7, 10, tzinfo=UTC)],
+    )
+    def test_through_end_of_day_leaves_timestamps_alone(self, value):
+        parsed = blocks.parse_date_input(value, through_end_of_day=True)
+        assert parsed == blocks.parse_date_input(value)
+
+    def test_through_end_of_day_none_and_blank(self):
+        assert blocks.parse_date_input(None, through_end_of_day=True) is None
+        assert blocks.parse_date_input("", through_end_of_day=True) is None
+
+
+class TestGroupRejections:
+    def test_groups_by_code_and_message_ignoring_the_time_of_day(self):
+        # EC2 stamps the request time into the end-date message, so a sweep
+        # refused for one reason comes back with 21 slightly different
+        # strings; they are one group, labelled by the first message seen.
+        rejected = [
+            {
+                "region": "us-east-1",
+                "duration_hours": 24,
+                "error_code": "InvalidParameterValue",
+                "error": "End date must not be later than Sun Nov 08 17:07:06 UTC 2026.",
+            },
+            {
+                "region": "us-east-1",
+                "duration_hours": 48,
+                "error_code": "InvalidParameterValue",
+                "error": "End date must not be later than Sun Nov 08 17:08:16 UTC 2026.",
+            },
+            {
+                "region": "us-west-2",
+                "duration_hours": 63 * 24,
+                "error_code": "InvalidParameterValue",
+                "error": "The duration is not valid.",
+            },
+        ]
+        assert blocks.group_rejections(rejected) == [
+            {
+                "error_code": "InvalidParameterValue",
+                "error": "End date must not be later than Sun Nov 08 17:07:06 UTC 2026.",
+                "probes": ["us-east-1 1d", "us-east-1 2d"],
+            },
+            {
+                "error_code": "InvalidParameterValue",
+                "error": "The duration is not valid.",
+                "probes": ["us-west-2 63d"],
+            },
+        ]
+
+    def test_missing_fields_do_not_break_grouping(self):
+        assert blocks.group_rejections([{"region": "us-east-1"}]) == [
+            {"error_code": "", "error": "", "probes": ["us-east-1 0d"]}
+        ]
+
+    def test_empty(self):
+        assert blocks.group_rejections([]) == []
+
 
 # =============================================================================
 # blocks.py — instance normalization
@@ -502,18 +567,108 @@ class TestListCapacityBlockOfferingsEnhanced:
         return mock_ec2
 
     def test_date_range_threaded_to_api(self):
+        # EndDateRange bounds an offering's *end*, so "latest start" is sent as
+        # latest_start + duration: a 7-day block may start as late as July 10
+        # only if the range reaches July 17. Sending July 10 itself excluded
+        # every block starting after July 3 and, for any window shorter than
+        # the duration, made EC2 reject the request ("The duration is not valid").
         checker = _make_checker()
         mock_ec2 = self._ec2_with({"CapacityBlockOfferings": []})
         checker._session.client = MagicMock(return_value=mock_ec2)
         checker.list_capacity_block_offerings(
             "us-east-1",
             "p5.48xlarge",
+            duration_hours=168,
             earliest_start=datetime(2026, 7, 1, tzinfo=UTC),
             latest_start=datetime(2026, 7, 10, tzinfo=UTC),
         )
         kwargs = mock_ec2.describe_capacity_block_offerings.call_args[1]
         assert kwargs["StartDateRange"] == datetime(2026, 7, 1, tzinfo=UTC)
-        assert kwargs["EndDateRange"] == datetime(2026, 7, 10, tzinfo=UTC)
+        assert kwargs["EndDateRange"] == datetime(2026, 7, 17, tzinfo=UTC)
+
+    def test_no_dates_sends_no_range(self):
+        checker = _make_checker()
+        mock_ec2 = self._ec2_with({"CapacityBlockOfferings": []})
+        checker._session.client = MagicMock(return_value=mock_ec2)
+        checker.list_capacity_block_offerings("us-east-1", "p5.48xlarge")
+        kwargs = mock_ec2.describe_capacity_block_offerings.call_args[1]
+        assert "StartDateRange" not in kwargs
+        assert "EndDateRange" not in kwargs
+
+    def test_unsupported_type_invalidparametervalue_returns_empty(self):
+        # EC2 reports "no Capacity Blocks for this type here" as
+        # InvalidParameterValue too (eu-west-3 answers this for p5.48xlarge);
+        # the phrase marks it as the expected, quiet case.
+        checker = _make_checker()
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_capacity_block_offerings.side_effect = ClientError(
+            {
+                "Error": {
+                    "Code": "InvalidParameterValue",
+                    "Message": (
+                        "The instance type 'p5.48xlarge' is not supported for Capacity "
+                        "Blocks in 'eu-west-3'. Specify a compatible instance type and try again."
+                    ),
+                }
+            },
+            "DescribeCapacityBlockOfferings",
+        )
+        checker._session.client = MagicMock(return_value=mock_ec2)
+        assert checker.list_capacity_block_offerings("eu-west-3", "p5.48xlarge") == []
+
+    @pytest.mark.parametrize(
+        ("code", "message"),
+        [
+            (
+                "InvalidParameterValue",
+                "The duration is not valid. Specify a new duration and try again.",
+            ),
+            (
+                "InvalidParameterValue",
+                "The instance count is not valid. Refer to the Capacity Blocks user guide.",
+            ),
+            (
+                "InvalidParameterValue",
+                "The end date is not valid. End date must not be later than Sun Nov 08.",
+            ),
+            ("InvalidParameterCombination", "Specify either InstanceType or UltraserverType."),
+        ],
+    )
+    def test_rejected_request_raises_instead_of_empty(self, code, message):
+        # Every other InvalidParameterValue / InvalidParameterCombination is EC2
+        # refusing the request. It used to be swallowed as "no offerings" and
+        # the caller was then told to try a wider window.
+        from cli.capacity import CapacityBlockRequestError, CapacityCheckError
+
+        checker = _make_checker()
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_capacity_block_offerings.side_effect = ClientError(
+            {"Error": {"Code": code, "Message": message}}, "DescribeCapacityBlockOfferings"
+        )
+        checker._session.client = MagicMock(return_value=mock_ec2)
+        with pytest.raises(CapacityBlockRequestError) as excinfo:
+            checker.list_capacity_block_offerings("us-east-1", "p5.48xlarge", duration_hours=48)
+        error = excinfo.value
+        assert isinstance(error, CapacityCheckError)
+        assert (error.region, error.duration_hours) == ("us-east-1", 48)
+        assert error.error_code == code
+        assert error.message == message
+        assert (
+            str(error) == f"EC2 rejected the Capacity Block search in us-east-1 ({code}): {message}"
+        )
+
+    def test_rejected_request_without_message_uses_the_error_text(self):
+        from cli.capacity import CapacityBlockRequestError
+
+        checker = _make_checker()
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_capacity_block_offerings.side_effect = ClientError(
+            {"Error": {"Code": "InvalidParameterValue"}}, "DescribeCapacityBlockOfferings"
+        )
+        checker._session.client = MagicMock(return_value=mock_ec2)
+        with pytest.raises(CapacityBlockRequestError) as excinfo:
+            checker.list_capacity_block_offerings("us-east-1", "p5.48xlarge")
+        assert "InvalidParameterValue" in excinfo.value.message
 
     def test_pagination_follows_next_token(self):
         checker = _make_checker()
@@ -858,7 +1013,176 @@ class TestFindCapacityBlocks:
         with patch.object(checker, "list_capacity_block_offerings", return_value=[]):
             report = checker.find_capacity_blocks("p5.48xlarge", regions=["us-east-1"])
         assert report["offerings_found"] == 0
+        assert report["rejected_probes"] == []
         assert "No Capacity Block offerings" in report["recommendation"]
+        assert "rejected" not in report["recommendation"]
+
+    def test_latest_start_date_covers_the_whole_day(self):
+        # A date-only --latest-start means "starting on or before that day";
+        # blocks start at 11:30 UTC, so the bound is the end of the day. A
+        # timestamp is passed through unchanged, and --earliest-start keeps
+        # midnight.
+        checker = _make_checker()
+        with patch.object(checker, "list_capacity_block_offerings", return_value=[]) as mock_list:
+            report = checker.find_capacity_blocks(
+                "p5.48xlarge",
+                regions=["us-east-1"],
+                earliest_start="2026-07-01",
+                latest_start="2026-07-10",
+            )
+        assert report["date_window"]["earliest_start"] == "2026-07-01T00:00:00+00:00"
+        assert report["date_window"]["latest_start"] == "2026-07-10T23:59:59+00:00"
+        assert mock_list.call_args.kwargs["latest_start"] == datetime(
+            2026, 7, 10, 23, 59, 59, tzinfo=UTC
+        )
+        with patch.object(checker, "list_capacity_block_offerings", return_value=[]):
+            report = checker.find_capacity_blocks(
+                "p5.48xlarge", regions=["us-east-1"], latest_start="2026-07-10T09:00:00Z"
+            )
+        assert report["date_window"]["latest_start"] == "2026-07-10T09:00:00+00:00"
+
+    def test_rejected_probes_are_reported_not_hidden(self):
+        # EC2 refuses the long durations (the window cannot hold them) and
+        # answers the short ones with nothing: the report names the refusals,
+        # the recommendation leads with them, and the advice still follows.
+        from cli.capacity import CapacityBlockRequestError
+
+        checker = _make_checker()
+
+        def fake_list(region, instance_type, *, instance_count, duration_hours, **kwargs):
+            if duration_hours > 48:
+                raise CapacityBlockRequestError(
+                    region,
+                    duration_hours,
+                    "InvalidParameterValue",
+                    "The end date is not valid. End date must not be later than Sun Nov 08.",
+                )
+            return []
+
+        with patch.object(checker, "list_capacity_block_offerings", side_effect=fake_list):
+            report = checker.find_capacity_blocks(
+                "p5.48xlarge",
+                regions=["us-west-2", "us-east-1"],
+                min_duration_hours=24,
+                max_duration_hours=96,
+            )
+        assert report["offerings_found"] == 0
+        assert report["rejected_probes"] == [
+            {
+                "region": "us-east-1",
+                "duration_hours": 72,
+                "error_code": "InvalidParameterValue",
+                "error": "The end date is not valid. End date must not be later than Sun Nov 08.",
+            },
+            {
+                "region": "us-east-1",
+                "duration_hours": 96,
+                "error_code": "InvalidParameterValue",
+                "error": "The end date is not valid. End date must not be later than Sun Nov 08.",
+            },
+            {
+                "region": "us-west-2",
+                "duration_hours": 72,
+                "error_code": "InvalidParameterValue",
+                "error": "The end date is not valid. End date must not be later than Sun Nov 08.",
+            },
+            {
+                "region": "us-west-2",
+                "duration_hours": 96,
+                "error_code": "InvalidParameterValue",
+                "error": "The end date is not valid. End date must not be later than Sun Nov 08.",
+            },
+        ]
+        recommendation = report["recommendation"]
+        assert "No Capacity Block offerings for p5.48xlarge across 2 region(s)" in recommendation
+        assert (
+            "EC2 rejected 4 probe(s): InvalidParameterValue: The end date is not valid. "
+            "End date must not be later than Sun Nov 08. "
+            "[us-east-1 3d, us-east-1 4d, us-west-2 3d, us-west-2 4d]." in recommendation
+        )
+        assert recommendation.endswith("or check back later.")
+
+    def test_rejected_probes_noted_next_to_offerings(self):
+        from cli.capacity import CapacityBlockRequestError
+
+        checker = _make_checker()
+
+        def fake_list(region, instance_type, *, instance_count, duration_hours, **kwargs):
+            if duration_hours == 48:
+                raise CapacityBlockRequestError(
+                    region, duration_hours, "InvalidParameterValue", "The duration is not valid."
+                )
+            return [
+                _enriched(
+                    region,
+                    "us-east-1a",
+                    "cbo-1",
+                    24,
+                    "2026-07-01T11:30:00",
+                    fee_usd=2400,
+                    gpu_hr=12.5,
+                )
+            ]
+
+        with patch.object(checker, "list_capacity_block_offerings", side_effect=fake_list):
+            report = checker.find_capacity_blocks(
+                "p5.48xlarge", regions=["us-east-1"], min_duration_hours=24, max_duration_hours=48
+            )
+        assert report["offerings_found"] == 1
+        assert [r["duration_hours"] for r in report["rejected_probes"]] == [48]
+        assert "Found 1 Capacity Block offering(s)" in report["recommendation"]
+        assert report["recommendation"].endswith(
+            "EC2 rejected 1 probe(s): InvalidParameterValue: The duration is not valid. "
+            "[us-east-1 2d]."
+        )
+
+    def test_every_probe_rejected_raises(self):
+        # The caller's parameters were refused everywhere (an invalid instance
+        # count, say): nothing was searched, so the sweep fails loudly with
+        # EC2's reason instead of reporting zero offerings.
+        from cli.capacity import CapacityBlockRequestError, CapacityCheckError
+
+        checker = _make_checker()
+
+        def fake_list(region, instance_type, *, instance_count, duration_hours, **kwargs):
+            raise CapacityBlockRequestError(
+                region,
+                duration_hours,
+                "InvalidParameterValue",
+                "The instance count is not valid. Refer to the Capacity Blocks user guide.",
+            )
+
+        with (
+            patch.object(checker, "list_capacity_block_offerings", side_effect=fake_list),
+            pytest.raises(CapacityCheckError) as excinfo,
+        ):
+            checker.find_capacity_blocks(
+                "p5.48xlarge",
+                regions=["us-east-1", "us-west-2", "eu-west-1"],
+                instance_count=999,
+                min_duration_days=1,
+                max_duration_days=2,
+            )
+        text = str(excinfo.value)
+        assert text.startswith(
+            "EC2 rejected every Capacity Block probe for p5.48xlarge (6 across 3 region(s)); "
+            "nothing was searched. InvalidParameterValue: The instance count is not valid."
+        )
+        # Six probes, one distinct reason: the first four are named, the rest counted.
+        assert text.endswith("[eu-west-1 1d, eu-west-1 2d, us-east-1 1d, us-east-1 2d, +2 more]")
+
+    def test_other_probe_exception_still_warns_and_continues(self):
+        # A transient failure (not EC2 refusing the parameters) keeps its
+        # warning-and-continue handling; it is not a rejected probe.
+        checker = _make_checker()
+
+        def fake_list(region, instance_type, *, instance_count, duration_hours, **kwargs):
+            raise RuntimeError("transient")
+
+        with patch.object(checker, "list_capacity_block_offerings", side_effect=fake_list):
+            report = checker.find_capacity_blocks("p5.48xlarge", regions=["us-east-1"])
+        assert report["offerings_found"] == 0
+        assert report["rejected_probes"] == []
 
     def test_default_regions_discovered_when_omitted(self):
         checker = _make_checker()
@@ -1112,6 +1436,65 @@ class TestFindBlocksCLI:
         result = runner.invoke(cli, ["capacity", "find-blocks", "-i", "p6-b200", "-r", "us-east-1"])
         assert result.exit_code == 0
         assert "No Capacity Block offerings" in result.output
+        assert "rejected" not in result.output
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_find_blocks_table_names_rejected_probes(self, mock_fmt_fn, mock_checker_fn):
+        # Two regions x three durations = six probes; EC2 refused the 63-day
+        # ones. The table says so, grouped by reason, before the rows the
+        # accepted probes produced.
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        rejected = [
+            {
+                "region": region,
+                "duration_hours": 63 * 24,
+                "error_code": "InvalidParameterValue",
+                "error": "The end date is not valid. End date must not be later than Sun Nov 08.",
+            }
+            for region in ("us-east-1", "us-west-2")
+        ]
+        mock_checker_fn.return_value.find_capacity_blocks.return_value = self._report(
+            rejected_probes=rejected
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli, ["capacity", "find-blocks", "-i", "p6-b200", "-r", "us-east-1"])
+        assert result.exit_code == 0
+        assert "⚠  EC2 rejected 2 of 6 probe(s); their results are missing:" in result.output
+        assert (
+            "InvalidParameterValue: The end date is not valid. End date must not be later than "
+            "Sun Nov 08." in result.output
+        )
+        assert "probes: us-east-1 63d, us-west-2 63d" in result.output
+        # The accepted probes' offerings still render.
+        assert "cbo-1" not in result.output  # ids are not a table column
+        assert "us-east-1a" in result.output
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_find_blocks_every_probe_rejected_exits_nonzero(self, mock_fmt_fn, mock_checker_fn):
+        from cli.capacity import CapacityCheckError
+        from cli.main import cli
+
+        fmt = MagicMock()
+        mock_fmt_fn.return_value = fmt
+        mock_checker_fn.return_value.find_capacity_blocks.side_effect = CapacityCheckError(
+            "EC2 rejected every Capacity Block probe for p5.48xlarge (2 across 1 region(s)); "
+            "nothing was searched. InvalidParameterValue: The instance count is not valid. "
+            "[us-east-1 1d, us-east-1 2d]"
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["capacity", "find-blocks", "-i", "p5.48xlarge", "-r", "us-east-1", "-c", "999"]
+        )
+        assert result.exit_code == 1
+        message = fmt.print_error.call_args.args[0]
+        assert message.startswith(
+            "Failed to find capacity blocks: EC2 rejected every Capacity Block probe"
+        )
+        assert "The instance count is not valid" in message
 
     @patch("cli.commands.capacity_cmd.get_capacity_checker")
     @patch("cli.commands.capacity_cmd.get_output_formatter")

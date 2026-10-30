@@ -104,36 +104,99 @@ def test_script_coverage_without_hits_is_unmeasured_not_covered() -> None:
 
 
 # --------------------------------------------------------------------------
-# find_report
+# find_reports
 # --------------------------------------------------------------------------
 
 
-def test_find_report_accepts_the_resultset_directly(tmp_path: Path) -> None:
+def test_find_reports_accepts_the_resultset_directly(tmp_path: Path) -> None:
     report = _write_report(tmp_path, _resultset({}))
-    assert checker.find_report(report) == report
+    assert checker.find_reports(report) == [report]
 
 
-def test_find_report_accepts_the_coverage_directory(tmp_path: Path) -> None:
+def test_find_reports_accepts_the_coverage_directory(tmp_path: Path) -> None:
     report = _write_report(tmp_path, _resultset({}))
-    assert checker.find_report(tmp_path) == report
+    assert checker.find_reports(tmp_path) == [report]
 
 
-def test_find_report_searches_one_level_down(tmp_path: Path) -> None:
+def test_find_reports_searches_one_level_down(tmp_path: Path) -> None:
     """bashcov can nest its output when several commands are merged."""
     nested = tmp_path / "coverage"
     nested.mkdir()
     report = _write_report(nested, _resultset({}))
-    assert checker.find_report(tmp_path) == report
+    assert checker.find_reports(tmp_path) == [report]
 
 
-def test_find_report_rejects_a_missing_path(tmp_path: Path) -> None:
+def test_find_reports_returns_every_shard_resultset_in_order(tmp_path: Path) -> None:
+    """The combining job hands over the directory the shard artifacts were downloaded into.
+
+    Each shard renames its report off the leading dot so the artifact upload
+    needs no hidden-file flag; the hidden spelling is still found for a local
+    unsharded run, and both are merged. Order is by path so the log line that
+    lists them is stable.
+    """
+    (tmp_path / "bash-coverage-shard-2").mkdir()
+    (tmp_path / "bash-coverage-shard-1").mkdir()
+    second = tmp_path / "bash-coverage-shard-2" / "bash-coverage-shard-2.resultset.json"
+    first = tmp_path / "bash-coverage-shard-1" / "bash-coverage-shard-1.resultset.json"
+    hidden = tmp_path / "local" / ".resultset.json"
+    hidden.parent.mkdir()
+    for path in (second, first, hidden):
+        path.write_text(json.dumps(_resultset({})), encoding="utf-8")
+    (tmp_path / "bash-coverage-shard-1" / "report-shard-1.xml").write_text("", encoding="utf-8")
+    assert checker.find_reports(tmp_path) == [first, second, hidden]
+
+
+def test_find_reports_prefers_the_direct_resultset_over_nested_ones(tmp_path: Path) -> None:
+    """``coverage/.resultset.json`` is the report; anything nested below is SimpleCov's own."""
+    report = _write_report(tmp_path, _resultset({}))
+    nested = tmp_path / "shards"
+    nested.mkdir()
+    (nested / "old.resultset.json").write_text(json.dumps(_resultset({})), encoding="utf-8")
+    assert checker.find_reports(tmp_path) == [report]
+
+
+def test_find_reports_rejects_a_missing_path(tmp_path: Path) -> None:
     with pytest.raises(checker.ReportError, match="does not exist"):
-        checker.find_report(tmp_path / "absent")
+        checker.find_reports(tmp_path / "absent")
 
 
-def test_find_report_rejects_a_directory_with_no_resultset(tmp_path: Path) -> None:
+def test_find_reports_rejects_a_directory_with_no_resultset(tmp_path: Path) -> None:
     with pytest.raises(checker.ReportError, match=re.escape("no .resultset.json")):
-        checker.find_report(tmp_path)
+        checker.find_reports(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# merge_reports
+# --------------------------------------------------------------------------
+
+
+def test_merge_reports_sums_hits_across_shards(tmp_path: Path) -> None:
+    """Shards trace disjoint tests over the same scripts, so their hits add up.
+
+    Line 1 ran in both shards (2 + 3), line 2 only in the second, and line 3
+    in neither but is executable in both, so it stays an uncovered 0.
+    """
+    one = tmp_path / "bash-coverage-shard-1.resultset.json"
+    two = tmp_path / "bash-coverage-shard-2.resultset.json"
+    one.write_text(json.dumps(_resultset({"/w/a.sh": _lines(2, 0, 0)})), encoding="utf-8")
+    two.write_text(json.dumps(_resultset({"/w/a.sh": _lines(3, 7, 0)})), encoding="utf-8")
+    assert checker.merge_reports([one, two]) == {"/w/a.sh": {1: 5, 2: 7, 3: 0}}
+
+
+def test_merge_reports_keeps_a_line_one_shard_saw_as_non_executable(tmp_path: Path) -> None:
+    """A null in one shard is "no trace reached the file there", not "not a statement"."""
+    one = tmp_path / "bash-coverage-shard-1.resultset.json"
+    two = tmp_path / "bash-coverage-shard-2.resultset.json"
+    one.write_text(json.dumps(_resultset({"/w/a.sh": _lines(None, None)})), encoding="utf-8")
+    two.write_text(
+        json.dumps(_resultset({"/w/a.sh": _lines(1, 0), "/w/b.sh": _lines(4)})), encoding="utf-8"
+    )
+    assert checker.merge_reports([one, two]) == {"/w/a.sh": {1: 1, 2: 0}, "/w/b.sh": {1: 4}}
+
+
+def test_merge_reports_of_one_report_is_parse_report(tmp_path: Path) -> None:
+    report = _write_report(tmp_path, _resultset({"/w/a.sh": _lines(None, 2, 0)}))
+    assert checker.merge_reports([report]) == checker.parse_report(report)
 
 
 # --------------------------------------------------------------------------
@@ -777,6 +840,25 @@ def test_main_returns_one_when_a_tracked_script_is_not_in_the_report(
     out = capsys.readouterr().out
     assert "1/2 tracked scripts at 100%" in out
     assert "lib/b.sh: absent from the bashcov report" in out
+
+
+def test_main_merges_a_directory_of_shard_resultsets(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The combining job's call: each shard covered part of the script; together, all of it."""
+    root = _fake_repo(tmp_path, {"a.sh": "echo hi\necho there\n"})
+    shards = tmp_path / "shard-artifacts"
+    for index, lines in ((1, _lines(1, 0)), (2, _lines(0, 1))):
+        folder = shards / f"bash-coverage-shard-{index}"
+        folder.mkdir(parents=True)
+        (folder / f"bash-coverage-shard-{index}.resultset.json").write_text(
+            json.dumps(_resultset({str(root / "a.sh"): lines})), encoding="utf-8"
+        )
+    assert checker.main([str(shards), "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "Merged 2 shard resultsets:" in out
+    assert "bash-coverage-shard-1.resultset.json" in out
+    assert "1/1 tracked scripts at 100%" in out
 
 
 def test_main_returns_two_when_the_report_is_missing(

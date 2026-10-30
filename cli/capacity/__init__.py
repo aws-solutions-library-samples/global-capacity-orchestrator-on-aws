@@ -21,7 +21,12 @@ from .advisor import (
     CapacityPredictionResult,
     get_bedrock_capacity_advisor,
 )
-from .checker import CapacityChecker, SpotPlacementConfigLimitError, get_capacity_checker
+from .checker import (
+    CapacityBlockRequestError,
+    CapacityChecker,
+    SpotPlacementConfigLimitError,
+    get_capacity_checker,
+)
 from .history import (
     CapacityHistoryStore,
     flatten_capacity_data,
@@ -51,6 +56,7 @@ from .traffic_dial import (
 __all__ = [
     "BedrockCapacityAdvisor",
     "BedrockCapacityRecommendation",
+    "CapacityBlockRequestError",
     "CapacityCheckError",
     "CapacityChecker",
     "CapacityEstimate",

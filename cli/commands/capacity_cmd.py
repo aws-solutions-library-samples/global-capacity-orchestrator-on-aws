@@ -1,5 +1,6 @@
 """Capacity checking commands."""
 
+import shlex
 import sys
 from typing import Any
 
@@ -9,6 +10,7 @@ from botocore.exceptions import ClientError
 from gco.bedrock import BEDROCK_FTU_REMEDIATION, is_bedrock_ftu_form_error
 
 from ..capacity import get_capacity_checker
+from ..capacity.blocks import group_rejections
 from ..capacity.history import METRIC_FIELDS
 from ..config import GCOConfig
 from ..output import confirm, format_capacity_table, get_output_formatter
@@ -791,6 +793,19 @@ def _print_find_blocks_report(result: dict[str, Any]) -> None:
         print()
         return
 
+    rejected = result.get("rejected_probes") or []
+    if rejected:
+        # EC2 refused these probes outright; the rows below are only what the
+        # accepted probes returned.
+        total = len(result.get("regions_checked", [])) * len(
+            result.get("durations_probed_hours", [])
+        )
+        print()
+        print(f"  ⚠  EC2 rejected {len(rejected)} of {total} probe(s); their results are missing:")
+        for group in group_rejections(rejected):
+            print(f"     {group['error_code']}: {group['error']}")
+            print(f"       probes: {', '.join(group['probes'])}")
+
     offerings = result.get("offerings", [])
     if not offerings:
         print()
@@ -927,23 +942,28 @@ def find_blocks(
 @click.option(
     "--dry-run",
     is_flag=True,
-    help="Validate the offering without purchasing (no cost incurred)",
+    help=(
+        "Check the request and your permission without purchasing (no cost). "
+        "EC2 does not verify the offering exists until the real purchase."
+    ),
 )
 @pass_config
 def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -> None:
     """Purchase a Capacity Block offering by its ID.
 
-    Use 'gco capacity reservation-check' first to find available offerings
-    and their IDs, then purchase with this command.
+    Use 'gco capacity find-blocks' or 'gco capacity reservation-check' first to
+    find available offerings and their IDs, then purchase with this command.
 
     ⚠️  WARNING: This command purchases capacity and incurs charges.
-    Use --dry-run to validate first.
+    Use --dry-run to check the request and your permission first. EC2's dry
+    run does not look the offering up, so it cannot tell you whether the
+    offering still exists; only the purchase itself does.
 
     Examples:
         # First, find offerings:
-        gco capacity reservation-check -i p4d.24xlarge -r us-east-1
+        gco capacity find-blocks -i p4d.24xlarge -r us-east-1
 
-        # Validate without purchasing:
+        # Check the request and your permission without purchasing:
         gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --dry-run
 
         # Purchase:
@@ -971,8 +991,18 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
         if result["success"]:
             if dry_run:
                 print()
-                print(f"  ✓ Dry run passed — offering {offering_id} is valid and purchasable")
-                print(f"  Region: {region}")
+                print(
+                    "  ✓ Dry run passed — the request is well-formed and you are authorized to purchase"
+                )
+                print(f"  Offering: {offering_id}")
+                print(f"  Region:   {region}")
+                print()
+                print(
+                    "  EC2's dry run does not check that the offering exists or is still for sale;"
+                )
+                print(
+                    "  only the purchase does. Use an ID from a recent find-blocks or reservation-check."
+                )
                 print()
                 print("  To purchase, run without --dry-run:")
                 print(f"    gco capacity reserve -o {offering_id} -r {region}")
@@ -1122,6 +1152,45 @@ def find_reservations(
         sys.exit(1)
 
 
+def _create_reservation_command(
+    *,
+    instance_type: str,
+    region: str,
+    availability_zone: str,
+    count: int,
+    platform: str,
+    tenancy: str,
+    match_criteria: str,
+    end_date: str | None,
+    ebs_optimized: bool,
+) -> str:
+    """The exact ``create-reservation`` command a passed dry run stands for.
+
+    Every option that differs from its default is repeated, so the command the
+    hint shows creates the reservation the dry run checked, not a default one
+    (the hint used to drop ``--match-criteria``, ``--end-date``, ``--platform``,
+    ``--tenancy`` and ``--ebs-optimized``).
+    """
+    parts = [
+        "gco capacity create-reservation",
+        f"-i {shlex.quote(instance_type)}",
+        f"-r {shlex.quote(region)}",
+        f"-z {shlex.quote(availability_zone)}",
+        f"-c {int(count)}",
+    ]
+    if platform != "Linux/UNIX":
+        parts.append(f"--platform {shlex.quote(platform)}")
+    if tenancy != "default":
+        parts.append(f"--tenancy {shlex.quote(tenancy)}")
+    if match_criteria != "open":
+        parts.append(f"--match-criteria {shlex.quote(match_criteria)}")
+    if end_date:
+        parts.append(f"--end-date {shlex.quote(str(end_date))}")
+    if ebs_optimized:
+        parts.append("--ebs-optimized")
+    return " ".join(parts)
+
+
 @capacity.command("create-reservation")
 @click.option("--instance-type", "-i", required=True, help="EC2 instance type or alias")
 @click.option("--region", "-r", required=True, help="AWS region")
@@ -1151,7 +1220,10 @@ def find_reservations(
 @click.option(
     "--dry-run",
     is_flag=True,
-    help="Validate the request without creating (no cost incurred)",
+    help=(
+        "Check the request and your permission without creating (no cost). "
+        "EC2 does not check capacity or the Availability Zone until the real request."
+    ),
 )
 @pass_config
 def create_reservation(
@@ -1174,7 +1246,8 @@ def create_reservation(
 
     ⚠️  WARNING: creating a reservation incurs On-Demand charges for the reserved
     capacity whether or not it is used, until the reservation is cancelled.
-    Use --dry-run to validate first.
+    Use --dry-run to check the request and your permission first; EC2's dry
+    run does not check capacity or the Availability Zone.
 
     Examples:
         gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2 --dry-run
@@ -1216,15 +1289,30 @@ def create_reservation(
         if result["success"]:
             if dry_run:
                 print()
-                print("  ✓ Dry run passed — reservation parameters are valid")
+                print(
+                    "  ✓ Dry run passed — the request is well-formed and you are authorized to create it"
+                )
                 print(f"  Instance Type: {result.get('instance_type')}")
                 print(f"  AZ:            {result.get('availability_zone')}")
                 print(f"  Instances:     {result.get('instance_count')}")
                 print()
+                print("  EC2's dry run does not check the Availability Zone or whether capacity is")
+                print("  available; only the real request does.")
+                print()
                 print("  To create, run without --dry-run:")
                 print(
-                    f"    gco capacity create-reservation -i {result.get('instance_type')} "
-                    f"-r {region} -z {availability_zone} -c {count}"
+                    "    "
+                    + _create_reservation_command(
+                        instance_type=str(result.get("instance_type") or instance_type),
+                        region=region,
+                        availability_zone=availability_zone,
+                        count=count,
+                        platform=platform,
+                        tenancy=tenancy,
+                        match_criteria=match_criteria,
+                        end_date=end_date,
+                        ebs_optimized=ebs_optimized,
+                    )
                 )
                 print()
             else:
@@ -1260,7 +1348,12 @@ def create_reservation(
 )
 @click.option("--region", "-r", required=True, help="AWS region where the reservation exists")
 @click.option(
-    "--dry-run", is_flag=True, help="Validate the cancellation without cancelling (no change)"
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Check your permission without cancelling (no change). "
+        "EC2 does not verify the reservation exists until the real request."
+    ),
 )
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @pass_config
@@ -1303,7 +1396,9 @@ def cancel_reservation(
         if result["success"]:
             print()
             if dry_run:
-                print(f"  ✓ Dry run passed — {reservation_id} can be cancelled")
+                print("  ✓ Dry run passed — you are authorized to cancel reservations")
+                print(f"  EC2's dry run did not check that {reservation_id} exists; only the real")
+                print("  request does.")
             else:
                 print(f"  ✓ {result.get('message', 'Reservation cancelled.')}")
             print()

@@ -146,19 +146,93 @@ def _pool_catalog_lookup() -> Any | None:
         return None
 
 
-# Capacity Block offering API error codes that mean "this instance type / region
-# simply doesn't have Capacity Blocks" rather than a real failure — expected and
-# handled quietly. ``Unsupported`` / ``UnsupportedOperation`` / ``InvalidAction``
-# cover regions where the Capacity Block API isn't available at all (e.g.
-# DescribeCapacityBlockOfferings returns ``InvalidAction`` in eu-west-1).
-_CB_EXPECTED_ERROR_CODES = frozenset(
-    {
-        "Unsupported",
-        "UnsupportedOperation",
-        "InvalidAction",
-        "InvalidParameterValue",
-        "InvalidParameterCombination",
-    }
+# DescribeCapacityBlockOfferings error codes that mean the Capacity Block API is
+# not available in the Region at all (it returns ``InvalidAction`` in eu-west-1,
+# for example): expected, and handled quietly as "no offerings here".
+_CB_UNSUPPORTED_ERROR_CODES = frozenset({"Unsupported", "UnsupportedOperation", "InvalidAction"})
+
+# EC2 reports "this instance type has no Capacity Blocks in this Region" as
+# ``InvalidParameterValue`` too ("The instance type 'm5.large' is not supported
+# for Capacity Blocks in 'us-east-1'"), recognizable only by this phrase. That
+# one is as expected as the codes above. Every other ``InvalidParameterValue``
+# or ``InvalidParameterCombination`` is EC2 refusing the request itself: an
+# invalid duration or instance count, or a start/end window the service cannot
+# serve. Those used to be swallowed with the expected codes, and the caller was
+# then told there were no offerings and to try a wider window.
+_CB_UNSUPPORTED_TYPE_PHRASE = "not supported for Capacity Blocks"
+_CB_REQUEST_ERROR_CODES = frozenset({"InvalidParameterValue", "InvalidParameterCombination"})
+
+
+class CapacityBlockRequestError(CapacityCheckError):
+    """EC2 rejected the parameters of a ``DescribeCapacityBlockOfferings`` call.
+
+    Nothing was searched, so this must not be reported as "no offerings".
+    ``error_code`` and ``message`` are EC2's; ``region`` and ``duration_hours``
+    identify the probe that was refused.
+    """
+
+    def __init__(self, region: str, duration_hours: int, error_code: str, message: str) -> None:
+        super().__init__(
+            f"EC2 rejected the Capacity Block search in {region} ({error_code}): {message}"
+        )
+        self.region = region
+        self.duration_hours = duration_hours
+        self.error_code = error_code
+        self.message = message
+
+
+def _classify_capacity_block_error(error: ClientError) -> str:
+    """Sort a DescribeCapacityBlockOfferings ``ClientError`` into one of three kinds.
+
+    ``"unsupported"``: the Region or instance type has no Capacity Blocks
+    (expected, quiet). ``"request"``: EC2 refused the request's parameters.
+    ``"other"``: anything else (throttling past the retry budget, a denied
+    permission, an internal error).
+    """
+    details = error.response.get("Error", {})
+    code = str(details.get("Code", ""))
+    if code in _CB_UNSUPPORTED_ERROR_CODES:
+        return "unsupported"
+    if code in _CB_REQUEST_ERROR_CODES:
+        if _CB_UNSUPPORTED_TYPE_PHRASE in str(details.get("Message", "")):
+            return "unsupported"
+        return "request"
+    return "other"
+
+
+def _summarize_rejections(rejected: list[dict[str, Any]], *, max_probes: int = 4) -> str:
+    """One clause per distinct EC2 rejection, naming the probes it refused."""
+    parts = []
+    for group in blocks.group_rejections(rejected):
+        probes = group["probes"]
+        shown = ", ".join(probes[:max_probes])
+        if len(probes) > max_probes:
+            shown += f", +{len(probes) - max_probes} more"
+        parts.append(f"{group['error_code']}: {group['error']} [{shown}]")
+    return " | ".join(parts)
+
+
+# What EC2's DryRun proves for the three capacity actions: that the request is
+# well-formed and the caller holds the permission. It does not look up the
+# offering or reservation named in the request, and it does not check capacity.
+# Verified against EC2: PurchaseCapacityBlock and CancelCapacityReservation
+# answer DryRunOperation for well-formed ids that do not exist, and
+# CreateCapacityReservation answers it for an Availability Zone that does not
+# exist. The messages say exactly that so a passed dry run is not read as
+# "the offering is there and purchasable".
+_PURCHASE_DRY_RUN_PASSED = (
+    "Dry run passed: the request is well-formed and you are authorized to purchase. "
+    "EC2 did not check that the offering exists or is still for sale; only the "
+    "purchase does."
+)
+_CREATE_DRY_RUN_PASSED = (
+    "Dry run passed: the request is well-formed and you are authorized to create it. "
+    "EC2 did not check the Availability Zone or whether capacity is available; only "
+    "the real request does."
+)
+_CANCEL_DRY_RUN_PASSED = (
+    "Dry run passed: you are authorized to cancel reservations. EC2 did not check "
+    "that this reservation exists; only the real request does."
 )
 
 # Adaptive client-side retry config for DescribeCapacityBlockOfferings. The
@@ -1359,14 +1433,20 @@ class CapacityChecker:
             duration_hours: Desired block duration in hours (must be a supported value)
             earliest_start: Only return blocks starting on/after this datetime
                 (EC2 StartDateRange). Lets callers ask "blocks starting near D1".
-            latest_start: Only return blocks starting on/before this datetime
-                (EC2 EndDateRange).
+            latest_start: Only return blocks starting on/before this datetime.
+                EC2's ``EndDateRange`` bounds a block's *end*, so this is sent as
+                ``latest_start`` plus the block duration.
             gpus_per_instance: GPUs per instance, used for per-GPU-hour pricing.
                 Resolved from the instance specs when omitted.
 
         Returns:
             List of available capacity block offerings (enriched with pricing).
-            All matching pages are followed via NextToken.
+            All matching pages are followed via NextToken. A Region or
+            instance type without Capacity Blocks yields an empty list.
+
+        Raises:
+            CapacityBlockRequestError: EC2 refused the request's parameters (an
+                invalid duration or instance count, a window it cannot serve).
         """
         ec2 = self._session.client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
         offerings: list[dict[str, Any]] = []
@@ -1383,7 +1463,13 @@ class CapacityChecker:
         if earliest_start is not None:
             api_kwargs["StartDateRange"] = earliest_start
         if latest_start is not None:
-            api_kwargs["EndDateRange"] = latest_start
+            # EndDateRange is the latest *end* date of an offering. A block
+            # that starts at ``latest_start`` ends ``duration_hours`` later, so
+            # that is the bound. Sending ``latest_start`` itself dropped every
+            # block starting in the last ``duration_hours`` of the window, and
+            # once the window was shorter than the duration EC2 rejected the
+            # request outright ("The duration is not valid").
+            api_kwargs["EndDateRange"] = latest_start + timedelta(hours=duration_hours)
 
         try:
             next_token: str | None = None
@@ -1401,11 +1487,18 @@ class CapacityChecker:
                 if not next_token:
                     break
         except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in _CB_EXPECTED_ERROR_CODES:
-                pass  # Type/region doesn't support Capacity Blocks — expected
-            else:
+            kind = _classify_capacity_block_error(e)
+            if kind == "request":
+                details = e.response.get("Error", {})
+                raise CapacityBlockRequestError(
+                    region,
+                    duration_hours,
+                    str(details.get("Code", "")),
+                    str(details.get("Message") or e),
+                ) from e
+            if kind == "other":
                 logger.warning("Failed to list capacity block offerings in %s: %s", region, e)
+            # "unsupported": the type/Region has no Capacity Blocks — expected.
         except BotoCoreError as e:
             # Endpoint resolution / connection errors surface here when the
             # Capacity Block API isn't available in a region.
@@ -1446,8 +1539,15 @@ class CapacityChecker:
                 EndDateRange=far_end,
             )
         except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code not in _CB_EXPECTED_ERROR_CODES:
+            kind = _classify_capacity_block_error(e)
+            if kind == "request":
+                # The trend is a best-effort signal probed for many Regions at
+                # once; EC2 refusing the window is a debug line, not a warning,
+                # but it is no longer silent.
+                logger.debug(
+                    "Capacity block trend query rejected for %s in %s: %s", instance_type, region, e
+                )
+            elif kind == "other":
                 logger.warning(
                     "Capacity block trend query failed for %s in %s: %s",
                     instance_type,
@@ -1709,12 +1809,23 @@ class CapacityChecker:
         best: dict[str, Any] | None,
         longest: dict[str, Any] | None,
         note: str | None,
+        rejected: list[dict[str, Any]] | None = None,
     ) -> str:
-        """Build a one-line human recommendation for a consolidated block search."""
+        """Build a one-line human recommendation for a consolidated block search.
+
+        ``rejected`` lists the (region, duration) probes EC2 refused; they are
+        named before any advice, so a refused request is never read as an
+        empty one.
+        """
+        rejection = (
+            f" EC2 rejected {len(rejected)} probe(s): {_summarize_rejections(rejected)}."
+            if rejected
+            else ""
+        )
         if not offerings:
             msg = (
                 f"No Capacity Block offerings for {instance_type} across "
-                f"{len(regions)} region(s) in the requested window. Try a wider "
+                f"{len(regions)} region(s) in the requested window.{rejection} Try a wider "
                 "date range, a shorter duration, more regions, or check back later."
             )
             return f"{note} {msg}" if note else msg
@@ -1737,7 +1848,7 @@ class CapacityChecker:
                 f"Longest: {longest.get('duration_days')}d in "
                 f"{longest.get('region')}/{longest.get('availability_zone')}."
             )
-        msg = " ".join(parts)
+        msg = " ".join(parts) + rejection
         return f"{note} {msg}" if note else msg
 
     def find_capacity_blocks(
@@ -1785,13 +1896,18 @@ class CapacityChecker:
 
         Returns:
             A consolidated report dict (see keys assembled below).
+            ``rejected_probes`` lists any (region, duration) probe EC2 refused.
+
+        Raises:
+            CapacityCheckError: EC2 refused every probe, so nothing was
+                searched; the message carries EC2's reason(s).
         """
         validation = self.validate_instance_type(instance_type)
         canonical = validation["instance_type"]
         gpus_per_instance = validation["gpu_count"]
 
         parsed_earliest = blocks.parse_date_input(earliest_start)
-        parsed_latest = blocks.parse_date_input(latest_start)
+        parsed_latest = blocks.parse_date_input(latest_start, through_end_of_day=True)
 
         durations = blocks.resolve_search_durations(
             duration_hours=blocks.coerce_hours(duration_hours, duration_days),
@@ -1827,6 +1943,7 @@ class CapacityChecker:
             "best": None,
             "longest": None,
             "regions_with_offerings": [],
+            "rejected_probes": [],
         }
 
         if not validation["valid"]:
@@ -1839,6 +1956,7 @@ class CapacityChecker:
 
         probes = [(region, dur) for region in regions for dur in durations]
         collected: list[dict[str, Any]] = []
+        rejected: list[CapacityBlockRequestError] = []
         workers = max(1, min(max_workers or _MAX_SEARCH_WORKERS, len(probes)))
 
         def _probe(region: str, dur: int) -> list[dict[str, Any]]:
@@ -1852,6 +1970,11 @@ class CapacityChecker:
                     latest_start=parsed_latest,
                     gpus_per_instance=gpus_per_instance,
                 )
+            except CapacityBlockRequestError as e:
+                # The caller's parameters, not a transient failure: kept for the
+                # report so the answer is never a bare "no offerings".
+                rejected.append(e)
+                return []
             except Exception as e:
                 logger.warning(
                     "Capacity block probe failed for %s in %s (%sh): %s",
@@ -1867,6 +1990,22 @@ class CapacityChecker:
             for future in as_completed(futures):
                 collected.extend(future.result())
 
+        rejected_probes = [
+            {
+                "region": e.region,
+                "duration_hours": e.duration_hours,
+                "error_code": e.error_code,
+                "error": e.message,
+            }
+            for e in sorted(rejected, key=lambda e: (e.region, e.duration_hours))
+        ]
+        if rejected and len(rejected) == len(probes):
+            raise CapacityCheckError(
+                f"EC2 rejected every Capacity Block probe for {canonical} "
+                f"({len(probes)} across {len(regions)} region(s)); nothing was searched. "
+                f"{_summarize_rejections(rejected_probes)}"
+            )
+
         unique = blocks.dedupe_offerings(collected)
         ranked = blocks.rank_offerings(unique)
         best = ranked[0] if ranked else None
@@ -1880,8 +2019,15 @@ class CapacityChecker:
                 "best": best,
                 "longest": longest,
                 "regions_with_offerings": sorted({o["region"] for o in unique if o.get("region")}),
+                "rejected_probes": rejected_probes,
                 "recommendation": self._summarize_block_search(
-                    canonical, regions, unique, best, longest, validation["note"]
+                    canonical,
+                    regions,
+                    unique,
+                    best,
+                    longest,
+                    validation["note"],
+                    rejected=rejected_probes,
                 ),
             }
         )
@@ -1935,7 +2081,7 @@ class CapacityChecker:
             blocks.coerce_hours(block_duration_hours, block_duration_days) or 24
         )
         parsed_earliest = blocks.parse_date_input(earliest_start)
-        parsed_latest = blocks.parse_date_input(latest_start)
+        parsed_latest = blocks.parse_date_input(latest_start, through_end_of_day=True)
 
         def _check_region(r: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             reservations = self.list_capacity_reservations(r, instance_type=instance_type)
@@ -2033,7 +2179,10 @@ class CapacityChecker:
         Args:
             offering_id: Capacity Block offering ID (cb-xxx) from list_capacity_block_offerings
             region: AWS region where the offering exists
-            dry_run: If True, validate the offering without purchasing
+            dry_run: If True, check the request and the caller's permission
+                without purchasing. EC2's dry run does not look the offering
+                up: a well-formed ``cb-`` id that no longer (or never) exists
+                passes, and only the purchase itself reports it.
 
         Returns:
             Dictionary with the created capacity reservation details
@@ -2058,7 +2207,7 @@ class CapacityChecker:
                         "dry_run": True,
                         "offering_id": offering_id,
                         "region": region,
-                        "message": "Dry run succeeded — offering is valid and purchasable",
+                        "message": _PURCHASE_DRY_RUN_PASSED,
                     }
                 error_msg = e.response.get("Error", {}).get("Message", str(e))
                 return {
@@ -2152,7 +2301,10 @@ class CapacityChecker:
                 reservation is "limited" and auto-releases then; omit for
                 "unlimited".
             ebs_optimized: Reserve EBS-optimized capacity.
-            dry_run: Validate permissions/parameters without creating (no cost).
+            dry_run: Check the request's shape and the caller's permission
+                without creating (no cost). EC2's dry run does not check the
+                Availability Zone or whether capacity is available; only the
+                real request does.
 
         Returns:
             Dict with the created reservation's details, or an error payload.
@@ -2201,7 +2353,7 @@ class CapacityChecker:
                         "availability_zone": availability_zone,
                         "region": region,
                         "instance_count": instance_count,
-                        "message": "Dry run succeeded — reservation parameters are valid.",
+                        "message": _CREATE_DRY_RUN_PASSED,
                     }
                 error_msg = e.response.get("Error", {}).get("Message", str(e))
                 return {
@@ -2270,7 +2422,9 @@ class CapacityChecker:
         Args:
             reservation_id: Capacity Reservation id (cr-...).
             region: AWS region where the reservation exists.
-            dry_run: Validate permissions without cancelling.
+            dry_run: Check the caller's permission without cancelling. EC2's
+                dry run does not look the reservation up; an id that does not
+                exist passes.
 
         Returns:
             Dict describing the outcome.
@@ -2288,7 +2442,7 @@ class CapacityChecker:
                         "dry_run": True,
                         "reservation_id": reservation_id,
                         "region": region,
-                        "message": "Dry run succeeded — reservation can be cancelled.",
+                        "message": _CANCEL_DRY_RUN_PASSED,
                     }
                 error_msg = e.response.get("Error", {}).get("Message", str(e))
                 return {

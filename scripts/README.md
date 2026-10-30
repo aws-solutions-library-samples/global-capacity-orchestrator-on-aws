@@ -33,6 +33,7 @@ Utility scripts for development, testing, and operations.
 | `migrate_fork.py` | Safely rewrites references owned by this repository when adopting GCO into a fork. See [`docs/FORKING.md`](../docs/FORKING.md). |
 | `setup-cluster-access.sh` | Configures kubectl access to a GCO [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) cluster. |
 | `setup-dev-alias.sh` | Builds the dev image and installs the shell function that runs `gco` through the containerized toolchain. |
+| `split_bats.py` | Deterministically balances the BATS suite across CI shards: each suite's `@test` count times a per-suite cost (`SUITE_WEIGHTS`, with the measurement behind each entry), packed with `split_tests.py`'s greedy algorithm. Standard library only. |
 | `split_tests.py` | Collects and deterministically balances the core pytest suite across CI shards. |
 | `test_webhook_delivery.py` | Sends sample lifecycle events and verifies webhook delivery, signatures, and retries. |
 | `example_job_validation/` | Static and authorized live validation harness for every shipped example manifest. See its [README](example_job_validation/README.md) for the layout and where a new example belongs. |

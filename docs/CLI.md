@@ -750,7 +750,7 @@ gco capacity reservation-check [OPTIONS]
 | `--block-duration` | Capacity Block duration in hours (default: 24) |
 | `--block-duration-days` | Capacity Block duration in days (overrides `--block-duration`) |
 | `--earliest-start` | Earliest block start date (`YYYY-MM-DD` or ISO datetime) |
-| `--latest-start` | Latest block start date (`YYYY-MM-DD` or ISO datetime) |
+| `--latest-start` | Latest block start date (`YYYY-MM-DD` or ISO datetime); a date means the whole of that day |
 
 ```bash
 # Check for p5.48xlarge reservations and block offerings
@@ -785,12 +785,14 @@ gco capacity find-blocks [OPTIONS]
 | `--min-duration-days` / `--max-duration-days` | Duration range bounds, in days |
 | `--min-duration-hours` / `--max-duration-hours` | Duration range bounds, in hours |
 | `--earliest-start` | Earliest block start (`YYYY-MM-DD` or ISO datetime) |
-| `--latest-start` | Latest block start (`YYYY-MM-DD` or ISO datetime) |
+| `--latest-start` | Latest block start (`YYYY-MM-DD` or ISO datetime); a date means the whole of that day |
 | `--find-longest` | Sweep the duration ladder and surface the longest available block |
 
 **Allowed Capacity Block durations.** AWS accepts reservation durations in **1-day increments up to 14 days, then 7-day increments up to 182 days** (26 weeks). Because the `DescribeCapacityBlockOfferings` API requires an exact duration per query, a duration *range* is expanded to those discrete valid values automatically (e.g. `1`–`63` days probes 1…14, 21, 28, …, 63 days). All Capacity Blocks end at 11:30 UTC, so a returned block's actual duration is the closest valid match to your request and is reported per offering.
 
 **Instance-type notes.** Friendly names are normalized (`p6-b200` → `p6-b200.48xlarge`, `p6-b300` → `p6-b300.48xlarge`). Both B200 and B300 (Blackwell Ultra) are standalone EC2 instance types and resolve normally. The Grace-Blackwell **GB200/GB300** NVL72 *superchips* ship only as **P6e-GB200 / P6e-GB300 UltraServers** (never as a standalone `InstanceType`), so those names are flagged with guidance toward the UltraServer flow rather than silently returning nothing. Unknown/typo'd types are reported as invalid (distinct from a valid type that simply has zero offerings).
+
+**Rejected probes.** Each (region, duration) pair is one `DescribeCapacityBlockOfferings` call. When EC2 refuses a call's parameters (an instance count it does not sell, a start window later than it currently serves) rather than answering with zero offerings, the refusal is reported as such: the table lists the rejected probes with EC2's reason, the JSON report carries them under `rejected_probes`, and when EC2 refuses every probe the command exits non-zero with that reason instead of suggesting a wider window. A Region or instance type that simply has no Capacity Blocks is still an ordinary empty result.
 
 ```bash
 # Bound the motivating scenario in a single call:
@@ -811,10 +813,13 @@ gco --output json capacity find-blocks -i p6-b200 -r us-east-1 --max-duration-da
 
 #### `gco capacity reserve`
 
-Purchase a Capacity Block offering by ID. Use `gco capacity reservation-check`
-first to find available offerings, then pass the `cb-...` ID to this
-command. Always validate with `--dry-run` before committing — Capacity
-Block purchases incur charges.
+Purchase a Capacity Block offering by ID. Use `gco capacity find-blocks` or
+`gco capacity reservation-check` first to find available offerings, then pass
+the `cb-...` ID to this command. Run with `--dry-run` before committing —
+Capacity Block purchases incur charges. A passed dry run means the request is
+well-formed and you hold `ec2:PurchaseCapacityBlock`; EC2's dry run does not
+look the offering up, so it cannot tell you whether the offering still exists.
+Only the purchase itself does.
 
 ```bash
 gco capacity reserve [OPTIONS]
@@ -826,7 +831,7 @@ gco capacity reserve [OPTIONS]
 |--------|-------|-------------|
 | `--offering-id` | `-o` | Capacity Block offering ID (`cb-…`) (required) |
 | `--region` | `-r` | AWS region where the offering exists (required) |
-| `--dry-run` | | Validate the offering without purchasing |
+| `--dry-run` | | Check the request and your permission without purchasing; does not verify the offering exists |
 
 **Example:**
 
@@ -863,7 +868,7 @@ gco capacity find-reservations -i p6-b200 -r us-east-1 -r us-west-2 --no-pricing
 
 #### `gco capacity create-reservation`
 
-Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Always validate with `--dry-run` first.
+Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Run with `--dry-run` first to check the request and your permission; EC2's dry run does not check capacity or the Availability Zone, only the real request does.
 
 ```bash
 gco capacity create-reservation [OPTIONS]
@@ -880,7 +885,7 @@ gco capacity create-reservation [OPTIONS]
 | `--match-criteria` | | `open` or `targeted` (default: `open`) |
 | `--end-date` | | Optional end date (`YYYY-MM-DD` or ISO); omit for an unlimited reservation |
 | `--ebs-optimized` | | Reserve EBS-optimized capacity |
-| `--dry-run` | | Validate the request without creating (no cost) |
+| `--dry-run` | | Check the request and your permission without creating (no cost); does not check capacity or the AZ |
 
 ```bash
 # Validate, then create
@@ -900,7 +905,7 @@ gco capacity cancel-reservation [OPTIONS]
 |--------|-------|-------------|
 | `--reservation-id` | `-o` | Capacity Reservation ID (`cr-…`) to cancel (required) |
 | `--region` | `-r` | AWS region where the reservation exists (required) |
-| `--dry-run` | | Validate the cancellation without cancelling |
+| `--dry-run` | | Check your permission without cancelling; does not verify the reservation exists |
 | `--yes` | `-y` | Skip confirmation |
 
 ```bash

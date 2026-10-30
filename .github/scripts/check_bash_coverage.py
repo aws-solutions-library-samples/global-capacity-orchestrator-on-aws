@@ -80,11 +80,20 @@ from the corrected data instead; ``unit:bats:shell`` ships it in the
 ``/bash-coverage/`` and renders the README badge from the summary, so the
 badge, the report and the gate describe one measurement.
 
+**Shards.** ``unit:bats:shell`` runs the suite as parallel slices, each tracing
+its own ``.bats`` files over the same scripts, and the combining job hands this
+script the directory their resultsets were downloaded into. Every resultset
+found there is parsed and the hits are summed line by line before the floor is
+applied, so the verdict is about the whole suite, as it was when one job ran
+it; a line only one shard's tests reach is covered, and a script no shard's
+tests reach is still absent and still a failure.
+
 Usage::
 
     python3 .github/scripts/check_bash_coverage.py coverage/
     python3 .github/scripts/check_bash_coverage.py coverage/ --report coverage/report
     python3 .github/scripts/check_bash_coverage.py coverage/.resultset.json
+    python3 .github/scripts/check_bash_coverage.py shard-artifacts/ --report coverage/report
 
 Exit codes::
 
@@ -327,23 +336,29 @@ class Result:
         return not self.failures
 
 
-def find_report(target: Path) -> Path:
-    """Return the SimpleCov resultset inside ``target``.
+def find_reports(target: Path) -> list[Path]:
+    """Return every SimpleCov resultset ``target`` names, in a stable order.
 
-    ``target`` may be the resultset itself or the directory bashcov wrote
-    (``coverage/`` by default).
+    ``target`` may be a resultset itself, the directory bashcov wrote
+    (``coverage/``, whose ``.resultset.json`` is then the one report), or a
+    directory of shard artifacts: ``unit:bats:shell`` runs the suite in parallel
+    slices, each slice uploads its resultset under a distinct name
+    (``bash-coverage-shard-<n>.resultset.json``), and the combining job hands
+    the directory they were downloaded into here. Every ``*.resultset.json``
+    beneath it is a shard, and the hidden ``.resultset.json`` spelling is still
+    accepted for a local, unsharded run.
     """
     if target.is_file():
-        return target
+        return [target]
     if not target.is_dir():
         raise ReportError(f"bashcov output path does not exist: {target}")
     direct = target / RESULTSET_NAME
     if direct.is_file():
-        return direct
-    nested = sorted(target.glob(f"**/{RESULTSET_NAME}"))
-    if not nested:
+        return [direct]
+    found = {*target.glob(f"**/{RESULTSET_NAME}"), *target.glob(f"**/*{RESULTSET_NAME}")}
+    if not found:
         raise ReportError(f"no {RESULTSET_NAME} found under {target}")
-    return nested[0]
+    return sorted(found)
 
 
 def parse_report(report: Path) -> dict[str, dict[int, int]]:
@@ -385,6 +400,25 @@ def parse_report(report: Path) -> dict[str, dict[int, int]]:
                 line_number = index + 1
                 merged[line_number] = max(merged.get(line_number, 0), hits)
     return parsed
+
+
+def merge_reports(reports: list[Path]) -> dict[str, dict[int, int]]:
+    """Parse every resultset and add their hits together, line by line.
+
+    The shards of ``unit:bats:shell`` each trace a disjoint slice of the suite
+    over the same scripts, so a line's hits across shards are additive: the
+    sum is what one traced run of the whole suite would have counted. A line
+    that is executable in one shard's report and absent (``null``) from
+    another's is kept, since SimpleCov marks a line non-executable only when
+    no trace ever reached the file in that run.
+    """
+    merged: dict[str, dict[int, int]] = {}
+    for report in reports:
+        for filename, lines in parse_report(report).items():
+            target = merged.setdefault(filename, {})
+            for line_number, hits in lines.items():
+                target[line_number] = target.get(line_number, 0) + hits
+    return merged
 
 
 def map_to_tracked(reported_path: str, inventory: list[str]) -> str | None:
@@ -809,14 +843,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        report = find_report(args.bashcov_output)
-        reported = parse_report(report)
+        reports = find_reports(args.bashcov_output)
+        reported = merge_reports(reports)
         inventory = tracked_shell_scripts(args.root)
         untraceable, spans = classify_scripts(args.root, inventory)
     except ReportError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
+    if len(reports) > 1:
+        print(f"Merged {len(reports)} shard resultsets:")
+        for report in reports:
+            print(f"  {report}")
     result = evaluate(reported, inventory, untraceable, spans)
     if args.report is not None:
         write_report(result, args.root, untraceable, spans, args.report)
