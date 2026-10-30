@@ -652,8 +652,8 @@ This command gathers comprehensive capacity data including:
 
 - Spot placement scores, pricing, and 7-day per-AZ price trends across regions
 - On-demand availability and pricing
-- Capacity Reservations (ODCRs), Capacity Block offerings, and 26-week
-  block-availability trends
+- Capacity Reservations (ODCRs), Capacity Block offerings, and the near-term
+  block-availability trend over the window EC2 answers (about nine days)
 - Current cluster utilization (queue depth, GPU/CPU usage)
 - Running and pending job counts
 - The algorithmic multi-signal region ranking as advisory context
