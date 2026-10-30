@@ -79,10 +79,23 @@ These options are available for all commands:
 | `--config` | `-c` | Path to config file |
 | `--region` | `-r` | Default AWS region |
 | `--output` | `-o` | Output format: `table`, `json`, `yaml` |
-| `--verbose` | `-v` | Enable verbose output |
+| `--verbose` | `-v` | Verbose output: GCO's own debug logging plus AWS SDK info messages (which credential provider was used, retries). Never the SDK's debug output; see [Verbose and debug output](#verbose-and-debug-output) |
+| `--debug-aws` | | Log AWS SDK requests and SigV4 signing details to stderr, with signatures, session tokens and credential fields redacted and response bodies never logged. Flag only: no config or environment equivalent |
 | `--regional-api` | | Require the authorized direct regional API path instead of the global endpoint |
 | `--help` | | Show help message |
 | `--version` | | Show version |
+
+### Verbose and Debug Output
+
+`-v` (also `GCO_VERBOSE=true` or `verbose: true` in `~/.gco/config.yaml`) turns on DEBUG for GCO's own loggers and INFO for the AWS SDK and HTTP stack (`botocore`, `boto3`, `urllib3`, `s3transfer`) and the Kubernetes client. It never raises them to DEBUG: botocore's debug output carries the SigV4 `CanonicalRequest` with your session token, the `Authorization` signature and every response body, which for an assume-role profile is a complete set of temporary credentials. Up to v8.16.0, `-v` did exactly that, so treat `-v` output from those versions as sensitive and rotate any credentials it carried into a shared place.
+
+`--debug-aws` is the escape hatch for debugging the SDK itself (endpoint resolution, retries, signing). It raises the SDK loggers to DEBUG, keeps `botocore.parsers` at INFO so no response body is ever logged, and runs every log line through a redaction filter that replaces signatures, `X-Amz-Security-Token` values, `SecretAccessKey`/`SessionToken`/`SecretString` fields, bearer tokens and the config-file credential keys with `[REDACTED]`. The redaction is a denylist, so still treat the output as sensitive. The flag has no config or environment equivalent on purpose: the MCP server's CLI runner inherits the host environment and returns CLI stderr to its client, and SDK debug output must stay a per-invocation decision. Combine it with `-v` to see GCO's own debug logging at the same time:
+
+```bash
+gco -v --debug-aws capacity spot-prices -i p5.48xlarge -r us-east-1 2> debug.log
+```
+
+`GCO_LOG_LEVEL` sets the level of GCO's own loggers by name (`DEBUG`, `INFO`, `WARNING`, ...) without touching the SDK's.
 
 ### Structured Output Contract
 
@@ -6471,7 +6484,8 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_API_GATEWAY_REGION`, `GCO_GLOBAL_REGION`, `GCO_MONITORING_REGION` | Override the corresponding `deployment_regions` entries from `cdk.json` |
 | `GCO_DEFAULT_NAMESPACE` | Default Kubernetes namespace for job commands (default `gco-jobs`) |
 | `GCO_OUTPUT_FORMAT` | `table`, `json` or `yaml`; top-level `-o` wins |
-| `GCO_VERBOSE` | Enable verbose output (`true`/`false`) |
+| `GCO_VERBOSE` | Enable verbose output (`true`/`false`): GCO debug logging plus AWS SDK info messages, never SDK debug output (that is the `--debug-aws` flag only) |
+| `GCO_LOG_LEVEL` | Level for GCO's own loggers (`DEBUG`, `INFO`, `WARNING`, ...); `-v` is `DEBUG`. Leaves the AWS SDK loggers alone |
 | `GCO_CACHE_DIR` | Directory for cached lookups (default `~/.gco/cache`) |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
