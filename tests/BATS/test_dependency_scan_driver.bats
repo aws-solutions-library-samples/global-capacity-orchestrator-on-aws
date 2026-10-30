@@ -176,6 +176,32 @@ case "$url" in
         # check requires both, the Python/Ruby checks ignore the two fields.
         reply 200 "[{\"cycle\": \"${cycle}\", \"latest\": \"${cycle}.1\", \"lts\": true, \"releaseDate\": \"2020-01-01\", \"eol\": false}]"
         ;;
+    *docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html)
+        # The PCS User Guide's two version tables, built from the tree's
+        # PCS_SUPPORTED_SLURM_VERSIONS: every listed version supported with a
+        # far-off EOL. FAKE_DRIFT=1 adds a newer supported version;
+        # FAKE_PCS_SLURM=eol brings the default's EOL inside the warning
+        # window; =unsupported moves the oldest listed version to the
+        # unsupported table; =no-table answers a page with no table at all.
+        [ "${FAKE_PCS_SLURM:-ok}" = "no-table" ] && { reply 200 '<html><body><p>Slurm versions in AWS PCS</p></body></html>'; exit 0; }
+        default="$(catalog_get pcs-slurm default)"
+        oldest="$(catalog_values pcs-slurm supported | sort -V | head -1)"
+        newest="$(catalog_values pcs-slurm supported | sort -V | tail -1)"
+        soon="$("$REAL_PYTHON3" -c 'import datetime; d = datetime.date.today() + datetime.timedelta(days=30); print(f"{d.month}/{d.day}/{d.year}")')"
+        supported="" unsupported="<tr><td>20.11</td><td>11/1/2020</td><td>5/1/2021</td><td>5/31/2022</td></tr>"
+        while IFS= read -r v; do
+            [ -n "$v" ] || continue
+            eol="12/31/2999"
+            [ "${FAKE_PCS_SLURM:-ok}" = "eol" ] && [ "$v" = "$default" ] && eol="$soon"
+            if [ "${FAKE_PCS_SLURM:-ok}" = "unsupported" ] && [ "$v" = "$oldest" ]; then
+                unsupported="${unsupported}<tr><td>${v}</td><td>1/1/2020</td><td>6/1/2020</td><td>6/30/2021</td></tr>"
+            else
+                supported="${supported}<tr><td>${v}</td><td>1/1/2020</td><td>6/1/2020</td><td>${eol}</td><td>1.0.0-1</td><td>aws-pcs-sample_ami-al2023-x86_64</td></tr>"
+            fi
+        done < <(catalog_values pcs-slurm supported | sort -V)
+        [ "${FAKE_DRIFT:-0}" = "1" ] && supported="<tr><td>$(bump "$newest")</td><td>1/1/2026</td><td>6/1/2026</td><td>12/31/2999</td><td>1.0.0-1</td><td>aws-pcs-sample_ami-al2023-x86_64</td></tr>${supported}"
+        reply 200 "<html><body><h2>Supported Slurm versions in AWS PCS</h2><table><tr><th>Slurm version</th><th>SchedMD release date</th><th>AWS PCS release date</th><th>AWS PCS EOL date</th><th>Minimum compatible AWS PCS agent version</th><th>Supported AWS PCS sample AMIs</th></tr>${supported}</table><h2>Unsupported Slurm versions in AWS PCS</h2><table><tr><th>Slurm version</th><th>SchedMD release date</th><th>AWS PCS release date</th><th>AWS PCS EOL date</th></tr>${unsupported}</table></body></html>"
+        ;;
     *) reply 404 ''; exit 0 ;;
 esac
 FAKE_CURL
@@ -267,6 +293,50 @@ case "${1:-} ${2:-}" in
             [ "${FAKE_DRIFT:-0}" = "1" ] && printf ',{"modelId": "%s", "modelLifecycle": {"status": "ACTIVE"}}' "$(bump "$mid")"
         done < <(catalog_values bedrock-embedding | sort -u)
         printf ']}\n'
+        ;;
+    "s3api list-objects-v2")
+        # The public aws-pcs-repo bucket: every pinned lifecycle script as
+        # its immutable object, its .sha256 sidecar and the moving -v1-latest
+        # alias. Under drift a patch newer (or, with FAKE_PCS_DRIFT=major, a
+        # new major) sits beside it. FAKE_AWS_PCS=fail refuses the listing,
+        # =empty answers an empty prefix, =aliases-only lists only the aliases.
+        [ "${FAKE_AWS_PCS:-ok}" = "fail" ] && { echo "An error occurred (AccessDenied) when calling the ListObjectsV2 operation" >&2; exit 254; }
+        [ "${FAKE_AWS_PCS:-ok}" = "empty" ] && { echo "null"; exit 0; }
+        prefix=""
+        while [ "$#" -gt 0 ]; do [ "$1" = "--prefix" ] && prefix="$2"; shift; done
+        keys=()
+        while IFS='|' read -r base version; do
+            [ -n "$base" ] || continue
+            keys+=("${prefix}${base}-v1-latest.sh" "${prefix}${base}-v1-latest.sha256")
+            [ "${FAKE_AWS_PCS:-ok}" = "aliases-only" ] && continue
+            keys+=("${prefix}${base}-v${version}.sh" "${prefix}${base}-v${version}.sha256")
+            if [ "${FAKE_DRIFT:-0}" = "1" ]; then
+                if [ "${FAKE_PCS_DRIFT:-patch}" = "major" ]; then
+                    keys+=("${prefix}${base}-v$(bump "$version").sh")
+                else
+                    keys+=("${prefix}${base}-v$(bump_last "$version").sh")
+                fi
+            fi
+        done < <(grep '^pcs-script|' "$FAKE_CATALOG" | cut -d'|' -f2-)
+        json_list "${keys[@]+"${keys[@]}"}"; echo
+        ;;
+    "ssm get-parameters-by-path")
+        # The public /aws/service/pcs/ami tree: the pinned DLAMI base for both
+        # architectures, plus a newer base of the same OS line under drift.
+        [ "${FAKE_AWS_PCS_AMI:-ok}" = "fail" ] && { echo "An error occurred (AccessDeniedException) when calling the GetParametersByPath operation" >&2; exit 254; }
+        family="$(catalog_get pcs-ami dlami)"
+        names=("/aws/service/pcs/ami/${family}/x86_64/latest/ami-id" "/aws/service/pcs/ami/${family}/arm64/latest/ami-id")
+        [ "${FAKE_DRIFT:-0}" = "1" ] && names+=("/aws/service/pcs/ami/$(bump "$family")/x86_64/latest/ami-id")
+        json_list "${names[@]}"; echo
+        ;;
+    "ec2 describe-images")
+        # Amazon's PCS sample AMIs: the pinned OS base for both architectures,
+        # plus a newer release of the same OS under drift.
+        [ "${FAKE_AWS_PCS_AMI:-ok}" = "fail" ] && { echo "An error occurred (UnauthorizedOperation) when calling the DescribeImages operation" >&2; exit 254; }
+        family="$(catalog_get pcs-ami sample)"
+        names=("aws-pcs-sample_ami-${family}-x86_64-2026-01-01T00-00-00.000Z" "aws-pcs-sample_ami-${family}-arm64-2026-01-01T00-00-00.000Z")
+        [ "${FAKE_DRIFT:-0}" = "1" ] && names+=("aws-pcs-sample_ami-$(bump "$family")-x86_64-2026-06-01T00-00-00.000Z")
+        json_list "${names[@]}"; echo
         ;;
     *) exit 0 ;;
 esac
@@ -558,6 +628,17 @@ PY
             echo "bedrock-embedding|vector_store|$(extract_default_bedrock_model cdk.json embedding_model_id vector_store)"
             echo "cdk-enum|LAMBDA_PYTHON_RUNTIME|$(extract_constant_value LAMBDA_PYTHON_RUNTIME)"
             echo "cdk-enum|LAMBDA_NODEJS_RUNTIME|$(extract_constant_value LAMBDA_NODEJS_RUNTIME)"
+            # The AWS PCS pins: each lifecycle script as base|version, the
+            # supported Slurm versions and the default, the two AMI families.
+            for name in PCS_MOUNT_EFS_SCRIPT PCS_MOUNT_FSX_SCRIPT PCS_CLOUDWATCH_LOGS_SCRIPT; do
+                parts="$(pcs_lifecycle_script_parts "$(extract_python_string_constant "$name" gco/stacks/pcs_cluster.py)")"
+                [ -n "$parts" ] && echo "pcs-script|$parts"
+            done
+            pcs_supported="$(extract_python_literal_constant PCS_SUPPORTED_SLURM_VERSIONS gco/pcs_config.py)"
+            for v in ${pcs_supported//,/ }; do echo "pcs-slurm|supported|$v"; done
+            echo "pcs-slurm|default|$(extract_python_literal_constant PCS_DEFAULTS gco/pcs_config.py managed.slurm_version)"
+            echo "pcs-ami|dlami|$(pcs_dlami_family "$(extract_python_string_constant DLAMI_SSM_PARAMETER lambda/pcs-lookup/handler.py)")"
+            echo "pcs-ami|sample|$(pcs_sample_ami_family "$(extract_python_string_constant SAMPLE_NAME_PATTERN lambda/pcs-lookup/handler.py)")"
         } | grep -v '|$' > "$FAKE_CATALOG"
     )
 }
@@ -572,7 +653,7 @@ make_consistent_checkout() {
     # clock: ``date -u`` is a day ahead of a US-timezone workstation every
     # evening and would make a "0 days" expiry read as 1.
     today="$(date +%Y-%m-%d)"
-    mkdir -p "$root"/{.github/workflows,.github/actions/install-trivy,.github/config,gco/stacks,gco/services,cli,lambda/helm-installer,lambda/kubectl-applier-simple/manifests,examples,scripts/live_release_validation/manifests,dockerfiles}
+    mkdir -p "$root"/{.github/workflows,.github/actions/install-trivy,.github/config,gco/stacks,gco/services,cli,lambda/helm-installer,lambda/kubectl-applier-simple/manifests,lambda/pcs-lookup,examples,scripts/live_release_validation/manifests,dockerfiles}
     cat > "$root/pyproject.toml" <<'TOML'
 [build-system]
 requires = ["setuptools==84.0.0"]
@@ -670,6 +751,34 @@ PY
     printf '# the stack reads its pins from constants.py\n' > "$root/gco/stacks/regional_stack.py"
     printf 'AWS_CLI_IMAGE = "public.ecr.aws/aws-cli/aws-cli:2.36.41@sha256:%s"\n' "$DIGEST_A" > "$root/gco/services/inference_monitor.py"
     printf 'SLURM_IMAGE_TAG = "26.05.5-ubuntu24.04"\n' > "$root/gco/slurm_config.py"
+    # The AWS PCS pins the scan reads without importing: the lifecycle
+    # scripts beside CDK code, the annotated tuple and nested default, and
+    # the lookup Lambda's name patterns.
+    cat > "$root/gco/stacks/pcs_cluster.py" <<'PY'
+from aws_cdk import Stack  # not importable here: the scan must read, not import
+PCS_LIFECYCLE_SCRIPTS_PREFIX = "aws-pcs-node-lifecycle-scripts"
+PCS_MOUNT_EFS_SCRIPT = "mount-efs-v1.0.0.sh"
+PCS_MOUNT_FSX_SCRIPT = "mount-fsx-lustre-v1.0.0.sh"
+PCS_CLOUDWATCH_LOGS_SCRIPT = "configure-cloudwatch-logs-v1.0.0.sh"
+PY
+    cat > "$root/gco/pcs_config.py" <<'PY'
+from typing import Any
+PCS_SUPPORTED_SLURM_VERSIONS: tuple[str, ...] = ("25.11", "26.05")
+PCS_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "managed": {
+        "cluster_name": None,
+        "slurm_version": "25.11",
+        "size": "SMALL",
+    },
+}
+PY
+    cat > "$root/lambda/pcs-lookup/handler.py" <<'PY'
+import boto3  # not importable here either
+SAMPLE_NAME_PATTERN = "aws-pcs-sample_ami-al2023-{architecture}*"
+DLAMI_NAME_PATTERN = "aws-pcs-ready-dlami-base-ubuntu2404-{architecture}-*"
+DLAMI_SSM_PARAMETER = "/aws/service/pcs/ami/dlami-base-ubuntu2404/{architecture}/latest/ami-id"
+PY
     printf '_DISAGGREGATED_DEFAULT_IMAGE = "vllm/vllm-openai:v0.28.0"\n' > "$root/cli/images.py"
     cat > "$root/cli/autopilot.py" <<'PY'
 CLAUDE_CODE_VERSION = "2.1.252"
@@ -810,7 +919,7 @@ findings_path() {
     [ "$(jq -r '.schema' "$findings")" = "gco.dependency-scan.findings/1" ]
     [ "$(jq -r '.has_drift' "$findings")" = "false" ]
     [ "$(jq -r '.scan_complete' "$findings")" = "true" ]
-    [ "$(jq -r '.surfaces | length' "$findings")" = "23" ]
+    [ "$(jq -r '.surfaces | length' "$findings")" = "25" ]
     [ "$(jq -r '[.surfaces[].count] | add' "$findings")" = "0" ]
     [ "$(jq -r '[.surfaces[] | select(.skipped != null)] | length' "$findings")" = "0" ]
     # Every surface was consulted through the faked tools.
@@ -835,6 +944,12 @@ findings_path() {
     grep -q '^helm show chart oci://registry.k8s.io/kueue/charts/kueue' "$CALLS"
     grep -q '^aws eks describe-addon-versions --addon-name metrics-server --kubernetes-version 1.37' "$CALLS"
     grep -q '^aws bedrock list-foundation-models --by-output-modality EMBEDDING' "$CALLS"
+    grep -q '^curl https://docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html$' "$CALLS"
+    grep -q '^aws s3api list-objects-v2 --bucket aws-pcs-repo-us-east-1 --prefix aws-pcs-node-lifecycle-scripts/ --region us-east-1' "$CALLS"
+    grep -q '^aws ssm get-parameters-by-path --path /aws/service/pcs/ami --recursive --region us-east-1' "$CALLS"
+    grep -q '^aws ec2 describe-images --owners amazon --region us-east-1 --filters Name=name,Values=aws-pcs-sample_ami-\*' "$CALLS"
+    [[ "$output" == *"PCS Slurm versions:       0"* ]]
+    [[ "$output" == *"PCS scripts and AMIs:     0"* ]]
 }
 
 @test "one release newer on every surface produces a complete drift report with every section" {
@@ -865,6 +980,17 @@ findings_path() {
     [[ "$output" == *"  - bedrock codex_default_model_id: global.openai.gpt-5.6-sol -> global.openai.gpt-6.6-sol"* ]]
     [[ "$output" == *"  - bedrock opencode_default_model_id: global.moonshotai.kimi-k3 -> global.moonshotai.kimi-k4"* ]]
     [[ "$output" == *"  - vector_store embedding_model_id: amazon.titan-embed-text-v2:0 -> amazon.titan-embed-text-v3:0"* ]]
+    # PCS: a Slurm version the guide supports that the tuple lacks (the
+    # fixture's newest, 26.05, bumped), a patch-newer lifecycle script per
+    # pin, and a newer release of each AMI family's OS line.
+    [[ "$output" == *"  - PCS_SUPPORTED_SLURM_VERSIONS: 27.05 is supported upstream (EOL 2999-12-31) but not listed"* ]]
+    [[ "$output" == *"  - PCS_MOUNT_EFS_SCRIPT: mount-efs-v1.0.0.sh -> mount-efs-v1.0.1.sh"* ]]
+    [[ "$output" == *"  - PCS_MOUNT_FSX_SCRIPT: mount-fsx-lustre-v1.0.0.sh -> mount-fsx-lustre-v1.0.1.sh"* ]]
+    [[ "$output" == *"  - PCS_CLOUDWATCH_LOGS_SCRIPT: configure-cloudwatch-logs-v1.0.0.sh -> configure-cloudwatch-logs-v1.0.1.sh"* ]]
+    [[ "$output" == *"  - DLAMI_SSM_PARAMETER: dlami-base-ubuntu2404 -> dlami-base-ubuntu2405 (newer PCS-ready DLAMI base)"* ]]
+    [[ "$output" == *"  - SAMPLE_NAME_PATTERN: al2023 -> al2024 (newer sample AMI base)"* ]]
+    [[ "$output" == *"PCS Slurm versions:       1"* ]]
+    [[ "$output" == *"PCS scripts and AMIs:     5"* ]]
     [[ "$output" == *"  - NODE_VERSION: v24.21.0 -> v25.21.0"* ]]
     [[ "$output" == *"  - UV_VERSION: 0.12.11 -> 1.12.11"* ]]
     [[ "$output" == *"  - SESSION_MANAGER_PLUGIN_VERSION: 1.2.896.0 -> 2.2.896.0"* ]]
@@ -897,7 +1023,8 @@ findings_path() {
     local section
     for section in "## Summary" "## Python Packages" "## npm Packages" "## Docker Images" "## Helm Charts" \
             "## EKS Add-ons" "## EKS Kubernetes Version" "## Aurora PostgreSQL Engine" "## EMR Serverless" \
-            "## Bedrock Default Model" "## Accelerator Catalog and NodePools" "## Dockerfile.dev Pins" \
+            "## Bedrock Default Model" "## PCS Slurm Versions" "## PCS Lifecycle Scripts and AMIs" \
+            "## Accelerator Catalog and NodePools" "## Dockerfile.dev Pins" \
             "## GCO Autopilot Pins" "## Pre-commit Hooks" "## CDK Enum Constants" "## Python Release" \
             "## Runner Images" "## Ruby Release" "## Ubuntu LTS Base" "## CI Tooling" "## Action Required"; do
         grep -qF -- "$section" "$report" || { echo "missing section: $section"; false; }
@@ -905,6 +1032,10 @@ findings_path() {
     grep -qF -- "| [Python Packages](#python-packages) | 3 update(s) | routine |" "$report"
     grep -qF -- "| [Ubuntu LTS Base](#ubuntu-lts-base) | 1 update(s) | informational |" "$report"
     grep -qF -- "| SLURM_IMAGE_TAG (gco/slurm_config.py) | 26.05.5-ubuntu24.04 | 26.05.5-ubuntu25.04 |" "$report"
+    grep -qF -- "| [PCS Slurm Versions](#pcs-slurm-versions) | 1 update(s) | act soon |" "$report"
+    grep -qF -- "| PCS_SUPPORTED_SLURM_VERSIONS (gco/pcs_config.py) | 25.11, 26.05 | 27.05 supported (EOL 2999-12-31) | add it once a cluster on it is confirmed to serve slurmrestd OpenAPI v0.0.44 |" "$report"
+    grep -qF -- "| PCS_MOUNT_EFS_SCRIPT (gco/stacks/pcs_cluster.py) | mount-efs-v1.0.0.sh | mount-efs-v1.0.1.sh |" "$report"
+    grep -qF -- "| DLAMI_SSM_PARAMETER (lambda/pcs-lookup/handler.py) | dlami-base-ubuntu2404 | dlami-base-ubuntu2405 (newer PCS-ready DLAMI base) |" "$report"
     grep -qF -- "| \`.\` | aws-cdk | 2.1140.0 | 3.1140.0 | [npm](https://www.npmjs.com/package/aws-cdk) |" "$report"
     grep -qF -- "#### Retire p2 from the GPU pool" "$report"
     ! grep -q "Skipped checks" "$report"
@@ -928,6 +1059,8 @@ findings_path() {
     [ "$(jq -r '.surfaces[] | select(.surface == "npm Packages") | .findings[] | select(.package == "aws-cdk") | "\(.graph) \(.current) \(.latest)"' "$findings")" = ". 2.1140.0 3.1140.0" ]
     [ "$(jq -r '.surfaces[] | select(.surface == "EMR Serverless") | .findings[0] | "\(.release) \(.current) \(.latest)"' "$findings")" = "emr-serverless emr-7.14.0 emr-7.14.1" ]
     [ "$(jq -r '.surfaces[] | select(.surface == "EKS Kubernetes Version") | .findings[0].standard_support_ends' "$findings")" = "2027-01-15" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "PCS Slurm Versions") | .urgency + " " + (.count | tostring) + " " + (.findings[0] | keys | join(","))' "$findings")" = "act soon 1 action,current,pin,upstream" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "PCS Lifecycle Scripts and AMIs") | .findings[] | select(.pin | startswith("SAMPLE_NAME_PATTERN")) | .latest' "$findings")" = "al2024 (newer sample AMI base)" ]
     [[ "$(jq -r '.surfaces[] | select(.surface == "Accelerator Catalog and NodePools") | .offline_report_markdown' "$findings")" == *"Retire p2 from the GPU pool"* ]]
     [ "$(jq -r '.surfaces[] | select(.surface == "Accelerator Catalog and NodePools") | .count' "$findings")" = "4" ]
     [ "$(jq -r '[.surfaces[] | select(.count > 0)] | length' "$findings")" -ge 18 ]
@@ -954,13 +1087,19 @@ findings_path() {
     [[ "$output" == *"No AWS credentials available (scan needs elasticmapreduce:ListReleaseLabels)"* ]]
     [[ "$output" == *"No AWS credentials available (scan needs bedrock:ListInferenceProfiles)"* ]]
     [[ "$output" == *"No AWS credentials available for the online EC2 catalog check"* ]]
+    [[ "$output" == *"No AWS credentials available (scan needs s3:ListBucket on aws-pcs-repo-*, ssm:GetParametersByPath and ec2:DescribeImages)"* ]]
     [[ "$output" == *"EKS add-ons outdated:     (skipped)"* ]]
+    # The Slurm-version half reads a public page, so it still runs.
+    [[ "$output" == *"PCS Slurm versions:       0"* ]]
+    [[ "$output" == *"PCS scripts and AMIs:     (skipped)"* ]]
     [[ "$output" == *"Accelerator catalog:      0 (online skipped)"* ]]
     [[ "$output" == *"No drift was found in completed checks, but the scan is incomplete."* ]]
     grep -qx 'has_drift=false' "$GITHUB_OUTPUT"
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
     grep -q '_Incomplete or skipped checks: EKS add-ons skipped: No AWS credentials' "$GITHUB_STEP_SUMMARY"
     ! grep -q '^aws eks' "$CALLS"
+    ! grep -q '^aws s3api' "$CALLS"
+    grep -q '^curl https://docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html$' "$CALLS"
 }
 
 @test "with drift and skipped sections the report carries the incomplete warning and the collapsed skip list" {
@@ -994,7 +1133,7 @@ findings_path() {
     make_consistent_checkout "$root"
     build_catalog "$root"
     run_scan "$root" FAKE_NETWORK=down FAKE_PIP=list-fails FAKE_AWS_ADDON=invalid FAKE_AWS_K8S=fail \
-        FAKE_AWS_AURORA=invalid FAKE_AWS_EMR=empty FAKE_AWS_BEDROCK=empty FAKE_HELM=oci-fails FAKE_ACCELERATOR=error
+        FAKE_AWS_AURORA=invalid FAKE_AWS_EMR=empty FAKE_AWS_BEDROCK=empty FAKE_AWS_PCS=empty FAKE_HELM=oci-fails FAKE_ACCELERATOR=error
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"INCOMPLETE: pip list --outdated failed."* ]]
@@ -1010,6 +1149,8 @@ findings_path() {
     [[ "$output" == *"Aurora PostgreSQL engine lookup failed or returned an invalid version for major 17."* ]]
     [[ "$output" == *"EMR release-label lookup failed or returned an empty response."* ]]
     [[ "$output" == *"Bedrock model lookup failed or returned no active release in the model family of context.bedrock.mission_default_model_id."* ]]
+    [[ "$output" == *"Could not read the supported Slurm versions from the AWS PCS User Guide (network, or the page layout changed)."* ]]
+    [[ "$output" == *"PCS lifecycle script listing failed or returned no objects (s3://aws-pcs-repo-us-east-1/aws-pcs-node-lifecycle-scripts/)."* ]]
     [[ "$output" == *"INCOMPLETE: Node.js release-schedule lookup failed or returned no active LTS major."* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin CDK_VERSION."* ]]
     [[ "$output" == *"npm lookup for @anthropic-ai/claude-code failed (network)."* ]]
@@ -1316,6 +1457,9 @@ YAML
     [[ "$output" == *"Could not read EKS add-on pins from gco/stacks/regional_stack.py."* ]]
     [[ "$output" == *"Could not read AURORA_POSTGRES_VERSION from gco/stacks/constants.py."* ]]
     [[ "$output" == *"Could not read the EMR Serverless release-label pin from gco/stacks/constants.py."* ]]
+    [[ "$output" == *"Could not read PCS_SUPPORTED_SLURM_VERSIONS and the managed slurm_version default from gco/pcs_config.py."* ]]
+    [[ "$output" == *"Could not read the PCS lifecycle script pins from gco/stacks/pcs_cluster.py."* ]]
+    [[ "$output" == *"PCS Slurm versions:       (skipped)"* ]]
     [[ "$output" == *"Could not read context.bedrock.mission_default_model_id from cdk.json."* ]]
     [[ "$output" == *"INCOMPLETE: Dockerfile.dev is missing."* ]]
     [[ "$output" == *"cli/autopilot.py not found."* ]]
@@ -1472,6 +1616,80 @@ YAML
     [[ "$output" == *"SLURM_IMAGE_TAG 26.05.5-rockylinux9 is not an Ubuntu variant; nothing to compare."* ]]
     [[ "$output" == *"Ubuntu LTS base:          0"* ]]
     ! grep -q 'curl https://endoflife.date/api/ubuntu.json' "$CALLS"
+}
+
+@test "the PCS checks report EOL, retired and new Slurm versions, new script majors, and degrade by name" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    build_catalog "$root"
+
+    # The default version's EOL inside the warning window is an act-soon row
+    # pointing at the newest listed version; nothing else moves.
+    run_scan "$root" FAKE_PCS_SLURM=eol
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - pcs.managed.slurm_version default 25.11: EOL "*" (30 days)"* ]]
+    [[ "$output" == *"PCS Slurm versions:       1"* ]]
+    grep -qF -- "| pcs.managed.slurm_version default (gco/pcs_config.py) | 25.11 | EOL " "$(report_path)"
+    grep -qF -- " (30 days) | move the default to 26.05 |" "$(report_path)"
+    grep -qF -- "slurmrestd OpenAPI plugin version every GCO" "$(report_path)"
+
+    # A listed version the guide has retired (the fixture's oldest, which is
+    # also the default) is a remove-and-move row.
+    run_scan "$root" FAKE_PCS_SLURM=unsupported
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - PCS_SUPPORTED_SLURM_VERSIONS: 25.11 is no longer supported upstream (EOL 2021-06-30)"* ]]
+    grep -qF -- "| PCS_SUPPORTED_SLURM_VERSIONS (gco/pcs_config.py) | 25.11 | unsupported upstream (EOL 2021-06-30) | remove it and move the default to 26.05 |" "$(report_path)"
+
+    # A new major of a lifecycle script with no newer patch in the pinned line.
+    run_scan "$root" FAKE_DRIFT=1 FAKE_PCS_DRIFT=major
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - PCS_MOUNT_EFS_SCRIPT: mount-efs-v1.0.0.sh -> mount-efs-v2.0.0.sh (new major available)"* ]]
+    grep -qF -- "| PCS_MOUNT_FSX_SCRIPT (gco/stacks/pcs_cluster.py) | mount-fsx-lustre-v1.0.0.sh | mount-fsx-lustre-v2.0.0.sh (new major available) |" "$(report_path)"
+
+    # The guide answers without its tables: a skip, not a verdict. The AMI
+    # lookups failing after a good script listing skip the section too.
+    run_scan "$root" FAKE_PCS_SLURM=no-table FAKE_AWS_PCS_AMI=fail
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Could not read the supported Slurm versions from the AWS PCS User Guide (network, or the page layout changed)."* ]]
+    [[ "$output" == *"PCS AMI family lookup failed or returned nothing (ssm get-parameters-by-path /aws/service/pcs/ami, ec2 describe-images aws-pcs-sample_ami-*)."* ]]
+    [[ "$output" == *"PCS Slurm versions:       (skipped)"* ]]
+    [[ "$output" == *"PCS scripts and AMIs:     (skipped)"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+    local notes
+    notes="$(grep '_Incomplete or skipped checks:' "$GITHUB_STEP_SUMMARY")"
+    [[ "$notes" == *"PCS Slurm versions skipped: Could not read the supported Slurm versions"* ]]
+    [[ "$notes" == *"PCS scripts and AMIs skipped: PCS AMI family lookup failed"* ]]
+
+    # The bucket refuses the listing; with drift elsewhere the report carries
+    # the skip in its collapsed list.
+    run_scan "$root" FAKE_DRIFT=1 FAKE_AWS_PCS=fail
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PCS lifecycle script listing failed or returned no objects (s3://aws-pcs-repo-us-east-1/aws-pcs-node-lifecycle-scripts/)."* ]]
+    grep -qF -- "- **PCS Lifecycle Scripts and AMIs:** PCS lifecycle script listing failed" "$(report_path)"
+    grep -qF -- "| PCS Lifecycle Scripts and AMIs | skipped | — |" "$(report_path)"
+
+    # A bucket that lists only the moving aliases has nothing immutable to
+    # compare against.
+    run_scan "$root" FAKE_AWS_PCS=aliases-only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"The listing of s3://aws-pcs-repo-us-east-1/aws-pcs-node-lifecycle-scripts/ carries no immutable mount-efs script."* ]]
+
+    # A pin on the moving alias is itself the finding the section refuses to
+    # rank: it is reported by name as a skip.
+    sed -i.bak 's/^PCS_MOUNT_FSX_SCRIPT = .*/PCS_MOUNT_FSX_SCRIPT = "mount-fsx-lustre-v1-latest.sh"/' "$root/gco/stacks/pcs_cluster.py"
+    build_catalog "$root"
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PCS_MOUNT_FSX_SCRIPT (mount-fsx-lustre-v1-latest.sh) is not an immutable <name>-vX.Y.Z.sh lifecycle script pin."* ]]
+    mv "$root/gco/stacks/pcs_cluster.py.bak" "$root/gco/stacks/pcs_cluster.py"
+
+    # The lookup Lambda's name patterns gone: a skip by file name.
+    rm -f "$root/lambda/pcs-lookup/handler.py"
+    build_catalog "$root"
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Could not read the PCS AMI name patterns from lambda/pcs-lookup/handler.py."* ]]
+    [[ "$output" == *"PCS scripts and AMIs:     (skipped)"* ]]
 }
 
 @test "engine packages that went unhealthy are drift; companions the registry cannot answer for are a skip" {

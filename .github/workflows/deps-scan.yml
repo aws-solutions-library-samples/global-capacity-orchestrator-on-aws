@@ -24,6 +24,13 @@
 #     newest same-family release — inference profiles for the generation
 #     keys, EMBEDDING foundation models for the embedding keys (AWS creds
 #     via OIDC)
+#   - AWS PCS Slurm versions: PCS_SUPPORTED_SLURM_VERSIONS and the managed
+#     default in gco/pcs_config.py against the supported/EOL tables of the PCS
+#     User Guide (public page, no AWS creds)
+#   - AWS PCS node lifecycle script pins in gco/stacks/pcs_cluster.py against
+#     the public aws-pcs-repo-<region> bucket, and the AMI families
+#     lambda/pcs-lookup/handler.py resolves against the public SSM tree and
+#     Amazon's sample AMIs (AWS creds via OIDC)
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
 #     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (OIDC)
 #   - Dockerfile.dev ARG pins (NODE_VERSION, NPM_VERSION, CDK_VERSION,

@@ -4530,6 +4530,282 @@ SHIM
     rm -rf "$tmpdir"
 }
 
+# ── AWS PCS pins ─────────────────────────────────────────────────────────────
+#
+# The managed PCS backend's lifecycle-script versions, Slurm versions and AMI
+# families live in Python constants (one of them annotated and tuple-valued,
+# one nested in a defaults dict) in modules that import aws_cdk or boto3, so
+# the helpers read them without importing. Their upstreams are a public S3
+# listing, two public AWS catalogs and a User Guide page.
+
+@test "extract_python_literal_constant: a plain string, an annotated tuple, a nested dict key" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+from typing import Any
+import something_that_does_not_exist
+PCS_MOUNT_EFS_SCRIPT = "mount-efs-v1.0.0.sh"
+PCS_SUPPORTED_SLURM_VERSIONS: tuple[str, ...] = (
+    "25.11",  # introduced v0.0.44
+    "26.05",
+)
+PCS_SIZES: list[str] = ["SMALL", "MEDIUM"]
+PCS_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "managed": {"cluster_name": None, "slurm_version": "25.11", "size": "SMALL"},
+}
+raise RuntimeError("must not execute")
+EOF
+    run extract_python_literal_constant PCS_MOUNT_EFS_SCRIPT "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "mount-efs-v1.0.0.sh" ]
+    run extract_python_literal_constant PCS_SUPPORTED_SLURM_VERSIONS "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "25.11,26.05" ]
+    run extract_python_literal_constant PCS_SIZES "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ "$output" = "SMALL,MEDIUM" ]
+    run extract_python_literal_constant PCS_DEFAULTS "$tmpfile" managed.slurm_version
+    [ "$status" -eq 0 ]
+    [ "$output" = "25.11" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_python_literal_constant: nothing for a missing key, a non-string literal, a name or a bare dict" {
+    tmpfile="$(mktemp)"
+    cat > "$tmpfile" <<'EOF'
+PCS_DEFAULTS: dict[str, object] = {"managed": {"slurm_version": "25.11", "max_nodes": 4}}
+PORT: int = 6820
+MIXED = ("a", 1)
+ALIAS = PORT
+ANNOTATED_WITHOUT_VALUE: int
+CALLED = int("3")
+EOF
+    for probe in "PCS_DEFAULTS managed.nope" "PCS_DEFAULTS managed.max_nodes" "PCS_DEFAULTS existing.slurm_version" \
+                 "PCS_DEFAULTS" "PORT" "MIXED" "ALIAS" "ANNOTATED_WITHOUT_VALUE" "CALLED" "NOT_THERE"; do
+        # shellcheck disable=SC2086
+        run extract_python_literal_constant $probe "$tmpfile" ${probe#* }
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+    done
+    rm -f "$tmpfile"
+}
+
+@test "extract_python_literal_constant: empty for a missing or malformed module" {
+    run extract_python_literal_constant PCS_DEFAULTS /nonexistent/module.py
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    tmpfile="$(mktemp)"
+    printf '%s\n' 'PCS_DEFAULTS = {' > "$tmpfile"
+    run extract_python_literal_constant PCS_DEFAULTS "$tmpfile"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -f "$tmpfile"
+}
+
+@test "extract_python_literal_constant: reads the committed PCS pins without importing their modules" {
+    run extract_python_literal_constant PCS_SUPPORTED_SLURM_VERSIONS "$REPO_ROOT/gco/pcs_config.py"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+(,[0-9]+\.[0-9]+)*$ ]]
+    run extract_python_literal_constant PCS_DEFAULTS "$REPO_ROOT/gco/pcs_config.py" managed.slurm_version
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+\.[0-9]+$ ]]
+    # The default is one of the supported versions.
+    default="$output"
+    supported="$(extract_python_literal_constant PCS_SUPPORTED_SLURM_VERSIONS "$REPO_ROOT/gco/pcs_config.py")"
+    [[ ",${supported}," == *",${default},"* ]]
+}
+
+@test "pcs_lifecycle_script_parts: base and version of an immutable script, nothing for aliases and sidecars" {
+    [ "$(pcs_lifecycle_script_parts mount-efs-v1.0.0.sh)" = "mount-efs|1.0.0" ]
+    [ "$(pcs_lifecycle_script_parts configure-cloudwatch-logs-v12.3.4.sh)" = "configure-cloudwatch-logs|12.3.4" ]
+    for name in mount-efs-v1-latest.sh mount-efs-v1.0.0.sha256 mount-efs.sh mount-efs-1.0.0.sh ""; do
+        run pcs_lifecycle_script_parts "$name"
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+    done
+}
+
+@test "pcs_lifecycle_script_parts: the committed lifecycle script pins are immutable versions" {
+    for name in PCS_MOUNT_EFS_SCRIPT PCS_MOUNT_FSX_SCRIPT PCS_CLOUDWATCH_LOGS_SCRIPT; do
+        pin="$(extract_python_string_constant "$name" "$REPO_ROOT/gco/stacks/pcs_cluster.py")"
+        [ -n "$pin" ]
+        run pcs_lifecycle_script_parts "$pin"
+        [ "$status" -eq 0 ]
+        [[ "$output" =~ ^[a-z0-9-]+\|[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    done
+}
+
+_write_pcs_aws_stub() {
+    # $1: directory for the stub. PCS_STUB_MODE: ok|fail|null|bad-json.
+    cat > "$1/aws" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${PCS_STUB_CALLS}"
+case "${PCS_STUB_MODE}" in
+    fail) exit 254 ;;
+    null) echo null ;;
+    bad-json) echo '["unterminated' ;;
+    *)
+        case "$1 $2" in
+            "s3api list-objects-v2")
+                echo '["aws-pcs-node-lifecycle-scripts/mount-efs-v1-latest.sh", "aws-pcs-node-lifecycle-scripts/mount-efs-v1.0.0.sh", "aws-pcs-node-lifecycle-scripts/mount-efs-v1.0.0.sha256", "aws-pcs-node-lifecycle-scripts/mount-efs-v1.2.0.sh", "aws-pcs-node-lifecycle-scripts/mount-efs-v2.0.0.sh", "aws-pcs-node-lifecycle-scripts/mount-fsx-lustre-v1.0.0.sh"]' ;;
+            "ssm get-parameters-by-path")
+                echo '["/aws/service/pcs/ami/dlami-base-ubuntu2404/x86_64/latest/ami-id", "/aws/service/pcs/ami/dlami-base-ubuntu2404/arm64/latest/ami-id", "/aws/service/pcs/ami/dlami-base-ubuntu2604/x86_64/latest/ami-id", "/aws/service/pcs/other"]' ;;
+            "ec2 describe-images")
+                echo '["aws-pcs-sample_ami-al2023-x86_64-slurm-25.11-2026-09-07T08-03-31.357Z", "aws-pcs-sample_ami-al2023-arm64-2026-10-01T00-00-00.000Z", "aws-pcs-sample_ami-amzn2-x86_64-slurm-25.05-2025-01-01T00-00-00.000Z", "aws-pcs-ready-dlami-base-ubuntu2404-x86_64-2026-10-21T08-53-37.130Z"]' ;;
+        esac ;;
+esac
+STUB
+    chmod +x "$1/aws"
+}
+
+@test "list_pcs_lifecycle_scripts: prints every object name under the prefix, from one paged CLI call" {
+    tmpdir="$(mktemp -d)"
+    _write_pcs_aws_stub "$tmpdir"
+    export PCS_STUB_CALLS="$tmpdir/calls" PCS_STUB_MODE=ok
+    PATH="$tmpdir:$PATH" run list_pcs_lifecycle_scripts us-east-1 aws-pcs-node-lifecycle-scripts
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'mount-efs-v1-latest.sh\nmount-efs-v1.0.0.sh\nmount-efs-v1.0.0.sha256\nmount-efs-v1.2.0.sh\nmount-efs-v2.0.0.sh\nmount-fsx-lustre-v1.0.0.sh')" ]
+    grep -q -- '--bucket aws-pcs-repo-us-east-1 --prefix aws-pcs-node-lifecycle-scripts/ --region us-east-1' "$tmpdir/calls"
+    rm -rf "$tmpdir"
+}
+
+@test "list_pcs_lifecycle_scripts: a refused listing fails, an empty prefix prints nothing, bad JSON fails" {
+    tmpdir="$(mktemp -d)"
+    _write_pcs_aws_stub "$tmpdir"
+    export PCS_STUB_CALLS="$tmpdir/calls"
+    PCS_STUB_MODE=fail PATH="$tmpdir:$PATH" run list_pcs_lifecycle_scripts us-east-1 aws-pcs-node-lifecycle-scripts
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    PCS_STUB_MODE=null PATH="$tmpdir:$PATH" run list_pcs_lifecycle_scripts us-east-1 aws-pcs-node-lifecycle-scripts
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    PCS_STUB_MODE=bad-json PATH="$tmpdir:$PATH" run list_pcs_lifecycle_scripts us-east-1 aws-pcs-node-lifecycle-scripts
+    [ "$status" -ne 0 ]
+    rm -rf "$tmpdir"
+}
+
+@test "newest_pcs_lifecycle_script: the highest immutable version of one base, within a major when asked" {
+    listing="$(printf '%s\n' mount-efs-v1-latest.sh mount-efs-v1.0.0.sh mount-efs-v1.0.0.sha256 mount-efs-v1.2.0.sh mount-efs-v1.10.0.sh mount-efs-v2.0.0.sh mount-fsx-lustre-v3.0.0.sh)"
+    [ "$(newest_pcs_lifecycle_script mount-efs <<< "$listing")" = "mount-efs-v2.0.0.sh" ]
+    [ "$(newest_pcs_lifecycle_script mount-efs 1 <<< "$listing")" = "mount-efs-v1.10.0.sh" ]
+    [ "$(newest_pcs_lifecycle_script mount-fsx-lustre <<< "$listing")" = "mount-fsx-lustre-v3.0.0.sh" ]
+    # Another base, a major nobody published, an alias-only listing: nothing.
+    [ -z "$(newest_pcs_lifecycle_script configure-cloudwatch-logs <<< "$listing")" ]
+    [ -z "$(newest_pcs_lifecycle_script mount-efs 4 <<< "$listing")" ]
+    [ -z "$(printf 'mount-efs-v1-latest.sh\n' | newest_pcs_lifecycle_script mount-efs)" ]
+    [ -z "$(printf '' | newest_pcs_lifecycle_script mount-efs)" ]
+}
+
+@test "pcs_dlami_family and pcs_sample_ami_family: the family a lookup pattern names, nothing otherwise" {
+    [ "$(pcs_dlami_family "/aws/service/pcs/ami/dlami-base-ubuntu2404/{architecture}/latest/ami-id")" = "dlami-base-ubuntu2404" ]
+    [ -z "$(pcs_dlami_family "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64")" ]
+    [ -z "$(pcs_dlami_family "")" ]
+    [ "$(pcs_sample_ami_family "aws-pcs-sample_ami-al2023-{architecture}*")" = "al2023" ]
+    [ -z "$(pcs_sample_ami_family "aws-pcs-ready-dlami-base-ubuntu2404-{architecture}-*")" ]
+    [ -z "$(pcs_sample_ami_family "")" ]
+}
+
+@test "pcs_dlami_family and pcs_sample_ami_family: the committed lookup patterns name a family each" {
+    run pcs_dlami_family "$(extract_python_string_constant DLAMI_SSM_PARAMETER "$REPO_ROOT/lambda/pcs-lookup/handler.py")"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^dlami-base-[a-z]+[0-9]+$ ]]
+    run pcs_sample_ami_family "$(extract_python_string_constant SAMPLE_NAME_PATTERN "$REPO_ROOT/lambda/pcs-lookup/handler.py")"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[a-z]+[0-9]+$ ]]
+}
+
+@test "list_pcs_dlami_families and list_pcs_sample_ami_families: deduplicated families, failures fail" {
+    tmpdir="$(mktemp -d)"
+    _write_pcs_aws_stub "$tmpdir"
+    export PCS_STUB_CALLS="$tmpdir/calls" PCS_STUB_MODE=ok
+    PATH="$tmpdir:$PATH" run list_pcs_dlami_families us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'dlami-base-ubuntu2404\ndlami-base-ubuntu2604')" ]
+    PATH="$tmpdir:$PATH" run list_pcs_sample_ami_families us-east-1
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'al2023\namzn2')" ]
+    grep -q -- 'ssm get-parameters-by-path --path /aws/service/pcs/ami --recursive --region us-east-1' "$tmpdir/calls"
+    grep -q -- 'ec2 describe-images --owners amazon --region us-east-1 --filters Name=name,Values=aws-pcs-sample_ami-\*' "$tmpdir/calls"
+    export PCS_STUB_MODE=fail
+    PATH="$tmpdir:$PATH" run list_pcs_dlami_families us-east-1
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    PATH="$tmpdir:$PATH" run list_pcs_sample_ami_families us-east-1
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    export PCS_STUB_MODE=null
+    PATH="$tmpdir:$PATH" run list_pcs_dlami_families us-east-1
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    PATH="$tmpdir:$PATH" run list_pcs_sample_ami_families us-east-1
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "newest_pcs_ami_family: a newer release of the same OS line, never another OS" {
+    [ "$(printf 'dlami-base-ubuntu2404\ndlami-base-ubuntu2604\ndlami-base-rocky9\n' | newest_pcs_ami_family dlami-base-ubuntu2404)" = "dlami-base-ubuntu2604" ]
+    [ "$(printf 'al2023\nal2025\namzn2\n' | newest_pcs_ami_family al2023)" = "al2025" ]
+    # Even when the pin itself is no longer listed, its line's newest counts.
+    [ "$(printf 'al2025\n' | newest_pcs_ami_family al2023)" = "al2025" ]
+    # Another OS only, an older release only, the pin alone, nothing: nothing.
+    [ -z "$(printf 'amzn2\n' | newest_pcs_ami_family al2023)" ]
+    [ -z "$(printf 'dlami-base-ubuntu2204\ndlami-base-ubuntu2404\n' | newest_pcs_ami_family dlami-base-ubuntu2404)" ]
+    [ -z "$(printf 'al2023\n' | newest_pcs_ami_family al2023)" ]
+    [ -z "$(printf '' | newest_pcs_ami_family al2023)" ]
+}
+
+_make_pcs_docs_curl() {
+    # $1: directory for the stub; $2: the page body (empty = exit 22).
+    if [ -z "$2" ]; then
+        printf '#!/usr/bin/env bash\nexit 22\n' > "$1/curl"
+    else
+        printf '#!/usr/bin/env bash\ncat <<'"'"'PAGE'"'"'\n%s\nPAGE\n' "$2" > "$1/curl"
+    fi
+    chmod +x "$1/curl"
+}
+
+@test "fetch_pcs_slurm_versions: the supported and unsupported tables as version|status|eol" {
+    tmpdir="$(mktemp -d)"
+    _make_pcs_docs_curl "$tmpdir" '<html><body>
+<h2>Supported Slurm versions in AWS PCS</h2>
+<table><tr><th>Slurm version</th><th>SchedMD release date</th><th>AWS PCS release date</th><th>AWS PCS EOL date</th><th>Minimum compatible AWS PCS agent version</th><th>Supported AWS PCS sample AMIs</th></tr>
+<tr><td><p>26.05</p></td><td>5/26/2026</td><td>9/10/2026</td><td>11/30/2027</td><td>1.0.0-1</td><td><code>aws-pcs-sample_ami-al2023-x86_64</code> <code>aws-pcs-sample_ami-al2023-arm64</code></td></tr>
+<tr><td>25.11</td><td>11/6/2025</td><td>4/9/2026</td><td>5/31/2027</td><td>1.0.0-1</td><td>aws-pcs-sample_ami-al2023-x86_64-slurm-25.11</td></tr>
+<tr><td>25.05</td><td>5/29/2025</td><td>10/16/2025</td><td>TBD</td><td>1.0.0-1</td><td>aws-pcs-sample_ami-amzn2-x86_64-slurm-25.05</td></tr>
+<tr><td>Note</td><td colspan="5">Starting with 26.05, a single sample AMI supports every Slurm version.</td></tr>
+</table>
+<h2>Unsupported Slurm versions in AWS PCS</h2>
+<table><tr><th>Slurm version</th><th>SchedMD release date</th><th>AWS PCS release date</th><th>AWS PCS EOL date</th></tr>
+<tr><td>24.11</td><td>11/29/2024</td><td>5/14/2025</td><td>5/31/2026</td></tr>
+<tr><td>24.05</td><td>5/30/2024</td><td>12/18/2024</td><td>2/30/2025</td></tr>
+</table></body></html>'
+    PATH="$tmpdir:$PATH" run fetch_pcs_slurm_versions
+    [ "$status" -eq 0 ]
+    # Nested markup inside a cell is folded, a non-date EOL cell is empty, an
+    # impossible calendar date is empty too, and the note row is skipped.
+    [ "$output" = "$(printf '26.05|supported|2027-11-30\n25.11|supported|2027-05-31\n25.05|supported|\n24.11|unsupported|2026-05-31\n24.05|unsupported|')" ]
+    rm -rf "$tmpdir"
+}
+
+@test "fetch_pcs_slurm_versions: nothing on an unreachable page, a page without tables, or a broken document" {
+    tmpdir="$(mktemp -d)"
+    _make_pcs_docs_curl "$tmpdir" ""
+    PATH="$tmpdir:$PATH" run fetch_pcs_slurm_versions
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    _make_pcs_docs_curl "$tmpdir" '<html><body><p>Slurm versions in AWS PCS</p><table><tr><td>not a version</td><td>x</td><td>y</td><td>z</td></tr></table></body></html>'
+    PATH="$tmpdir:$PATH" run fetch_pcs_slurm_versions
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    # A cell closing outside any row and a table-less page are both nothing.
+    _make_pcs_docs_curl "$tmpdir" '</td></tr><table><tr><td>26.05</td></tr></table>'
+    PATH="$tmpdir:$PATH" run fetch_pcs_slurm_versions
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
 # ── npm graph management and cross-source Node/npm/CDK pins ─────────────────
 
 make_npm_fixture() {

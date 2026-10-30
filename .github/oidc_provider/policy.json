@@ -9,15 +9,25 @@
         "bedrock:GetFoundationModel",
         "bedrock:ListInferenceProfiles",
         "bedrock:GetInferenceProfile",
+        "ec2:DescribeImages",
         "ec2:DescribeInstanceTypes",
         "ec2:DescribeRegions",
         "eks:DescribeAddonVersions",
         "eks:DescribeClusterVersions",
         "elasticmapreduce:ListReleaseLabels",
         "rds:DescribeDBEngineVersions",
+        "ssm:GetParametersByPath",
         "sts:GetCallerIdentity"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "CIDependencyScanPcsRepo",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::aws-pcs-repo-*"
     }
   ]
 }

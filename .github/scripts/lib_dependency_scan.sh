@@ -1043,6 +1043,271 @@ if candidates:
 " 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# AWS PCS pins
+#
+# The managed PCS backend (gco/stacks/pcs_cluster.py, gco/pcs_config.py,
+# lambda/pcs-lookup/handler.py) pins four things no package manager watches:
+# the AWS-maintained node lifecycle scripts it runs (immutable ``-vX.Y.Z``
+# objects in the public ``aws-pcs-repo-<region>`` bucket), the Slurm versions
+# it lets a cluster be created with (and the default), and the AMI families
+# the lookup Lambda resolves (the PCS-ready DLAMI base and the sample AMI's
+# OS). The helpers below read those pins and the upstreams that move them.
+# ---------------------------------------------------------------------------
+
+# extract_python_literal_constant <name> <python_path> [key.path]
+#
+# The literal-valued sibling of ``extract_python_string_constant``: the same
+# tokenizer walk (nothing is imported or executed, grammar newer than the
+# scanner's interpreter is tolerated), but the assignment may carry a type
+# annotation (``NAME: tuple[str, ...] = (...)``) and the value may be any
+# ``ast.literal_eval`` literal. A string prints as is; a list or tuple of
+# strings prints comma-joined; with <key.path> a dict is walked key by key
+# and the string found there is printed. Anything else prints nothing.
+extract_python_literal_constant() {
+  local name="$1"
+  local file="$2"
+  local key_path="${3:-}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import ast, io, sys, tokenize
+name, key_path = sys.argv[1], sys.argv[3]
+try:
+    with open(sys.argv[2], encoding='utf-8') as handle:
+        source = handle.read()
+except OSError:
+    raise SystemExit(0)
+tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+value = None
+try:
+    for token in tokens:
+        if not (token.type == tokenize.NAME and token.string == name and token.start[1] == 0):
+            continue
+        for token in tokens:
+            if token.type not in (tokenize.NL, tokenize.COMMENT):
+                break
+        if token.type == tokenize.OP and token.string == ':':
+            # An annotation: skip to the '=' that closes it.
+            depth = 0
+            for token in tokens:
+                if token.type == tokenize.OP and token.string in '([{':
+                    depth += 1
+                elif token.type == tokenize.OP and token.string in ')]}':
+                    depth -= 1
+                elif token.type == tokenize.OP and token.string == '=' and depth == 0:
+                    break
+                elif token.type in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                    break
+        if token.type != tokenize.OP or token.string != '=':
+            continue
+        expression = []
+        depth = 0
+        for token in tokens:
+            if token.type == tokenize.OP:
+                if token.string in '([{':
+                    depth += 1
+                elif token.string in ')]}':
+                    depth -= 1
+            if token.type in (tokenize.NEWLINE, tokenize.ENDMARKER) and depth == 0:
+                break
+            expression.append((token.type, token.string))
+        try:
+            value = ast.literal_eval(tokenize.untokenize(expression))
+        except (SyntaxError, ValueError):
+            pass
+        break
+except tokenize.TokenError:
+    raise SystemExit(0)
+for key in [part for part in key_path.split('.') if part]:
+    value = value.get(key) if isinstance(value, dict) else None
+if isinstance(value, str):
+    print(value)
+elif isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+    print(','.join(value))
+" "$name" "$file" "$key_path" 2>/dev/null
+}
+
+#: An immutable PCS node lifecycle script object: ``mount-efs-v1.0.0.sh``.
+#: The moving ``-v1-latest`` aliases do not match.
+PCS_LIFECYCLE_SCRIPT_RE='^([a-z0-9-]+)-v([0-9]+\.[0-9]+\.[0-9]+)\.sh$'
+
+# pcs_lifecycle_script_parts <file-name>
+#
+# Prints ``base|version`` for an immutable lifecycle script name
+# (``mount-efs-v1.0.0.sh`` -> ``mount-efs|1.0.0``), nothing for anything
+# else (a ``-v1-latest`` alias, a ``.sha256`` sidecar, a bare name).
+pcs_lifecycle_script_parts() {
+  [[ "${1:-}" =~ $PCS_LIFECYCLE_SCRIPT_RE ]] || return 0
+  printf '%s|%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
+# list_pcs_lifecycle_scripts <region> <prefix>
+#
+# Prints the object names (the key with <prefix>/ stripped) under <prefix>/ in
+# the Region's public ``aws-pcs-repo-<region>`` bucket, one per line. The
+# bucket admits any AWS principal (anonymous listing is refused), so the OIDC
+# role carries ``s3:ListBucket`` on ``arn:aws:s3:::aws-pcs-repo-*``; the AWS
+# CLI pages ``list-objects-v2`` on its own. Fails (non-zero, nothing printed)
+# when the listing cannot be fetched or parsed.
+list_pcs_lifecycle_scripts() {
+  local region="$1" prefix="$2" keys
+  keys="$(aws s3api list-objects-v2 --bucket "aws-pcs-repo-${region}" --prefix "${prefix}/" \
+    --region "$region" --query 'Contents[].Key' --output json 2>/dev/null)" || return 1
+  jq -r --arg prefix "${prefix}/" '(. // [])[] | ltrimstr($prefix)' <<< "$keys" 2>/dev/null || return 1
+}
+
+# newest_pcs_lifecycle_script <base> [major]
+#
+# Reads object names on stdin and prints the immutable ``<base>-vX.Y.Z.sh``
+# with the highest version — restricted to the given major when <major> is
+# given. Prints nothing when none qualifies. The ``-v1-latest`` alias is not
+# a candidate: the pin is immutable on purpose, so the report names the
+# version to move to.
+newest_pcs_lifecycle_script() {
+  local base="$1" major="${2:-}" name parts version
+  while IFS= read -r name; do
+    parts="$(pcs_lifecycle_script_parts "$name")"
+    [ -n "$parts" ] || continue
+    [ "${parts%%|*}" = "$base" ] || continue
+    version="${parts#*|}"
+    [ -z "$major" ] || [ "${version%%.*}" = "$major" ] || continue
+    printf '%s %s\n' "$version" "$name"
+  done | sort -V | tail -1 | cut -d' ' -f2-
+}
+
+# pcs_dlami_family <ssm-parameter-template>
+#
+# The PCS-ready DLAMI base a lookup parameter names:
+# ``/aws/service/pcs/ami/dlami-base-ubuntu2404/{architecture}/latest/ami-id``
+# -> ``dlami-base-ubuntu2404``. Nothing for any other path.
+pcs_dlami_family() {
+  printf '%s\n' "${1:-}" | sed -nE 's#^/aws/service/pcs/ami/([^/]+)/.*$#\1#p'
+}
+
+# pcs_sample_ami_family <name-pattern>
+#
+# The OS base of a sample-AMI name pattern:
+# ``aws-pcs-sample_ami-al2023-{architecture}*`` -> ``al2023``. Nothing for
+# any other pattern.
+pcs_sample_ami_family() {
+  printf '%s\n' "${1:-}" | sed -nE 's/^aws-pcs-sample_ami-([a-z0-9]+)-.*$/\1/p'
+}
+
+# list_pcs_dlami_families <region>
+#
+# Prints every PCS-ready DLAMI base the public SSM parameter tree
+# ``/aws/service/pcs/ami/<base>/<arch>/latest/ami-id`` carries, one per line,
+# deduplicated. IAM: ``ssm:GetParametersByPath`` on the public
+# ``parameter/aws/service/pcs/*`` tree. Fails (non-zero, nothing printed) when
+# the lookup cannot be fetched or parsed.
+list_pcs_dlami_families() {
+  local region="$1" names
+  names="$(aws ssm get-parameters-by-path --path /aws/service/pcs/ami --recursive \
+    --region "$region" --query 'Parameters[].Name' --output json 2>/dev/null)" || return 1
+  jq -r '(. // [])[]' <<< "$names" 2>/dev/null | sed -nE 's#^/aws/service/pcs/ami/([^/]+)/.*$#\1#p' | sort -u
+}
+
+# list_pcs_sample_ami_families <region>
+#
+# Prints every OS base Amazon publishes PCS sample AMIs on
+# (``aws-pcs-sample_ami-<base>-<arch>...``), one per line, deduplicated. IAM:
+# ``ec2:DescribeImages``. Fails (non-zero, nothing printed) when the lookup
+# cannot be fetched or parsed.
+list_pcs_sample_ami_families() {
+  local region="$1" names
+  names="$(aws ec2 describe-images --owners amazon --region "$region" \
+    --filters 'Name=name,Values=aws-pcs-sample_ami-*' --query 'Images[].Name' --output json 2>/dev/null)" \
+    || return 1
+  jq -r '(. // [])[]' <<< "$names" 2>/dev/null | sed -nE 's/^aws-pcs-sample_ami-([a-z0-9]+)-.*$/\1/p' | sort -u
+}
+
+# newest_pcs_ami_family <current>
+#
+# Reads family names on stdin and prints the newest one in the same line as
+# <current>, if it is newer: ``dlami-base-ubuntu2604`` for a
+# ``dlami-base-ubuntu2404`` pin, ``al2025`` for ``al2023``. A line is the
+# name with its trailing OS release digits stripped, so only a newer release
+# of the same OS qualifies — a different OS (``amzn2`` next to ``al2023``, a
+# Rocky-based DLAMI next to the Ubuntu one) is a human decision, not drift,
+# the same scoping the Bedrock check applies to model families. Nothing when
+# the pin is already the newest of its line.
+newest_pcs_ami_family() {
+  local current="$1" families stem newest
+  families="$(cat)"
+  stem="$(printf '%s\n' "$current" | sed -E 's/[0-9]+$//')"
+  newest="$(printf '%s\n%s\n' "$current" "$families" \
+    | grep -E "^${stem}[0-9]+$" | sort -V | tail -1)"
+  [ -n "$newest" ] && [ "$newest" != "$current" ] || return 0
+  printf '%s\n' "$newest"
+}
+
+#: The AWS PCS User Guide page that publishes the supported Slurm versions
+#: and their EOL dates. There is no API for this list: the PCS service model
+#: documents it in prose that lags the page by a release.
+PCS_SLURM_VERSIONS_URL="https://docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html"
+
+# fetch_pcs_slurm_versions
+#
+# Prints ``version|status|eol`` for every Slurm version the AWS PCS User Guide
+# lists — ``status`` is ``supported`` for rows of the "Supported Slurm
+# versions" table and ``unsupported`` for the table that follows, ``eol`` the
+# "AWS PCS EOL date" column as ISO ``YYYY-MM-DD`` (the page prints it
+# ``M/D/YYYY``; an unparseable cell is printed empty). The tables are read in
+# page order with the stdlib HTML parser: the first table is the supported
+# one, every later table unsupported. Prints nothing on a fetch failure or
+# when the page carries no version table — callers treat both as a skip.
+fetch_pcs_slurm_versions() {
+  curl -fsSL --max-time 20 "${SCAN_CURL_RETRY[@]}" "$PCS_SLURM_VERSIONS_URL" 2>/dev/null \
+    | python3 -c "
+import datetime, re, sys
+from html.parser import HTMLParser
+
+class Tables(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tables, self.row, self.cell = [], None, None
+    def handle_starttag(self, tag, attrs):
+        if tag == 'table':
+            self.tables.append([])
+        elif tag == 'tr' and self.tables:
+            self.row = []
+        elif tag in ('td', 'th') and self.row is not None:
+            self.cell = []
+    def handle_endtag(self, tag):
+        if tag in ('td', 'th') and self.cell is not None and self.row is not None:
+            self.row.append(' '.join(''.join(self.cell).split()))
+            self.cell = None
+        elif tag == 'tr' and self.row is not None:
+            self.tables[-1].append(self.row)
+            self.row = None
+    def handle_data(self, data):
+        if self.cell is not None:
+            self.cell.append(data)
+
+parser = Tables()
+try:
+    parser.feed(sys.stdin.read())
+except Exception:
+    raise SystemExit(0)
+
+def iso(cell):
+    m = re.fullmatch(r'(\d{1,2})/(\d{1,2})/(\d{4})', cell.strip())
+    if not m:
+        return ''
+    try:
+        return datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2))).isoformat()
+    except ValueError:
+        return ''
+
+for index, table in enumerate(parser.tables):
+    status = 'supported' if index == 0 else 'unsupported'
+    for row in table:
+        if len(row) < 4 or not re.fullmatch(r'\d+\.\d+', row[0]):
+            continue
+        print(f'{row[0]}|{status}|{iso(row[3])}')
+" 2>/dev/null
+}
+
 # read_ruby_version_pin [version_file]
 #
 # Prints the committed Ruby series from .ruby-version (comments and blank
