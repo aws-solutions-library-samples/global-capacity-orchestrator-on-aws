@@ -1004,24 +1004,27 @@ class TestRunnerRun:
         assert "Markdown report:" in output
         assert Path.cwd() == previous_cwd
 
-    @pytest.mark.parametrize("previous_tmpdir", [None, "/tmp/elsewhere"])
-    def test_children_get_a_run_scoped_tmpdir_that_leaves_with_the_run(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, previous_tmpdir: str | None
+    def test_cdk_children_get_a_run_scoped_tmpdir_that_leaves_with_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The CDK CLI leaves ``cdk.out*`` assemblies under ``TMPDIR``; the run owns that."""
-        if previous_tmpdir is None:
-            monkeypatch.delenv("TMPDIR", raising=False)
-        else:
-            monkeypatch.setenv("TMPDIR", previous_tmpdir)
+        """The CDK CLI leaves ``cdk.out*`` assemblies under ``TMPDIR``; the run owns that.
+
+        Only the CDK children get the run-scoped ``TMPDIR``: the process's
+        own stays untouched, because the Session Manager plugin binds a Unix
+        socket under it and the long run-scoped path broke the tunnel once.
+        """
+        monkeypatch.setenv("TMPDIR", "/tmp/elsewhere")
         seen: dict[str, Any] = {}
 
         def baseline(ctx: RunContext) -> dict[str, Any]:
-            scratch = Path(os.environ["TMPDIR"])
+            scratch = instance._scratch_dir
+            assert scratch is not None
             # What a successful ``cdk list`` leaves behind.
             (scratch / "cdk.outAbC123").mkdir()
             (scratch / "cdk.outAbC123" / "manifest.json").write_text("{}", encoding="utf-8")
             seen["scratch"] = scratch
-            seen["runner_scratch"] = instance._scratch_dir
+            seen["process_tmpdir"] = os.environ.get("TMPDIR")
+            seen["cdk_environment"] = ctx.stack_manager.set_cdk_environment.call_args_list[-1]
             return {"ok": True}
 
         instance = _build_runner(
@@ -1034,18 +1037,19 @@ class TestRunnerRun:
         assert instance.run() == 0
 
         scratch = seen["scratch"]
-        assert scratch == seen["runner_scratch"]
         assert scratch.name.startswith("gco-live-pr_1_2-")
         assert scratch.parent == Path(tempfile.gettempdir())
+        assert seen["process_tmpdir"] == "/tmp/elsewhere"
+        assert seen["cdk_environment"].args == ({"TMPDIR": str(scratch)},)
         assert not scratch.exists()
         assert instance._scratch_dir is None
-        assert os.environ.get("TMPDIR") == previous_tmpdir
+        # The CDK children lose the variable with the directory.
+        assert instance.stack_manager.set_cdk_environment.call_args_list[-1].args == ({},)
         # Leaving before entering (a failure ahead of the scratch setup in
-        # run()'s try) only restores the environment.
-        monkeypatch.setenv("TMPDIR", "/tmp/during")
-        instance._previous_tmpdir = None
+        # run()'s try) is a no-op.
+        calls = len(instance.stack_manager.set_cdk_environment.call_args_list)
         instance._leave_run_scratch()
-        assert "TMPDIR" not in os.environ and instance._scratch_dir is None
+        assert len(instance.stack_manager.set_cdk_environment.call_args_list) == calls
 
     def test_partial_scope_without_deploy_needs_no_cleanup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

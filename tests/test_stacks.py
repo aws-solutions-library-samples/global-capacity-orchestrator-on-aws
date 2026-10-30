@@ -1035,6 +1035,39 @@ class TestStackManagerOperations:
             index = argv.index("--context")
             assert argv[index + 1] == "helm_enabled_overrides=slurm,yunikorn"
 
+    def test_cdk_environment_reaches_only_the_cdk_children(self, monkeypatch):
+        """``set_cdk_environment`` overlays the CDK child's environment, not this process's."""
+        from cli.stacks import StackManager
+
+        monkeypatch.setenv("TMPDIR", "/tmp/process")
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        manager.set_cdk_environment({"TMPDIR": "/tmp/run-scratch", "CDK_DEBUG": 1})
+        process = _FakePopenProcess(stdout="", stderr="")
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
+            manager._run_cdk(["list"], capture_output=True, env={"CDK_DEBUG": "0"})
+        child_env = mock_popen.call_args.kwargs["env"]
+        assert child_env["TMPDIR"] == "/tmp/run-scratch"
+        # An explicit per-call env still wins over the registered overlay.
+        assert child_env["CDK_DEBUG"] == "0"
+        assert os.environ["TMPDIR"] == "/tmp/process"
+        # Clearing the overlay restores the inherited value for later children.
+        manager.set_cdk_environment({})
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build"),
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
+            manager._run_cdk(["list"], capture_output=True)
+        assert mock_popen.call_args.kwargs["env"]["TMPDIR"] == "/tmp/process"
+        for bad in ({"": "x"}, {"A=B": "x"}, {"A\0": "x"}, {"A": "x\0y"}):
+            with pytest.raises(ValueError, match="Invalid CDK environment variable"):
+                manager.set_cdk_environment(bad)
+
     def test_extra_cdk_context_never_touches_non_app_commands(self):
         """Non-synthesizing commands (e.g. bootstrap) stay unmodified."""
         from cli.stacks import StackManager

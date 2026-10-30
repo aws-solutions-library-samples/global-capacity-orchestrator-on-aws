@@ -1355,6 +1355,24 @@ class StackManager:
         # to force-enable optional Helm charts (helm_enabled_overrides) for a
         # run without mutating the checked-out cdk.json.
         self._extra_cdk_context: dict[str, str] = {}
+        # Extra environment for every CDK child process (set_cdk_environment);
+        # the live release validation harness points the CDK CLI's temporary
+        # cloud assemblies (TMPDIR) at a run-scoped directory it removes.
+        self._cdk_environment: dict[str, str] = {}
+
+    def set_cdk_environment(self, environment: Mapping[str, str]) -> None:
+        """Register environment variables for every subsequent CDK child process.
+
+        They apply to the CDK CLI and what it spawns (the app synth, image
+        builds), never to this process or to other children such as the
+        Session Manager plugin, whose Unix socket path must stay short.
+        """
+        validated: dict[str, str] = {}
+        for key, value in environment.items():
+            if not key or "=" in key or "\0" in key or "\0" in str(value):
+                raise ValueError(f"Invalid CDK environment variable: {key!r}")
+            validated[str(key)] = str(value)
+        self._cdk_environment = validated
 
     def set_extra_cdk_context(self, context: Mapping[str, str]) -> None:
         """Register `--context` pairs for every subsequent CDK invocation.
@@ -2044,6 +2062,7 @@ class StackManager:
                 command = [*command, "--context", f"{key}={value}"]
 
         full_env = os.environ.copy()
+        full_env.update(self._cdk_environment)
 
         # Inject PYTHONPATH so CDK's python3 subprocess can find aws_cdk
         # This is essential for pipx installations
