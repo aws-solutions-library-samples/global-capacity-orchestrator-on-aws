@@ -5031,7 +5031,7 @@ gco stacks deploy-all [OPTIONS]
 ```bash
 gco stacks deploy-all -y
 gco stacks deploy-all -y --parallel --max-workers 8
-gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs
+gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs,hyperpod
 ```
 
 See [Run-scoped enablement overrides](CUSTOMIZATION.md#run-scoped-enablement-overrides)

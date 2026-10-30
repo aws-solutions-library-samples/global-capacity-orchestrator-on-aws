@@ -1647,14 +1647,14 @@ Sometimes you want a feature on for **one run** without changing that shipped po
 
 ```bash
 # One run with every optional feature on; cdk.json is not modified.
-gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs
+gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs,hyperpod
 ```
 
 Names are validated before any AWS call, so a typo fails immediately rather than deploying without the feature you asked for. Repeated and comma-joined forms are equivalent (`--enable valkey --enable slurm` = `--enable valkey,slurm`).
 
 | Category | Valid names | CDK context key |
 |----------|-------------|-----------------|
-| Infrastructure features | `aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store`, `pcs` | `feature_enabled_overrides` |
+| Infrastructure features | `aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store`, `pcs`, `hyperpod` | `feature_enabled_overrides` |
 | Helm charts | `argocd`, `aws_efa_device_plugin`, `aws_load_balancer_controller`, `aws_neuron_device_plugin`, `cert_manager`, `crossplane`, `keda`, `kubeflow_trainer`, `kuberay`, `kueue`, `slurm`, `volcano`, `yunikorn` | `helm_enabled_overrides` |
 
 Two properties matter:
