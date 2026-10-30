@@ -3440,6 +3440,9 @@ class TestActionFinalInventory:
             patch_live_validation_helper(
                 "_strip_deleted_vpc_endpoints", return_value=(inventory, [{"arn": "vpce"}])
             ),
+            patch_live_validation_helper(
+                "_strip_deleted_volumes", return_value=(inventory, [{"arn": "vol"}])
+            ),
             patch_live_validation_helper("summarize_project_resources", return_value={"total": 0}),
             patch_live_validation_helper("project_resources_are_absent", return_value=absent),
         ):
@@ -3471,6 +3474,7 @@ class TestActionFinalInventory:
         assert result["accepted_pending_kms_keys"] == [{"key": "pending"}]
         assert result["accepted_expired_dynamodb_streams"] == [{"arn": "stream"}]
         assert result["accepted_deleted_vpc_endpoints"] == [{"arn": "vpce"}]
+        assert result["accepted_deleted_volumes"] == [{"arn": "vol"}]
         assert result["residual_project_resources"] == self._PROJECT_INVENTORY
         assert result["transaction_search"] == self._TRANSACTION_SEARCH
         assert ctx.report.final_inventory is result

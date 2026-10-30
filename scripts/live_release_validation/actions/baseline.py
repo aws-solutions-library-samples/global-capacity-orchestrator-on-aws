@@ -18,6 +18,7 @@ from ..models import RunContext
 from ..ownership.dynamodb_streams import (
     _strip_expired_table_streams,
 )
+from ..ownership.ebs_volumes import _strip_deleted_volumes
 from ..ownership.ecr import (
     _strip_baseline_ecr,
 )
@@ -93,6 +94,10 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         ctx,
         disallowed_inventory,
     )
+    disallowed_inventory, accepted_deleted_volumes = _strip_deleted_volumes(
+        ctx,
+        disallowed_inventory,
+    )
     if not project_resources_are_absent(disallowed_inventory):
         raise RuntimeError(
             "Fresh baseline contains project resources not owned by this run: "
@@ -114,5 +119,6 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         "accepted_efs_automatic_backup_recovery_points": accepted_efs_backups,
         "accepted_expired_dynamodb_streams": accepted_expired_streams,
         "accepted_deleted_vpc_endpoints": accepted_deleted_vpc_endpoints,
+        "accepted_deleted_volumes": accepted_deleted_volumes,
         "transaction_search": transaction_search,
     }

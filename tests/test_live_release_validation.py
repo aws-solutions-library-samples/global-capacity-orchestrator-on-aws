@@ -52,6 +52,7 @@ from scripts.live_release_validation.inference_contract import (
 from scripts.live_release_validation.inventory import ecr as inventory_ecr
 from scripts.live_release_validation.inventory import scanners as inventory_scanners
 from scripts.live_release_validation.ownership import dynamodb_streams as ownership_streams
+from scripts.live_release_validation.ownership import ebs_volumes as ownership_ebs_volumes
 from scripts.live_release_validation.ownership import ecr as ownership_ecr
 from scripts.live_release_validation.ownership import efs_automatic_backups as ownership_efs_backups
 from scripts.live_release_validation.ownership import log_groups as ownership_log_groups
@@ -6056,6 +6057,171 @@ class TestStripExpiredTableStreams:
         assert inventory == snapshot
 
 
+class TestStripDeletedVolumes:
+    """``_strip_deleted_volumes`` — Tagging API lag on the PCS nodes' root volumes.
+
+    Pins the live failure from 2026-10-30: the managed PCS login node's root
+    volume (tagged by the launch template) was ``deleting`` when the final
+    inventory ran, EC2 answered ``InvalidVolume.NotFound`` a minute later, and
+    the next baseline still saw the ARN in the Tagging API index ninety
+    minutes after that. Acceptance is conditional on EC2 proving the volume
+    gone (or terminal); a live volume keeps its entry as genuine residue.
+    """
+
+    _ACCOUNT = "123456789012"
+    _REGION = "us-east-1"
+    _VOLUME_ID = "vol-0a70a8cfc46f1c38e"
+    _ARN = f"arn:aws:ec2:{_REGION}:{_ACCOUNT}:volume/{_VOLUME_ID}"
+    _TAGS = {
+        "Name": "gco-pcs-login",
+        "gco:project": "gco",
+        "gco:pcs-cluster": "gco-pcs",
+        "gco:pcs-node-group": "login",
+    }
+
+    def _inventory(self, *entries: dict[str, object]) -> dict[str, object]:
+        return {
+            "regional": {
+                self._REGION: {"tagged_resources": list(entries), "vpcs": []},
+            }
+        }
+
+    def _ctx(self, *, state: str | None) -> tuple[SimpleNamespace, MagicMock]:
+        """``state=None`` makes EC2 answer NotFound; otherwise the given State."""
+        ec2 = MagicMock()
+        if state is None:
+            ec2.describe_volumes.side_effect = ClientError(
+                {"Error": {"Code": "InvalidVolume.NotFound", "Message": "gone"}},
+                "DescribeVolumes",
+            )
+        else:
+            ec2.describe_volumes.return_value = {
+                "Volumes": [{"VolumeId": self._VOLUME_ID, "State": state}]
+            }
+        ctx = _context()
+        ctx.session = MagicMock()
+        ctx.session.client.return_value = ec2
+        return ctx, ec2
+
+    def test_not_found_volume_is_stripped_with_evidence(self):
+        ctx, ec2 = self._ctx(state=None)
+        inventory = self._inventory({"arn": self._ARN, "tags": dict(self._TAGS)})
+
+        residual, accepted = ownership_ebs_volumes._strip_deleted_volumes(ctx, inventory)
+
+        assert self._REGION not in residual["regional"]
+        assert accepted == [
+            {
+                "region": self._REGION,
+                "arn": self._ARN,
+                "volume_id": self._VOLUME_ID,
+                "volume_state": "ABSENT",
+                "authority": "ec2:DescribeVolumes",
+                "tags": self._TAGS,
+                "note": (
+                    "the Resource Groups Tagging API index lags volume deletion; "
+                    "EC2 is the authority for existence"
+                ),
+            }
+        ]
+        ec2.describe_volumes.assert_called_once_with(VolumeIds=[self._VOLUME_ID])
+        assert ctx.session.client.call_args.kwargs["region_name"] == self._REGION
+
+    @pytest.mark.parametrize("state", ["deleting", "deleted"])
+    def test_terminal_states_are_accepted_with_the_observed_state(self, state):
+        ctx, _ec2 = self._ctx(state=state)
+        residual, accepted = ownership_ebs_volumes._strip_deleted_volumes(
+            ctx, self._inventory({"arn": self._ARN, "tags": {}})
+        )
+        assert self._REGION not in residual["regional"]
+        assert accepted[0]["volume_state"] == state
+
+    def test_empty_describe_response_counts_as_absent(self):
+        ctx, ec2 = self._ctx(state="available")
+        ec2.describe_volumes.return_value = {"Volumes": []}
+        _residual, accepted = ownership_ebs_volumes._strip_deleted_volumes(
+            ctx, self._inventory({"arn": self._ARN, "tags": {}})
+        )
+        assert accepted[0]["volume_state"] == "ABSENT"
+
+    @pytest.mark.parametrize("state", ["available", "in-use", "creating", "error"])
+    def test_live_volume_keeps_its_entry(self, state):
+        ctx, _ec2 = self._ctx(state=state)
+        entry = {"arn": self._ARN, "tags": {}}
+        residual, accepted = ownership_ebs_volumes._strip_deleted_volumes(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+
+    def test_volume_without_a_state_is_kept_as_unknown(self):
+        ctx, ec2 = self._ctx(state="available")
+        ec2.describe_volumes.return_value = {"Volumes": [{"VolumeId": self._VOLUME_ID}]}
+        entry = {"arn": self._ARN, "tags": {}}
+        residual, accepted = ownership_ebs_volumes._strip_deleted_volumes(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+
+    def test_non_volume_and_foreign_entries_are_untouched(self):
+        ctx, ec2 = self._ctx(state=None)
+        vpc = {"arn": f"arn:aws:ec2:{self._REGION}:{self._ACCOUNT}:vpc/vpc-0d07ab86e0611dda5"}
+        wrong_account = {
+            "arn": f"arn:aws:ec2:{self._REGION}:999999999999:volume/vol-0aaaaaaaaaaaaaaaa"
+        }
+        wrong_region = {
+            "arn": f"arn:aws:ec2:eu-west-1:{self._ACCOUNT}:volume/vol-0bbbbbbbbbbbbbbbb"
+        }
+        snapshot = {"arn": f"arn:aws:ec2:{self._REGION}:{self._ACCOUNT}:snapshot/snap-0123"}
+        residual, accepted = ownership_ebs_volumes._strip_deleted_volumes(
+            ctx, self._inventory(vpc, wrong_account, wrong_region, snapshot)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [
+            vpc,
+            wrong_account,
+            wrong_region,
+            snapshot,
+        ]
+        assert accepted == []
+        ec2.describe_volumes.assert_not_called()
+
+    def test_region_with_other_resources_keeps_its_bucket(self):
+        ctx, _ec2 = self._ctx(state=None)
+        inventory = {
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [{"arn": self._ARN, "tags": {}}],
+                    "vpcs": ["vpc-0d07ab86e0611dda5"],
+                }
+            }
+        }
+        residual, accepted = ownership_ebs_volumes._strip_deleted_volumes(ctx, inventory)
+        assert residual["regional"][self._REGION] == {
+            "tagged_resources": [],
+            "vpcs": ["vpc-0d07ab86e0611dda5"],
+        }
+        assert len(accepted) == 1
+
+    def test_unexpected_describe_error_propagates(self):
+        ctx, ec2 = self._ctx(state=None)
+        ec2.describe_volumes.side_effect = ClientError(
+            {"Error": {"Code": "RequestLimitExceeded", "Message": "slow down"}},
+            "DescribeVolumes",
+        )
+        with pytest.raises(ClientError):
+            ownership_ebs_volumes._strip_deleted_volumes(
+                ctx, self._inventory({"arn": self._ARN, "tags": {}})
+            )
+
+    def test_input_inventory_is_not_mutated(self):
+        ctx, _ec2 = self._ctx(state=None)
+        inventory = self._inventory({"arn": self._ARN, "tags": {}})
+        snapshot = json.loads(json.dumps(inventory))
+        ownership_ebs_volumes._strip_deleted_volumes(ctx, inventory)
+        assert inventory == snapshot
+
+
 class TestStripDeletedVpcEndpoints:
     """``_strip_deleted_vpc_endpoints`` — Tagging API lag on deleted endpoints.
 
@@ -6770,6 +6936,8 @@ class TestActionBaselineCheckpointPurity:
         assert accepted[0]["arn"] == stream_arn
         assert result["accepted_deleted_vpc_endpoints"] == []
         assert "accepted_deleted_vpc_endpoints" not in ctx.checkpoint.baseline
+        assert result["accepted_deleted_volumes"] == []
+        assert "accepted_deleted_volumes" not in ctx.checkpoint.baseline
         # The persisted checkpoint is the pure capture — byte-for-byte what
         # compare_baseline will re-capture against after teardown.
         assert ctx.checkpoint.baseline == self._BASELINE

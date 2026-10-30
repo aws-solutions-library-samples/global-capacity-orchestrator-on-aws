@@ -263,6 +263,8 @@ One further residual class is accepted with evidence in both `baseline` and `fin
 
 The same treatment applies to VPC endpoints. The Resource Groups Tagging API is an index that lags deletion by minutes: the regional stack's S3 and DynamoDB gateway endpoints are removed with their stack, yet the index kept returning both ARNs — stack tags intact — when `final-inventory` ran seconds later, while EC2 already reported them not found. A tagged `vpc-endpoint/…` ARN in the expected account and Region is stripped only after `DescribeVpcEndpoints` confirms the endpoint absent or already `deleting`/`deleted`; an endpoint EC2 still reports as `available` (or any other live state) stays as genuine residue. Every acceptance is reported as `accepted_deleted_vpc_endpoints` with the EC2 state observed.
 
+The nodes' root volumes of a managed AWS PCS cluster get the same treatment. The launch templates tag them with the project's ownership tags, EBS deletes a `DeleteOnTermination` volume only after its instance is `terminated`, and the Tagging API index kept the login node's volume for more than an hour after `DescribeVolumes` answered `InvalidVolume.NotFound`. A tagged `volume/…` ARN in the expected account and Region is stripped only after `DescribeVolumes` confirms the volume absent or already `deleting`/`deleted`; a volume EC2 still reports as `available` or `in-use` stays as genuine residue. Every acceptance is reported as `accepted_deleted_volumes` with the EC2 state observed, in the baseline and in the final inventory alike.
+
 If the local process is killed before cleanup finishes:
 
 1. Do not start a fresh run to adopt or delete the remaining stacks.
