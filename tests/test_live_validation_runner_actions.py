@@ -26,6 +26,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from collections import UserDict
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -1002,6 +1003,49 @@ class TestRunnerRun:
         assert "JSON report:" in output
         assert "Markdown report:" in output
         assert Path.cwd() == previous_cwd
+
+    @pytest.mark.parametrize("previous_tmpdir", [None, "/tmp/elsewhere"])
+    def test_children_get_a_run_scoped_tmpdir_that_leaves_with_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, previous_tmpdir: str | None
+    ) -> None:
+        """The CDK CLI leaves ``cdk.out*`` assemblies under ``TMPDIR``; the run owns that."""
+        if previous_tmpdir is None:
+            monkeypatch.delenv("TMPDIR", raising=False)
+        else:
+            monkeypatch.setenv("TMPDIR", previous_tmpdir)
+        seen: dict[str, Any] = {}
+
+        def baseline(ctx: RunContext) -> dict[str, Any]:
+            scratch = Path(os.environ["TMPDIR"])
+            # What a successful ``cdk list`` leaves behind.
+            (scratch / "cdk.outAbC123").mkdir()
+            (scratch / "cdk.outAbC123" / "manifest.json").write_text("{}", encoding="utf-8")
+            seen["scratch"] = scratch
+            seen["runner_scratch"] = instance._scratch_dir
+            return {"ok": True}
+
+        instance = _build_runner(
+            tmp_path,
+            monkeypatch,
+            settings=_run_settings(tmp_path, requested_actions=("baseline",), run_id="pr 1/2"),
+            registry=_fake_registry({"baseline": baseline}),
+        )
+
+        assert instance.run() == 0
+
+        scratch = seen["scratch"]
+        assert scratch == seen["runner_scratch"]
+        assert scratch.name.startswith("gco-live-pr_1_2-")
+        assert scratch.parent == Path(tempfile.gettempdir())
+        assert not scratch.exists()
+        assert instance._scratch_dir is None
+        assert os.environ.get("TMPDIR") == previous_tmpdir
+        # Leaving before entering (a failure ahead of the scratch setup in
+        # run()'s try) only restores the environment.
+        monkeypatch.setenv("TMPDIR", "/tmp/during")
+        instance._previous_tmpdir = None
+        instance._leave_run_scratch()
+        assert "TMPDIR" not in os.environ and instance._scratch_dir is None
 
     def test_partial_scope_without_deploy_needs_no_cleanup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -77,8 +77,9 @@ def _check_free_disk(settings: RunSettings) -> dict[str, float]:
             f"Free disk space is below the {floor_gib:g} GiB floor deploy needs for "
             "container image builds and checkpoint persistence: "
             + "; ".join(short)
-            + ". Reclaim space (stale container images from earlier runs are the usual "
-            "culprit) or lower --min-free-disk-gib, then rerun."
+            + ". Reclaim space (the usual culprits are stale container images and, after an "
+            "interrupted run, its gco-live-* scratch directory of CDK cdk.out* assemblies "
+            "under the system temporary directory) or lower --min-free-disk-gib, then rerun."
         )
     return observed
 
