@@ -604,7 +604,9 @@ class PcsCluster(Construct):
         security_group.add_ingress_rule(
             peer=security_group,
             connection=ec2.Port.all_traffic(),
-            description="Slurm controller <-> compute nodes, srun, and EFA between nodes",
+            # EC2 rejects "<" and ">" in rule descriptions (the allowed set is
+            # a-zA-Z0-9. _-:/()#,@[]+=&;{}!$*); the first live deploy failed here.
+            description="Slurm controller to/from compute nodes, srun, and EFA between nodes",
         )
         security_group.add_ingress_rule(
             peer=self.eks_cluster_security_group,

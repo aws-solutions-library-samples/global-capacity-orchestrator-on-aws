@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -496,6 +497,28 @@ def _ingress_rules(resources: dict[str, Any], *, to_group: str) -> list[dict[str
     ]
 
 
+#: The characters EC2 accepts in a security group rule description (the API's
+#: own error text); anything else fails the stack at CREATE time, after the
+#: rest of the template is already in flight.
+_EC2_RULE_DESCRIPTION = re.compile(r"[a-zA-Z0-9. _\-:/()#,@\[\]+=&;{}!$*]{0,255}")
+
+
+def _rule_descriptions(resources: dict[str, Any]) -> dict[str, str]:
+    """Every security group rule description in the template, standalone and inline."""
+    found: dict[str, str] = {}
+    for logical_id, resource in resources.items():
+        properties = resource.get("Properties", {})
+        if resource["Type"] in {"AWS::EC2::SecurityGroupIngress", "AWS::EC2::SecurityGroupEgress"}:
+            if "Description" in properties:
+                found[logical_id] = properties["Description"]
+        elif resource["Type"] == "AWS::EC2::SecurityGroup":
+            for direction in ("SecurityGroupIngress", "SecurityGroupEgress"):
+                for index, rule in enumerate(properties.get(direction, [])):
+                    if "Description" in rule:
+                        found[f"{logical_id}.{direction}[{index}]"] = rule["Description"]
+    return found
+
+
 class TestManagedModeCluster:
     def test_the_cluster_is_created_from_the_block(self, pcs_managed_full) -> None:
         stack, resources = pcs_managed_full
@@ -567,6 +590,30 @@ class TestManagedModeCluster:
         assert metrics["ToPort"] == 6817 and metrics["IpProtocol"] == "tcp"
         assert metrics["SourceSecurityGroupId"]["Fn::GetAtt"][1] == "ClusterSecurityGroupId"
         assert len(rules) == 3
+
+    def test_every_rule_description_is_one_ec2_accepts(self, pcs_managed_full) -> None:
+        """EC2 validates rule descriptions at CREATE time, not at synth.
+
+        The first live deploy of the PCS block rolled back the whole regional
+        stack on ``Invalid rule description`` for the self rule's ``<->``;
+        every description the template carries (the PCS group's and the EFS
+        and FSx rules it adds, plus the rest of the stack's) must stay inside
+        the set the API accepts, so the failure is a unit test, not an hour
+        into a deploy.
+        """
+        _stack, resources = pcs_managed_full
+        descriptions = _rule_descriptions(resources)
+        pcs_rules = {k: v for k, v in descriptions.items() if "PcsSecurityGroup" in k}
+        assert len(pcs_rules) >= 3, sorted(descriptions)
+        assert "Slurm controller to/from compute nodes, srun, and EFA between nodes" in set(
+            pcs_rules.values()
+        )
+        rejected = {
+            k: v
+            for k, v in descriptions.items()
+            if not isinstance(v, str) or _EC2_RULE_DESCRIPTION.fullmatch(v) is None
+        }
+        assert rejected == {}
 
     def test_metrics_resolve_the_controller_address_for_the_scrape(self, pcs_managed_full) -> None:
         """``managed.metrics.enabled`` wires the ScrapeConfig's static target.
