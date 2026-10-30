@@ -1056,6 +1056,18 @@ class TestInferenceTools:
             assert "MODEL=llama3" in cmd
             assert "--framework" not in cmd
             assert not any(token.startswith("--extra-args") for token in cmd)
+            # Unset capacity type: no selector flag, so the pods stay unpinned.
+            assert "--capacity-type" not in cmd
+
+    def test_deploy_inference_capacity_type_reaches_the_cli_as_two_tokens(self):
+        """``--capacity-type <value>`` is appended only when the parameter is set."""
+        for value in ("spot", "on-demand"):
+            with patch("cli_runner.subprocess.run") as mock:
+                mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+                run_mcp.deploy_inference("my-llm", "img:v1", capacity_type=value)
+                cmd = mock.call_args[0][0]
+                assert cmd[cmd.index("--capacity-type") + 1] == value
+                assert cmd.count("--capacity-type") == 1
 
     def test_deploy_inference_passes_framework_and_extra_args_as_single_tokens(self):
         """A token that starts with ``--`` must reach the CLI as a value, not an option."""

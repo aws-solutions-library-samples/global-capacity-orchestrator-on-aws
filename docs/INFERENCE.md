@@ -916,22 +916,29 @@ How it works:
 Use spot instances to reduce inference serving costs. Spot GPU instances can be significantly cheaper than on-demand but can be interrupted with 2 minutes notice.
 
 ```bash
-# Deploy on spot instances
+# Unpinned (the default): Spot when available, On-Demand otherwise
+gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1
+
+# Pin to spot (no fallback)
 gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 --capacity-type spot
 
-# Deploy on on-demand (default, guaranteed availability)
+# Pin to on-demand (guaranteed availability)
 gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 --capacity-type on-demand
 ```
 
-When `--capacity-type spot` is set, the inference_monitor adds a `karpenter.sh/capacity-type: spot` node selector to the deployment. Karpenter then provisions spot GPU instances for those pods.
+`--capacity-type` is a hard pin: the inference monitor turns it into a `karpenter.sh/capacity-type` node selector on the endpoint's Deployment, and the pods schedule only on nodes of that type.
 
-When to use spot for inference:
+- **Unset (the default):** no selector is added. The GPU NodePools allow both capacity types, so when Karpenter launches a node for the pod it tries Spot first and falls back to On-Demand (the [NodePool capacity type ordering](https://karpenter.sh/docs/concepts/nodepools/)). That ordering only applies to new nodes: a pod can land on any existing node with room, whatever its capacity type, and because the GPU pools consolidate `WhenEmpty`, a pod that landed on On-Demand is not moved to Spot later.
+- **`spot`:** Spot only, no fallback. Pods stay Pending while Spot is unavailable.
+- **`on-demand`:** On-Demand only. Recommended for production and for single-replica endpoints, which cannot tolerate a Spot interruption.
+
+When to pin to spot:
 
 - Development and testing environments
 - Non-critical inference endpoints with multiple replicas (if one gets interrupted, others continue serving)
-- Cost-sensitive workloads where occasional brief interruptions are acceptable
+- Cost-sensitive workloads where occasional brief interruptions are acceptable, and where waiting for Spot capacity is acceptable too
 
-When to use on-demand (default):
+When to pin to on-demand:
 
 - Production inference endpoints requiring high availability
 - Single-replica deployments where interruption means downtime

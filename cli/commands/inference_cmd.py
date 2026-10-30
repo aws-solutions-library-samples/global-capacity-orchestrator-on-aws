@@ -89,7 +89,13 @@ def inference(config: Any) -> None:
     "--capacity-type",
     type=click.Choice(["on-demand", "spot"]),
     default=None,
-    help="Node capacity type. 'spot' uses cheaper preemptible instances.",
+    help=(
+        "Pin the endpoint's pods to one node capacity type. Unset (the default) adds no "
+        "selector: a new node is Spot when Spot is available and On-Demand otherwise, and a "
+        "pod may land on any existing node with room. 'spot' pins to Spot with no fallback "
+        "(pods stay Pending while Spot is unavailable). 'on-demand' pins to On-Demand; use it "
+        "for production and single-replica endpoints."
+    ),
 )
 @click.option(
     "--extra-args",
