@@ -571,26 +571,47 @@ def _ec2_pages(*instances: tuple[str, str]) -> list[dict[str, Any]]:
     ]
 
 
-def _ec2_session(responses: list[list[dict[str, Any]]]) -> tuple[MagicMock, MagicMock]:
-    paginator = MagicMock()
-    paginator.paginate.side_effect = lambda **_kwargs: responses.pop(0)
+def _volume_pages(*volumes: tuple[str, str]) -> list[dict[str, Any]]:
+    return [{"Volumes": [{"VolumeId": volume_id, "State": state} for volume_id, state in volumes]}]
+
+
+def _ec2_session(
+    responses: dict[str, list[list[dict[str, Any]]]],
+) -> tuple[MagicMock, dict[str, MagicMock]]:
+    """One fake paginator per EC2 operation, each answering its queued pages in turn."""
+    paginators: dict[str, MagicMock] = {}
+    for operation, pages in responses.items():
+        paginator = MagicMock()
+        paginator.paginate.side_effect = lambda _pages=pages, **_kwargs: _pages.pop(0)
+        paginators[operation] = paginator
     client = MagicMock()
-    client.get_paginator.return_value = paginator
+    client.get_paginator.side_effect = lambda operation: paginators[operation]
     session = MagicMock()
     session.client.return_value = client
-    return session, paginator
+    return session, paginators
 
 
 class TestPcsNodeDrain:
-    def test_waits_until_the_shutting_down_nodes_are_gone(self) -> None:
+    def test_waits_until_the_shutting_down_nodes_and_their_volumes_are_gone(self) -> None:
+        """The root volume outlives its terminated instance; the wait covers both."""
         ctx = _ctx()
-        ctx.session, paginator = _ec2_session(
-            [
-                _ec2_pages(("i-aaa", "shutting-down"), ("i-bbb", "running")),
-                _ec2_pages(("i-aaa", "shutting-down")),
-                _ec2_pages(),
-            ]
+        ctx.session, paginators = _ec2_session(
+            {
+                "describe_instances": [
+                    _ec2_pages(("i-aaa", "shutting-down"), ("i-bbb", "running")),
+                    _ec2_pages(("i-aaa", "shutting-down")),
+                    _ec2_pages(),
+                    _ec2_pages(),
+                ],
+                "describe_volumes": [
+                    _volume_pages(("vol-aaa", "in-use"), ("vol-bbb", "in-use")),
+                    _volume_pages(("vol-aaa", "deleting")),
+                    _volume_pages(("vol-aaa", "deleting")),
+                    _volume_pages(),
+                ],
+            }
         )
+
         result = cleanup_pcs_nodes._wait_for_pcs_nodes_terminated(ctx, timeout_seconds=60)
 
         assert result["regions"][_REGION] == {
@@ -599,41 +620,104 @@ class TestPcsNodeDrain:
                 {"instance_id": "i-bbb", "state": "running"},
             ],
             "remaining_instances": [],
-            "polls": 2,
+            "initial_volumes": [
+                {"volume_id": "vol-aaa", "state": "in-use"},
+                {"volume_id": "vol-bbb", "state": "in-use"},
+            ],
+            "remaining_volumes": [],
+            "polls": 3,
             "terminated": True,
         }
-        filters = paginator.paginate.call_args.kwargs["Filters"]
+        filters = paginators["describe_instances"].paginate.call_args.kwargs["Filters"]
         assert {"Name": "tag:gco:project", "Values": [_PROJECT]} in filters
         assert {"Name": "tag-key", "Values": ["aws:pcs:compute-node-group-id"]} in filters
         assert {
             "Name": "instance-state-name",
             "Values": ["pending", "running", "stopping", "stopped", "shutting-down"],
         } in filters
+        volume_filters = paginators["describe_volumes"].paginate.call_args.kwargs["Filters"]
+        assert {"Name": "tag:gco:project", "Values": [_PROJECT]} in volume_filters
+        assert {"Name": "tag-key", "Values": ["gco:pcs-node-group"]} in volume_filters
+        assert {
+            "Name": "status",
+            "Values": ["creating", "available", "in-use", "deleting", "error"],
+        } in volume_filters
         ctx.session.client.assert_called_with("ec2", region_name=_REGION)
 
     def test_nothing_to_wait_for(self) -> None:
         ctx = _ctx(regions=(_REGION, "eu-west-1"))
-        ctx.session, _paginator = _ec2_session([_ec2_pages(), _ec2_pages()])
+        ctx.session, _paginators = _ec2_session(
+            {
+                "describe_instances": [_ec2_pages(), _ec2_pages()],
+                "describe_volumes": [_volume_pages(), _volume_pages()],
+            }
+        )
+
         result = cleanup_pcs_nodes._wait_for_pcs_nodes_terminated(ctx)
+
         assert all(
             entry["terminated"] and entry["polls"] == 0 for entry in result["regions"].values()
         )
         assert set(result["regions"]) == {_REGION, "eu-west-1"}
 
-    def test_nodes_still_live_at_the_deadline_are_named(self) -> None:
+    def test_nodes_and_volumes_still_present_at_the_deadline_are_named(self) -> None:
         ctx = _ctx()
-        ctx.session, _paginator = _ec2_session(
-            [_ec2_pages(("i-aaa", "shutting-down")), _ec2_pages(("i-aaa", "shutting-down"))]
+        ctx.session, _paginators = _ec2_session(
+            {
+                "describe_instances": [
+                    _ec2_pages(("i-aaa", "shutting-down")),
+                    _ec2_pages(("i-aaa", "shutting-down")),
+                ],
+                "describe_volumes": [
+                    _volume_pages(("vol-aaa", "deleting")),
+                    _volume_pages(("vol-aaa", "deleting")),
+                ],
+            }
         )
+
         with pytest.raises(
-            RuntimeError, match=r"still live after 0s: us-east-1: i-aaa \(shutting-down\)"
+            RuntimeError,
+            match=(
+                r"still present after 0s: us-east-1: i-aaa \(shutting-down\), "
+                r"vol-aaa \(deleting\)"
+            ),
         ):
             cleanup_pcs_nodes._wait_for_pcs_nodes_terminated(ctx, timeout_seconds=0)
 
-    def test_an_instance_without_an_id_fails_closed(self) -> None:
+    def test_a_lone_deleting_volume_is_waited_for(self) -> None:
+        """What the first full run saw: instances gone, the login node's root volume not yet."""
         ctx = _ctx()
-        ctx.session, _paginator = _ec2_session(
-            [[{"Reservations": [{"Instances": [{"State": {"Name": "running"}}]}]}]]
+        ctx.session, _paginators = _ec2_session(
+            {
+                "describe_instances": [_ec2_pages(), _ec2_pages()],
+                "describe_volumes": [_volume_pages(("vol-login", "deleting")), _volume_pages()],
+            }
+        )
+
+        result = cleanup_pcs_nodes._wait_for_pcs_nodes_terminated(ctx, timeout_seconds=60)
+
+        entry = result["regions"][_REGION]
+        assert entry["initial_instances"] == [] and entry["remaining_instances"] == []
+        assert entry["initial_volumes"] == [{"volume_id": "vol-login", "state": "deleting"}]
+        assert entry["remaining_volumes"] == [] and entry["polls"] == 1 and entry["terminated"]
+
+    def test_an_instance_or_volume_without_an_id_fails_closed(self) -> None:
+        ctx = _ctx()
+        ctx.session, _paginators = _ec2_session(
+            {
+                "describe_instances": [
+                    [{"Reservations": [{"Instances": [{"State": {"Name": "running"}}]}]}]
+                ],
+                "describe_volumes": [],
+            }
         )
         with pytest.raises(RuntimeError, match="instance without an ID"):
+            cleanup_pcs_nodes._wait_for_pcs_nodes_terminated(ctx)
+        ctx.session, _paginators = _ec2_session(
+            {
+                "describe_instances": [_ec2_pages()],
+                "describe_volumes": [[{"Volumes": [{"State": "deleting"}]}]],
+            }
+        )
+        with pytest.raises(RuntimeError, match="volume without an ID"):
             cleanup_pcs_nodes._wait_for_pcs_nodes_terminated(ctx)
