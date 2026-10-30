@@ -53,6 +53,18 @@ concurrency:
 permissions:
   contents: read
 
+# Bound every cache restore (setup-python's pip cache, setup-node's npm cache,
+# actions/cache). A segment download that has not finished in this many minutes
+# is abandoned and the job falls back to a fresh install. The default is ten
+# minutes, and @actions/cache leaves that timer running after a download has
+# already *failed*, so a restore GitHub's storage refused ("Egress is over the
+# account limit", 2026-10-30) held the action's process for the full ten
+# minutes and two jobs were cancelled by their timeouts without a test failing.
+# One minute is far above a healthy restore (~120 MB in about a second) and far
+# below any job's timeout. The whole account is in .github/CI.md ("Caches").
+env:
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+
 jobs:
   # --------------------------------------------------------------------------
   # Path filter used by the lockfile / fresh-install jobs below. Both of those
@@ -151,6 +163,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version-file: ".nvmrc"
+          # No root `npm ci` here, so the npm cache setup-node restores by default
+          # (package.json names npm as the package manager) would download ~90 MB
+          # keyed on the root lockfile for nothing this job uses: the Lambda
+          # package's own `npm ci` fetches its three dependencies faster than that
+          # restore, and a restore GitHub's storage refuses stalls the job (see
+          # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
+          package-manager-cache: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
@@ -360,19 +379,35 @@ jobs:
             shard-artifacts/
           retention-days: 7
 
-  unit-bats-shell:
-    name: "unit:bats:shell"
+  # --------------------------------------------------------------------------
+  # The BATS suite is sharded the way the core pytest suite is: each shard runs
+  # its slice twice (plain, then traced under bashcov) and uploads its
+  # resultset; unit:bats:shell below merges every slice and enforces the floor.
+  # One job ran the whole suite in 21-22 minutes (353 s plain, 907 s traced on
+  # 2026-10-30), twice the longest pytest shard, and everything else in this
+  # workflow waited for it. Four shards bring the worst slice to about 7.5
+  # minutes, which is the cost of the heaviest single .bats file.
+  #
+  # TO CHANGE THE SHARD COUNT, edit `matrix.shard` below and nothing else: the
+  # slice is computed at run time by scripts/split_bats.py from
+  # `strategy.job-total`, and tests/test_split_bats.py asserts the matrix and
+  # the script agree.
+  # --------------------------------------------------------------------------
+  unit-bats-shell-shard:
+    name: "unit:bats:shell (shard ${{ matrix.shard }}/${{ strategy.job-total }})"
     runs-on: ubuntu-26.04
-    # The suite runs twice below — once plain, once under bashcov — and the
-    # traced pass costs about twice the plain one (bashcov follows xtrace, so
-    # every executed line is a write down a pipe). The job grew from 9 to 15
-    # minutes across September 2026 as the dependency-scan and autopilot
-    # suites landed, and 97d98157 hit the old 15-minute limit exactly. Kept at
-    # about twice the current worst case, the margin the other jobs carry, so
-    # a script that genuinely hangs is still killed promptly instead of idling
-    # a runner for hours.
-    timeout-minutes: 30
+    # The heaviest slice is test_dependency_scan_driver.bats on its own:
+    # 193 s plain plus 247 s traced on 2026-10-30, about 7.5 minutes with
+    # setup. Twice that, the margin the other jobs carry, so a script that
+    # genuinely hangs is still killed promptly.
+    timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    strategy:
+      # Run every shard even when one fails, so a contributor sees every
+      # failing suite rather than only those in the first shard to break.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -381,9 +416,10 @@ jobs:
       - name: Install bats + deps (with retry)
         # nodejs: use-pinned-npm.sh reads package.json through `node -e`, and
         # its suite skips itself without a node on PATH — which the coverage
-        # gate below would then report as an unmeasured script. The runner
-        # image ships a node already; installing it here makes that a
-        # guarantee rather than an assumption.
+        # gate would then report as an unmeasured script. The runner image
+        # ships a node already; installing it here makes that a guarantee
+        # rather than an assumption. python3 also runs scripts/split_bats.py
+        # (standard library only; this job has no project virtualenv).
         uses: ./.github/actions/apt-install-with-retry
         with:
           packages: bats jq python3 python3-yaml bash nodejs
@@ -405,12 +441,32 @@ jobs:
           bundle config set --local frozen true
           bundle config set --local path vendor/bundle
           bundle install --jobs 4 --retry 3
+      - name: Select this shard's suites
+        # Every .bats file is weighed (its @test count times the suite's
+        # per-test cost) and greedily packed; the list is written to a file the
+        # two runs below read, so plain and traced execute exactly the same
+        # suites. --summary prints the whole partition for the log.
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+        run: |
+          set -euo pipefail
+          python3 scripts/split_bats.py --of "$SHARDS" --summary
+          python3 scripts/split_bats.py --shard "$SHARD" --of "$SHARDS" > shard-suites.txt
+          echo "shard $SHARD/$SHARDS: $(wc -l < shard-suites.txt) suites"
+          cat shard-suites.txt
+          # The copy that travels with the artifact carries the shard number:
+          # the combining job merges every shard's files into one directory.
+          cp shard-suites.txt "bash-coverage-shard-${SHARD}.suites.txt"
       - name: Run BATS suite
-        # The correctness gate: the suite as a contributor runs it, with no
+        # The correctness gate: the slice as a contributor runs it, with no
         # instrumentation anywhere in the process tree.
-        run: bats tests/BATS/
+        run: |
+          set -euo pipefail
+          mapfile -t SHARD_FILES < shard-suites.txt
+          bats "${SHARD_FILES[@]}"
       - name: Measure shell coverage
-        # The same suite again, traced. bashcov is not run on `bats` directly
+        # The same slice again, traced. bashcov is not run on `bats` directly
         # but on tests/BATS/bashcov_wrapper.sh, which carries the tracing to
         # every child through BASH_ENV instead of bashcov's exported SHELLOPTS
         # (which also carried the nounset/errexit/pipefail that Debian's
@@ -425,29 +481,102 @@ jobs:
         # a script again, and that is something to fix rather than note.
         # `.simplecov` at the repository root decides which files the report
         # may contain.
-        run: bundle exec bashcov --root . -- tests/BATS/bashcov_wrapper.sh tests/BATS/
+        #
+        # The resultset is renamed off its leading dot so the upload needs no
+        # hidden-file flag, and so each shard's report is distinct when the
+        # combining job downloads them all into one directory.
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mapfile -t SHARD_FILES < shard-suites.txt
+          bundle exec bashcov --root . -- tests/BATS/bashcov_wrapper.sh "${SHARD_FILES[@]}"
+          mv coverage/.resultset.json "bash-coverage-shard-${SHARD}.resultset.json"
+      - name: Upload shard coverage data
+        if: always()
+        uses: ./.github/actions/upload-artifact-with-retry
+        with:
+          name: bash-coverage-shard-${{ matrix.shard }}
+          path: |
+            bash-coverage-shard-${{ matrix.shard }}.resultset.json
+            bash-coverage-shard-${{ matrix.shard }}.suites.txt
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Merges every shard's resultset and enforces the shell coverage floor.
+  # Keeping the display name `unit:bats:shell` means a branch protection rule
+  # that already requires this check keeps working, and the check still means
+  # "the whole BATS suite passed, plain and traced, and every tracked script
+  # is fully covered".
+  # --------------------------------------------------------------------------
+  unit-bats-shell:
+    name: "unit:bats:shell"
+    needs: unit-bats-shell-shard
+    # Always scheduled for any run that could merge, then failed explicitly
+    # unless every shard succeeded: a skipped required check can be treated as
+    # non-blocking, a failed one cannot. See unit-pytest-core for the draft
+    # clause.
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Keep temporary files on the work disk
+        # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
+      - name: Require every shard to pass
+        env:
+          SHARD_RESULT: ${{ needs.unit-bats-shell-shard.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::BATS shard result was ${SHARD_RESULT}; refusing a successful aggregate check."
+            exit 1
+          fi
+      # The gate builds the tracked-script inventory from `git ls-files` and
+      # reads every script to classify its lines, so it needs the full tree.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download shard coverage data
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: bash-coverage-shard-*
+          path: shard-artifacts
+          merge-multiple: true
       - name: Enforce the shell coverage floor
         # Fails when any tracked shell script has an uncovered statement or is
         # missing from the report entirely (a mis-scoped run, or a bashcov run
         # that produced nothing usable). There is no exclusion list: a new
         # script needs a suite that executes it in place.
         #
+        # Handed the directory of shard resultsets, the gate sums their hits
+        # line by line before applying the floor, so the verdict is about the
+        # whole suite exactly as it was when one job ran it. The runner's own
+        # python3 suffices: the gate is standard library only.
+        #
         # --report writes the statement-level HTML report and summary.json
         # from the same corrected data the verdict comes from (SimpleCov's own
-        # HTML in coverage/ renders the raw line hits and reads lower). That
-        # is the view pages.yml serves at /bash-coverage/ and renders the
-        # README badge from; it is written whatever the verdict.
-        run: python3 .github/scripts/check_bash_coverage.py coverage/ --report coverage/report
+        # HTML renders the raw line hits and reads lower). That is the view
+        # pages.yml serves at /bash-coverage/ and renders the README badge
+        # from; it is written whatever the verdict.
+        #
+        # The shard resultsets are kept under coverage/shards/ so the artifact
+        # carries the gate's inputs next to its verdict. Copied before the gate
+        # runs, so a failing run still ships them.
+        run: |
+          set -euo pipefail
+          ls -l shard-artifacts
+          mkdir -p coverage/shards
+          cp -R shard-artifacts/. coverage/shards/
+          python3 .github/scripts/check_bash_coverage.py shard-artifacts/ --report coverage/report
       - name: Upload shell coverage report
+        # pages.yml moves this artifact's report/ into the site, so coverage/
+        # stays the single upload root and report/ stays at the artifact's top
+        # level.
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry
         with:
           name: bash-coverage-report
           path: coverage/
           retention-days: 7
-          # .resultset.json is the machine-readable report the gate reads;
-          # upload-artifact skips dotfiles unless told otherwise.
-          include-hidden-files: true
 
   unit-recorder-macos-bash32:
     name: "unit:recorder:macos-bash32"
@@ -585,6 +714,14 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version-file: ".nvmrc"
+          # No root `npm ci` here. The job's npm work is global installs of the
+          # pinned agent CLIs, which the npm cache setup-node restores by default
+          # (package.json names npm as the package manager) would help only if the
+          # job that happened to save the shared root-lockfile entry had installed
+          # the same packages. Fetching them is quicker than a ~90 MB restore, and
+          # a restore GitHub's storage refuses stalls the job (see
+          # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
+          package-manager-cache: false
       - name: Install and verify the declared npm version
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - name: Install CLI
@@ -832,6 +969,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version-file: ".nvmrc"
+          # No root `npm ci` here, so the npm cache setup-node restores by default
+          # (package.json names npm as the package manager) would download ~90 MB
+          # keyed on the root lockfile for nothing this job uses: the Lambda
+          # package's own `npm ci` fetches its three dependencies faster than that
+          # restore, and a restore GitHub's storage refuses stalls the job (see
+          # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
+          package-manager-cache: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
@@ -891,6 +1035,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version-file: ".nvmrc"
+          # No root `npm ci` here, so the npm cache setup-node restores by default
+          # (package.json names npm as the package manager) would download ~90 MB
+          # keyed on the root lockfile for nothing this job uses: the Lambda
+          # package's own `npm ci` fetches its three dependencies faster than that
+          # restore, and a restore GitHub's storage refuses stalls the job (see
+          # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
+          package-manager-cache: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
@@ -980,6 +1131,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version-file: ".nvmrc"
+          # No root `npm ci` here, so the npm cache setup-node restores by default
+          # (package.json names npm as the package manager) would download ~90 MB
+          # keyed on the root lockfile for nothing this job uses: the Lambda
+          # package's own `npm ci` fetches its three dependencies faster than that
+          # restore, and a restore GitHub's storage refuses stalls the job (see
+          # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
+          package-manager-cache: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
@@ -1117,6 +1275,12 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version-file: ".nvmrc"
+          # No `npm ci` here at all, so the npm cache setup-node restores by default
+          # (package.json names npm as the package manager) would download ~90 MB
+          # keyed on the root lockfile for nothing this job uses, and a restore
+          # GitHub's storage refuses stalls the job (see
+          # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
+          package-manager-cache: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version-file: ".python-version"
@@ -1282,6 +1446,7 @@ jobs:
     needs:
       - changes
       - unit-bats-shell
+      - unit-bats-shell-shard
       - unit-cdk-config-matrix
       - unit-cdk-nag-compliance
       - unit-cdk-nag-compliance-matrix

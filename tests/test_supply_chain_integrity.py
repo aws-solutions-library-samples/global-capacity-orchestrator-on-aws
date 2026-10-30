@@ -1549,6 +1549,97 @@ def test_slurm_ubuntu_base_is_covered_by_the_monthly_drift_scan() -> None:
     )
 
 
+def _cache_restoring_steps(job: dict) -> list[dict]:
+    """Steps of ``job`` that restore a GitHub Actions cache before running anything.
+
+    ``actions/cache`` always does; ``setup-python`` does when ``cache`` is set;
+    ``setup-node`` does when ``cache`` is set *or* by default, because
+    ``package.json`` names npm as the package manager and v7 then caches npm
+    unless ``package-manager-cache: false`` says otherwise.
+    """
+    restoring = []
+    for step in job.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        uses = str(step.get("uses", ""))
+        inputs = step.get("with") or {}
+        explicit_cache = uses.startswith("actions/cache@")
+        pip_cache = uses.startswith("actions/setup-python@") and bool(inputs.get("cache"))
+        npm_cache = uses.startswith("actions/setup-node@") and (
+            bool(inputs.get("cache")) or inputs.get("package-manager-cache", True) is not False
+        )
+        if explicit_cache or pip_cache or npm_cache:
+            restoring.append(step)
+    return restoring
+
+
+def test_every_cache_restore_is_bounded_by_the_segment_timeout() -> None:
+    """A workflow that restores any cache sets ``SEGMENT_DOWNLOAD_TIMEOUT_MINS`` once, at the top.
+
+    @actions/cache aborts a segment download that has not finished within
+    this many minutes and lets the job fall back to a fresh install. Its
+    default is ten, and it leaves that timer running after a download has
+    already failed, so when GitHub's cache storage refused restores on
+    2026-10-30 ("Egress is over the account limit") the setup-node step sat
+    idle for the full ten minutes and two jobs were cancelled by their
+    timeouts with no test having failed. One minute is far above a healthy
+    restore (about a second for ~120 MB) and far below every job timeout.
+    Workflow-level ``env`` reaches every action step, so one setting covers
+    every restore in the file; a job- or step-level copy would be a second
+    place to keep in step.
+    """
+    missing: list[str] = []
+    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        document = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+        jobs = document.get("jobs") or {}
+        if not any(_cache_restoring_steps(job) for job in jobs.values() if isinstance(job, dict)):
+            continue
+        env = document.get("env") or {}
+        if env.get("SEGMENT_DOWNLOAD_TIMEOUT_MINS") != "1":
+            missing.append(workflow.name)
+    assert not missing, (
+        'workflows that restore a cache must set SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1" '
+        f"at the workflow level: {missing}"
+    )
+
+
+def test_setup_node_restores_the_npm_cache_only_where_the_job_installs_from_the_lockfile() -> None:
+    """``cache: npm`` where the job runs ``npm ci``/``npm install``; opt out everywhere else.
+
+    setup-node v7 restores the npm cache by default because ``package.json``
+    names npm as the package manager, keyed on the root lockfile. In a job that
+    installs nothing from that lockfile the restore downloads ~90 MB for
+    nothing it uses, and it was that implicit restore that stalled
+    ``unit:pytest:core (shard 2/4)`` and ``unit:cli:autopilot`` on 2026-10-30.
+    So the choice is explicit in every job: a job that installs from a
+    lockfile asks for the cache, and every other job sets
+    ``package-manager-cache: false``.
+    """
+    root_install = re.compile(r"\bnpm (ci|install)\b(?!\s+--global)")
+    problems: list[str] = []
+    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        document = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+        for job_id, job in (document.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            steps = [step for step in job.get("steps") or [] if isinstance(step, dict)]
+            installs = any(root_install.search(str(step.get("run", ""))) for step in steps)
+            for step in steps:
+                if not str(step.get("uses", "")).startswith("actions/setup-node@"):
+                    continue
+                inputs = step.get("with") or {}
+                if installs and inputs.get("cache") != "npm":
+                    problems.append(
+                        f"{workflow.name}: {job_id} runs npm ci/install but does not set cache: npm"
+                    )
+                if not installs and inputs.get("package-manager-cache") is not False:
+                    problems.append(
+                        f"{workflow.name}: {job_id} installs nothing from a lockfile but still "
+                        "restores the npm cache; set package-manager-cache: false"
+                    )
+    assert not problems, "\n".join(problems)
+
+
 def test_ruby_version_file_is_the_only_source_of_the_ci_ruby() -> None:
     """One pin, read by the workflow — never a literal duplicated in YAML."""
     literals: list[str] = []
@@ -1563,7 +1654,9 @@ def test_ruby_version_file_is_the_only_source_of_the_ci_ruby() -> None:
         f"workflows must set ruby-version to '.ruby-version', not a literal: {literals}"
     )
 
-    step = _workflow_job_step(".github/workflows/unit-tests.yml", "unit-bats-shell", "Set up Ruby")
+    step = _workflow_job_step(
+        ".github/workflows/unit-tests.yml", "unit-bats-shell-shard", "Set up Ruby"
+    )
     assert step["with"]["ruby-version"] == ".ruby-version"
 
 
@@ -1592,9 +1685,11 @@ def test_gem_dependencies_are_exactly_pinned_and_locked() -> None:
 
 
 def test_shell_coverage_gate_installs_the_committed_gem_lock() -> None:
-    """The bats job must install exactly Gemfile.lock, then enforce the floor."""
+    """Each bats shard must install exactly Gemfile.lock; the aggregate enforces the floor."""
     install = _workflow_job_step(
-        ".github/workflows/unit-tests.yml", "unit-bats-shell", "Install the committed gem lock"
+        ".github/workflows/unit-tests.yml",
+        "unit-bats-shell-shard",
+        "Install the committed gem lock",
     )["run"]
     assert "bundle config set --local frozen true" in install, (
         "without frozen, Bundler silently re-resolves instead of failing on drift"
@@ -1609,28 +1704,34 @@ def test_shell_coverage_gate_installs_the_committed_gem_lock() -> None:
     # tracing through BASH_ENV instead, so both runs execute the same suite and
     # both exit codes gate the job.
     plain = _workflow_job_step(
-        ".github/workflows/unit-tests.yml", "unit-bats-shell", "Run BATS suite"
+        ".github/workflows/unit-tests.yml", "unit-bats-shell-shard", "Run BATS suite"
     )["run"]
-    assert "bats tests/BATS/" in plain
+    assert 'bats "${SHARD_FILES[@]}"' in plain
     assert "bashcov" not in plain, (
         "the authoritative BATS run must not be instrumented; coverage is measured "
         "by the separate traced run"
     )
 
     measure = _workflow_job_step(
-        ".github/workflows/unit-tests.yml", "unit-bats-shell", "Measure shell coverage"
+        ".github/workflows/unit-tests.yml", "unit-bats-shell-shard", "Measure shell coverage"
     )["run"]
     assert "bundle exec bashcov" in measure
-    assert "tests/BATS/bashcov_wrapper.sh tests/BATS/" in measure, (
-        "the traced run must go through the wrapper (over the whole suite), not "
-        "`bashcov -- bats`, or instrumentation leaks into the scripts under test"
+    assert 'tests/BATS/bashcov_wrapper.sh "${SHARD_FILES[@]}"' in measure, (
+        "the traced run must go through the wrapper (over the same suites as the "
+        "plain run), not `bashcov -- bats`, or instrumentation leaks into the "
+        "scripts under test"
     )
     assert "bashcov -- bats" not in measure
+    # Both runs read the one list the shard computed, so they cannot diverge.
+    assert "mapfile -t SHARD_FILES < shard-suites.txt" in plain
+    assert "mapfile -t SHARD_FILES < shard-suites.txt" in measure
 
     gate = _workflow_job_step(
         ".github/workflows/unit-tests.yml", "unit-bats-shell", "Enforce the shell coverage floor"
     )["run"]
-    assert "check_bash_coverage.py" in gate
+    assert "check_bash_coverage.py shard-artifacts/" in gate, (
+        "the floor is enforced once, over every shard's resultset, by the aggregate job"
+    )
     assert "--report coverage/report" in gate, (
         "the statement-level report pages.yml publishes is written by the gate step"
     )
