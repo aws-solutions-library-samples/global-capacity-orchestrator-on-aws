@@ -53,6 +53,18 @@ concurrency:
 permissions:
   contents: read
 
+# Bound every cache restore (setup-python's pip cache, setup-node's npm cache,
+# actions/cache). A segment download that has not finished in this many minutes
+# is abandoned and the job falls back to a fresh install. The default is ten
+# minutes, and @actions/cache leaves that timer running after a download has
+# already *failed*, so a restore GitHub's storage refused ("Egress is over the
+# account limit", 2026-10-30) held the action's process for the full ten
+# minutes and two jobs were cancelled by their timeouts without a test failing.
+# One minute is far above a healthy restore (~120 MB in about a second) and far
+# below any job's timeout. The whole account is in .github/CI.md ("Caches").
+env:
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+
 jobs:
   lint-actionlint-workflows:
     name: "lint:actionlint:workflows"
