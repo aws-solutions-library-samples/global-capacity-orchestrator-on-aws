@@ -12,6 +12,19 @@ resource types, told apart by the event's ``ResourceType``:
   index, so this handler picks the ``SLURMCTLD`` entry by type. The response
   carries ``Data.PrivateIpAddress``, ``Data.Port`` and ``Data.Address``
   (``ip:port``). Properties: ``ClusterId``, ``Region``.
+* ``Custom::PcsSubnetLookup`` narrows a node group's candidate subnets to the
+  Availability Zones that offer every one of its instance types. PCS refuses
+  a node group whose instance types are not offered in each zone of its
+  subnets (``The following instance type isn't offered in 1 or more of the
+  cluster's Availability Zones``), and the regional VPC spans every zone in
+  the Region, some of which (``us-east-1e`` for one) lack most current
+  types. ``describe-subnets`` gives each candidate's zone and
+  ``describe-instance-type-offerings`` (``availability-zone`` location type)
+  the zones each type is offered in; the response carries ``Data.SubnetIds``
+  (the kept subnets, in the caller's order), ``Data.AvailabilityZones`` and
+  ``Data.DroppedZones`` (a readable summary, or ``none``). No zone left is a
+  failure. Properties: ``SubnetIds``, ``InstanceTypes``, ``Region``,
+  ``NodeGroup``.
 
 A PCS compute node group launches one AMI. GCO lets the ``pcs`` block name it
 three ways (``gco/pcs_config.py`` ``ami``):
@@ -64,10 +77,11 @@ DLAMI_SSM_PARAMETER = "/aws/service/pcs/ami/dlami-base-ubuntu2404/{architecture}
 KINDS = ("sample", "dlami")
 ARCHITECTURES = ("x86_64", "arm64")
 
-#: The two custom resource types this provider serves (``event["ResourceType"]``).
+#: The custom resource types this provider serves (``event["ResourceType"]``).
 AMI_RESOURCE_TYPE = "Custom::PcsAmiLookup"
 CONTROLLER_RESOURCE_TYPE = "Custom::PcsControllerLookup"
-RESOURCE_TYPES = (AMI_RESOURCE_TYPE, CONTROLLER_RESOURCE_TYPE)
+SUBNETS_RESOURCE_TYPE = "Custom::PcsSubnetLookup"
+RESOURCE_TYPES = (AMI_RESOURCE_TYPE, CONTROLLER_RESOURCE_TYPE, SUBNETS_RESOURCE_TYPE)
 #: ``GetCluster`` endpoint type of slurmctld, whose port also serves the metrics.
 CONTROLLER_ENDPOINT_TYPE = "SLURMCTLD"
 
@@ -132,6 +146,114 @@ def resolve_controller(properties: dict[str, str]) -> dict[str, str]:
         clusterIdentifier=properties["ClusterId"]
     )
     return controller_endpoint(dict(response.get("cluster") or {}))
+
+
+def _string_list(raw: Any, name: str) -> list[str]:
+    """A non-empty list property of non-blank strings, deduplicated in order."""
+    if not isinstance(raw, list):
+        raise ValueError(f"{name} must be a list")
+    values = list(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
+    if not values:
+        raise ValueError(f"{name} must name at least one value")
+    return values
+
+
+def _subnet_properties(event: dict[str, Any]) -> dict[str, Any]:
+    raw = event.get("ResourceProperties") or {}
+    region = str(raw.get("Region") or "").strip()
+    if not region:
+        raise ValueError("Region is required")
+    return {
+        "SubnetIds": _string_list(raw.get("SubnetIds"), "SubnetIds"),
+        "InstanceTypes": sorted(_string_list(raw.get("InstanceTypes"), "InstanceTypes")),
+        "Region": region,
+        "NodeGroup": str(raw.get("NodeGroup") or "node-group").strip(),
+    }
+
+
+def subnet_zones(ec2: Any, subnet_ids: list[str]) -> dict[str, str]:
+    """``describe-subnets``: each candidate subnet's Availability Zone name."""
+    zones: dict[str, str] = {}
+    paginator = ec2.get_paginator("describe_subnets")
+    for page in paginator.paginate(SubnetIds=subnet_ids):
+        for subnet in page.get("Subnets") or []:
+            subnet_id = str(subnet.get("SubnetId") or "")
+            zone = str(subnet.get("AvailabilityZone") or "")
+            if subnet_id and zone:
+                zones[subnet_id] = zone
+    missing = [subnet_id for subnet_id in subnet_ids if subnet_id not in zones]
+    if missing:
+        raise LookupError(f"EC2 did not describe subnet(s) {', '.join(missing)}")
+    return zones
+
+
+def offered_types_by_zone(ec2: Any, instance_types: list[str]) -> dict[str, set[str]]:
+    """``describe-instance-type-offerings`` per zone: zone name -> the types offered there."""
+    offered: dict[str, set[str]] = {}
+    paginator = ec2.get_paginator("describe_instance_type_offerings")
+    for page in paginator.paginate(
+        LocationType="availability-zone",
+        Filters=[{"Name": "instance-type", "Values": instance_types}],
+    ):
+        for offering in page.get("InstanceTypeOfferings") or []:
+            zone = str(offering.get("Location") or "")
+            instance_type = str(offering.get("InstanceType") or "")
+            if zone and instance_type:
+                offered.setdefault(zone, set()).add(instance_type)
+    return offered
+
+
+def select_subnets(
+    *,
+    subnet_ids: list[str],
+    zones: dict[str, str],
+    offered: dict[str, set[str]],
+    instance_types: list[str],
+    node_group: str,
+) -> dict[str, Any]:
+    """Keep the subnets whose zone offers every instance type; none left is a failure."""
+    wanted = set(instance_types)
+    kept: list[str] = []
+    dropped: dict[str, list[str]] = {}
+    for subnet_id in subnet_ids:
+        zone = zones[subnet_id]
+        missing = sorted(wanted - offered.get(zone, set()))
+        if missing:
+            dropped[zone] = missing
+        else:
+            kept.append(subnet_id)
+    if not kept:
+        raise LookupError(
+            f"no Availability Zone of node group {node_group} offers every instance type "
+            f"({', '.join(instance_types)}); PCS refuses a node group whose types are missing "
+            "from one of its zones, so narrow instance_types or name availability_zones where "
+            "the types are offered: "
+            + "; ".join(
+                f"{zone} lacks {', '.join(types)}" for zone, types in sorted(dropped.items())
+            )
+        )
+    return {
+        "SubnetIds": kept,
+        "AvailabilityZones": sorted({zones[subnet_id] for subnet_id in kept}),
+        "DroppedZones": (
+            "; ".join(f"{zone} (no {', '.join(types)})" for zone, types in sorted(dropped.items()))
+            or "none"
+        ),
+    }
+
+
+def resolve_subnets(properties: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the subnets a node group can launch its instance types in."""
+    ec2 = _ec2_client(str(properties["Region"]))
+    subnet_ids = list(properties["SubnetIds"])
+    instance_types = list(properties["InstanceTypes"])
+    return select_subnets(
+        subnet_ids=subnet_ids,
+        zones=subnet_zones(ec2, subnet_ids),
+        offered=offered_types_by_zone(ec2, instance_types),
+        instance_types=instance_types,
+        node_group=str(properties["NodeGroup"]),
+    )
 
 
 def _properties(event: dict[str, Any]) -> dict[str, str]:
@@ -262,7 +384,20 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
         return {"PhysicalResourceId": event.get("PhysicalResourceId") or "gco-pcs-lookup"}
     if request_type not in ("Create", "Update"):
         raise ValueError(f"Unsupported RequestType: {request_type!r}")
-    if _resource_type(event) == CONTROLLER_RESOURCE_TYPE:
+    resource_type = _resource_type(event)
+    if resource_type == SUBNETS_RESOURCE_TYPE:
+        subnets = _subnet_properties(event)
+        selected = resolve_subnets(subnets)
+        logger.info(
+            "PCS node group %s (%s) launches in %s; dropped: %s",
+            subnets["NodeGroup"],
+            ", ".join(subnets["InstanceTypes"]),
+            ", ".join(selected["AvailabilityZones"]),
+            selected["DroppedZones"],
+        )
+        physical_id = event.get("PhysicalResourceId") or f"gco-pcs-subnets-{subnets['NodeGroup']}"
+        return {"PhysicalResourceId": physical_id, "Data": selected}
+    if resource_type == CONTROLLER_RESOURCE_TYPE:
         controller = _controller_properties(event)
         data = resolve_controller(controller)
         logger.info(

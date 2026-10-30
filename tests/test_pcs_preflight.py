@@ -674,6 +674,45 @@ def _expect_list_clusters(clients: _Clients, names: list[str]) -> None:
     )
 
 
+def _offering(instance_type: str, zone: str) -> dict[str, str]:
+    return {"InstanceType": instance_type, "LocationType": "availability-zone", "Location": zone}
+
+
+def _expect_unzoned_offerings(
+    clients: _Clients, types: list[str], offered: list[tuple[str, str]]
+) -> None:
+    """The offerings call for the groups without ``availability_zones``."""
+    clients["ec2"].add_response(
+        "describe_instance_type_offerings",
+        {"InstanceTypeOfferings": [_offering(t, z) for t, z in offered]},
+        {
+            "LocationType": "availability-zone",
+            "Filters": [{"Name": "instance-type", "Values": types}],
+        },
+    )
+
+
+_ZONE_FILTERS = {
+    "Filters": [
+        {"Name": "state", "Values": ["available"]},
+        {"Name": "zone-type", "Values": ["availability-zone"]},
+    ]
+}
+
+
+def _expect_region_zones(clients: _Clients, zones: list[str]) -> None:
+    clients["ec2"].add_response(
+        "describe_availability_zones",
+        {
+            "AvailabilityZones": [
+                {"ZoneName": zone, "State": "available", "ZoneType": "availability-zone"}
+                for zone in zones
+            ]
+        },
+        _ZONE_FILTERS,
+    )
+
+
 def _expect_role(clients: _Clients, present: bool) -> None:
     if not present:
         clients["iam"].add_client_error(
@@ -746,6 +785,16 @@ class TestManagedMode:
                 ],
             },
         )
+        # gco-compute and spot name no zones: us-east-1e offers no c6i.large,
+        # which the stack's subnet lookup drops; m6i.large is everywhere.
+        zones = ["us-east-1a", "us-east-1b", "us-east-1c", "us-east-1d", "us-east-1e", "us-east-1f"]
+        _expect_unzoned_offerings(
+            clients,
+            ["c6i.large", "m6i.large"],
+            [("c6i.large", z) for z in zones if z != "us-east-1e"]
+            + [("m6i.large", z) for z in zones],
+        )
+        _expect_region_zones(clients, zones)
         clients["ec2"].add_response(
             "describe_capacity_reservations",
             {
@@ -781,9 +830,13 @@ class TestManagedMode:
             "gpu: p5.48xlarge supports EFA on 4 of 32 network card(s)"
         ]
         assert sorted(c.detail for c in grouped["zones"]) == [
+            "gco-compute: c6i.large offered in us-east-1a, us-east-1b, us-east-1c, us-east-1d, "
+            "us-east-1f; the stack skips us-east-1e",
             "gpu: p5.48xlarge is offered in us-east-1a",
             "hpc: hpc6a.48xlarge is offered in us-east-1b",
             "login: t4g.small is offered in us-east-1a",
+            "spot: m6i.large offered in us-east-1a, us-east-1b, us-east-1c, us-east-1d, "
+            "us-east-1e, us-east-1f",
         ]
         assert [c.detail for c in grouped["capacity-reservations"]] == [
             "hpc: cr-0123456789abcdef0 active, hpc6a.48xlarge in us-east-1b"
@@ -831,6 +884,11 @@ class TestManagedMode:
                 ],
             },
         )
+        # Of the two groups without zones, only gco-compute's type is offered anywhere.
+        _expect_unzoned_offerings(
+            clients, ["c6i.large", "m6i.large"], [("c6i.large", "us-east-1a")]
+        )
+        _expect_region_zones(clients, ["us-east-1a", "us-east-1b"])
         clients["ec2"].add_response(
             "describe_capacity_reservations",
             {
@@ -869,10 +927,22 @@ class TestManagedMode:
         assert [c.detail for c in grouped["efa"]] == [
             "gpu: p5.48xlarge has 2 network card(s) but efa_interfaces is 4"
         ]
-        assert all(c.status == pf.FAIL for c in grouped["zones"])
-        assert "hpc: hpc6a.48xlarge is not offered in us-east-1b" in [
-            c.detail for c in grouped["zones"]
+        zone_details = [c.detail for c in grouped["zones"]]
+        assert "hpc: hpc6a.48xlarge is not offered in us-east-1b" in zone_details
+        # gco-compute's one type is offered in us-east-1a: it can launch there.
+        assert [c.status for c in grouped["zones"] if c.detail.startswith("gco-compute")] == [
+            pf.PASS
         ]
+        assert "gco-compute: c6i.large offered in us-east-1a; the stack skips us-east-1b" in (
+            zone_details
+        )
+        assert (
+            "spot: m6i.large offered together in no zone of us-east-1; narrow instance_types "
+            "to types one zone offers together, or name availability_zones"
+        ) in zone_details
+        assert all(
+            c.status == pf.FAIL for c in grouped["zones"] if not c.detail.startswith("gco-compute")
+        )
         [reservation] = grouped["capacity-reservations"]
         assert reservation.status == pf.FAIL
         assert "state is expired" in reservation.detail
@@ -1057,6 +1127,14 @@ class TestManagedMode:
             },
         )
         clients["ec2"].add_client_error(
+            "describe_instance_type_offerings",
+            service_error_code="UnauthorizedOperation",
+            expected_params={
+                "LocationType": "availability-zone",
+                "Filters": [{"Name": "instance-type", "Values": ["c6i.large", "m6i.large"]}],
+            },
+        )
+        clients["ec2"].add_client_error(
             "describe_capacity_reservations",
             service_error_code="UnauthorizedOperation",
             expected_params={"CapacityReservationIds": ["cr-0123456789abcdef0"]},
@@ -1082,6 +1160,32 @@ class TestManagedMode:
             "capacity-reservations": pf.WARN,
             "spot-role": pf.WARN,
         }
+        # The named-zone and the unnamed-zone offerings each warn once; the
+        # zone list is not fetched when the offerings are unavailable.
+        assert len([c for c in report.checks if c.name == "zones"]) == 2
+
+    def test_an_unavailable_zone_list_is_a_warning(self, clients: _Clients) -> None:
+        block = {"enabled": True, "managed": {"login": {"enabled": False}}}
+        _expect_list_clusters(clients, [])
+        clients["ec2"].add_response(
+            "describe_instance_types",
+            {"InstanceTypes": [_instance_type("c6i.large", "x86_64")]},
+            {"InstanceTypes": ["c6i.large"]},
+        )
+        _expect_unzoned_offerings(clients, ["c6i.large"], [("c6i.large", "us-east-1a")])
+        clients["ec2"].add_client_error(
+            "describe_availability_zones",
+            service_error_code="UnauthorizedOperation",
+            expected_params=_ZONE_FILTERS,
+        )
+
+        report = pf.run_preflight(
+            _REGION, validate_pcs_config(block), project=_PROJECT, client_factory=clients.factory
+        )
+
+        assert report.ok
+        [zones] = _by_name(report)["zones"]
+        assert zones.status == pf.WARN and "UnauthorizedOperation" in zones.detail
 
     def test_a_single_type_lookup_error_other_than_unknown_propagates_as_a_warning(
         self, clients: _Clients
@@ -1101,6 +1205,11 @@ class TestManagedMode:
             service_error_code="RequestLimitExceeded",
             expected_params={"InstanceTypes": ["c6i.large"]},
         )
+        # The default group names no zones, so its offerings are still checked.
+        _expect_unzoned_offerings(
+            clients, ["c6i.large"], [("c6i.large", "us-east-1a"), ("c6i.large", "us-east-1b")]
+        )
+        _expect_region_zones(clients, ["us-east-1a", "us-east-1b"])
 
         report = pf.run_preflight(
             _REGION, validate_pcs_config(block), project=_PROJECT, client_factory=clients.factory
@@ -1108,8 +1217,11 @@ class TestManagedMode:
 
         [check] = _by_name(report)["instance-types"]
         assert check.status == pf.WARN and "RequestLimitExceeded" in check.detail
-        # No zones, reservations or Spot in the default block.
-        assert set(_by_name(report)) == {"pcs-service", "cluster-name", "instance-types"}
+        # No named zones, reservations or Spot in the default block.
+        assert set(_by_name(report)) == {"pcs-service", "cluster-name", "instance-types", "zones"}
+        assert [c.detail for c in _by_name(report)["zones"]] == [
+            "gco-compute: c6i.large offered in us-east-1a, us-east-1b"
+        ]
 
 
 # ---------------------------------------------------------------------------

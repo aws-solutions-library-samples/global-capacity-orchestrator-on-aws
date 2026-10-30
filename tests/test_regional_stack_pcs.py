@@ -824,11 +824,74 @@ class TestManagedModeNodeGroups:
         def subnet_ids(name: str) -> list[str]:
             return [ref["Ref"] for ref in groups[name]["Properties"]["SubnetIds"]]
 
-        assert set(subnet_ids("gco-compute")) == set(subnets.values())
         assert subnet_ids("gpu") == [subnets["us-east-1a"]]
         assert subnet_ids("hpc") == [subnets["us-east-1b"]]
         assert subnet_ids("block") == [subnets["us-east-1c"]]
         assert subnet_ids("login") == [subnets["us-east-1a"]]
+        # Named zones never go through the deploy-time lookup.
+        assert not any(
+            isinstance(groups[name]["Properties"]["SubnetIds"], dict)
+            for name in ("gpu", "hpc", "block", "shared", "login")
+        )
+
+    def test_groups_without_zones_narrow_their_subnets_at_deploy_time(
+        self, pcs_managed_full
+    ) -> None:
+        """``Custom::PcsSubnetLookup`` keeps the zones that offer every instance type.
+
+        The second live deploy of the PCS block failed its node groups on
+        ``The following instance type isn't offered in 1 or more of the
+        cluster's Availability Zones``: the regional VPC spans every zone in
+        us-east-1 and us-east-1e offers neither c6i.large nor t3.medium. A
+        group without ``availability_zones`` now hands every private subnet
+        and its instance types to the lookup and takes the subnets it returns.
+        """
+        stack, resources = pcs_managed_full
+        groups = _named(resources, "AWS::PCS::ComputeNodeGroup")
+        subnets = _private_subnets_by_zone(resources)
+        lookups = _of_type(resources, "Custom::PcsSubnetLookup")
+        by_group = {v["Properties"]["NodeGroup"]: k for k, v in lookups.items()}
+        assert set(by_group) == {"gco-compute", "spot", "spot-default"}
+        assert set(stack.pcs.ami_lookup.subnet_lookups) == set(by_group)
+        for name, logical_id in by_group.items():
+            properties = lookups[logical_id]["Properties"]
+            # Every private subnet is a candidate; the handler drops the zones
+            # that lack one of the (sorted, deduplicated) instance types.
+            assert {ref["Ref"] for ref in properties["SubnetIds"]} == set(subnets.values())
+            assert properties["Region"] == _REGION
+            assert (
+                properties["ServiceToken"]
+                == _of_type(resources, "Custom::PcsAmiLookup").popitem()[1]["Properties"][
+                    "ServiceToken"
+                ]
+            )
+            [log_group] = [
+                k
+                for k in _of_type(resources, "AWS::Logs::LogGroup")
+                if k.startswith("PcsAmiLookupProviderLogGroup")
+            ]
+            assert lookups[logical_id]["DependsOn"] == [log_group]
+            assert groups[name]["Properties"]["SubnetIds"] == {
+                "Fn::GetAtt": [logical_id, "SubnetIds"]
+            }
+        assert lookups[by_group["gco-compute"]]["Properties"]["InstanceTypes"] == [
+            "c6i.large",
+            "c6i.xlarge",
+        ]
+        assert lookups[by_group["spot"]]["Properties"]["InstanceTypes"] == ["c6i.large"]
+        # The handler's role can describe subnets and offerings next to images.
+        statements = _statements(resources, "PcsAmiLookupFunctionServiceRole")
+        catalog = _by_sid(statements, "DescribeEc2Catalog")
+        assert catalog["Action"] == [
+            "ec2:DescribeImages",
+            "ec2:DescribeInstanceTypeOfferings",
+            "ec2:DescribeSubnets",
+        ]
+        assert catalog["Resource"] == "*"
+        with pytest.raises(ValueError, match="already has a subnet lookup"):
+            stack.pcs.ami_lookup.subnet_ids(
+                node_group="spot", candidates=["subnet-1"], instance_types=["c6i.large"]
+            )
 
     def test_node_groups_wait_for_the_role_and_the_storage(self, pcs_managed_full) -> None:
         _stack, resources = pcs_managed_full
@@ -1198,6 +1261,10 @@ class TestManagedModeMinimal:
         assert groups["gco-compute"]["DeletionPolicy"] == "Delete"
         assert len(_of_type(resources, "AWS::EC2::LaunchTemplate")) == 1
         assert len(_of_type(resources, "Custom::PcsAmiLookup")) == 1
+        # The one group names no zones, so its subnets come from the lookup.
+        [subnet_lookup] = _of_type(resources, "Custom::PcsSubnetLookup").values()
+        assert subnet_lookup["Properties"]["NodeGroup"] == "gco-compute"
+        assert subnet_lookup["Properties"]["InstanceTypes"] == ["c6i.large"]
         assert not _of_type(resources, "AWS::EC2::PlacementGroup")
         # Metrics off (the default): no controller lookup, no 6817 rule, no
         # observability gate, and the lookup role reads no cluster.

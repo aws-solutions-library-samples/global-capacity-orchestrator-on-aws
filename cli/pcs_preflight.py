@@ -622,27 +622,28 @@ def _managed_mode_checks(checker: _Checker, config: Mapping[str, Any], *, projec
                         f"{group['efa_interfaces']} of {cards} network card(s)",
                     )
 
-    zoned = [(g, z) for g in groups for z in g["availability_zones"]]
+    def offerings(types: Sequence[str]) -> set[tuple[str, str]]:
+        """``(instance type, zone)`` pairs EC2 offers, for ``types``."""
+        pairs: set[tuple[str, str]] = set()
+        paginator = checker.client("ec2").get_paginator("describe_instance_type_offerings")
+        for page in paginator.paginate(
+            LocationType="availability-zone",
+            Filters=[{"Name": "instance-type", "Values": list(types)}],
+        ):
+            for offering in page.get("InstanceTypeOfferings") or []:
+                pairs.add((str(offering.get("InstanceType")), str(offering.get("Location"))))
+        return pairs
+
+    launchers = [dict(g) for g in groups]
     if login["enabled"]:
-        zoned.extend(
-            (login | {"name": "login", "instance_types": [login["instance_type"]]}, z)
-            for z in login["availability_zones"]
+        launchers.append(
+            dict(login) | {"name": "login", "instance_types": [login["instance_type"]]}
         )
+    zoned = [(g, z) for g in launchers for z in g["availability_zones"]]
     if zoned:
-
-        def offerings() -> set[tuple[str, str]]:
-            pairs: set[tuple[str, str]] = set()
-            types = sorted({t for g, _z in zoned for t in g["instance_types"]})
-            paginator = checker.client("ec2").get_paginator("describe_instance_type_offerings")
-            for page in paginator.paginate(
-                LocationType="availability-zone",
-                Filters=[{"Name": "instance-type", "Values": types}],
-            ):
-                for offering in page.get("InstanceTypeOfferings") or []:
-                    pairs.add((str(offering.get("InstanceType")), str(offering.get("Location"))))
-            return pairs
-
-        offered = checker.guarded("zones", offerings)
+        offered = checker.guarded(
+            "zones", lambda: offerings(sorted({t for g, _z in zoned for t in g["instance_types"]}))
+        )
         if offered is not None:
             for group, zone in zoned:
                 for instance_type in group["instance_types"]:
@@ -654,6 +655,51 @@ def _managed_mode_checks(checker: _Checker, config: Mapping[str, Any], *, projec
                         + ("is offered" if ok else "is not offered")
                         + f" in {zone}",
                     )
+
+    # Groups without availability_zones launch in every private subnet whose
+    # zone offers all of their instance types (the stack's
+    # Custom::PcsSubnetLookup narrows the subnets at deploy time). The Region
+    # usually has a zone short of current types (us-east-1e); that is fine,
+    # a group no zone can host is not.
+    unzoned = [g for g in launchers if not g["availability_zones"]]
+    if unzoned:
+
+        def region_zones() -> list[str]:
+            response = checker.client("ec2").describe_availability_zones(
+                Filters=[
+                    {"Name": "state", "Values": ["available"]},
+                    {"Name": "zone-type", "Values": ["availability-zone"]},
+                ]
+            )
+            return sorted(
+                str(zone.get("ZoneName"))
+                for zone in response.get("AvailabilityZones") or []
+                if zone.get("ZoneName")
+            )
+
+        offered_unzoned = checker.guarded(
+            "zones", lambda: offerings(sorted({t for g in unzoned for t in g["instance_types"]}))
+        )
+        zones = checker.guarded("zones", region_zones) if offered_unzoned is not None else None
+        if offered_unzoned is not None and zones is not None:
+            for group in unzoned:
+                types = sorted(group["instance_types"])
+                hosts = [z for z in zones if all((t, z) in offered_unzoned for t in types)]
+                skipped = [z for z in zones if z not in hosts]
+                label = f"{group['name']}: {', '.join(types)}"
+                if not hosts:
+                    checker.add(
+                        "zones",
+                        FAIL,
+                        f"{label} offered together in no zone of {checker.region}; narrow "
+                        "instance_types to types one zone offers together, or name "
+                        "availability_zones",
+                    )
+                    continue
+                detail = f"{label} offered in {', '.join(hosts)}"
+                if skipped:
+                    detail += f"; the stack skips {', '.join(skipped)}"
+                checker.add("zones", PASS, detail)
 
     reservations = [(g, g["capacity_reservation"]) for g in groups if g["capacity_reservation"]]
     if reservations:

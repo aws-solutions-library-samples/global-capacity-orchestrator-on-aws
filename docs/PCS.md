@@ -93,7 +93,7 @@ Managed mode, per Region (`gco/stacks/pcs_cluster.py`):
 | `AWS::PCS::ComputeNodeGroup` | One per `node_groups` entry plus the `login` group; the node group's name is its `name` |
 | `AWS::PCS::Queue` | One per `queues` entry; exactly one is Slurm's default partition |
 | EFS access point | `/pcs/home` on the regional file system, owned by the identity, mounted at `/home` (`storage.home: efs`) |
-| Lookups | A custom-resource Lambda (`lambda/pcs-lookup`) that resolves `sample` and `dlami` to the newest AMI for the cluster's Slurm version and the node group's architecture and, with `metrics.enabled`, the controller's address for the metrics scrape |
+| Lookups | A custom-resource Lambda (`lambda/pcs-lookup`) that resolves `sample` and `dlami` to the newest AMI for the cluster's Slurm version and the node group's architecture, narrows a node group without `availability_zones` to the private subnets whose zone offers every one of its instance types (PCS refuses a group whose types are missing from one of its zones, and the regional VPC spans every zone, `us-east-1e` included) and, with `metrics.enabled`, the controller's address for the metrics scrape |
 | Metrics (`metrics.enabled`) | The cluster is created with `MetricsType=metrics/openmetrics` and `CommunicationParameters=enable_http`, the security group admits tcp/6817 from the EKS cluster security group, and a Prometheus `ScrapeConfig` targets the controller; see [Monitoring](#monitoring) |
 | Lifecycle actions | PCS's maintained scripts (`configure-cloudwatch-logs`, `mount-efs`, `mount-fsx-lustre`, pinned v1.0.0) and GCO's `ensure-identity-home.sh`, run on every boot |
 | Stack outputs | `PcsClusterId`, `PcsClusterName`, `PcsMode`, `PcsSlurmVersion`, `PcsRestApiMode`, `PcsRestApiPort`, `PcsSecurityGroupId`, `PcsNodeRoleArn`, `PcsLoginNodeGroupId` (the keys `gco stacks pcs status` and `gco slurm shell` read) |
@@ -187,7 +187,7 @@ Every [live release validation](LIVE_RELEASE_VALIDATION.md) run deploys PCS in m
 
 ## Preflight
 
-`gco stacks pcs preflight` checks the account with the AWS APIs alone before a deploy ([CLI reference](CLI.md#gco-stacks-pcs)). Existing mode: the cluster exists and is `ACTIVE` on Slurm 25.11 or 26.05 with the REST API on and a `SLURMRESTD` endpoint, its JWT key secret exists, its security group admits tcp/6820 from the EKS cluster security group (by group or by a CIDR covering the regional VPC), and it sits in the regional VPC or `pcs.endpoint_cidr` covers the endpoint. Managed mode: PCS answers in the Region, the cluster name is free, every instance type exists with the architecture its name implies, supports EFA on enough network cards when asked, and is offered in the group's zones; every capacity reservation exists, is usable (`active`, or `scheduled` for a Capacity Block) and matches its group's type, zone and kind; the EC2 Spot service-linked role exists when a group buys Spot. An AWS error while checking is a warning (the preflight never blocks a deploy over its own permissions); only a definite fact that would break the deploy or the API fails it. `gco stacks deploy` / `deploy-all` run the same checks for every regional stack with PCS on.
+`gco stacks pcs preflight` checks the account with the AWS APIs alone before a deploy ([CLI reference](CLI.md#gco-stacks-pcs)). Existing mode: the cluster exists and is `ACTIVE` on Slurm 25.11 or 26.05 with the REST API on and a `SLURMRESTD` endpoint, its JWT key secret exists, its security group admits tcp/6820 from the EKS cluster security group (by group or by a CIDR covering the regional VPC), and it sits in the regional VPC or `pcs.endpoint_cidr` covers the endpoint. Managed mode: PCS answers in the Region, the cluster name is free, every instance type exists with the architecture its name implies, supports EFA on enough network cards when asked, and is offered in the group's zones (a group without `availability_zones` must have at least one zone in the Region that offers all of its types; the check names the zones the stack will skip); every capacity reservation exists, is usable (`active`, or `scheduled` for a Capacity Block) and matches its group's type, zone and kind; the EC2 Spot service-linked role exists when a group buys Spot. An AWS error while checking is a warning (the preflight never blocks a deploy over its own permissions); only a definite fact that would break the deploy or the API fails it. `gco stacks deploy` / `deploy-all` run the same checks for every regional stack with PCS on.
 
 ## Compared with Slurm on EKS (Slinky)
 
@@ -220,7 +220,7 @@ Both backends give you Slurm 25/26 with `sbatch`/`srun`/`sacct`, accounting, aut
 | `storage.home` | `efs` | `/home` on the regional EFS through a PCS-only access point, or `none` |
 | `storage.scratch` | `auto` | `/scratch` on FSx for Lustre when the Region has it (`auto`), always (`fsx`) or never (`none`) |
 | `login.enabled` | `true` | The always-on login node behind `gco slurm shell` / `output` |
-| `login.instance_type` / `ami` / `availability_zones` | `t3.medium` / `sample` / `[]` | The login node's instance, image and zones (`[]` = every private subnet) |
+| `login.instance_type` / `ami` / `availability_zones` | `t3.medium` / `sample` / `[]` | The login node's instance, image and zones (`[]` = every private subnet whose zone offers the instance type) |
 | `node_groups` | one `gco-compute` group of `c6i.large`, 0-4 nodes | See below |
 | `queues` | one default `gco` queue on `gco-compute` | See below |
 | `metrics.enabled` | `false` | Scrape the controller's Slurm metrics into the in-cluster Prometheus (sets `MetricsType` and `enable_http` on the cluster, opens tcp/6817 from the EKS cluster security group; `PrivateData` must stay unset); see [Monitoring](#monitoring) |
@@ -238,7 +238,7 @@ Per node group (`pcs.managed.node_groups[]`):
 | `purchase_option` | `null` | `ONDEMAND`, `SPOT`, `CAPACITY_BLOCK` or `INTERRUPTIBLE_CAPACITY_RESERVATION`; `null` = derived |
 | `spot_allocation_strategy` | `null` | `lowest-price`, `capacity-optimized` or `price-capacity-optimized` (Spot only) |
 | `capacity_reservation` | `null` | `{"type": "odcr" \| "capacity_block" \| "interruptible", "id": "cr-..."}` |
-| `availability_zones` | `[]` | Zones to launch in (`[]` = every private subnet); exactly one with EFA, a placement group or a reservation |
+| `availability_zones` | `[]` | Zones to launch in (`[]` = every private subnet whose zone offers all of the group's `instance_types`, resolved at deploy time); exactly one with EFA, a placement group or a reservation |
 | `ami` | `sample` | `sample`, `dlami` or an `ami-` id |
 | `efa` / `efa_interfaces` | `false` / `1` | EFA on `efa_interfaces` network cards |
 | `placement_group` | `false` | A cluster placement group for the group's instances |

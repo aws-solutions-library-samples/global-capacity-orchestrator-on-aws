@@ -224,7 +224,11 @@ class PcsLookup(Construct):
     strategy. ``Custom::PcsControllerLookup`` resolves the controller's
     ``SLURMCTLD`` endpoint (``ip:6817``) by type for the metrics scrape;
     ``GetCluster`` lists endpoints in no guaranteed order, which is why
-    ``AwsCustomResource`` cannot do it.
+    ``AwsCustomResource`` cannot do it. ``Custom::PcsSubnetLookup`` narrows
+    a node group's subnets to the zones that offer every one of its instance
+    types (one per node group without ``availability_zones``): PCS refuses a
+    group whose types are missing from one of its zones, and the regional
+    VPC spans every zone in the Region, ``us-east-1e`` included.
     """
 
     def __init__(
@@ -241,6 +245,8 @@ class PcsLookup(Construct):
         self._resources: dict[tuple[str, str], CustomResource] = {}
         #: The ``Custom::PcsControllerLookup`` resource once a caller asks for it.
         self.controller_lookup: CustomResource | None = None
+        #: ``Custom::PcsSubnetLookup`` resources by node group name.
+        self.subnet_lookups: dict[str, CustomResource] = {}
 
         self.function = lambda_.Function(
             self,
@@ -256,13 +262,18 @@ class PcsLookup(Construct):
                 "cluster controller's address"
             ),
         )
-        # describe-images has no resource-level scoping; the public PCS AMI
-        # parameters live under one account-less SSM path.
+        # The EC2 describe calls (images, subnets, instance type offerings)
+        # have no resource-level scoping; the public PCS AMI parameters live
+        # under one account-less SSM path.
         self.function.add_to_role_policy(
             iam.PolicyStatement(
-                sid="DescribePublicAmis",
+                sid="DescribeEc2Catalog",
                 effect=iam.Effect.ALLOW,
-                actions=["ec2:DescribeImages"],
+                actions=[
+                    "ec2:DescribeImages",
+                    "ec2:DescribeInstanceTypeOfferings",
+                    "ec2:DescribeSubnets",
+                ],
                 resources=["*"],
             )
         )
@@ -318,6 +329,34 @@ class PcsLookup(Construct):
     def lookups(self) -> Mapping[tuple[str, str], CustomResource]:
         return dict(self._resources)
 
+    def subnet_ids(
+        self, *, node_group: str, candidates: Sequence[str], instance_types: Sequence[str]
+    ) -> list[str]:
+        """The subnet-id list token for ``node_group``: ``candidates`` narrowed by offerings.
+
+        The resource re-runs on every deploy whose properties change (a new
+        instance type, a new subnet), and its ``Data.SubnetIds`` list feeds
+        the node group's ``SubnetIds`` through ``Fn::GetAtt``.
+        """
+        if node_group in self.subnet_lookups:
+            raise ValueError(f"node group {node_group} already has a subnet lookup")
+        resource = CustomResource(
+            self,
+            f"Subnets{_pascal(node_group)}",
+            service_token=self.provider.service_token,
+            resource_type="Custom::PcsSubnetLookup",
+            properties={
+                "SubnetIds": list(candidates),
+                "InstanceTypes": sorted(dict.fromkeys(instance_types)),
+                "Region": Stack.of(self).region,
+                "NodeGroup": node_group,
+            },
+        )
+        resource.node.add_dependency(self.log_group)
+        self.subnet_lookups[node_group] = resource
+        # list() for the CDK-less strict mypy job, where Token.as_list is Any.
+        return list(Token.as_list(resource.get_att("SubnetIds")))
+
     def controller_address(self, *, cluster_id: str, cluster_arn: str) -> str:
         """The controller's ``ip:6817`` token for the cluster (one lookup per provider).
 
@@ -351,10 +390,11 @@ class PcsLookup(Construct):
                 NagSuppression(
                     id="AwsSolutions-IAM5",
                     reason=(
-                        "ec2:DescribeImages has no resource-level permissions, and the "
-                        "public PCS AMI parameters live under one account-less SSM path "
-                        "(/aws/service/pcs/ami/*) whose leaves name the AMI kind and "
-                        "architecture."
+                        "ec2:DescribeImages, ec2:DescribeSubnets and "
+                        "ec2:DescribeInstanceTypeOfferings have no resource-level "
+                        "permissions, and the public PCS AMI parameters live under one "
+                        "account-less SSM path (/aws/service/pcs/ami/*) whose leaves name "
+                        "the AMI kind and architecture."
                     ),
                     applies_to=["Resource::*", f"Resource::{self.ssm_parameter_arn}"],
                 ),
@@ -658,11 +698,27 @@ class PcsCluster(Construct):
             raise ValueError("the regional VPC has no private subnets for the PCS controller")
         return subnets[0]
 
-    def _subnet_ids(self, zones: Sequence[str], path: str) -> list[str]:
-        """The private subnets a node group launches in, narrowed to ``zones`` when given."""
+    def _subnet_ids(
+        self, zones: Sequence[str], path: str, *, node_group: str, instance_types: Sequence[str]
+    ) -> list[str]:
+        """The private subnets a node group launches in.
+
+        Named ``availability_zones`` are taken as they are (the preflight's
+        ``zones`` check tells the operator when a type is not offered in one
+        of them). Without them, the group gets every private subnet whose
+        zone offers all of its instance types, resolved at deploy time by
+        ``Custom::PcsSubnetLookup``: PCS refuses a node group whose types are
+        missing from any zone of its subnets, and the regional VPC spans
+        every zone in the Region.
+        """
         subnets = list(self.vpc.private_subnets)
         if not zones:
-            return [subnet.subnet_id for subnet in subnets]
+            assert self.ami_lookup is not None
+            return self.ami_lookup.subnet_ids(
+                node_group=node_group,
+                candidates=[subnet.subnet_id for subnet in subnets],
+                instance_types=instance_types,
+            )
         available = [subnet.availability_zone for subnet in subnets]
         if any(Token.is_unresolved(zone) for zone in available):
             raise ValueError(
@@ -1231,7 +1287,12 @@ class PcsCluster(Construct):
             instance_types=[str(t) for t in group["instance_types"]],
             min_nodes=int(group["min_nodes"]),
             max_nodes=int(group["max_nodes"]),
-            subnet_ids=self._subnet_ids(group["availability_zones"], path),
+            subnet_ids=self._subnet_ids(
+                group["availability_zones"],
+                path,
+                node_group=name,
+                instance_types=[str(t) for t in group["instance_types"]],
+            ),
             purchase_option=purchase,
             spot_options=spot_options,
             slurm_configuration=slurm_configuration,
@@ -1260,7 +1321,12 @@ class PcsCluster(Construct):
             instance_types=[str(login["instance_type"])],
             min_nodes=1,
             max_nodes=1,
-            subnet_ids=self._subnet_ids(login["availability_zones"], "pcs.managed.login"),
+            subnet_ids=self._subnet_ids(
+                login["availability_zones"],
+                "pcs.managed.login",
+                node_group=name,
+                instance_types=[str(login["instance_type"])],
+            ),
             purchase_option="ONDEMAND",
             spot_options=None,
             slurm_configuration=None,

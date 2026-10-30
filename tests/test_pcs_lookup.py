@@ -530,3 +530,219 @@ class TestControllerLookup:
         ) == {"PrivateIpAddress": "10.0.0.1", "Port": "6817", "Address": "10.0.0.1:6817"}
         with pytest.raises(LookupError, match=r"cluster \? reports no SLURMCTLD endpoint"):
             handler.controller_endpoint({})
+
+
+# ---------------------------------------------------------------------------
+# Custom::PcsSubnetLookup
+# ---------------------------------------------------------------------------
+
+_SUBNETS = {
+    "subnet-0a": "us-east-1a",
+    "subnet-0b": "us-east-1b",
+    "subnet-0e": "us-east-1e",
+    "subnet-0f": "us-east-1f",
+}
+
+
+def _subnet_event(request_type: str, **properties: Any) -> dict[str, Any]:
+    resource_properties: dict[str, Any] = {
+        "ServiceToken": "arn:aws:lambda:us-east-1:123456789012:function:provider",
+        "SubnetIds": list(_SUBNETS),
+        "InstanceTypes": ["t3.medium", "c6i.large"],
+        "Region": _REGION,
+        "NodeGroup": "gco-compute",
+    }
+    resource_properties.update(properties)
+    return {
+        "RequestType": request_type,
+        "ResourceType": "Custom::PcsSubnetLookup",
+        "LogicalResourceId": "AmiLookupSubnetsGcoCompute",
+        "ResourceProperties": resource_properties,
+    }
+
+
+def _expect_describe_subnets(clients: _Clients, zones: dict[str, str]) -> None:
+    clients.ec2_stub.add_response(
+        "describe_subnets",
+        {
+            "Subnets": [
+                {"SubnetId": subnet_id, "AvailabilityZone": zone, "VpcId": "vpc-0gco"}
+                for subnet_id, zone in zones.items()
+            ]
+        },
+        {"SubnetIds": list(_SUBNETS)},
+    )
+
+
+def _expect_offerings(
+    clients: _Clients, offered: list[tuple[str, str]], *, types: list[str]
+) -> None:
+    clients.ec2_stub.add_response(
+        "describe_instance_type_offerings",
+        {
+            "InstanceTypeOfferings": [
+                {
+                    "InstanceType": instance_type,
+                    "LocationType": "availability-zone",
+                    "Location": zone,
+                }
+                for instance_type, zone in offered
+            ]
+        },
+        {
+            "LocationType": "availability-zone",
+            "Filters": [{"Name": "instance-type", "Values": types}],
+        },
+    )
+
+
+class TestSubnetLookup:
+    _TYPES = ["c6i.large", "t3.medium"]  # sorted and deduplicated from the event
+
+    def test_create_keeps_the_zones_that_offer_every_type(
+        self, handler: ModuleType, clients: _Clients
+    ) -> None:
+        """us-east-1e offers neither type and us-east-1f lacks one: both are dropped."""
+        _expect_describe_subnets(clients, _SUBNETS)
+        _expect_offerings(
+            clients,
+            [
+                ("c6i.large", "us-east-1a"),
+                ("t3.medium", "us-east-1a"),
+                ("t3.medium", "us-east-1b"),
+                ("c6i.large", "us-east-1b"),
+                ("t3.medium", "us-east-1f"),
+            ],
+            types=self._TYPES,
+        )
+
+        response = handler.lambda_handler(_subnet_event("Create"))
+
+        assert response == {
+            "PhysicalResourceId": "gco-pcs-subnets-gco-compute",
+            "Data": {
+                "SubnetIds": ["subnet-0a", "subnet-0b"],
+                "AvailabilityZones": ["us-east-1a", "us-east-1b"],
+                "DroppedZones": "us-east-1e (no c6i.large, t3.medium); us-east-1f (no c6i.large)",
+            },
+        }
+        assert clients.requests == [
+            ("ec2", {"region_name": _REGION, "config": handler._CLIENT_CONFIG})
+        ]
+
+    def test_update_keeps_the_physical_id_and_the_callers_subnet_order(
+        self, handler: ModuleType, clients: _Clients
+    ) -> None:
+        # EC2 describes the subnets in its own order; the response keeps the caller's.
+        _expect_describe_subnets(clients, dict(reversed(list(_SUBNETS.items()))))
+        _expect_offerings(
+            clients,
+            [(t, z) for z in _SUBNETS.values() for t in self._TYPES],
+            types=self._TYPES,
+        )
+
+        response = handler.lambda_handler({**_subnet_event("Update"), "PhysicalResourceId": "kept"})
+
+        assert response["PhysicalResourceId"] == "kept"
+        assert response["Data"]["SubnetIds"] == list(_SUBNETS)
+        assert response["Data"]["AvailabilityZones"] == sorted(_SUBNETS.values())
+        assert response["Data"]["DroppedZones"] == "none"
+
+    def test_no_zone_left_fails_the_resource_by_name(
+        self, handler: ModuleType, clients: _Clients
+    ) -> None:
+        _expect_describe_subnets(clients, _SUBNETS)
+        _expect_offerings(clients, [("c6i.large", "us-east-1a")], types=self._TYPES)
+
+        with pytest.raises(LookupError) as excinfo:
+            handler.lambda_handler(_subnet_event("Create"))
+
+        message = str(excinfo.value)
+        assert message.startswith(
+            "no Availability Zone of node group gco-compute offers every instance type "
+            "(c6i.large, t3.medium)"
+        )
+        assert "us-east-1a lacks t3.medium; us-east-1b lacks c6i.large, t3.medium" in message
+
+    def test_a_subnet_ec2_does_not_describe_fails_the_resource(
+        self, handler: ModuleType, clients: _Clients
+    ) -> None:
+        described = {k: v for k, v in _SUBNETS.items() if k != "subnet-0e"}
+        _expect_describe_subnets(clients, described)
+
+        with pytest.raises(LookupError, match=r"did not describe subnet\(s\) subnet-0e"):
+            handler.lambda_handler(_subnet_event("Create"))
+
+    def test_properties_are_validated_by_name(self, handler: ModuleType) -> None:
+        with pytest.raises(ValueError, match=r"SubnetIds must be a list"):
+            handler.lambda_handler(_subnet_event("Create", SubnetIds="subnet-0a"))
+        with pytest.raises(ValueError, match=r"SubnetIds must name at least one value"):
+            handler.lambda_handler(_subnet_event("Create", SubnetIds=[" ", ""]))
+        with pytest.raises(ValueError, match=r"InstanceTypes must name at least one value"):
+            handler.lambda_handler(_subnet_event("Create", InstanceTypes=[]))
+        with pytest.raises(ValueError, match=r"Region is required"):
+            handler.lambda_handler(_subnet_event("Create", Region=" "))
+
+    def test_the_node_group_label_defaults_and_types_are_deduplicated(
+        self, handler: ModuleType, clients: _Clients
+    ) -> None:
+        _expect_describe_subnets(clients, _SUBNETS)
+        _expect_offerings(
+            clients,
+            [("c6i.large", zone) for zone in _SUBNETS.values()],
+            types=["c6i.large"],
+        )
+
+        response = handler.lambda_handler(
+            _subnet_event("Create", NodeGroup="", InstanceTypes=["c6i.large", " c6i.large ", ""])
+        )
+
+        assert response["PhysicalResourceId"] == "gco-pcs-subnets-node-group"
+        assert response["Data"]["SubnetIds"] == list(_SUBNETS)
+
+    def test_delete_is_a_no_op(self, handler: ModuleType) -> None:
+        assert handler.lambda_handler(
+            {**_subnet_event("Delete"), "PhysicalResourceId": "gco-pcs-subnets-gco-compute"}
+        ) == {"PhysicalResourceId": "gco-pcs-subnets-gco-compute"}
+
+    def test_ec2_errors_propagate(self, handler: ModuleType, clients: _Clients) -> None:
+        clients.ec2_stub.add_client_error(
+            "describe_subnets",
+            service_error_code="UnauthorizedOperation",
+            expected_params={"SubnetIds": list(_SUBNETS)},
+        )
+
+        with pytest.raises(handler.ClientError):
+            handler.lambda_handler(_subnet_event("Create"))
+
+    def test_odd_documents_are_skipped_by_the_helpers(self, handler: ModuleType) -> None:
+        class _Pages:
+            def __init__(self, pages: list[dict[str, Any]]) -> None:
+                self.pages = pages
+
+            def paginate(self, **_kwargs: Any) -> list[dict[str, Any]]:
+                return self.pages
+
+        class _Ec2:
+            def __init__(self, pages: dict[str, list[dict[str, Any]]]) -> None:
+                self.pages = pages
+
+            def get_paginator(self, name: str) -> _Pages:
+                return _Pages(self.pages[name])
+
+        ec2 = _Ec2(
+            {
+                "describe_subnets": [
+                    {"Subnets": [{"SubnetId": "subnet-0a", "AvailabilityZone": "us-east-1a"}]},
+                    {"Subnets": [{"SubnetId": "", "AvailabilityZone": "us-east-1b"}, {}]},
+                    {},
+                ],
+                "describe_instance_type_offerings": [
+                    {"InstanceTypeOfferings": [{"InstanceType": "c6i.large", "Location": ""}]},
+                    {"InstanceTypeOfferings": [{"Location": "us-east-1a"}]},
+                    {},
+                ],
+            }
+        )
+        assert handler.subnet_zones(ec2, ["subnet-0a"]) == {"subnet-0a": "us-east-1a"}
+        assert handler.offered_types_by_zone(ec2, ["c6i.large"]) == {}
