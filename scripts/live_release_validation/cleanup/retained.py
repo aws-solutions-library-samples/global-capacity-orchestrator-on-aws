@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import time
+from datetime import datetime
 from typing import Any
 
 from botocore.exceptions import ClientError
@@ -18,6 +20,8 @@ from ..cleanup.transaction_search import (
     _restore_transaction_search,
 )
 from ..constants import (
+    _KMS_DELETION_DATE_POLL_SECONDS,
+    _KMS_DELETION_DATE_REREADS,
     _KMS_PENDING_WINDOW_DAYS,
     _RUN_STACK_TAG,
     _LogGroupCleanupError,
@@ -27,6 +31,37 @@ from ..ownership.kms import (
     _kms_tags,
     _validated_owned_kms_identity,
 )
+
+
+def _pending_deletion_date(kms: Any, key_id: str, arn: str, metadata: dict[str, Any]) -> datetime:
+    """Return the deletion date of a key already observed in ``PendingDeletion``.
+
+    ``DescribeKey`` is eventually consistent. In run
+    ``pr496-release-799cc96b-20261030T163054Z`` a key CloudFormation had just
+    scheduled for deletion read ``PendingDeletion`` with no ``DeletionDate``,
+    which failed the whole retained sweep on the first destroy attempt; the
+    second attempt, four minutes later, saw the date. Re-read the key on a
+    short, bounded schedule before giving up, and keep refusing a key that
+    leaves ``PendingDeletion`` meanwhile.
+    """
+    for reread in range(_KMS_DELETION_DATE_REREADS + 1):
+        deletion_date = metadata.get("DeletionDate")
+        if isinstance(deletion_date, datetime):
+            return deletion_date
+        if reread < _KMS_DELETION_DATE_REREADS:
+            time.sleep(_KMS_DELETION_DATE_POLL_SECONDS)
+            metadata = kms.describe_key(KeyId=key_id).get("KeyMetadata", {})
+            state = str(metadata.get("KeyState") or "")
+            if state != "PendingDeletion":
+                raise RuntimeError(
+                    f"KMS key {arn} left PendingDeletion while its deletion date was awaited; "
+                    f"found {state}"
+                )
+    raise RuntimeError(
+        "Pending-deletion KMS key omitted its deletion date after "
+        f"{_KMS_DELETION_DATE_REREADS} re-reads over "
+        f"{_KMS_DELETION_DATE_REREADS * _KMS_DELETION_DATE_POLL_SECONDS} s: {arn}"
+    )
 
 
 def _schedule_retained_kms_keys(ctx: RunContext) -> dict[str, Any]:
@@ -79,11 +114,9 @@ def _schedule_retained_kms_keys(ctx: RunContext) -> dict[str, Any]:
             raise RuntimeError(
                 f"Expected {cleanup_policy} KMS key {arn} to be PendingDeletion; found {state}"
             )
-        deletion_date = metadata.get("DeletionDate")
+        deletion_date = _pending_deletion_date(kms, key_id, arn, metadata)
         record["scheduled"] = True
-        record["deletion_date"] = deletion_date.isoformat() if deletion_date is not None else None
-        if not record["deletion_date"]:
-            raise RuntimeError(f"Pending-deletion KMS key omitted its deletion date: {arn}")
+        record["deletion_date"] = deletion_date.isoformat()
         results.append(
             {
                 "arn": arn,

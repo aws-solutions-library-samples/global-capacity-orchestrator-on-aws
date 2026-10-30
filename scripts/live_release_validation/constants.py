@@ -53,6 +53,11 @@ _EKS_KEY_LOGICAL_ID = "EksSecretsEncryptionKey74AFFE88"
 
 
 _KMS_PENDING_WINDOW_DAYS = 7
+# ``DescribeKey`` is eventually consistent: a key can read ``PendingDeletion``
+# before its ``DeletionDate`` is visible. Re-read on this bounded schedule
+# (6 x 10 s) before treating the missing date as a failure.
+_KMS_DELETION_DATE_REREADS = 6
+_KMS_DELETION_DATE_POLL_SECONDS = 10
 
 
 _LOG_CLEANUP_TOKEN_TAG = "GcoLiveValidationCleanupToken"  # nosec B105  # AWS tag key, not a secret

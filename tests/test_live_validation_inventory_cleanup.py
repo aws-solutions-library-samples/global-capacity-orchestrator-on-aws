@@ -2941,11 +2941,77 @@ class TestRetainedKmsScheduling:
             self._schedule(ctx)
         kms.schedule_key_deletion.assert_not_called()
 
-        ctx, _kms = self._environment(
-            records=[self._record()], states=["PendingDeletion"], deletion_date=None
-        )
-        with pytest.raises(RuntimeError, match="omitted its deletion date"):
+    # DescribeKey is eventually consistent: run pr496-release-799cc96b-20261030T163054Z
+    # read a key CloudFormation had just scheduled as PendingDeletion with no
+    # DeletionDate, and the whole retained sweep failed on the first destroy attempt.
+
+    def _metadata(self, state: str, deletion_date: datetime | None) -> dict[str, Any]:
+        return {"KeyMetadata": {"Arn": self._ARN, "KeyState": state, "DeletionDate": deletion_date}}
+
+    def test_deletion_date_missing_on_first_read_is_reread_on_the_bounded_schedule(
+        self,
+    ) -> None:
+        record = self._record("cloudformation-delete")
+        ctx, kms = self._environment(records=[record], states=[])
+        kms.describe_key.side_effect = [
+            self._metadata("PendingDeletion", None),
+            self._metadata("PendingDeletion", None),
+            self._metadata("PendingDeletion", _PUSHED_AT),
+        ]
+
+        with patch.object(cleanup_retained, "time") as clock:
+            result = self._schedule(ctx)
+
+        assert result["keys"] == [
+            {
+                "arn": self._ARN,
+                "state": "PendingDeletion",
+                "cleanup_policy": "cloudformation-delete",
+                "deletion_date": _PUSHED_AT.isoformat(),
+            }
+        ]
+        assert record["deletion_date"] == _PUSHED_AT.isoformat()
+        assert kms.describe_key.call_count == 3
+        assert clock.sleep.call_args_list == [
+            ((constants._KMS_DELETION_DATE_POLL_SECONDS,),),
+            ((constants._KMS_DELETION_DATE_POLL_SECONDS,),),
+        ]
+        kms.schedule_key_deletion.assert_not_called()
+
+    def test_deletion_date_still_missing_after_every_reread_fails_the_sweep(self) -> None:
+        ctx, kms = self._environment(records=[self._record()], states=[])
+        rereads = constants._KMS_DELETION_DATE_REREADS
+        kms.describe_key.side_effect = [self._metadata("PendingDeletion", None)] * (rereads + 1)
+
+        with (
+            patch.object(cleanup_retained, "time") as clock,
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    f"omitted its deletion date after {rereads} re-reads over "
+                    f"{rereads * constants._KMS_DELETION_DATE_POLL_SECONDS} s"
+                ),
+            ),
+        ):
             self._schedule(ctx)
+
+        assert kms.describe_key.call_count == rereads + 1
+        assert clock.sleep.call_count == rereads
+
+    def test_key_leaving_pending_deletion_during_the_rereads_is_refused(self) -> None:
+        ctx, kms = self._environment(records=[self._record()], states=[])
+        kms.describe_key.side_effect = [
+            self._metadata("PendingDeletion", None),
+            self._metadata("Disabled", None),
+        ]
+
+        with (
+            patch.object(cleanup_retained, "time"),
+            pytest.raises(RuntimeError, match=r"left PendingDeletion .* found Disabled"),
+        ):
+            self._schedule(ctx)
+
+        assert kms.describe_key.call_count == 2
 
 
 class TestRetainedResourceCleanup:
