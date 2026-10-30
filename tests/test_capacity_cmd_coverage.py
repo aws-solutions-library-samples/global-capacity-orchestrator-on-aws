@@ -282,7 +282,16 @@ class TestCapacityCmdReserve:
             cli, ["capacity", "reserve", "-o", "cb-123", "-r", "us-east-1", "--dry-run"]
         )
         assert result.exit_code == 0
-        assert "Dry run passed" in result.output
+        # EC2's dry run passes for a well-formed offering id that does not
+        # exist, so the output says what was checked and what was not.
+        assert (
+            "Dry run passed — the request is well-formed and you are authorized to purchase"
+            in result.output
+        )
+        assert "Offering: cb-123" in result.output
+        assert "does not check that the offering exists or is still for sale" in result.output
+        assert "gco capacity reserve -o cb-123 -r us-east-1" in result.output
+        assert "valid and purchasable" not in result.output
 
     @patch("cli.commands.capacity_cmd.get_capacity_checker")
     @patch("cli.commands.capacity_cmd.get_output_formatter")
@@ -440,7 +449,91 @@ class TestCapacityCmdCreateReservation:
             ],
         )
         assert result.exit_code == 0
-        assert "Dry run passed" in result.output
+        assert (
+            "Dry run passed — the request is well-formed and you are authorized to create it"
+            in result.output
+        )
+        assert "does not check the Availability Zone or whether capacity" in result.output
+        # Defaults are not repeated in the hint.
+        assert (
+            "    gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2\n"
+            in result.output
+        )
+        assert "reservation parameters are valid" not in result.output
+
+    @patch("cli.commands.capacity_cmd.get_capacity_checker")
+    @patch("cli.commands.capacity_cmd.get_output_formatter")
+    def test_create_dry_run_hint_repeats_every_non_default_option(
+        self, mock_fmt_fn, mock_checker_fn
+    ):
+        # The hint used to show only -i/-r/-z/-c, so following it after a
+        # targeted, dated, dedicated, EBS-optimized, Windows dry run would have
+        # created an open, unlimited, shared-tenancy Linux reservation.
+        from cli.main import cli
+
+        mock_fmt_fn.return_value = MagicMock()
+        mock_checker_fn.return_value.create_capacity_reservation.return_value = {
+            "success": True,
+            "dry_run": True,
+            "instance_type": "p6-b200.48xlarge",
+            "availability_zone": "us-east-1a",
+            "instance_count": 4,
+        }
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "capacity",
+                "create-reservation",
+                "-i",
+                "p6-b200",
+                "-r",
+                "us-east-1",
+                "-z",
+                "us-east-1a",
+                "-c",
+                "4",
+                "--platform",
+                "Windows",
+                "--tenancy",
+                "dedicated",
+                "--match-criteria",
+                "targeted",
+                "--end-date",
+                "2026-08-01T11:30:00Z",
+                "--ebs-optimized",
+                "--dry-run",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert (
+            "    gco capacity create-reservation -i p6-b200.48xlarge -r us-east-1 -z us-east-1a "
+            "-c 4 --platform Windows --tenancy dedicated --match-criteria targeted "
+            "--end-date 2026-08-01T11:30:00Z --ebs-optimized\n"
+        ) in result.output
+        call = mock_checker_fn.return_value.create_capacity_reservation.call_args
+        assert call.kwargs["instance_match_criteria"] == "targeted"
+        assert call.kwargs["end_date"] == "2026-08-01T11:30:00Z"
+
+    def test_create_reservation_command_quotes_shell_metacharacters(self):
+        from cli.commands.capacity_cmd import _create_reservation_command
+
+        command = _create_reservation_command(
+            instance_type="p5.48xlarge",
+            region="us-east-1",
+            availability_zone="us-east-1a",
+            count=1,
+            platform="Red Hat Enterprise Linux",
+            tenancy="default",
+            match_criteria="open",
+            end_date=None,
+            ebs_optimized=False,
+        )
+        assert command == (
+            "gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 1 "
+            "--platform 'Red Hat Enterprise Linux'"
+        )
 
     @patch("cli.commands.capacity_cmd.get_capacity_checker")
     @patch("cli.commands.capacity_cmd.get_output_formatter")
@@ -527,7 +620,11 @@ class TestCapacityCmdCancelReservation:
             cli, ["capacity", "cancel-reservation", "-o", "cr-abc", "-r", "us-east-1", "--dry-run"]
         )
         assert result.exit_code == 0
-        assert "can be cancelled" in result.output
+        # EC2's dry run answers DryRunOperation for a reservation id that does
+        # not exist, so the output claims only what it proved.
+        assert "Dry run passed — you are authorized to cancel reservations" in result.output
+        assert "did not check that cr-abc exists" in result.output
+        assert "can be cancelled" not in result.output
 
     @patch("cli.commands.capacity_cmd.get_capacity_checker")
     @patch("cli.commands.capacity_cmd.get_output_formatter")

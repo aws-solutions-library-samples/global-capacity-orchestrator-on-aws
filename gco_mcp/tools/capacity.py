@@ -232,7 +232,12 @@ def reservation_check(
         block_duration: Capacity Block duration in hours (default 24).
         block_duration_days: Capacity Block duration in days (overrides hours).
         earliest_start: Earliest block start date (YYYY-MM-DD or ISO datetime).
-        latest_start: Latest block start date (YYYY-MM-DD or ISO datetime).
+        latest_start: Latest block start date (YYYY-MM-DD or ISO datetime); a
+            date means the whole of that day.
+
+    A Capacity Block request EC2 refuses (an instance count it does not sell,
+    a start window it cannot serve) is returned as an error with EC2's
+    reason rather than as "no offerings".
     """
     args = ["capacity", "reservation-check", "-i", instance_type, "-c", str(count)]
     for r in regions or []:
@@ -289,8 +294,14 @@ def find_capacity_blocks(
         min_duration_days / max_duration_days: Duration range bounds in days.
         min_duration_hours / max_duration_hours: Duration range bounds in hours.
         earliest_start: Earliest block start (YYYY-MM-DD or ISO datetime).
-        latest_start: Latest block start (YYYY-MM-DD or ISO datetime).
+        latest_start: Latest block start (YYYY-MM-DD or ISO datetime); a date
+            means the whole of that day.
         find_longest: Sweep the duration ladder and surface the longest block.
+
+    A probe EC2 refuses (an instance count it does not sell, a start window
+    it cannot serve) is listed in the report's ``rejected_probes`` and named
+    in ``recommendation``; when EC2 refuses every probe the tool returns an
+    error with EC2's reason instead of an empty report.
     """
     args = ["capacity", "find-blocks", "-i", instance_type]
     for r in regions or []:
@@ -447,13 +458,17 @@ if is_enabled(FLAG_CAPACITY_PURCHASE):
     ) -> str:
         """Purchase a Capacity Block offering by its ID.
 
-        Use reservation_check first to find available offerings and their IDs,
-        then purchase with this tool. Use dry_run=True to validate without purchasing.
+        Use find_capacity_blocks or reservation_check first to find available
+        offerings and their IDs, then purchase with this tool. dry_run=True
+        checks the request and the caller's permission without purchasing;
+        EC2's dry run does not look the offering up, so it cannot tell whether
+        the offering still exists. Only the purchase itself does.
 
         Args:
-            offering_id: Capacity Block offering ID (cb-xxx) from reservation_check.
+            offering_id: Capacity Block offering ID (cb-xxx) from a recent search.
             region: AWS region where the offering exists.
-            dry_run: If True, validate the offering without purchasing (no cost).
+            dry_run: If True, check the request and permission without
+                purchasing (no cost). Does not verify the offering exists.
         """
         args = ["capacity", "reserve", "-o", offering_id, "-r", region]
         if dry_run:
@@ -478,7 +493,9 @@ if is_enabled(FLAG_CAPACITY_PURCHASE):
 
         The ODCR counterpart to reserve_capacity. Reserves On-Demand capacity for
         an instance type in a specific AZ. Charges accrue for the reserved
-        capacity until it is cancelled — use dry_run=True to validate first.
+        capacity until it is cancelled — use dry_run=True first to check the
+        request and the caller's permission. EC2's dry run does not check
+        capacity or the Availability Zone; only the real request does.
 
         Args:
             instance_type: EC2 instance type or alias (e.g. p5.48xlarge, p6-b200).
@@ -490,7 +507,8 @@ if is_enabled(FLAG_CAPACITY_PURCHASE):
             match_criteria: "open" or "targeted".
             end_date: Optional end date (YYYY-MM-DD or ISO); omit for unlimited.
             ebs_optimized: Reserve EBS-optimized capacity.
-            dry_run: If True, validate without creating (no cost).
+            dry_run: If True, check the request and permission without creating
+                (no cost). Does not check capacity or the AZ.
         """
         args = [
             "capacity",
@@ -541,7 +559,8 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
         Args:
             reservation_id: Capacity Reservation ID (cr-xxx) to cancel.
             region: AWS region where the reservation exists.
-            dry_run: If True, validate the cancellation without cancelling.
+            dry_run: If True, check the caller's permission without cancelling.
+                EC2's dry run does not verify the reservation exists.
         """
         args = ["capacity", "cancel-reservation", "-o", reservation_id, "-r", region, "-y"]
         if dry_run:

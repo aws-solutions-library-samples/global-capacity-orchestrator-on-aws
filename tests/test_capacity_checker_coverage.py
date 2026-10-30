@@ -362,6 +362,46 @@ def test_get_capacity_block_trend_error_returns_zero():
     assert checker.get_capacity_block_trend("p5.48xlarge", "us-east-1") == 0.0
 
 
+def test_get_capacity_block_trend_rejected_window_is_zero_with_a_debug_line(caplog):
+    # EC2 refusing the 182-day window is the caller's parameters, not a
+    # capacity signal. The trend stays a best-effort 0.0 for the many Regions
+    # it is probed in, but the refusal is visible at debug level instead of
+    # being filed silently with the unsupported-Region codes.
+    import logging
+
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    mock_ec2.describe_capacity_block_offerings.side_effect = ClientError(
+        {
+            "Error": {
+                "Code": "InvalidParameterValue",
+                "Message": "The end date is not valid. End date must not be later than Sun Nov 08.",
+            }
+        },
+        "DescribeCapacityBlockOfferings",
+    )
+    checker._session.client = MagicMock(return_value=mock_ec2)
+    with caplog.at_level(logging.DEBUG, logger="cli.capacity.checker"):
+        assert checker.get_capacity_block_trend("p5.48xlarge", "us-east-1") == 0.0
+    records = [r for r in caplog.records if "trend query rejected" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    assert "The end date is not valid" in records[0].getMessage()
+
+
+def test_get_capacity_block_trend_other_error_warns():
+    checker = _make_checker()
+    mock_ec2 = MagicMock()
+    mock_ec2.describe_capacity_block_offerings.side_effect = ClientError(
+        {"Error": {"Code": "InternalError", "Message": "boom"}}, "DescribeCapacityBlockOfferings"
+    )
+    checker._session.client = MagicMock(return_value=mock_ec2)
+    with patch("cli.capacity.checker.logger") as mock_logger:
+        assert checker.get_capacity_block_trend("p5.48xlarge", "us-east-1") == 0.0
+    mock_logger.warning.assert_called_once()
+    assert mock_logger.warning.call_args.args[0].startswith("Capacity block trend query failed")
+
+
 def test_get_capacity_block_trend_empty_offerings_returns_zero():
     checker = _make_checker()
     mock_ec2 = MagicMock()

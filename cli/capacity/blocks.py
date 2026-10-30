@@ -18,7 +18,8 @@ validation that needs AWS live in ``checker.py``.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -140,17 +141,54 @@ def hours_to_days(hours: int | None) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Rejected probes
+# ---------------------------------------------------------------------------
+
+#: EC2 stamps the request time into some rejection messages ("End date must not
+#: be later than Sun Nov 08 17:07:06 UTC 2026"), so probes refused for one
+#: reason differ by a few seconds of text. Grouping ignores the time of day.
+_TIME_OF_DAY = re.compile(r"\b\d{1,2}:\d{2}:\d{2}\b")
+
+
+def group_rejections(rejected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold a sweep's rejected probes into one row per distinct EC2 reason.
+
+    Each input row carries ``region``, ``duration_hours``, ``error_code`` and
+    ``error`` (EC2's message). Each output row carries ``error_code``, the
+    first ``error`` seen for that reason, and ``probes``: the refused probes
+    as ``"<region> <days>d"`` labels in input order.
+    """
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rejected:
+        code = str(row.get("error_code") or "")
+        message = str(row.get("error") or "")
+        key = (code, _TIME_OF_DAY.sub("", message))
+        days = hours_to_days(int(row.get("duration_hours") or 0)) or 0
+        label = f"{row.get('region')} {days:g}d"
+        group = grouped.setdefault(key, {"error_code": code, "error": message, "probes": []})
+        group["probes"].append(label)
+    return list(grouped.values())
+
+
+# ---------------------------------------------------------------------------
 # Date parsing
 # ---------------------------------------------------------------------------
 
 
-def parse_date_input(value: str | datetime | None) -> datetime | None:
+def parse_date_input(
+    value: str | datetime | None, *, through_end_of_day: bool = False
+) -> datetime | None:
     """Parse a date/datetime input into a timezone-aware UTC ``datetime``.
 
     Accepts ``None`` (passthrough), a ``datetime`` (naive values are assumed
     UTC), an ISO-8601 string (``2026-07-01`` or ``2026-07-01T11:30:00Z``), and
     tolerates a trailing ``Z``. Raises ``ValueError`` with a friendly message on
     anything else so the CLI can surface a clear error.
+
+    ``through_end_of_day`` is for the *latest* bound of a window: a date-only
+    string then means the whole of that day (``2026-07-10`` becomes
+    ``2026-07-10T23:59:59Z``), so a block starting at 11:30 UTC on the last
+    day asked for is inside the window. Timestamps are left exactly as given.
     """
     if value is None:
         return None
@@ -166,6 +204,8 @@ def parse_date_input(value: str | datetime | None) -> datetime | None:
             f"Invalid date {value!r}; use YYYY-MM-DD or an ISO-8601 timestamp "
             "(e.g. 2026-07-01 or 2026-07-01T11:30:00Z)."
         ) from exc
+    if through_end_of_day and re.fullmatch(r"\d{4}-?\d{2}-?\d{2}", text):
+        parsed += timedelta(days=1, seconds=-1)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 

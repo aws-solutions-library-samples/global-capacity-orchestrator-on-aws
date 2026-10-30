@@ -55,10 +55,24 @@ from .commands import (
     webhooks,
 )
 from .config import get_config
+from .log_redaction import CredentialRedactionFilter
 from .output import StructuredOutputGroup
 
+#: The AWS SDK and HTTP-stack loggers the CLI pins. At DEBUG they print
+#: material a user must never paste anywhere: the SigV4 CanonicalRequest with
+#: the session token, the Authorization signature, and (botocore.parsers)
+#: every response body, STS credentials included. ``-v`` therefore stops at
+#: INFO for them; DEBUG is the explicit ``--debug-aws`` (see cli.log_redaction).
+_SDK_LOGGERS = ("botocore", "boto3", "urllib3", "s3transfer")
+#: The Kubernetes client logs response bodies (Secret data included) at DEBUG
+#: and is never raised past INFO.
+_KUBERNETES_LOGGER = "kubernetes"
+#: botocore's response parser logs every response body at DEBUG; it stays at
+#: INFO even under ``--debug-aws``.
+_RESPONSE_BODY_LOGGER = "botocore.parsers"
 
-def _configure_cli_logging(verbose: bool) -> None:
+
+def _configure_cli_logging(verbose: bool, debug_aws: bool = False) -> None:
     """
     Configure logging for the CLI.
 
@@ -69,8 +83,12 @@ def _configure_cli_logging(verbose: bool) -> None:
     clutter normal output.
 
     ``--verbose`` / ``-v`` (or ``GCO_LOG_LEVEL=DEBUG``) turns on DEBUG for
-    everything, which is the right escape hatch when something is actually
-    wrong and you need to see what the SDK is doing.
+    GCO's own loggers. ``-v`` also lets the SDK loggers speak at INFO (which
+    credential provider was used, connection retries) but never DEBUG: SDK
+    debug output carries signing material and credentials, so it is the
+    separate, flag-only ``--debug-aws``, which raises the SDK loggers to
+    DEBUG while keeping ``botocore.parsers`` (response bodies) at INFO. In
+    every mode the root handler carries a ``CredentialRedactionFilter``.
 
     This function also calls ``logging.basicConfig`` with ``force=True`` so
     it overrides any ``basicConfig`` that might have been called at import
@@ -89,13 +107,31 @@ def _configure_cli_logging(verbose: bool) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         force=True,
     )
+    redaction = CredentialRedactionFilter()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(redaction)
 
-    # Pin noisy third-party loggers even when we're at DEBUG, unless the
-    # user explicitly asked for verbose output. This keeps ``-v`` useful
-    # for seeing OUR logs without being drowned by boto's retry chatter.
-    third_party_level = logging.DEBUG if verbose else logging.WARNING
-    for name in ("botocore", "boto3", "urllib3", "s3transfer", "kubernetes"):
+    # Pin the third-party loggers even when we're at DEBUG. ``-v`` opens them
+    # to INFO so the user sees which credentials were found and whether
+    # requests are being retried, without boto's per-request debug chatter
+    # (and without the credentials inside it).
+    third_party_level = logging.INFO if verbose else logging.WARNING
+    for name in (*_SDK_LOGGERS, _KUBERNETES_LOGGER):
         logging.getLogger(name).setLevel(third_party_level)
+    if debug_aws:
+        for name in _SDK_LOGGERS:
+            logging.getLogger(name).setLevel(logging.DEBUG)
+    # Response bodies are never logged: sts:AssumeRole answers with a full
+    # credential set, secretsmanager:GetSecretValue with the secret.
+    logging.getLogger(_RESPONSE_BODY_LOGGER).setLevel(logging.INFO if debug_aws else logging.NOTSET)
+
+
+#: Printed to stderr whenever ``--debug-aws`` is on, before any SDK call.
+_DEBUG_AWS_NOTICE = (
+    "AWS SDK debug logging is on: request parameters and SigV4 signing details go to "
+    "stderr. Signatures, session tokens and credential fields are redacted and response "
+    "bodies are never logged, but treat this output as sensitive."
+)
 
 
 @click.group(cls=StructuredOutputGroup)
@@ -110,7 +146,22 @@ def _configure_cli_logging(verbose: bool) -> None:
     default=None,
     help="Output format (defaults to the configured value)",
 )
-@click.option("--verbose", "-v", is_flag=True, default=None, help="Verbose output")
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=None,
+    help="Verbose output: GCO debug logging plus AWS SDK info messages",
+)
+@click.option(
+    "--debug-aws",
+    is_flag=True,
+    default=False,
+    help=(
+        "Log AWS SDK requests and SigV4 signing details to stderr (credentials redacted, "
+        "response bodies never logged). Flag only: no config or environment equivalent."
+    ),
+)
 @click.option(
     "--regional-api/--global-api",
     default=None,
@@ -123,6 +174,7 @@ def cli(
     default_region: str | None,
     output_format: str | None,
     verbose: bool | None,
+    debug_aws: bool,
     regional_api: bool | None,
 ) -> None:
     """GCO CLI - Manage multi-region EKS clusters for AI/ML workloads."""
@@ -137,7 +189,12 @@ def cli(
     if regional_api is not None:
         config.use_regional_api = regional_api
 
-    _configure_cli_logging(config.verbose)
+    # debug_aws is deliberately not a config or environment setting: SDK debug
+    # output is a per-invocation decision, and the MCP server's CLI runner
+    # (which returns CLI stderr to its client) inherits the host environment.
+    _configure_cli_logging(config.verbose, debug_aws=debug_aws)
+    if debug_aws:
+        click.echo(_DEBUG_AWS_NOTICE, err=True)
     ctx.obj = config
 
 

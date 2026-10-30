@@ -497,6 +497,15 @@ class TestPurchaseCapacityBlock:
             assert result["success"] is True
             assert result["dry_run"] is True
             assert result["offering_id"] == "cb-0123456789abcdef0"
+            # EC2 answers DryRunOperation for a well-formed offering id that
+            # does not exist (verified live: cb-ffffffffffffffff0), so the
+            # message claims only what a dry run proves.
+            assert result["message"] == (
+                "Dry run passed: the request is well-formed and you are authorized to purchase. "
+                "EC2 did not check that the offering exists or is still for sale; only the "
+                "purchase does."
+            )
+            assert "purchasable" not in result["message"]
 
     @patch("cli.capacity.checker.get_config")
     def test_purchase_dry_run_failure(self, mock_config):
@@ -772,6 +781,13 @@ class TestCreateCapacityReservation:
             assert result["dry_run"] is True
             assert result["instance_type"] == "p5.48xlarge"
             assert result["instance_count"] == 2
+            # EC2's dry run accepted a nonexistent Availability Zone live
+            # (us-east-1z), so the message does not call the parameters valid.
+            assert result["message"] == (
+                "Dry run passed: the request is well-formed and you are authorized to create "
+                "it. EC2 did not check the Availability Zone or whether capacity is available; "
+                "only the real request does."
+            )
 
     @patch("cli.capacity.checker.get_config")
     def test_create_real_success(self, mock_config):
@@ -928,6 +944,11 @@ class TestCancelCapacityReservation:
 
             assert result["success"] is True
             assert result["dry_run"] is True
+            # EC2 answers DryRunOperation for a reservation id that does not exist.
+            assert result["message"] == (
+                "Dry run passed: you are authorized to cancel reservations. EC2 did not check "
+                "that this reservation exists; only the real request does."
+            )
 
     @patch("cli.capacity.checker.get_config")
     def test_cancel_real_success(self, mock_config):
