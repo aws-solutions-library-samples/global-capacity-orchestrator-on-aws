@@ -615,7 +615,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 
 | File | Description |
 |------|-------------|
-| `conftest.py` | Shared pytest fixtures and configuration |
+| `conftest.py` | Shared pytest fixtures and configuration. Also routes every `aws_cdk.App()` built without an `outdir` into a session-owned temp root and reaps each test's assemblies in the background: aws-cdk-lib otherwise leaves one `$TMPDIR/cdk.outXXXXXX` per App (~150 MB once synthesized) behind forever, which cost a full local run about 25 GiB |
 | `_lambda_imports.py` | `load_lambda_module()` helper for importing Lambda handler modules under unique `sys.modules` names. See the [Lambda Handler Import Helper](#lambda-handler-import-helper) section above. |
 | `_auth.py` | Shared cache-state and signature-verifier isolation for API tests whose subject is not authentication. |
 | `_cel.py` | How the admission-policy suites (`test_internal_tls_manifests.py`, `test_tenant_write_fence.py`) run the shipped policies' CEL: compiled and evaluated by cel-expr-python, the CEL project's binding of cel-cpp (in the `test` extra), with CEL's standard library and the request roots declared. Each policy variable compiles against the ones defined before it and keeps its own value or error for the request, as in the API server. A forward or unknown reference, a root the tests do not bind or a function outside the standard library does not compile, and any evaluation error fails the test. |
