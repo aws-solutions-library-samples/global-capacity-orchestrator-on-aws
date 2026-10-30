@@ -405,10 +405,41 @@ class TestManaged:
         assert managed["slurmdbd_custom_settings"] == {"PurgeJobAfter": "90days"}
         assert managed["cgroup_custom_settings"] == {"ConstrainCores": "yes"}
 
+    def test_accounting_keeps_the_job_comment(self) -> None:
+        """slurmdbd stores the API's ``gco:<caller>`` comment only under job_comment.
+
+        The first live run of the backend: the accounting record of the probe
+        job came back ``COMPLETED`` with an empty comment, because the cluster
+        had no ``AccountingStoreFlags``; Slinky has set the same flag since
+        its accounting shipped.
+        """
+        # Default block: accounting on, so the flag is added on its own.
+        bare = _validate(_managed())
+        assert pc.managed_slurm_custom_settings(bare) == {"AccountingStoreFlags": "job_comment"}
+        # Merged into the operator's flags without duplicating itself.
+        merged = _validate(
+            _managed(slurm_custom_settings={"AccountingStoreFlags": "job_env, job_comment"})
+        )
+        assert pc.managed_slurm_custom_settings(merged) == {
+            "AccountingStoreFlags": "job_env,job_comment"
+        }
+        appended = _validate(_managed(slurm_custom_settings={"AccountingStoreFlags": "job_env"}))
+        assert pc.managed_slurm_custom_settings(appended) == {
+            "AccountingStoreFlags": "job_env,job_comment"
+        }
+        # Accounting off: nothing to keep, the operator's settings untouched.
+        off = _validate(
+            _managed(accounting={"enabled": False}, slurm_custom_settings={"MaxJobCount": 20000})
+        )
+        assert pc.managed_slurm_custom_settings(off) == {"MaxJobCount": "20000"}
+
     def test_metrics_add_the_pcs_documented_slurm_settings(self) -> None:
-        # Off: the operator's settings, untouched.
+        # Off: the operator's settings plus the accounting flag only.
         plain = _validate(_managed(slurm_custom_settings={"MaxJobCount": 20000}))
-        assert pc.managed_slurm_custom_settings(plain) == {"MaxJobCount": "20000"}
+        assert pc.managed_slurm_custom_settings(plain) == {
+            "MaxJobCount": "20000",
+            "AccountingStoreFlags": "job_comment",
+        }
         assert not pc.metrics_enabled(plain)
         # On: MetricsType and the HTTP listener, merged into existing
         # CommunicationParameters without duplicating enable_http.
@@ -425,9 +456,10 @@ class TestManaged:
         assert pc.managed_slurm_custom_settings(config) == {
             "MaxJobCount": "20000",
             "CommunicationParameters": "block_null_hash,enable_http",
+            "AccountingStoreFlags": "job_comment",
             "MetricsType": "metrics/openmetrics",
         }
-        bare = _validate(_managed(metrics={"enabled": True}))
+        bare = _validate(_managed(metrics={"enabled": True}, accounting={"enabled": False}))
         assert pc.managed_slurm_custom_settings(bare) == {
             "MetricsType": "metrics/openmetrics",
             "CommunicationParameters": "enable_http",

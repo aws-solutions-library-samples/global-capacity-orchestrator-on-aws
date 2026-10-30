@@ -88,6 +88,13 @@ PCS_METRICS_SLURM_SETTINGS: dict[str, str] = {
     "MetricsType": "metrics/openmetrics",
     "CommunicationParameters": "enable_http",
 }
+#: With accounting on, slurmdbd keeps each job's ``comment`` (the API's
+#: caller attribution, ``gco:<caller>``) only under this flag; without it the
+#: accounting record's comment is empty and ``gco slurm accounting`` cannot
+#: say who submitted a job. The Slinky cluster sets the same flag
+#: (``gco/slurm_config.py``); the first live run of the PCS backend showed a
+#: ``COMPLETED`` record with no comment.
+PCS_ACCOUNTING_SLURM_SETTINGS: dict[str, str] = {"AccountingStoreFlags": "job_comment"}
 #: The Prometheus ``job`` label of the managed cluster's metrics scrape (the
 #: ``ScrapeConfig``'s ``jobName``); the PCS dashboard and alerts select on
 #: it, and the Slinky ones select on theirs, so the two clusters' ``slurm_*``
@@ -828,29 +835,40 @@ def _check_metrics_settings(settings: Mapping[str, str], path: str) -> None:
         )
 
 
+def _with_flag(settings: dict[str, str], parameter: str, flag: str) -> None:
+    """Merge ``flag`` into the comma-separated Slurm list ``settings[parameter]``."""
+    flags = [item.strip() for item in str(settings.get(parameter) or "").split(",") if item.strip()]
+    if flag not in flags:
+        flags.append(flag)
+    settings[parameter] = ",".join(flags)
+
+
 def managed_slurm_custom_settings(config: Mapping[str, Any]) -> dict[str, str]:
     """The cluster-level ``slurm.conf`` settings the managed cluster is created with.
 
-    The operator's ``managed.slurm_custom_settings`` plus, with
-    ``metrics.enabled``, the settings PCS documents for its Slurm metrics:
-    ``MetricsType`` set, and ``enable_http`` merged into whatever
-    ``CommunicationParameters`` the operator already lists (a comma-separated
-    Slurm parameter list), so a block that sets other communication flags
-    keeps them.
+    The operator's ``managed.slurm_custom_settings`` plus what the enabled
+    features need, each merged into whatever comma-separated list the
+    operator already has so a block that sets other flags keeps them:
+
+    * ``accounting.enabled``: ``job_comment`` in ``AccountingStoreFlags``,
+      so slurmdbd keeps the API's caller attribution on every record;
+    * ``metrics.enabled``: ``MetricsType`` set and ``enable_http`` in
+      ``CommunicationParameters``, the settings PCS documents for its Slurm
+      metrics.
     """
     managed = config["managed"]
     settings = dict(managed["slurm_custom_settings"])
-    if not managed["metrics"]["enabled"]:
-        return settings
-    settings["MetricsType"] = PCS_METRICS_SLURM_SETTINGS["MetricsType"]
-    flags = [
-        flag.strip()
-        for flag in str(settings.get("CommunicationParameters") or "").split(",")
-        if flag.strip()
-    ]
-    if PCS_METRICS_SLURM_SETTINGS["CommunicationParameters"] not in flags:
-        flags.append(PCS_METRICS_SLURM_SETTINGS["CommunicationParameters"])
-    settings["CommunicationParameters"] = ",".join(flags)
+    if managed["accounting"]["enabled"]:
+        _with_flag(
+            settings, "AccountingStoreFlags", PCS_ACCOUNTING_SLURM_SETTINGS["AccountingStoreFlags"]
+        )
+    if managed["metrics"]["enabled"]:
+        settings["MetricsType"] = PCS_METRICS_SLURM_SETTINGS["MetricsType"]
+        _with_flag(
+            settings,
+            "CommunicationParameters",
+            PCS_METRICS_SLURM_SETTINGS["CommunicationParameters"],
+        )
     return settings
 
 

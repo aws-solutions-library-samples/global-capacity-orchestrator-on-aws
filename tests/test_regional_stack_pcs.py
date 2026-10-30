@@ -543,14 +543,17 @@ class TestManagedModeCluster:
         assert slurm["SlurmRest"] == {"Mode": "STANDARD"}
         assert slurm["Accounting"] == {"Mode": "STANDARD", "DefaultPurgeTimeInDays": -1}
         assert slurm["ScaleDownIdleTimeInSeconds"] == 300
-        # The operator's settings plus the two PCS documents for its metrics,
-        # enable_http merged into the operator's CommunicationParameters.
+        # The operator's settings, the accounting flag that keeps the API's
+        # caller attribution in slurmdbd, and the two PCS documents for its
+        # metrics (enable_http merged into the operator's
+        # CommunicationParameters).
         assert slurm["SlurmCustomSettings"] == [
             {"ParameterName": "MaxJobCount", "ParameterValue": "20000"},
             {
                 "ParameterName": "CommunicationParameters",
                 "ParameterValue": "block_null_hash,enable_http",
             },
+            {"ParameterName": "AccountingStoreFlags", "ParameterValue": "job_comment"},
             {"ParameterName": "MetricsType", "ParameterValue": "metrics/openmetrics"},
         ]
         assert slurm["SlurmdbdCustomSettings"] == [

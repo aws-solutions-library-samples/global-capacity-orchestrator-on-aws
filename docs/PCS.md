@@ -216,7 +216,7 @@ Both backends give you Slurm 25/26 with `sbatch`/`srun`/`sacct`, accounting, aut
 | `cluster_name` | `null` | PCS cluster name; `null` = `<project_name>-pcs`. Changing it replaces the cluster |
 | `slurm_version` | `25.11` | `25.11` or `26.05` (both serve the OpenAPI version the API speaks) |
 | `size` | `SMALL` | `SMALL` (32 nodes / 256 jobs), `MEDIUM` (512 / 8192) or `LARGE` (2048 / 16384) |
-| `accounting.enabled` / `purge_days` | `true` / `30` | slurmdbd (`sacct`, `gco slurm accounting`); `-1` never purges |
+| `accounting.enabled` / `purge_days` | `true` / `30` | slurmdbd (`sacct`, `gco slurm accounting`); `-1` never purges. The cluster gets `AccountingStoreFlags=job_comment` (merged into any flags you set) so slurmdbd keeps the API's `gco:<caller>` attribution on every record |
 | `scale_down_idle_seconds` | `600` | Idle time before PCS scales a node group's instances down |
 | `storage.home` | `efs` | `/home` on the regional EFS through a PCS-only access point, or `none` |
 | `storage.scratch` | `auto` | `/scratch` on FSx for Lustre when the Region has it (`auto`), always (`fsx`) or never (`none`) |
