@@ -913,6 +913,33 @@ class TestManagedModeNodeGroups:
             k.startswith("FsxSecurityGroupfrom") and "PcsSecurityGroup" in k for k in depends_on
         )
 
+    def test_the_stack_owns_the_lifecycle_log_group(self, pcs_managed_full) -> None:
+        """``/aws/pcs/<cluster id>/lifecycle`` is the stack's, not the CloudWatch agent's.
+
+        The first live teardown left an untagged, never-expiring copy of this
+        group behind: the agent had created it (``logs:CreateLogGroup``) and
+        nothing owned it. The stack now creates it with the project tags, a
+        retention period and the log-group removal policy, every node group
+        depends on it (so it exists before the first node boots and goes
+        after the last one), and the role can no longer create log groups.
+        """
+        stack, resources = pcs_managed_full
+        [(log_group_id, log_group)] = [
+            (k, v)
+            for k, v in _of_type(resources, "AWS::Logs::LogGroup").items()
+            if k.startswith("PcsLifecycleLogGroup")
+        ]
+        [(cluster_id, _)] = _of_type(resources, "AWS::PCS::Cluster").items()
+        assert log_group["Properties"]["LogGroupName"] == {
+            "Fn::Join": ["", ["/aws/pcs/", {"Fn::GetAtt": [cluster_id, "Id"]}, "/lifecycle"]]
+        }
+        assert log_group["Properties"]["RetentionInDays"] == 30
+        assert log_group["DeletionPolicy"] == "Delete"
+        assert {"Key": "gco:project", "Value": "gco-test"} in log_group["Properties"]["Tags"]
+        assert stack.pcs.lifecycle_log_group is not None
+        for group in _of_type(resources, "AWS::PCS::ComputeNodeGroup").values():
+            assert log_group_id in group["DependsOn"]
+
 
 class TestManagedModeLaunchTemplates:
     def test_plain_groups_use_the_security_group_and_imdsv2(self, pcs_managed_full) -> None:
@@ -1220,8 +1247,9 @@ class TestManagedModeNodeRole:
         assert mount["Resource"] == {"Fn::GetAtt": [efs_id, "Arn"]}
         assert "elasticfilesystem:AccessPointArn" in mount["Condition"]["StringEquals"]
         logs = _by_sid(statements, "ForwardPcsLifecycleLogs")
+        # No CreateLogGroup: the stack owns the group, and a node still
+        # flushing during teardown must not bring an untagged copy back.
         assert logs["Action"] == [
-            "logs:CreateLogGroup",
             "logs:CreateLogStream",
             "logs:PutLogEvents",
             "logs:DescribeLogStreams",
@@ -1282,6 +1310,11 @@ class TestManagedModeMinimal:
         ] == ["/gco-jobs"]
         assert stack.pcs.home_access_point is None and stack.pcs.identity_home_asset is None
         assert stack.pcs.lifecycle_actions is None
+        # Lifecycle logs off: no log group of the stack's and no grant.
+        assert stack.pcs.lifecycle_log_group is None
+        assert not any(
+            k.startswith("PcsLifecycleLogGroup") for k in _of_type(resources, "AWS::Logs::LogGroup")
+        )
         statements = _statements(resources, "PcsNodeRole")
         assert _sids(statements) == {"ReadPcsLifecycleScripts"}
         [pcs_sg] = [

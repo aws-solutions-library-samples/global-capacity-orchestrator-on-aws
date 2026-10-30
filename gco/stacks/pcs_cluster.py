@@ -57,7 +57,16 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from aws_cdk import CfnOutput, CfnTag, CustomResource, Duration, RemovalPolicy, Stack, Token
+from aws_cdk import (
+    CfnOutput,
+    CfnTag,
+    CustomResource,
+    Duration,
+    RemovalPolicy,
+    Stack,
+    Tags,
+    Token,
+)
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_efs as efs
 from aws_cdk import aws_fsx as fsx
@@ -484,6 +493,8 @@ class PcsCluster(Construct):
         self.queues: dict[str, pcs.CfnQueue] = {}
         self.login_node_group: pcs.CfnComputeNodeGroup | None = None
         self.lifecycle_actions: pcs.CfnComputeNodeGroup.NodeLifecycleActionsProperty | None = None
+        #: The lifecycle log group the stack owns when ``lifecycle_logs`` is on.
+        self.lifecycle_log_group: logs.LogGroup | None = None
         self.removal_policy = RemovalPolicy.DESTROY
         self.home_on_efs = False
         self.scratch = "none"
@@ -954,6 +965,25 @@ class PcsCluster(Construct):
         if managed["lifecycle_logs"]["enabled"]:
             cluster_logical_id = self.stack.get_logical_id(self.cluster_resource)
             log_group = PCS_LIFECYCLE_LOG_GROUP.format(cluster_id=self.cluster_id)
+            # The stack owns the group the agent writes to: it carries the
+            # project tags, a retention period, and leaves with the stack. The
+            # agent-created alternative (the CloudWatch agent calls
+            # CreateLogGroup when the group is missing) is untagged, keeps
+            # its streams forever and survives `gco stacks destroy`; the
+            # first live teardown left one behind. Without CreateLogGroup in
+            # the role, a node still flushing during teardown cannot bring
+            # it back either.
+            self.lifecycle_log_group = logs.LogGroup(
+                self,
+                "LifecycleLogGroup",
+                log_group_name=log_group,
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=self.provider_log_group_removal_policy,
+            )
+            # The same ownership tags as the nodes and volumes, so the
+            # inventory claims the group however the app is tagged.
+            for key, value in self._tags().items():
+                Tags.of(self.lifecycle_log_group).add(key, value)
             log_group_arn = (
                 f"arn:{self.partition}:logs:{self.region}:{self.account}:log-group:{log_group}"
             )
@@ -962,7 +992,6 @@ class PcsCluster(Construct):
                     sid="ForwardPcsLifecycleLogs",
                     effect=iam.Effect.ALLOW,
                     actions=[
-                        "logs:CreateLogGroup",
                         "logs:CreateLogStream",
                         "logs:PutLogEvents",
                         "logs:DescribeLogStreams",
@@ -1380,6 +1409,10 @@ class PcsCluster(Construct):
         # node): the role's policies, the mount targets and the storage
         # security-group rules must all be in place by then.
         node_group.node.add_dependency(self.node_role)
+        if self.lifecycle_log_group is not None:
+            # Created before the first node boots; deleted only after every
+            # node group (and so every node) is gone.
+            node_group.node.add_dependency(self.lifecycle_log_group)
         if self.home_on_efs:
             assert self.efs_file_system is not None and self.efs_security_group is not None
             node_group.node.add_dependency(self.efs_file_system)
