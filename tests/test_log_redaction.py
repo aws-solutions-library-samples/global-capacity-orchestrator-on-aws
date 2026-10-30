@@ -293,7 +293,7 @@ class TestDebugAwsFlag:
 
 _STS_BODY = (
     '<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult>'
-    "<Credentials><AccessKeyId>ASIACANARYKEYID00001</AccessKeyId>"
+    "<Credentials><AccessKeyId>ASIAIOSFODNN7EXAMPLE</AccessKeyId>"
     f"<SecretAccessKey>{CANARY_SECRET}</SecretAccessKey>"
     f"<SessionToken>{CANARY_ASSUMED_TOKEN}</SessionToken>"
     "<Expiration>2099-01-01T00:00:00Z</Expiration></Credentials>"
