@@ -76,6 +76,7 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [Using Valkey in Jobs](#using-valkey-in-jobs)
 - [Configure Aurora pgvector](#configure-aurora-pgvector)
   - [Using Aurora pgvector in Jobs](#using-aurora-pgvector-in-jobs)
+- [Configure AWS PCS](#configure-aws-pcs)
 - [Configure the Vector Store](#configure-the-vector-store)
   - [Vector store or Aurora pgvector?](#vector-store-or-aurora-pgvector)
   - [Using the Vector Store in Jobs](#using-the-vector-store-in-jobs)
@@ -1445,6 +1446,7 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
 | [trust-manager](https://cert-manager.io/docs/trust/trust-manager/) | With MLflow | No toggle of its own: installed whenever MLflow is, in its own `trust-manager` namespace, to publish the internal CA to MLflow's clients in `gco-jobs` — see [In-cluster TLS](ARCHITECTURE.md#in-cluster-tls) |
 | [Slurm](SLURM_OPERATOR.md) (Slinky) | Disabled | Slurm operator plus a cluster configured from one `helm.slurm` block: autoscaled CPU/GPU partitions on GCO's node pools, accounting with S3 backups, a login pod, metrics and alerts, and the `/api/v1/slurm` routes behind `gco slurm` — see the [configuration reference](SLURM_OPERATOR.md#configuration-reference) |
 | [YuniKorn](https://yunikorn.apache.org/) | Disabled | App-aware scheduler with hierarchical queues |
+| [AWS PCS](PCS.md) (`pcs` block, not a chart) | Disabled | AWS Parallel Computing Service as a second Slurm backend behind the same `/api/v1/slurm` routes, `gco slurm` CLI and tools: a managed cluster with EC2 node groups (EFA, placement groups, Spot, Capacity Blocks), queues, a login node and EFS/FSx storage, or an existing cluster you run — see the [configuration reference](PCS.md#configuration-reference) |
 | [Argo CD](https://argo-cd.readthedocs.io/en/stable/) | Disabled | Self-managed GitOps controller in namespaced mode, fenced to `gco-jobs` and `gco-inference`, with an optional root Application per cluster and a repo-server autoscaler (`helm.argocd.gitops`, `helm.argocd.repo_server`) — see [GitOps with Argo CD](GITOPS.md) |
 | [Crossplane](https://docs.crossplane.io/) + Crossview | Disabled | Crossplane v2 and its dashboard under one toggle; composite resources compose tenant workloads in the tenant namespaces only — see [Crossplane](CROSSPLANE.md) |
 | [Kueue](https://kueue.sigs.k8s.io/) | Enabled | Job queueing with quotas and fair sharing; installed last |
@@ -1644,15 +1646,15 @@ Every optional add-on ships **disabled** in `cdk.json` because each one bills co
 Sometimes you want a feature on for **one run** without changing that shipped posture: trying a scheduler before committing to a config change, validating an example that needs optional infrastructure, or recording a demo of the full topology. `--enable` does exactly that. It threads the request through CDK context instead of rewriting `cdk.json`, so the file stays clean (which also keeps clean-worktree preflights in the validation harnesses intact).
 
 ```bash
-# One run with all six optional features on; cdk.json is not modified.
-gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn
+# One run with every optional feature on; cdk.json is not modified.
+gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs
 ```
 
 Names are validated before any AWS call, so a typo fails immediately rather than deploying without the feature you asked for. Repeated and comma-joined forms are equivalent (`--enable valkey --enable slurm` = `--enable valkey,slurm`).
 
 | Category | Valid names | CDK context key |
 |----------|-------------|-----------------|
-| Infrastructure features | `aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store` | `feature_enabled_overrides` |
+| Infrastructure features | `aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store`, `pcs` | `feature_enabled_overrides` |
 | Helm charts | `argocd`, `aws_efa_device_plugin`, `aws_load_balancer_controller`, `aws_neuron_device_plugin`, `cert_manager`, `crossplane`, `keda`, `kubeflow_trainer`, `kuberay`, `kueue`, `slurm`, `volcano`, `yunikorn` | `helm_enabled_overrides` |
 
 Two properties matter:
@@ -1941,6 +1943,34 @@ The cluster includes both a writer and a reader instance for high availability. 
 For use outside the cluster (scripts, Lambda functions), the endpoint is also stored in SSM at `/{project}/aurora-pgvector-endpoint-{region}`.
 
 See `examples/aurora-pgvector-job.yaml` for a complete working example that creates the pgvector extension, an embeddings table with an HNSW index, and runs a similarity search.
+
+## Configure AWS PCS
+
+[AWS Parallel Computing Service](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) is a second Slurm backend next to the in-cluster Slinky cluster: the same `/api/v1/slurm/*` routes, `gco slurm` commands and `slurm_*` MCP tools address it with `backend=pcs`, and both backends may be on in one Region. The `pcs` block (with per-Region `pcs_regions` overlays, like `fsx_lustre_regions`) is validated at synth by `gco/pcs_config.py`; every key is documented in [PCS.md](PCS.md#configuration-reference).
+
+```json
+{
+  "context": {
+    "pcs": {
+      "enabled": true,
+      "mode": "managed",
+      "managed": {
+        "node_groups": [
+          { "name": "gco-compute", "instance_types": ["c6i.large"], "max_nodes": 8 },
+          { "name": "gpu", "instance_types": ["p5.48xlarge"], "ami": "dlami", "efa": true, "efa_interfaces": 32, "availability_zones": ["us-east-1a"], "max_nodes": 2 }
+        ],
+        "queues": [
+          { "name": "gco", "node_groups": ["gco-compute"], "default": true },
+          { "name": "gpu", "node_groups": ["gpu"] }
+        ],
+        "metrics": { "enabled": true }
+      }
+    }
+  }
+}
+```
+
+`gco stacks pcs enable|disable` edit the block (globally or as a `pcs_regions` overlay), `gco stacks pcs status` shows what is configured and deployed, and `gco stacks pcs preflight` checks the account before a deploy (`gco stacks deploy` runs it too). `mode: existing` with `cluster_id` points the API at a cluster you already run instead. The managed cluster mounts the regional EFS at `/home` and FSx for Lustre at `/scratch` where the Region has it, and `metrics.enabled` scrapes its Slurm metrics into the in-cluster Prometheus next to Slinky's.
 
 ## Configure the Vector Store
 

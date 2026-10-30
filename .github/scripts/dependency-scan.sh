@@ -1025,6 +1025,195 @@ fi
 BEDROCK_MODEL_COUNT="$(wc -l < "$BEDROCK_MODEL_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$BEDROCK_MODEL_COUNT" ] && BEDROCK_MODEL_COUNT=0
 
+# ---------------------------------------------------------------------------
+# PCS Slurm versions (public endpoint — no AWS creds)
+#
+# The managed AWS PCS backend lets a cluster be created with the Slurm
+# versions in PCS_SUPPORTED_SLURM_VERSIONS (gco/pcs_config.py) and defaults
+# new clusters to PCS_DEFAULTS["managed"]["slurm_version"]. PCS retires a
+# version on a published EOL date — after it no cluster can be created with
+# that version — and releases a new one about twice a year. Neither moves a
+# package, so nothing else in this scan would notice. The authority is the
+# "Slurm versions in AWS PCS" page of the PCS User Guide
+# (fetch_pcs_slurm_versions): the PCS service model's own "Valid Values"
+# prose lags it by a release and there is no API.
+#
+# Three findings, each with the action in the row:
+#   * a version the guide supports that the tuple does not list — a candidate
+#     to add, once a cluster on it is confirmed to serve the slurmrestd
+#     OpenAPI plugin version every GCO surface addresses (v0.0.44; see the
+#     constant's comment);
+#   * a version the tuple lists that the guide no longer supports — remove it
+#     (and move the default if it was the default);
+#   * the default version within PCS_SLURM_EOL_WARN_DAYS of its EOL — move
+#     the default to the newest listed version before clusters can no longer
+#     be created with it. The urgency is "act soon" for the same reason the
+#     EKS standard-support window is.
+# ---------------------------------------------------------------------------
+PCS_SLURM_EOL_WARN_DAYS="${PCS_SLURM_EOL_WARN_DAYS:-180}"
+echo ""
+echo "=== Checking PCS Slurm versions ==="
+
+PCS_SLURM_RESULTS="$(mktemp)"
+PCS_SLURM_SKIP_REASON=""
+PCS_SLURM_SUPPORTED_PIN="$(extract_python_literal_constant PCS_SUPPORTED_SLURM_VERSIONS gco/pcs_config.py)"
+PCS_SLURM_DEFAULT_PIN="$(extract_python_literal_constant PCS_DEFAULTS gco/pcs_config.py managed.slurm_version)"
+
+if [ -z "$PCS_SLURM_SUPPORTED_PIN" ] || [ -z "$PCS_SLURM_DEFAULT_PIN" ]; then
+  PCS_SLURM_SKIP_REASON="Could not read PCS_SUPPORTED_SLURM_VERSIONS and the managed slurm_version default from gco/pcs_config.py."
+  echo "  $PCS_SLURM_SKIP_REASON"
+else
+  PCS_SLURM_UPSTREAM="$(fetch_pcs_slurm_versions)"
+  if [ -z "$PCS_SLURM_UPSTREAM" ]; then
+    PCS_SLURM_SKIP_REASON="Could not read the supported Slurm versions from the AWS PCS User Guide (network, or the page layout changed)."
+    echo "  $PCS_SLURM_SKIP_REASON"
+  else
+    pcs_supported_listed="${PCS_SLURM_SUPPORTED_PIN//,/, }"
+    pcs_newest_listed="$(printf '%s\n' "${PCS_SLURM_SUPPORTED_PIN//,/$'\n'}" | sort -V | tail -1)"
+    # Versions the guide supports that the tuple does not list.
+    while IFS='|' read -r pcs_version pcs_status pcs_eol; do
+      [ "$pcs_status" = "supported" ] || continue
+      case ",${PCS_SLURM_SUPPORTED_PIN}," in *",${pcs_version},"*) continue ;; esac
+      echo "  - PCS_SUPPORTED_SLURM_VERSIONS: ${pcs_version} is supported upstream (EOL ${pcs_eol:-unannounced}) but not listed"
+      echo "PCS_SUPPORTED_SLURM_VERSIONS (gco/pcs_config.py)|${pcs_supported_listed}|${pcs_version} supported (EOL ${pcs_eol:-unannounced})|add it once a cluster on it is confirmed to serve slurmrestd OpenAPI v0.0.44" >> "$PCS_SLURM_RESULTS"
+    done <<< "$PCS_SLURM_UPSTREAM"
+    # Versions the tuple lists that the guide no longer supports, and the
+    # default's distance from its EOL.
+    for pcs_version in ${PCS_SLURM_SUPPORTED_PIN//,/ }; do
+      pcs_row="$(grep -E "^${pcs_version//./\\.}\|" <<< "$PCS_SLURM_UPSTREAM" | head -1)"
+      pcs_status="$(cut -d'|' -f2 <<< "$pcs_row")"
+      pcs_eol="$(cut -d'|' -f3 <<< "$pcs_row")"
+      if [ "$pcs_status" != "supported" ]; then
+        echo "  - PCS_SUPPORTED_SLURM_VERSIONS: ${pcs_version} is no longer supported upstream (EOL ${pcs_eol:-unlisted})"
+        pcs_action="remove it"
+        [ "$pcs_version" != "$PCS_SLURM_DEFAULT_PIN" ] || pcs_action="remove it and move the default to ${pcs_newest_listed}"
+        echo "PCS_SUPPORTED_SLURM_VERSIONS (gco/pcs_config.py)|${pcs_version}|unsupported upstream (EOL ${pcs_eol:-unlisted})|${pcs_action}" >> "$PCS_SLURM_RESULTS"
+      elif [ "$pcs_version" = "$PCS_SLURM_DEFAULT_PIN" ] && [ -n "$pcs_eol" ]; then
+        pcs_days_left="$(days_until "$pcs_eol")"
+        if [ -n "$pcs_days_left" ] && [ "$pcs_days_left" -le "$PCS_SLURM_EOL_WARN_DAYS" ]; then
+          echo "  - pcs.managed.slurm_version default ${pcs_version}: EOL ${pcs_eol} (${pcs_days_left} days)"
+          echo "pcs.managed.slurm_version default (gco/pcs_config.py)|${pcs_version}|EOL ${pcs_eol} (${pcs_days_left} days)|move the default to ${pcs_newest_listed}" >> "$PCS_SLURM_RESULTS"
+        fi
+      fi
+    done
+  fi
+fi
+
+PCS_SLURM_COUNT="$(wc -l < "$PCS_SLURM_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$PCS_SLURM_COUNT" ] && PCS_SLURM_COUNT=0
+
+# ---------------------------------------------------------------------------
+# PCS lifecycle scripts and AMI families (best-effort — requires AWS credentials)
+#
+# The managed PCS node groups run three AWS-maintained node lifecycle scripts
+# pinned to immutable versions in gco/stacks/pcs_cluster.py
+# (PCS_MOUNT_EFS_SCRIPT, PCS_MOUNT_FSX_SCRIPT, PCS_CLOUDWATCH_LOGS_SCRIPT:
+# ``mount-efs-v1.0.0.sh`` and friends). AWS publishes new versions beside the
+# old ones in the public ``aws-pcs-repo-<region>`` bucket and only moves the
+# ``-v1-latest`` aliases, so a pinned node never changes behaviour — and never
+# picks up a fix either. The check lists the bucket (list_pcs_lifecycle_scripts)
+# and, like the EMR check, reports a newer version in the pinned major line
+# as a routine bump and a newer major as "new major available".
+#
+# The lookup Lambda (lambda/pcs-lookup/handler.py) resolves node images by
+# family: the PCS-ready DLAMI base named in DLAMI_SSM_PARAMETER
+# (``dlami-base-ubuntu2404``) through the public SSM tree
+# ``/aws/service/pcs/ami/<base>/...``, and the sample AMI's OS base named in
+# SAMPLE_NAME_PATTERN (``al2023``) through ``ec2 describe-images``. When AWS
+# publishes a newer release of the same OS line (``dlami-base-ubuntu2604``,
+# ``al2025``) the pinned family keeps resolving until AWS stops publishing it,
+# which is exactly the silent staleness this scan exists for.
+#
+# IAM: ``s3:ListBucket`` on ``arn:aws:s3:::aws-pcs-repo-*`` (the bucket admits
+# any AWS principal but refuses anonymous listing), ``ssm:GetParametersByPath``
+# on the public ``parameter/aws/service/pcs/*`` tree and ``ec2:DescribeImages``.
+# Pinned to us-east-1 like the Bedrock and EMR checks: every Region's bucket
+# and parameter tree carry the same catalog. Same credential preflight as the
+# other AWS-backed checks.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking PCS lifecycle scripts and AMI families ==="
+
+PCS_ASSETS_RESULTS="$(mktemp)"
+PCS_ASSETS_SKIP_REASON=""
+
+if ! aws sts get-caller-identity >/dev/null 2>&1; then
+  PCS_ASSETS_SKIP_REASON="No AWS credentials available (scan needs s3:ListBucket on aws-pcs-repo-*, ssm:GetParametersByPath and ec2:DescribeImages). Configure OIDC to enable."
+  echo "  $PCS_ASSETS_SKIP_REASON"
+else
+  PCS_SCRIPTS_PREFIX="$(extract_python_string_constant PCS_LIFECYCLE_SCRIPTS_PREFIX gco/stacks/pcs_cluster.py)"
+  PCS_SCRIPT_PINS=""
+  for pcs_pin_name in PCS_MOUNT_EFS_SCRIPT PCS_MOUNT_FSX_SCRIPT PCS_CLOUDWATCH_LOGS_SCRIPT; do
+    pcs_pin_value="$(extract_python_string_constant "$pcs_pin_name" gco/stacks/pcs_cluster.py)"
+    [ -n "$pcs_pin_value" ] && PCS_SCRIPT_PINS="${PCS_SCRIPT_PINS}${pcs_pin_name}|${pcs_pin_value}"$'\n'
+  done
+  PCS_DLAMI_FAMILY="$(pcs_dlami_family "$(extract_python_string_constant DLAMI_SSM_PARAMETER lambda/pcs-lookup/handler.py)")"
+  PCS_SAMPLE_FAMILY="$(pcs_sample_ami_family "$(extract_python_string_constant SAMPLE_NAME_PATTERN lambda/pcs-lookup/handler.py)")"
+
+  if [ -z "$PCS_SCRIPTS_PREFIX" ] || [ -z "$PCS_SCRIPT_PINS" ]; then
+    PCS_ASSETS_SKIP_REASON="Could not read the PCS lifecycle script pins from gco/stacks/pcs_cluster.py."
+    echo "  $PCS_ASSETS_SKIP_REASON"
+  elif [ -z "$PCS_DLAMI_FAMILY" ] || [ -z "$PCS_SAMPLE_FAMILY" ]; then
+    PCS_ASSETS_SKIP_REASON="Could not read the PCS AMI name patterns from lambda/pcs-lookup/handler.py."
+    echo "  $PCS_ASSETS_SKIP_REASON"
+  else
+    pcs_scripts="$(list_pcs_lifecycle_scripts us-east-1 "$PCS_SCRIPTS_PREFIX")" || pcs_scripts=""
+    if [ -z "$pcs_scripts" ]; then
+      PCS_ASSETS_SKIP_REASON="PCS lifecycle script listing failed or returned no objects (s3://aws-pcs-repo-us-east-1/${PCS_SCRIPTS_PREFIX}/)."
+      echo "  $PCS_ASSETS_SKIP_REASON"
+    else
+      while IFS='|' read -r pcs_pin_name pcs_pin_value; do
+        [ -n "$pcs_pin_name" ] || continue
+        pcs_parts="$(pcs_lifecycle_script_parts "$pcs_pin_value")"
+        if [ -z "$pcs_parts" ]; then
+          PCS_ASSETS_SKIP_REASON="${pcs_pin_name} (${pcs_pin_value}) is not an immutable <name>-vX.Y.Z.sh lifecycle script pin."
+          echo "  $PCS_ASSETS_SKIP_REASON"
+          break
+        fi
+        pcs_base="${pcs_parts%%|*}"
+        pcs_version="${pcs_parts#*|}"
+        pcs_latest="$(newest_pcs_lifecycle_script "$pcs_base" "${pcs_version%%.*}" <<< "$pcs_scripts")"
+        pcs_latest_any="$(newest_pcs_lifecycle_script "$pcs_base" <<< "$pcs_scripts")"
+        if [ -z "$pcs_latest_any" ]; then
+          PCS_ASSETS_SKIP_REASON="The listing of s3://aws-pcs-repo-us-east-1/${PCS_SCRIPTS_PREFIX}/ carries no immutable ${pcs_base} script."
+          echo "  $PCS_ASSETS_SKIP_REASON"
+          break
+        fi
+        if [ -n "$pcs_latest" ] && [ "$pcs_latest" != "$pcs_pin_value" ] \
+           && [ "$(compare_semver "$pcs_version" "${pcs_latest#*-v}")" = "newer" ]; then
+          echo "  - ${pcs_pin_name}: ${pcs_pin_value} -> ${pcs_latest}"
+          echo "${pcs_pin_name} (gco/stacks/pcs_cluster.py)|${pcs_pin_value}|${pcs_latest}" >> "$PCS_ASSETS_RESULTS"
+        elif [ "$pcs_latest_any" != "$pcs_pin_value" ] \
+             && [ "$(compare_semver "$pcs_version" "${pcs_latest_any#*-v}")" = "newer" ]; then
+          echo "  - ${pcs_pin_name}: ${pcs_pin_value} -> ${pcs_latest_any} (new major available)"
+          echo "${pcs_pin_name} (gco/stacks/pcs_cluster.py)|${pcs_pin_value}|${pcs_latest_any} (new major available)" >> "$PCS_ASSETS_RESULTS"
+        fi
+      done <<< "$PCS_SCRIPT_PINS"
+    fi
+    if [ -z "$PCS_ASSETS_SKIP_REASON" ]; then
+      pcs_dlami_families="$(list_pcs_dlami_families us-east-1)" || pcs_dlami_families=""
+      pcs_sample_families="$(list_pcs_sample_ami_families us-east-1)" || pcs_sample_families=""
+      if [ -z "$pcs_dlami_families" ] || [ -z "$pcs_sample_families" ]; then
+        PCS_ASSETS_SKIP_REASON="PCS AMI family lookup failed or returned nothing (ssm get-parameters-by-path /aws/service/pcs/ami, ec2 describe-images aws-pcs-sample_ami-*)."
+        echo "  $PCS_ASSETS_SKIP_REASON"
+      else
+        pcs_newer_dlami="$(newest_pcs_ami_family "$PCS_DLAMI_FAMILY" <<< "$pcs_dlami_families")"
+        if [ -n "$pcs_newer_dlami" ]; then
+          echo "  - DLAMI_SSM_PARAMETER: ${PCS_DLAMI_FAMILY} -> ${pcs_newer_dlami} (newer PCS-ready DLAMI base)"
+          echo "DLAMI_SSM_PARAMETER (lambda/pcs-lookup/handler.py)|${PCS_DLAMI_FAMILY}|${pcs_newer_dlami} (newer PCS-ready DLAMI base)" >> "$PCS_ASSETS_RESULTS"
+        fi
+        pcs_newer_sample="$(newest_pcs_ami_family "$PCS_SAMPLE_FAMILY" <<< "$pcs_sample_families")"
+        if [ -n "$pcs_newer_sample" ]; then
+          echo "  - SAMPLE_NAME_PATTERN: ${PCS_SAMPLE_FAMILY} -> ${pcs_newer_sample} (newer sample AMI base)"
+          echo "SAMPLE_NAME_PATTERN (lambda/pcs-lookup/handler.py)|${PCS_SAMPLE_FAMILY}|${pcs_newer_sample} (newer sample AMI base)" >> "$PCS_ASSETS_RESULTS"
+        fi
+      fi
+    fi
+  fi
+fi
+
+PCS_ASSETS_COUNT="$(wc -l < "$PCS_ASSETS_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$PCS_ASSETS_COUNT" ] && PCS_ASSETS_COUNT=0
 
 # ---------------------------------------------------------------------------
 # Dockerfile.dev ARG pins
@@ -2337,6 +2526,16 @@ if [ -n "$BEDROCK_MODEL_SKIP_REASON" ]; then
 else
   echo "Bedrock default model:    $BEDROCK_MODEL_COUNT"
 fi
+if [ -n "$PCS_SLURM_SKIP_REASON" ]; then
+  echo "PCS Slurm versions:       (skipped)"
+else
+  echo "PCS Slurm versions:       $PCS_SLURM_COUNT"
+fi
+if [ -n "$PCS_ASSETS_SKIP_REASON" ]; then
+  echo "PCS scripts and AMIs:     (skipped)"
+else
+  echo "PCS scripts and AMIs:     $PCS_ASSETS_COUNT"
+fi
 if [ -n "$ACCELERATOR_SKIP_REASON" ]; then
   echo "Accelerator catalog:      ${ACCELERATOR_COUNT} (online skipped)"
 else
@@ -2396,7 +2595,9 @@ if ! dependency_scan_is_complete \
   "$PYTHON_RELEASE_SKIP_REASON" \
   "$RUBY_RELEASE_SKIP_REASON" \
   "$UBUNTU_LTS_SKIP_REASON" \
-  "$RUNNER_IMAGE_SKIP_REASON"; then
+  "$RUNNER_IMAGE_SKIP_REASON" \
+  "$PCS_SLURM_SKIP_REASON" \
+  "$PCS_ASSETS_SKIP_REASON"; then
   SCAN_COMPLETE=false
 fi
 
@@ -2416,6 +2617,8 @@ findings_surface "EKS Kubernetes Version"   "act soon" "$EKS_K8S_COUNT"       "$
 findings_surface "Aurora PostgreSQL Engine" "routine" "$AURORA_COUNT"         "$AURORA_SKIP_REASON"        "engine|current|latest" "$AURORA_RESULTS"
 findings_surface "EMR Serverless"           "routine" "$EMR_COUNT"            "$EMR_SKIP_REASON"           "release|current|latest" "$EMR_RESULTS"
 findings_surface "Bedrock Default Model"    "routine" "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "key|current|latest" "$BEDROCK_MODEL_RESULTS"
+findings_surface "PCS Slurm Versions"       "act soon" "$PCS_SLURM_COUNT"     "$PCS_SLURM_SKIP_REASON"     "pin|current|upstream|action" "$PCS_SLURM_RESULTS"
+findings_surface "PCS Lifecycle Scripts and AMIs" "routine" "$PCS_ASSETS_COUNT" "$PCS_ASSETS_SKIP_REASON"  "pin|current|latest" "$PCS_ASSETS_RESULTS"
 ACCELERATOR_EXTRA="$(jq -n --rawfile offline "$ACCELERATOR_OFFLINE_REPORT" --rawfile online "$ACCELERATOR_ONLINE_REPORT" \
   '{offline_report_markdown: $offline, online_report_markdown: $online}')"
 findings_surface_json "Accelerator Catalog and NodePools" "act soon" "$ACCELERATOR_COUNT" "$ACCELERATOR_SUMMARY_SKIP_REASON" "[]" "$ACCELERATOR_EXTRA"
@@ -2446,6 +2649,8 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
    && [ "$UBUNTU_LTS_COUNT" -eq 0 ] \
    && [ "$RUNNER_IMAGE_COUNT" -eq 0 ] \
    && [ "$BEDROCK_MODEL_COUNT" -eq 0 ] \
+   && [ "$PCS_SLURM_COUNT" -eq 0 ] \
+   && [ "$PCS_ASSETS_COUNT" -eq 0 ] \
    && [ "$ACCELERATOR_COUNT" -eq 0 ] \
    && [ "$CI_TOOLING_COUNT" -eq 0 ] \
    && [ "$CONSISTENCY_COUNT" -eq 0 ] \
@@ -2472,6 +2677,14 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
   if [ -n "$BEDROCK_MODEL_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Bedrock model skipped: $BEDROCK_MODEL_SKIP_REASON"
+  fi
+  if [ -n "$PCS_SLURM_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}PCS Slurm versions skipped: $PCS_SLURM_SKIP_REASON"
+  fi
+  if [ -n "$PCS_ASSETS_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}PCS scripts and AMIs skipped: $PCS_ASSETS_SKIP_REASON"
   fi
   if [ -n "$ACCELERATOR_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
@@ -2513,7 +2726,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
   echo "$STATUS_MESSAGE"
   write_findings_document "$FINDINGS_FILE" "$SCAN_COMPLETE" false "$INCOMPLETE_REASONS_FILE"
   rm -f "$FINDINGS_SURFACES"
-  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
@@ -2600,6 +2813,8 @@ rm -f "$FINDINGS_SURFACES"
   summary_row "Aurora PostgreSQL Engine" "$AURORA_COUNT"         "$AURORA_SKIP_REASON"       "routine"
   summary_row "EMR Serverless"           "$EMR_COUNT"            "$EMR_SKIP_REASON"          "routine"
   summary_row "Bedrock Default Model"    "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "routine"
+  summary_row "PCS Slurm Versions"       "$PCS_SLURM_COUNT"      "$PCS_SLURM_SKIP_REASON"    "act soon"
+  summary_row "PCS Lifecycle Scripts and AMIs" "$PCS_ASSETS_COUNT" "$PCS_ASSETS_SKIP_REASON" "routine"
   summary_row "Accelerator Catalog and NodePools" "$ACCELERATOR_COUNT" "$ACCELERATOR_SUMMARY_SKIP_REASON" "act soon"
   summary_row "Dockerfile.dev Pins"      "$DOCKERFILE_COUNT"     ""                          "routine"
   summary_row "GCO Autopilot Pins"       "$AUTOPILOT_COUNT"      "$AUTOPILOT_SKIP_REASON"    "act soon"
@@ -2725,6 +2940,41 @@ rm -f "$FINDINGS_SURFACES"
     echo "existing data before adopting the newer model."
     echo ""
     emit_md_table "Configuration key|Current|Latest" "$BEDROCK_MODEL_RESULTS"
+    echo ""
+  fi
+
+  if [ "$PCS_SLURM_COUNT" -gt 0 ]; then
+    echo "## PCS Slurm Versions"
+    echo ""
+    echo "The Slurm versions the managed AWS PCS backend lets a cluster be created"
+    echo "with (\`PCS_SUPPORTED_SLURM_VERSIONS\` in \`gco/pcs_config.py\`) and the"
+    echo "default for new clusters (\`PCS_DEFAULTS[\"managed\"][\"slurm_version\"]\`),"
+    echo "against the supported versions and EOL dates in the"
+    echo "[PCS User Guide](${PCS_SLURM_VERSIONS_URL}). After a version's EOL, PCS no"
+    echo "longer creates clusters with it. Before adding a version, confirm a"
+    echo "cluster on it serves the slurmrestd OpenAPI plugin version every GCO"
+    echo "surface addresses (\`gco.slurm_config.SLURM_API_VERSION\`); a bump of the"
+    echo "default is a deployed change, so re-run the live release validation"
+    echo "(it deploys and proves the PCS backend)."
+    echo ""
+    emit_md_table "Pin|Current|Upstream|Action" "$PCS_SLURM_RESULTS"
+    echo ""
+  fi
+
+  if [ "$PCS_ASSETS_COUNT" -gt 0 ]; then
+    echo "## PCS Lifecycle Scripts and AMIs"
+    echo ""
+    echo "The AWS-maintained node lifecycle scripts the managed PCS node groups"
+    echo "run, pinned to immutable versions in \`gco/stacks/pcs_cluster.py\` (AWS"
+    echo "publishes new versions beside the old ones in the public"
+    echo "\`aws-pcs-repo-<region>\` bucket and only moves the \`-v1-latest\`"
+    echo "aliases), and the AMI families \`lambda/pcs-lookup/handler.py\` resolves"
+    echo "node images from (the PCS-ready DLAMI base in the public SSM tree and"
+    echo "the sample AMI's OS base). Bump the constant; a change to the scripts or"
+    echo "the image family is a deployed change, so re-run the live release"
+    echo "validation."
+    echo ""
+    emit_md_table "Pin|Current|Latest" "$PCS_ASSETS_RESULTS"
     echo ""
   fi
 
@@ -2951,7 +3201,7 @@ rm -f "$FINDINGS_SURFACES"
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${UBUNTU_LTS_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}" ] \
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${PCS_SLURM_SKIP_REASON}${PCS_ASSETS_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${UBUNTU_LTS_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}" ] \
      || [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
@@ -2961,6 +3211,8 @@ rm -f "$FINDINGS_SURFACES"
     [ -n "$AURORA_SKIP_REASON" ]        && echo "- **Aurora PostgreSQL Engine:** $AURORA_SKIP_REASON"
     [ -n "$EMR_SKIP_REASON" ]           && echo "- **EMR Serverless:** $EMR_SKIP_REASON"
     [ -n "$BEDROCK_MODEL_SKIP_REASON" ] && echo "- **Bedrock Default Model:** $BEDROCK_MODEL_SKIP_REASON"
+    [ -n "$PCS_SLURM_SKIP_REASON" ]     && echo "- **PCS Slurm Versions:** $PCS_SLURM_SKIP_REASON"
+    [ -n "$PCS_ASSETS_SKIP_REASON" ]    && echo "- **PCS Lifecycle Scripts and AMIs:** $PCS_ASSETS_SKIP_REASON"
     [ -n "$ACCELERATOR_SKIP_REASON" ]   && echo "- **Online Accelerator Catalog:** $ACCELERATOR_SKIP_REASON"
     [ -n "$AUTOPILOT_SKIP_REASON" ]     && echo "- **GCO Autopilot Pins:** $AUTOPILOT_SKIP_REASON"
     [ -n "$CDK_ENUM_SKIP_REASON" ]      && echo "- **CDK Enum Constants:** $CDK_ENUM_SKIP_REASON"
@@ -3000,7 +3252,7 @@ rm -f "$FINDINGS_SURFACES"
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {

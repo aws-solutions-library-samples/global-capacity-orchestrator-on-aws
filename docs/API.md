@@ -79,6 +79,7 @@ Gateway exposes it, and which authentication applies.
   - [Cancel Queued Job](#cancel-queued-job)
   - [Queue Statistics](#queue-statistics)
 - [Slurm](#slurm)
+  - [Slurm Backends](#slurm-backends)
   - [Slurm Status](#slurm-status)
   - [Submit a Batch Job](#submit-a-batch-job)
   - [Queue, Job and Cancel](#queue-job-and-cancel)
@@ -463,10 +464,11 @@ Available when `cost_monitoring.enabled` is on (the default). Each region's mani
 
 ### Slurm (Per Region)
 
-Available when `helm.slurm.enabled` is on. Each region's manifest API proxies these to its in-cluster slurmrestd with an operator-minted token; callers never hold a Slurm credential. Disabled regions answer `404` with the enablement remedy. See [SLURM_OPERATOR.md](SLURM_OPERATOR.md).
+Available when `helm.slurm.enabled` (the [Slinky](SLURM_OPERATOR.md) cluster) or `pcs.enabled` ([AWS PCS](PCS.md)) is on. Each region's manifest API proxies these to the backend's slurmrestd with a credential it holds; callers never hold a Slurm credential. Every route but `/backends` takes `?backend=slinky|pcs`, optional with one backend on and required (`400`) with both. Disabled regions answer `404` with the enablement remedy.
 
 | Method | Endpoint | Description | CLI Command |
 |--------|----------|-------------|-------------|
+| GET | `/api/v1/slurm/backends` | The Slurm backends enabled in the region and what each one is | `gco slurm backends -r REGION` |
 | GET | `/api/v1/slurm/status` | Controller reachability, partitions, node and job counts | `gco slurm status -r REGION` |
 | GET | `/api/v1/slurm/partitions` | Partitions with state, time limit and node counts | `gco slurm partitions -r REGION` |
 | GET | `/api/v1/slurm/nodes` | Slurm nodes (slurmd worker pods) with state and resources | `gco slurm nodes -r REGION` |
@@ -1548,7 +1550,62 @@ With `"include_rows": true` the response also carries the normalized per-namespa
 
 ## Slurm
 
-Region-scoped access to the [Slinky](https://slinky.schedmd.com/) Slurm cluster deployed when `helm.slurm.enabled` is on. Each region's manifest API proxies these routes to its own slurmrestd (`slinky-slurm-restapi` in `gco-jobs`), authenticating as Slurm's own user with a JWT the slurm-operator mints into a Kubernetes Secret and rotates (`post-helm-slurm-api-access.yaml`); the API pod never sees the cluster's signing key, and callers never see a Slurm credential. The submitting caller's identity is stamped into every job's `comment` as `gco:<caller>` so accounting can attribute it: the API Gateway proxies forward the SigV4 principal's ARN (`requestContext.identity.userArn`) as `x-gco-caller`, a header callers cannot set themselves (the proxy's allowlist drops it), and `gco-api` is recorded when no principal is known. Pin requests to a region (`-r REGION` on the CLI); a region deployed without Slurm answers every route with `404` and the enablement remedy, an unreachable slurmrestd or a missing token with `503`. Cluster design, partitions, autoscaling and the interactive `gco slurm shell` are covered in [SLURM_OPERATOR.md](SLURM_OPERATOR.md).
+Region-scoped access to a region's Slurm cluster(s): the [Slinky](https://slinky.schedmd.com/) cluster deployed on the EKS cluster when `helm.slurm.enabled` is on ([SLURM_OPERATOR.md](SLURM_OPERATOR.md)), the [AWS PCS](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) cluster GCO manages or connects to when `pcs.enabled` is on ([PCS.md](PCS.md)), or both. Each region's manifest API proxies these routes to the backend's slurmrestd with a credential it holds and callers never see: for Slinky, a JWT the slurm-operator mints into a Kubernetes Secret and rotates (`post-helm-slurm-api-access.yaml`), sent as Slurm's own user; for PCS, a short-lived JWT the API mints from the cluster's signing key in Secrets Manager for the fixed `pcs.identity` (PCS does not impersonate users). The submitting caller's identity is stamped into every job's `comment` as `gco:<caller>` so accounting can attribute it: the API Gateway proxies forward the SigV4 principal's ARN (`requestContext.identity.userArn`) as `x-gco-caller`, a header callers cannot set themselves (the proxy's allowlist drops it), and `gco-api` is recorded when no principal is known. Pin requests to a region (`-r REGION` on the CLI); a region deployed without Slurm answers every route with `404` and the enablement remedy, an unreachable slurmrestd or a missing credential with `503`. Cluster design, partitions, autoscaling and the interactive `gco slurm shell` are covered in [SLURM_OPERATOR.md](SLURM_OPERATOR.md) and [PCS.md](PCS.md).
+
+### Slurm Backends
+
+```http
+GET /api/v1/slurm/backends
+```
+
+**CLI:**
+
+```bash
+gco slurm backends -r us-east-1
+```
+
+**Response:**
+
+```json
+{
+  "timestamp": "2026-10-27T23:40:00+00:00",
+  "backends": [
+    {
+      "name": "slinky",
+      "kind": "slinky",
+      "description": "Slinky slurm-operator cluster on the regional EKS cluster",
+      "endpoint": "http://slinky-slurm-restapi.gco-jobs.svc.cluster.local:6820",
+      "restapi_service": "slinky-slurm-restapi.gco-jobs",
+      "login": {"kind": "pod", "namespace": "gco-jobs", "deployment": "slinky-slurm-login-gco"},
+      "default_partition": null,
+      "working_directory": "/home/slurm"
+    },
+    {
+      "name": "pcs",
+      "kind": "pcs",
+      "description": "AWS Parallel Computing Service cluster in the regional VPC",
+      "cluster_id": "pcs_0123456789abcdef",
+      "cluster_name": "gco-pcs",
+      "cluster_arn": "arn:aws:pcs:us-east-1:123456789012:cluster/pcs_0123456789abcdef",
+      "status": "ACTIVE",
+      "size": "SMALL",
+      "slurm_version": "25.11",
+      "rest_mode": "STANDARD",
+      "accounting_mode": "STANDARD",
+      "controller": "10.0.1.5:6817",
+      "endpoint": "http://10.0.1.5:6820",
+      "identity": {"name": "ec2-user", "uid": 1000, "gid": 1000},
+      "login": {"kind": "ssm", "cluster_id": "pcs_0123456789abcdef"},
+      "default_partition": "gco",
+      "working_directory": "/home/ec2-user"
+    }
+  ],
+  "default": null,
+  "selection_required": true
+}
+```
+
+Answers `200` with an empty `backends` list when no Slurm backend is deployed in the region, so a client can tell "Slurm is off here" from "the API is down" without parsing a `404`. `default` names the one backend when exactly one is enabled (then every other route may leave `backend` out) and `selection_required` is `true` when both are, in which case every other route without `?backend=` answers `400`; an unknown value answers `400` too, and a backend that is not enabled in the region `404` with the remedy. Each entry's facts are best-effort: a backend whose discovery fails still appears, with the failure in `error` instead of its facts, so one broken backend never hides the other. Responses from the other routes carry `"backend": "<name>"` next to `timestamp` so a caller can see which cluster answered.
 
 ### Slurm Status
 

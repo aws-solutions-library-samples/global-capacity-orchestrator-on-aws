@@ -54,6 +54,14 @@ from gco.inference_proxy_config import (
 )
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.models import ClusterConfig, ResourceThresholds
+from gco.pcs_config import (
+    PCS_FEATURE_KEY,
+    PCS_OVERRIDES_CONTEXT_KEY,
+    PCS_REGIONS_KEY,
+    PcsConfigError,
+    apply_pcs_overrides,
+    validate_pcs_config,
+)
 from gco.resource_governance import parse_k8s_quantity
 from gco.slurm_config import SlurmConfigError, validate_slurm_config
 from gco.stacks.constants import (
@@ -128,8 +136,11 @@ FEATURE_OVERRIDE_CONTEXT_KEY = "feature_enabled_overrides"
 
 #: The cdk.json blocks whose ``enabled`` flag the override may force on. Kept
 #: deliberately narrow: each of these is a self-contained regional feature the
-#: examples exercise (Aurora pgvector, Valkey Serverless, FSx for Lustre).
-FEATURE_OVERRIDE_KEYS = frozenset({"aurora_pgvector", "valkey", "fsx_lustre", "vector_store"})
+#: examples or the live validation harness exercise (Aurora pgvector, Valkey
+#: Serverless, FSx for Lustre, the vector store, AWS PCS).
+FEATURE_OVERRIDE_KEYS = frozenset(
+    {"aurora_pgvector", "valkey", "fsx_lustre", "vector_store", "pcs"}
+)
 
 
 def parse_feature_enabled_overrides(raw: object) -> frozenset[str]:
@@ -360,6 +371,8 @@ class ConfigLoader:
         self._validate_argocd_config()
         # Validate the Slurm cluster block (helm.slurm)
         self._validate_slurm_config()
+        # Validate the AWS PCS block (pcs / pcs_regions)
+        self._validate_pcs_config()
 
         # Validate analytics environment config (optional block)
         self._validate_analytics_environment_config()
@@ -1073,6 +1086,104 @@ class ConfigLoader:
             )
         except SlurmConfigError as exc:
             raise ConfigValidationError(str(exc)) from exc
+
+    def _raw_pcs_config(self, region: str | None = None) -> object:
+        """The cdk.json ``pcs`` block with the region's ``pcs_regions`` overlay applied.
+
+        Both are optional; ``None`` means neither exists. A per-region overlay
+        is a patch over the global block (``pcs_regions.us-east-1.enabled``
+        turns PCS on in that region only), merged one level at a time so an
+        overlay that names one nested key keeps the global block's siblings.
+        An overlay for a region is only applied when the overlay is an object;
+        anything else is reported by the validator with the region named. The
+        run-scoped ``pcs_overrides`` context (a JSON object) is merged last.
+        """
+        global_raw = self.app.node.try_get_context(PCS_FEATURE_KEY)
+        overrides = self.app.node.try_get_context(PCS_OVERRIDES_CONTEXT_KEY)
+        try:
+            if region is None:
+                return apply_pcs_overrides(global_raw, overrides)
+            overlays = self.app.node.try_get_context(PCS_REGIONS_KEY)
+            if not isinstance(overlays, dict) or region not in overlays:
+                return apply_pcs_overrides(global_raw, overrides)
+            overlay = overlays[region]
+            if not isinstance(overlay, dict):
+                raise ConfigValidationError(
+                    f"{PCS_REGIONS_KEY}.{region} must be an object, got {overlay!r}"
+                )
+            base: dict[str, Any] = global_raw if isinstance(global_raw, dict) else {}
+            # The run-scoped overrides win over the region's overlay, as the
+            # tracing and EKS-capabilities overrides win over their blocks.
+            return apply_pcs_overrides(_deep_merge(base, overlay), overrides)
+        except PcsConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def _pcs_fsx_enabled(self, region: str | None) -> bool:
+        """Whether ``pcs.managed.storage.scratch: fsx`` can be honored.
+
+        Per region this is that region's ``fsx_lustre`` toggle; for the global
+        block it is "every deployment region has FSx", like the Slinky rule.
+        Consulted only when the block actually asks for ``fsx``: the FSx lookup
+        validates the run-scoped ``feature_enabled_overrides`` as a side effect,
+        and a PCS block that never asked for FSx must not turn an unrelated
+        override typo into a PCS error.
+        """
+        raw = self._raw_pcs_config(region)
+        managed = raw.get("managed") if isinstance(raw, dict) else None
+        storage = managed.get("storage") if isinstance(managed, dict) else None
+        if not isinstance(storage, dict) or storage.get("scratch") != "fsx":
+            return False
+        if region is not None:
+            return bool(self.get_fsx_lustre_config(region)["enabled"])
+        regions = self.get_regions()
+        return bool(regions) and all(
+            bool(self.get_fsx_lustre_config(r)["enabled"]) for r in regions
+        )
+
+    def _validate_pcs_config(self) -> None:
+        """Validate the optional AWS PCS block (``pcs`` and ``pcs_regions``).
+
+        PCS is off by default, so an absent block is valid. The shape rules
+        live in :mod:`gco.pcs_config`: unknown keys fail by name, ``existing``
+        mode needs a cluster id, managed mode needs coherent node groups and
+        queues with exactly one default, reservation types and purchase options
+        must agree, and ``storage.scratch: fsx`` needs FSx in the region. The
+        global block and every per-region overlay are validated separately so
+        the error names the region whose overlay is wrong.
+        """
+        overlays = self.app.node.try_get_context(PCS_REGIONS_KEY)
+        if overlays is not None and not isinstance(overlays, dict):
+            raise ConfigValidationError(
+                f"{PCS_REGIONS_KEY} must be an object keyed by region, got {overlays!r}"
+            )
+        try:
+            validate_pcs_config(self._raw_pcs_config(), fsx_enabled=self._pcs_fsx_enabled(None))
+            for region in sorted(overlays or {}):
+                validate_pcs_config(
+                    self._raw_pcs_config(str(region)),
+                    fsx_enabled=self._pcs_fsx_enabled(str(region)),
+                )
+        except PcsConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def get_pcs_config(self, region: str | None = None) -> dict[str, Any]:
+        """Return the ``pcs`` block for a region with defaults merged in.
+
+        Keys: ``enabled``, ``mode``, ``cluster_id``, ``endpoint_cidr``,
+        ``identity``, ``managed`` (see :data:`gco.pcs_config.PCS_DEFAULTS`).
+        ``region`` applies that region's ``pcs_regions`` overlay; the
+        run-scoped ``feature_enabled_overrides=pcs`` context forces
+        ``enabled`` on, like the other feature blocks.
+        """
+        try:
+            config = validate_pcs_config(
+                self._raw_pcs_config(region), fsx_enabled=self._pcs_fsx_enabled(region)
+            )
+        except PcsConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+        if self._feature_override_enabled(PCS_FEATURE_KEY):
+            config["enabled"] = True
+        return config
 
     def get_eks_capabilities_config(self) -> dict[str, Any]:
         """Return the ``eks_capabilities`` block with defaults merged in.

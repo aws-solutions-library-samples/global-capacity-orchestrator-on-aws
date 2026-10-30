@@ -163,6 +163,12 @@ def _print_cluster_access_hint(formatter: Any, config: Any, stack_name: str) -> 
     )
 
 
+_SKIP_PCS_PREFLIGHT_HELP = (
+    "Deploy without the AWS PCS preflight that runs for regional stacks with pcs enabled "
+    "(see 'gco stacks pcs preflight')."
+)
+
+
 @stacks.command("deploy")
 @click.argument("stack_name")
 @click.option("--yes", "-y", is_flag=True, help="Skip approval prompts")
@@ -176,6 +182,7 @@ def _print_cluster_access_hint(formatter: Any, config: Any, stack_name: str) -> 
     callback=_validate_enable,
     help=_ENABLE_OPTION_HELP,
 )
+@click.option("--skip-pcs-preflight", is_flag=True, help=_SKIP_PCS_PREFLIGHT_HELP)
 @pass_config
 def deploy_stack(
     config: Any,
@@ -184,6 +191,7 @@ def deploy_stack(
     outputs_file: Any,
     tag: Any,
     enable: Mapping[str, str],
+    skip_pcs_preflight: bool,
 ) -> None:
     """Deploy a single CDK stack to AWS.
 
@@ -200,6 +208,9 @@ def deploy_stack(
     and Aurora add monitoring-stack dashboard widgets). A single-stack override
     therefore deploys a partially wired feature without complaining. Prefer
     'deploy-all --enable' unless you specifically want that.
+
+    A regional stack with AWS PCS on is preflighted first ('gco stacks pcs
+    preflight'); a failure stops the deploy before CloudFormation starts.
     """
     from ..stacks import get_stack_manager
 
@@ -211,6 +222,10 @@ def deploy_stack(
         if "=" in t:
             k, v = t.split("=", 1)
             tags[k] = v
+
+    _pcs_preflight_before_deploy(
+        formatter, config, stack_name=str(stack_name), enable=enable, skip=skip_pcs_preflight
+    )
 
     try:
         manager = get_stack_manager(config)
@@ -326,6 +341,7 @@ def destroy_stack(
     callback=_validate_enable,
     help=_ENABLE_OPTION_HELP,
 )
+@click.option("--skip-pcs-preflight", is_flag=True, help=_SKIP_PCS_PREFLIGHT_HELP)
 @pass_config
 def deploy_all_orchestrated(
     config: Any,
@@ -335,6 +351,7 @@ def deploy_all_orchestrated(
     parallel: Any,
     max_workers: Any,
     enable: Mapping[str, str],
+    skip_pcs_preflight: bool,
 ) -> None:
     """Deploy all stacks in the correct order.
 
@@ -349,12 +366,15 @@ def deploy_all_orchestrated(
     significantly reduce total deployment time when deploying to
     multiple regions.
 
+    Regions with AWS PCS on are preflighted first ('gco stacks pcs
+    preflight'); a failure stops the deploy before CloudFormation starts.
+
     Examples:
         gco stacks deploy-all -y
         gco stacks deploy-all -y --parallel
         gco stacks deploy-all -y -p --max-workers 8
         gco stacks deploy-all -y -t Environment=prod
-        gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn
+        gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn,pcs
     """
     from ..stacks import get_stack_manager
 
@@ -366,6 +386,10 @@ def deploy_all_orchestrated(
         if "=" in t:
             k, v = t.split("=", 1)
             tags[k] = v
+
+    _pcs_preflight_before_deploy(
+        formatter, config, stack_name=None, enable=enable, skip=skip_pcs_preflight
+    )
 
     try:
         manager = get_stack_manager(config)
@@ -1841,6 +1865,396 @@ def fsx_disable(config: Any, region: Any, yes: Any) -> None:
     except Exception as e:
         formatter.print_error(f"Failed to disable FSx: {e}")
         sys.exit(1)
+
+
+# =============================================================================
+# AWS PCS commands
+# =============================================================================
+
+
+@stacks.group("pcs")
+@pass_config
+def pcs_cmd(config: Any) -> None:
+    """AWS Parallel Computing Service as a Slurm backend (cdk.json pcs).
+
+    'enable' / 'disable' edit the block (managed mode creates the cluster on
+    the next deploy; existing mode fronts a cluster you already run),
+    'status' shows what is configured and, once deployed, what the regional
+    stack published, and 'preflight' checks the account before a deploy
+    ('gco stacks deploy' runs it too). See docs/PCS.md.
+    """
+
+
+def _pcs_stack_name(config: Any, region: str) -> str:
+    return f"{config.regional_stack_prefix}-{region}"
+
+
+@pcs_cmd.command("status")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option("--all-regions", "-A", is_flag=True, help="Show status across all deployment regions")
+@pass_config
+def pcs_status(config: Any, region: Any, all_regions: bool) -> None:
+    """Configured and deployed AWS PCS state per region.
+
+    Reads the validated cdk.json block (mode, cluster, node groups, queues,
+    identity) and the regional stack's PCS outputs when the stack is deployed
+    (cluster id, Slurm version, REST mode, login node group).
+
+    Examples:
+        gco stacks pcs status
+        gco stacks pcs status --all-regions --output json
+    """
+    from gco.pcs_config import managed_cluster_name
+
+    from .. import pcs_login, pcs_preflight
+
+    formatter = get_output_formatter(config)
+    documents: list[dict[str, Any]] = []
+    failures = 0
+    for target in _target_regions(config, region, all_regions):
+        try:
+            block = pcs_preflight.load_pcs_config(target)
+        except pcs_preflight.PcsPreflightError as exc:
+            formatter.print_error(f"[{target}] {exc}")
+            failures += 1
+            continue
+        managed = block["managed"]
+        document: dict[str, Any] = {
+            "region": target,
+            "enabled": block["enabled"],
+            "mode": block["mode"],
+            "cluster_id": block["cluster_id"],
+            "endpoint_cidr": block["endpoint_cidr"],
+            "identity": block["identity"]["name"],
+            "cluster_name": (
+                managed_cluster_name(block, _project_name()) if block["mode"] == "managed" else None
+            ),
+            "slurm_version": managed["slurm_version"],
+            "node_groups": [
+                {
+                    "name": g["name"],
+                    "instance_types": g["instance_types"],
+                    "min_nodes": g["min_nodes"],
+                    "max_nodes": g["max_nodes"],
+                    "purchase_option": g["purchase_option"],
+                    "ami": g["ami"],
+                    "efa": g["efa"],
+                }
+                for g in managed["node_groups"]
+            ],
+            "queues": [
+                {"name": q["name"], "node_groups": q["node_groups"], "default": q["default"]}
+                for q in managed["queues"]
+            ],
+            "login": managed["login"]["enabled"],
+            "deployed": None,
+        }
+        try:
+            outputs = pcs_login.stack_outputs(target, _pcs_stack_name(config, target))
+        except pcs_login.PcsLoginError as exc:
+            formatter.print_warning(f"[{target}] could not read the regional stack: {exc}")
+            outputs = {}
+        deployed = {
+            key.removeprefix("Pcs"): value
+            for key, value in outputs.items()
+            if key.startswith("Pcs")
+        }
+        document["deployed"] = deployed or None
+        documents.append(document)
+        if config.output_format == "table":
+            _print_pcs_status(formatter, document)
+    if documents and config.output_format != "table":
+        formatter.print(documents if all_regions else documents[0])
+    if failures:
+        sys.exit(1)
+
+
+def _print_pcs_status(formatter: Any, document: Mapping[str, Any]) -> None:
+    region = document["region"]
+    state = "enabled" if document["enabled"] else "disabled"
+    formatter.print_info(f"AWS PCS in {region}: {state}, {document['mode']} mode")
+    if document["mode"] == "existing":
+        formatter.print_info(f"  cluster: {document['cluster_id']}")
+        if document["endpoint_cidr"]:
+            formatter.print_info(f"  endpoint CIDR: {document['endpoint_cidr']}")
+    else:
+        formatter.print_info(
+            f"  cluster: {document['cluster_name']} (Slurm {document['slurm_version']}), "
+            f"login node {'on' if document['login'] else 'off'}"
+        )
+        formatter.print(
+            document["node_groups"],
+            columns=[
+                "name",
+                "instance_types",
+                "min_nodes",
+                "max_nodes",
+                "purchase_option",
+                "ami",
+                "efa",
+            ],
+        )
+        formatter.print(document["queues"], columns=["name", "node_groups", "default"])
+    formatter.print_info(f"  identity: {document['identity']}")
+    deployed = document["deployed"]
+    if deployed:
+        formatter.print_info(
+            "  deployed: " + ", ".join(f"{key} {value}" for key, value in sorted(deployed.items()))
+        )
+    else:
+        formatter.print_info("  deployed: no (the regional stack publishes no PCS outputs)")
+
+
+@pcs_cmd.command("enable")
+@click.option("--region", "-r", help="Enable PCS for this region only (a pcs_regions overlay)")
+@click.option(
+    "--mode",
+    type=click.Choice(["managed", "existing"]),
+    default=None,
+    help="managed: GCO creates the cluster (default); existing: front a cluster you run",
+)
+@click.option(
+    "--cluster-id", help="The existing cluster's id (pcs_...), required for existing mode"
+)
+@click.option(
+    "--endpoint-cidr",
+    help="IPv4 range the API pod may reach slurmrestd in (existing mode, a peered VPC)",
+)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def pcs_enable(
+    config: Any,
+    region: Any,
+    mode: str | None,
+    cluster_id: str | None,
+    endpoint_cidr: str | None,
+    yes: bool,
+) -> None:
+    """Turn AWS PCS on in cdk.json (apply with 'gco stacks deploy').
+
+    Managed mode (the default) makes the regional stack create a PCS cluster
+    from the pcs.managed block: node groups, queues, the login node, the EFS
+    home and the lifecycle actions. Existing mode points the API at a cluster
+    you already run; 'gco stacks pcs preflight' then checks it.
+
+    Examples:
+        gco stacks pcs enable
+        gco stacks pcs enable --region us-east-1
+        gco stacks pcs enable --mode existing --cluster-id pcs_0123456789abcdef
+        gco stacks pcs enable --mode existing --cluster-id pcs_0123456789abcdef --endpoint-cidr 10.42.0.0/16
+    """
+    from gco.pcs_config import PcsConfigError, validate_pcs_config
+
+    from ..stacks import get_pcs_config, update_pcs_config
+
+    formatter = get_output_formatter(config)
+    scope = f"region {region}" if region else "all regions (global)"
+    settings: dict[str, Any] = {"enabled": True}
+    if mode:
+        settings["mode"] = mode
+    if cluster_id:
+        settings["cluster_id"] = cluster_id
+    if endpoint_cidr:
+        settings["endpoint_cidr"] = endpoint_cidr
+    try:
+        current = get_pcs_config(region)
+        merged = {
+            k: v for k, v in current.items() if k not in ("is_region_specific", "region")
+        } | settings
+        validate_pcs_config(merged)
+    except PcsConfigError as exc:
+        formatter.print_error(f"Refusing to write an invalid pcs block: {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        formatter.print_error(f"Failed to read cdk.json: {exc}")
+        sys.exit(1)
+    effective_mode = str(merged.get("mode") or "managed")
+    if not yes:
+        formatter.print_info(f"AWS PCS configuration for {scope}:")
+        formatter.print_info(f"  Mode: {effective_mode}")
+        if effective_mode == "existing":
+            formatter.print_info(f"  Cluster: {merged.get('cluster_id')}")
+            if merged.get("endpoint_cidr"):
+                formatter.print_info(f"  Endpoint CIDR: {merged['endpoint_cidr']}")
+        else:
+            formatter.print_info("  The regional stack creates the cluster from pcs.managed")
+        confirm(f"\nEnable AWS PCS for {scope}?", abort=True)
+    try:
+        update_pcs_config(settings, region)
+    except Exception as exc:
+        formatter.print_error(f"Failed to enable PCS: {exc}")
+        sys.exit(1)
+    formatter.print_success(f"AWS PCS enabled in cdk.json for {scope} ({effective_mode} mode)")
+    formatter.print_info("Run 'gco stacks pcs preflight' to check the account, then")
+    if region:
+        formatter.print_info(f"'gco stacks deploy {_pcs_stack_name(config, str(region))}' to apply")
+    else:
+        formatter.print_info("'gco stacks deploy-all' to apply")
+
+
+@pcs_cmd.command("disable")
+@click.option("--region", "-r", help="Disable PCS for this region only")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def pcs_disable(config: Any, region: Any, yes: bool) -> None:
+    """Turn AWS PCS off in cdk.json (apply with 'gco stacks deploy').
+
+    In managed mode the next deploy deletes the cluster, its node groups and
+    queues (pcs.managed.removal_policy decides whether they are retained
+    instead); the shared EFS home directory stays.
+
+    Examples:
+        gco stacks pcs disable
+        gco stacks pcs disable --region us-east-1
+    """
+    from ..stacks import update_pcs_config
+
+    formatter = get_output_formatter(config)
+    scope = f"region {region}" if region else "all regions (global)"
+    if not yes:
+        formatter.print_warning(f"This will disable AWS PCS for {scope}.")
+        formatter.print_warning(
+            "A managed cluster, its node groups and queues are deleted on the next deploy "
+            "unless pcs.managed.removal_policy is 'retain'."
+        )
+        confirm("Are you sure?", abort=True)
+    try:
+        update_pcs_config({"enabled": False}, region)
+    except Exception as exc:
+        formatter.print_error(f"Failed to disable PCS: {exc}")
+        sys.exit(1)
+    formatter.print_success(f"AWS PCS disabled in cdk.json for {scope}")
+    if region:
+        formatter.print_info(
+            f"Run 'gco stacks deploy {_pcs_stack_name(config, str(region))}' to apply"
+        )
+    else:
+        formatter.print_info("Run 'gco stacks deploy-all' to apply")
+
+
+@pcs_cmd.command("preflight")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option("--all-regions", "-A", is_flag=True, help="Check every deployment region")
+@pass_config
+def pcs_preflight_command(config: Any, region: Any, all_regions: bool) -> None:
+    """Check the account before a deploy with AWS PCS on.
+
+    Existing mode: the cluster exists and is ACTIVE on Slurm 25.11/26.05 with
+    the REST API on, its security group admits tcp/6820 from the EKS cluster,
+    and it sits in the regional VPC (or pcs.endpoint_cidr covers its REST
+    endpoint). Managed mode: PCS answers in the region, every instance type
+    exists with the expected architecture (and EFA when asked), capacity
+    reservations match their node groups, and the Spot service-linked role
+    exists when a group buys Spot. AWS errors are warnings, never failures.
+    Exits 1 when a region has a failure.
+
+    Examples:
+        gco stacks pcs preflight
+        gco stacks pcs preflight -r us-east-1 --output json
+    """
+    from .. import pcs_preflight
+
+    formatter = get_output_formatter(config)
+    regions = _target_regions(config, region, all_regions)
+    reports, errors = _pcs_preflight_reports(formatter, regions, force_enabled=False)
+    if config.output_format != "table":
+        formatter.print(pcs_preflight.summarize(reports))
+    else:
+        for report in reports:
+            print(pcs_preflight.render_report(report))
+    if errors or any(not report.ok for report in reports):
+        sys.exit(1)
+
+
+def _pcs_preflight_reports(
+    formatter: Any, regions: list[str], *, force_enabled: bool
+) -> tuple[list[Any], int]:
+    """Run the PCS preflight for each region; a bad block counts as an error."""
+    from .. import pcs_preflight
+
+    project = _project_name()
+    reports: list[Any] = []
+    errors = 0
+    for target in regions:
+        try:
+            block = pcs_preflight.load_pcs_config(target, force_enabled=force_enabled)
+        except pcs_preflight.PcsPreflightError as exc:
+            formatter.print_error(f"[{target}] {exc}")
+            errors += 1
+            continue
+        reports.append(pcs_preflight.run_preflight(target, block, project=project))
+    return reports, errors
+
+
+def _pcs_enabled_regions(regions: list[str], *, force_enabled: bool) -> list[str]:
+    """The regions whose cdk.json block (or the --enable pcs override) turns PCS on."""
+    from .. import pcs_preflight
+
+    enabled: list[str] = []
+    for target in regions:
+        try:
+            block = pcs_preflight.load_pcs_config(target, force_enabled=force_enabled)
+        except pcs_preflight.PcsPreflightError:
+            # The deploy's own synth reports the bad block with the full message.
+            continue
+        if block["enabled"]:
+            enabled.append(target)
+    return enabled
+
+
+def _regional_stack_regions(config: Any, stack_name: str | None) -> list[str]:
+    """The workload regions a deploy touches: one base regional stack's, or all of them."""
+    cdk_regions = _load_cdk_json()
+    regional = [str(r) for r in (cdk_regions.get("regional") or [])] if cdk_regions else []
+    if stack_name is None:
+        return regional
+    prefix = f"{config.regional_stack_prefix}-"
+    if not stack_name.startswith(prefix):
+        return []
+    region = stack_name.removeprefix(prefix)
+    return [region] if region in regional else []
+
+
+def _pcs_preflight_before_deploy(
+    formatter: Any,
+    config: Any,
+    *,
+    stack_name: str | None,
+    enable: Mapping[str, str],
+    skip: bool,
+) -> None:
+    """Run the PCS preflight for the regional stacks a deploy covers; exit 1 on a failure.
+
+    Only regions with PCS on (in cdk.json, or through ``--enable pcs``) are
+    checked. ``--skip-pcs-preflight`` bypasses it for a deploy that must go
+    ahead regardless, for example to roll a fix to the cluster itself.
+    """
+    from .. import pcs_preflight
+
+    if skip:
+        return
+    force_enabled = "pcs" in (enable.get("feature_enabled_overrides") or "").split(",")
+    regions = _pcs_enabled_regions(
+        _regional_stack_regions(config, stack_name), force_enabled=force_enabled
+    )
+    if not regions:
+        return
+    formatter.print_info(f"AWS PCS preflight for {', '.join(regions)}...")
+    reports, errors = _pcs_preflight_reports(formatter, regions, force_enabled=force_enabled)
+    failed = [report for report in reports if not report.ok]
+    for report in failed:
+        print(pcs_preflight.render_report(report))
+    if errors or failed:
+        formatter.print_error(
+            "AWS PCS preflight failed; fix the findings above (or pass --skip-pcs-preflight to "
+            "deploy anyway)"
+        )
+        sys.exit(1)
+    for report in reports:
+        warnings = [c for c in report.checks if c.status == pcs_preflight.WARN]
+        for check in warnings:
+            formatter.print_warning(f"[{report.region}] {check.name}: {check.detail}")
+    formatter.print_success(f"AWS PCS preflight passed for {', '.join(regions)}")
 
 
 # =============================================================================

@@ -22,6 +22,7 @@ GCO ships with seven scheduling and orchestration tools, each designed for diffe
 | [KEDA](KEDA.md) | Event-driven autoscaler | Yes (mandatory) | Scale-to-zero, SQS triggers, metric-based scaling |
 | [Kubeflow Trainer](DISTRIBUTED_TRAINING.md) | Training operator | Yes | Multi-node PyTorch `TrainJob`s against platform-shipped runtimes |
 | [Slurm (Slinky)](SLURM_OPERATOR.md) | HPC scheduler | Opt-in | sbatch/srun/sacct workflows, HPC migration, whole-node GPU jobs, accounting; autoscaled partitions from zero |
+| [Slurm (AWS PCS)](PCS.md) | Managed HPC scheduler | Opt-in | The same Slurm workflows on AWS Parallel Computing Service: EC2 node groups with native EFA, placement groups and Capacity Blocks, behind the same API and CLI as Slinky (`--backend pcs`) |
 | [YuniKorn](YUNIKORN.md) | App-aware scheduler | Opt-in | Multi-tenant queues, hierarchical quotas, fair sharing |
 
 > **Warning:** If you enable multiple schedulers with GPU quotas (Kueue ClusterQueues, Volcano Queues, YuniKorn queues, Slurm GPU NodeSets), ensure the total doesn't exceed your physical GPU count. See [GPU Quota Coordination](#gpu-quota-coordination) below — misconfiguration can deadlock your cluster.
@@ -94,6 +95,8 @@ Use **KubeRay**. It manages Ray clusters with autoscaling worker groups.
 
 Use **Slurm (Slinky)**. Enable it (`helm.slurm.enabled` in `cdk.json`) and GCO deploys a production Slurm cluster: autoscaled CPU and GPU partitions, accounting with backups, a login pod, metrics and alerts, and `sbatch`/`squeue`/`sacct` through the GCO API (`gco slurm ...`).
 → `examples/slurm-cluster-job.yaml`, [SLURM_OPERATOR.md](SLURM_OPERATOR.md)
+
+For Slurm's control plane run by AWS and whole EC2 instances as nodes (native EFA on every network card, cluster placement groups, Capacity Blocks), turn on the **AWS PCS** backend instead of, or next to, Slinky (`pcs.enabled`): the same `gco slurm` commands and `/api/v1/slurm` routes address it with `--backend pcs`. → [PCS.md](PCS.md)
 
 ### "I need multi-tenant fair sharing with a web UI"
 

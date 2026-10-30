@@ -44,6 +44,8 @@ decisions.
 | When the scan flags an epoch older than 45 days (or [Trivy](https://trivy.dev/) finds an OS CVE) | Bump the base-image security epoch | `deps-scan` **Base-image Security Epochs** row |
 | ~30 days before a suppression `exp:` date | Renew or drop the CVE suppression | `deps-scan` **Suppression Expiries** row |
 | When the scan flags a newer same-family model | Bump the Bedrock default model pin | `deps-scan` **Bedrock default model** row |
+| When the scan flags a PCS Slurm version nearing EOL, retired, or newly supported | Move the managed default / edit `PCS_SUPPORTED_SLURM_VERSIONS` in `gco/pcs_config.py`, then re-run the live release validation | `deps-scan` **PCS Slurm Versions** row |
+| When the scan flags a newer PCS lifecycle script or AMI family | Bump the pin in `gco/stacks/pcs_cluster.py` / `lambda/pcs-lookup/handler.py`, then re-run the live release validation | `deps-scan` **PCS Lifecycle Scripts and AMIs** row |
 | Weekly | Check the `cve-scan` result and act on new findings | Monday `cve-scan` run |
 | Every PR | Hold exact 100% Python line + branch coverage and label the PR so release notes categorize | Opening a pull request |
 | Every release | Bump the version and confirm the generated GitHub Release notes | Cutting a version |

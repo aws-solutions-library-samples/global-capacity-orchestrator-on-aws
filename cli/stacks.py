@@ -75,8 +75,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-23T11:52:58Z
-# Generated from Git commit: 6c1b25d9046fec3666f29c38a10fbefe6b833c00
+# Generated at (UTC): 2026-10-30T09:51:11Z
+# Generated from Git commit: ea3bb60a33c82d9e7f7839e5eb84540d1c8a3bd0
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -1355,6 +1355,24 @@ class StackManager:
         # to force-enable optional Helm charts (helm_enabled_overrides) for a
         # run without mutating the checked-out cdk.json.
         self._extra_cdk_context: dict[str, str] = {}
+        # Extra environment for every CDK child process (set_cdk_environment);
+        # the live release validation harness points the CDK CLI's temporary
+        # cloud assemblies (TMPDIR) at a run-scoped directory it removes.
+        self._cdk_environment: dict[str, str] = {}
+
+    def set_cdk_environment(self, environment: Mapping[str, str]) -> None:
+        """Register environment variables for every subsequent CDK child process.
+
+        They apply to the CDK CLI and what it spawns (the app synth, image
+        builds), never to this process or to other children such as the
+        Session Manager plugin, whose Unix socket path must stay short.
+        """
+        validated: dict[str, str] = {}
+        for key, value in environment.items():
+            if not key or "=" in key or "\0" in key or "\0" in str(value):
+                raise ValueError(f"Invalid CDK environment variable: {key!r}")
+            validated[str(key)] = str(value)
+        self._cdk_environment = validated
 
     def set_extra_cdk_context(self, context: Mapping[str, str]) -> None:
         """Register `--context` pairs for every subsequent CDK invocation.
@@ -2044,6 +2062,7 @@ class StackManager:
                 command = [*command, "--context", f"{key}={value}"]
 
         full_env = os.environ.copy()
+        full_env.update(self._cdk_environment)
 
         # Inject PYTHONPATH so CDK's python3 subprocess can find aws_cdk
         # This is essential for pipx installations
@@ -6952,6 +6971,28 @@ def update_fsx_config(settings: dict[str, Any], region: str | None = None) -> No
         region: Optional region for region-specific config. If None, updates global config.
     """
     _update_feature_config("fsx_lustre", settings, _FSX_DEFAULTS, region)
+
+
+_PCS_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "mode": "managed",
+    "cluster_id": None,
+    "endpoint_cidr": None,
+}
+
+
+def get_pcs_config(region: str | None = None) -> dict[str, Any]:
+    """Get the raw AWS PCS block from cdk.json (``pcs`` with the region's ``pcs_regions`` overlay).
+
+    The top-level keys only, as written; ``gco stacks pcs status`` and the
+    preflight validate the whole block through :mod:`gco.pcs_config`.
+    """
+    return _get_feature_config("pcs", _PCS_DEFAULTS, region)
+
+
+def update_pcs_config(settings: dict[str, Any], region: str | None = None) -> None:
+    """Update the AWS PCS block in cdk.json (global, or the region's overlay)."""
+    _update_feature_config("pcs", settings, _PCS_DEFAULTS, region)
 
 
 # =============================================================================

@@ -49,8 +49,8 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-28T14:57:12Z
-# Generated from Git commit: fdfe31c154bbf84cdfeb034fee1256e0a838d1f1
+# Generated at (UTC): 2026-10-29T20:23:35Z
+# Generated from Git commit: 58e51b2b4563e9e1a4f61f565bd64ce972f41231
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -166,6 +166,10 @@ _MONITORING_CUSTOM_OBJECT_PLURALS: dict[str, str] = {
     "ServiceMonitor": "servicemonitors",
     "PodMonitor": "podmonitors",
     "PrometheusRule": "prometheusrules",
+    # v1alpha1: the API version comes from the manifest's apiVersion, so the
+    # static-target scrape of the AWS PCS controller
+    # (post-helm-pcs-observability.yaml) shares this path.
+    "ScrapeConfig": "scrapeconfigs",
 }
 
 # A Secret annotated with this marker names (comma-separated) the data keys
@@ -234,6 +238,7 @@ _SUPPORTED_MANIFEST_KINDS = frozenset(
         "RoleBinding",
         "ScaledJob",
         "ScaledObject",
+        "ScrapeConfig",
         "Secret",
         "Service",
         "ServiceAccount",
@@ -871,6 +876,13 @@ _SLURM_OBSERVABILITY_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
     ("v1", "ConfigMap", "monitoring", "gco-dashboard-slurm"),
     ("monitoring.coreos.com/v1", "PrometheusRule", "monitoring", "gco-slurm-alerts"),
 )
+# Likewise for the AWS PCS controller scrape (post-helm-pcs-observability.yaml):
+# gated on the managed cluster's metrics toggle and on observability.
+_PCS_OBSERVABILITY_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
+    ("monitoring.coreos.com/v1alpha1", "ScrapeConfig", "monitoring", "gco-pcs-slurm-controller"),
+    ("v1", "ConfigMap", "monitoring", "gco-dashboard-pcs"),
+    ("monitoring.coreos.com/v1", "PrometheusRule", "monitoring", "gco-pcs-alerts"),
+)
 
 _FEATURE_RESOURCE_INVENTORY: dict[
     tuple[str, bool], tuple[tuple[str, str, str | None, str], ...]
@@ -927,6 +939,7 @@ _FEATURE_RESOURCE_INVENTORY: dict[
             )
         ),
         *_SLURM_OBSERVABILITY_RESOURCES,
+        *_PCS_OBSERVABILITY_RESOURCES,
         *tuple(
             ("monitoring.coreos.com/v1", "PodMonitor", "monitoring", name)
             for name in (
@@ -1014,6 +1027,22 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ),
         *_SLURM_OBSERVABILITY_RESOURCES,
     ),
+    # AWS PCS (cdk.json pcs): the API pod's egress to the PCS controller's
+    # slurmrestd (post-helm-pcs-network.yaml). The cluster itself is an AWS
+    # resource the regional stack owns, not a manifest.
+    ("{{PCS_ENABLED}}", True): (
+        (
+            "networking.k8s.io/v1",
+            "NetworkPolicy",
+            "gco-system",
+            "allow-manifest-processor-to-pcs-restapi",
+        ),
+    ),
+    # The managed PCS cluster's metrics (pcs.managed.metrics.enabled,
+    # post-helm-pcs-observability.yaml): the static-target scrape of its
+    # controller, the dashboard and the alerts. The file carries the
+    # observability gate too, so the same identities sit under that key.
+    ("{{PCS_METRICS_ENABLED}}", True): _PCS_OBSERVABILITY_RESOURCES,
     # The in-cluster accounting database (29-slurm-accounting-db.yaml, base
     # pass so MariaDB is up before the Slinky chart starts slurmdbd and
     # slurmctld, whose first boot refuses to run without the dbd) and its

@@ -25,6 +25,7 @@
 | `image-lookup/` | Adopts or creates retained `gco/<name>` [ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html) repositories without same-name deployment failures. |
 | `inference-streaming-proxy/` | Node.js 24 response-streaming proxy used by global and regional `/inference/*` [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) integrations. |
 | `kubectl-applier-simple/` | Applies Kubernetes manifests to [EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html) clusters during CDK deployment. |
+| `pcs-lookup/` | Regional-stack custom resources for a managed [AWS PCS](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) cluster: `Custom::PcsAmiLookup` resolves the newest PCS sample AMI or PCS-ready DLAMI for a compute node group's architecture and Slurm version; `Custom::PcsControllerLookup` resolves the controller's `SLURMCTLD` endpoint (`ip:6817`) by type for the Prometheus scrape of its Slurm metrics. |
 | `proxy-shared/` | Shared request signing, header sanitization, URL, timeout, and retry utilities for API proxy Lambdas. |
 | `regional-api-proxy/` | [VPC](https://docs.aws.amazon.com/vpc/latest/userguide/what-is-amazon-vpc.html) proxy behind each regional aggregation bridge; verifies the internal ALB and uses HMAC plus private-root TLS. |
 | `secret-rotation/` | Daily overlap-safe rotation of the backend HMAC key in [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html). |

@@ -26,6 +26,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from collections import UserDict
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -1002,6 +1003,53 @@ class TestRunnerRun:
         assert "JSON report:" in output
         assert "Markdown report:" in output
         assert Path.cwd() == previous_cwd
+
+    def test_cdk_children_get_a_run_scoped_tmpdir_that_leaves_with_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CDK CLI leaves ``cdk.out*`` assemblies under ``TMPDIR``; the run owns that.
+
+        Only the CDK children get the run-scoped ``TMPDIR``: the process's
+        own stays untouched, because the Session Manager plugin binds a Unix
+        socket under it and the long run-scoped path broke the tunnel once.
+        """
+        monkeypatch.setenv("TMPDIR", "/tmp/elsewhere")
+        seen: dict[str, Any] = {}
+
+        def baseline(ctx: RunContext) -> dict[str, Any]:
+            scratch = instance._scratch_dir
+            assert scratch is not None
+            # What a successful ``cdk list`` leaves behind.
+            (scratch / "cdk.outAbC123").mkdir()
+            (scratch / "cdk.outAbC123" / "manifest.json").write_text("{}", encoding="utf-8")
+            seen["scratch"] = scratch
+            seen["process_tmpdir"] = os.environ.get("TMPDIR")
+            seen["cdk_environment"] = ctx.stack_manager.set_cdk_environment.call_args_list[-1]
+            return {"ok": True}
+
+        instance = _build_runner(
+            tmp_path,
+            monkeypatch,
+            settings=_run_settings(tmp_path, requested_actions=("baseline",), run_id="pr 1/2"),
+            registry=_fake_registry({"baseline": baseline}),
+        )
+
+        assert instance.run() == 0
+
+        scratch = seen["scratch"]
+        assert scratch.name.startswith("gco-live-pr_1_2-")
+        assert scratch.parent == Path(tempfile.gettempdir())
+        assert seen["process_tmpdir"] == "/tmp/elsewhere"
+        assert seen["cdk_environment"].args == ({"TMPDIR": str(scratch)},)
+        assert not scratch.exists()
+        assert instance._scratch_dir is None
+        # The CDK children lose the variable with the directory.
+        assert instance.stack_manager.set_cdk_environment.call_args_list[-1].args == ({},)
+        # Leaving before entering (a failure ahead of the scratch setup in
+        # run()'s try) is a no-op.
+        calls = len(instance.stack_manager.set_cdk_environment.call_args_list)
+        instance._leave_run_scratch()
+        assert len(instance.stack_manager.set_cdk_environment.call_args_list) == calls
 
     def test_partial_scope_without_deploy_needs_no_cleanup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3392,6 +3440,9 @@ class TestActionFinalInventory:
             patch_live_validation_helper(
                 "_strip_deleted_vpc_endpoints", return_value=(inventory, [{"arn": "vpce"}])
             ),
+            patch_live_validation_helper(
+                "_strip_deleted_volumes", return_value=(inventory, [{"arn": "vol"}])
+            ),
             patch_live_validation_helper("summarize_project_resources", return_value={"total": 0}),
             patch_live_validation_helper("project_resources_are_absent", return_value=absent),
         ):
@@ -3423,6 +3474,7 @@ class TestActionFinalInventory:
         assert result["accepted_pending_kms_keys"] == [{"key": "pending"}]
         assert result["accepted_expired_dynamodb_streams"] == [{"arn": "stream"}]
         assert result["accepted_deleted_vpc_endpoints"] == [{"arn": "vpce"}]
+        assert result["accepted_deleted_volumes"] == [{"arn": "vol"}]
         assert result["residual_project_resources"] == self._PROJECT_INVENTORY
         assert result["transaction_search"] == self._TRANSACTION_SEARCH
         assert ctx.report.final_inventory is result

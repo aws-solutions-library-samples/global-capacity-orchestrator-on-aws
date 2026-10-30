@@ -180,7 +180,7 @@ All CI workflows share the same safety defaults:
 - `permissions:` scoped narrowly. All CI workflows run with `contents: read`. `release.yml` grants `contents: write` (push the release branch), `pull-requests: write` (open the release PR; also requires the repository Actions setting "Allow GitHub Actions to create and approve pull requests"), and `actions: write` (dispatch the PR-gating workflows). `release-publish.yml` grants `contents: write` for the tag push and Release creation. `pages.yml`'s deploy job grants `pages: write` + `id-token: write` (to publish to Pages) and `actions: read` (to pull the `pytest-coverage` artifact from the triggering Unit Tests run).
 - Temporary files on the work disk: the first step of every job that runs on an Ubuntu label is `Keep temporary files on the work disk`, which exports `TMPDIR=$RUNNER_TEMP` through `GITHUB_ENV`. The Ubuntu 26.04 runner image mounts `/tmp` as a tmpfs sized to half the machine's memory with a per-user quota of a few gigabytes ([actions/runner-images#14777](https://github.com/actions/runner-images/issues/14777)); `unit:cdk:config-matrix` and three `unit:pytest:core` shards hit it (`Unknown system error -122`, `EDQUOT`) while the work disk had more than a hundred gigabytes free, and the kind image loader writes whole image archives to `TMPDIR`. The `runner` context is not available to `jobs.<id>.env`, so the export is a step; it is identical everywhere and sits before checkout so nothing can run ahead of it (the one job with a `defaults.run.working-directory`, which checkout creates, points this step at `${{ github.workspace }}`, which exists from the start). `gate:*` jobs are exempt (they are pinned to two steps and write nothing of size); macOS and Windows jobs do not get it. `tests/test_workflow_tmpdir_contract.py` enforces all of this.
 - Caching: see [Caches](#caches) below.
-- AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, and EC2 accelerator-catalog reads; deterministic accelerator policy validation remains offline.
+- AWS-backed dependency discovery uses OIDC via `aws-actions/configure-aws-credentials` — never long-lived access keys. The monthly scan uses the role for EKS, RDS, EMR, Bedrock, EC2 accelerator-catalog and AWS PCS catalog reads (the public `aws-pcs-repo-*` buckets, the `/aws/service/pcs/ami` SSM tree and the sample AMIs); deterministic accelerator policy validation remains offline.
 
 ### Caches
 
@@ -509,6 +509,8 @@ without a row). The ones the workflows lean on most:
 | Aurora PostgreSQL engine | `AURORA_POSTGRES_VERSION` from `gco/stacks/constants.py` (a plain version string applied via `AuroraPostgresEngineVersion.of()`, so a bump never waits for an aws-cdk-lib enum release) | Requires AWS credentials (via OIDC). Queries `rds describe-db-engine-versions` for the latest minor release within the same major line |
 | EMR Serverless | `EMR_SERVERLESS_RELEASE_LABEL` from `gco/stacks/constants.py` | Requires AWS credentials (via OIDC). Lists release labels (`emr list-release-labels`, following every `NextToken` page, since the CLI does not paginate it and the API pages at 100) and reports a newer GA release in the pinned major line, or a new major line when one exists. Both label families count: the classic `emr-N.x.y` line and the AWS runtime for Apache Spark line, `emr-spark-N.x.y`, which the service lists on the last page and which is the current major (`emr-spark-8.1.0`); ranking is by version across both, so `emr-spark-8.x` is reported as the new major for an `emr-7.x` pin. Preview, beta and rc labels never qualify |
 | Bedrock default models | `context.bedrock.mission_default_model_id` (Mission sampling), `context.bedrock.capacity_advisor_default_model_id` (capacity advisor), `context.bedrock.claude_code_default_model_id` (`gco autopilot`'s Claude Code session model), `context.bedrock.codex_default_model_id` (its Codex session model), `context.bedrock.opencode_default_model_id` (its OpenCode session model), and `context.bedrock.embedding_model_id` (Mission memory's text-embedding model) from `cdk.json`, each resolved through `gco.bedrock`; plus `context.vector_store.embedding_model_id` (the workload RAG corpus's independent embedding model) | Requires AWS credentials (via OIDC). The generation keys compare against system-defined inference profiles (`bedrock list-inference-profiles`); the embedding keys compare against `bedrock list-foundation-models --by-output-modality EMBEDDING` (both pinned to us-east-1). Drift is reported per key only within the *same model family*; a single-letter generation marker (Kimi `k3`) folds like a numeric generation, so `kimi-k4` is drift against the OpenCode default rather than a separate family. Dependabot does not inspect these deployment configuration values |
+| PCS Slurm versions | `PCS_SUPPORTED_SLURM_VERSIONS` and `PCS_DEFAULTS["managed"]["slurm_version"]` in `gco/pcs_config.py` (read without importing the module, via `extract_python_literal_constant`) | Public endpoint, no AWS creds. Reads the supported and unsupported version tables of the [PCS User Guide](https://docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html) (`fetch_pcs_slurm_versions`; the service model's own "Valid Values" prose lags it and there is no API). Reports a supported version the tuple lacks (add it once a cluster on it serves the slurmrestd OpenAPI plugin version GCO addresses), a listed version PCS has retired (remove it, move the default), and the default within `PCS_SLURM_EOL_WARN_DAYS` (180) of its EOL — after EOL, PCS creates no clusters with that version. Urgency **act soon** |
+| PCS lifecycle scripts and AMIs | `PCS_MOUNT_EFS_SCRIPT`, `PCS_MOUNT_FSX_SCRIPT`, `PCS_CLOUDWATCH_LOGS_SCRIPT` in `gco/stacks/pcs_cluster.py` (immutable `<name>-vX.Y.Z.sh` objects); `DLAMI_SSM_PARAMETER` and `SAMPLE_NAME_PATTERN` in `lambda/pcs-lookup/handler.py` (the PCS-ready DLAMI base and the sample AMI's OS base) | Requires AWS credentials (via OIDC): `s3:ListBucket` on the public `aws-pcs-repo-*` buckets (anonymous listing is refused), `ssm:GetParametersByPath` on the public `/aws/service/pcs/ami` tree and `ec2:DescribeImages` for `aws-pcs-sample_ami-*`. Lists the scripts under `aws-pcs-node-lifecycle-scripts/` in us-east-1 and, like EMR, reports a newer version in the pinned major line or a new major (`-v1-latest` aliases never qualify: the pin is immutable on purpose); reports a newer release of each AMI family's OS line (`dlami-base-ubuntu2604`, `al2025`), never another OS |
 | Dockerfile.dev pins | `ARG` pins in `Dockerfile.dev` (Node LTS major, npm, CDK CLI, kubectl, AWS CLI v2, Docker CLI, Buildx, uv) | Public endpoints, no AWS creds. Each ARG resolves against its own upstream (`nodejs/Release`, the npm/CDK registries, `dl.k8s.io`, `aws/aws-cli` tags, `moby/moby`, `docker/buildx`, `astral-sh/uv`) |
 | GCO Autopilot pins | `CLAUDE_CODE_VERSION`, `CODEX_VERSION`, `OPENCODE_VERSION`, and `COMPANION_MCP_SERVERS` in `cli/autopilot.py` (via `extract_claude_code_pin` / `extract_codex_pin` / `extract_opencode_pin` / `extract_companion_mcp_packages`) | Public endpoints, no AWS creds. The Claude Code, Codex, and OpenCode install pins are each compared against the npm `latest` dist-tag; each companion MCP server is resolved on its registry (`get_registry_package_status`) and reported when missing, deprecated, or yanked — companions are launched unpinned by npx/uvx, so registry health *is* the dependency surface. All these constants live in Python, invisible to Dependabot |
 | Pre-commit hooks | `repo:` / `rev:` blocks in `.pre-commit-config.yaml` | Calls `GET /repos/{owner}/{repo}/tags` on GitHub for each hook and reports drift when our pinned `rev:` is older than the highest semver-shaped tag. Authenticated with the job token like every other `api.github.com` read (see [GitHub API lookups](#github-api-lookups)); full 40- or 64-character Git object IDs are accepted as immutable exemptions, while unsupported revisions and failed lookups make the scan incomplete |
@@ -635,7 +637,8 @@ The console output shows each surface's drift inline. To trigger the exact workf
 
 Several dependency surfaces require authoritative AWS APIs: EKS add-on and
 cluster versions, Aurora engine versions, EMR Serverless releases, Bedrock model
-profiles, and the enabled-Region EC2 accelerator catalog. Without credentials,
+profiles, the enabled-Region EC2 accelerator catalog, and the AWS PCS node
+lifecycle script and AMI catalogs. Without credentials,
 each online surface records an explicit skip; all public and deterministic
 offline checks continue. The accelerator validator always checks NodePool policy
 and watch-list completeness before any AWS call.
@@ -672,23 +675,32 @@ To turn the check on without introducing long-lived access keys, configure a Git
    ```json
    {
      "Version": "2012-10-17",
-     "Statement": [{
+     "Statement": [
+     {
        "Effect":   "Allow",
        "Action": [
          "bedrock:ListFoundationModels",
          "bedrock:GetFoundationModel",
          "bedrock:ListInferenceProfiles",
          "bedrock:GetInferenceProfile",
+         "ec2:DescribeImages",
          "ec2:DescribeInstanceTypes",
          "ec2:DescribeRegions",
          "eks:DescribeAddonVersions",
          "eks:DescribeClusterVersions",
          "elasticmapreduce:ListReleaseLabels",
          "rds:DescribeDBEngineVersions",
+         "ssm:GetParametersByPath",
          "sts:GetCallerIdentity"
        ],
        "Resource": "*"
-     }]
+     },
+     {
+       "Effect":   "Allow",
+       "Action":   "s3:ListBucket",
+       "Resource": "arn:aws:s3:::aws-pcs-repo-*"
+     }
+     ]
    }
    ```
 

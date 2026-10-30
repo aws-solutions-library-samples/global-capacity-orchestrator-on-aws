@@ -72,7 +72,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 151 tools by default (up to 210 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 152 tools by default (up to 211 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -902,13 +902,14 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 
 ### Slurm
 
-The [Slinky](../docs/SLURM_OPERATOR.md) Slurm cluster deployed when `cdk.json` `helm.slurm.enabled` is on, reached through the GCO API's `/api/v1/slurm/*` routes; every tool takes the region whose cluster it addresses. The interactive `gco slurm shell` and the streaming `gco slurm output --follow` have no tool.
+A region's Slurm cluster(s), reached through the GCO API's `/api/v1/slurm/*` routes: the [Slinky](../docs/SLURM_OPERATOR.md) cluster deployed on the EKS cluster when `cdk.json` `helm.slurm.enabled` is on, the [AWS PCS](../docs/PCS.md) cluster GCO manages or connects to when `pcs.enabled` is on, or both. Every tool takes the region whose cluster it addresses and, except `slurm_backends`, a `backend` (`slinky` or `pcs`) that may be left out when the region runs one backend and is required when it runs both. The interactive `gco slurm shell` and the streaming `gco slurm output --follow` have no tool.
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
+| `slurm_backends` | The Slurm backends enabled in a region, with the default the other tools use | safe | — |
 | `slurm_status` | Controller reachability, partitions, node and job counts | safe | — |
 | `slurm_partitions` | Partitions with state, time limit and node counts (`sinfo`) | safe | — |
-| `slurm_nodes` | Slurm nodes (slurmd worker pods) with state, resources and gres | safe | — |
+| `slurm_nodes` | Slurm nodes (slurmd worker pods or PCS instances) with state, resources and gres | safe | — |
 | `slurm_queue` | The live queue (`squeue`), filterable by state, partition and name | safe | — |
 | `slurm_job` | One job in full, including its stdout/stderr paths | safe | — |
 | `slurm_accounting` | Job history from slurmdbd (`sacct`) over a window | safe | — |

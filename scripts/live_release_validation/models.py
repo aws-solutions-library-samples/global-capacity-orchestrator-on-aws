@@ -176,6 +176,12 @@ class RunSettings:
     #: always sets ``{"sample_ratio":1.0}`` so the ``tracing`` action finds a
     #: span for every request it drives; part of the resume identity.
     tracing_overrides_json: str = ""
+    #: Canonical JSON of the ``pcs_overrides`` CDK context (deep-merged over
+    #: cdk.json ``pcs``), or ``""`` for none. The release entry point always
+    #: turns the AWS PCS backend on in managed mode with its metrics scrape
+    #: (``checks/pcs.py``) so the ``schedulers`` action proves it; part of
+    #: the resume identity.
+    pcs_overrides_json: str = ""
 
     # First-class inference action contract. ``inference_enabled`` is explicit
     # because sibling harnesses reuse RunSettings with their own ``all`` action.
@@ -270,6 +276,8 @@ class RunSettings:
             context["eks_capabilities_overrides"] = self.eks_capabilities_overrides_json
         if self.tracing_overrides_json:
             context["tracing_overrides"] = self.tracing_overrides_json
+        if self.pcs_overrides_json:
+            context["pcs_overrides"] = self.pcs_overrides_json
         return context
 
     def identity(self) -> dict[str, Any]:

@@ -1,24 +1,39 @@
 """slurmrestd client behind the GCO API's ``/api/v1/slurm`` routes.
 
 The manifest-processor (the authenticated API ingress) talks to Slurm through
-slurmrestd, the Slurm REST daemon the Slinky chart runs in ``gco-jobs``
-(``gco.slurm_config.SLURM_RESTAPI_NAME``). Authentication is Slurm's own
-``auth/jwt``: the slurm-operator mints a JWT for the API's Slurm identity into
-a Kubernetes Secret through a ``Token`` custom resource
-(post-helm-slurm-api-access.yaml) and refreshes it before it expires; this
-module reads that Secret (a scoped RBAC grant on exactly that one Secret) and
-sends it as ``X-SLURM-USER-TOKEN``. The API never sees the cluster's JWT
-signing key.
+slurmrestd, the Slurm REST daemon. Two backends can stand behind the same
+routes; this module defines the contract (:class:`SlurmBackend`) and the
+Slinky implementation, :mod:`gco.services.pcs_backend` the PCS one, and
+:mod:`gco.services.slurm_backends` the registry that builds and caches one
+client per enabled backend:
 
-The hop is plain HTTP inside the namespace boundary (the NetworkPolicies in
-post-helm-slurm-network.yaml admit only the manifest-processor pods to the
-REST port); slurmrestd has no TLS listener of its own, and the ALB-facing side
-of the API is the TLS boundary callers see.
+- **Slinky** (``helm.slurm``): the chart runs slurmrestd in ``gco-jobs``
+  (``gco.slurm_config.SLURM_RESTAPI_NAME``). Authentication is Slurm's own
+  ``auth/jwt``: the slurm-operator mints a JWT for the API's Slurm identity
+  into a Kubernetes Secret through a ``Token`` custom resource
+  (post-helm-slurm-api-access.yaml) and refreshes it before it expires;
+  :class:`SecretTokenProvider` reads that Secret (a scoped RBAC grant on
+  exactly that one Secret) and the backend sends it as ``X-SLURM-USER-TOKEN``
+  beside ``X-SLURM-USER-NAME``. The API never sees the cluster's JWT signing
+  key.
+- **AWS PCS** (``pcs``): the managed controller's slurmrestd in the regional
+  VPC; the API mints its own short-lived JWT from the signing key PCS keeps in
+  Secrets Manager (:mod:`gco.services.pcs_backend`).
 
-Errors map to the API the same way the cost proxy's do: Slurm not enabled for
-the deployment -> 404 with a remedy, slurmrestd unreachable or the token
-unavailable -> 503, a Slurm-side rejection -> the status slurmrestd meant (404
-for an unknown job, 400 for a bad submission, 502 for anything else).
+Either hop is plain HTTP inside a boundary the deployment draws (the
+NetworkPolicies in post-helm-slurm-network.yaml and post-helm-pcs-network.yaml
+admit only the manifest-processor pods to the REST port; PCS's security group
+admits only the EKS cluster); slurmrestd has no TLS listener of its own, and
+the ALB-facing side of the API is the TLS boundary callers see.
+
+``GCO_SLURM_BACKENDS`` on the API pod names the enabled backends
+(``slinky``, ``pcs``, or both); a request names one with ``backend=`` only
+when both are on (:func:`resolve_backend`). Errors map to the API the same
+way the cost proxy's do: no backend enabled, or the named one off ->
+404 with a remedy; slurmrestd unreachable or the credential unavailable ->
+503; an ambiguous or unknown backend name -> 400; a Slurm-side rejection ->
+the status slurmrestd meant (404 for an unknown job, 400 for a bad
+submission, 502 for anything else).
 """
 
 from __future__ import annotations
@@ -29,14 +44,18 @@ import logging
 import os
 import time
 from collections.abc import Mapping
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 import httpx2
 from fastapi import HTTPException
 
+from gco.pcs_config import PCS_BACKEND, SLINKY_BACKEND, SLURM_BACKENDS
 from gco.services import tracing
 from gco.slurm_config import (
     SLURM_API_VERSION,
+    SLURM_DEFAULT_WORKING_DIRECTORY,
+    SLURM_LOGIN_NAME,
     SLURM_NAMESPACE,
     SLURM_RESTAPI_NAME,
     SLURM_RESTAPI_PORT,
@@ -48,10 +67,11 @@ logger = logging.getLogger(__name__)
 #: lives in :mod:`gco.slurm_config` beside the image tag it moves with; it is
 #: re-exported here because this module is where the version is used.
 
-#: The Slurm identity the API acts as. ``slurm`` is SlurmUser: it may submit,
-#: inspect and cancel any job, which is what a single authenticated front door
-#: needs; the caller's identity travels in each job's ``comment`` for
-#: accounting attribution.
+#: The Slurm identity the API acts as toward Slinky. ``slurm`` is SlurmUser:
+#: it may submit, inspect and cancel any job, which is what a single
+#: authenticated front door needs; the caller's identity travels in each job's
+#: ``comment`` for accounting attribution. (PCS uses the configured
+#: ``pcs.identity`` instead; see :mod:`gco.services.pcs_backend`.)
 SLURM_API_USER = "slurm"
 
 #: The Token custom resource and the Secret it writes (post-helm-slurm-api-access.yaml).
@@ -70,10 +90,27 @@ TOKEN_REFRESH_SECONDS = 300.0
 
 REQUEST_TIMEOUT_SECONDS = 30.0
 
+#: The API pod's backend list (``{{SLURM_BACKENDS}}`` in 31-manifest-processor.yaml).
+BACKENDS_ENV = "GCO_SLURM_BACKENDS"
+#: The pre-PCS boolean; still honored so an API pod rendered by an older
+#: manifest keeps serving Slinky.
+LEGACY_ENABLED_ENV = "GCO_SLURM_ENABLED"
+
 DISABLED_DETAIL = (
-    "Slurm is not enabled in this region. Set helm.slurm.enabled to true in cdk.json "
-    "(or deploy with --enable slurm) and redeploy the regional stack."
+    "Slurm is not enabled in this region. Set helm.slurm.enabled (Slinky on the EKS cluster) "
+    "or pcs.enabled (AWS PCS) to true in cdk.json (or deploy with --enable slurm / "
+    "--enable pcs) and redeploy the regional stack."
 )
+BACKEND_DISABLED_DETAILS: dict[str, str] = {
+    SLINKY_BACKEND: (
+        "The Slinky Slurm cluster is not enabled in this region. Set helm.slurm.enabled to "
+        "true in cdk.json (or deploy with --enable slurm) and redeploy the regional stack."
+    ),
+    PCS_BACKEND: (
+        "AWS PCS is not enabled in this region. Set pcs.enabled to true in cdk.json (or "
+        "deploy with --enable pcs) and redeploy the regional stack."
+    ),
+}
 UNAVAILABLE_DETAIL = (
     "Slurm's REST API is unavailable in this region. Check the slinky-slurm-restapi "
     "Deployment and the slinky-slurm-controller StatefulSet in gco-jobs."
@@ -95,11 +132,24 @@ API_VERSION_DETAIL = (
 
 
 class SlurmDisabledError(Exception):
-    """Slurm is not deployed in this region (cdk.json helm.slurm.enabled false)."""
+    """No Slurm backend is deployed here, or the one the caller named is not.
+
+    ``detail`` is the enablement remedy for the backend the caller named;
+    without one :func:`http_exception_for` answers the generic remedy that
+    names both backends.
+    """
+
+    def __init__(self, message: str, *, detail: str | None = None) -> None:
+        super().__init__(message)
+        self.detail = detail
+
+
+class SlurmBackendSelectionError(Exception):
+    """The caller must (or must not) name a backend: ambiguous or unknown ``backend=``."""
 
 
 class SlurmUnavailableError(Exception):
-    """slurmrestd or the API's token cannot be reached right now.
+    """slurmrestd or the API's credential cannot be reached right now.
 
     ``detail`` is the operator-facing remedy the API answers with when the
     cause is known precisely; :func:`http_exception_for` falls back to the
@@ -134,9 +184,62 @@ class SlurmApiError(Exception):
         self.http_status = http_status
 
 
+def enabled_backends() -> list[str]:
+    """The backends this API pod serves, in canonical order.
+
+    ``GCO_SLURM_BACKENDS`` is the comma-separated list the regional stack
+    renders from the two enablement flags; when it is absent the legacy
+    ``GCO_SLURM_ENABLED=true`` means Slinky alone. Unknown names are ignored
+    with a warning rather than failing every request: the manifest is
+    GCO-rendered, so a bad name is a deployment bug the log should show once.
+    """
+    raw = os.getenv(BACKENDS_ENV)
+    if raw is None:
+        if os.getenv(LEGACY_ENABLED_ENV, "false").strip().lower() == "true":
+            return [SLINKY_BACKEND]
+        return []
+    requested = {part.strip().lower() for part in raw.split(",") if part.strip()}
+    unknown = sorted(requested - set(SLURM_BACKENDS))
+    if unknown:
+        logger.warning("%s names unknown Slurm backend(s): %s", BACKENDS_ENV, ", ".join(unknown))
+    return [name for name in SLURM_BACKENDS if name in requested]
+
+
 def slurm_enabled() -> bool:
-    """Whether the regional stack deployed Slurm (``GCO_SLURM_ENABLED`` on the API pod)."""
-    return os.getenv("GCO_SLURM_ENABLED", "false").strip().lower() == "true"
+    """Whether any Slurm backend is deployed in this region."""
+    return bool(enabled_backends())
+
+
+def resolve_backend(name: str | None) -> str:
+    """Decide which backend a request means.
+
+    Explicit ``name``: that backend, or 404 (:class:`SlurmDisabledError`)
+    with its enablement remedy when it is off, or 400 when it is not a backend
+    GCO knows. Omitted: the single enabled backend; with both enabled the
+    caller must choose (400), because silently picking one would send jobs to
+    a cluster the caller did not mean.
+    """
+    enabled = enabled_backends()
+    if name is not None:
+        candidate = name.strip().lower()
+        if candidate not in SLURM_BACKENDS:
+            raise SlurmBackendSelectionError(
+                f"backend must be one of {', '.join(SLURM_BACKENDS)}, got {name!r}"
+            )
+        if candidate not in enabled:
+            raise SlurmDisabledError(
+                f"Slurm backend {candidate!r} is not enabled",
+                detail=BACKEND_DISABLED_DETAILS[candidate],
+            )
+        return candidate
+    if not enabled:
+        raise SlurmDisabledError(DISABLED_DETAIL)
+    if len(enabled) > 1:
+        raise SlurmBackendSelectionError(
+            "Both Slurm backends are enabled in this region; pass backend=slinky or "
+            "backend=pcs to say which cluster you mean (GET /api/v1/slurm/backends lists them)."
+        )
+    return enabled[0]
 
 
 def restapi_base_url() -> str:
@@ -206,32 +309,159 @@ class SecretTokenProvider:
         return token
 
 
-class SlurmRestClient:
-    """A thin, typed wrapper over the slurmrestd endpoints the API exposes."""
+# ---------------------------------------------------------------------------
+# The backend contract the client speaks through
+# ---------------------------------------------------------------------------
+# Defined here, beside the client, so the layering stays one-directional:
+# this module knows nothing about the concrete PCS backend, and
+# :mod:`gco.services.slurm_backends` (the registry of enabled backends) and
+# :mod:`gco.services.pcs_backend` import *from* here, never the other way.
+
+
+@dataclass(frozen=True)
+class BackendDefaults:
+    """What a submission falls back to when the caller leaves a field out.
+
+    ``partition`` ``None`` means "let slurmctld apply its own default
+    partition"; ``working_directory`` is where ``slurm-<jobid>.out`` lands and
+    must exist on every compute node (the shared ``/home`` on both backends).
+    """
+
+    partition: str | None
+    working_directory: str
+
+
+class SlurmBackend(Protocol):
+    """One place slurmrestd lives and one way to authenticate to it."""
+
+    #: ``slinky`` or ``pcs``: the ``backend`` query parameter value.
+    name: str
+    #: Submission defaults for this backend.
+    defaults: BackendDefaults
+
+    async def base_url(self) -> str:
+        """``http://host:port`` of slurmrestd, resolved if the backend discovers it."""
+
+    async def auth_headers(self) -> dict[str, str]:
+        """The headers that authenticate one request (never logged)."""
+
+    def invalidate(self) -> None:
+        """Forget cached credentials after a 401 so the next request re-fetches them."""
+
+    def on_transport_error(self) -> None:
+        """Forget cached discovery after a connection failure (the endpoint may have moved)."""
+
+    def endpoint_hint(self) -> str:
+        """The best-known endpoint for log and error messages (never a credential)."""
+
+    def unavailable_detail(self) -> str:
+        """The operator-facing remedy when slurmrestd cannot be reached."""
+
+    def api_version_detail(self, version: str) -> str:
+        """The remedy when slurmrestd does not serve the pinned OpenAPI plugin version."""
+
+    async def describe(self) -> dict[str, Any]:
+        """Facts for ``/backends`` and ``/status``: what cluster this is and where."""
+
+
+class SlinkyBackend:
+    """The Slinky cluster on the regional EKS cluster (``helm.slurm``).
+
+    The in-cluster ``slinky-slurm-restapi`` Service and the JWT the
+    slurm-operator mints into a Kubernetes Secret for the API's Slurm identity
+    (``slurm``, SlurmUser), sent with the impersonation header Slinky's
+    slurmrestd accepts.
+    """
+
+    name = SLINKY_BACKEND
 
     def __init__(
         self,
         *,
+        base_url: str | None = None,
+        token_provider: SecretTokenProvider | None = None,
+        user: str = SLURM_API_USER,
+    ) -> None:
+        self._base_url = (base_url or restapi_base_url()).rstrip("/")
+        self.token_provider = token_provider or SecretTokenProvider()
+        self.user = user
+        self.defaults = BackendDefaults(
+            partition=None, working_directory=SLURM_DEFAULT_WORKING_DIRECTORY
+        )
+
+    async def base_url(self) -> str:
+        return self._base_url
+
+    async def auth_headers(self) -> dict[str, str]:
+        token = await self.token_provider.token()
+        return {"X-SLURM-USER-NAME": self.user, "X-SLURM-USER-TOKEN": token}
+
+    def invalidate(self) -> None:
+        self.token_provider.invalidate()
+
+    def on_transport_error(self) -> None:
+        """The in-cluster Service name is static; nothing to re-discover."""
+
+    def endpoint_hint(self) -> str:
+        return self._base_url
+
+    def unavailable_detail(self) -> str:
+        return UNAVAILABLE_DETAIL
+
+    def api_version_detail(self, version: str) -> str:
+        return API_VERSION_DETAIL.format(version=version)
+
+    async def describe(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "kind": "slinky",
+            "description": "Slinky slurm-operator cluster on the regional EKS cluster",
+            "endpoint": self._base_url,
+            "restapi_service": f"{SLURM_RESTAPI_NAME}.{SLURM_NAMESPACE}",
+            "login": {"kind": "pod", "namespace": SLURM_NAMESPACE, "deployment": SLURM_LOGIN_NAME},
+            "default_partition": self.defaults.partition,
+            "working_directory": self.defaults.working_directory,
+        }
+
+
+class SlurmRestClient:
+    """A thin, typed wrapper over the slurmrestd endpoints the API exposes.
+
+    ``backend`` says where slurmrestd is and how to authenticate; the keyword
+    arguments ``base_url``, ``token_provider`` and ``user`` build a
+    :class:`SlinkyBackend` when no backend is given, which keeps the
+    one-cluster call shape working.
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: SlurmBackend | None = None,
         base_url: str | None = None,
         version: str | None = None,
         token_provider: SecretTokenProvider | None = None,
         user: str = SLURM_API_USER,
         timeout: float = REQUEST_TIMEOUT_SECONDS,
     ) -> None:
-        self.base_url = (base_url or restapi_base_url()).rstrip("/")
+        if backend is None:
+            backend = SlinkyBackend(base_url=base_url, token_provider=token_provider, user=user)
+        self.backend = backend
         self.version = version or api_version()
-        self.token_provider = token_provider or SecretTokenProvider()
-        self.user = user
         self.timeout = timeout
+
+    @property
+    def base_url(self) -> str:
+        """The best-known slurmrestd address (for messages; the request resolves it live)."""
+        return self.backend.endpoint_hint()
 
     # -- transport -----------------------------------------------------------
 
     async def _send(
         self, method: str, path: str, *, params: Mapping[str, Any] | None, json: Any
     ) -> httpx2.Response:
-        token = await self.token_provider.token()
-        headers = {"X-SLURM-USER-NAME": self.user, "X-SLURM-USER-TOKEN": token}
-        url = f"{self.base_url}{path}"
+        headers = await self.backend.auth_headers()
+        base_url = await self.backend.base_url()
+        url = f"{base_url}{path}"
         try:
             transport = httpx2.AsyncHTTPTransport(trust_env=False)
             async with httpx2.AsyncClient(
@@ -244,7 +474,11 @@ class SlurmRestClient:
                 )
         except httpx2.HTTPError as exc:
             logger.warning("slurmrestd unreachable at %s: %s", url, exc)
-            raise SlurmUnavailableError(f"slurmrestd unreachable at {self.base_url}") from exc
+            self.backend.on_transport_error()
+            raise SlurmUnavailableError(
+                f"slurmrestd unreachable at {base_url}",
+                detail=self.backend.unavailable_detail(),
+            ) from exc
 
     async def request(
         self,
@@ -254,10 +488,10 @@ class SlurmRestClient:
         params: Mapping[str, Any] | None = None,
         json: Any = None,
     ) -> dict[str, Any]:
-        """Send one request; retry once with a fresh token on 401; decode the body."""
+        """Send one request; retry once with a fresh credential on 401; decode the body."""
         response = await self._send(method, path, params=params, json=json)
         if response.status_code == 401:
-            self.token_provider.invalidate()
+            self.backend.invalidate()
             response = await self._send(method, path, params=params, json=json)
         return self._decode(response)
 
@@ -305,7 +539,7 @@ class SlurmRestClient:
             if exc.http_status == 404:
                 raise SlurmUnavailableError(
                     f"slurmrestd at {self.base_url} does not serve {self.version}",
-                    detail=API_VERSION_DETAIL.format(version=self.version),
+                    detail=self.backend.api_version_detail(self.version),
                 ) from exc
             raise
 
@@ -389,7 +623,9 @@ def http_exception_for(error: Exception, *, context: str = "talking to Slurm") -
     the operation (``context``), never the exception text.
     """
     if isinstance(error, SlurmDisabledError):
-        return HTTPException(status_code=404, detail=DISABLED_DETAIL)
+        return HTTPException(status_code=404, detail=error.detail or DISABLED_DETAIL)
+    if isinstance(error, SlurmBackendSelectionError):
+        return HTTPException(status_code=400, detail=str(error))
     if isinstance(error, SlurmUnavailableError):
         detail = error.detail or (
             TOKEN_UNAVAILABLE_DETAIL if "Secret" in str(error) else UNAVAILABLE_DETAIL
@@ -398,22 +634,3 @@ def http_exception_for(error: Exception, *, context: str = "talking to Slurm") -
     if isinstance(error, SlurmApiError):
         return HTTPException(status_code=error.status_code, detail=error.detail)
     return HTTPException(status_code=500, detail=f"Internal error while {context}")
-
-
-_client: SlurmRestClient | None = None
-
-
-def get_client() -> SlurmRestClient:
-    """The process-wide client; raises :class:`SlurmDisabledError` when Slurm is off."""
-    global _client
-    if not slurm_enabled():
-        raise SlurmDisabledError(DISABLED_DETAIL)
-    if _client is None:
-        _client = SlurmRestClient()
-    return _client
-
-
-def reset_client() -> None:
-    """Drop the cached client (tests, configuration reloads)."""
-    global _client
-    _client = None

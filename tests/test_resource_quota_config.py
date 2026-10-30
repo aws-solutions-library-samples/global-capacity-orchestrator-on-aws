@@ -290,6 +290,11 @@ class TestManifestTemplatePlaceholderCoverage:
         # post-helm-slurm-accounting-backup.yaml and the manifest processor's
         # GCO_SLURM_ENABLED env are rendered by compute_slurm_replacements.
         Path("gco/slurm_config.py"),
+        # The {{PCS_*}} and {{SLURM_BACKENDS}} tokens gating
+        # post-helm-pcs-network.yaml and post-helm-pcs-observability.yaml, and
+        # feeding the manifest processor's PCS env in 31-manifest-processor.yaml,
+        # are rendered by compute_pcs_replacements.
+        Path("gco/pcs_config.py"),
     )
 
     # Placeholders that are intentionally only provided for specific

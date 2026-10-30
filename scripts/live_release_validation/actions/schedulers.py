@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..checks.jobs import _run_api_transport_lifecycle
+from ..checks.pcs import effective_pcs_enablement, probe_pcs
 from ..checks.schedulers import (
     PROBED_SCHEDULERS,
     effective_scheduler_enablement,
@@ -19,6 +20,11 @@ def action_schedulers(ctx: RunContext) -> dict[str, Any]:
     that scheduler bound them. Kueue: a queue-labeled Job stays webhook-
     suspended until the deployed gco-default queue admits it. Slurm: a probe
     Job submits a real batch job through slurmrestd and requires COMPLETED.
+    AWS PCS (the second Slurm backend, on for every release run through the
+    ``pcs_overrides`` context): a batch job submitted through the GCO API
+    with ``backend=pcs`` must reach COMPLETED on a node PCS launched from
+    zero, land in accounting with its caller attribution, and its output
+    file must be readable from the managed login node over SSM.
     Disabled schedulers are recorded as skipped with the configuration source;
     KEDA and KubeRay carry derived evidence (see the reasons in the result).
     """
@@ -42,6 +48,19 @@ def action_schedulers(ctx: RunContext) -> dict[str, Any]:
             marker_prefix=scheduler.upper(),
         )
         results[scheduler] = {"status": "validated", "source": state["source"], **lifecycle}
+
+    pcs_state = effective_pcs_enablement(ctx)
+    enablement["pcs"] = pcs_state
+    if pcs_state["enabled"]:
+        results["pcs"] = {"status": "validated", "source": pcs_state["source"], **probe_pcs(ctx)}
+    else:
+        results["pcs"] = {
+            "status": "skipped",
+            "reason": (
+                f"Disabled by {pcs_state['source']}; a release run turns AWS PCS on through "
+                "the pcs_overrides CDK context"
+            ),
+        }
 
     results["keda"] = {
         "status": "derived",

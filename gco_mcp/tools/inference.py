@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import json
-from typing import Any
+from typing import Any, Literal
 
 import cli_runner
 from audit import audit_logged
@@ -72,6 +72,7 @@ def deploy_inference(
     env_vars: list[str] | None = None,
     framework: str | None = None,
     extra_args: list[str] | None = None,
+    capacity_type: Literal["on-demand", "spot"] | None = None,
 ) -> str:
     """Deploy an inference endpoint across regions.
 
@@ -91,6 +92,13 @@ def deploy_inference(
         framework: Strict serving adapter, ``vllm`` or ``sglang``. Omit to let
             the image name decide.
         extra_args: Container arguments, one token per entry, appended in order.
+        capacity_type: Pin the pods to one node capacity type. Omit (the
+            default) to add no selector: a node launched for the pod is Spot
+            when Spot is available and On-Demand otherwise, and the pod may
+            land on any existing node with room. ``spot`` pins to Spot with no
+            fallback (pods stay Pending while Spot is unavailable);
+            ``on-demand`` pins to On-Demand, the choice for production and
+            single-replica endpoints.
     """
     args = [
         "inference",
@@ -114,6 +122,8 @@ def deploy_inference(
     # The ``--extra-args=<token>`` form keeps a token that starts with "--"
     # from being read as an option of its own.
     args += [f"--extra-args={token}" for token in extra_args or []]
+    if capacity_type:
+        args += ["--capacity-type", capacity_type]
     return cli_runner._run_cli(*args)
 
 

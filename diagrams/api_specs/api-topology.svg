@@ -69,7 +69,7 @@
   <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/manifest-processor/"><title>GCO Manifest Processor API</title>
     <rect x="1655" y="356" width="205" height="70" rx="8" fill="#f1f5f9" stroke="#334155" stroke-width="1.5"/>
     <text x="1665" y="375" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" text-anchor="start" fill="#334155">GCO Manifest Processor API</text>
-    <text x="1665" y="394" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">45 endpoints</text>
+    <text x="1665" y="394" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">46 endpoints</text>
     <text x="1665" y="409" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5" font-weight="normal" text-anchor="start" fill="#1e293b">Service manifest-processor</text>
   </a>
   <a href="https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/api/api-gateway-global/"><title>GCO Global API Gateway</title>

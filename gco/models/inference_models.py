@@ -105,7 +105,9 @@ class InferenceEndpointSpec:
     )
     # Canary deployment fields
     canary: dict[str, Any] | None = None  # {image, weight, replicas}
-    # Capacity type: "on-demand", "spot", or "mixed" (base on-demand, overflow spot)
+    # Capacity type: "on-demand" or "spot", each a hard karpenter.sh/capacity-type
+    # pin on the endpoint's pods; None (the default) adds no selector, so a new
+    # node is Spot when available and On-Demand otherwise.
     capacity_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:

@@ -59,6 +59,23 @@ skipped with their configuration source unless the run passes
 the `helm_enabled_overrides` context so the deployed chart set, the applier's
 gated manifests, and the probes all resolve enablement identically.
 
+The same action proves the AWS PCS Slurm backend (`checks/pcs.py`), which
+every release run deploys in managed mode with its metrics scrape on through
+the `pcs_overrides` CDK context (`pcs_overrides_json()`, deep-merged over the
+`pcs` block by the config loader, part of the resume identity like
+`tracing_overrides`): the API's `/api/v1/slurm/backends` listing, a batch job
+submitted with `backend=pcs` that must reach `COMPLETED` on a node PCS
+launches from zero, its slurmdbd record with the caller attribution, and the
+output file read back from the managed login node by the real
+`gco slurm output --backend pcs` (an argv-only subprocess). `preflight` runs
+`cli.pcs_preflight` for the same merged block before `deploy`
+(`_pcs_preflight`), and `cleanup/pcs_nodes.py` waits after teardown for the
+instances PCS launched to leave `shutting-down` and for their tagged root
+volumes to finish deleting, which the inventory would otherwise count as
+present. The inventory's `pcs` scanner (`inventory/scanners.py`)
+claims clusters by project name or `gco:project` tag and everything PCS keeps
+under them.
+
 The two cluster-facing actions share their kubectl plumbing in
 `checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated
 kubeconfig the `inference` action uses, and a fail-closed JSON read that

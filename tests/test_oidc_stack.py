@@ -410,6 +410,72 @@ class TestOIDCIAMPolicy:
             },
         )
 
+    def test_policy_has_pcs_catalog_reads(self):
+        """Policy should allow the PCS AMI-family lookups of the monthly scan.
+
+        ``ssm:GetParametersByPath`` walks the public ``/aws/service/pcs/ami``
+        tree and ``ec2:DescribeImages`` lists Amazon's PCS sample AMIs; both
+        are account-wide read actions, so they sit in the ``Resource: "*"``
+        statement with the other catalog reads.
+        """
+        template = _synth_stack()
+        template.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Action": Match.array_with(
+                                        ["ec2:DescribeImages", "ssm:GetParametersByPath"]
+                                    ),
+                                    "Effect": "Allow",
+                                    "Resource": "*",
+                                }
+                            )
+                        ]
+                    )
+                }
+            },
+        )
+
+    def test_policy_scopes_pcs_repo_listing_to_the_public_buckets(self):
+        """``s3:ListBucket`` is granted on the ``aws-pcs-repo-*`` buckets only.
+
+        The scan lists the AWS-maintained node lifecycle scripts there; the
+        bucket admits any AWS principal but refuses anonymous listing. The
+        grant must not widen to every bucket in the account.
+        """
+        template = _synth_stack()
+        template.has_resource_properties(
+            "AWS::IAM::Policy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Action": "s3:ListBucket",
+                                    "Effect": "Allow",
+                                    "Resource": "arn:aws:s3:::aws-pcs-repo-*",
+                                }
+                            )
+                        ]
+                    )
+                }
+            },
+        )
+        policy = json.loads(
+            (Path(__file__).parent.parent / ".github" / "oidc_provider" / "policy.json").read_text()
+        )
+        for stmt in policy["Statement"]:
+            actions = stmt["Action"] if isinstance(stmt["Action"], list) else [stmt["Action"]]
+            if any(action.startswith("s3:") for action in actions):
+                assert stmt["Resource"] == "arn:aws:s3:::aws-pcs-repo-*", (
+                    "every S3 action of the CI role must stay scoped to the public PCS buckets"
+                )
+
     def test_policy_has_sts_get_caller_identity(self):
         """Policy should allow sts:GetCallerIdentity."""
         template = _synth_stack()

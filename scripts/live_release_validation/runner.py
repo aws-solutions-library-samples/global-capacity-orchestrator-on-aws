@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import signal
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -129,6 +132,8 @@ class LiveValidationRunner:
         self._identity_verified = False
         self._received_signal: int | None = None
         self._previous_signal_handlers: dict[int, Any] = {}
+        #: The run's scratch directory (``TMPDIR`` for the CDK children) while ``run()`` is active.
+        self._scratch_dir: Path | None = None
         #: The guaranteed post-run inventory when it ran *after* the
         #: ``final-inventory`` action had already passed: the action keeps its
         #: own row and timing, and this scan (the latest look at the account)
@@ -148,6 +153,36 @@ class LiveValidationRunner:
         for signum, previous in self._previous_signal_handlers.items():
             signal.signal(signum, previous)
         self._previous_signal_handlers.clear()
+
+    def _enter_run_scratch(self) -> Path:
+        """Give the run's CDK invocations their own temporary directory.
+
+        The CDK CLI synthesizes an app-evaluating command that carries no
+        ``--output`` (``list``, ``destroy``, a single-stack ``deploy``) into
+        a ``cdk.out<random>`` directory under the system temporary directory
+        and keeps it once the command succeeds. A release run makes some
+        seventy such calls at over a hundred megabytes each, which is how
+        two runs on one host left fifteen gigabytes behind and failed the
+        next run's free-disk preflight. The CDK children read ``TMPDIR`` at
+        start, so a run-scoped value bounds the leak to the run; the
+        directory is removed when the run ends, whatever its outcome.
+
+        Only the CDK children see it (``StackManager.set_cdk_environment``).
+        The first run that set ``TMPDIR`` for the whole process broke the
+        inference tunnel: the Session Manager plugin binds a Unix socket
+        under ``TMPDIR``, and the run-scoped path pushed it past the
+        104-byte limit (``bind: invalid argument``).
+        """
+        label = re.sub(r"[^A-Za-z0-9._-]", "_", self.settings.run_id)[:80]
+        self._scratch_dir = Path(tempfile.mkdtemp(prefix=f"gco-live-{label}-"))
+        self.stack_manager.set_cdk_environment({"TMPDIR": str(self._scratch_dir)})
+        return self._scratch_dir
+
+    def _leave_run_scratch(self) -> None:
+        if self._scratch_dir is not None:
+            self.stack_manager.set_cdk_environment({})
+            shutil.rmtree(self._scratch_dir, ignore_errors=True)
+            self._scratch_dir = None
 
     def _handle_signal(self, signum: int, _frame: Any) -> None:
         self._received_signal = signum
@@ -500,6 +535,7 @@ class LiveValidationRunner:
         interrupt_exit_code: int | None = None
         try:
             self._install_signal_handlers()
+            self._enter_run_scratch()
             try:
                 for name in self.selected_actions:
                     definition = self.registry[name]
@@ -578,6 +614,7 @@ class LiveValidationRunner:
                 print(f"Markdown report: {markdown_path}")
         finally:
             self._restore_signal_handlers()
+            self._leave_run_scratch()
             os.chdir(self._previous_cwd)
 
         if interrupt_exit_code is not None:

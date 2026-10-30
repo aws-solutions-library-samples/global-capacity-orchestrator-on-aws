@@ -1608,23 +1608,42 @@ def test_task_prune_accepts_zero_and_returns_cli_value() -> None:
 
 
 # ---------------------------------------------------------------------------
-# tools/slurm.py — the Slinky cluster through `gco slurm`
+# tools/slurm.py — the Slinky and AWS PCS clusters through `gco slurm`
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("function_name", "args", "kwargs", "expected_argv"),
     [
+        ("slurm_backends", ("us-east-1",), {}, ("slurm", "backends", "-r", "us-east-1")),
         ("slurm_status", ("us-east-1",), {}, ("slurm", "status", "-r", "us-east-1")),
+        (
+            "slurm_status",
+            ("us-east-1",),
+            {"backend": "pcs"},
+            ("slurm", "status", "-r", "us-east-1", "--backend", "pcs"),
+        ),
         ("slurm_partitions", ("us-east-1",), {}, ("slurm", "partitions", "-r", "us-east-1")),
+        (
+            "slurm_partitions",
+            ("us-east-1",),
+            {"backend": "slinky"},
+            ("slurm", "partitions", "-r", "us-east-1", "--backend", "slinky"),
+        ),
         ("slurm_nodes", ("us-east-1",), {}, ("slurm", "nodes", "-r", "us-east-1")),
         (
             "slurm_nodes",
             ("us-east-1",),
-            {"partition": "gpu"},
-            ("slurm", "nodes", "-r", "us-east-1", "--partition", "gpu"),
+            {"partition": "gpu", "backend": "pcs"},
+            ("slurm", "nodes", "-r", "us-east-1", "--backend", "pcs", "--partition", "gpu"),
         ),
         ("slurm_queue", ("us-east-1",), {}, ("slurm", "queue", "-r", "us-east-1")),
+        (
+            "slurm_queue",
+            ("us-east-1",),
+            {"backend": "pcs", "state": "RUNNING"},
+            ("slurm", "queue", "-r", "us-east-1", "--backend", "pcs", "--state", "RUNNING"),
+        ),
         (
             "slurm_queue",
             ("us-east-1",),
@@ -1645,7 +1664,19 @@ def test_task_prune_accepts_zero_and_returns_cli_value() -> None:
             ),
         ),
         ("slurm_job", ("us-east-1", 42), {}, ("slurm", "job", "42", "-r", "us-east-1")),
+        (
+            "slurm_job",
+            ("us-east-1", 42),
+            {"backend": "pcs"},
+            ("slurm", "job", "42", "-r", "us-east-1", "--backend", "pcs"),
+        ),
         ("slurm_accounting", ("us-east-1",), {}, ("slurm", "accounting", "-r", "us-east-1")),
+        (
+            "slurm_accounting",
+            ("us-east-1",),
+            {"since": "1d", "backend": "pcs"},
+            ("slurm", "accounting", "-r", "us-east-1", "--backend", "pcs", "--since", "1d"),
+        ),
         (
             "slurm_accounting",
             ("us-east-1",),
@@ -1754,6 +1785,22 @@ def test_task_prune_accepts_zero_and_returns_cli_value() -> None:
                 "0",
             ),
         ),
+        (
+            "slurm_submit",
+            ("us-east-1", "/tmp/train.sbatch"),
+            {"partition": "gpu", "backend": "pcs"},
+            (
+                "slurm",
+                "submit",
+                "/tmp/train.sbatch",
+                "-r",
+                "us-east-1",
+                "--backend",
+                "pcs",
+                "--partition",
+                "gpu",
+            ),
+        ),
     ],
 )
 def test_slurm_wrapper_matrix(
@@ -1791,6 +1838,14 @@ def test_slurm_gated_cancel_warns_and_passes_the_signal() -> None:
             ("us-east-1", 7),
             {},
             ("slurm", "cancel", "7", "-r", "us-east-1", "-y"),
+        )
+        loaded.module._ctx_warning = AsyncMock()
+        _assert_cli_call(
+            loaded,
+            "slurm_cancel",
+            ("us-east-1", 7),
+            {"backend": "pcs"},
+            ("slurm", "cancel", "7", "-r", "us-east-1", "--backend", "pcs", "-y"),
         )
 
 

@@ -495,10 +495,16 @@
             "title": "Time Limit"
           },
           "working_directory": {
-            "default": "/home/slurm",
-            "description": "Working directory on the worker (default: the slurm user's home on the shared filesystem, where slurm-<jobid>.out lands)",
-            "title": "Working Directory",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Working directory on the worker (default: the backend's Slurm user home on the shared filesystem, where slurm-<jobid>.out lands)",
+            "title": "Working Directory"
           }
         },
         "required": [
@@ -2614,6 +2620,24 @@
               "title": "Limit",
               "type": "integer"
             }
+          },
+          {
+            "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+            "in": "query",
+            "name": "backend",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+              "title": "Backend"
+            }
           }
         ],
         "responses": {
@@ -2642,6 +2666,38 @@
           }
         ],
         "summary": "Slurm Accounting Jobs",
+        "tags": [
+          "manifest-processor",
+          "Slurm"
+        ],
+        "x-gco-route": {
+          "namespace": "gco-system",
+          "port": 443,
+          "rule": "/",
+          "service": "manifest-processor"
+        }
+      }
+    },
+    "/api/v1/slurm/backends": {
+      "get": {
+        "description": "The Slurm backends enabled in this region with what each one is and where.\n\nAnswers 200 with an empty list when none is deployed, so a client can tell\n\"Slurm is off here\" from \"the API is down\" without parsing a 404. Each\nentry's ``describe()`` is best-effort: a backend whose discovery fails\nstill appears, with the failure in ``error`` instead of its facts, so one\nbroken backend never hides the other.",
+        "operationId": "slurm_backends_api_v1_slurm_backends_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "gcoHmac": []
+          }
+        ],
+        "summary": "Slurm Backends",
         "tags": [
           "manifest-processor",
           "Slurm"
@@ -2726,6 +2782,24 @@
               "title": "Limit",
               "type": "integer"
             }
+          },
+          {
+            "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+            "in": "query",
+            "name": "backend",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+              "title": "Backend"
+            }
           }
         ],
         "responses": {
@@ -2768,6 +2842,26 @@
       "post": {
         "description": "Submit a batch script to Slurm (sbatch through slurmrestd).",
         "operationId": "slurm_submit_api_v1_slurm_jobs_post",
+        "parameters": [
+          {
+            "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+            "in": "query",
+            "name": "backend",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+              "title": "Backend"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -2848,6 +2942,24 @@
               "description": "Signal name",
               "title": "Signal"
             }
+          },
+          {
+            "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+            "in": "query",
+            "name": "backend",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+              "title": "Backend"
+            }
           }
         ],
         "responses": {
@@ -2899,6 +3011,24 @@
               "title": "Job Id",
               "type": "integer"
             }
+          },
+          {
+            "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+            "in": "query",
+            "name": "backend",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+              "title": "Backend"
+            }
           }
         ],
         "responses": {
@@ -2941,7 +3071,7 @@
     },
     "/api/v1/slurm/nodes": {
       "get": {
-        "description": "Slurm nodes (the slurmd worker pods) with state, resources and gres.",
+        "description": "Slurm nodes (slurmd worker pods or PCS instances) with state, resources and gres.",
         "operationId": "slurm_nodes_api_v1_slurm_nodes_get",
         "parameters": [
           {
@@ -2960,6 +3090,24 @@
               ],
               "description": "Only nodes in this partition",
               "title": "Partition"
+            }
+          },
+          {
+            "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+            "in": "query",
+            "name": "backend",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+              "title": "Backend"
             }
           }
         ],
@@ -3005,6 +3153,26 @@
       "get": {
         "description": "Every Slurm partition with its state, time limit and node count.",
         "operationId": "slurm_partitions_api_v1_slurm_partitions_get",
+        "parameters": [
+          {
+            "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+            "in": "query",
+            "name": "backend",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+              "title": "Backend"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3013,6 +3181,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [
@@ -3037,6 +3215,26 @@
       "get": {
         "description": "Controller reachability plus partition, node and job counts for this region.",
         "operationId": "slurm_status_api_v1_slurm_status_get",
+        "parameters": [
+          {
+            "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+            "in": "query",
+            "name": "backend",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which Slurm cluster: 'slinky' (the cluster on the EKS cluster) or 'pcs' (AWS PCS). Optional when one backend is enabled; required when both are.",
+              "title": "Backend"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3045,6 +3243,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [

@@ -1,0 +1,44 @@
+# NetworkPolicy for the AWS PCS Slurm backend (cdk.json pcs).
+#
+# The GCO API (manifest-processor, gco-system) proxies /api/v1/slurm/*
+# requests with backend=pcs to slurmrestd on the PCS cluster's controller,
+# which AWS runs at a private address in the regional VPC (or a peered range
+# the operator names in pcs.endpoint_cidr) on tcp/6820, plain HTTP. gco-system
+# pods may otherwise leave only for DNS, HTTPS and the Pod Identity Agent
+# (03-network-policies.yaml), so this plaintext hop needs its own egress rule.
+#
+# The peer is an ipBlock rather than a podSelector because the controller is
+# not a pod: it is an ENI in the VPC that PCS manages. The range is the whole
+# VPC (or endpoint_cidr) because the controller's address is only known at
+# runtime (pcs:GetCluster) and may change when PCS replaces the controller;
+# the port pins the rule to slurmrestd. The other half of the boundary is the
+# PCS cluster's security group, which admits tcp/6820 only from the EKS
+# cluster security group (gco/stacks/pcs_cluster.py; for an existing cluster
+# the operator adds that rule).
+#
+# Gated on {{PCS_ENABLED}}: substituted by GCORegionalStack only when the
+# cdk.json pcs toggle (or a feature_enabled_overrides context override)
+# enables PCS; otherwise the applier skips this file and
+# _FEATURE_RESOURCE_INVENTORY prunes the policy on a later disable.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-manifest-processor-to-pcs-restapi
+  namespace: gco-system
+  labels:
+    project: gco
+    gco.io/pcs-enabled: "{{PCS_ENABLED}}"
+spec:
+  podSelector:
+    matchLabels:
+      app: manifest-processor
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: "{{PCS_RESTAPI_CIDR}}"
+      ports:
+        - protocol: TCP
+          port: 6820

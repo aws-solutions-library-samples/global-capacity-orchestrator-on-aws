@@ -376,6 +376,86 @@ CONFIGS.extend(
             },
         ),
         (
+            # AWS PCS fronting a cluster the operator already runs: no PCS
+            # resources, the GetCluster facts custom resource through the
+            # shared custom-resource role, and the two exact reads on the
+            # manifest-processor role (its own IAM surface, also in
+            # NAG_CONFIGS). The identity's home is wherever the operator's
+            # nodes put it, so a non-/home directory is legal here.
+            "pcs-existing",
+            {
+                "pcs": {
+                    "enabled": True,
+                    "mode": "existing",
+                    "cluster_id": "pcs_0123456789abcdef",
+                    "endpoint_cidr": "10.42.0.0/16",
+                    "identity": {"name": "hpc", "uid": 2000, "gid": 2000, "dir": "/shared/hpc"},
+                }
+            },
+        ),
+        (
+            # The managed PCS cluster at its shipped defaults beside the Slinky
+            # cluster and FSx (so storage.scratch resolves to FSx): the node
+            # role under /aws-pcs/, the AMI lookup provider, launch templates,
+            # node groups, queues, the login node, the EFS home access point
+            # and the lifecycle actions — the other PCS IAM surface, also in
+            # NAG_CONFIGS. Both Slurm backends on is the coexistence shape the
+            # live-validation harness deploys. Node groups keep the default
+            # (no availability_zones): an env-agnostic synth cannot match
+            # subnets by zone, which tests/test_regional_stack_pcs.py covers.
+            "pcs-managed-with-slinky-and-fsx",
+            {
+                "pcs": {
+                    "enabled": True,
+                    "managed": {
+                        # Metrics on: the controller lookup, the tcp/6817 rule and
+                        # the ScrapeConfig gate ride this synth and the nag run.
+                        "metrics": {"enabled": True},
+                        "node_groups": [
+                            {"name": "gco-compute", "instance_types": ["c6i.large"]},
+                            {
+                                "name": "spot",
+                                "instance_types": ["m6i.large", "m6i.xlarge"],
+                                "purchase_option": "SPOT",
+                                "max_nodes": 8,
+                            },
+                        ],
+                        "queues": [
+                            {"name": "gco", "node_groups": ["gco-compute"], "default": True},
+                            {"name": "spot", "node_groups": ["spot"]},
+                        ],
+                    },
+                },
+                "fsx_lustre": {
+                    "enabled": True,
+                    "storage_capacity_gib": 1200,
+                    "deployment_type": "SCRATCH_2",
+                    "file_system_type_version": "2.15",
+                    "per_unit_storage_throughput": 200,
+                    "data_compression_type": "LZ4",
+                    "import_path": None,
+                    "export_path": None,
+                    "auto_import_policy": "NEW_CHANGED_DELETED",
+                },
+                "helm": {"slurm": {"enabled": True}},
+            },
+        ),
+        (
+            # The per-Region overlay: the global block leaves PCS off and the
+            # overlay turns it on for one Region with its own identity, the
+            # same deep-merge the fsx_lustre_regions list does by name.
+            "pcs-regions-overlay",
+            {
+                "pcs": {"enabled": False, "identity": {"name": "hpc", "uid": 2000, "gid": 2000}},
+                "pcs_regions": {
+                    "us-east-1": {
+                        "enabled": True,
+                        "managed": {"login": {"enabled": False}, "accounting": {"enabled": False}},
+                    }
+                },
+            },
+        ),
+        (
             "helm-minimal",
             {
                 "helm": {
@@ -852,6 +932,14 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
         "validating, so it reaches the same loader path the tracing-* entries "
         "above vary; the parse and merge are pinned in tests/test_config_loader.py."
     ),
+    "pcs_overrides": (
+        "Run-scoped sibling of the pcs block, like eks_capabilities_overrides: a "
+        "JSON object the live-validation harness deep-merges over pcs (after the "
+        "pcs_regions overlay) for one deploy, so every release run exercises the "
+        "managed cluster with metrics on. _raw_pcs_config merges it before "
+        "validating, so it reaches the same loader path the pcs-* entries above "
+        "vary; the parse and merge order are pinned in tests/test_pcs_config.py."
+    ),
 }
 
 
@@ -936,6 +1024,15 @@ _NAG_CONFIG_NAMES = {
     # role per capability trusted by capabilities.eks.amazonaws.com, and the
     # ACK role's opt-in AWS managed policies with their acknowledgment.
     "eks-capabilities-enabled",
+    # AWS PCS, both modes. Existing mode adds the manifest-processor role's
+    # pcs:GetCluster and Secrets Manager reads (exact ARNs, the latter from a
+    # custom resource's output). Managed mode adds the compute node role under
+    # /aws-pcs/ (two AWS managed policies with their acknowledgments, the
+    # lifecycle-script prefix and lifecycle log-group wildcards), the AMI
+    # lookup Lambda (DescribeImages and the public SSM parameter path) and
+    # its cr.Provider role.
+    "pcs-existing",
+    "pcs-managed-with-slinky-and-fsx",
 }
 
 NAG_CONFIGS: list[tuple[str, dict[str, Any]]] = [

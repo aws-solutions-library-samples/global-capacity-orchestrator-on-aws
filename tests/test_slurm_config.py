@@ -941,12 +941,15 @@ class TestScaledObjects:
         assert pending["type"] == largest["type"] == "prometheus"
         assert pending["metricType"] == largest["metricType"] == "Value"
         assert pending["metadata"]["serverAddress"] == sc.SLURM_PROMETHEUS_URL
-        assert 'slurm_partition_jobs_pending{partition="gpu"}' in pending["metadata"]["query"]
+        # Every selector names the Slinky controller's scrape job: the AWS PCS
+        # backend's controller serves identically named series into the same
+        # Prometheus under job="pcs-slurm-controller", and an unscoped sum
+        # would scale Slinky's workers for PCS's queue.
+        gpu = 'job="slinky-slurm-controller", partition="gpu"'
+        assert sc.SLURM_METRICS_JOB == sc.SLURM_CONTROLLER_NAME == "slinky-slurm-controller"
+        assert f"slurm_partition_jobs_pending{{{gpu}}}" in pending["metadata"]["query"]
         assert pending["metadata"]["threshold"] == "1"
-        assert (
-            'slurm_partition_jobs_max_job_nodes_nohold{partition="gpu"}'
-            in largest["metadata"]["query"]
-        )
+        assert f"slurm_partition_jobs_max_job_nodes_nohold{{{gpu}}}" in largest["metadata"]["query"]
         assert largest["metadata"]["threshold"] == "1"
         for trigger in (pending, largest):
             query = trigger["metadata"]["query"]
@@ -954,10 +957,11 @@ class TestScaledObjects:
             # is MIXED, and counting only ALLOCATED nodes read it as idle, so
             # KEDA scaled the NodeSet to zero under a running job (live,
             # 2026-10-28).
-            assert 'slurm_partition_nodes_alloc{partition="gpu"}' in query
-            assert 'slurm_partition_nodes_mixed{partition="gpu"}' in query
+            assert f"slurm_partition_nodes_alloc{{{gpu}}}" in query
+            assert f"slurm_partition_nodes_mixed{{{gpu}}}" in query
             # Every series is guarded so a missing metric never reads as idle.
             assert query.count("or vector(0)") == 3
+            assert query.count("slurm_") == query.count(sc.SLURM_METRICS_JOB)
 
     def test_floor_above_zero_has_no_idle_replica_count(self) -> None:
         raw = _on(

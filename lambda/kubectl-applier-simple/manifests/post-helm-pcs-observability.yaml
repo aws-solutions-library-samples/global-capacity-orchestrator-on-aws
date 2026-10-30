@@ -1,0 +1,229 @@
+# AWS PCS observability: the controller scrape, the Grafana dashboard and the
+# alerting rules for the managed PCS cluster (cdk.json pcs.managed.metrics).
+#
+# The PCS controller is an AWS-managed host behind an ENI in the regional VPC,
+# not a pod, so no Service or ServiceMonitor can point at it: the ScrapeConfig
+# below (a Prometheus Operator CRD, discovered because the chart's Prometheus
+# has scrapeConfigSelectorNilUsesHelmValues=false) scrapes slurmctld's
+# OpenMetrics endpoints on its own port (6817) by static address. The address
+# is {{PCS_CONTROLLER_ADDRESS}}, the ip:port the regional stack's controller
+# lookup (lambda/pcs-lookup, Custom::PcsControllerLookup) resolves from
+# GetCluster once the cluster is ACTIVE; the stack opens tcp/6817 on the PCS
+# security group from the EKS cluster security group and creates the cluster
+# with MetricsType=metrics/openmetrics and CommunicationParameters=enable_http,
+# the three prerequisites PCS documents. Four static targets, one per metrics
+# category, each with its own __metrics_path__ (the shape Slurm's metrics
+# guide documents for Prometheus); 60 s is the interval the guide recommends.
+#
+# Every series Slurm serves is prefixed slurm_ and labelled only by what it
+# describes, so in a Region that also runs the Slinky cluster both clusters'
+# series land in one Prometheus. jobName pins the job label to
+# pcs-slurm-controller; every PCS expression below selects on it, and the
+# Slinky dashboard, alerts and KEDA queries select on slinky-slurm-controller.
+#
+# The dashboard ConfigMap carries the grafana_dashboard="1" label the
+# kube-prometheus-stack Grafana sidecar watches; the PrometheusRule is
+# discovered by the chart's Prometheus (ruleSelectorNilUsesHelmValues=false)
+# and routed by its Alertmanager.
+#
+# Both gates are in this file, so it applies only when the managed cluster's
+# metrics AND observability are on and is pruned by _FEATURE_RESOURCE_INVENTORY
+# when either is turned off (or PCS itself is).
+---
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: gco-pcs-slurm-controller
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+    app.kubernetes.io/part-of: pcs
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+    gco.io/pcs-metrics-enabled: "{{PCS_METRICS_ENABLED}}"
+spec:
+  jobName: pcs-slurm-controller
+  scheme: HTTP
+  scrapeInterval: 60s
+  scrapeTimeout: 50s
+  staticConfigs:
+    - targets:
+        - "{{PCS_CONTROLLER_ADDRESS}}"
+      labels:
+        __metrics_path__: /metrics/jobs
+    - targets:
+        - "{{PCS_CONTROLLER_ADDRESS}}"
+      labels:
+        __metrics_path__: /metrics/nodes
+    - targets:
+        - "{{PCS_CONTROLLER_ADDRESS}}"
+      labels:
+        __metrics_path__: /metrics/partitions
+    - targets:
+        - "{{PCS_CONTROLLER_ADDRESS}}"
+      labels:
+        __metrics_path__: /metrics/scheduler
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gco-dashboard-pcs
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    project: gco
+    app: gco-observability
+    app.kubernetes.io/part-of: pcs
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+    gco.io/pcs-metrics-enabled: "{{PCS_METRICS_ENABLED}}"
+data:
+  gco-pcs.json: |
+    {
+      "title": "GCO Slurm (AWS PCS)",
+      "uid": "gco-pcs",
+      "tags": ["gco", "scheduler", "slurm", "pcs"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "time": {"from": "now-6h", "to": "now"},
+      "panels": [
+        {
+          "id": 1,
+          "title": "Pending jobs by partition",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "sum by (partition) (slurm_partition_jobs_pending{job=\"pcs-slurm-controller\"})", "legendFormat": "{{partition}}"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Running jobs by partition",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+          "targets": [
+            {"expr": "sum by (partition) (slurm_partition_jobs_running{job=\"pcs-slurm-controller\"})", "legendFormat": "{{partition}}"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Largest pending job (nodes) by partition",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+          "targets": [
+            {"expr": "max by (partition) (slurm_partition_jobs_max_job_nodes_nohold{job=\"pcs-slurm-controller\"})", "legendFormat": "{{partition}}"}
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Nodes by state",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "sum(slurm_nodes_idle{job=\"pcs-slurm-controller\"})", "legendFormat": "idle"},
+            {"expr": "sum(slurm_nodes_alloc{job=\"pcs-slurm-controller\"})", "legendFormat": "allocated"},
+            {"expr": "sum(slurm_nodes_mixed{job=\"pcs-slurm-controller\"})", "legendFormat": "mixed"},
+            {"expr": "sum(slurm_nodes_down{job=\"pcs-slurm-controller\"})", "legendFormat": "down"},
+            {"expr": "sum(slurm_nodes_drain{job=\"pcs-slurm-controller\"})", "legendFormat": "drain"}
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Allocated CPUs and GPUs",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {"expr": "sum(slurm_jobs_cpus_alloc{job=\"pcs-slurm-controller\"})", "legendFormat": "cpus"},
+            {"expr": "sum(slurm_jobs_gpus_alloc{job=\"pcs-slurm-controller\"})", "legendFormat": "gpus"}
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Scheduler cycle time (last, µs)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "targets": [
+            {"expr": "slurm_schedule_cycle_last{job=\"pcs-slurm-controller\"}", "legendFormat": "main scheduler"},
+            {"expr": "slurm_bf_cycle_last{job=\"pcs-slurm-controller\"}", "legendFormat": "backfill"}
+          ]
+        },
+        {
+          "id": 7,
+          "title": "Controller",
+          "type": "stat",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "targets": [
+            {"expr": "max(up{job=\"pcs-slurm-controller\"})", "legendFormat": "slurmctld scraped"},
+            {"expr": "sum(slurm_jobs_running{job=\"pcs-slurm-controller\"})", "legendFormat": "running jobs"},
+            {"expr": "sum(slurm_jobs_pending{job=\"pcs-slurm-controller\"})", "legendFormat": "pending jobs"}
+          ]
+        }
+      ]
+    }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gco-pcs-alerts
+  namespace: monitoring
+  labels:
+    project: gco
+    app: gco-observability
+    app.kubernetes.io/part-of: pcs
+  annotations:
+    gco.io/cluster-observability-enabled: "{{CLUSTER_OBSERVABILITY_ENABLED}}"
+    gco.io/pcs-metrics-enabled: "{{PCS_METRICS_ENABLED}}"
+spec:
+  groups:
+    - name: gco-pcs
+      rules:
+        - alert: PcsSlurmControllerDown
+          # No successful scrape of the PCS controller for five minutes: the
+          # cluster is not ACTIVE, slurmctld stopped serving metrics, or the
+          # path from Prometheus to tcp/6817 on the controller ENI is closed.
+          expr: max(up{job="pcs-slurm-controller"}) == 0 or absent(up{job="pcs-slurm-controller"})
+          for: 5m
+          labels:
+            severity: critical
+            component: pcs
+          annotations:
+            summary: "AWS PCS Slurm controller is not being scraped"
+            description: >-
+              The PCS controller's slurmctld has had no successful metrics scrape for 5
+              minutes. Check the cluster status (gco stacks pcs status, aws pcs get-cluster),
+              that its Slurm settings still carry MetricsType=metrics/openmetrics and
+              CommunicationParameters=enable_http, and that the PCS security group admits
+              tcp/6817 from the EKS cluster security group.
+        - alert: PcsSlurmNodesDown
+          # PCS nodes scale down through Slurm's power save, which leaves no
+          # DOWN record; a DOWN node that is not drained lost its slurmd or
+          # never finished its lifecycle actions.
+          expr: (sum(slurm_nodes_down{job="pcs-slurm-controller"}) - sum(slurm_nodes_drained{job="pcs-slurm-controller"})) > 0
+          for: 15m
+          labels:
+            severity: warning
+            component: pcs
+          annotations:
+            summary: "AWS PCS reports DOWN Slurm nodes that were not drained"
+            description: >-
+              {{ $value }} PCS node(s) have been DOWN without a drain for 15 minutes: an
+              instance whose lifecycle actions failed (CloudWatch Logs
+              /aws/pcs/<cluster id>/lifecycle) or whose slurmd stopped answering (check
+              `sinfo -R` from the login node, gco slurm shell --backend pcs).
+        - alert: PcsSlurmQueueStalled
+          # Work is waiting and nothing is running: PCS is not launching
+          # instances (a node group at max_nodes, no capacity in its zones, a
+          # reservation that is not active, or instances failing to join).
+          expr: sum(slurm_jobs_pending{job="pcs-slurm-controller"}) > 0 and sum(slurm_jobs_running{job="pcs-slurm-controller"}) == 0
+          for: 30m
+          labels:
+            severity: warning
+            component: pcs
+          annotations:
+            summary: "AWS PCS Slurm jobs have been pending with nothing running for 30 minutes"
+            description: >-
+              {{ $value }} job(s) pending and none running on the PCS cluster. Check the node
+              group's max_nodes and zones (gco slurm queue --backend pcs shows the reason),
+              the capacity reservation's state, and the lifecycle logs of instances that
+              launched but never registered.

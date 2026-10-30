@@ -2136,6 +2136,7 @@ jobs:
           from pathlib import Path
 
           from gco.inference_proxy_config import compute_inference_proxy_tls_replacements
+          from gco.pcs_config import compute_pcs_replacements
 
           manifests = Path("lambda/kubectl-applier-simple/manifests")
           values = {
@@ -2147,6 +2148,13 @@ jobs:
                       "min_replicas": 3,
                       "max_replicas": 10,
                   }
+              ),
+              # No Slurm backend at all in this kind run (neither Slinky nor
+              # AWS PCS), rendered by the same pure function the regional
+              # stack uses: GCO_SLURM_BACKENDS and the GCO_PCS_* settings the
+              # manifest processor reads at startup come out empty.
+              **compute_pcs_replacements(
+                  {}, enabled=False, slinky_enabled=False, cluster_id="", vpc_cidr="10.0.0.0/16"
               ),
               "{{HEALTH_MONITOR_IMAGE}}": "health-monitor:ci",
               "{{MANIFEST_PROCESSOR_IMAGE}}": "manifest-processor:ci",

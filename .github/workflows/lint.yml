@@ -429,7 +429,8 @@ jobs:
                    lambda/cross-region-aggregator lambda/drift-detection \
                    lambda/ga-registration lambda/helm-installer \
                    lambda/helm-orchestrator lambda/image-lookup \
-                   lambda/kubectl-applier-simple lambda/proxy-shared \
+                   lambda/kubectl-applier-simple lambda/pcs-lookup \
+                   lambda/proxy-shared \
                    lambda/regional-api-proxy lambda/secret-rotation \
                    lambda/tls-certificate-manager lambda/tls-shared \
                    lambda/traffic-dial-controller lambda/transaction-search \

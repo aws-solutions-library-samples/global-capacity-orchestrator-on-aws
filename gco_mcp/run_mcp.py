@@ -238,6 +238,7 @@ from tools.nodepools import (  # noqa: E402, F401
 from tools.queue import queue_get, queue_list, queue_stats, queue_submit  # noqa: E402, F401
 from tools.slurm import (  # noqa: E402, F401
     slurm_accounting,
+    slurm_backends,
     slurm_job,
     slurm_nodes,
     slurm_partitions,
@@ -815,6 +816,7 @@ _PUBLIC_EXPORTS = [
     "set_opencode_default_model",
     "setup_cluster_access",
     "slurm_accounting",
+    "slurm_backends",
     "slurm_cancel",
     "slurm_job",
     "slurm_nodes",
