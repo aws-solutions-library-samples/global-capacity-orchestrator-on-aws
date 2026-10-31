@@ -6995,6 +6995,27 @@ def update_pcs_config(settings: dict[str, Any], region: str | None = None) -> No
     _update_feature_config("pcs", settings, _PCS_DEFAULTS, region)
 
 
+_HYPERPOD_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "cluster_name": None,
+    "availability_zone": None,
+}
+
+
+def get_hyperpod_config(region: str | None = None) -> dict[str, Any]:
+    """Get the raw SageMaker HyperPod block from cdk.json (``hyperpod`` with the region's overlay).
+
+    The top-level keys only, as written; ``gco stacks hyperpod status`` and
+    the preflight validate the whole block through :mod:`gco.hyperpod_config`.
+    """
+    return _get_feature_config("hyperpod", _HYPERPOD_DEFAULTS, region)
+
+
+def update_hyperpod_config(settings: dict[str, Any], region: str | None = None) -> None:
+    """Update the SageMaker HyperPod block in cdk.json (global, or the region's overlay)."""
+    _update_feature_config("hyperpod", settings, _HYPERPOD_DEFAULTS, region)
+
+
 # =============================================================================
 # EKS cluster access configuration (endpoint mode + CIDR allowlist)
 # =============================================================================

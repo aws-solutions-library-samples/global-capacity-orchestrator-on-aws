@@ -102,6 +102,7 @@ GPU capacity checking, region recommendation, and AI-powered advisory.
 | `models.py` | Data models for capacity responses |
 | `multi_region.py` | Cross-region capacity aggregation and comparison |
 | `traffic_dial.py` | Manual Global Accelerator traffic-dial controls (`gco capacity traffic-dial show`, `set`, `clear`) |
+| `training_plans.py` | SageMaker Training Plan offering search and account listing (`gco capacity find-training-plans`, `training-plans`): the reserved capacity HyperPod instance groups launch into |
 
 ## Installation
 

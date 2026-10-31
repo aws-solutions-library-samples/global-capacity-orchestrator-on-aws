@@ -1,8 +1,10 @@
 """Stack deployment and management commands."""
 
+import importlib
 import re
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import click
@@ -167,6 +169,10 @@ _SKIP_PCS_PREFLIGHT_HELP = (
     "Deploy without the AWS PCS preflight that runs for regional stacks with pcs enabled "
     "(see 'gco stacks pcs preflight')."
 )
+_SKIP_HYPERPOD_PREFLIGHT_HELP = (
+    "Deploy without the SageMaker HyperPod preflight that runs for regional stacks with "
+    "hyperpod enabled (see 'gco stacks hyperpod preflight')."
+)
 
 
 @stacks.command("deploy")
@@ -183,6 +189,7 @@ _SKIP_PCS_PREFLIGHT_HELP = (
     help=_ENABLE_OPTION_HELP,
 )
 @click.option("--skip-pcs-preflight", is_flag=True, help=_SKIP_PCS_PREFLIGHT_HELP)
+@click.option("--skip-hyperpod-preflight", is_flag=True, help=_SKIP_HYPERPOD_PREFLIGHT_HELP)
 @pass_config
 def deploy_stack(
     config: Any,
@@ -192,6 +199,7 @@ def deploy_stack(
     tag: Any,
     enable: Mapping[str, str],
     skip_pcs_preflight: bool,
+    skip_hyperpod_preflight: bool,
 ) -> None:
     """Deploy a single CDK stack to AWS.
 
@@ -209,8 +217,9 @@ def deploy_stack(
     therefore deploys a partially wired feature without complaining. Prefer
     'deploy-all --enable' unless you specifically want that.
 
-    A regional stack with AWS PCS on is preflighted first ('gco stacks pcs
-    preflight'); a failure stops the deploy before CloudFormation starts.
+    A regional stack with AWS PCS or SageMaker HyperPod on is preflighted
+    first ('gco stacks pcs preflight', 'gco stacks hyperpod preflight'); a
+    failure stops the deploy before CloudFormation starts.
     """
     from ..stacks import get_stack_manager
 
@@ -223,8 +232,21 @@ def deploy_stack(
             k, v = t.split("=", 1)
             tags[k] = v
 
-    _pcs_preflight_before_deploy(
-        formatter, config, stack_name=str(stack_name), enable=enable, skip=skip_pcs_preflight
+    _preflight_before_deploy(
+        formatter,
+        config,
+        _PCS_PREFLIGHT,
+        stack_name=str(stack_name),
+        enable=enable,
+        skip=skip_pcs_preflight,
+    )
+    _preflight_before_deploy(
+        formatter,
+        config,
+        _HYPERPOD_PREFLIGHT,
+        stack_name=str(stack_name),
+        enable=enable,
+        skip=skip_hyperpod_preflight,
     )
 
     try:
@@ -342,6 +364,7 @@ def destroy_stack(
     help=_ENABLE_OPTION_HELP,
 )
 @click.option("--skip-pcs-preflight", is_flag=True, help=_SKIP_PCS_PREFLIGHT_HELP)
+@click.option("--skip-hyperpod-preflight", is_flag=True, help=_SKIP_HYPERPOD_PREFLIGHT_HELP)
 @pass_config
 def deploy_all_orchestrated(
     config: Any,
@@ -352,6 +375,7 @@ def deploy_all_orchestrated(
     max_workers: Any,
     enable: Mapping[str, str],
     skip_pcs_preflight: bool,
+    skip_hyperpod_preflight: bool,
 ) -> None:
     """Deploy all stacks in the correct order.
 
@@ -366,8 +390,9 @@ def deploy_all_orchestrated(
     significantly reduce total deployment time when deploying to
     multiple regions.
 
-    Regions with AWS PCS on are preflighted first ('gco stacks pcs
-    preflight'); a failure stops the deploy before CloudFormation starts.
+    Regions with AWS PCS or SageMaker HyperPod on are preflighted first
+    ('gco stacks pcs preflight', 'gco stacks hyperpod preflight'); a failure
+    stops the deploy before CloudFormation starts.
 
     Examples:
         gco stacks deploy-all -y
@@ -375,6 +400,7 @@ def deploy_all_orchestrated(
         gco stacks deploy-all -y -p --max-workers 8
         gco stacks deploy-all -y -t Environment=prod
         gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,slurm,yunikorn,pcs
+        gco stacks deploy-all -y --enable hyperpod
     """
     from ..stacks import get_stack_manager
 
@@ -387,8 +413,16 @@ def deploy_all_orchestrated(
             k, v = t.split("=", 1)
             tags[k] = v
 
-    _pcs_preflight_before_deploy(
-        formatter, config, stack_name=None, enable=enable, skip=skip_pcs_preflight
+    _preflight_before_deploy(
+        formatter, config, _PCS_PREFLIGHT, stack_name=None, enable=enable, skip=skip_pcs_preflight
+    )
+    _preflight_before_deploy(
+        formatter,
+        config,
+        _HYPERPOD_PREFLIGHT,
+        stack_name=None,
+        enable=enable,
+        skip=skip_hyperpod_preflight,
     )
 
     try:
@@ -2156,7 +2190,7 @@ def pcs_preflight_command(config: Any, region: Any, all_regions: bool) -> None:
 
     formatter = get_output_formatter(config)
     regions = _target_regions(config, region, all_regions)
-    reports, errors = _pcs_preflight_reports(formatter, regions, force_enabled=False)
+    reports, errors = _preflight_reports(formatter, _PCS_PREFLIGHT, regions, force_enabled=False)
     if config.output_format != "table":
         formatter.print(pcs_preflight.summarize(reports))
     else:
@@ -2166,35 +2200,82 @@ def pcs_preflight_command(config: Any, region: Any, all_regions: bool) -> None:
         sys.exit(1)
 
 
-def _pcs_preflight_reports(
-    formatter: Any, regions: list[str], *, force_enabled: bool
-) -> tuple[list[Any], int]:
-    """Run the PCS preflight for each region; a bad block counts as an error."""
-    from .. import pcs_preflight
+@dataclass(frozen=True)
+class _PreflightFeature:
+    """A feature whose preflight module is shaped like :mod:`cli.pcs_preflight`.
 
+    The module is imported by name when needed (the CLI keeps boto3 off its
+    import path until a command runs, and tests patch the module's functions).
+    """
+
+    key: str  # the cdk.json block and the --enable override name
+    label: str  # how messages name the feature
+    skip_flag: str  # the deploy flag that bypasses the preflight
+    module_name: str  # under cli/
+    loader: str  # module function: (region, *, force_enabled) -> validated block
+    error: str  # module exception for a block that cannot be read or validated
+
+    def module(self) -> Any:
+        return importlib.import_module(f"cli.{self.module_name}")
+
+    def load(self, region: str, *, force_enabled: bool) -> dict[str, Any]:
+        """The validated block, or raise the module's error."""
+        block: dict[str, Any] = getattr(self.module(), self.loader)(
+            region, force_enabled=force_enabled
+        )
+        return block
+
+    def error_type(self) -> type[Exception]:
+        error: type[Exception] = getattr(self.module(), self.error)
+        return error
+
+
+_PCS_PREFLIGHT = _PreflightFeature(
+    key="pcs",
+    label="AWS PCS",
+    skip_flag="--skip-pcs-preflight",
+    module_name="pcs_preflight",
+    loader="load_pcs_config",
+    error="PcsPreflightError",
+)
+_HYPERPOD_PREFLIGHT = _PreflightFeature(
+    key="hyperpod",
+    label="SageMaker HyperPod",
+    skip_flag="--skip-hyperpod-preflight",
+    module_name="hyperpod_preflight",
+    loader="load_hyperpod_config",
+    error="HyperpodPreflightError",
+)
+
+
+def _preflight_reports(
+    formatter: Any, feature: _PreflightFeature, regions: list[str], *, force_enabled: bool
+) -> tuple[list[Any], int]:
+    """Run the feature's preflight for each region; a bad block counts as an error."""
+    module = feature.module()
     project = _project_name()
     reports: list[Any] = []
     errors = 0
     for target in regions:
         try:
-            block = pcs_preflight.load_pcs_config(target, force_enabled=force_enabled)
-        except pcs_preflight.PcsPreflightError as exc:
+            block = feature.load(target, force_enabled=force_enabled)
+        except feature.error_type() as exc:
             formatter.print_error(f"[{target}] {exc}")
             errors += 1
             continue
-        reports.append(pcs_preflight.run_preflight(target, block, project=project))
+        reports.append(module.run_preflight(target, block, project=project))
     return reports, errors
 
 
-def _pcs_enabled_regions(regions: list[str], *, force_enabled: bool) -> list[str]:
-    """The regions whose cdk.json block (or the --enable pcs override) turns PCS on."""
-    from .. import pcs_preflight
-
+def _feature_enabled_regions(
+    feature: _PreflightFeature, regions: list[str], *, force_enabled: bool
+) -> list[str]:
+    """The regions whose cdk.json block (or the --enable override) turns the feature on."""
     enabled: list[str] = []
     for target in regions:
         try:
-            block = pcs_preflight.load_pcs_config(target, force_enabled=force_enabled)
-        except pcs_preflight.PcsPreflightError:
+            block = feature.load(target, force_enabled=force_enabled)
+        except feature.error_type():
             # The deploy's own synth reports the bad block with the full message.
             continue
         if block["enabled"]:
@@ -2215,46 +2296,367 @@ def _regional_stack_regions(config: Any, stack_name: str | None) -> list[str]:
     return [region] if region in regional else []
 
 
-def _pcs_preflight_before_deploy(
+def _preflight_before_deploy(
     formatter: Any,
     config: Any,
+    feature: _PreflightFeature,
     *,
     stack_name: str | None,
     enable: Mapping[str, str],
     skip: bool,
 ) -> None:
-    """Run the PCS preflight for the regional stacks a deploy covers; exit 1 on a failure.
+    """Run a feature's preflight for the regional stacks a deploy covers; exit 1 on a failure.
 
-    Only regions with PCS on (in cdk.json, or through ``--enable pcs``) are
-    checked. ``--skip-pcs-preflight`` bypasses it for a deploy that must go
-    ahead regardless, for example to roll a fix to the cluster itself.
+    Only regions with the feature on (in cdk.json, or through ``--enable``)
+    are checked. The feature's skip flag bypasses it for a deploy that must
+    go ahead regardless, for example to roll a fix to the cluster itself.
     """
-    from .. import pcs_preflight
-
     if skip:
         return
-    force_enabled = "pcs" in (enable.get("feature_enabled_overrides") or "").split(",")
-    regions = _pcs_enabled_regions(
-        _regional_stack_regions(config, stack_name), force_enabled=force_enabled
+    module = feature.module()
+    force_enabled = feature.key in (enable.get("feature_enabled_overrides") or "").split(",")
+    regions = _feature_enabled_regions(
+        feature, _regional_stack_regions(config, stack_name), force_enabled=force_enabled
     )
     if not regions:
         return
-    formatter.print_info(f"AWS PCS preflight for {', '.join(regions)}...")
-    reports, errors = _pcs_preflight_reports(formatter, regions, force_enabled=force_enabled)
+    formatter.print_info(f"{feature.label} preflight for {', '.join(regions)}...")
+    reports, errors = _preflight_reports(formatter, feature, regions, force_enabled=force_enabled)
     failed = [report for report in reports if not report.ok]
     for report in failed:
-        print(pcs_preflight.render_report(report))
+        print(module.render_report(report))
     if errors or failed:
         formatter.print_error(
-            "AWS PCS preflight failed; fix the findings above (or pass --skip-pcs-preflight to "
-            "deploy anyway)"
+            f"{feature.label} preflight failed; fix the findings above (or pass "
+            f"{feature.skip_flag} to deploy anyway)"
         )
         sys.exit(1)
     for report in reports:
-        warnings = [c for c in report.checks if c.status == pcs_preflight.WARN]
+        warnings = [c for c in report.checks if c.status == module.WARN]
         for check in warnings:
             formatter.print_warning(f"[{report.region}] {check.name}: {check.detail}")
-    formatter.print_success(f"AWS PCS preflight passed for {', '.join(regions)}")
+    formatter.print_success(f"{feature.label} preflight passed for {', '.join(regions)}")
+
+
+# =============================================================================
+# SageMaker HyperPod commands
+# =============================================================================
+
+
+@stacks.group("hyperpod")
+@pass_config
+def hyperpod_cmd(config: Any) -> None:
+    """SageMaker HyperPod instance groups as nodes of the regional EKS cluster (cdk.json hyperpod).
+
+    'enable' / 'disable' edit the block (the next deploy creates or deletes
+    the HyperPod cluster), 'status' shows what is configured and, once
+    deployed, the cluster SageMaker reports, and 'preflight' checks the
+    account before a deploy ('gco stacks deploy' runs it too). See
+    docs/HYPERPOD.md.
+    """
+
+
+def _hyperpod_stack_name(config: Any, region: str) -> str:
+    return f"{config.regional_stack_prefix}-{region}"
+
+
+@hyperpod_cmd.command("status")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option("--all-regions", "-A", is_flag=True, help="Show status across all deployment regions")
+@pass_config
+def hyperpod_status(config: Any, region: Any, all_regions: bool) -> None:
+    """Configured and deployed SageMaker HyperPod state per region.
+
+    Reads the validated cdk.json block (cluster name, node recovery, zone,
+    instance groups, Kueue quotas) and, when the regional stack is deployed
+    with HyperPod on, the cluster SageMaker describes under the published
+    name: its status and every instance group's current and target counts.
+
+    Examples:
+        gco stacks hyperpod status
+        gco stacks hyperpod status --all-regions --output json
+    """
+    from gco.hyperpod_config import cluster_name
+
+    from .. import hyperpod_preflight, hyperpod_status
+
+    formatter = get_output_formatter(config)
+    documents: list[dict[str, Any]] = []
+    failures = 0
+    for target in _target_regions(config, region, all_regions):
+        try:
+            block = hyperpod_preflight.load_hyperpod_config(target)
+        except hyperpod_preflight.HyperpodPreflightError as exc:
+            formatter.print_error(f"[{target}] {exc}")
+            failures += 1
+            continue
+        document: dict[str, Any] = {
+            "region": target,
+            "enabled": block["enabled"],
+            "cluster_name": cluster_name(block, _project_name()),
+            "node_recovery": block["node_recovery"],
+            "availability_zone": block["availability_zone"],
+            "removal_policy": block["removal_policy"],
+            "instance_groups": [
+                {
+                    "name": g["name"],
+                    "instance_type": g["instance_type"],
+                    "instance_count": g["instance_count"],
+                    "threads_per_core": g["threads_per_core"],
+                    "training_plan_arn": g["training_plan_arn"],
+                    "root_volume_size_gb": g["root_volume_size_gb"],
+                }
+                for g in block["instance_groups"]
+            ],
+            "queue": dict(block["queue"]),
+            "deployed": None,
+        }
+        try:
+            deployed = hyperpod_status.deployed_cluster(
+                target, _hyperpod_stack_name(config, target)
+            )
+        except hyperpod_status.HyperpodStatusError as exc:
+            formatter.print_warning(f"[{target}] could not read the deployed cluster: {exc}")
+            deployed = None
+        document["deployed"] = deployed.to_dict() if deployed else None
+        documents.append(document)
+        if config.output_format == "table":
+            _print_hyperpod_status(formatter, document)
+    if documents and config.output_format != "table":
+        formatter.print(documents if all_regions else documents[0])
+    if failures:
+        sys.exit(1)
+
+
+def _print_hyperpod_status(formatter: Any, document: Mapping[str, Any]) -> None:
+    region = document["region"]
+    state = "enabled" if document["enabled"] else "disabled"
+    formatter.print_info(f"SageMaker HyperPod in {region}: {state}")
+    zone = document["availability_zone"] or "first EKS-supported subnet"
+    formatter.print_info(
+        f"  cluster: {document['cluster_name']}, node recovery {document['node_recovery']}, "
+        f"zone {zone}, removal policy {document['removal_policy']}"
+    )
+    formatter.print(
+        document["instance_groups"],
+        columns=[
+            "name",
+            "instance_type",
+            "instance_count",
+            "threads_per_core",
+            "training_plan_arn",
+            "root_volume_size_gb",
+        ],
+    )
+    queue = document["queue"]
+    formatter.print_info(
+        f"  queue quotas: cpu {queue['max_cpu']}, memory {queue['max_memory']}, "
+        f"gpu {queue['max_gpu']}"
+    )
+    deployed = document["deployed"]
+    if not deployed:
+        formatter.print_info("  deployed: no (the regional stack publishes no HyperPod cluster)")
+        return
+    formatter.print_info(f"  deployed: {deployed['name']} {deployed['status']} ({deployed['arn']})")
+    if deployed["failure_message"]:
+        formatter.print_warning(f"  failure: {deployed['failure_message']}")
+    formatter.print(
+        deployed["instance_groups"],
+        columns=["name", "instance_type", "current", "target", "status"],
+    )
+
+
+@hyperpod_cmd.command("enable")
+@click.option(
+    "--region", "-r", help="Enable HyperPod for this region only (a hyperpod_regions overlay)"
+)
+@click.option(
+    "--instance-type",
+    help="The instance group's HyperPod instance type (default: ml.g5.8xlarge, or as configured)",
+)
+@click.option(
+    "--instance-count",
+    type=int,
+    help="Instances in the instance group (default: 1, or as configured)",
+)
+@click.option(
+    "--training-plan-arn",
+    help="A SageMaker Training Plan the instance group launches into (see 'gco capacity training-plans')",
+)
+@click.option(
+    "--availability-zone",
+    help="The zone the instance groups launch into (default: first EKS subnet)",
+)
+@click.option("--cluster-name", help="The HyperPod cluster name (default: <project>-hyperpod)")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def hyperpod_enable(
+    config: Any,
+    region: Any,
+    instance_type: Any,
+    instance_count: Any,
+    training_plan_arn: Any,
+    availability_zone: Any,
+    cluster_name: Any,
+    yes: bool,
+) -> None:
+    """Turn SageMaker HyperPod on in cdk.json (apply with 'gco stacks deploy').
+
+    The next deploy creates an EKS-orchestrated HyperPod cluster whose
+    instance groups join the regional EKS cluster as nodes. The instance
+    group options rewrite the block's first (or only) instance group; edit
+    cdk.json directly for several groups. 'gco stacks hyperpod preflight'
+    then checks the account.
+
+    Examples:
+        gco stacks hyperpod enable
+        gco stacks hyperpod enable --instance-type ml.g5.8xlarge --instance-count 1
+        gco stacks hyperpod enable --region us-east-1 --availability-zone us-east-1b
+        gco stacks hyperpod enable --training-plan-arn arn:aws:sagemaker:us-east-1:123456789012:training-plan/p5
+    """
+    from gco.hyperpod_config import HyperpodConfigError, validate_hyperpod_config
+    from gco.hyperpod_config import cluster_name as effective_cluster_name
+
+    from ..stacks import get_hyperpod_config, update_hyperpod_config
+
+    formatter = get_output_formatter(config)
+    scope = f"region {region}" if region else "all regions (global)"
+    settings: dict[str, Any] = {"enabled": True}
+    if availability_zone:
+        settings["availability_zone"] = availability_zone
+    if cluster_name:
+        settings["cluster_name"] = cluster_name
+    try:
+        current = get_hyperpod_config(region)
+        group_options = {
+            "instance_type": instance_type,
+            "instance_count": instance_count,
+            "training_plan_arn": training_plan_arn,
+        }
+        if any(value is not None for value in group_options.values()):
+            existing = current.get("instance_groups")
+            first = existing[0] if isinstance(existing, list) and existing else {}
+            group = {
+                **(first if isinstance(first, Mapping) else {}),
+                **{key: value for key, value in group_options.items() if value is not None},
+            }
+            group.setdefault("name", "accelerated")
+            settings["instance_groups"] = [group]
+        merged = {
+            k: v for k, v in current.items() if k not in ("is_region_specific", "region")
+        } | settings
+        validated = validate_hyperpod_config(merged)
+    except HyperpodConfigError as exc:
+        formatter.print_error(f"Refusing to write an invalid hyperpod block: {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        formatter.print_error(f"Failed to read the HyperPod configuration: {exc}")
+        sys.exit(1)
+    if not yes:
+        formatter.print_info(f"SageMaker HyperPod configuration for {scope}:")
+        formatter.print_info(
+            f"  Cluster: {effective_cluster_name(validated, _project_name())}, "
+            f"zone {validated['availability_zone'] or 'first EKS-supported subnet'}"
+        )
+        for group in validated["instance_groups"]:
+            plan = (
+                f", training plan {group['training_plan_arn']}"
+                if group["training_plan_arn"]
+                else ""
+            )
+            formatter.print_info(
+                f"  Instance group {group['name']}: {group['instance_count']} x "
+                f"{group['instance_type']}{plan}"
+            )
+        confirm(f"\nEnable SageMaker HyperPod for {scope}?", abort=True)
+    try:
+        update_hyperpod_config(settings, region)
+    except Exception as exc:
+        formatter.print_error(f"Failed to enable HyperPod: {exc}")
+        sys.exit(1)
+    formatter.print_success(f"SageMaker HyperPod enabled in cdk.json for {scope}")
+    formatter.print_info("Run 'gco stacks hyperpod preflight' to check the account, then")
+    if region:
+        formatter.print_info(
+            f"'gco stacks deploy {_hyperpod_stack_name(config, str(region))}' to apply"
+        )
+    else:
+        formatter.print_info("'gco stacks deploy-all' to apply")
+
+
+@hyperpod_cmd.command("disable")
+@click.option("--region", "-r", help="Disable HyperPod for this region only")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@pass_config
+def hyperpod_disable(config: Any, region: Any, yes: bool) -> None:
+    """Turn SageMaker HyperPod off in cdk.json (apply with 'gco stacks deploy').
+
+    The next deploy deletes the HyperPod cluster and its instances
+    (hyperpod.removal_policy 'retain' keeps the cluster, its execution role
+    and security group when the stack itself is deleted).
+
+    Examples:
+        gco stacks hyperpod disable
+        gco stacks hyperpod disable --region us-east-1
+    """
+    from ..stacks import update_hyperpod_config
+
+    formatter = get_output_formatter(config)
+    scope = f"region {region}" if region else "all regions (global)"
+    if not yes:
+        formatter.print_warning(f"This will disable SageMaker HyperPod for {scope}.")
+        formatter.print_warning(
+            "The HyperPod cluster and its instances are deleted on the next deploy; "
+            "work running on them is lost."
+        )
+        confirm("Are you sure?", abort=True)
+    try:
+        update_hyperpod_config({"enabled": False}, region)
+    except Exception as exc:
+        formatter.print_error(f"Failed to disable HyperPod: {exc}")
+        sys.exit(1)
+    formatter.print_success(f"SageMaker HyperPod disabled in cdk.json for {scope}")
+    if region:
+        formatter.print_info(
+            f"Run 'gco stacks deploy {_hyperpod_stack_name(config, str(region))}' to apply"
+        )
+    else:
+        formatter.print_info("Run 'gco stacks deploy-all' to apply")
+
+
+@hyperpod_cmd.command("preflight")
+@click.option("--region", "-r", help="AWS region (default: first deployment region)")
+@click.option("--all-regions", "-A", is_flag=True, help="Check every deployment region")
+@pass_config
+def hyperpod_preflight_command(config: Any, region: Any, all_regions: bool) -> None:
+    """Check the account before a deploy with SageMaker HyperPod on.
+
+    Per region: HyperPod publishes a health-monitoring agent image there,
+    the account's '<instance type> for cluster usage' quotas cover every
+    instance group, each training plan exists and fits its group, the
+    configured zone exists, the EKS cluster (once deployed) is ACTIVE with
+    access entries, and the cluster name is free or already this project's.
+    AWS errors are warnings, never failures. Exits 1 when a region has a
+    failure.
+
+    Examples:
+        gco stacks hyperpod preflight
+        gco stacks hyperpod preflight -r us-east-1 --output json
+    """
+    from .. import hyperpod_preflight
+
+    formatter = get_output_formatter(config)
+    regions = _target_regions(config, region, all_regions)
+    reports, errors = _preflight_reports(
+        formatter, _HYPERPOD_PREFLIGHT, regions, force_enabled=False
+    )
+    if config.output_format != "table":
+        formatter.print(hyperpod_preflight.summarize(reports))
+    else:
+        for report in reports:
+            print(hyperpod_preflight.render_report(report))
+    if errors or any(not report.ok for report in reports):
+        sys.exit(1)
 
 
 # =============================================================================

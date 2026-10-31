@@ -931,6 +931,244 @@ def find_blocks(
         sys.exit(1)
 
 
+def _default_capacity_regions(config: Any) -> list[str]:
+    """The deployed regional stacks' Regions, or the configured default Region."""
+    from ..aws_client import get_aws_client
+
+    stacks = get_aws_client(config).discover_regional_stacks()
+    return list(stacks.keys()) if stacks else [str(config.default_region)]
+
+
+def _print_training_plan_errors(errors: list[dict[str, Any]]) -> None:
+    if errors:
+        print()
+        print(
+            f"  ⚠  SageMaker refused the lookup in {len(errors)} Region(s); their results are missing:"
+        )
+        for error in errors:
+            print(f"     {error['region']}: {error['error_code']}: {error['error']}")
+
+
+def _print_training_plan_offerings(result: dict[str, Any]) -> None:
+    """Render a Training Plan offering search as a readable table block."""
+    itype = result["instance_type"]
+    requested = result.get("requested_instance_type")
+    if requested and requested != itype:
+        print(
+            f"\n  Training Plan offerings for {result['instance_count']} x {requested} -> {itype}"
+        )
+    else:
+        print(f"\n  Training Plan offerings for {result['instance_count']} x {itype}")
+    print("  " + "-" * 78)
+    window = result.get("window") or {}
+    after = (window.get("start_after") or "any")[:16]
+    before = (window.get("end_before") or "any")[:16]
+    duration = result.get("duration_hours")
+    print(
+        f"  Regions: {', '.join(result.get('regions_checked', []))}    Target: {result['target']}"
+    )
+    print(
+        f"  Duration: {f'{duration}h' if duration else 'any'}    "
+        f"Start after: {after}    End before: {before}"
+    )
+    _print_training_plan_errors(result.get("errors") or [])
+    offerings = result.get("offerings") or []
+    if not offerings:
+        print()
+        print("  No Training Plan offerings match; widen the window or try another Region.")
+        print()
+        return
+    print()
+    print(
+        f"  {'REGION':<13} {'AZ':<13} {'START':<17} {'END':<17} {'COUNT':>5} "
+        f"{'UPFRONT':>11} {'$/inst-hr':>10}"
+    )
+    print("  " + "-" * 78)
+    for offering in offerings:
+        fee = offering.get("upfront_fee_usd")
+        fee_str = f"${fee:,.0f}" if isinstance(fee, int | float) else "?"
+        rate = offering.get("price_per_instance_hour")
+        rate_str = f"${rate:,.2f}" if isinstance(rate, int | float) else "-"
+        zones = ",".join(offering.get("availability_zones") or []) or "-"
+        print(
+            f"  {offering['region']:<13} {zones:<13} {(offering.get('start_time') or '')[:16]:<17} "
+            f"{(offering.get('end_time') or '')[:16]:<17} {offering['instance_count']:>5} "
+            f"{fee_str:>11} {rate_str:>10}"
+        )
+        print(f"     offering {offering['offering_id']}")
+    print()
+    print(
+        "  💡 Purchasing a plan is an account commitment: use the console or "
+        "'aws sagemaker create-training-plan --training-plan-offering-id <id>', then put the "
+        "plan's ARN in hyperpod.instance_groups[].training_plan_arn."
+    )
+    print()
+
+
+def _print_training_plans(result: dict[str, Any]) -> None:
+    """Render the account's Training Plans as a readable table block."""
+    print(f"\n  Training Plans ({result['plans_found']} found)")
+    print("  " + "-" * 96)
+    print(f"  Regions: {', '.join(result.get('regions_checked', []))}")
+    _print_training_plan_errors(result.get("errors") or [])
+    plans = result.get("plans") or []
+    if not plans:
+        print()
+        print("  No Training Plans held; 'gco capacity find-training-plans' searches offerings.")
+        print()
+        return
+    print()
+    print(
+        f"  {'NAME':<24} {'REGION':<13} {'STATUS':<10} {'TYPES':<22} {'TOTAL':>5} {'AVAIL':>5} "
+        f"{'START':<17} {'END':<17}"
+    )
+    print("  " + "-" * 96)
+    for plan in plans:
+        types = ",".join(plan.get("instance_types") or []) or "-"
+        print(
+            f"  {plan['name'][:24]:<24} {plan['region']:<13} {plan['status']:<10} {types[:22]:<22} "
+            f"{plan['total_instances']:>5} {plan['available_instances']:>5} "
+            f"{(plan.get('start_time') or '')[:16]:<17} {(plan.get('end_time') or '')[:16]:<17}"
+        )
+        print(f"     {plan['arn']}")
+    print()
+    print(
+        f"  Total: {result['total_instances']} reserved, {result['available_instances']} available"
+    )
+    print()
+
+
+@capacity.command("find-training-plans")
+@click.option(
+    "--instance-type",
+    "-i",
+    required=True,
+    help="HyperPod instance type or alias (e.g. ml.p5.48xlarge, p5)",
+)
+@click.option(
+    "--region",
+    "-r",
+    "regions",
+    multiple=True,
+    help="Region(s) to search; repeatable (default: all deployed regions)",
+)
+@click.option("--count", "-c", default=1, type=int, help="Instances the plan must reserve")
+@click.option("--duration-hours", default=None, type=int, help="Plan duration in hours")
+@click.option("--duration-days", default=None, type=int, help="Plan duration in days")
+@click.option("--start-after", default=None, help="Earliest start (YYYY-MM-DD or ISO datetime)")
+@click.option(
+    "--end-before",
+    default=None,
+    help="Latest end (YYYY-MM-DD or ISO datetime); a date means the whole of that day",
+)
+@click.option(
+    "--target",
+    type=click.Choice(["hyperpod-cluster", "training-job"]),
+    default="hyperpod-cluster",
+    show_default=True,
+    help="What the plan's capacity is for",
+)
+@pass_config
+def find_training_plans(
+    config: Any,
+    instance_type: Any,
+    regions: Any,
+    count: Any,
+    duration_hours: Any,
+    duration_days: Any,
+    start_after: Any,
+    end_before: Any,
+    target: Any,
+) -> None:
+    """Find SageMaker Training Plan offerings for a HyperPod instance group.
+
+    A Training Plan reserves accelerated instances for a fixed window, the
+    SageMaker counterpart of an EC2 Capacity Block. Every requested Region is
+    searched in parallel and the offerings are ranked cheapest per
+    instance-hour first. Nothing is purchased: buying a plan is a console or
+    'aws sagemaker create-training-plan' action, after which its ARN goes in
+    hyperpod.instance_groups[].training_plan_arn (see docs/HYPERPOD.md).
+
+    Examples:
+        gco capacity find-training-plans -i ml.p5.48xlarge -c 4 -r us-east-1 --duration-hours 168
+        gco capacity find-training-plans -i p5 -r us-east-1 -r us-west-2 --start-after 2026-11-10
+    """
+    from ..capacity import training_plans
+
+    formatter = get_output_formatter(config)
+    if duration_hours is not None and duration_days is not None:
+        formatter.print_error("Pass --duration-hours or --duration-days, not both")
+        sys.exit(1)
+    hours = (
+        duration_hours
+        if duration_hours is not None
+        else (duration_days * 24 if duration_days is not None else None)
+    )
+    try:
+        result = training_plans.search_offerings(
+            instance_type,
+            regions=list(regions) or _default_capacity_regions(config),
+            instance_count=count,
+            duration_hours=hours,
+            start_after=start_after,
+            end_before=end_before,
+            target=target,
+        )
+    except Exception as exc:
+        formatter.print_error(f"Failed to find Training Plan offerings: {exc}")
+        sys.exit(1)
+    if config.output_format != "table":
+        formatter.print(result)
+        return
+    _print_training_plan_offerings(result)
+
+
+@capacity.command("training-plans")
+@click.option("--instance-type", "-i", help="Keep the plans reserving this instance type")
+@click.option(
+    "--region",
+    "-r",
+    "regions",
+    multiple=True,
+    help="Region(s) to list; repeatable (default: all deployed regions)",
+)
+@click.option(
+    "--status",
+    type=click.Choice(["Pending", "Active", "Scheduled", "Expired", "Failed"]),
+    default=None,
+    help="Keep the plans in this state",
+)
+@pass_config
+def list_training_plans(config: Any, instance_type: Any, regions: Any, status: Any) -> None:
+    """List the SageMaker Training Plans the account holds.
+
+    Shows each plan's state, reserved instance types and zones, total and
+    available instances, and window, soonest start first. A plan's ARN is
+    what hyperpod.instance_groups[].training_plan_arn takes.
+
+    Examples:
+        gco capacity training-plans
+        gco capacity training-plans -r us-east-1 --status Active
+        gco capacity training-plans -i ml.p5.48xlarge --output json
+    """
+    from ..capacity import training_plans
+
+    formatter = get_output_formatter(config)
+    try:
+        result = training_plans.list_plans(
+            regions=list(regions) or _default_capacity_regions(config),
+            instance_type=instance_type,
+            status=status,
+        )
+    except Exception as exc:
+        formatter.print_error(f"Failed to list Training Plans: {exc}")
+        sys.exit(1)
+    if config.output_format != "table":
+        formatter.print(result)
+        return
+    _print_training_plans(result)
+
+
 @capacity.command("reserve")
 @click.option(
     "--offering-id",
