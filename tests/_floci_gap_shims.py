@@ -1,6 +1,6 @@
 """Documented Floci-gap shims, importable without pytest.
 
-Three emulator gaps affect GCO's AWS surface (each probed empirically; see
+Four emulator gaps affect GCO's AWS surface (each probed empirically; see
 docs/FLOCI_TESTING.md):
 
 * CloudFormation ``GetStackPolicy`` responses omit the
@@ -16,6 +16,10 @@ docs/FLOCI_TESTING.md):
   Floci 2.2.0), while the harness's
   baseline records each Region's trace segment destination before anything
   deploys, so the Transaction Search state the run changes can be restored.
+* SageMaker ``ListClusters`` (the HyperPod cluster listing) is not among the
+  SageMaker actions Floci 2.2.0 models (``ValidationException: Action
+  ListClusters is not supported``), while the harness's inventory lists the
+  project's HyperPod clusters in every Region to prove them absent.
 
 Each shim registers a botocore ``before-send`` handler that answers exactly
 one read-only operation with the response real AWS would give for the
@@ -52,6 +56,11 @@ _EMPTY_STACK_POLICY_XML = (
 _DEFAULT_TRACE_SEGMENT_DESTINATION_JSON = json.dumps(
     {"Destination": "XRay", "Status": "ACTIVE"}
 ).encode()
+
+# What ListClusters returns for an account with no HyperPod clusters, which
+# an emulator account is: Floci models no SageMaker CreateCluster either, so
+# nothing in a Floci run can have created one.
+_NO_HYPERPOD_CLUSTERS_JSON = json.dumps({"ClusterSummaries": []}).encode()
 
 
 def _local_response(request, body: bytes, content_type: str) -> AWSResponse:
@@ -154,8 +163,29 @@ def shim_floci_missing_xray(events) -> None:
     events.register("before-send.xray.GetTraceSegmentDestination", _synthesize)
 
 
+def shim_floci_sagemaker_list_clusters(events) -> None:
+    """Answer SageMaker ``ListClusters`` with the no-clusters shape.
+
+    The only SageMaker call the Floci layers reach is the harness inventory's
+    HyperPod scanner (``scripts/live_release_validation/inventory/scanners.py``),
+    which lists every Region's clusters to prove the project's absent. Floci
+    2.2.0 answers ``ValidationException: Action ListClusters is not supported``
+    (SageMaker is in its catalog; this action is not). Real AWS returns an
+    empty page for an account with no HyperPod clusters, and an emulator
+    account can have none: ``CreateCluster`` is not modeled either. Every
+    other SageMaker operation stays unshimmed; the scanner's ownership
+    matching keeps its coverage in patched-client unit tests.
+    """
+
+    def _synthesize(request, **_kwargs):
+        return _local_response(request, _NO_HYPERPOD_CLUSTERS_JSON, "application/x-amz-json-1.1")
+
+    events.register("before-send.sagemaker.ListClusters", _synthesize)
+
+
 def apply_known_floci_gap_shims(events) -> None:
     """Install every documented Floci-gap shim on a botocore event system."""
     shim_floci_get_stack_policy(events)
     shim_floci_zone_id_lookup(events)
     shim_floci_missing_xray(events)
+    shim_floci_sagemaker_list_clusters(events)

@@ -167,7 +167,14 @@ def _remove_trees(paths: list[Path]) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def _cdk_default_outdirs_are_session_owned():
-    import aws_cdk
+    try:
+        import aws_cdk
+    except ModuleNotFoundError:
+        # The integration jobs install the project without the ``cdk`` extra
+        # (integration:pytest:cross-module, integration:docker:mooncake-image);
+        # with no aws-cdk-lib there is no App to route and nothing to reap.
+        yield
+        return
 
     root = Path(tempfile.mkdtemp(prefix="cdk.out-pytest-"))
     original_init = aws_cdk.App.__init__

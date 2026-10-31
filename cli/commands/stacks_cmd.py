@@ -1,10 +1,10 @@
 """Stack deployment and management commands."""
 
-import importlib
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Any
 
 import click
@@ -2200,23 +2200,37 @@ def pcs_preflight_command(config: Any, region: Any, all_regions: bool) -> None:
         sys.exit(1)
 
 
+def _import_pcs_preflight() -> ModuleType:
+    from cli import pcs_preflight
+
+    return pcs_preflight
+
+
+def _import_hyperpod_preflight() -> ModuleType:
+    from cli import hyperpod_preflight
+
+    return hyperpod_preflight
+
+
 @dataclass(frozen=True)
 class _PreflightFeature:
     """A feature whose preflight module is shaped like :mod:`cli.pcs_preflight`.
 
-    The module is imported by name when needed (the CLI keeps boto3 off its
-    import path until a command runs, and tests patch the module's functions).
+    The module is imported when needed, through a literal import per feature
+    (the CLI keeps boto3 off its import path until a command runs, the module
+    set stays static for the import audit, and tests patch the module's
+    functions on the module object the import returns).
     """
 
     key: str  # the cdk.json block and the --enable override name
     label: str  # how messages name the feature
     skip_flag: str  # the deploy flag that bypasses the preflight
-    module_name: str  # under cli/
+    importer: Callable[[], ModuleType]  # the preflight module under cli/
     loader: str  # module function: (region, *, force_enabled) -> validated block
     error: str  # module exception for a block that cannot be read or validated
 
-    def module(self) -> Any:
-        return importlib.import_module(f"cli.{self.module_name}")
+    def module(self) -> ModuleType:
+        return self.importer()
 
     def load(self, region: str, *, force_enabled: bool) -> dict[str, Any]:
         """The validated block, or raise the module's error."""
@@ -2234,7 +2248,7 @@ _PCS_PREFLIGHT = _PreflightFeature(
     key="pcs",
     label="AWS PCS",
     skip_flag="--skip-pcs-preflight",
-    module_name="pcs_preflight",
+    importer=_import_pcs_preflight,
     loader="load_pcs_config",
     error="PcsPreflightError",
 )
@@ -2242,7 +2256,7 @@ _HYPERPOD_PREFLIGHT = _PreflightFeature(
     key="hyperpod",
     label="SageMaker HyperPod",
     skip_flag="--skip-hyperpod-preflight",
-    module_name="hyperpod_preflight",
+    importer=_import_hyperpod_preflight,
     loader="load_hyperpod_config",
     error="HyperpodPreflightError",
 )

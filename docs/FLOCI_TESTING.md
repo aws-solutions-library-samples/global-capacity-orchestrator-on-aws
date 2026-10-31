@@ -121,7 +121,7 @@ in-cluster behavior cannot be exercised honestly.
 ## Known emulator gaps
 
 Each gap below was probed empirically (re-probed against Floci 2.2.0); the
-first three have narrow,
+first three and the seventh have narrow,
 documented answers in `tests/_floci_gap_shims.py` (a botocore `before-send`
 handler per read-only operation — production code is untouched; harness
 subprocesses receive them via `tests/_floci_sitecustomize/`):
@@ -167,6 +167,14 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    eventually-reports-zero contract therefore stays in the unit suite; the
    wire-level tests cover start/stop/adopt/describe semantics, which the
    emulator models faithfully.
+7. **SageMaker `ListClusters`** (the HyperPod cluster listing) is not among
+   the SageMaker actions Floci 2.2.0 models: it answers
+   `ValidationException: Action ListClusters is not supported`. The harness
+   inventory lists every Region's HyperPod clusters to prove the project's
+   absent, so the shim answers the empty page real AWS returns for an account
+   with no HyperPod clusters — which an emulator account is, since
+   `CreateCluster` is not modeled either. The scanner's ownership matching
+   (name and tags) keeps its coverage in patched-client unit tests.
 
 ## Where the E2E stops, and why
 
