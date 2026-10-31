@@ -47,7 +47,7 @@ The globs are complements, so their union is always the whole layer.
 
 ```bash
 docker run --rm -p 4566:4566 -e FLOCI_STORAGE_MODE=memory \
-  -e FLOCI_SERVICES_EKS_MOCK=true \
+  -e FLOCI_SERVICES_EKS_MOCK=true -e FLOCI_SERVICES_EC2_MOCK=true \
   floci/floci:2.2.0    # finch/podman work identically
 GCO_FLOCI_ENDPOINT=http://127.0.0.1:4566 pytest tests/test_floci_*.py -v
 ```
@@ -56,6 +56,13 @@ GCO_FLOCI_ENDPOINT=http://127.0.0.1:4566 pytest tests/test_floci_*.py -v
 Floci's default real mode a `CreateCluster` starts a k3s container and
 answers only once it is ready (about 90 seconds), past botocore's 60-second
 read timeout, so the client's retry collides with the first create.
+`FLOCI_SERVICES_EC2_MOCK=true` matches CI as well: EC2 instances are
+metadata-only and jump to their final state. In real mode, with a Docker
+socket available, every `RunInstances` starts a container and
+`StopInstances` runs `docker stop`, which the PCS login-node tests saw take
+longer than two minutes to reach `stopped`; without a socket (a Finch host)
+Floci retries the daemon for about fifteen seconds per instance operation
+before falling back, so mock mode is also what makes a local run quick.
 
 The E2E module additionally needs the Node CDK toolchain on `PATH`
 (`npm ci`, then `export PATH="$PWD/node_modules/.bin:$PATH"`) and a clean

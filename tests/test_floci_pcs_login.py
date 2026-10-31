@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 import pytest
@@ -33,7 +32,8 @@ from tests._floci import floci_test_markers, unique_name
 pytestmark = floci_test_markers()
 
 REGION = "us-east-1"
-#: The emulator finishes a stack or an instance launch at once; botocore's
+#: The emulator finishes a stack or an instance transition at once (EC2 runs
+#: in its metadata-only mock mode, see docs/FLOCI_TESTING.md); botocore's
 #: default waiter delays (30 s and 15 s between polls) would only add minutes.
 _FAST_WAIT = {"Delay": 1, "MaxAttempts": 120}
 
@@ -87,14 +87,8 @@ def network(verified_floci_endpoint):
 
 
 def _terminate(instance_ids: list[str]) -> None:
-    """Terminate each instance in its own call: the emulator holds one call ~15 s per instance."""
-    ec2 = boto3.client("ec2", region_name=REGION)
-    with ThreadPoolExecutor(max_workers=max(1, len(instance_ids))) as pool:
-        list(
-            pool.map(
-                lambda instance_id: ec2.terminate_instances(InstanceIds=[instance_id]), instance_ids
-            )
-        )
+    if instance_ids:
+        boto3.client("ec2", region_name=REGION).terminate_instances(InstanceIds=instance_ids)
 
 
 def _launch_login_instance(subnet_id: str, node_group_id: str) -> str:
@@ -168,20 +162,16 @@ class TestFindLoginNode:
 
             # A node PCS is replacing: the old one stopped, a newer one running
             # beside it, and an unrelated running instance from another group.
-            # The emulator takes about fifteen seconds to bring an instance
-            # up, so the two older ones launch together.
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                replaced, other_group = pool.map(
-                    _launch_login_instance,
-                    [network["subnet_id"], network["subnet_id"]],
-                    [node_group_id, f"{node_group_id}x"],
-                )
+            replaced = _launch_login_instance(network["subnet_id"], node_group_id)
+            other_group = _launch_login_instance(network["subnet_id"], f"{node_group_id}x")
             instances.extend([replaced, other_group])
             ec2.stop_instances(InstanceIds=[replaced])
             time.sleep(1.1)  # LaunchTime is what ranks the survivors
             current = _launch_login_instance(network["subnet_id"], node_group_id)
             instances.append(current)
-            ec2.get_waiter("instance_running").wait(InstanceIds=[current], WaiterConfig=_FAST_WAIT)
+            ec2.get_waiter("instance_running").wait(
+                InstanceIds=[current, other_group], WaiterConfig=_FAST_WAIT
+            )
             ec2.get_waiter("instance_stopped").wait(InstanceIds=[replaced], WaiterConfig=_FAST_WAIT)
 
             node = find_login_node(REGION, stack_name)
