@@ -165,6 +165,7 @@ Keep GCO healthy over time.
 Reach for these from any track once the core is solid:
 
 - **More schedulers:** [KubeRay](KUBERAY.md), [KEDA](KEDA.md), [Slurm](SLURM_OPERATOR.md) (and its [AWS PCS](PCS.md) backend), and [YuniKorn](YUNIKORN.md).
+- **Self-healing GPU capacity:** [SageMaker HyperPod](HYPERPOD.md) instance groups join a Region's cluster as nodes behind a Kueue queue.
 - **Pipelines:** multi-step DAGs via [`examples/pipeline-dag.yaml`](../examples/pipeline-dag.yaml).
 - **Databases and caching:** [`examples/aurora-pgvector-job.yaml`](../examples/aurora-pgvector-job.yaml) and [`examples/valkey-cache-job.yaml`](../examples/valkey-cache-job.yaml).
 - **Analytics:** the [Analytics Environment](ANALYTICS.md) (SageMaker Studio and [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html)).

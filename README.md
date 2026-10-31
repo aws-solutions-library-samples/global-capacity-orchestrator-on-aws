@@ -39,7 +39,7 @@
 
 </div>
 
-**Global Capacity Orchestrator (GCO)** runs accelerated workloads — LLM training and inference, batch ML, HPC — on [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) clusters in as many AWS Regions as you configure, behind one [IAM](https://aws.amazon.com/iam/)-authenticated [API](docs/API.md), [CLI](docs/CLI.md) and [MCP server](gco_mcp/README.md). It finds where NVIDIA GPU, [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/), [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) and CPU capacity actually is, places jobs there, and serves inference endpoints with automatic cross-Region failover.
+**Global Capacity Orchestrator (GCO)** runs accelerated workloads — LLM training and inference, batch ML, HPC — on [EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html) clusters in as many AWS Regions as you configure — with an [AWS Parallel Computing Service](docs/PCS.md) Slurm cluster and [Amazon SageMaker HyperPod](docs/HYPERPOD.md) instance groups attached to a Region where its workloads call for them — behind one [IAM](https://aws.amazon.com/iam/)-authenticated [API](docs/API.md), [CLI](docs/CLI.md) and [MCP server](gco_mcp/README.md). It finds where NVIDIA GPU, [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/), [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/) and CPU capacity actually is, places jobs there, and serves inference endpoints with automatic cross-Region failover.
 
 ![A recorded gco session: fleet status, capacity discovery, four schedulers, shared storage, a vector search and live LLM inference](demo/live_demo.gif)
 
@@ -62,7 +62,7 @@ Running accelerated workloads across Regions means finding capacity, standing up
 | Challenge | Traditional Approach | With GCO |
 |-----------|---------------------|--------------|
 | GPU availability | Manually check each region | Capacity tools and auto-region workflows compare configured regions |
-| Node provisioning | Pre-provision or wait for scaling | EKS Auto Mode provisions on-demand |
+| Node provisioning | Pre-provision or wait for scaling | EKS Auto Mode provisions on-demand; a Region can add an AWS PCS Slurm cluster or SageMaker HyperPod instance groups with their own health monitoring and node replacement |
 | Multi-region ops | Manage clusters separately | One platform across unlimited SDK-known Regions in one partition |
 | Authentication | Configure per-cluster access | IAM-based, uses existing AWS credentials |
 | Job outputs | Lost unless persisted | EFS/FSx and per-region S3 available to every job that mounts or writes them |
@@ -76,8 +76,11 @@ Running accelerated workloads across Regions means finding capacity, standing up
 - You want multi-region redundancy without managing multiple clusters
 - You prefer [IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/introduction.html) authentication over kubeconfig management
 - You need job outputs to persist after completion
+- You run Slurm workloads and want AWS to run the controller ([AWS PCS](docs/PCS.md)), or you want GPU nodes that are health-checked and replaced for you ([SageMaker HyperPod](docs/HYPERPOD.md)), behind the same API
 
 **What it does.** Spins up [EKS Auto Mode](docs/CONCEPTS.md#eks-auto-mode) clusters across any number of SDK-known [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) Regions in one [AWS partition](https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/partitions.html). In commercial `aws`, [Global Accelerator](docs/CONCEPTS.md#global-routing) provides latency-aware [anycast routing](https://www.cloudflare.com/learning/cdn/glossary/anycast-network/) and automatic failover behind the global workload API; other partitions (`aws-cn` and `aws-us-gov`) use IAM-authenticated regional workload APIs while retaining the aggregate global API. Capacity tools and auto-region queue/CLI workflows select a target Region, EKS Auto Mode provisions matching nodes from the built-in `system` and `general-purpose` [NodePools](https://karpenter.sh/docs/concepts/nodepools/) plus project-managed GPU x86, GPU ARM, inference, [EFA](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html), [Mooncake](https://kvcache-ai.github.io/Mooncake/) EFA, [Neuron](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/), and CPU NodePools, and shared storage persists workload outputs. Network routing never substitutes for live GPU-capacity placement.
+
+A Region can also attach an [AWS PCS](docs/PCS.md) cluster — Slurm's controller run by AWS, EC2 node groups launched from zero, reached through the same `gco slurm` surface as Slinky — and a [SageMaker HyperPod](docs/HYPERPOD.md) cluster whose instance groups join the EKS cluster as nodes with HyperPod's deep health checks and automatic node replacement.
 
 **Why it's different.** Capacity-aware placement tools and auto-region workflows, partition-aware authenticated routing, full-stack observability ([CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) dashboards, alarms, [SNS](https://docs.aws.amazon.com/sns/latest/dg/welcome.html)), and a [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) app validated across the full curated configuration matrix in CI. Read [Core Concepts](docs/CONCEPTS.md) for the ideas behind it and the [Learning Path](docs/LEARNING_PATH.md) if Kubernetes is new to you.
 
@@ -422,15 +425,17 @@ supported workload ingress in other partitions.
 Everything GCO does, grouped by area; expand one for the details and its guide.
 
 <details>
-<summary><b>Compute and orchestration</b>: NodePools for every accelerator, four submission paths, distributed training, pipelines and Helm-managed schedulers</summary>
+<summary><b>Compute and orchestration</b>: NodePools for every accelerator, Slurm on AWS PCS, SageMaker HyperPod capacity, four submission paths, distributed training, pipelines and Helm-managed schedulers</summary>
 
 - **EKS Auto Mode** with automatic node provisioning — no pre-scaling needed
 - **GPU and accelerator support** through [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), and [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), plus built-in and [project-scoped CPU pools](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml). Only families on the [EKS Auto Mode supported instance list](https://docs.aws.amazon.com/eks/latest/userguide/automode-learn-instances.html#auto-supported-instances) can launch at any one time; the pools deliberately list newer families (such as `g7`/`g7e`) ahead of that support so they come online without a GCO release — see [which instance types can actually launch](docs/CUSTOMIZATION.md#which-instance-types-can-actually-launch)
 - **Reserved capacity**: `gco capacity find-blocks` ranks Capacity Block offerings across Regions and `gco capacity reserve` buys one; `gco capacity create-reservation` creates an On-Demand Capacity Reservation; `gco capacity find-training-plans` ranks SageMaker Training Plan offerings (the reserved capacity a [HyperPod](docs/HYPERPOD.md) instance group launches into) and `gco capacity training-plans` lists the plans you hold. `gco nodepools create-capacity-block` and `gco nodepools create-odcr` then generate an EKS Auto Mode NodeClass bound to the reservation and a NodePool that launches into it, for you to apply with kubectl; pods reach it with the `karpenter.sh/nodepool: <name>` node selector — see [Nodepools Commands](docs/CLI.md#nodepools-commands)
+- **Slurm on AWS PCS**: the `pcs` block has the regional stack create a managed [AWS Parallel Computing Service](docs/PCS.md) cluster (node groups with EFA, placement groups, Spot and Capacity Blocks, queues, a login node over SSM, shared EFS home) or connect to one you run; `gco slurm --backend pcs`, the `/api/v1/slurm/*` routes and the `slurm_*` MCP tools work against it exactly as against Slinky
+- **SageMaker HyperPod capacity**: the `hyperpod` block has the regional stack create an EKS-orchestrated [HyperPod](docs/HYPERPOD.md) cluster whose instance groups join the cluster as labelled, tainted GPU nodes with deep health checks, a health-monitoring agent and automatic node replacement; work reaches them through the `gco-hyperpod` Kueue queue or `gco inference deploy --capacity-type hyperpod`, and `gco capacity find-training-plans` finds the reserved capacity they can launch into
 - **Multiple submission methods**: API Gateway, SQS queues, DynamoDB job queue, or direct kubectl
 - **Distributed training** via [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) (on by default): multi-node PyTorch through the `TrainJob` API against platform-shipped runtimes, validated end to end by the same security pipeline as every other submission, with optional Kueue gang admission — see the [Distributed Training Guide](docs/DISTRIBUTED_TRAINING.md)
 - **Job pipelines (DAGs)**: Multi-step ML pipelines with dependency ordering and failure handling
-- **Helm-managed ecosystem**: mandatory KEDA; [EFA](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) and [Neuron](https://docs.aws.amazon.com/eks/latest/userguide/device-management-neuron.html) device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [Kubeflow Trainer](https://github.com/kubeflow/trainer), [cert-manager](https://cert-manager.io/docs/), [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) (on by default with cluster observability), and Kueue; opt-in Slurm/Slinky, YuniKorn, [Argo CD](docs/GITOPS.md) and [Crossplane](docs/CROSSPLANE.md) with its Crossview dashboard
+- **Helm-managed ecosystem**: mandatory KEDA; [EFA](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) and [Neuron](https://docs.aws.amazon.com/eks/latest/userguide/device-management-neuron.html) device plugins; Volcano, [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html), [Kubeflow Trainer](https://github.com/kubeflow/trainer), [cert-manager](https://cert-manager.io/docs/), [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) (on by default with cluster observability), and Kueue; opt-in Slurm/Slinky, YuniKorn, [Argo CD](docs/GITOPS.md), [Crossplane](docs/CROSSPLANE.md) with its Crossview dashboard, and the NVIDIA device plugin that comes with HyperPod
 
 </details>
 
@@ -513,7 +518,7 @@ Goal-directed iteration loop for orchestrated workflows. The operator declares a
 
 ## AWS Services in this Guidance
 
-GCO is published in the AWS Solutions Library as the [Guidance for EKS AutoMode Clusters with Global Capacity Orchestrator on AWS](https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/). It is built from 31 AWS services.
+GCO is published in the AWS Solutions Library as the [Guidance for EKS AutoMode Clusters with Global Capacity Orchestrator on AWS](https://docs.aws.amazon.com/solutions/eks-automode-clusters-with-global-capacity-orchestrator-on-aws/). It is built from 32 AWS services.
 
 <details>
 <summary><b>Every AWS service GCO uses, and what for</b></summary>
@@ -527,7 +532,7 @@ GCO is published in the AWS Solutions Library as the [Guidance for EKS AutoMode 
 | [Amazon CloudWatch](https://aws.amazon.com/cloudwatch/) | Metrics, logs, alarms, dashboards, Container Insights for GPU utilization, and Transaction Search for the API services' trace spans |
 | [Amazon Cognito](https://aws.amazon.com/cognito/) | Optional user pool authenticating analytics users to presigned Studio sessions |
 | [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) | Inference endpoint desired-state store, job queue state, and template storage |
-| [Amazon EC2](https://aws.amazon.com/ec2/) | Accelerated instance fleet plus the capacity APIs behind `gco capacity` — spot placement scores, spot price history, On-Demand Capacity Reservations, and Capacity Blocks for ML |
+| [Amazon EC2](https://aws.amazon.com/ec2/) | Accelerated instance fleet (EKS Auto Mode nodes and the launch templates a managed PCS cluster's node groups launch from) plus the capacity APIs behind `gco capacity` — spot placement scores, spot price history, On-Demand Capacity Reservations, and Capacity Blocks for ML |
 | [Amazon ECR](https://aws.amazon.com/ecr/) | Container image registry with cross-region replication for platform and user images |
 | [Amazon EFS](https://aws.amazon.com/efs/) | Shared elastic storage for job outputs, model weights, and inter-pod data sharing |
 | [Amazon EKS](https://aws.amazon.com/eks/) | Kubernetes control plane and Auto Mode compute (GPU, [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/), [Inferentia](https://aws.amazon.com/ai/machine-learning/inferentia/), CPU nodepools); optional [EKS Capabilities](https://docs.aws.amazon.com/eks/latest/userguide/capabilities.html) — the AWS-managed ACK and kro — attached per cluster |
@@ -535,7 +540,7 @@ GCO is published in the AWS Solutions Library as the [Guidance for EKS AutoMode 
 | [Amazon EMR Serverless](https://aws.amazon.com/emr/serverless/) | Optional Spark application paired with the Studio domain for large-scale notebook analytics |
 | [Amazon FSx for Lustre](https://aws.amazon.com/fsx/lustre/) | Optional high-performance parallel file system for ML training workloads |
 | [Amazon S3](https://aws.amazon.com/s3/) | Model weight storage (KMS-encrypted), cluster shared bucket, CDK asset staging |
-| [Amazon SageMaker AI](https://aws.amazon.com/sagemaker/) | Optional Studio domain for interactive notebook analytics (`gco analytics enable`) |
+| [Amazon SageMaker AI](https://aws.amazon.com/sagemaker/) | Optional Studio domain for interactive notebook analytics (`gco analytics enable`); optional [HyperPod](docs/HYPERPOD.md) clusters orchestrated by the regional EKS cluster (`hyperpod` block), and the Training Plan offerings `gco capacity find-training-plans` searches |
 | [Amazon SNS](https://aws.amazon.com/sns/) | Alert notifications for drift detection, health issues, and capacity events |
 | [Amazon SQS](https://aws.amazon.com/sqs/) | Regional job ingestion queue with dead-letter queue and KEDA-driven scale-to-zero consumer |
 | [Amazon VPC](https://aws.amazon.com/vpc/) | Network isolation with public/private subnets, NAT Gateways, and VPC endpoints |
@@ -547,6 +552,7 @@ GCO is published in the AWS Solutions Library as the [Guidance for EKS AutoMode 
 | [AWS IAM](https://aws.amazon.com/iam/) | IRSA roles for pod-level AWS access, service roles, the per-type roles the optional EKS Capabilities assume, and SigV4 authentication |
 | [AWS KMS](https://aws.amazon.com/kms/) | Encryption keys for S3 model buckets, EFS, application secrets, and the backend TLS root secret |
 | [AWS Lambda](https://aws.amazon.com/lambda/) | HMAC-signing proxy functions, Global Accelerator registration, manifest application, and Helm chart installation orchestration |
+| [AWS Parallel Computing Service](https://aws.amazon.com/pcs/) | Optional managed Slurm cluster per Region (`pcs` block): the controller, `slurmrestd` and accounting run by AWS, EC2 compute node groups and queues created by the regional stack, reached through `gco slurm --backend pcs` |
 | [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) | Rotating HMAC signing key plus the KMS-encrypted deployment-local TLS root state |
 | [AWS Step Functions](https://aws.amazon.com/step-functions/) | Orchestrates Helm chart installs — one state per chart with per-chart retry and backoff |
 | [AWS X-Ray](https://aws.amazon.com/xray/) | OpenTelemetry traces of the four API services (OTLP endpoint, stored through CloudWatch Transaction Search) and active tracing for the Lambda functions |
@@ -614,6 +620,8 @@ Then redeploy: `gco stacks deploy-all -y` (or run `gco stacks regions add <regio
 
 GPU instance availability varies by region. Use `gco capacity check -i <instance-type> -r <region>` or `gco capacity recommend-region --gpu` to find regions with available GPU capacity before deploying workloads.
 
+[AWS PCS](docs/PCS.md) and [SageMaker HyperPod](docs/HYPERPOD.md) are offered in a subset of Regions; `gco stacks pcs preflight` and `gco stacks hyperpod preflight` (which `gco stacks deploy` runs for a Region with either on) report a Region that cannot host them before anything is created.
+
 > A regional stack can be deployed to any CloudFormation Region known to the installed AWS SDK. Add or remove Regions in `deployment_regions.regional`; all configured Regions must belong to one AWS partition, and GCO imposes no count limit.
 
 </details>
@@ -665,6 +673,8 @@ embedded.
 | Your Goal | Read This |
 |-----------|-----------|
 | Add regions, tune nodepools, enable FSx | [Customization Guide](docs/CUSTOMIZATION.md) |
+| Run Slurm on a managed AWS PCS cluster | [Slurm on AWS PCS](docs/PCS.md) |
+| Add SageMaker HyperPod GPU capacity to a Region | [SageMaker HyperPod](docs/HYPERPOD.md) |
 | Reconcile tenant workloads from Git with Argo CD | [GitOps with Argo CD](docs/GITOPS.md) |
 | Publish your own platform APIs with Crossplane | [Crossplane](docs/CROSSPLANE.md) |
 | Attach AWS-managed ACK or kro | [EKS Capabilities](docs/EKS_CAPABILITIES.md) |
@@ -710,7 +720,7 @@ exceptions require an [Architecture Decision Record](docs/adr/README.md).
 │   ├── config/                          # Configuration loader with validation
 │   ├── models/                          # Data models for k8s clusters, health monitor, inference monitor and manifest processor
 │   ├── services/                        # K8s services (health/inference monitors, inference proxy, manifest/queue processors)
-│   └── stacks/                          # CDK stacks (global, API gateway, regional, regional API gateway, monitoring, analytics)
+│   └── stacks/                          # CDK stacks (global, API gateway, regional with its PCS and HyperPod constructs, regional API gateway, monitoring, analytics)
 │       └── constants.py                 # Pinned versions: EKS addons, Lambda runtime, Aurora engine
 │
 ├── lambda/                              # Lambda functions

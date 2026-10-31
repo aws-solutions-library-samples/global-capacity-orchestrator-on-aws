@@ -25,7 +25,7 @@ Comprehensive guides for understanding, deploying, operating, and customizing **
 | [Inference Guide](INFERENCE.md) | ML engineers | Deploy and manage multi-region GPU inference endpoints ([vLLM](https://docs.vllm.ai/en/latest/), [SGLang](https://docs.sglang.ai/), [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html)) |
 | [Distributed Training](DISTRIBUTED_TRAINING.md) | ML engineers | Multi-node training through the [Kubeflow Trainer v2](https://github.com/kubeflow/trainer) `TrainJob` API (on by default): runtimes, validation semantics, GPU variants, Kueue gang scheduling, and Spot guidance |
 | [API Reference](API.md) | Developers | Every HTTP surface: the control plane (manifests, jobs, queue, templates, webhooks, cost), cross-region aggregation, inference, and health/observability |
-| [Customization](CUSTOMIZATION.md) | Platform teams | Add regions, tune nodepools, enable FSx/[Valkey](https://valkey.io/)/EFA, configure queue processor |
+| [Customization](CUSTOMIZATION.md) | Platform teams | Add regions, tune nodepools, enable FSx/[Valkey](https://valkey.io/)/EFA, turn on AWS PCS or SageMaker HyperPod, configure queue processor |
 | [EKS Capabilities](EKS_CAPABILITIES.md) | Platform teams | Opt-in AWS-managed [ACK](https://aws-controllers-k8s.github.io/docs/) and [kro](https://kro.run/) per regional cluster (off by default): capability IAM roles with exactly the permissions you configure, the tenant RBAC kro composes workloads with, and live status/drift |
 | [GitOps with Argo CD](GITOPS.md) | Platform teams | Self-managed [Argo CD](https://argo-cd.readthedocs.io/en/stable/) per regional cluster (off by default): namespaced and fenced to the tenant namespaces, an optional GitOps hand-off to one repository path per cluster, a repo-server autoscaler, and the UI over a private port-forward |
 | [Crossplane](CROSSPLANE.md) | Platform teams | Self-managed [Crossplane](https://docs.crossplane.io/) v2 and the Crossview dashboard (off by default): your own Kubernetes APIs whose composite resources compose tenant workloads in `gco-jobs` and `gco-inference` only |
@@ -92,6 +92,7 @@ If you're customizing or operating:
 6. [Analytics Environment](ANALYTICS.md) — optional Studio + EMR for interactive analysis
 7. [Mission](MISSION.md) — run goal-directed iteration loops
 8. [Schedulers Overview](SCHEDULERS.md) — configure scheduling tools
-9. [Troubleshooting](TROUBLESHOOTING.md) — fix issues
-10. [Operational Runbooks](RUNBOOKS.md) — incident response procedures
-11. [Maintenance](MAINTENANCE.md) — keep the accelerator catalog, EKS version, and pinned tooling current
+9. [Slurm (AWS PCS)](PCS.md) and [SageMaker HyperPod](HYPERPOD.md) — attach a managed Slurm cluster or self-healing GPU capacity to a Region
+10. [Troubleshooting](TROUBLESHOOTING.md) — fix issues
+11. [Operational Runbooks](RUNBOOKS.md) — incident response procedures
+12. [Maintenance](MAINTENANCE.md) — keep the accelerator catalog, EKS version, and pinned tooling current

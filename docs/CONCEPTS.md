@@ -34,6 +34,7 @@ GCO is a **multi-region Kubernetes platform** built on AWS EKS Auto Mode, design
 - Automatic GPU node provisioning through EKS Auto Mode and purpose-built NodePools
 - Inference endpoint management across regions with a single command
 - Shared storage for job outputs that persists after pods terminate
+- Slurm through [Slinky](SLURM_OPERATOR.md) on the cluster or a managed [AWS PCS](PCS.md) cluster, and [SageMaker HyperPod](HYPERPOD.md) instance groups as self-healing GPU nodes, all behind the same API
 - Production-ready security with IAM authentication
 
 Think of it as a GPU workload platform: you submit a Kubernetes manifest, and GCO validates it, provisions matching nodes, runs it, and can persist outputs when the workload mounts shared storage. Capacity-aware CLI/queue workflows can choose a Region. In commercial `aws`, the global workload API routes by network health and latency rather than inspecting GPU inventory; other partitions use explicitly selected regional workload APIs. For inference, GCO reconciles long-running endpoints across selected Regions and, in `aws`, provides health-based global failover.
