@@ -25,6 +25,7 @@
 #   - Argo CD (argo-cd chart): https://github.com/argoproj/argo-helm/releases
 #   - Crossplane: https://github.com/crossplane/crossplane/releases
 #   - Crossview: https://github.com/crossplane-contrib/crossview/releases
+#   - NVIDIA device plugin: https://github.com/NVIDIA/k8s-device-plugin/releases
 
 charts:
   # AWS Load Balancer Controller - mandatory Gateway API data plane
@@ -1470,6 +1471,48 @@ charts:
         limits:
           cpu: 500m
           memory: 1Gi
+      podAnnotations:
+        karpenter.sh/do-not-disrupt: "true"
+
+  # NVIDIA device plugin - advertises the GPUs on SageMaker HyperPod nodes.
+  # EKS Auto Mode nodes carry a built-in device plugin, but HyperPod instance
+  # groups run HyperPod's AMI and join the cluster outside Auto Mode, so the
+  # plugin runs on exactly those nodes (gco.aws/capacity-provider=hyperpod),
+  # tolerating the HyperPod taint and nvidia.com/gpu. Installed only while
+  # cdk.json hyperpod.enabled is true (see docs/HYPERPOD.md).
+  # https://github.com/NVIDIA/k8s-device-plugin
+  nvidia-device-plugin:
+    enabled: false
+    repo_name: nvdp
+    repo_url: https://nvidia.github.io/k8s-device-plugin
+    chart: nvidia-device-plugin
+    version: "0.20.1"
+    namespace: kube-system
+    create_namespace: false
+    values:
+      nodeSelector:
+        gco.aws/capacity-provider: hyperpod
+      tolerations:
+        - key: gco.aws/hyperpod
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      # Node Feature Discovery and GPU feature discovery stay off: HyperPod
+      # labels its nodes itself and the plugin only needs the device files.
+      gfd:
+        enabled: false
+      nfd:
+        enabled: false
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
       podAnnotations:
         karpenter.sh/do-not-disrupt: "true"
 

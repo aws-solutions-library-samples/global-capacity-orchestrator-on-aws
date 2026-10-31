@@ -1,0 +1,275 @@
+# SageMaker HyperPod health-monitoring agent: the node-problem-detector
+# derivative HyperPod runs on every one of its nodes to detect GPU, Neuron,
+# kernel and network faults and label the node
+# (sagemaker.amazonaws.com/node-health-status) so the service can reboot or
+# replace it (NodeRecovery=Automatic).
+#
+# Two DaemonSets, as in HyperPod's own chart: one for the NVIDIA GPU instance
+# types and one for the Trainium/Inferentia types with the NVIDIA runtime
+# hooks disabled. Both bind to ml.* instance types only, so they never land
+# on the EKS Auto Mode node pools, and tolerate every taint (the HyperPod
+# taint GCO sets, and the nodes' own pressure taints while unhealthy). The
+# image is the HyperPod team's per-Region ECR image, pinned in
+# gco/hyperpod_config.py ({{HYPERPOD_HMA_IMAGE}}).
+#
+# The agent reads the kernel ring buffer and the system logs from the host
+# and writes its own logs to the host's /var/log, so the hostPath mounts are
+# the agent's contract, not a choice GCO makes; everything else is locked
+# down (non-root, no capabilities, no privilege escalation, RuntimeDefault
+# seccomp, read-only root filesystem).
+#
+# Gated on {{HYPERPOD_ENABLED}} like 10-hyperpod-rbac.yaml.
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent
+  namespace: aws-hyperpod
+  labels:
+    app: health-monitoring-agent
+    project: gco
+    gco.io/hyperpod-enabled: "{{HYPERPOD_ENABLED}}"
+spec:
+  selector:
+    matchLabels:
+      app: health-monitoring-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: health-monitoring-agent
+        project: gco
+    spec:
+      serviceAccountName: health-monitoring-agent
+      automountServiceAccountToken: true
+      priorityClassName: system-node-critical
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: gco.aws/capacity-provider
+                    operator: In
+                    values: ["hyperpod"]
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - ml.p5en.48xlarge
+                      - ml.p5e.48xlarge
+                      - ml.p5.48xlarge
+                      - ml.p5.4xlarge
+                      - ml.p4d.24xlarge
+                      - ml.p4de.24xlarge
+                      - ml.g4dn.xlarge
+                      - ml.g4dn.2xlarge
+                      - ml.g4dn.4xlarge
+                      - ml.g4dn.8xlarge
+                      - ml.g4dn.12xlarge
+                      - ml.g4dn.16xlarge
+                      - ml.g5.xlarge
+                      - ml.g5.2xlarge
+                      - ml.g5.4xlarge
+                      - ml.g5.8xlarge
+                      - ml.g5.12xlarge
+                      - ml.g5.16xlarge
+                      - ml.g5.24xlarge
+                      - ml.g5.48xlarge
+                      - ml.g6.xlarge
+                      - ml.g6.2xlarge
+                      - ml.g6.4xlarge
+                      - ml.g6.8xlarge
+                      - ml.g6.16xlarge
+                      - ml.g6.12xlarge
+                      - ml.g6.24xlarge
+                      - ml.g6.48xlarge
+                      - ml.gr6.4xlarge
+                      - ml.gr6.8xlarge
+                      - ml.g6e.xlarge
+                      - ml.g6e.2xlarge
+                      - ml.g6e.4xlarge
+                      - ml.g6e.8xlarge
+                      - ml.g6e.16xlarge
+                      - ml.g6e.12xlarge
+                      - ml.g6e.24xlarge
+                      - ml.g6e.48xlarge
+                      - ml.g7.2xlarge
+                      - ml.g7.4xlarge
+                      - ml.g7.8xlarge
+                      - ml.g7.12xlarge
+                      - ml.g7.24xlarge
+                      - ml.g7.48xlarge
+                      - ml.g7e.2xlarge
+                      - ml.g7e.4xlarge
+                      - ml.g7e.8xlarge
+                      - ml.g7e.12xlarge
+                      - ml.g7e.24xlarge
+                      - ml.g7e.48xlarge
+                      - ml.p6-b200.48xlarge
+                      - ml.p6-b300.48xlarge
+                      - ml.p6e-gb200.36xlarge
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      containers:
+        - name: health-monitoring-agent
+          image: "{{HYPERPOD_HMA_IMAGE}}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: log
+              mountPath: /var/log
+            - name: kmsg
+              mountPath: /dev/kmsg
+              readOnly: true
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: true
+      volumes:
+        - name: log
+          hostPath:
+            path: /var/log/
+        - name: kmsg
+          hostPath:
+            path: /dev/kmsg
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent-non-nvidia
+  namespace: aws-hyperpod
+  labels:
+    app: health-monitoring-agent-non-nvidia
+    project: gco
+    gco.io/hyperpod-enabled: "{{HYPERPOD_ENABLED}}"
+spec:
+  selector:
+    matchLabels:
+      app: health-monitoring-agent-non-nvidia
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: health-monitoring-agent-non-nvidia
+        project: gco
+    spec:
+      serviceAccountName: health-monitoring-agent
+      automountServiceAccountToken: true
+      priorityClassName: system-node-critical
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: gco.aws/capacity-provider
+                    operator: In
+                    values: ["hyperpod"]
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - ml.inf2.xlarge
+                      - ml.inf2.8xlarge
+                      - ml.inf2.24xlarge
+                      - ml.inf2.48xlarge
+                      - ml.trn1.32xlarge
+                      - ml.trn1n.32xlarge
+                      - ml.trn2.3xlarge
+                      - ml.trn2.48xlarge
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      containers:
+        - name: health-monitoring-agent-non-nvidia
+          image: "{{HYPERPOD_HMA_IMAGE}}"
+          imagePullPolicy: IfNotPresent
+          args:
+            - --enable-k8s-exporter=false
+            - --config.system-log-monitor=/config/system-message-monitor.json
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "void"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: ""
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: log
+              mountPath: /var/log
+            - name: kmsg
+              mountPath: /dev/kmsg
+              readOnly: true
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: true
+      volumes:
+        - name: log
+          hostPath:
+            path: /var/log/
+        - name: kmsg
+          hostPath:
+            path: /dev/kmsg
+        - name: localtime
+          hostPath:
+            path: /etc/localtime

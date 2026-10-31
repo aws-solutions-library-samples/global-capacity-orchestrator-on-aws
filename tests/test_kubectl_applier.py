@@ -3461,10 +3461,15 @@ class TestQueueingCustomObjectMapConsistency:
         manifests_dir = (
             Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
         )
-        gated = manifests_dir / "post-helm-kueue-default-queues.yaml"
+        # Both Kueue-gated files: the default topology and the HyperPod one
+        # (which carries the HyperPod gate too and sits under that key as well).
         expected = {
             (str(doc.get("apiVersion")), str(doc.get("kind")), str(doc["metadata"]["name"]))
-            for doc in _parse_manifest_documents(gated)
+            for filename in (
+                "post-helm-kueue-default-queues.yaml",
+                "post-helm-kueue-hyperpod-queue.yaml",
+            )
+            for doc in _parse_manifest_documents(manifests_dir / filename)
         }
         inventory = handler_module._FEATURE_RESOURCE_INVENTORY[("{{KUEUE_ENABLED}}", True)]
         pruned = {(api_version, kind, name) for api_version, kind, _ns, name in inventory}
@@ -3637,6 +3642,42 @@ class TestQueueingCustomObjectMapConsistency:
             for token, value in replacements.items():
                 text = text.replace(token, value)
             assert not handler_module._UNRESOLVED_PLACEHOLDER_RE.findall(text), filename
+
+    def test_hyperpod_prune_inventory_matches_the_gated_manifests(self, handler_module) -> None:
+        """Every object a {{HYPERPOD_ENABLED}} manifest applies is pruned on disable.
+
+        The base key covers the aws-hyperpod namespace, the three identities'
+        RBAC and the health-monitoring agent DaemonSets; the post-Helm key
+        covers the Kueue topology, which also carries the Kueue gate.
+        """
+        inventory = handler_module._FEATURE_RESOURCE_INVENTORY
+        assert set(inventory[("{{HYPERPOD_ENABLED}}", False)]) == self._identities(
+            "10-hyperpod-rbac.yaml", "51-hyperpod-health-monitoring-agent.yaml"
+        )
+        assert set(inventory[("{{HYPERPOD_ENABLED}}", True)]) == self._identities(
+            "post-helm-kueue-hyperpod-queue.yaml"
+        )
+        base = list(inventory[("{{HYPERPOD_ENABLED}}", False)])
+        # Workloads before their ServiceAccount, bindings before roles, the
+        # fixed-name namespace last.
+        kinds = [kind for _api, kind, _ns, _name in base]
+        assert kinds[:2] == ["DaemonSet", "DaemonSet"]
+        assert kinds[-1] == "Namespace"
+        for binding_index, (_api, kind, _ns, name) in enumerate(base):
+            if kind != "ClusterRoleBinding":
+                continue
+            role_index = next(
+                index
+                for index, (_a, k, _n, role_name) in enumerate(base)
+                if k == "ClusterRole" and role_name.startswith(name.removesuffix("-binding"))
+            )
+            assert binding_index < role_index, f"{name} must be pruned before its ClusterRole"
+        post_helm = list(inventory[("{{HYPERPOD_ENABLED}}", True)])
+        assert [kind for _a, kind, _n, _name in post_helm] == [
+            "LocalQueue",
+            "ClusterQueue",
+            "ResourceFlavor",
+        ]
 
     def test_pcs_prune_inventory_matches_the_gated_manifest(self, handler_module) -> None:
         """The API's egress policy to the PCS controller is pruned when PCS is disabled."""

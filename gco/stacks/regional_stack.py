@@ -136,6 +136,11 @@ from gco.eks_capabilities_config import (
     kro_kubernetes_username,
     normalize_eks_capabilities_config,
 )
+from gco.hyperpod_config import (
+    compute_hyperpod_replacements,
+    hyperpod_enabled,
+    validate_hyperpod_config,
+)
 from gco.inference_proxy_config import (
     compute_inference_proxy_tls_replacements as _compute_inference_proxy_tls_replacements,
 )
@@ -172,6 +177,7 @@ from gco.stacks.constants import (
     parse_k8s_quantity,
     regional_shared_ssm_parameter_prefix,
 )
+from gco.stacks.hyperpod_cluster import HyperpodCluster
 from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.pcs_cluster import PcsCluster
 
@@ -1211,6 +1217,13 @@ class GCORegionalStack(Stack):
         # Apply Kubernetes manifests (after EFS so IDs are available)
         self._apply_kubernetes_manifests()
 
+        # SageMaker HyperPod (if enabled): the instance groups join the EKS
+        # cluster as nodes. Created after the manifests so the cluster can
+        # depend on the convergence trigger (the aws-hyperpod namespace, the
+        # health-monitoring agent and the RBAC HyperPod expects are base
+        # manifests of that convergence) and before the outputs.
+        self._create_hyperpod()
+
         # Switch on CloudWatch Transaction Search in this Region: the X-Ray
         # OTLP endpoint the traced API services export to requires it
         # (tracing.enabled + tracing.enable_transaction_search).
@@ -2077,6 +2090,57 @@ class GCORegionalStack(Stack):
             fsx_security_group=getattr(self, "fsx_security_group", None),
             provider_log_group_removal_policy=self.provider_log_group_removal_policy,
         )
+
+    def _hyperpod_config(self) -> dict[str, Any]:
+        """The validated ``hyperpod`` block for this region, or the all-default block.
+
+        Same optional-accessor posture as :meth:`_pcs_config`: config doubles
+        without ``get_hyperpod_config`` (or a ``MagicMock`` returning a
+        non-dict) read as the shipped default (HyperPod off). The loader
+        applies this region's ``hyperpod_regions`` overlay and the run-scoped
+        ``feature_enabled_overrides=hyperpod`` context.
+        """
+        getter = getattr(self.config, "get_hyperpod_config", None)
+        raw = getter(self.deployment_region) if callable(getter) else None
+        if not isinstance(raw, dict):
+            return validate_hyperpod_config(None)
+        return raw
+
+    def _hyperpod_active(self) -> bool:
+        """Whether this region deploys a SageMaker HyperPod cluster."""
+        return hyperpod_enabled(self._hyperpod_config())
+
+    def _create_hyperpod(self) -> None:
+        """Deploy the ``hyperpod`` block for this region (see :mod:`gco.stacks.hyperpod_cluster`).
+
+        ``self.hyperpod`` is ``None`` when HyperPod is off. The cluster is
+        ordered after the convergence trigger so the base manifests (the
+        ``aws-hyperpod`` namespace, the health-monitoring agent, the RBAC the
+        service expects) are applying before the first node boots, and so
+        stack deletion removes the cluster before the add-on layer unwinds.
+        """
+        config = self._hyperpod_config()
+        if not hyperpod_enabled(config):
+            self.hyperpod = None
+            return
+        self.hyperpod = HyperpodCluster(
+            self,
+            "Hyperpod",
+            config=config,
+            project_name=self.config.get_project_name(),
+            region=self.deployment_region,
+            vpc=self.vpc,
+            # The private subnets EKS accepted for the control plane, recorded by
+            # _eks_control_plane_subnets() when the cluster was created.
+            subnets=list(self.eks_control_plane_subnets),
+            eks_cluster_name=self.cluster.cluster_name,
+            eks_cluster_arn=self.cluster.cluster_arn,
+            eks_cluster_security_group=self.cluster.cluster_security_group,
+            shared_bucket=self.regional_shared_bucket,
+            shared_bucket_key=self.regional_shared_kms_key,
+            custom_resource_role=self.aws_custom_resource_role,
+        )
+        self.hyperpod.cluster.node.add_dependency(self.converge_trigger)
 
     def _tracing_config(self) -> dict[str, Any]:
         """The validated ``tracing`` block (``enabled``, ``sample_ratio``, ...).
@@ -4474,6 +4538,17 @@ class GCORegionalStack(Stack):
             )
         )
 
+        # SageMaker HyperPod: the gate, the Region's health-monitoring agent
+        # image and the Kueue quotas for the HyperPod queue, emitted only while
+        # HyperPod is on (the manifests stay gated out and are pruned otherwise).
+        image_replacements.update(
+            compute_hyperpod_replacements(
+                self._hyperpod_config(),
+                enabled=self._hyperpod_active(),
+                region=self.deployment_region,
+            )
+        )
+
         # Cost monitoring (on by default): gate the cost-monitor Deployment
         # and the Grafana cost dashboard on the toggle via the same
         # unreplaced-placeholder mechanism. The image/role placeholders exist
@@ -4756,6 +4831,7 @@ class GCORegionalStack(Stack):
             service_token=self.helm_installer_provider.service_token,
             properties=convergence_properties,
         )
+        self.converge_trigger = converge_trigger
         converge_trigger.node.add_dependency(self.helm_installer_provider_log_group)
         converge_trigger.node.add_dependency(self.aws_load_balancer_controller_policy)
 
@@ -5760,6 +5836,12 @@ class GCORegionalStack(Stack):
         # right after cert-manager, which issues its webhook certificate.
         if self._mlflow_active():
             enabled_charts.extend(("trust-manager", "mlflow"))
+
+        # HyperPod nodes run HyperPod's AMI, not EKS Auto Mode's, so the GPUs on
+        # them are advertised by the NVIDIA device plugin, pinned to those nodes
+        # by the capacity-provider label (values in charts.yaml).
+        if self._hyperpod_active():
+            enabled_charts.append("nvidia-device-plugin")
 
         return enabled_charts
 

@@ -456,6 +456,31 @@ CONFIGS.extend(
             },
         ),
         (
+            # SageMaker HyperPod on: the AWS::SageMaker::Cluster orchestrated by
+            # the regional EKS cluster, the HYPERPOD_LINUX access entry, the
+            # execution role (managed policy plus the exact lifecycle-script
+            # grants), the node security group and its reciprocal EKS rule,
+            # the lifecycle-script custom resource, the {{HYPERPOD_*}} gates
+            # and the NVIDIA device plugin chart. Two instance groups: a GPU
+            # one with deep health checks and a CPU one sized to zero. Also in
+            # NAG_CONFIGS for the role and security-group acknowledgments.
+            "hyperpod-enabled",
+            {
+                "hyperpod": {
+                    "enabled": True,
+                    "instance_groups": [
+                        {"name": "accelerated", "instance_type": "ml.g5.8xlarge"},
+                        {
+                            "name": "cpu",
+                            "instance_type": "ml.c5.xlarge",
+                            "instance_count": 0,
+                            "deep_health_checks": [],
+                        },
+                    ],
+                },
+            },
+        ),
+        (
             "helm-minimal",
             {
                 "helm": {
@@ -1033,6 +1058,10 @@ _NAG_CONFIG_NAMES = {
     # its cr.Provider role.
     "pcs-existing",
     "pcs-managed-with-slinky-and-fsx",
+    # The HyperPod execution role (Resource::* for the documented ENI/ECR/Pod
+    # Identity actions, the lifecycle-script prefix) and the all-traffic
+    # security-group rules carry scoped acknowledgments that must stay exact.
+    "hyperpod-enabled",
 }
 
 NAG_CONFIGS: list[tuple[str, dict[str, Any]]] = [

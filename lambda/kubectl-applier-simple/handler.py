@@ -884,6 +884,16 @@ _PCS_OBSERVABILITY_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
     ("monitoring.coreos.com/v1", "PrometheusRule", "monitoring", "gco-pcs-alerts"),
 )
 
+# SageMaker HyperPod's Kueue topology (post-helm-kueue-hyperpod-queue.yaml):
+# gated on {{KUEUE_ENABLED}} and {{HYPERPOD_ENABLED}} both, so it sits under
+# both prune keys. Queue objects first (a LocalQueue references its
+# ClusterQueue, which references the flavor).
+_HYPERPOD_QUEUE_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
+    ("kueue.x-k8s.io/v1beta2", "LocalQueue", "gco-jobs", "gco-hyperpod"),
+    ("kueue.x-k8s.io/v1beta2", "ClusterQueue", None, "gco-hyperpod-queue"),
+    ("kueue.x-k8s.io/v1beta2", "ResourceFlavor", None, "gco-hyperpod-flavor"),
+)
+
 _FEATURE_RESOURCE_INVENTORY: dict[
     tuple[str, bool], tuple[tuple[str, str, str | None, str], ...]
 ] = {
@@ -979,6 +989,7 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("kueue.x-k8s.io/v1beta2", "LocalQueue", "gco-jobs", "gco-default"),
         ("kueue.x-k8s.io/v1beta2", "ClusterQueue", None, "gco-cluster-queue"),
         ("kueue.x-k8s.io/v1beta2", "ResourceFlavor", None, "gco-default-flavor"),
+        *_HYPERPOD_QUEUE_RESOURCES,
     ),
     # Slurm (cdk.json helm.slurm). The base pass owns the gp3 StorageClass the
     # controller's state volume and the accounting database bind to; the
@@ -1030,6 +1041,34 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     # AWS PCS (cdk.json pcs): the API pod's egress to the PCS controller's
     # slurmrestd (post-helm-pcs-network.yaml). The cluster itself is an AWS
     # resource the regional stack owns, not a manifest.
+    # SageMaker HyperPod (10-hyperpod-rbac.yaml, 51-hyperpod-health-monitoring-
+    # agent.yaml): the agent DaemonSets first, then each identity's binding,
+    # role and ServiceAccount, the fixed-name namespace last.
+    ("{{HYPERPOD_ENABLED}}", False): (
+        ("apps/v1", "DaemonSet", "aws-hyperpod", "health-monitoring-agent"),
+        ("apps/v1", "DaemonSet", "aws-hyperpod", "health-monitoring-agent-non-nvidia"),
+        ("rbac.authorization.k8s.io/v1", "ClusterRoleBinding", None, "health-monitoring-agent"),
+        ("rbac.authorization.k8s.io/v1", "ClusterRole", None, "health-monitoring-agent"),
+        ("v1", "ServiceAccount", "aws-hyperpod", "health-monitoring-agent"),
+        (
+            "rbac.authorization.k8s.io/v1",
+            "ClusterRoleBinding",
+            None,
+            "deep-health-check-service-account-role-binding",
+        ),
+        (
+            "rbac.authorization.k8s.io/v1",
+            "ClusterRole",
+            None,
+            "deep-health-check-service-account-role",
+        ),
+        ("v1", "ServiceAccount", "aws-hyperpod", "deep-health-check-service-account"),
+        ("rbac.authorization.k8s.io/v1", "ClusterRoleBinding", None, "job-auto-restart"),
+        ("rbac.authorization.k8s.io/v1", "ClusterRole", None, "job-auto-restart"),
+        ("v1", "ServiceAccount", "aws-hyperpod", "job-auto-restart"),
+        ("v1", "Namespace", None, "aws-hyperpod"),
+    ),
+    ("{{HYPERPOD_ENABLED}}", True): _HYPERPOD_QUEUE_RESOURCES,
     ("{{PCS_ENABLED}}", True): (
         (
             "networking.k8s.io/v1",
