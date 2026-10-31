@@ -4806,6 +4806,235 @@ _make_pcs_docs_curl() {
     rm -rf "$tmpdir"
 }
 
+# ── HyperPod health-monitoring agent (the chart copy) ───────────────────────
+
+HMA_MANIFEST_PATH="lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml"
+
+_write_hma_template() {
+    # $1: file to write. A Helm template shaped like the upstream chart's:
+    # un-parseable as YAML, two DaemonSets, the instance-type expression after
+    # another matchExpression, and a quoted item.
+    cat > "$1" <<'TPL'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: health-monitoring-agent
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent
+  namespace: {{ .Values.namespace }}
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: gco.aws/capacity-provider
+                    operator: In
+                    values: ["hyperpod"]
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - ml.p5.48xlarge
+                      - "ml.g5.xlarge"
+                      - ml.g6e.48xlarge
+      containers:
+        - name: health-monitoring-agent
+          image: {{ include "health-monitoring-agent.imageUri" . }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent-non-nvidia
+  namespace: {{ .Values.namespace }}
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values: [ml.trn1.32xlarge, "ml.trn2.48xlarge"]
+      containers:
+        - name: health-monitoring-agent-non-nvidia
+          image: {{ include "health-monitoring-agent.imageUri" . }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent-listless
+  namespace: {{ .Values.namespace }}
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node.kubernetes.io/instance-type
+                    operator: Exists
+                  - key: other
+                    operator: In
+                    values:
+                      - not-the-list
+TPL
+}
+
+@test "extract_hma_instance_types: each DaemonSet's list, block or inline, quoted or not; nothing otherwise" {
+    tmpdir="$(mktemp -d)"
+    _write_hma_template "$tmpdir/template.yaml"
+    run extract_hma_instance_types "$tmpdir/template.yaml" health-monitoring-agent
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'ml.p5.48xlarge\nml.g5.xlarge\nml.g6e.48xlarge')" ]
+    run extract_hma_instance_types "$tmpdir/template.yaml" health-monitoring-agent-non-nvidia
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'ml.trn1.32xlarge\nml.trn2.48xlarge')" ]
+    # An expression without values, a DaemonSet that does not exist, a
+    # ServiceAccount of the same name, a missing file: all nothing.
+    for probe in health-monitoring-agent-listless health-monitoring-agent-ghost; do
+        run extract_hma_instance_types "$tmpdir/template.yaml" "$probe"
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+    done
+    run extract_hma_instance_types "$tmpdir/missing.yaml" health-monitoring-agent
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_hma_instance_types: the committed manifest lists ml.* types once each, with no type in both DaemonSets" {
+    nvidia="$(extract_hma_instance_types "$REPO_ROOT/$HMA_MANIFEST_PATH" health-monitoring-agent)"
+    neuron="$(extract_hma_instance_types "$REPO_ROOT/$HMA_MANIFEST_PATH" health-monitoring-agent-non-nvidia)"
+    [ -n "$nvidia" ] && [ -n "$neuron" ]
+    for itype in $nvidia $neuron; do
+        [[ "$itype" =~ ^ml\.[a-z0-9]+(-[a-z0-9]+)?\.[a-z0-9]+$ ]]
+    done
+    # No duplicates within a list, no overlap between the two.
+    [ "$(printf '%s\n' "$nvidia" | sort | uniq -d | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(printf '%s\n' "$neuron" | sort | uniq -d | wc -l | tr -d ' ')" -eq 0 ]
+    [ -z "$(comm -12 <(printf '%s\n' "$nvidia" | sort) <(printf '%s\n' "$neuron" | sort))" ]
+    # The NVIDIA list is GPU families, the other Trainium and Inferentia.
+    for itype in $nvidia; do [[ "$itype" =~ ^ml\.(p|g|gr)[0-9] ]]; done
+    for itype in $neuron; do [[ "$itype" =~ ^ml\.(trn|inf)[0-9] ]]; done
+}
+
+@test "extract_hma_default_tag: the chart's default image tag; nothing without one" {
+    tmpdir="$(mktemp -d)"
+    printf '{{- define "health-monitoring-agent.imageUri" -}}\n{{- $imageTag := .Values.imageTag | default "1.0.2710.0_1.0.501.0" -}}\n{{- end }}\n' > "$tmpdir/_helpers.tpl"
+    run extract_hma_default_tag "$tmpdir/_helpers.tpl"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1.0.2710.0_1.0.501.0" ]
+    printf '{{- $imageTag := .Values.imageTag -}}\n' > "$tmpdir/_helpers.tpl"
+    run extract_hma_default_tag "$tmpdir/_helpers.tpl"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_hma_default_tag "$tmpdir/missing.tpl"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_hma_readme_regions: region|account|tag per ECR URI row, first mention wins; nothing otherwise" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/readme.md" <<'MD'
+- **Supported Regions and their ECR URIs**:
+  ```
+  us-east-1 (US East (N. Virginia)):      111122223333.dkr.ecr.us-east-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+  eu-west-1 (Europe (Ireland)):           444455556666.dkr.ecr.eu-west-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+  us-east-1 (US East (N. Virginia)):      999999999999.dkr.ecr.us-east-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+  us-west-2 (US West (Oregon)):           111122223333.dkr.ecr.eu-west-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+  ```
+  helm install hma 111122223333.dkr.ecr.us-east-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+MD
+    run extract_hma_readme_regions "$tmpdir/readme.md"
+    [ "$status" -eq 0 ]
+    # The duplicate us-east-1 row and the row whose URI names another Region
+    # are both dropped; the prose line is not a row.
+    [ "$output" = "$(printf 'us-east-1|111122223333|1.0.2710.0_1.0.501.0\neu-west-1|444455556666|1.0.2710.0_1.0.501.0')" ]
+    printf '# HyperPod Helm chart\n' > "$tmpdir/readme.md"
+    run extract_hma_readme_regions "$tmpdir/readme.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_hma_readme_regions "$tmpdir/missing.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_hma_region_accounts: region|account per mapping entry, read without importing; the committed module parses" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/hyperpod_config.py" <<'PY'
+from gco.config import load  # not importable here
+HEALTH_MONITORING_AGENT_TAG = "1.0.2710.0_1.0.501.0"
+HEALTH_MONITORING_AGENT_ACCOUNTS: Mapping[str, str] = {
+    "us-east-1": "111122223333",  # trailing comment
+    "us-gov-west-1": "444455556666",
+}
+OTHER_ACCOUNTS = {"eu-west-1": "777788889999"}
+PY
+    run extract_hma_region_accounts "$tmpdir/hyperpod_config.py"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'us-east-1|111122223333\nus-gov-west-1|444455556666')" ]
+    printf 'HEALTH_MONITORING_AGENT_TAG = "1.0.0.0_1.0.0.0"\n' > "$tmpdir/hyperpod_config.py"
+    run extract_hma_region_accounts "$tmpdir/hyperpod_config.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_hma_region_accounts "$tmpdir/missing.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+
+    run extract_hma_region_accounts "$REPO_ROOT/gco/hyperpod_config.py"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"us-east-1|"* ]]
+    while IFS='|' read -r region account; do
+        [[ "$region" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
+        [[ "$account" =~ ^[0-9]{12}$ ]]
+    done <<< "$output"
+    # The tag pin the same surface reads is a plain string constant.
+    [[ "$(extract_python_string_constant HEALTH_MONITORING_AGENT_TAG "$REPO_ROOT/gco/hyperpod_config.py")" =~ ^[0-9][0-9._]+$ ]]
+}
+
+@test "fetch_hma_upstream_file: one raw chart file per name through the retrying curl; an unknown name fails" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${HMA_STUB_CALLS}"
+[ "${HMA_STUB_MODE:-ok}" = "fail" ] && exit 22
+echo "body of ${*: -1}"
+STUB
+    chmod +x "$tmpdir/curl"
+    export HMA_STUB_CALLS="$tmpdir/calls"
+    PATH="$tmpdir:$PATH" run fetch_hma_upstream_file template
+    [ "$status" -eq 0 ]
+    [ "$output" = "body of https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/HyperPodHelmChart/charts/health-monitoring-agent/templates/health-monitoring-agent.yaml" ]
+    PATH="$tmpdir:$PATH" run fetch_hma_upstream_file helpers
+    [ "$output" = "body of https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/HyperPodHelmChart/charts/health-monitoring-agent/templates/_helpers.tpl" ]
+    PATH="$tmpdir:$PATH" run fetch_hma_upstream_file readme
+    [ "$output" = "body of https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/readme.md" ]
+    grep -q -- '--retry 2 --retry-connrefused --retry-max-time 30' "$tmpdir/calls"
+    PATH="$tmpdir:$PATH" run fetch_hma_upstream_file values
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    HMA_STUB_MODE=fail PATH="$tmpdir:$PATH" run fetch_hma_upstream_file template
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    # A fork can point the lookup elsewhere.
+    HMA_UPSTREAM_RAW_BASE="https://example.invalid/chart" PATH="$tmpdir:$PATH" run fetch_hma_upstream_file readme
+    [ "$output" = "body of https://example.invalid/chart/readme.md" ]
+    rm -rf "$tmpdir"
+}
+
 # ── npm graph management and cross-source Node/npm/CDK pins ─────────────────
 
 make_npm_fixture() {

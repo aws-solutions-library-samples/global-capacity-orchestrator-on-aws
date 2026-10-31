@@ -202,6 +202,88 @@ case "$url" in
         [ "${FAKE_DRIFT:-0}" = "1" ] && supported="<tr><td>$(bump "$newest")</td><td>1/1/2026</td><td>6/1/2026</td><td>12/31/2999</td><td>1.0.0-1</td><td>aws-pcs-sample_ami-al2023-x86_64</td></tr>${supported}"
         reply 200 "<html><body><h2>Supported Slurm versions in AWS PCS</h2><table><tr><th>Slurm version</th><th>SchedMD release date</th><th>AWS PCS release date</th><th>AWS PCS EOL date</th><th>Minimum compatible AWS PCS agent version</th><th>Supported AWS PCS sample AMIs</th></tr>${supported}</table><h2>Unsupported Slurm versions in AWS PCS</h2><table><tr><th>Slurm version</th><th>SchedMD release date</th><th>AWS PCS release date</th><th>AWS PCS EOL date</th></tr>${unsupported}</table></body></html>"
         ;;
+    *raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/*/helm_chart/*)
+        # The HyperPod team's chart, rebuilt from the tree's own copy: the two
+        # DaemonSets' instance-type lists (a Helm template no YAML parser
+        # accepts, as upstream), the default image tag in _helpers.tpl and the
+        # readme's Region list. FAKE_DRIFT=1 adds one type to each list (the
+        # first entry, one generation newer), bumps the tag and adds a Region;
+        # FAKE_HMA=retire drops the first type of each list instead;
+        # =account-moved changes the first Region's account; =no-lists answers
+        # a template without the affinities; =fail refuses every file.
+        [ "${FAKE_HMA:-ok}" = "fail" ] && { reply 404 ''; exit 22; }
+        hma_daemonset() {
+            local name="$1" first=1 body
+            body="---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ${name}
+  namespace: {{ .Values.namespace }}
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+"
+            if [ "${FAKE_HMA:-ok}" = "no-lists" ]; then
+                body="${body}                  - key: gco.aws/capacity-provider
+                    operator: Exists
+"
+            else
+                body="${body}                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+"
+            fi
+            while IFS= read -r itype; do
+                [ "${FAKE_HMA:-ok}" = "no-lists" ] && break
+                [ -n "$itype" ] || continue
+                if [ "$first" -eq 1 ]; then
+                    first=0
+                    [ "${FAKE_HMA:-ok}" = "retire" ] && continue
+                    [ "${FAKE_DRIFT:-0}" = "1" ] && body="${body}                      - $(bump "$itype")
+"
+                fi
+                body="${body}                      - ${itype}
+"
+            done < <(catalog_values hma-type "$name")
+            body="${body}      containers:
+        - name: ${name}
+          image: {{ include \"health-monitoring-agent.imageUri\" . }}
+"
+            printf '%s' "$body"
+        }
+        case "$url" in
+            *templates/health-monitoring-agent.yaml)
+                reply 200 "$(hma_daemonset health-monitoring-agent; hma_daemonset health-monitoring-agent-non-nvidia)" ;;
+            *templates/_helpers.tpl)
+                reply 200 "{{- define \"health-monitoring-agent.imageUri\" -}}
+{{- \$imageTag := .Values.imageTag | default \"$(answer hma-tag default 1.0.0.0_1.0.0.0)\" -}}
+{{- end }}" ;;
+            *readme.md)
+                tag="$(catalog_get hma-tag default)"
+                rows="- **Supported Regions and their ECR URIs**:
+"
+                first=1
+                while IFS='|' read -r region account; do
+                    [ -n "$region" ] || continue
+                    if [ "$first" -eq 1 ]; then
+                        first=0
+                        [ "${FAKE_HMA:-ok}" = "account-moved" ] && account="999999999999"
+                    fi
+                    rows="${rows}  ${region} (Some Region):      ${account}.dkr.ecr.${region}.amazonaws.com/hyperpod-health-monitoring-agent:${tag}
+"
+                done < <(grep '^hma-region|' "$FAKE_CATALOG" | cut -d'|' -f2-)
+                [ "${FAKE_DRIFT:-0}" = "1" ] && rows="${rows}  eu-south-2 (Europe (Spain)):      111122223333.dkr.ecr.eu-south-2.amazonaws.com/hyperpod-health-monitoring-agent:${tag}
+"
+                reply 200 "$rows" ;;
+            *) reply 404 ''; exit 22 ;;
+        esac
+        ;;
     *) reply 404 ''; exit 0 ;;
 esac
 FAKE_CURL
@@ -638,6 +720,11 @@ PY
             for v in ${pcs_supported//,/ }; do echo "pcs-slurm|supported|$v"; done
             echo "pcs-slurm|default|$(extract_python_literal_constant PCS_DEFAULTS gco/pcs_config.py managed.slurm_version)"
             echo "pcs-ami|dlami|$(pcs_dlami_family "$(extract_python_string_constant DLAMI_SSM_PARAMETER lambda/pcs-lookup/handler.py)")"
+            hma_manifest=lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml
+            extract_hma_instance_types "$hma_manifest" health-monitoring-agent | sed 's/^/hma-type|health-monitoring-agent|/'
+            extract_hma_instance_types "$hma_manifest" health-monitoring-agent-non-nvidia | sed 's/^/hma-type|health-monitoring-agent-non-nvidia|/'
+            echo "hma-tag|default|$(extract_python_string_constant HEALTH_MONITORING_AGENT_TAG gco/hyperpod_config.py)"
+            extract_hma_region_accounts gco/hyperpod_config.py | sed 's/^/hma-region|/'
             echo "pcs-ami|sample|$(pcs_sample_ami_family "$(extract_python_string_constant SAMPLE_NAME_PATTERN lambda/pcs-lookup/handler.py)")"
         } | grep -v '|$' > "$FAKE_CATALOG"
     )
@@ -780,6 +867,71 @@ DLAMI_NAME_PATTERN = "aws-pcs-ready-dlami-base-ubuntu2404-{architecture}-*"
 DLAMI_SSM_PARAMETER = "/aws/service/pcs/ami/dlami-base-ubuntu2404/{architecture}/latest/ami-id"
 PY
     printf '_DISAGGREGATED_DEFAULT_IMAGE = "vllm/vllm-openai:v0.28.0"\n' > "$root/cli/images.py"
+    # The HyperPod health-monitoring agent copy: the two DaemonSets with the
+    # capacity-provider expression first (an inline list the scan must step
+    # over) and short instance-type lists, plus the tag and Region pins.
+    cat > "$root/lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml" <<'YAML'
+# kics-scan disable=5308a7a8-06f8-45ac-bf10-791fe21de46e
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent
+  namespace: aws-hyperpod
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: gco.aws/capacity-provider
+                    operator: In
+                    values: ["hyperpod"]
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - ml.p5.48xlarge
+                      - ml.g5.xlarge
+      containers:
+        - name: health-monitoring-agent
+          image: "{{HYPERPOD_HMA_IMAGE}}"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent-non-nvidia
+  namespace: aws-hyperpod
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: gco.aws/capacity-provider
+                    operator: In
+                    values: ["hyperpod"]
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - ml.trn1.32xlarge
+                      - ml.inf2.xlarge
+      containers:
+        - name: health-monitoring-agent-non-nvidia
+          image: "{{HYPERPOD_HMA_IMAGE}}"
+YAML
+    cat > "$root/gco/hyperpod_config.py" <<'PY'
+from collections.abc import Mapping
+from gco.config import load  # not importable here: the scan must read, not import
+HEALTH_MONITORING_AGENT_TAG = "1.0.2710.0_1.0.501.0"
+HEALTH_MONITORING_AGENT_ACCOUNTS: Mapping[str, str] = {
+    "us-east-1": "111122223333",
+    "eu-west-1": "444455556666",
+}
+PY
     cat > "$root/cli/autopilot.py" <<'PY'
 CLAUDE_CODE_VERSION = "2.1.252"
 CODEX_VERSION = "0.152.0"
@@ -919,7 +1071,7 @@ findings_path() {
     [ "$(jq -r '.schema' "$findings")" = "gco.dependency-scan.findings/1" ]
     [ "$(jq -r '.has_drift' "$findings")" = "false" ]
     [ "$(jq -r '.scan_complete' "$findings")" = "true" ]
-    [ "$(jq -r '.surfaces | length' "$findings")" = "25" ]
+    [ "$(jq -r '.surfaces | length' "$findings")" = "26" ]
     [ "$(jq -r '[.surfaces[].count] | add' "$findings")" = "0" ]
     [ "$(jq -r '[.surfaces[] | select(.skipped != null)] | length' "$findings")" = "0" ]
     # Every surface was consulted through the faked tools.
@@ -950,6 +1102,10 @@ findings_path() {
     grep -q '^aws ec2 describe-images --owners amazon --region us-east-1 --filters Name=name,Values=aws-pcs-sample_ami-\*' "$CALLS"
     [[ "$output" == *"PCS Slurm versions:       0"* ]]
     [[ "$output" == *"PCS scripts and AMIs:     0"* ]]
+    [[ "$output" == *"HyperPod health agent:    0"* ]]
+    grep -q '^curl https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/HyperPodHelmChart/charts/health-monitoring-agent/templates/health-monitoring-agent.yaml$' "$CALLS"
+    grep -q '^curl https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/HyperPodHelmChart/charts/health-monitoring-agent/templates/_helpers.tpl$' "$CALLS"
+    grep -q '^curl https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/readme.md$' "$CALLS"
 }
 
 @test "one release newer on every surface produces a complete drift report with every section" {
@@ -1014,6 +1170,13 @@ findings_path() {
     [[ "$output" == *"  - kind node image (kindest/node): v1.37.0 -> v1.37.1"* ]]
     [[ "$output" == *"Found 2 offline accelerator policy finding(s)."* ]]
     [[ "$output" == *"Found 2 live EC2 catalog drift finding(s)."* ]]
+    # The HyperPod agent copy: a type one generation newer at the head of each
+    # list, a newer default tag, and a Region the readme now publishes to.
+    [[ "$output" == *"  - health-monitoring-agent instance types: 2 -> 3 (add ml.p6.48xlarge)"* ]]
+    [[ "$output" == *"  - health-monitoring-agent-non-nvidia instance types: 2 -> 3 (add ml.trn2.32xlarge)"* ]]
+    [[ "$output" == *"  - HEALTH_MONITORING_AGENT_TAG: 1.0.2710.0_1.0.501.0 -> 2.0.2710.0_1.0.501.0"* ]]
+    [[ "$output" == *"  - HEALTH_MONITORING_AGENT_ACCOUNTS: 2 -> 3 Regions (add eu-south-2)"* ]]
+    [[ "$output" == *"HyperPod health agent:    4"* ]]
     [[ "$output" == *"Incomplete lookups:       0"* ]]
     grep -qx 'has_drift=true' "$GITHUB_OUTPUT"
     grep -qx 'scan_complete=true' "$GITHUB_OUTPUT"
@@ -1024,13 +1187,18 @@ findings_path() {
     for section in "## Summary" "## Python Packages" "## npm Packages" "## Docker Images" "## Helm Charts" \
             "## EKS Add-ons" "## EKS Kubernetes Version" "## Aurora PostgreSQL Engine" "## EMR Serverless" \
             "## Bedrock Default Model" "## PCS Slurm Versions" "## PCS Lifecycle Scripts and AMIs" \
-            "## Accelerator Catalog and NodePools" "## Dockerfile.dev Pins" \
+            "## HyperPod Health Monitoring Agent" "## Accelerator Catalog and NodePools" "## Dockerfile.dev Pins" \
             "## GCO Autopilot Pins" "## Pre-commit Hooks" "## CDK Enum Constants" "## Python Release" \
             "## Runner Images" "## Ruby Release" "## Ubuntu LTS Base" "## CI Tooling" "## Action Required"; do
         grep -qF -- "$section" "$report" || { echo "missing section: $section"; false; }
     done
     grep -qF -- "| [Python Packages](#python-packages) | 3 update(s) | routine |" "$report"
     grep -qF -- "| [Ubuntu LTS Base](#ubuntu-lts-base) | 1 update(s) | informational |" "$report"
+    grep -qF -- "| [HyperPod Health Monitoring Agent](#hyperpod-health-monitoring-agent) | 4 update(s) | routine |" "$report"
+    grep -qF -- "| health-monitoring-agent nodeAffinity (51-hyperpod-health-monitoring-agent.yaml) | 2 instance types | 3 instance types | add ml.p6.48xlarge |" "$report"
+    grep -qF -- "| HEALTH_MONITORING_AGENT_TAG (gco/hyperpod_config.py) | 1.0.2710.0_1.0.501.0 | 2.0.2710.0_1.0.501.0 | bump the tag |" "$report"
+    grep -qF -- "| HEALTH_MONITORING_AGENT_ACCOUNTS (gco/hyperpod_config.py) | 2 Regions | 3 Regions | add eu-south-2 |" "$report"
+    grep -qF -- "re-run the live release" "$report"
     grep -qF -- "| SLURM_IMAGE_TAG (gco/slurm_config.py) | 26.05.5-ubuntu24.04 | 26.05.5-ubuntu25.04 |" "$report"
     grep -qF -- "| [PCS Slurm Versions](#pcs-slurm-versions) | 1 update(s) | act soon |" "$report"
     grep -qF -- "| PCS_SUPPORTED_SLURM_VERSIONS (gco/pcs_config.py) | 25.11, 26.05 | 27.05 supported (EOL 2999-12-31) | add it once a cluster on it is confirmed to serve slurmrestd OpenAPI v0.0.44 |" "$report"
@@ -1062,6 +1230,7 @@ findings_path() {
     [ "$(jq -r '.surfaces[] | select(.surface == "PCS Slurm Versions") | .urgency + " " + (.count | tostring) + " " + (.findings[0] | keys | join(","))' "$findings")" = "act soon 1 action,current,pin,upstream" ]
     [ "$(jq -r '.surfaces[] | select(.surface == "PCS Lifecycle Scripts and AMIs") | .findings[] | select(.pin | startswith("SAMPLE_NAME_PATTERN")) | .latest' "$findings")" = "al2024 (newer sample AMI base)" ]
     [[ "$(jq -r '.surfaces[] | select(.surface == "Accelerator Catalog and NodePools") | .offline_report_markdown' "$findings")" == *"Retire p2 from the GPU pool"* ]]
+    [ "$(jq -r '.surfaces[] | select(.surface == "HyperPod Health Monitoring Agent") | .findings[] | select(.pin | startswith("HEALTH_MONITORING_AGENT_TAG")) | "\(.current) \(.upstream) \(.action)"' "$findings")" = "1.0.2710.0_1.0.501.0 2.0.2710.0_1.0.501.0 bump the tag" ]
     [ "$(jq -r '.surfaces[] | select(.surface == "Accelerator Catalog and NodePools") | .count' "$findings")" = "4" ]
     [ "$(jq -r '[.surfaces[] | select(.count > 0)] | length' "$findings")" -ge 18 ]
     grep -qF -- '<!-- gco-deps-findings:begin -->' "$report"
@@ -1144,6 +1313,8 @@ findings_path() {
     [[ "$output" == *"INCOMPLETE: Container manifest lookup failed for xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5."* ]]
     [[ "$output" == *"INCOMPLETE: Helm repository refresh failed for keda (https://kedacore.github.io/charts)."* ]]
     [[ "$output" == *"INCOMPLETE: Helm OCI lookup failed for oci://registry.k8s.io/kueue/charts/kueue."* ]]
+    [[ "$output" == *"HyperPod chart lookup failed (aws/sagemaker-hyperpod-cli helm_chart on raw.githubusercontent.com)."* ]]
+    [[ "$output" == *"HyperPod health agent:    (skipped)"* ]]
     [[ "$output" == *"EKS add-on lookup failed or returned an invalid version for eks-pod-identity-agent."* ]]
     [[ "$output" == *"EKS Kubernetes version lookup failed: An error occurred (AccessDeniedException)"* ]]
     [[ "$output" == *"Aurora PostgreSQL engine lookup failed or returned an invalid version for major 17."* ]]
@@ -1459,7 +1630,9 @@ YAML
     [[ "$output" == *"Could not read the EMR Serverless release-label pin from gco/stacks/constants.py."* ]]
     [[ "$output" == *"Could not read PCS_SUPPORTED_SLURM_VERSIONS and the managed slurm_version default from gco/pcs_config.py."* ]]
     [[ "$output" == *"Could not read the PCS lifecycle script pins from gco/stacks/pcs_cluster.py."* ]]
+    [[ "$output" == *"Could not read the DaemonSet instance-type lists from lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml."* ]]
     [[ "$output" == *"PCS Slurm versions:       (skipped)"* ]]
+    [[ "$output" == *"HyperPod health agent:    (skipped)"* ]]
     [[ "$output" == *"Could not read context.bedrock.mission_default_model_id from cdk.json."* ]]
     [[ "$output" == *"INCOMPLETE: Dockerfile.dev is missing."* ]]
     [[ "$output" == *"cli/autopilot.py not found."* ]]
@@ -1533,10 +1706,11 @@ YAML
     make_consistent_checkout "$root"
     rm -f "$root/cli/autopilot.py"
     build_catalog "$root"
-    run_scan "$root" FAKE_AWS=none FAKE_AWS_CDK=absent FAKE_RUNNER_IMAGES=fail FAKE_ENDOFLIFE=down
+    run_scan "$root" FAKE_AWS=none FAKE_AWS_CDK=absent FAKE_RUNNER_IMAGES=fail FAKE_ENDOFLIFE=down FAKE_HMA=fail
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"cli/autopilot.py not found."* ]]
+    [[ "$output" == *"HyperPod health agent:    (skipped)"* ]]
     [[ "$output" == *"Python release:           (skipped)"* ]]
     [[ "$output" == *"Ruby release:             (skipped)"* ]]
     [[ "$output" == *"Ubuntu LTS base:          (skipped)"* ]]
@@ -1551,6 +1725,7 @@ YAML
     [[ "$notes" == *"Ruby release skipped: endoflife.date query failed"* ]]
     [[ "$notes" == *"Ubuntu LTS base skipped: endoflife.date query failed"* ]]
     [[ "$notes" == *"Runner images skipped: Could not read the actions/runner-images catalog"* ]]
+    [[ "$notes" == *"HyperPod health agent skipped: HyperPod chart lookup failed"* ]]
     [[ "$notes" != *"Incomplete checks:"* ]]
 }
 
@@ -1690,6 +1865,66 @@ YAML
     [ "$status" -eq 0 ]
     [[ "$output" == *"Could not read the PCS AMI name patterns from lambda/pcs-lookup/handler.py."* ]]
     [[ "$output" == *"PCS scripts and AMIs:     (skipped)"* ]]
+}
+
+@test "the HyperPod agent check reports retired types and a moved account, and degrades by name" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    build_catalog "$root"
+
+    # Upstream dropped the head of each list: a removal per DaemonSet, nothing
+    # else moves, and the readme's tag is not compared (the chart default is).
+    run_scan "$root" FAKE_HMA=retire
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - health-monitoring-agent instance types: 2 -> 1 (remove ml.p5.48xlarge)"* ]]
+    [[ "$output" == *"  - health-monitoring-agent-non-nvidia instance types: 2 -> 1 (remove ml.trn1.32xlarge)"* ]]
+    [[ "$output" == *"HyperPod health agent:    2"* ]]
+    [[ "$output" != *"HEALTH_MONITORING_AGENT_TAG:"* ]]
+    grep -qF -- "| health-monitoring-agent-non-nvidia nodeAffinity (51-hyperpod-health-monitoring-agent.yaml) | 2 instance types | 1 instance types | remove ml.trn1.32xlarge |" "$(report_path)"
+
+    # A Region whose ECR account moved is an update, not an add-and-remove.
+    run_scan "$root" FAKE_HMA=account-moved
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - HEALTH_MONITORING_AGENT_ACCOUNTS: 2 -> 2 Regions (update the account for us-east-1)"* ]]
+    [[ "$output" == *"HyperPod health agent:    1"* ]]
+    grep -qF -- "| HEALTH_MONITORING_AGENT_ACCOUNTS (gco/hyperpod_config.py) | 2 Regions | 2 Regions | update the account for us-east-1 |" "$(report_path)"
+
+    # A chart whose layout no longer carries the lists is a skip, not a verdict.
+    run_scan "$root" FAKE_HMA=no-lists
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"The HyperPod chart answered without its instance-type lists, default image tag or Region list (the chart layout changed)."* ]]
+    [[ "$output" == *"HyperPod health agent:    (skipped)"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+    grep -q '_Incomplete or skipped checks: .*HyperPod health agent skipped: The HyperPod chart answered without' "$GITHUB_STEP_SUMMARY"
+
+    # The files refused; with drift elsewhere the report carries the skip in
+    # its collapsed list and the summary table.
+    run_scan "$root" FAKE_DRIFT=1 FAKE_HMA=fail
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"HyperPod chart lookup failed (aws/sagemaker-hyperpod-cli helm_chart on raw.githubusercontent.com)."* ]]
+    grep -qF -- "- **HyperPod Health Monitoring Agent:** HyperPod chart lookup failed" "$(report_path)"
+    grep -qF -- "| HyperPod Health Monitoring Agent | skipped | — |" "$(report_path)"
+
+    # Reordering a list is not drift: the lists compare as sets.
+    "$REAL_PYTHON3" - "$root/lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+text = text.replace("                      - ml.p5.48xlarge\n                      - ml.g5.xlarge\n",
+                    "                      - ml.g5.xlarge\n                      - ml.p5.48xlarge\n")
+open(path, "w", encoding="utf-8").write(text)
+PY
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"HyperPod health agent:    0"* ]]
+
+    # The config pins gone: a skip by file name.
+    rm -f "$root/gco/hyperpod_config.py"
+    build_catalog "$root"
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Could not read HEALTH_MONITORING_AGENT_TAG and HEALTH_MONITORING_AGENT_ACCOUNTS from gco/hyperpod_config.py."* ]]
+    [[ "$output" == *"HyperPod health agent:    (skipped)"* ]]
 }
 
 @test "engine packages that went unhealthy are drift; companions the registry cannot answer for are a skip" {

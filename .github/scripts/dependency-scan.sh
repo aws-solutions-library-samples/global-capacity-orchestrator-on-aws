@@ -28,6 +28,11 @@
 #     keys (AWS creds)
 #   - Accelerator catalog and Karpenter NodePool policy (offline), plus live
 #     NVIDIA GPU / AWS Neuron EC2 catalog drift across enabled Regions (AWS creds)
+#   - HyperPod health-monitoring agent: the two DaemonSets' instance-type
+#     lists in 51-hyperpod-health-monitoring-agent.yaml, the agent image tag
+#     and the per-Region ECR accounts in gco/hyperpod_config.py, against the
+#     HyperPod team's chart in aws/sagemaker-hyperpod-cli (public raw files,
+#     no AWS creds, no GitHub API quota)
 #   - Dockerfile.dev ARG pins (Node LTS major, npm, CDK CLI, kubectl,
 #     AWS CLI v2, Docker CLI, Docker Buildx, uv) and the immutable AWS CLI
 #     runtime image in gco/services/inference_monitor.py — public registries,
@@ -1214,6 +1219,132 @@ fi
 
 PCS_ASSETS_COUNT="$(wc -l < "$PCS_ASSETS_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$PCS_ASSETS_COUNT" ] && PCS_ASSETS_COUNT=0
+
+# ---------------------------------------------------------------------------
+# SageMaker HyperPod health-monitoring agent
+#
+# The health-monitoring agent GCO installs on its HyperPod nodes is a copy of
+# the HyperPod team's chart (aws/sagemaker-hyperpod-cli,
+# helm_chart/HyperPodHelmChart/charts/health-monitoring-agent), which the
+# helm-installer cannot consume (the repository publishes no chart index).
+# Three things were copied and can drift:
+#
+#   - the instance types each DaemonSet binds to (nodeAffinity on
+#     node.kubernetes.io/instance-type in
+#     lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml):
+#     the NVIDIA list and the Trainium/Inferentia list. A type missing from
+#     GCO's copy runs without the agent, so HyperPod never sees its faults.
+#   - the agent image tag, HEALTH_MONITORING_AGENT_TAG in gco/hyperpod_config.py,
+#     against the chart's default
+#   - the Regions the image is published in, HEALTH_MONITORING_AGENT_ACCOUNTS,
+#     against the chart readme's "Supported Regions and their ECR URIs" list
+#
+# Public raw files on GitHub: no AWS credentials, no GitHub API quota.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking HyperPod health-monitoring agent ==="
+
+HMA_RESULTS="$(mktemp)"
+HMA_SKIP_REASON=""
+HMA_MANIFEST="lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml"
+HMA_CONFIG="gco/hyperpod_config.py"
+HMA_NVIDIA_TYPES="$(extract_hma_instance_types "$HMA_MANIFEST" health-monitoring-agent)"
+HMA_NEURON_TYPES="$(extract_hma_instance_types "$HMA_MANIFEST" health-monitoring-agent-non-nvidia)"
+HMA_TAG="$(extract_python_string_constant HEALTH_MONITORING_AGENT_TAG "$HMA_CONFIG")"
+HMA_REGIONS="$(extract_hma_region_accounts "$HMA_CONFIG")"
+
+# hma_report_list_drift <daemonset> <our types> <upstream types>
+# One row per DaemonSet whose list differs from upstream, naming the types to
+# add and to remove. Order is not drift: both sides are compared as sets.
+hma_report_list_drift() {
+  local daemonset="$1" ours="$2" upstream="$3"
+  local added removed action="" ours_n upstream_n
+  added="$(comm -13 <(sort -u <<< "$ours") <(sort -u <<< "$upstream") | paste -sd ' ' -)"
+  removed="$(comm -23 <(sort -u <<< "$ours") <(sort -u <<< "$upstream") | paste -sd ' ' -)"
+  [ -z "${added}${removed}" ] && return 0
+  [ -n "$added" ] && action="add ${added// /, }"
+  if [ -n "$removed" ]; then
+    [ -n "$action" ] && action="${action}; "
+    action="${action}remove ${removed// /, }"
+  fi
+  ours_n="$(grep -c . <<< "$ours")"
+  upstream_n="$(grep -c . <<< "$upstream")"
+  echo "  - ${daemonset} instance types: ${ours_n} -> ${upstream_n} (${action})"
+  echo "${daemonset} nodeAffinity (51-hyperpod-health-monitoring-agent.yaml)|${ours_n} instance types|${upstream_n} instance types|${action}" >> "$HMA_RESULTS"
+}
+
+if [ -z "$HMA_NVIDIA_TYPES" ] || [ -z "$HMA_NEURON_TYPES" ]; then
+  HMA_SKIP_REASON="Could not read the DaemonSet instance-type lists from ${HMA_MANIFEST}."
+  echo "  $HMA_SKIP_REASON"
+elif [ -z "$HMA_TAG" ] || [ -z "$HMA_REGIONS" ]; then
+  HMA_SKIP_REASON="Could not read HEALTH_MONITORING_AGENT_TAG and HEALTH_MONITORING_AGENT_ACCOUNTS from ${HMA_CONFIG}."
+  echo "  $HMA_SKIP_REASON"
+else
+  hma_template="$(mktemp)"
+  hma_helpers="$(mktemp)"
+  hma_readme="$(mktemp)"
+  if ! fetch_hma_upstream_file template > "$hma_template" \
+     || ! fetch_hma_upstream_file helpers > "$hma_helpers" \
+     || ! fetch_hma_upstream_file readme > "$hma_readme"; then
+    HMA_SKIP_REASON="HyperPod chart lookup failed (aws/sagemaker-hyperpod-cli helm_chart on raw.githubusercontent.com)."
+    echo "  $HMA_SKIP_REASON"
+  else
+    hma_upstream_nvidia="$(extract_hma_instance_types "$hma_template" health-monitoring-agent)"
+    hma_upstream_neuron="$(extract_hma_instance_types "$hma_template" health-monitoring-agent-non-nvidia)"
+    hma_upstream_tag="$(extract_hma_default_tag "$hma_helpers")"
+    hma_upstream_regions="$(extract_hma_readme_regions "$hma_readme")"
+    if [ -z "$hma_upstream_nvidia" ] || [ -z "$hma_upstream_neuron" ] \
+       || [ -z "$hma_upstream_tag" ] || [ -z "$hma_upstream_regions" ]; then
+      HMA_SKIP_REASON="The HyperPod chart answered without its instance-type lists, default image tag or Region list (the chart layout changed)."
+      echo "  $HMA_SKIP_REASON"
+    else
+      hma_report_list_drift health-monitoring-agent "$HMA_NVIDIA_TYPES" "$hma_upstream_nvidia"
+      hma_report_list_drift health-monitoring-agent-non-nvidia "$HMA_NEURON_TYPES" "$hma_upstream_neuron"
+      if [ "$HMA_TAG" != "$hma_upstream_tag" ]; then
+        echo "  - HEALTH_MONITORING_AGENT_TAG: ${HMA_TAG} -> ${hma_upstream_tag}"
+        echo "HEALTH_MONITORING_AGENT_TAG (gco/hyperpod_config.py)|${HMA_TAG}|${hma_upstream_tag}|bump the tag" >> "$HMA_RESULTS"
+      fi
+      # Regions: one upstream has that GCO lacks is an addition, one GCO
+      # lists that upstream dropped is a removal, and a Region whose
+      # account moved is an update. The readme's tag is not compared here;
+      # the chart default above is the authoritative tag.
+      hma_added="" hma_removed="" hma_moved=""
+      while IFS='|' read -r hma_region hma_account _hma_tag; do
+        [ -n "$hma_region" ] || continue
+        hma_ours="$(awk -F'|' -v r="$hma_region" '$1 == r { print $2; exit }' <<< "$HMA_REGIONS")"
+        if [ -z "$hma_ours" ]; then
+          hma_added="${hma_added:+${hma_added}, }${hma_region}"
+        elif [ "$hma_ours" != "$hma_account" ]; then
+          hma_moved="${hma_moved:+${hma_moved}, }${hma_region}"
+        fi
+      done <<< "$hma_upstream_regions"
+      while IFS='|' read -r hma_region _hma_account; do
+        [ -n "$hma_region" ] || continue
+        grep -q "^${hma_region}|" <<< "$hma_upstream_regions" \
+          || hma_removed="${hma_removed:+${hma_removed}, }${hma_region}"
+      done <<< "$HMA_REGIONS"
+      if [ -n "${hma_added}${hma_removed}${hma_moved}" ]; then
+        hma_action=""
+        [ -n "$hma_added" ] && hma_action="add ${hma_added}"
+        if [ -n "$hma_removed" ]; then
+          [ -n "$hma_action" ] && hma_action="${hma_action}; "
+          hma_action="${hma_action}remove ${hma_removed}"
+        fi
+        if [ -n "$hma_moved" ]; then
+          [ -n "$hma_action" ] && hma_action="${hma_action}; "
+          hma_action="${hma_action}update the account for ${hma_moved}"
+        fi
+        hma_ours_n="$(grep -c . <<< "$HMA_REGIONS")"
+        hma_upstream_n="$(grep -c . <<< "$hma_upstream_regions")"
+        echo "  - HEALTH_MONITORING_AGENT_ACCOUNTS: ${hma_ours_n} -> ${hma_upstream_n} Regions (${hma_action})"
+        echo "HEALTH_MONITORING_AGENT_ACCOUNTS (gco/hyperpod_config.py)|${hma_ours_n} Regions|${hma_upstream_n} Regions|${hma_action}" >> "$HMA_RESULTS"
+      fi
+    fi
+  fi
+  rm -f "$hma_template" "$hma_helpers" "$hma_readme"
+fi
+HMA_COUNT="$(wc -l < "$HMA_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$HMA_COUNT" ] && HMA_COUNT=0
 
 # ---------------------------------------------------------------------------
 # Dockerfile.dev ARG pins
@@ -2536,6 +2667,11 @@ if [ -n "$PCS_ASSETS_SKIP_REASON" ]; then
 else
   echo "PCS scripts and AMIs:     $PCS_ASSETS_COUNT"
 fi
+if [ -n "$HMA_SKIP_REASON" ]; then
+  echo "HyperPod health agent:    (skipped)"
+else
+  echo "HyperPod health agent:    $HMA_COUNT"
+fi
 if [ -n "$ACCELERATOR_SKIP_REASON" ]; then
   echo "Accelerator catalog:      ${ACCELERATOR_COUNT} (online skipped)"
 else
@@ -2597,7 +2733,8 @@ if ! dependency_scan_is_complete \
   "$UBUNTU_LTS_SKIP_REASON" \
   "$RUNNER_IMAGE_SKIP_REASON" \
   "$PCS_SLURM_SKIP_REASON" \
-  "$PCS_ASSETS_SKIP_REASON"; then
+  "$PCS_ASSETS_SKIP_REASON" \
+  "$HMA_SKIP_REASON"; then
   SCAN_COMPLETE=false
 fi
 
@@ -2619,6 +2756,7 @@ findings_surface "EMR Serverless"           "routine" "$EMR_COUNT"            "$
 findings_surface "Bedrock Default Model"    "routine" "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "key|current|latest" "$BEDROCK_MODEL_RESULTS"
 findings_surface "PCS Slurm Versions"       "act soon" "$PCS_SLURM_COUNT"     "$PCS_SLURM_SKIP_REASON"     "pin|current|upstream|action" "$PCS_SLURM_RESULTS"
 findings_surface "PCS Lifecycle Scripts and AMIs" "routine" "$PCS_ASSETS_COUNT" "$PCS_ASSETS_SKIP_REASON"  "pin|current|latest" "$PCS_ASSETS_RESULTS"
+findings_surface "HyperPod Health Monitoring Agent" "routine" "$HMA_COUNT"      "$HMA_SKIP_REASON"           "pin|current|upstream|action" "$HMA_RESULTS"
 ACCELERATOR_EXTRA="$(jq -n --rawfile offline "$ACCELERATOR_OFFLINE_REPORT" --rawfile online "$ACCELERATOR_ONLINE_REPORT" \
   '{offline_report_markdown: $offline, online_report_markdown: $online}')"
 findings_surface_json "Accelerator Catalog and NodePools" "act soon" "$ACCELERATOR_COUNT" "$ACCELERATOR_SUMMARY_SKIP_REASON" "[]" "$ACCELERATOR_EXTRA"
@@ -2651,6 +2789,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
    && [ "$BEDROCK_MODEL_COUNT" -eq 0 ] \
    && [ "$PCS_SLURM_COUNT" -eq 0 ] \
    && [ "$PCS_ASSETS_COUNT" -eq 0 ] \
+   && [ "$HMA_COUNT" -eq 0 ] \
    && [ "$ACCELERATOR_COUNT" -eq 0 ] \
    && [ "$CI_TOOLING_COUNT" -eq 0 ] \
    && [ "$CONSISTENCY_COUNT" -eq 0 ] \
@@ -2685,6 +2824,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
   if [ -n "$PCS_ASSETS_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}PCS scripts and AMIs skipped: $PCS_ASSETS_SKIP_REASON"
+  fi
+  if [ -n "$HMA_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}HyperPod health agent skipped: $HMA_SKIP_REASON"
   fi
   if [ -n "$ACCELERATOR_SKIP_REASON" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
@@ -2726,7 +2869,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
   echo "$STATUS_MESSAGE"
   write_findings_document "$FINDINGS_FILE" "$SCAN_COMPLETE" false "$INCOMPLETE_REASONS_FILE"
   rm -f "$FINDINGS_SURFACES"
-  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
@@ -2815,6 +2958,7 @@ rm -f "$FINDINGS_SURFACES"
   summary_row "Bedrock Default Model"    "$BEDROCK_MODEL_COUNT"  "$BEDROCK_MODEL_SKIP_REASON" "routine"
   summary_row "PCS Slurm Versions"       "$PCS_SLURM_COUNT"      "$PCS_SLURM_SKIP_REASON"    "act soon"
   summary_row "PCS Lifecycle Scripts and AMIs" "$PCS_ASSETS_COUNT" "$PCS_ASSETS_SKIP_REASON" "routine"
+  summary_row "HyperPod Health Monitoring Agent" "$HMA_COUNT"    "$HMA_SKIP_REASON"          "routine"
   summary_row "Accelerator Catalog and NodePools" "$ACCELERATOR_COUNT" "$ACCELERATOR_SUMMARY_SKIP_REASON" "act soon"
   summary_row "Dockerfile.dev Pins"      "$DOCKERFILE_COUNT"     ""                          "routine"
   summary_row "GCO Autopilot Pins"       "$AUTOPILOT_COUNT"      "$AUTOPILOT_SKIP_REASON"    "act soon"
@@ -2975,6 +3119,26 @@ rm -f "$FINDINGS_SURFACES"
     echo "validation."
     echo ""
     emit_md_table "Pin|Current|Latest" "$PCS_ASSETS_RESULTS"
+    echo ""
+  fi
+
+  if [ "$HMA_COUNT" -gt 0 ]; then
+    echo "## HyperPod Health Monitoring Agent"
+    echo ""
+    echo "GCO installs the HyperPod health-monitoring agent from a copy of the"
+    echo "HyperPod team's chart (\`aws/sagemaker-hyperpod-cli\`,"
+    echo "\`helm_chart/HyperPodHelmChart/charts/health-monitoring-agent\`): the two"
+    echo "DaemonSets' instance-type lists in"
+    echo "\`lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml\`,"
+    echo "and the agent image tag (\`HEALTH_MONITORING_AGENT_TAG\`) and per-Region ECR"
+    echo "accounts (\`HEALTH_MONITORING_AGENT_ACCOUNTS\`) in \`gco/hyperpod_config.py\`."
+    echo "A type missing from a list runs without the agent, so HyperPod never sees"
+    echo "its faults; a new tag carries the team's detector fixes; a new Region is"
+    echo "one more place HyperPod can be enabled. Apply the action, keeping the"
+    echo "lists in the order upstream writes them, then re-run the live release"
+    echo "validation (it deploys and proves the HyperPod backend)."
+    echo ""
+    emit_md_table "Pin|Current|Upstream|Action" "$HMA_RESULTS"
     echo ""
   fi
 
@@ -3201,7 +3365,7 @@ rm -f "$FINDINGS_SURFACES"
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${PCS_SLURM_SKIP_REASON}${PCS_ASSETS_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${UBUNTU_LTS_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}" ] \
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${PCS_SLURM_SKIP_REASON}${PCS_ASSETS_SKIP_REASON}${HMA_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${UBUNTU_LTS_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}" ] \
      || [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
@@ -3213,6 +3377,7 @@ rm -f "$FINDINGS_SURFACES"
     [ -n "$BEDROCK_MODEL_SKIP_REASON" ] && echo "- **Bedrock Default Model:** $BEDROCK_MODEL_SKIP_REASON"
     [ -n "$PCS_SLURM_SKIP_REASON" ]     && echo "- **PCS Slurm Versions:** $PCS_SLURM_SKIP_REASON"
     [ -n "$PCS_ASSETS_SKIP_REASON" ]    && echo "- **PCS Lifecycle Scripts and AMIs:** $PCS_ASSETS_SKIP_REASON"
+    [ -n "$HMA_SKIP_REASON" ]           && echo "- **HyperPod Health Monitoring Agent:** $HMA_SKIP_REASON"
     [ -n "$ACCELERATOR_SKIP_REASON" ]   && echo "- **Online Accelerator Catalog:** $ACCELERATOR_SKIP_REASON"
     [ -n "$AUTOPILOT_SKIP_REASON" ]     && echo "- **GCO Autopilot Pins:** $AUTOPILOT_SKIP_REASON"
     [ -n "$CDK_ENUM_SKIP_REASON" ]      && echo "- **CDK Enum Constants:** $CDK_ENUM_SKIP_REASON"
@@ -3252,7 +3417,7 @@ rm -f "$FINDINGS_SURFACES"
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {

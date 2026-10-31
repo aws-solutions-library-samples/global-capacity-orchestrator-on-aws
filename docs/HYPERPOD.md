@@ -224,6 +224,14 @@ nodes that ran a job (see [How work reaches HyperPod nodes](#how-work-reaches-hy
   `/dev/kmsg` and `/etc/localtime` mounts are the agent's contract.
 - The `aws-hyperpod` namespace is labelled for the `privileged` Pod Security
   level because of those mounts; nothing else runs there.
+- The agent manifest is a copy of the HyperPod team's chart
+  ([aws/sagemaker-hyperpod-cli](https://github.com/aws/sagemaker-hyperpod-cli),
+  `helm_chart/HyperPodHelmChart/charts/health-monitoring-agent`), which the
+  helm-installer cannot consume because no chart index is published. The
+  monthly `deps-scan` workflow's **HyperPod Health Monitoring Agent** surface
+  compares the two DaemonSets' instance-type lists, the pinned image tag and
+  the Region map against the chart and names what to add, remove or bump (see
+  `docs/MAINTENANCE.md`).
 
 ## Live release validation
 

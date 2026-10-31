@@ -1308,6 +1308,179 @@ for index, table in enumerate(parser.tables):
 " 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# SageMaker HyperPod health-monitoring agent (HMA)
+#
+# GCO installs the HyperPod health-monitoring agent on its HyperPod nodes from
+# a copy of the HyperPod team's chart (aws/sagemaker-hyperpod-cli,
+# helm_chart/HyperPodHelmChart/charts/health-monitoring-agent): the two
+# DaemonSets and their instance-type node affinities live in
+# lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml,
+# the agent image tag and the per-Region ECR accounts in
+# gco/hyperpod_config.py. The chart is published as source only (no chart
+# index the helm-installer could consume), so nothing else notices when the
+# upstream copy moves. These helpers read the three facts from both sides;
+# the raw files are public and read without the GitHub API, so the lookup
+# needs neither credentials nor API quota.
+# ---------------------------------------------------------------------------
+
+#: Where the upstream chart's files are read from. Overridable for a fork.
+HMA_UPSTREAM_RAW_BASE="${HMA_UPSTREAM_RAW_BASE:-https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart}"
+#: The chart's DaemonSet template (the instance-type lists), its helpers
+#: (the default image tag) and the chart readme (the Region table).
+HMA_UPSTREAM_TEMPLATE_PATH="HyperPodHelmChart/charts/health-monitoring-agent/templates/health-monitoring-agent.yaml"
+HMA_UPSTREAM_HELPERS_PATH="HyperPodHelmChart/charts/health-monitoring-agent/templates/_helpers.tpl"
+HMA_UPSTREAM_README_PATH="readme.md"
+
+# fetch_hma_upstream_file template|helpers|readme
+#
+# Prints the named raw upstream file. Non-zero with no output on a transport
+# or HTTP failure (or an unknown name), so the caller skips the section
+# instead of comparing against an empty page.
+fetch_hma_upstream_file() {
+  local path
+  case "$1" in
+    template) path="$HMA_UPSTREAM_TEMPLATE_PATH" ;;
+    helpers) path="$HMA_UPSTREAM_HELPERS_PATH" ;;
+    readme) path="$HMA_UPSTREAM_README_PATH" ;;
+    *) return 1 ;;
+  esac
+  curl -fsSL --max-time 20 "${SCAN_CURL_RETRY[@]}" "${HMA_UPSTREAM_RAW_BASE}/${path}" 2>/dev/null
+}
+
+# extract_hma_instance_types <manifest-or-template> <daemonset-name>
+#
+# Prints, one per line, the ``node.kubernetes.io/instance-type`` values of the
+# named DaemonSet's required node affinity. A text scan rather than a YAML
+# load, because the upstream copy is a Helm template (``{{ .Values.namespace }}``)
+# no YAML parser accepts, and both files write the list the same way: the
+# ``- key:`` line, then ``values:`` with one ``- ml.*`` item per line (an
+# inline ``values: [...]`` list is read too). Prints nothing when the file,
+# the DaemonSet or the list is absent.
+extract_hma_instance_types() {
+  local file="$1" daemonset="$2"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+path, wanted = sys.argv[1], sys.argv[2]
+quotes = chr(34) + chr(39)
+try:
+    with open(path, encoding='utf-8') as handle:
+        text = handle.read()
+except OSError:
+    raise SystemExit(0)
+for document in re.split(r'^---[ \t]*$', text, flags=re.MULTILINE):
+    if not re.search(r'^kind:[ \t]*DaemonSet[ \t]*$', document, re.MULTILINE):
+        continue
+    name = re.search(r'^  name:[ \t]*(\S+)[ \t]*$', document, re.MULTILINE)
+    if not name or name.group(1).strip(quotes) != wanted:
+        continue
+    lines = document.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if re.match(r'^[ \t]*-[ \t]*key:[ \t]*node\.kubernetes\.io/instance-type[ \t]*$', line):
+            start = index
+            break
+    if start is None:
+        break
+    values = []
+    for index in range(start + 1, len(lines)):
+        inline = re.match(r'^[ \t]*values:[ \t]*\[(.*)\][ \t]*$', lines[index])
+        if inline:
+            values = [item.strip().strip(quotes) for item in inline.group(1).split(',') if item.strip()]
+            break
+        if re.match(r'^[ \t]*values:[ \t]*$', lines[index]):
+            for item_line in lines[index + 1:]:
+                item = re.match(r'^[ \t]*-[ \t]*(\S+)[ \t]*$', item_line)
+                if not item:
+                    break
+                values.append(item.group(1).strip(quotes))
+            break
+        if re.match(r'^[ \t]*-[ \t]*key:', lines[index]):
+            break
+    for value in values:
+        print(value)
+    break
+" "$file" "$daemonset" 2>/dev/null
+}
+
+# extract_hma_default_tag <_helpers.tpl>
+#
+# Prints the agent image tag the upstream chart deploys when no override is
+# given: the literal in ``.Values.imageTag | default \"<tag>\"``. Nothing when
+# the file or the expression is absent.
+extract_hma_default_tag() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        text = handle.read()
+except OSError:
+    raise SystemExit(0)
+m = re.search(r'\.Values\.imageTag[ \t]*\|[ \t]*default[ \t]+(\S+)', text)
+if m:
+    tag = m.group(1).strip(chr(34) + chr(39))
+    if tag:
+        print(tag)
+" "$file" 2>/dev/null
+}
+
+# extract_hma_readme_regions <readme.md>
+#
+# Prints ``region|account|tag`` for every row of the chart readme's
+# \"Supported Regions and their ECR URIs\" list, each written as
+# ``<region> (<name>): <account>.dkr.ecr.<region>.amazonaws.com/hyperpod-health-monitoring-agent:<tag>``.
+# Nothing when the file is absent or the list is not laid out that way.
+extract_hma_readme_regions() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        text = handle.read()
+except OSError:
+    raise SystemExit(0)
+row = re.compile(
+    r'^[ \t]*([a-z]{2}(?:-gov)?-[a-z]+-\d+)[ \t]*\(.*\):[ \t]*(\d{12})\.dkr\.ecr\.\1\.amazonaws\.com/'
+    r'hyperpod-health-monitoring-agent:(\S+)[ \t]*$'
+)
+seen = set()
+for line in text.splitlines():
+    m = row.match(line)
+    if m and m.group(1) not in seen:
+        seen.add(m.group(1))
+        print(f'{m.group(1)}|{m.group(2)}|{m.group(3)}')
+" "$file" 2>/dev/null
+}
+
+# extract_hma_region_accounts [hyperpod_config.py]
+#
+# Prints ``region|account`` for every entry of ``HEALTH_MONITORING_AGENT_ACCOUNTS``
+# in gco/hyperpod_config.py, read from the source text (the module imports
+# the project, so it is read rather than imported, like the PCS pins).
+# Nothing when the file or the mapping is absent.
+extract_hma_region_accounts() {
+  local file="${1:-gco/hyperpod_config.py}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        text = handle.read()
+except OSError:
+    raise SystemExit(0)
+m = re.search(r'^HEALTH_MONITORING_AGENT_ACCOUNTS[^=]*=[ \t]*\{(.*?)^\}', text, re.MULTILINE | re.DOTALL)
+if not m:
+    raise SystemExit(0)
+q = chr(34)
+for region, account in re.findall(q + r'([a-z]{2}(?:-gov)?-[a-z]+-\d+)' + q + r'[ \t]*:[ \t]*' + q + r'(\d{12})' + q, m.group(1)):
+    print(f'{region}|{account}')
+" "$file" 2>/dev/null
+}
+
 # read_ruby_version_pin [version_file]
 #
 # Prints the committed Ruby series from .ruby-version (comments and blank
