@@ -76,6 +76,21 @@ present. The inventory's `pcs` scanner (`inventory/scanners.py`)
 claims clusters by project name or `gco:project` tag and everything PCS keeps
 under them.
 
+The `hyperpod` action (`actions/hyperpod.py`, checks in `checks/hyperpod.py`)
+proves the SageMaker HyperPod capacity every release run deploys through the
+`hyperpod_overrides` CDK context (`hyperpod_overrides_json()`: one
+`ml.g4dn.xlarge` instance group, part of the resume identity like the other
+fixed overrides): SageMaker must describe the stack's cluster `InService` with
+the instance group at its target count and its instance `Running`; the
+`manifests/hyperpod-smoke-job.yaml` probe, labelled for the `gco-hyperpod`
+Kueue queue and requesting one GPU, must complete through the shared
+API-transport lifecycle; and the lifecycle's `scheduling` evidence (the API's
+placement report, recorded for every probe) must put the pod on a `hyperpod`
+node. `preflight` runs `cli.hyperpod_preflight` for the merged block before
+`deploy` (`_hyperpod_preflight`), and the inventory's `hyperpod` scanner
+claims HyperPod clusters by project name or `gco:project` tag so one left
+behind is residue.
+
 The two cluster-facing actions share their kubectl plumbing in
 `checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated
 kubeconfig the `inference` action uses, and a fail-closed JSON read that

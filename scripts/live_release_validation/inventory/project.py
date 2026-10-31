@@ -32,6 +32,7 @@ from .scanners import (
     _list_project_backup_resources,
     _list_project_ec2_networking,
     _list_project_ecr_repositories,
+    _list_project_hyperpod_resources,
     _list_project_iam_resources,
     _list_project_kms_keys,
     _list_project_pcs_resources,
@@ -184,6 +185,7 @@ def collect_project_resources(
         "secretsmanager",
         "backup",
         "pcs",
+        "sagemaker",
     )
     service_regions = {
         service: set(session.get_available_regions(service, partition_name=partition))
@@ -302,6 +304,14 @@ def collect_project_resources(
     for region in pcs_regions:
         regional[region].update(_list_project_pcs_resources(session, region, project_name))
     completed_scanners.append("pcs")
+    # SageMaker HyperPod: the regional stack's cluster is deleted with the
+    # stack, so one left behind (a delete that never finished, a retained
+    # removal policy) is owned residue the stack listing no longer shows.
+    hyperpod_regions = sorted(set(regions) & service_regions["sagemaker"])
+    scanner_regions["hyperpod"] = hyperpod_regions
+    for region in hyperpod_regions:
+        regional[region].update(_list_project_hyperpod_resources(session, region, project_name))
+    completed_scanners.append("hyperpod")
 
     s3_buckets = _list_project_s3_buckets(session, seed_region, project_name)
     scanner_regions["s3_buckets"] = ["global"]

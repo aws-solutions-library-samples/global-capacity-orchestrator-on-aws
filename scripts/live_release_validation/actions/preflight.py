@@ -7,10 +7,14 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from cli.hyperpod_preflight import run_preflight as run_hyperpod_preflight
+from cli.hyperpod_preflight import summarize as summarize_hyperpod
 from cli.pcs_preflight import run_preflight, summarize
 from cli.stacks import check_asset_sources_readable
+from gco.hyperpod_config import hyperpod_enabled
 from gco.pcs_config import pcs_enabled
 
+from ..checks.hyperpod import effective_hyperpod_config
 from ..checks.pcs import effective_pcs_config
 from ..constants import (
     _CLUSTER_TUNNEL_ACTIONS,
@@ -122,6 +126,44 @@ def _pcs_preflight(ctx: RunContext) -> dict[str, Any]:
     return summary
 
 
+def _hyperpod_preflight(ctx: RunContext) -> dict[str, Any]:
+    """Run the SageMaker HyperPod account preflight for every deployment Region with it on.
+
+    Returns the per-Region summaries (``cli.hyperpod_preflight.summarize``);
+    raises when a Region has a failure, with the failing checks named.
+    """
+    reports = []
+    for region in ctx.deployment_regions:
+        config = effective_hyperpod_config(ctx, region)
+        if not hyperpod_enabled(config):
+            continue
+        reports.append(
+            run_hyperpod_preflight(
+                region,
+                config,
+                project=ctx.config.project_name,
+                client_factory=ctx.session.client,
+            )
+        )
+    summary = summarize_hyperpod(reports)
+    summary["regions_without_hyperpod"] = [
+        region
+        for region in ctx.deployment_regions
+        if region not in {report.region for report in reports}
+    ]
+    if not summary["ok"]:
+        failures = [
+            f"{report.region}: {check.name}: {check.detail}"
+            for report in reports
+            for check in report.failures
+        ]
+        raise RuntimeError(
+            "SageMaker HyperPod preflight failed; the deploy would fail or the nodes would "
+            "never join:\n  " + "\n  ".join(failures)
+        )
+    return summary
+
+
 def action_preflight(ctx: RunContext) -> dict[str, Any]:
     """Validate exact git/AWS/config identity and prove project ownership."""
     settings = ctx.settings
@@ -171,6 +213,14 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
     pcs_preflight: dict[str, Any] | str = "not-required"
     if "deploy" in selected:
         pcs_preflight = _pcs_preflight(ctx)
+    # Likewise the SageMaker HyperPod block (on for every release run through
+    # hyperpod_overrides): a Region without the health-monitoring agent image,
+    # a "for cluster usage" quota the instance group exceeds or a taken
+    # cluster name fails here instead of during the deploy. Same code as
+    # `gco stacks hyperpod preflight`; warnings never block.
+    hyperpod_preflight: dict[str, Any] | str = "not-required"
+    if "deploy" in selected:
+        hyperpod_preflight = _hyperpod_preflight(ctx)
 
     # A checkout made under a restrictive umask deploys Lambda code that the
     # Lambda runtime cannot read; refuse it before the stack listing below
@@ -312,5 +362,6 @@ def action_preflight(ctx: RunContext) -> dict[str, Any]:
         "asset_sources_readable": True if "deploy" in selected else "not-required",
         "kms_key_deletion_confirmed": settings.confirm_kms_key_deletion,
         "pcs_preflight": pcs_preflight,
+        "hyperpod_preflight": hyperpod_preflight,
         "resume": settings.resume,
     }

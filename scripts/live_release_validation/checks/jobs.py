@@ -428,6 +428,9 @@ def _complete_job_lifecycle(
             "region": appeared.get("region"),
             "uid": (appeared.get("metadata") or {}).get("uid"),
         },
+        # Where the pods ran, as the API reports it (node names, instance
+        # types, capacity type); the hyperpod probe requires its own.
+        "scheduling": copy.deepcopy(final.get("scheduling")),
     }
     with ctx.state_lock:
         record["validation_evidence"] = copy.deepcopy(evidence)

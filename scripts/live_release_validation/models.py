@@ -182,6 +182,12 @@ class RunSettings:
     #: (``checks/pcs.py``) so the ``schedulers`` action proves it; part of
     #: the resume identity.
     pcs_overrides_json: str = ""
+    #: Canonical JSON of the ``hyperpod_overrides`` CDK context (deep-merged
+    #: over cdk.json ``hyperpod``), or ``""`` for none. The release entry
+    #: point always turns the SageMaker HyperPod backend on with one small
+    #: GPU instance group (``checks/hyperpod.py``) so the ``hyperpod`` action
+    #: proves the node joins and runs work; part of the resume identity.
+    hyperpod_overrides_json: str = ""
 
     # First-class inference action contract. ``inference_enabled`` is explicit
     # because sibling harnesses reuse RunSettings with their own ``all`` action.
@@ -278,6 +284,8 @@ class RunSettings:
             context["tracing_overrides"] = self.tracing_overrides_json
         if self.pcs_overrides_json:
             context["pcs_overrides"] = self.pcs_overrides_json
+        if self.hyperpod_overrides_json:
+            context["hyperpod_overrides"] = self.hyperpod_overrides_json
         return context
 
     def identity(self) -> dict[str, Any]:

@@ -775,6 +775,40 @@ def _list_project_pcs_resources(
     return {key: sorted(values) for key, values in resources.items()}
 
 
+def _hyperpod_tags(client: Any, arn: str) -> dict[str, str]:
+    return _tags_to_dict(client.list_tags(ResourceArn=arn).get("Tags") or [])
+
+
+def _list_project_hyperpod_resources(
+    session: Any,
+    region: str,
+    project_name: str,
+) -> dict[str, list[str]]:
+    """SageMaker HyperPod clusters the project owns, by ARN.
+
+    A cluster is owned by name (``<project>-hyperpod``, or whatever the block
+    names under the project prefix) or by the ``gco:project`` / CloudFormation
+    stack tags the regional stack puts on it. Instance groups and instances
+    have no ARN of their own and go with the cluster, so one category covers
+    the residue. A cluster that merely shares the account stays out.
+    """
+    client = session.client("sagemaker", region_name=region)
+    owned: set[str] = set()
+    for page in client.get_paginator("list_clusters").paginate():
+        for summary in page.get("ClusterSummaries", []):
+            name = str(summary.get("ClusterName") or "")
+            arn = str(summary.get("ClusterArn") or "")
+            if not name or not arn:
+                raise RuntimeError(
+                    f"SageMaker returned a HyperPod cluster without identity in {region}"
+                )
+            if _project_owned_name(name, project_name) or _tags_are_project_owned(
+                _hyperpod_tags(client, arn), project_name
+            ):
+                owned.add(arn)
+    return {"hyperpod_clusters": sorted(owned)}
+
+
 def _list_project_backup_resources(
     session: Any,
     region: str,

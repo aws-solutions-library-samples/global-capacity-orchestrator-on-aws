@@ -2048,6 +2048,11 @@ class TestProjectInventory:
                     "pcs_queues": [],
                 }
             ),
+            "_list_project_hyperpod_resources": MagicMock(
+                side_effect=lambda session, region, project_name: {
+                    "hyperpod_clusters": ["hyperpod-cluster-arn"] if region == _REGION else []
+                }
+            ),
             "_list_project_s3_buckets": MagicMock(return_value=[f"{_PROJECT}-assets"]),
             "_list_project_iam_resources": MagicMock(
                 return_value={
@@ -2106,6 +2111,7 @@ class TestProjectInventory:
         assert coverage["enabled_regions"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["aws_backup"] == [_REGION]
         assert coverage["scanner_regions"]["pcs"] == [_REGION]
+        assert coverage["scanner_regions"]["hyperpod"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["ec2_networking"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["s3_buckets"] == ["global"]
         assert coverage["scanner_regions"]["global_accelerators"] == ["us-west-2"]
@@ -2142,6 +2148,7 @@ class TestProjectInventory:
         assert east["pcs_clusters"] == ["pcs-cluster-arn"]
         assert east["pcs_compute_node_groups"] == ["pcs-group-arn"]
         assert east["pcs_queues"] == []
+        assert east["hyperpod_clusters"] == ["hyperpod-cluster-arn"]
         assert east["sqs_queues"] == []
         assert inventory["s3_buckets"] == [f"{_PROJECT}-assets"]
         assert inventory["iam_roles"] == ["role-arn"]
@@ -2150,6 +2157,8 @@ class TestProjectInventory:
         fakes["_list_project_ec2_networking"].assert_any_call(session, _REGION, _PROJECT, ["i-1"])
         fakes["_list_project_backup_resources"].assert_called_once_with(session, _REGION, _PROJECT)
         fakes["_list_project_pcs_resources"].assert_called_once_with(session, _REGION, _PROJECT)
+        fakes["_list_project_hyperpod_resources"].assert_any_call(session, _REGION, _PROJECT)
+        assert fakes["_list_project_hyperpod_resources"].call_count == 2  # every enabled Region
         fakes["_list_global_accelerators"].assert_called_once_with(session, "us-west-2", _PROJECT)
         fakes["_list_instances"].assert_not_called()
 

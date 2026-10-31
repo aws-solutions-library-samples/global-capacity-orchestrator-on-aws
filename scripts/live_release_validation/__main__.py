@@ -19,6 +19,7 @@ from gco.inference_proxy_config import (
 )
 
 from .checks.eks_capabilities import build_eks_capabilities_overrides, overrides_json
+from .checks.hyperpod import hyperpod_overrides_json
 from .checks.pcs import pcs_overrides_json
 from .checks.schedulers import OPTIONAL_SCHEDULERS
 from .checks.tracing import tracing_overrides_json
@@ -371,6 +372,9 @@ def _settings_from_args(
         # ... and deploys the AWS PCS Slurm backend, so the schedulers action
         # proves it: PCS is not opt-in for a release.
         pcs_overrides_json=pcs_overrides_json(),
+        # ... and a one-instance SageMaker HyperPod cluster joined to the
+        # regional EKS cluster, so the hyperpod action proves the node path.
+        hyperpod_overrides_json=hyperpod_overrides_json(),
         inference_enabled=inference_enabled,
         selected_region=args.inference_region or "",
         inference_runtimes=runtimes,
