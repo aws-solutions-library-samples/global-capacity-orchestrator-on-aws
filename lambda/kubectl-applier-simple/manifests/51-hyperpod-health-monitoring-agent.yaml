@@ -1,3 +1,16 @@
+# kics-scan disable=5308a7a8-06f8-45ac-bf10-791fe21de46e,aa8f7a35-9923-4cad-bd61-a19b7f6aac91
+#
+# The two KICS queries disabled above (Workload Mounting With Sensitive OS
+# Directory; Non Kube System Pod With Host Mount) flag the three hostPath
+# volumes below. They are the agent's contract, not GCO's choice: it reads the
+# kernel ring buffer (/dev/kmsg, read-only), the host clock (/etc/localtime,
+# read-only) and writes its own logs next to the system's (/var/log), exactly
+# as the upstream HyperPod chart mounts them. The DaemonSets live in
+# aws-hyperpod rather than kube-system because that is the namespace the
+# HyperPod service and its RBAC (10-hyperpod-rbac.yaml) expect. Scoped to this
+# file on purpose; the repository-wide list in .github/config/.kics.yaml stays
+# free of hostPath allowances so a new hostPath anywhere else still fails.
+#
 # SageMaker HyperPod health-monitoring agent: the node-problem-detector
 # derivative HyperPod runs on every one of its nodes to detect GPU, Neuron,
 # kernel and network faults and label the node
@@ -33,6 +46,7 @@ metadata:
     checkov.io/skip5: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the image on restart
     checkov.io/skip6: CKV_K8S_38=The agent labels Nodes through the API with its ServiceAccount (10-hyperpod-rbac.yaml); the token is its contract
     checkov.io/skip7: CKV_K8S_40=The upstream chart's UID 1000:2000, which the agent's host log and kmsg mounts are set up for
+    checkov.io/skip8: CKV2_K8S_6=Serves no traffic; the agent only calls the kubelet and the API server, so no NetworkPolicy selects it
   labels:
     app: health-monitoring-agent
     project: gco
@@ -187,6 +201,7 @@ metadata:
     checkov.io/skip5: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the image on restart
     checkov.io/skip6: CKV_K8S_38=The agent labels Nodes through the API with its ServiceAccount (10-hyperpod-rbac.yaml); the token is its contract
     checkov.io/skip7: CKV_K8S_40=The upstream chart's UID 1000:2000, which the agent's host log and kmsg mounts are set up for
+    checkov.io/skip8: CKV2_K8S_6=Serves no traffic; the agent only calls the kubelet and the API server, so no NetworkPolicy selects it
   labels:
     app: health-monitoring-agent-non-nvidia
     project: gco
