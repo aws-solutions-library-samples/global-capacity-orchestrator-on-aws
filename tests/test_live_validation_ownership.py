@@ -3069,6 +3069,131 @@ class TestCheckpointOwnedLogGroups:
         harness.observe.assert_not_called()
         harness.cfn.get_paginator.assert_not_called()
 
+    def _run_with_stack_sequence(
+        self, harness: _CheckpointHarness, stacks: list[Any], observations: Any
+    ) -> tuple[list[dict[str, Any]], MagicMock, MagicMock]:
+        """Drive the checkpoint with describe_stack answering ``stacks`` in turn."""
+        describe = MagicMock(side_effect=stacks)
+        sleep = MagicMock(name="sleep")
+        harness.observe.side_effect = observations
+        with (
+            _patched_helpers(
+                {"describe_stack": describe, "_observe_log_group_stability": harness.observe}
+            ),
+            patch("time.sleep", sleep),
+        ):
+            records = ownership_log_groups._checkpoint_owned_log_groups(harness.ctx)
+        return records, describe, sleep
+
+    def test_rollback_in_flight_is_waited_out_before_authority_is_derived(self) -> None:
+        """Live failure this pins (release run pr502-release-1a9a8740-20261031T104421Z).
+
+        The deploy settled as ROLLBACK_IN_PROGRESS and teardown derived
+        log-group authority 24 minutes into a 28-minute rollback: every log
+        source but one was already a DELETE_* tombstone the live-stack filter
+        excludes, the stack was next seen as DELETE_FAILED, and 21 log groups
+        survived unowned. The checkpoint must wait for the rollback to settle
+        and then read the terminal tombstones — the retained provider group
+        and the deleted Lambda's default group both become owned.
+        """
+        default_name = f"/aws/lambda/{_FUNCTION}"
+        harness = _CheckpointHarness(
+            [
+                _resource("AWS::Logs::LogGroup", "ProviderLogGroup", _LOG_GROUP, "DELETE_SKIPPED"),
+                _resource("AWS::Lambda::Function", "Worker", _FUNCTION, "DELETE_COMPLETE"),
+            ]
+        )
+        harness.lambda_client.get_function_configuration.side_effect = _client_error(
+            "ResourceNotFoundException", "GetFunctionConfiguration"
+        )
+
+        def observe(client: Any, region: str, name: str, **kwargs: Any) -> dict[str, Any]:
+            return _present(_identity(arn=f"arn:aws:logs:{_REGION}:{_ACCOUNT}:log-group:{name}"))
+
+        records, describe, sleep = self._run_with_stack_sequence(
+            harness,
+            [
+                _live_stack(status="ROLLBACK_IN_PROGRESS"),
+                _live_stack(status="ROLLBACK_IN_PROGRESS"),
+                _live_stack(status="ROLLBACK_IN_PROGRESS"),
+                _live_stack(status="ROLLBACK_FAILED"),
+            ],
+            observe,
+        )
+
+        assert [record["name"] for record in records] == [_LOG_GROUP, default_name]
+        assert describe.call_count == 4
+        assert (
+            sleep.call_args_list
+            == [
+                ((constants._STACK_ROLLBACK_SETTLE_POLL_SECONDS,),),
+            ]
+            * 3
+        )
+        # The resources were listed once, after the rollback settled.
+        harness.cfn.get_paginator.assert_called_once_with("list_stack_resources")
+        harness.cfn.get_paginator("list_stack_resources").paginate.assert_called_once_with(
+            StackName=_STACK_ID
+        )
+        [wait] = harness.ctx.checkpoint.state["stack_rollback_settle_waits"]
+        assert wait["from_status"] == "ROLLBACK_IN_PROGRESS"
+        assert wait["to_status"] == "ROLLBACK_FAILED"
+        assert wait["polls"] == 3
+        assert wait["stack_id"] == _STACK_ID
+        assert harness.incidents == []
+
+    @pytest.mark.parametrize(
+        "status",
+        ["UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS"],
+    )
+    def test_update_rollbacks_in_flight_are_waited_out_too(self, status: str) -> None:
+        harness = _CheckpointHarness(
+            [_resource("AWS::Logs::LogGroup", "ProviderLogGroup", _LOG_GROUP, "DELETE_SKIPPED")]
+        )
+        records, describe, sleep = self._run_with_stack_sequence(
+            harness,
+            [_live_stack(status=status), _live_stack(status="UPDATE_ROLLBACK_COMPLETE")],
+            [_present(), _present(), _present()],
+        )
+        assert [record["name"] for record in records] == [_LOG_GROUP]
+        assert describe.call_count == 2
+        assert sleep.call_count == 1
+        assert harness.ctx.checkpoint.state["stack_rollback_settle_waits"][0]["to_status"] == (
+            "UPDATE_ROLLBACK_COMPLETE"
+        )
+
+    def test_stack_deleted_while_its_rollback_was_awaited_is_skipped(self) -> None:
+        harness = _CheckpointHarness()
+        records, _describe, sleep = self._run_with_stack_sequence(
+            harness, [_live_stack(status="ROLLBACK_IN_PROGRESS"), None], []
+        )
+        assert records == []
+        assert sleep.call_count == 1
+        harness.cfn.get_paginator.assert_not_called()
+        [wait] = harness.ctx.checkpoint.state["stack_rollback_settle_waits"]
+        assert wait["to_status"] == "absent"
+
+    def test_rollback_that_outlasts_the_budget_fails_closed(self) -> None:
+        harness = _CheckpointHarness()
+        stacks = [_live_stack(status="ROLLBACK_IN_PROGRESS")] * (
+            constants._STACK_ROLLBACK_SETTLE_POLL_ATTEMPTS + 1
+        )
+        with pytest.raises(RuntimeError, match="still ROLLBACK_IN_PROGRESS after 5400s"):
+            self._run_with_stack_sequence(harness, stacks, [])
+        assert harness.records == []
+        assert "stack_rollback_settle_waits" not in harness.ctx.checkpoint.state
+        harness.cfn.get_paginator.assert_not_called()
+
+    def test_settled_stacks_are_not_waited_on(self) -> None:
+        harness = _CheckpointHarness()
+        records, describe, sleep = self._run_with_stack_sequence(
+            harness, [_live_stack(status="CREATE_COMPLETE")], [_present(), _present(), _present()]
+        )
+        assert [record["name"] for record in records] == [_LOG_GROUP]
+        assert describe.call_count == 1
+        sleep.assert_not_called()
+        assert "stack_rollback_settle_waits" not in harness.ctx.checkpoint.state
+
     def test_tagged_live_group_is_checkpointed_with_three_stable_reads(self) -> None:
         harness = _CheckpointHarness(
             [
