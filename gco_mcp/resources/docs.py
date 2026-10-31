@@ -1372,6 +1372,28 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["SLURM_OPERATOR", "SCHEDULERS", "CLI"],
     },
+    "HYPERPOD": {
+        "summary": "Amazon SageMaker HyperPod on GCO — an EKS-orchestrated HyperPod cluster per Region whose instance groups join the regional EKS cluster as GPU nodes (labelled gco.aws/capacity-provider=hyperpod, tainted, fronted by the gco-hyperpod Kueue queue) with HyperPod's health monitoring and automatic node recovery: the cdk.json hyperpod block, Training Plans as reserved capacity (gco capacity find-training-plans / training-plans), gco stacks hyperpod status / enable / disable / preflight, the deploy preflight, placement for jobs and inference, and the security model.",
+        "topics": ["capacity", "deployment", "jobs", "eks"],
+        "keywords": [
+            "hyperpod",
+            "sagemaker hyperpod",
+            "sagemaker",
+            "instance group",
+            "training plan",
+            "reserved capacity",
+            "health monitoring agent",
+            "node recovery",
+            "deep health check",
+            "eks orchestration",
+            "gpu nodes",
+            "capacity provider",
+            "kueue",
+            "preflight",
+            "ml.p5.48xlarge",
+        ],
+        "related": ["KUEUE", "CUSTOMIZATION", "CLI", "PCS"],
+    },
     "TROUBLESHOOTING": {
         "summary": "Troubleshooting guide — common installation, deployment, kubectl, and pod issues with their resolutions.",
         "topics": [

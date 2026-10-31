@@ -72,7 +72,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 152 tools by default (up to 211 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 156 tools by default (up to 215 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -687,6 +687,8 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `reservation_check` | Check reservation availability and Capacity Block offerings | safe | — |
 | `find_capacity_blocks` | Search Capacity Block offerings across regions, durations, and a start-date window | safe | — |
 | `find_capacity_reservations` | Find existing ODCRs across regions in one parallel, ranked, priced report | safe | — |
+| `find_training_plans` | Find [SageMaker Training Plan](https://docs.aws.amazon.com/sagemaker/latest/dg/reserve-capacity-with-training-plans.html) offerings (reserved [HyperPod](../docs/HYPERPOD.md) capacity) across regions, ranked cheapest per instance-hour first | safe | — |
+| `list_training_plans` | List the SageMaker Training Plans the account holds, with their reserved capacity and ARNs | safe | — |
 | `capacity_history_show` | Show recorded capacity time-series data for an instance type and region | safe | — |
 | `capacity_history_stats` | Summarize historical capacity metrics with percentiles and dispersion | safe | — |
 | `capacity_history_patterns` | Show day-of-week and hour capacity patterns | safe | — |
@@ -755,6 +757,8 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `aurora_status` | Show [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) database stack status | safe | — |
 | `fsx_status` | Check [FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) configuration | safe | — |
 | `eks_capabilities_status` | Configured vs. live [EKS Capabilities](../docs/EKS_CAPABILITIES.md) (AWS-managed ACK and kro) per region, with drift | safe | — |
+| `hyperpod_status` | Configured and deployed [SageMaker HyperPod](../docs/HYPERPOD.md) state per region: the `hyperpod` block and the cluster SageMaker describes | safe | — |
+| `hyperpod_preflight` | Read-only account checks before a deploy with HyperPod on (agent image, quotas, training plans, zone, EKS access entries, cluster name) | safe | — |
 | `gitops_status` | Show the self-managed [Argo CD](../docs/GITOPS.md) configured in `cdk.json`: chart pin, fence, GitOps hand-off, repo-server scaling | safe | — |
 | `crossplane_status` | Show the self-managed [Crossplane](../docs/CROSSPLANE.md) configured in `cdk.json`: chart pins, composition functions, dashboard access | safe | — |
 | `setup_cluster_access` | Configure kubectl access to a GCO EKS cluster | low-risk | — |

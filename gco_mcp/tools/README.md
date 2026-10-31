@@ -13,14 +13,14 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
-default registration the server exposes 152 tools; with every flag enabled the
-ceiling is 211. See [Feature Flags](../README.md#feature-flags) for the
+default registration the server exposes 156 tools; with every flag enabled the
+ceiling is 215. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
 |------|-------|-------------|
 | `analytics.py` | 8 | `analytics_doctor`, `analytics_status`, `analytics_login_url`, `analytics_users_list`, `enable_analytics`, `disable_analytics`, `analytics_user_add`, `analytics_user_remove` (gated) |
-| `capacity.py` | 18 | `check_capacity`, `instance_info`, `recommend_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated) |
+| `capacity.py` | 20 | `check_capacity`, `instance_info`, `recommend_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `find_training_plans`, `list_training_plans`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated) |
 | `cluster.py` | 1 | `cluster_tunnel_command` |
 | `config.py` | 1 | `config_get` |
 | `costs.py` | 14 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_workloads`, `cost_allocation_status`, `cost_allocation_activate`, `cost_k8s_namespaces`, `cost_k8s_regions`, `cost_k8s_trend`, `cost_k8s_top`, `cost_report_status`, `cost_report_list`, `cost_report_generate` |
@@ -41,7 +41,7 @@ flag-to-tool mapping.
 | `queue.py` | 5 | `queue_list`, `queue_get`, `queue_stats`, `queue_submit`, `cancel_queue_job` (gated) |
 | `semantic_progress.py` | 1 | `metrics_semantic_progress` (gated by `GCO_ENABLE_SEMANTIC_PROGRESS`, default-off) — `safe` LLM-as-judge progress score |
 | `slurm.py` | 9 | `slurm_backends`, `slurm_status`, `slurm_partitions`, `slurm_nodes`, `slurm_queue`, `slurm_job`, `slurm_accounting`, `slurm_submit`, `slurm_cancel` (gated) |
-| `stacks.py` | 34 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `eks_capabilities_status`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated), `list_deployment_regions` (gated), `add_deployment_region` (gated), `remove_deployment_region` (gated), `set_deployment_region` (gated), `set_eks_endpoint_access` (gated), `set_mission_default_model` (gated), `set_capacity_advisor_default_model` (gated), `set_claude_code_default_model` (gated), `set_codex_default_model` (gated), `set_codex_reasoning_effort` (gated), `set_opencode_default_model` (gated) |
+| `stacks.py` | 36 | `list_stacks`, `stack_status`, `setup_cluster_access`, `fsx_status`, `stack_diff`, `stack_outputs`, `stack_synth`, `addons_status`, `valkey_status`, `aurora_status`, `eks_capabilities_status`, `hyperpod_status`, `hyperpod_preflight`, `enable_fsx`, `disable_fsx`, `enable_valkey`, `disable_valkey`, `enable_aurora`, `disable_aurora`, `addons_install` (gated), `deploy_stack` (gated), `deploy_all` (gated), `bootstrap_cdk` (gated), `destroy_stack` (gated), `destroy_all` (gated), `list_deployment_regions` (gated), `add_deployment_region` (gated), `remove_deployment_region` (gated), `set_deployment_region` (gated), `set_eks_endpoint_access` (gated), `set_mission_default_model` (gated), `set_capacity_advisor_default_model` (gated), `set_claude_code_default_model` (gated), `set_codex_default_model` (gated), `set_codex_reasoning_effort` (gated), `set_opencode_default_model` (gated) |
 | `status.py` | 1 | `fleet_status` |
 | `storage.py` | 8 | `list_storage_contents`, `list_file_systems`, `list_storage_buckets`, `s3_inventory`, `files_get`, `files_access_points`, `upload_to_regional_bucket` (gated by `GCO_ENABLE_MODEL_UPLOAD`), `sync_storage_bucket` (gated by `GCO_ENABLE_LOCAL_STORAGE_SYNC`) |
 | `swarm.py` | 6 | `swarm_start`, `swarm_iterate`, `swarm_status`, `swarm_abort`, `swarm_list`, `swarm_plan` — all gated by `GCO_ENABLE_SWARM`; the in-process supervisor tools (`mission_spawn`, `children_status`, `child_abort`) are deliberately not MCP tools |
@@ -81,8 +81,10 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `create_reservation` | Create a new On-Demand Capacity Reservation (ODCR) (gated by `GCO_ENABLE_CAPACITY_PURCHASE`). |
 | `find_capacity_blocks` | Find [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) [Capacity Blocks](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) across regions x durations x a start-date window in one consolidated, ranked, de-duplicated report. |
 | `find_capacity_reservations` | Find existing ODCRs across regions in one parallel, ranked, priced report. |
+| `find_training_plans` | `gco capacity find-training-plans` — find [SageMaker Training Plan](https://docs.aws.amazon.com/sagemaker/latest/dg/reserve-capacity-with-training-plans.html) offerings (the reserved capacity a [HyperPod](../../docs/HYPERPOD.md) instance group launches into) across regions, ranked cheapest per instance-hour first; never purchases. |
 | `instance_info` | Describe an EC2 instance type's compute characteristics, resolved live from `ec2:DescribeInstanceTypes` on every call (no checked-in specification table): vCPUs/cores/threads, memory, every accelerator class with per-model counts and memory, EFA and network limits, local NVMe and EBS, purchase options, platform capabilities. Carries no pricing. |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions. |
+| `list_training_plans` | `gco capacity training-plans` — the SageMaker Training Plans the account holds, with their reserved capacity, windows and ARNs. |
 | `recommend_capacity` | Recommend spot or on-demand capacity for a workload. |
 | `recommend_region` | Get optimal region recommendation based on capacity. |
 | `reservation_check` | Check ODCR and Capacity Block availability (multi-region, date-window, duration in hours or days). |
@@ -334,6 +336,8 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `enable_fsx` | `gco stacks fsx enable` — flip FSx Lustre on in cdk.json. |
 | `enable_valkey` | `gco stacks valkey enable` — flip Valkey Serverless on in cdk.json. |
 | `fsx_status` | Check FSx for Lustre configuration status. |
+| `hyperpod_preflight` | `gco stacks hyperpod preflight` — read-only account checks before a deploy with [SageMaker HyperPod](../../docs/HYPERPOD.md) on (agent image, `for cluster usage` quotas, training plans, zone, EKS access entries, cluster name). |
+| `hyperpod_status` | `gco stacks hyperpod status` — the configured `hyperpod` block and, once deployed, the cluster SageMaker describes with every instance group's current and target counts. |
 | `list_deployment_regions` | `gco stacks regions list` — show the cdk.json deployment-region topology and its resolved partition (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |
 | `list_stacks` | List all GCO CDK stacks. |
 | `remove_deployment_region` | `gco stacks regions remove` — remove a workload Region from cdk.json `deployment_regions.regional`; never destroys stacks (gated by `GCO_ENABLE_CONFIG_MANAGEMENT`). |

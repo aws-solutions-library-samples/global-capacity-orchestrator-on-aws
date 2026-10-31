@@ -331,6 +331,95 @@ def find_capacity_blocks(
 
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
+def find_training_plans(
+    instance_type: str,
+    regions: list[str] | None = None,
+    count: int = 1,
+    duration_hours: int | None = None,
+    duration_days: int | None = None,
+    start_after: str | None = None,
+    end_before: str | None = None,
+    target: str = "hyperpod-cluster",
+) -> str:
+    """Find SageMaker Training Plan offerings: reserved capacity for HyperPod instance groups.
+
+    A Training Plan reserves accelerated instances for a fixed window, the
+    SageMaker counterpart of an EC2 Capacity Block, and is what a HyperPod
+    instance group launches into through cdk.json
+    ``hyperpod.instance_groups[].training_plan_arn`` (see docs/HYPERPOD.md).
+    Every requested region is searched in parallel and the offerings come
+    back in one report ranked cheapest per instance-hour first, then
+    earliest start. Nothing is purchased: buying a plan is an account
+    commitment made in the console or with
+    ``aws sagemaker create-training-plan --training-plan-offering-id <id>``.
+
+    Args:
+        instance_type: HyperPod instance type or alias (e.g. ml.p5.48xlarge,
+            p5); the ``ml.`` prefix is added when missing.
+        regions: Regions to search (defaults to the deployed regions).
+        count: Instances the plan must reserve.
+        duration_hours / duration_days: The plan duration (one of the two).
+        start_after: Earliest start (YYYY-MM-DD or ISO datetime).
+        end_before: Latest end (YYYY-MM-DD or ISO datetime); a date means
+            the whole of that day.
+        target: What the capacity is for: ``hyperpod-cluster`` (default) or
+            ``training-job``.
+
+    A region that refuses the search is listed with its reason while the
+    others still answer; only when every region refuses does the tool
+    return an error.
+    """
+    args = ["capacity", "find-training-plans", "-i", instance_type]
+    for r in regions or []:
+        args += ["-r", r]
+    if count != 1:
+        args += ["-c", str(count)]
+    if duration_hours is not None:
+        args += ["--duration-hours", str(duration_hours)]
+    if duration_days is not None:
+        args += ["--duration-days", str(duration_days)]
+    if start_after:
+        args += ["--start-after", start_after]
+    if end_before:
+        args += ["--end-before", end_before]
+    if target != "hyperpod-cluster":
+        args += ["--target", target]
+    return cli_runner._run_cli(*args)
+
+
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
+def list_training_plans(
+    regions: list[str] | None = None,
+    instance_type: str | None = None,
+    status: str | None = None,
+) -> str:
+    """List the SageMaker Training Plans the account holds.
+
+    Each plan's state, reserved instance types and zones, total and
+    available instances, window and ARN, soonest start first. The ARN is
+    what cdk.json ``hyperpod.instance_groups[].training_plan_arn`` takes;
+    ``hyperpod_preflight`` then checks that the plan fits the instance group.
+
+    Args:
+        regions: Regions to list (defaults to the deployed regions).
+        instance_type: Keep the plans whose reserved capacity includes this
+            type (alias or ``ml.`` type).
+        status: Keep the plans in this state: Pending, Active, Scheduled,
+            Expired or Failed.
+    """
+    args = ["capacity", "training-plans"]
+    for r in regions or []:
+        args += ["-r", r]
+    if instance_type:
+        args += ["-i", instance_type]
+    if status:
+        args += ["--status", status]
+    return cli_runner._run_cli(*args)
+
+
+@mcp.tool(tags={"safe", "capacity"})
+@audit_logged
 def capacity_history_show(instance_type: str, region: str, hours: int = 168) -> str:
     """Show the recorded capacity time-series for an instance type in a region.
 
