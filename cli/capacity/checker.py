@@ -56,6 +56,8 @@ import functools
 import importlib.util
 import json
 import logging
+import math
+import re
 import statistics
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -198,6 +200,26 @@ def _classify_capacity_block_error(error: ClientError) -> str:
             return "unsupported"
         return "request"
     return "other"
+
+
+# EC2 names the latest EndDateRange it accepts when it refuses a longer window,
+# live (us-east-1, 2026-10-30 22:09Z): "The end date is not valid. End date must
+# not be later than Sun Nov 08 22:09:44 UTC 2026. Specify a new end date and try
+# again." The bound sat nine days out; StartDateRange had to fall within two.
+_CB_END_DATE_LIMIT = re.compile(
+    r"End date must not be later than "
+    r"(?P<date>[A-Z][a-z]{2} [A-Z][a-z]{2} \d{2} \d{2}:\d{2}:\d{2} UTC \d{4})"
+)
+_CB_END_DATE_LIMIT_FORMAT = "%a %b %d %H:%M:%S UTC %Y"
+
+
+def _latest_accepted_end_date(error: ClientError) -> datetime | None:
+    """The latest ``EndDateRange`` EC2 said it accepts, or ``None`` if it named none."""
+    message = str(error.response.get("Error", {}).get("Message", ""))
+    match = _CB_END_DATE_LIMIT.search(message)
+    if match is None:
+        return None
+    return datetime.strptime(match.group("date"), _CB_END_DATE_LIMIT_FORMAT).replace(tzinfo=UTC)
 
 
 def _summarize_rejections(rejected: list[dict[str, Any]], *, max_probes: int = 4) -> str:
@@ -1512,32 +1534,49 @@ class CapacityChecker:
         region: str,
     ) -> float:
         """
-        Estimate capacity block availability trend via time-series regression.
+        Estimate the near-term Capacity Block availability trend.
 
-        Queries offerings across the maximum 182-day (26-week) window, buckets
-        them into weekly bins by start date, and fits a linear regression to
-        the offering counts per week. The normalized slope indicates whether
-        capacity is growing or shrinking over time.
+        Asks for 24-hour offerings over the widest window EC2 accepts. The
+        first request spans the maximum block length (182 days); when EC2
+        refuses it and names the latest end date it allows (live, nine days
+        out: "End date must not be later than Sun Nov 08 22:09:44 UTC 2026"),
+        the request is repeated once with that end date. Until this method
+        honoured that answer the 182-day window was refused in every Region
+        and the trend was 0.0 everywhere. The offerings are bucketed into
+        daily bins by start date, and the least-squares slope of the counts
+        per day is normalized so that a doubling across the window maps to
+        about 1.0.
 
         Returns:
             Trend score from -1.0 to 1.0:
-              > 0 = capacity growing (offerings increasing week-over-week)
+              > 0 = capacity growing (offerings increasing day over day)
               = 0 = stable or no data
-              < 0 = capacity shrinking (offerings decreasing week-over-week)
+              < 0 = capacity shrinking (offerings decreasing day over day)
         """
         ec2 = self._session.client("ec2", region_name=region, config=_CB_RETRY_CONFIG)
 
         now = datetime.now(UTC)
-        far_end = now + timedelta(days=182)
+        window_end = now + timedelta(days=blocks.MAX_DURATION_DAYS)
 
-        try:
-            response = ec2.describe_capacity_block_offerings(
+        def describe(end: datetime) -> dict[str, Any]:
+            result: dict[str, Any] = ec2.describe_capacity_block_offerings(
                 InstanceType=instance_type,
                 InstanceCount=1,
                 CapacityDurationHours=24,  # Minimum duration for broadest results
                 StartDateRange=now,
-                EndDateRange=far_end,
+                EndDateRange=end,
             )
+            return result
+
+        try:
+            try:
+                response = describe(window_end)
+            except ClientError as e:
+                latest_end = _latest_accepted_end_date(e)
+                if latest_end is None or latest_end <= now:
+                    raise
+                window_end = latest_end
+                response = describe(window_end)
         except ClientError as e:
             kind = _classify_capacity_block_error(e)
             if kind == "request":
@@ -1565,24 +1604,24 @@ class CapacityChecker:
         if not offerings:
             return 0.0
 
-        # Bucket offerings into weekly bins (week 0 = this week, week 25 = ~6 months out)
-        num_weeks = 26
-        bins = [0] * num_weeks
+        # Bucket offerings into daily bins (day 0 = today, the last day = the
+        # window's end). A single bin cannot carry a slope.
+        num_days = max(2, math.ceil((window_end - now).total_seconds() / 86400.0))
+        bins = [0] * num_days
         for o in offerings:
             start = o.get("StartDate")
             if start is None:
                 continue
-            delta_days = (start - now).total_seconds() / 86400.0
-            week_idx = int(delta_days / 7)
-            if 0 <= week_idx < num_weeks:
-                bins[week_idx] += 1
+            day_idx = int((start - now).total_seconds() / 86400.0)
+            if 0 <= day_idx < num_days:
+                bins[day_idx] += 1
 
         # Need at least 2 non-zero bins to detect a meaningful trend
         non_zero = sum(1 for b in bins if b > 0)
         if non_zero < 2:
             return 0.0
 
-        # Linear regression: slope of offerings-per-week over time
+        # Linear regression: slope of offerings-per-day over time
         # Using least-squares: slope = Σ((x-x̄)(y-ȳ)) / Σ((x-x̄)²)
         n = len(bins)
         x_mean = (n - 1) / 2.0
@@ -1593,8 +1632,8 @@ class CapacityChecker:
         slope = numerator / denominator
 
         # Normalize slope to -1..1 range relative to the mean offering count.
-        # A slope of +y_mean per 26 weeks would be a doubling → maps to ~1.0.
-        normalized = slope * num_weeks / (y_mean * 2) if y_mean > 0 else 0.0
+        # A slope of +y_mean across the window would be a doubling → maps to ~1.0.
+        normalized = slope * num_days / (y_mean * 2)
 
         return round(max(-1.0, min(1.0, normalized)), 4)
 

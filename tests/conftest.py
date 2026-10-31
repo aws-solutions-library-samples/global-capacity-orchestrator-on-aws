@@ -6,7 +6,10 @@ including mock Kubernetes clients, sample manifests, and configuration objects.
 """
 
 import os
+import shutil
 import sys
+import tempfile
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, NonCallableMock, patch
@@ -129,6 +132,84 @@ def _neutralize_lambda_build(ensure_lambda_build_dirs):  # dep order only
         yield
     finally:
         _stacks.StackManager._ensure_lambda_build = orig_ensure
+
+
+# ============================================================================
+# Every App() without an outdir synthesizes under pytest's control
+# ============================================================================
+#
+# aws-cdk-lib gives an ``App`` constructed without ``outdir`` (and without
+# ``CDK_OUTDIR``) a fresh ``$TMPDIR/cdk.outXXXXXX`` the moment it is built, and
+# nothing ever removes it. The suite constructs about 160 such Apps across 27
+# modules; every synthesized assembly stages the Lambda bundles and container
+# build contexts, so one full local run left roughly 25 GiB behind. On
+# 2026-10-30 that filled the work disk twice, the second time killing a live
+# release validation's deploy with ENOSPC. CI runners are discarded after each
+# job, which is why the leak never showed there.
+#
+# The session fixture routes every default-outdir App into a directory under a
+# session-owned root; the function fixture hands the directories created during
+# each test to a background reaper as soon as the test finishes (a synthesized
+# regional assembly is ~150 MB, and removing it inline would add up to a second
+# per App to the synth-heavy modules), so peak usage stays at about one test's
+# assemblies. An App built by a higher-scoped fixture is constructed before the
+# function fixture takes its snapshot, so it is left alone until the root goes
+# at session end. Apps that pass ``outdir`` explicitly and the ``CDK_OUTDIR``
+# escape hatch are untouched.
+_CDK_DEFAULT_OUTDIRS: list[Path] = []
+_CDK_OUTDIR_REAPERS: list[threading.Thread] = []
+
+
+def _remove_trees(paths: list[Path]) -> None:
+    for path in paths:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cdk_default_outdirs_are_session_owned():
+    try:
+        import aws_cdk
+    except ModuleNotFoundError:
+        # The integration jobs install the project without the ``cdk`` extra
+        # (integration:pytest:cross-module, integration:docker:mooncake-image);
+        # with no aws-cdk-lib there is no App to route and nothing to reap.
+        yield
+        return
+
+    root = Path(tempfile.mkdtemp(prefix="cdk.out-pytest-"))
+    original_init = aws_cdk.App.__init__
+
+    def _init(self, *, outdir=None, **kwargs):
+        if outdir is None and not os.environ.get("CDK_OUTDIR"):
+            outdir = tempfile.mkdtemp(prefix="app-", dir=root)
+            _CDK_DEFAULT_OUTDIRS.append(Path(outdir))
+        original_init(self, outdir=outdir, **kwargs)
+
+    aws_cdk.App.__init__ = _init
+    try:
+        yield
+    finally:
+        aws_cdk.App.__init__ = original_init
+        for reaper in _CDK_OUTDIR_REAPERS:
+            reaper.join(timeout=60)
+        _CDK_OUTDIR_REAPERS.clear()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _cdk_default_outdirs_are_removed_after_each_test(_cdk_default_outdirs_are_session_owned):
+    first_new = len(_CDK_DEFAULT_OUTDIRS)
+    yield
+    created = _CDK_DEFAULT_OUTDIRS[first_new:]
+    del _CDK_DEFAULT_OUTDIRS[first_new:]
+    if not created:
+        return
+    _CDK_OUTDIR_REAPERS[:] = [reaper for reaper in _CDK_OUTDIR_REAPERS if reaper.is_alive()]
+    reaper = threading.Thread(
+        target=_remove_trees, args=(created,), name="cdk-outdir-reaper", daemon=True
+    )
+    reaper.start()
+    _CDK_OUTDIR_REAPERS.append(reaper)
 
 
 # ============================================================================

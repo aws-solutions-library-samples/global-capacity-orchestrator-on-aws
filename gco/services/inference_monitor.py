@@ -54,6 +54,11 @@ from kubernetes import client, config
 from kubernetes.client.models import V1Deployment
 from kubernetes.client.rest import ApiException
 
+from gco.hyperpod_config import (
+    CAPACITY_PROVIDER_HYPERPOD,
+    CAPACITY_PROVIDER_LABEL,
+    hyperpod_toleration,
+)
 from gco.models.inference_models import (
     GPU_NAME_NODE_LABEL,
     INFERENCE_PROBE_TIMEOUT_SECONDS,
@@ -64,8 +69,8 @@ from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-20T06:07:53Z
-# Generated from Git commit: a79cb382e149c05b653fcf1d50a9793f0c861209
+# Generated at (UTC): 2026-10-31T03:37:14Z
+# Generated from Git commit: 69410dc0745abef57030947bdac84489fb805d23
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)
@@ -4264,18 +4269,25 @@ class InferenceMonitor:
                 )
             ]
 
-        # Node selector based on accelerator type
+        # Node selector based on accelerator type. A HyperPod node carries
+        # none of the EKS-managed GPU labels, so the default accelerator
+        # selector would keep the pods off the very nodes they asked for.
+        capacity_type = spec.get("capacity_type")
         node_selector = spec.get("node_selector", {})
-        if gpu_count > 0 and not node_selector:
+        if gpu_count > 0 and not node_selector and capacity_type != CAPACITY_PROVIDER_HYPERPOD:
             if accelerator == "neuron":
                 node_selector = {"accelerator": "neuron"}
             else:
                 node_selector = {"eks.amazonaws.com/instance-gpu-manufacturer": "nvidia"}
 
-        # Apply capacity type preference (spot/on-demand)
-        capacity_type = spec.get("capacity_type")
+        # Apply capacity type preference: spot / on-demand pin Karpenter's
+        # label; hyperpod pins GCO's provider label and tolerates the taint
+        # every HyperPod node carries (see gco/hyperpod_config.py).
         if capacity_type in ("spot", "on-demand"):
             node_selector["karpenter.sh/capacity-type"] = capacity_type
+        elif capacity_type == CAPACITY_PROVIDER_HYPERPOD:
+            node_selector[CAPACITY_PROVIDER_LABEL] = CAPACITY_PROVIDER_HYPERPOD
+            tolerations.append(client.V1Toleration(**hyperpod_toleration()))
 
         # SGLang's prebuilt kernels need compute capability >= 8.0; the
         # shipped inference NodePool's cheapest fit is a T4 (g4dn), where the

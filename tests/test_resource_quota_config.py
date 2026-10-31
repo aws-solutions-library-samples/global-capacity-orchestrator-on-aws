@@ -295,6 +295,11 @@ class TestManifestTemplatePlaceholderCoverage:
         # feeding the manifest processor's PCS env in 31-manifest-processor.yaml,
         # are rendered by compute_pcs_replacements.
         Path("gco/pcs_config.py"),
+        # The {{HYPERPOD_*}} tokens gating 10-hyperpod-rbac.yaml,
+        # 51-hyperpod-health-monitoring-agent.yaml and
+        # post-helm-kueue-hyperpod-queue.yaml (the agent image and the Kueue
+        # quotas) are rendered by compute_hyperpod_replacements.
+        Path("gco/hyperpod_config.py"),
     )
 
     # Placeholders that are intentionally only provided for specific

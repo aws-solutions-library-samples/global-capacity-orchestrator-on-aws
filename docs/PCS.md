@@ -113,7 +113,7 @@ gco slurm job 42 -r us-east-1 -b pcs
 gco slurm accounting -r us-east-1 -b pcs --since 7d
 ```
 
-**The identity.** PCS's `slurmrestd` does not support user impersonation (`X-SLURM-USER-NAME`), so the API acts as one fixed POSIX identity, `pcs.identity` (`ec2-user`, uid/gid 1000 by default), carried in the JWT it mints. Jobs run as that uid; the caller's IAM identity travels in each job's comment (`gco:<caller>`) for attribution, exactly as with Slinky. The identity's uid and gid must resolve to a user on the compute nodes: 1000:1000 is the first user on both the sample AMI (`ec2-user`) and the DLAMI (`ubuntu`); a different identity has to exist on your AMI or be created by a lifecycle script of your own. The `ensure-identity-home` lifecycle action creates the identity's home directory on the shared EFS on every boot.
+**The identity.** PCS's `slurmrestd` does not support user impersonation (`X-SLURM-USER-NAME`), so the API acts as one fixed POSIX identity, `pcs.identity` (`ec2-user`, uid/gid 1000 by default), carried in the JWT it mints. Jobs run as that uid; the caller's IAM identity travels in each job's comment (`gco:<caller>`) for attribution, exactly as with Slinky. The identity's uid and gid must resolve to a user on the compute nodes: 1000:1000 is the first user on both the sample AMI (`ec2-user`) and the DLAMI (`ubuntu`); a different identity has to exist on your AMI, or `identity.create_user: true` has the `ensure-identity-home` lifecycle action add it to every node on boot (`groupadd` / `useradd` with the configured uid, gid, shell and GECOS; a uid or name that already belongs to someone else fails the boot rather than running jobs as the wrong user). The same action creates the identity's home directory on the shared EFS on every boot.
 
 **The login node.** In managed mode `gco slurm shell --backend pcs` opens an SSM session (the Session Manager plugin, no SSH key, no public IP, no `--via-ssm`) on the login EC2 instance as the identity, and `gco slurm output JOB -b pcs` reads a job's output file through `ssm:SendCommand` (`--follow` streams it over a session). Your IAM identity needs `ssm:StartSession` and `ssm:SendCommand` on the login instance, `ssm:GetCommandInvocation`, `ec2:DescribeInstances` and `cloudformation:DescribeStacks`. PCS replaces the login instance when it is unhealthy; the CLI finds the current one through the node group's `aws:pcs:compute-node-group-id` tag.
 
@@ -177,7 +177,7 @@ An existing cluster (`mode: existing`) is scraped by whoever runs it; the key si
 
 ## Live Validation
 
-Every [live release validation](LIVE_RELEASE_VALIDATION.md) run deploys PCS in managed mode with its metrics on, whatever the checkout's `cdk.json` says (the run-scoped `pcs_overrides` CDK context, never an edit), and proves it before the release: the `preflight` action runs the same checks as `gco stacks pcs preflight` for the block the run deploys; the `schedulers` action reads `/api/v1/slurm/backends`, submits a batch job with `backend=pcs` that must reach `COMPLETED` on a node PCS launches from zero, requires its accounting record with the caller attribution, and reads the job's output file from the login node with `gco slurm output --backend pcs`; and the teardown waits for the instances PCS launched to finish terminating before the final inventory proves the account clean. A Region where PCS is not offered fails the preflight with the reason.
+Every [live release validation](LIVE_RELEASE_VALIDATION.md) run deploys PCS in managed mode with its metrics on, whatever the checkout's `cdk.json` says (the run-scoped `pcs_overrides` CDK context, never an edit), and proves it before the release: the `preflight` action runs the same checks as `gco stacks pcs preflight` for the block the run deploys; the `schedulers` action reads `/api/v1/slurm/backends`, submits a batch job with `backend=pcs` that must reach `COMPLETED` on a node PCS launches from zero, requires its accounting record with the caller attribution, and reads the job's output file from the login node with `gco slurm output --backend pcs`; and the teardown waits for the instances PCS launched to finish terminating before the final inventory proves the account clean. A Region where PCS is not offered fails the preflight with the reason. The final inventory's PCS scanner runs in every enabled Region PCS is offered in, read from AWS's public `/aws/service/global-infrastructure/services/pcs/regions` parameters (botocore names no Region for PCS). The parts of the feature that never call the PCS API — the login-node finder and the backend's JWT key read — also run against the [Floci emulator](FLOCI_TESTING.md) in CI; the PCS API itself is absent from the emulator, so the preflight's and the backend's `GetCluster` paths stay in the unit suite.
 
 ## Security
 
@@ -204,10 +204,11 @@ Both backends give you Slurm 25/26 with `sbatch`/`srun`/`sacct`, accounting, aut
 | `mode` | `managed` | `managed` or `existing` |
 | `cluster_id` | `null` | Existing mode: the cluster's id (`pcs_...`) |
 | `endpoint_cidr` | `null` | IPv4 range the API pod may reach `slurmrestd` in; `null` = the regional VPC CIDR |
-| `identity.name` / `uid` / `gid` | `ec2-user` / `1000` / `1000` | The POSIX user the API submits as; must exist on the nodes |
+| `identity.name` / `uid` / `gid` | `ec2-user` / `1000` / `1000` | The POSIX user the API submits as; must exist on the nodes (or see `create_user`) |
 | `identity.gids` | `[]` | Supplementary group ids (the primary gid is always included) |
 | `identity.dir` | `null` | Home and default working directory; `null` = `/home/<name>`; required with `storage.home: none` |
 | `identity.shell` / `gecos` | `/bin/bash` / `null` | Login shell and GECOS field in the token |
+| `identity.create_user` | `false` | Have the `ensure-identity-home` lifecycle action create the identity (group and user) on every managed compute node when its uid is free; needs `storage.home: efs` |
 
 `pcs.managed`:
 

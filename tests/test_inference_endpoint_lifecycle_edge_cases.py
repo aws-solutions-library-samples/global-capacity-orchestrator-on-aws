@@ -635,6 +635,35 @@ async def test_tls_watcher_rejects_bad_rotated_keypair_then_stops(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_tls_watcher_leaves_the_loop_when_stop_arrives_inside_a_poll(tmp_path: Path) -> None:
+    """``shutdown()`` during a poll ends the watcher without another keypair read.
+
+    This pins the ``else: break`` arc of the watcher loop (the stop event
+    completing ``wait_for`` before the interval elapses) deterministically.
+    The live-rotation test crosses it only when ``shutdown()`` lands while
+    the watcher is inside ``wait_for`` rather than between ticks, which a
+    loaded CI runner cannot guarantee (the 2026-10-31 five-shard run missed
+    the arc and failed the combined coverage floor on this one line).
+    """
+    proxy = TlsProxy(_proxy_config(tmp_path))
+
+    async def stop_arrives(awaitable: Any, *, timeout: float) -> Any:
+        del timeout
+        awaitable.close()
+        proxy._stop.set()
+        return None
+
+    with (
+        patch("gco.services.tls_proxy.asyncio.wait_for", side_effect=stop_arrives),
+        patch("gco.services.tls_proxy._ssl_context") as ssl_context,
+    ):
+        await proxy.watch_certificates()
+
+    ssl_context.assert_not_called()
+    assert proxy._stop.is_set()
+
+
+@pytest.mark.asyncio
 async def test_tls_watcher_skips_reload_when_digest_is_unchanged_then_stops(tmp_path: Path) -> None:
     """A poll tick with an identical keypair digest loops without activating anything.
 

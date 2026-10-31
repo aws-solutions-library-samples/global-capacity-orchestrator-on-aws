@@ -75,8 +75,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-30T09:51:11Z
-# Generated from Git commit: ea3bb60a33c82d9e7f7839e5eb84540d1c8a3bd0
+# Generated at (UTC): 2026-10-31T03:37:14Z
+# Generated from Git commit: 69410dc0745abef57030947bdac84489fb805d23
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -6993,6 +6993,27 @@ def get_pcs_config(region: str | None = None) -> dict[str, Any]:
 def update_pcs_config(settings: dict[str, Any], region: str | None = None) -> None:
     """Update the AWS PCS block in cdk.json (global, or the region's overlay)."""
     _update_feature_config("pcs", settings, _PCS_DEFAULTS, region)
+
+
+_HYPERPOD_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "cluster_name": None,
+    "availability_zone": None,
+}
+
+
+def get_hyperpod_config(region: str | None = None) -> dict[str, Any]:
+    """Get the raw SageMaker HyperPod block from cdk.json (``hyperpod`` with the region's overlay).
+
+    The top-level keys only, as written; ``gco stacks hyperpod status`` and
+    the preflight validate the whole block through :mod:`gco.hyperpod_config`.
+    """
+    return _get_feature_config("hyperpod", _HYPERPOD_DEFAULTS, region)
+
+
+def update_hyperpod_config(settings: dict[str, Any], region: str | None = None) -> None:
+    """Update the SageMaker HyperPod block in cdk.json (global, or the region's overlay)."""
+    _update_feature_config("hyperpod", settings, _HYPERPOD_DEFAULTS, region)
 
 
 # =============================================================================

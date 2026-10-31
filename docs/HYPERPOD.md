@@ -1,0 +1,298 @@
+# Amazon SageMaker HyperPod
+
+GCO can attach an [Amazon SageMaker HyperPod](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-hyperpod.html)
+cluster to a Region's EKS cluster. HyperPod's instance groups join `gco-<region>`
+as nodes, so every scheduler GCO already runs (Kueue, Volcano, Slinky, the
+Kubeflow Trainer) can place work on them, while HyperPod supplies what the
+Karpenter node pools do not: deep health checks before a node takes work, a
+health-monitoring agent that catches GPU, Neuron, kernel and network faults
+while it runs, automatic reboot or replacement of a faulty node, and
+[Training Plans](#training-plans) for GPU capacity reserved ahead of time.
+
+HyperPod is **off by default** (`"hyperpod": {"enabled": false}` in
+`cdk.json`). Nothing changes for a deployment until it is turned on.
+
+## Table of Contents
+
+- [What gets deployed](#what-gets-deployed)
+- [How work reaches HyperPod nodes](#how-work-reaches-hyperpod-nodes)
+- [Enabling it](#enabling-it)
+- [Configuration reference](#configuration-reference)
+- [Training Plans](#training-plans)
+- [Preflight and status](#preflight-and-status)
+- [Security](#security)
+- [Live release validation](#live-release-validation)
+- [Limitations](#limitations)
+
+## What gets deployed
+
+When `hyperpod.enabled` is true for a Region, the regional stack
+(`gco/stacks/hyperpod_cluster.py`) adds:
+
+| Resource | Purpose |
+|----------|---------|
+| `AWS::SageMaker::Cluster` `<project>-hyperpod` | The HyperPod cluster, with `Orchestrator.Eks` pointing at the regional EKS cluster and `NodeRecovery` from the block (`Automatic` by default). One instance group per `hyperpod.instance_groups` entry. |
+| Execution role | Trusted by `sagemaker.amazonaws.com`; carries the AWS-managed `AmazonSageMakerClusterInstanceRolePolicy` plus the ENI, ECR and Pod Identity actions HyperPod documents for EKS orchestration, and read access to the lifecycle script. |
+| `AWS::EKS::AccessEntry` of type `HYPERPOD_LINUX` | How the nodes authenticate to the cluster. The EKS cluster is access-entries only; this entry takes no access policies. |
+| Security group `<project>-hyperpod-sg-<region>` | All traffic within the group (training traffic, EFA) and all traffic to and from the EKS cluster security group (kubelet and control plane, both ways). |
+| Lifecycle script | `on_create.sh` (a logging no-op; EKS orchestration bootstraps the kubelet itself) placed under `hyperpod/lifecycle/` in the regional shared bucket by a custom resource, because `SourceS3Uri` is a prefix HyperPod copies whole onto every node. |
+| `vpc-cni`, `kube-proxy` and `coredns` EKS add-ons | What makes self-managed nodes work on an EKS Auto Mode cluster. Auto Mode provides pod networking, kube-proxy and cluster DNS only for the nodes it manages, and AWS documents that a cluster mixing Auto Mode with other compute still needs these add-ons ([EKS add-ons, Considerations for Amazon EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/eks-add-ons.html)). The two DaemonSets are anti-affine to Auto Mode nodes and land only on the HyperPod nodes; CoreDNS runs on the Auto Mode nodes and publishes the `kube-dns` Service that kube-proxy on the HyperPod nodes routes to (Auto Mode's own DNS has no Service for them to reach). The CNI's network policy agent follows `eks_cluster.network_policy_enforcement`, so the HyperPod nodes enforce the shipped NetworkPolicies like the Auto Mode nodes do. Builds are pinned in `gco/stacks/constants.py` (`EKS_ADDON_VPC_CNI`, `EKS_ADDON_COREDNS`, `EKS_ADDON_KUBE_PROXY_BY_MINOR` keyed by EKS minor); a Region without HyperPod gets none of them. |
+| Kubernetes objects (via the kubectl-applier) | The fixed-name `aws-hyperpod` namespace, the health-monitoring agent `DaemonSet`s and the `deep-health-check` and `job-auto-restart` RBAC the service expects (`10-hyperpod-rbac.yaml`, `51-hyperpod-health-monitoring-agent.yaml`), and a Kueue `ResourceFlavor` / `ClusterQueue` / `LocalQueue` for the nodes (`post-helm-kueue-hyperpod-queue.yaml`). |
+| `nvidia-device-plugin` Helm chart | Advertises the GPUs on HyperPod nodes; EKS Auto Mode's built-in plugin covers only Auto Mode nodes. Pinned to the HyperPod nodes by label. |
+
+Every instance group's nodes carry the labels
+`gco.aws/capacity-provider=hyperpod` and
+`gco.aws/hyperpod-instance-group=<name>` and the taint
+`gco.aws/hyperpod=true:NoSchedule`. The taint is what keeps platform pods and
+ordinary jobs on the Karpenter node pools: only work that asks for HyperPod
+lands on HyperPod.
+
+The cluster is created after the regional add-on convergence starts, so the
+namespace, agent and RBAC are applying before the first node boots, and it is
+deleted before the add-on layer unwinds on stack deletion.
+
+## How work reaches HyperPod nodes
+
+**Kueue (recommended).** The gated manifest ships a `LocalQueue` `gco-hyperpod`
+in `gco-jobs` whose `ClusterQueue` admits onto the `gco-hyperpod-flavor`
+`ResourceFlavor`. The flavor carries the node label as `nodeLabels` and the
+HyperPod taint as a toleration, and Kueue injects both into every admitted
+workload. A Job needs nothing but the queue name:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train-on-hyperpod
+  namespace: gco-jobs
+  labels:
+    kueue.x-k8s.io/queue-name: gco-hyperpod
+spec:
+  suspend: true
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: train
+          image: public.ecr.aws/docker/library/python:3.12-slim
+          command: ["python", "-c", "print('hello from hyperpod')"]
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+```
+
+The `ClusterQueue`'s nominal quotas come from `hyperpod.queue`; they are
+admission caps, the instance groups are the real limit.
+
+**Any other scheduler.** Set the node selector and toleration yourself:
+
+```yaml
+nodeSelector:
+  gco.aws/capacity-provider: hyperpod
+tolerations:
+  - key: gco.aws/hyperpod
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+```
+
+**Inference.** `gco inference deploy --capacity-type hyperpod` (and the MCP
+`deploy_inference` tool) pins an endpoint's model pods to HyperPod nodes the
+same way.
+
+The jobs API reports where a job's pods landed (`GET /api/v1/jobs/{name}`,
+`gco jobs get`): `node_capacity_type` is `hyperpod` for a HyperPod node, and
+the node's HyperPod labels (`sagemaker.amazonaws.com/node-health-status`,
+`sagemaker.amazonaws.com/deep-health-check-status`, the instance group) are
+included in `node_labels`.
+
+## Enabling it
+
+**The EKS minor comes first.** HyperPod picks each node's AMI from the EKS
+cluster's Kubernetes version at `CreateCluster`, and it publishes that AMI per
+minor, some weeks after EKS ships the minor (the public SSM tree
+`/aws/service/sagemaker-hyperpod/ami/x86_64/eks-<minor>-amazon-linux-2023/latest/ami-id`
+lists what exists; the
+[AMI release notes](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-hyperpod-release-ami-eks.html)
+follow it). `cdk.json` ships the newest EKS minor, which HyperPod usually does
+not support yet, so a deployment that enables HyperPod sets
+`kubernetes_version` to the newest minor the tree carries *before its first
+deploy*: EKS cannot downgrade a running cluster, and a cluster already on an
+unsupported minor has to wait for HyperPod to add it. The preflight's
+`kubernetes-version` check reads the tree and fails on a minor without an AMI.
+
+```bash
+# Turn it on in cdk.json; the instance-group options rewrite the block's first
+# instance group (edit cdk.json directly for several groups)
+gco stacks hyperpod enable --instance-type ml.g5.8xlarge --instance-count 1
+gco stacks hyperpod enable --region us-east-1 --availability-zone us-east-1b --training-plan-arn arn:aws:sagemaker:us-east-1:123456789012:training-plan/p5
+gco stacks deploy-all -y
+
+# Or for one deploy only, without touching cdk.json
+gco stacks deploy-all -y --enable hyperpod
+```
+
+`gco stacks deploy` and `deploy-all` run the HyperPod preflight first (see
+below) when the Region has HyperPod on; `--skip-hyperpod-preflight` bypasses
+it. Turning HyperPod off (`gco stacks hyperpod disable` and a redeploy)
+deletes the cluster and its instances; `removal_policy: retain` keeps the
+cluster, the execution role and the security group when the stack is deleted.
+
+A per-Region overlay, `hyperpod_regions`, deep-merges over the global block:
+
+```json
+"hyperpod": {"enabled": false, "node_recovery": "Automatic"},
+"hyperpod_regions": {
+  "us-east-1": {
+    "enabled": true,
+    "availability_zone": "us-east-1b",
+    "instance_groups": [{"name": "p5", "instance_type": "ml.p5.48xlarge", "instance_count": 4}]
+  }
+}
+```
+
+## Configuration reference
+
+All keys live under `hyperpod` in `cdk.json` (and under `hyperpod_regions.<region>`
+for a per-Region overlay). Every key is validated at synth time by
+`gco/hyperpod_config.py`; unknown keys fail by name.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `false` | Deploy the HyperPod cluster in this Region. |
+| `cluster_name` | `null` (`<project>-hyperpod`) | `ClusterName`; 1–63 letters, digits and hyphens. |
+| `node_recovery` | `"Automatic"` | `Automatic` reboots or replaces a node the health checks fail; `None` only labels it. |
+| `availability_zone` | `null` (first EKS-supported private subnet) | The zone the instance groups launch into. HyperPod clusters are zonal; set this to match a Training Plan or Capacity Block. |
+| `instance_groups[]` | one group `accelerated`, `ml.g5.8xlarge`, count 1 | The instance groups; names must be unique, an enabled block needs at least one. |
+| `instance_groups[].name` | `accelerated` | `InstanceGroupName`. |
+| `instance_groups[].instance_type` | `ml.g5.8xlarge` | A HyperPod (`ml.*`) instance type. |
+| `instance_groups[].instance_count` | `1` | Instances in the group (0–10000; 0 keeps the group defined but empty). |
+| `instance_groups[].threads_per_core` | `1` | 1 disables hyperthreading, 2 keeps it. |
+| `instance_groups[].deep_health_checks` | `[]` | `OnStartDeepHealthChecks` SageMaker runs when an instance is created or replaced: `InstanceStress` (hardware, DCGM and EFA tests on the instance), `InstanceConnectivity` (NCCL tests across the group). Off by default because they hold each new instance for about two hours, and because SageMaker accepts `InstanceConnectivity` only for instance families with multi-node GPU networking (`CreateCluster` named G5 and G6 from 8xlarge up, P4, P5, P6 and Trn on 2026-10-31; it refuses `ml.g4dn.xlarge`). Turn them on per group for production training capacity. |
+| `instance_groups[].training_plan_arn` | `null` | A SageMaker Training Plan whose reserved capacity this group launches into (see below). |
+| `instance_groups[].data_volume_size_gb` | `null` | Size of an additional EBS volume SageMaker attaches to every instance in the group and mounts at `/opt/sagemaker` (1–16384 GB); `null` attaches none. The root volume is sized by SageMaker and cannot be set here: the API accepts `RootVolume: true` only to encrypt the root volume with your own KMS key, and rejects a size with it. |
+| `queue.max_cpu` / `max_memory` / `max_gpu` | `"1000"` / `"4Ti"` / `"64"` | Nominal quotas of the `gco-hyperpod-queue` Kueue ClusterQueue (Kubernetes quantities). |
+| `removal_policy` | `"destroy"` | `retain` keeps the cluster, execution role and security group on stack deletion. |
+
+The run-scoped CDK context `hyperpod_overrides` (a JSON object) deep-merges
+over the block for one deploy; the live release validation uses it to turn
+HyperPod on without editing `cdk.json`.
+
+## Training Plans
+
+A [SageMaker Training Plan](https://docs.aws.amazon.com/sagemaker/latest/dg/reserve-capacity-with-training-plans.html)
+reserves GPU capacity for a fixed window, the SageMaker counterpart of an EC2
+Capacity Block. `gco capacity` searches and lists them next to the Capacity
+Block commands:
+
+```bash
+# Offerings for 4x ml.p5.48xlarge for a week, starting on or after a date, usable by a HyperPod cluster
+gco capacity find-training-plans -i ml.p5.48xlarge -c 4 -r us-east-1 --duration-hours 168 --start-after 2026-11-10
+
+# Plans the account already holds
+gco capacity training-plans -r us-east-1
+```
+
+To launch an instance group into a plan, put its ARN in
+`instance_groups[].training_plan_arn` (the group's `instance_type` and
+`availability_zone` must match the plan). Purchasing a plan is an account
+commitment and stays a console or `aws sagemaker create-training-plan`
+action; GCO reports the offerings and never buys one.
+
+## Preflight and status
+
+```bash
+gco stacks hyperpod preflight -r us-east-1   # or --all-regions
+gco stacks hyperpod status -r us-east-1
+```
+
+The preflight checks, per Region, what would make the deploy fail or the
+nodes never join: the Region publishes a health-monitoring agent image,
+HyperPod publishes a node AMI for the EKS minor the cluster runs (cdk.json
+`kubernetes_version`; see [Enabling it](#enabling-it)), the
+account's `<instance type> for cluster usage` Service Quotas cover every
+instance group's count (a type with no such quota is not a HyperPod type in
+the Region), each `training_plan_arn` exists, is `Active` or `Scheduled`,
+targets HyperPod clusters, reserves the group's instance type and sits in the
+configured zone, the configured Availability Zone exists, the EKS cluster
+(once deployed) is `ACTIVE` and authenticates with access entries, and no
+HyperPod cluster of the same name that this project does not own exists. An
+AWS error while checking is a warning; only a fact that would break the
+deploy fails it. `status` shows the block as configured (cluster name, node
+recovery, zone, instance groups, Kueue quotas, removal policy) and, when the
+stack is deployed, the cluster SageMaker describes under the published name:
+its `ClusterStatus`, any failure message, and every instance group's current
+and target counts. The MCP server exposes both as `hyperpod_status` and
+`hyperpod_preflight`; the jobs API reports the node health labels of the
+nodes that ran a job (see [How work reaches HyperPod nodes](#how-work-reaches-hyperpod-nodes)).
+
+## Security
+
+- The nodes authenticate with the `HYPERPOD_LINUX` access entry of their
+  execution role only; no `aws-auth` ConfigMap, no cluster-admin grants.
+- The execution role holds the AWS-managed cluster-instance policy, the
+  documented EKS-node actions (the VPC CNI's `AmazonEKS_CNI_Policy` actions,
+  because `aws-node` on a HyperPod node runs with the node's credentials, plus
+  image pulls and Pod Identity; `ec2:CreateTags` is scoped to network
+  interfaces), and read access to the lifecycle prefix; the nodes get no
+  credentials for the regional bucket beyond that prefix.
+- The security group admits security-group sources only (itself and the EKS
+  cluster group), never a CIDR.
+- The health-monitoring agent runs non-root with every capability dropped,
+  a read-only root filesystem and `RuntimeDefault` seccomp; its host `/var/log`,
+  `/dev/kmsg` and `/etc/localtime` mounts are the agent's contract.
+- The `aws-hyperpod` namespace is labelled for the `privileged` Pod Security
+  level because of those mounts; nothing else runs there.
+- The agent manifest is a copy of the HyperPod team's chart
+  ([aws/sagemaker-hyperpod-cli](https://github.com/aws/sagemaker-hyperpod-cli),
+  `helm_chart/HyperPodHelmChart/charts/health-monitoring-agent`), which the
+  helm-installer cannot consume because no chart index is published. The
+  monthly `deps-scan` workflow's **HyperPod Health Monitoring Agent** surface
+  compares the two DaemonSets' instance-type lists, the pinned image tag and
+  the Region map against the chart and names what to add, remove or bump (see
+  `docs/MAINTENANCE.md`).
+
+## Live release validation
+
+Every release run deploys HyperPod through the run-scoped `hyperpod_overrides`
+context (one `ml.g4dn.xlarge` instance group, deep health checks off) and the `hyperpod` action proves
+it end to end: SageMaker describes the cluster `InService` with the instance
+group at its target count and its instance `Running`, a Job submitted through
+the GCO API to the `gco-hyperpod` queue and requesting one GPU completes, and
+the jobs API's placement report puts its pod on a `hyperpod` node. The account
+preflight runs first, and the final inventory counts HyperPod clusters as a
+residual category so one left behind fails the run. Because `cdk.json` ships
+the newest EKS minor and HyperPod's node AMI trails it, the run passes
+`gco release validate --kubernetes-version <minor>` with the newest minor the
+AMI tree carries: the clusters deploy at that minor (the same `kubernetes_version`
+CDK context a deployment sets in `cdk.json`), the preflight checks it, the
+`topology` action verifies it, and it is part of the resume identity. See
+[LIVE_RELEASE_VALIDATION.md](LIVE_RELEASE_VALIDATION.md).
+
+The preflight and status commands also run against the
+[Floci emulator](FLOCI_TESTING.md) in CI for the halves it models (EKS access
+mode, the zone, a real Service Quotas page, CloudFormation outputs); SageMaker's
+HyperPod and training-plan operations are not modeled there, so those tests
+prove each refusal lands on the documented path and the cluster-facing checks
+stay in the unit suite.
+
+## Limitations
+
+- EKS orchestration only. HyperPod's Slurm orchestration is not a GCO Slurm
+  backend; [AWS PCS](PCS.md) and [Slinky](SLURM_OPERATOR.md) are.
+- The EKS minor is bounded by HyperPod's node AMIs, which trail new EKS
+  minors; a Region with HyperPod on runs the newest minor the AMI tree
+  carries, not necessarily the one `cdk.json` ships (see
+  [Enabling it](#enabling-it)). Pods on HyperPod nodes resolve DNS through
+  the `coredns` add-on's pods on the Auto Mode nodes, so a HyperPod node
+  depends on the Auto Mode node pools for DNS.
+- One Availability Zone per cluster, as HyperPod requires.
+- The EFA and Neuron device plugins GCO installs target EC2 instance types;
+  EFA on HyperPod `ml.p*`/`ml.trn*` nodes needs their node affinities
+  extended (tracked as a follow-up).
+- HyperPod's job auto-restart integrates with the Kubeflow Training
+  Operator's `PyTorchJob` (v1); GCO ships the Kubeflow Trainer v2
+  (`TrainJob`), so auto-restart applies to `PyTorchJob`s you install the
+  operator for yourself.
+- HyperPod task governance (HyperPod's own Kueue install) is not installed;
+  GCO's Kueue is the single queueing layer.

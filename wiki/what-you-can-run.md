@@ -23,6 +23,7 @@ and Kueue enabled by default, Slurm (Slinky) and YuniKorn opt-in:
 - **KEDA** — event-driven autoscaling and scale-to-zero (SQS and 60+ sources)
   ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/keda-scaled-job.yaml))
 - **Slurm (Slinky)** — sbatch/srun/sacct workflows and HPC migration: autoscaled CPU and GPU partitions, accounting, a login shell and the `gco slurm` CLI; the same CLI and API also drive **AWS PCS**, AWS's managed Slurm, with `--backend pcs` ([PCS guide](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/PCS.md))
+- **SageMaker HyperPod capacity** — resilient GPU nodes for any of the schedulers above: an EKS-orchestrated HyperPod cluster joins the Region's cluster with deep health checks, a health-monitoring agent and automatic node recovery, and Training Plans reserve the capacity ahead of time; a Job reaches it with the `gco-hyperpod` Kueue queue, an endpoint with `--capacity-type hyperpod` ([docs](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/HYPERPOD.md)).
   ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/slurm-cluster-job.yaml))
 - **YuniKorn** — multi-tenant queues and hierarchical quotas
   ([example](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/examples/yunikorn-job.yaml))

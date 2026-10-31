@@ -23,6 +23,8 @@ from ..constants import (
     _LOG_GROUP_RETRYABLE_OBSERVATION_CODES,
     _LOG_GROUP_SOURCE_TYPES,
     _RUN_STACK_TAG,
+    _STACK_ROLLBACK_SETTLE_POLL_ATTEMPTS,
+    _STACK_ROLLBACK_SETTLE_POLL_SECONDS,
 )
 from ..inventory import (
     describe_stack,
@@ -32,6 +34,79 @@ from ..ownership.stacks import (
     _owned_stack_ids,
     _owned_stack_record,
 )
+
+# Stack statuses in which CloudFormation is still deleting resources after a
+# failed create or update. Log-group authority derived while one of these is
+# in flight is a snapshot of a moving target: a resource read as
+# DELETE_IN_PROGRESS now is a DELETE_COMPLETE or DELETE_SKIPPED tombstone
+# minutes later, and the groups it leaves behind go unowned.
+_ROLLBACK_IN_PROGRESS_STATUSES = frozenset(
+    {
+        "ROLLBACK_IN_PROGRESS",
+        "UPDATE_ROLLBACK_IN_PROGRESS",
+        "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
+    }
+)
+
+
+def _settle_rolling_back_stack(
+    ctx: RunContext,
+    region: str,
+    stack_id: str,
+    live_stack: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Wait for a stack whose rollback is in flight to reach a terminal status.
+
+    The strict deploy reports failure the moment the stack enters
+    ``ROLLBACK_IN_PROGRESS``, and teardown derives log-group authority right
+    after workload cleanup — while the rollback is still deleting resources.
+    Observed live (release run ``pr502-release-1a9a8740-20261031T104421Z``):
+    the regional stack's rollback ran 28 minutes; the pre-destroy checkpoint
+    read it 24 minutes in, when every log source but one was already a
+    ``DELETE_*`` tombstone the live-stack filter excludes, and the stack was
+    next seen as ``DELETE_FAILED`` — a status this authority is never derived
+    from. Twenty-one log groups (retained provider groups, Lambda default
+    groups, the EKS control-plane and Container Insights groups) survived the
+    teardown unowned, and the final inventory reported them as residue.
+
+    The wait is not free: CloudFormation accepts ``DeleteStack`` during a
+    rollback (that first teardown issued it 28 minutes into one, and the stack
+    went straight from ``ROLLBACK_IN_PROGRESS`` to ``DELETE_IN_PROGRESS``), so
+    this costs the remainder of the rollback. It buys the only authority there
+    is over the groups the rollback leaves behind. Returns the settled stack
+    (``None`` when it disappeared while waiting); the caller's rolled-back
+    handling then reads the terminal tombstones. Fails closed when the
+    rollback outlasts the budget rather than deriving authority from a
+    rollback still in flight.
+    """
+    status = str((live_stack or {}).get("status") or "")
+    if status not in _ROLLBACK_IN_PROGRESS_STATUSES:
+        return live_stack
+    started_at = utc_now()
+    for _attempt in range(_STACK_ROLLBACK_SETTLE_POLL_ATTEMPTS):
+        time.sleep(_STACK_ROLLBACK_SETTLE_POLL_SECONDS)
+        live_stack = describe_stack(ctx.session, region, stack_id)
+        settled = str((live_stack or {}).get("status") or "")
+        if settled not in _ROLLBACK_IN_PROGRESS_STATUSES:
+            with ctx.state_lock:
+                ctx.checkpoint.state.setdefault("stack_rollback_settle_waits", []).append(
+                    {
+                        "region": region,
+                        "stack_id": stack_id,
+                        "from_status": status,
+                        "to_status": settled or "absent",
+                        "polls": _attempt + 1,
+                        "started_at": started_at,
+                        "settled_at": utc_now(),
+                    }
+                )
+                ctx.persist()
+            return live_stack
+    raise RuntimeError(
+        f"Stack {stack_id} is still {status} after "
+        f"{_STACK_ROLLBACK_SETTLE_POLL_ATTEMPTS * _STACK_ROLLBACK_SETTLE_POLL_SECONDS}s; "
+        "log-group authority cannot be derived from a rollback in flight"
+    )
 
 
 def _derived_log_group_names(resource_type: str, physical_id: str) -> tuple[str, ...]:
@@ -626,6 +701,9 @@ def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
             if stack_record is None:
                 continue
             live_stack = describe_stack(ctx.session, region, stack_record["stack_id"])
+            live_stack = _settle_rolling_back_stack(
+                ctx, region, stack_record["stack_id"], live_stack
+            )
             if (
                 live_stack is None
                 or str(live_stack.get("status") or "").startswith("DELETE")

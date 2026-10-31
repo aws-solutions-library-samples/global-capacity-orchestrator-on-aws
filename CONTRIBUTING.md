@@ -824,7 +824,8 @@ validation still runs offline. To inspect EKS add-ons manually:
 # Check latest versions for all addons used by GCO
 K8S_VERSION="1.37"  # Match your configured Kubernetes version
 
-for addon in metrics-server aws-efs-csi-driver amazon-cloudwatch-observability aws-fsx-csi-driver; do
+for addon in eks-pod-identity-agent metrics-server aws-efs-csi-driver amazon-cloudwatch-observability aws-fsx-csi-driver \
+             vpc-cni kube-proxy coredns; do  # the last three ship only with SageMaker HyperPod
   echo "=== $addon ==="
   aws eks describe-addon-versions \
     --addon-name "$addon" \

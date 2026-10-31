@@ -363,10 +363,11 @@ def test_get_capacity_block_trend_error_returns_zero():
 
 
 def test_get_capacity_block_trend_rejected_window_is_zero_with_a_debug_line(caplog):
-    # EC2 refusing the 182-day window is the caller's parameters, not a
-    # capacity signal. The trend stays a best-effort 0.0 for the many Regions
-    # it is probed in, but the refusal is visible at debug level instead of
-    # being filed silently with the unsupported-Region codes.
+    # EC2 refusing the window is the caller's parameters, not a capacity
+    # signal. When the refusal names no usable end date (here the date is
+    # truncated), the trend stays a best-effort 0.0 for the many Regions it is
+    # probed in, but the refusal is visible at debug level instead of being
+    # filed silently with the unsupported-Region codes.
     import logging
 
     checker = _make_checker()
@@ -416,8 +417,8 @@ def test_get_capacity_block_trend_single_bin_returns_zero():
     now = datetime.now(UTC)
     mock_ec2.describe_capacity_block_offerings.return_value = {
         "CapacityBlockOfferings": [
-            {"StartDate": now + timedelta(days=2)},
-            {"StartDate": now + timedelta(days=3)},
+            {"StartDate": now + timedelta(days=2, hours=1)},
+            {"StartDate": now + timedelta(days=2, hours=2)},
         ]
     }
     checker._session.client = MagicMock(return_value=mock_ec2)

@@ -222,6 +222,55 @@ async def eks_capabilities_status(region: str | None = None, all_regions: bool =
     return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 
+@mcp.tool(tags={"safe", "stacks"})
+@audit_logged
+async def hyperpod_status(region: str | None = None, all_regions: bool = False) -> str:
+    """`gco stacks hyperpod status` — configured and deployed SageMaker HyperPod state.
+
+    Reads the validated cdk.json ``hyperpod`` block (cluster name, node
+    recovery, zone, instance groups, Kueue quotas, removal policy) and, when
+    the regional stack is deployed with HyperPod on, the cluster SageMaker
+    describes under the stack's published name: its status and every
+    instance group's current and target counts. See docs/HYPERPOD.md.
+
+    Args:
+        region: Region to inspect. Omit for the first deployment region.
+        all_regions: Inspect every configured deployment region.
+    """
+    args = ["stacks", "hyperpod", "status"]
+    if all_regions:
+        args.append("--all-regions")
+    elif region:
+        args += ["-r", region]
+    return await asyncio.to_thread(cli_runner._run_cli, *args)
+
+
+@mcp.tool(tags={"safe", "stacks"})
+@audit_logged
+async def hyperpod_preflight(region: str | None = None, all_regions: bool = False) -> str:
+    """`gco stacks hyperpod preflight` — check the account before a deploy with HyperPod on.
+
+    Read-only AWS checks per region: HyperPod publishes a health-monitoring
+    agent image there, the account's "<instance type> for cluster usage"
+    Service Quotas cover every instance group, each training plan exists and
+    fits its group, the configured zone exists, the EKS cluster (once
+    deployed) is ACTIVE with access entries, and the cluster name is free or
+    already this project's. An AWS error while checking is a warning; only a
+    fact that would break the deploy fails. ``deploy_stack`` and
+    ``deploy_all`` run the same checks unless told to skip them.
+
+    Args:
+        region: Region to check. Omit for the first deployment region.
+        all_regions: Check every configured deployment region.
+    """
+    args = ["stacks", "hyperpod", "preflight"]
+    if all_regions:
+        args.append("--all-regions")
+    elif region:
+        args += ["-r", region]
+    return await asyncio.to_thread(cli_runner._run_cli, *args)
+
+
 # =============================================================================
 # Mutating cdk.json toggles (low-risk)
 # =============================================================================
@@ -333,6 +382,8 @@ if is_enabled(FLAG_INFRASTRUCTURE_DEPLOY):
         yes: bool = True,
         outputs_file: str | None = None,
         tags: list[str] | None = None,
+        skip_pcs_preflight: bool = False,
+        skip_hyperpod_preflight: bool = False,
         *,
         ctx: Any = CurrentContext(),
         progress: Any = Progress(),
@@ -349,11 +400,18 @@ if is_enabled(FLAG_INFRASTRUCTURE_DEPLOY):
         CDK process and partial CloudFormation state may remain — inspect
         via stack_status or the AWS console.
 
+        A regional stack whose Region has AWS PCS or SageMaker HyperPod on
+        is preflighted first (the same checks as ``hyperpod_preflight`` /
+        `gco stacks pcs preflight`); a failed check stops the deploy before
+        CloudFormation starts, with the findings in the output.
+
         Args:
             stack_name: Stack to deploy (e.g. ``gco-us-east-1``).
             yes: Skip approval prompts (passes ``-y``). Defaults to True.
             outputs_file: Optional path to write stack outputs JSON.
             tags: Optional list of ``key=value`` tag strings applied to the stack.
+            skip_pcs_preflight: Deploy without the AWS PCS preflight.
+            skip_hyperpod_preflight: Deploy without the SageMaker HyperPod preflight.
         """
         argv = [
             "gco",
@@ -367,6 +425,10 @@ if is_enabled(FLAG_INFRASTRUCTURE_DEPLOY):
             argv += ["--outputs-file", outputs_file]
         for tag in tags or []:
             argv += ["--tag", tag]
+        if skip_pcs_preflight:
+            argv.append("--skip-pcs-preflight")
+        if skip_hyperpod_preflight:
+            argv.append("--skip-hyperpod-preflight")
         return await _run_long_task(
             argv,
             ctx=ctx,
@@ -383,6 +445,8 @@ if is_enabled(FLAG_INFRASTRUCTURE_DEPLOY):
         tags: list[str] | None = None,
         parallel: bool = False,
         max_workers: int | None = None,
+        skip_pcs_preflight: bool = False,
+        skip_hyperpod_preflight: bool = False,
         *,
         ctx: Any = CurrentContext(),
         progress: Any = Progress(),
@@ -399,12 +463,19 @@ if is_enabled(FLAG_INFRASTRUCTURE_DEPLOY):
         running CDK process and partial CloudFormation state may remain —
         inspect via stack_status or the AWS console.
 
+        Regions with AWS PCS or SageMaker HyperPod on are preflighted first
+        (the same checks as ``hyperpod_preflight`` / `gco stacks pcs
+        preflight`); a failed check stops the deploy before CloudFormation
+        starts, with the findings in the output.
+
         Args:
             yes: Skip approval prompts (passes ``-y``). Defaults to True.
             outputs_file: Optional path to write stack outputs JSON.
             tags: Optional list of ``key=value`` tag strings applied to every stack.
             parallel: Deploy regional stacks concurrently when True.
             max_workers: Cap on parallel deployments when ``parallel=True``.
+            skip_pcs_preflight: Deploy without the AWS PCS preflight.
+            skip_hyperpod_preflight: Deploy without the SageMaker HyperPod preflight.
         """
         argv = [
             "gco",
@@ -421,6 +492,10 @@ if is_enabled(FLAG_INFRASTRUCTURE_DEPLOY):
             argv.append("--parallel")
         if max_workers is not None:
             argv += ["--max-workers", str(max_workers)]
+        if skip_pcs_preflight:
+            argv.append("--skip-pcs-preflight")
+        if skip_hyperpod_preflight:
+            argv.append("--skip-hyperpod-preflight")
         return await _run_long_task(
             argv,
             ctx=ctx,

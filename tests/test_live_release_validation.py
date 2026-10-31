@@ -103,6 +103,7 @@ def _context(*, state: dict[str, object] | None = None) -> SimpleNamespace:
         # No PCS override: the AWS PCS checks read cdk.json alone and find it
         # off, as a sibling harness that sets none would.
         pcs_overrides_json="",
+        hyperpod_overrides_json="",
         command_timeout_seconds=300,
     )
     context = SimpleNamespace(
@@ -5121,6 +5122,10 @@ class TestLocalOnlyRuntime:
             "gco_live_validation_disable_efs_automatic_backups": "true",
             "tracing_overrides": '{"sample_ratio":1.0}',
             "pcs_overrides": '{"enabled":true,"managed":{"metrics":{"enabled":true}}}',
+            "hyperpod_overrides": (
+                '{"enabled":true,"instance_groups":[{"deep_health_checks":[],'
+                '"instance_count":1,"instance_type":"ml.g4dn.xlarge","name":"gco-hyperpod"}]}'
+            ),
         }
         identity = full_identity["inference"]
         assert identity["selected_region"] == "us-east-1"
@@ -5362,7 +5367,7 @@ class TestSmokeManifestSupplyChain:
         probes = sorted(manifest_dir.glob("netpol-*-job.yaml"))
         assert {path.name for path in smoke} == {
             f"{name}-smoke-job.yaml"
-            for name in ("api", "sqs", "kueue", "yunikorn", "volcano", "slurm")
+            for name in ("api", "sqs", "kueue", "yunikorn", "volcano", "slurm", "hyperpod")
         }
         assert {path.name for path in probes} == {
             "netpol-probe-job.yaml",

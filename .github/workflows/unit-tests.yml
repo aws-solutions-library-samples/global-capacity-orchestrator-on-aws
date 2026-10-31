@@ -135,7 +135,7 @@ jobs:
       # failures in the suite rather than only those in the first shard to break.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     # Several tests import Lambda handler modules that construct boto3
     # clients at module scope (lambda/api-gateway-proxy/proxy_utils.py,
     # lambda/cross-region-aggregator/handler.py). boto3 requires a region
@@ -385,8 +385,9 @@ jobs:
   # resultset; unit:bats:shell below merges every slice and enforces the floor.
   # One job ran the whole suite in 21-22 minutes (353 s plain, 907 s traced on
   # 2026-10-30), twice the longest pytest shard, and everything else in this
-  # workflow waited for it. Four shards bring the worst slice to about 7.5
-  # minutes, which is the cost of the heaviest single .bats file.
+  # workflow waited for it. Five shards bring every slice but one to a few
+  # minutes; the worst slice is the heaviest single .bats file by itself
+  # (about 10 minutes on 2026-10-31), which no shard count shortens.
   #
   # TO CHANGE THE SHARD COUNT, edit `matrix.shard` below and nothing else: the
   # slice is computed at run time by scripts/split_bats.py from
@@ -397,17 +398,17 @@ jobs:
     name: "unit:bats:shell (shard ${{ matrix.shard }}/${{ strategy.job-total }})"
     runs-on: ubuntu-26.04
     # The heaviest slice is test_dependency_scan_driver.bats on its own:
-    # 193 s plain plus 247 s traced on 2026-10-30, about 7.5 minutes with
+    # 262 s plain plus 335 s traced on 2026-10-31, about 10.5 minutes with
     # setup. Twice that, the margin the other jobs carry, so a script that
     # genuinely hangs is still killed promptly.
-    timeout-minutes: 15
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       # Run every shard even when one fails, so a contributor sees every
       # failing suite rather than only those in the first shard to break.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.

@@ -473,15 +473,34 @@ if value and re.fullmatch(r'\d+\.\d+(?:\.\d+)?', value):
 " "$file" 2>/dev/null | sort -V
 }
 
-# extract_eks_addons <file>
+# extract_eks_addons <file> [k8s_version]
 #
 # Extracts EKS addon name|version pairs from the constants module.
 # Falls back to reading constants.py directly if the module can't be imported.
 # Prints one "addon_name|addon_version" per line.
+#
+# The five platform add-ons are unconditional. The three mixed-compute add-ons
+# the regional stack creates with SageMaker HyperPod (vpc-cni, kube-proxy,
+# coredns) are included too; kube-proxy is pinned per EKS minor
+# (EKS_ADDON_KUBE_PROXY_BY_MINOR), so its line carries the build for
+# ``k8s_version`` (default: cdk.json's kubernetes_version) and is omitted when
+# that minor has no pin — tests/test_integration.py fails CI on that gap, and
+# comparing another minor's build against the cluster minor's latest would
+# only report noise.
 extract_eks_addons() {
   local file="${1:-gco/stacks/regional_stack.py}"
+  local k8s_version="${2:-}"
   python3 -c "
-import sys
+import json, os, re, sys
+
+def cdk_k8s_version():
+    try:
+        with open('cdk.json') as f:
+            return str(json.load(f)['context']['kubernetes_version'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ''
+
+k8s = sys.argv[2] or cdk_k8s_version()
 try:
     from gco.stacks.constants import (
         EKS_ADDON_POD_IDENTITY_AGENT,
@@ -489,6 +508,9 @@ try:
         EKS_ADDON_EFS_CSI_DRIVER,
         EKS_ADDON_CLOUDWATCH_OBSERVABILITY,
         EKS_ADDON_FSX_CSI_DRIVER,
+        EKS_ADDON_VPC_CNI,
+        EKS_ADDON_COREDNS,
+        EKS_ADDON_KUBE_PROXY_BY_MINOR,
     )
     addons = [
         ('eks-pod-identity-agent', EKS_ADDON_POD_IDENTITY_AGENT),
@@ -496,12 +518,14 @@ try:
         ('aws-efs-csi-driver', EKS_ADDON_EFS_CSI_DRIVER),
         ('amazon-cloudwatch-observability', EKS_ADDON_CLOUDWATCH_OBSERVABILITY),
         ('aws-fsx-csi-driver', EKS_ADDON_FSX_CSI_DRIVER),
+        ('vpc-cni', EKS_ADDON_VPC_CNI),
+        ('coredns', EKS_ADDON_COREDNS),
     ]
-    for name, version in addons:
-        print(f'{name}|{version}')
+    kube_proxy = dict(EKS_ADDON_KUBE_PROXY_BY_MINOR)
 except ImportError:
     # Fallback: read constants.py directly
-    import re, os
+    addons = []
+    kube_proxy = {}
     constants_path = os.path.join(os.path.dirname(sys.argv[1]), 'constants.py')
     if os.path.exists(constants_path):
         with open(constants_path) as f:
@@ -513,18 +537,27 @@ except ImportError:
             'EKS_ADDON_EFS_CSI_DRIVER': 'aws-efs-csi-driver',
             'EKS_ADDON_CLOUDWATCH_OBSERVABILITY': 'amazon-cloudwatch-observability',
             'EKS_ADDON_FSX_CSI_DRIVER': 'aws-fsx-csi-driver',
+            'EKS_ADDON_VPC_CNI': 'vpc-cni',
+            'EKS_ADDON_COREDNS': 'coredns',
         }
         for const_name, addon_name in mapping.items():
             m = re.search(const_name + r'\s*=\s*\"([^\"]+)\"', text)
             if m:
-                print(f'{addon_name}|{m.group(1)}')
+                addons.append((addon_name, m.group(1)))
+        block = re.search(r'EKS_ADDON_KUBE_PROXY_BY_MINOR[^{]*\{(.*?)\}', text, re.DOTALL)
+        if block:
+            kube_proxy = dict(re.findall(r'\"(\d+\.\d+)\":\s*\"([^\"]+)\"', block.group(1)))
     else:
         # Last resort: scan the file for inline addon_name/addon_version pairs
         with open(sys.argv[1]) as f:
             text = f.read()
         for m in re.finditer(r'addon_name=\"([^\"]+)\".*?addon_version=\"([^\"]+)\"', text, re.DOTALL):
-            print(f'{m.group(1)}|{m.group(2)}')
-" "$file" 2>/dev/null
+            addons.append((m.group(1), m.group(2)))
+if k8s in kube_proxy:
+    addons.append(('kube-proxy', kube_proxy[k8s]))
+for name, version in addons:
+    print(f'{name}|{version}')
+" "$file" "$k8s_version" 2>/dev/null
 }
 
 # extract_helm_charts [charts_yaml_path]
@@ -559,6 +592,124 @@ for name, cfg in (data or {}).get('charts', {}).items():
         'use_oci':  cfg.get('use_oci', False),
     }))
 " "$file" 2>/dev/null
+}
+
+# extract_kube_proxy_pins [constants_py_path]
+#
+# Prints every entry of ``EKS_ADDON_KUBE_PROXY_BY_MINOR`` (the kube-proxy
+# add-on build pinned per EKS minor for the SageMaker HyperPod mixed-compute
+# add-ons) as ``minor|build``, minors in numeric order. Imports the constants
+# module when it can and falls back to reading the mapping literal from the
+# source file, like extract_eks_addons. Prints nothing when neither works.
+extract_kube_proxy_pins() {
+  local file="${1:-gco/stacks/constants.py}"
+  python3 -c "
+import re, sys
+
+def minor_key(minor):
+    return tuple(int(part) for part in minor.split('.'))
+
+try:
+    from gco.stacks.constants import EKS_ADDON_KUBE_PROXY_BY_MINOR
+    pins = dict(EKS_ADDON_KUBE_PROXY_BY_MINOR)
+except ImportError:
+    pins = {}
+    try:
+        with open(sys.argv[1]) as f:
+            text = f.read()
+    except OSError:
+        sys.exit(0)
+    block = re.search(r'EKS_ADDON_KUBE_PROXY_BY_MINOR[^{]*\{(.*?)\}', text, re.DOTALL)
+    if block:
+        pins = dict(re.findall(r'\"(\d+\.\d+)\":\s*\"([^\"]+)\"', block.group(1)))
+for minor in sorted(pins, key=minor_key):
+    print(f'{minor}|{pins[minor]}')
+" "$file" 2>/dev/null
+}
+
+# list_hyperpod_eks_minors [region]
+#
+# Prints the EKS minors SageMaker HyperPod publishes a node AMI for, one per
+# line in numeric order, from the public SSM tree
+# ``/aws/service/sagemaker-hyperpod/ami/x86_64`` (one
+# ``eks-<minor>-amazon-linux-{2,2023}/latest/ami-id`` leaf per minor; the
+# Slurm leaves are ignored). HyperPod picks each node's AMI from the cluster's
+# minor at CreateCluster, so this list is what HyperPod supports — the docs
+# page lags it. IAM: ``ssm:GetParametersByPath``. Fails (non-zero, nothing
+# printed) when the tree cannot be read, parsed, or names no EKS minor.
+list_hyperpod_eks_minors() {
+  local region="${1:-us-east-1}" names
+  names="$(aws ssm get-parameters-by-path --path /aws/service/sagemaker-hyperpod/ami/x86_64 \
+    --recursive --region "$region" --query 'Parameters[].Name' --output json 2>/dev/null)" || return 1
+  [ -n "$names" ] || return 1
+  printf '%s' "$names" | python3 -c '
+import json, re, sys
+try:
+    names = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+minors = set()
+for name in names or []:
+    match = re.search(r"/eks-(\d+\.\d+)-amazon-linux-(?:2|2023)/latest/ami-id$", str(name))
+    if match:
+        minors.add(match.group(1))
+if not minors:
+    sys.exit(1)
+for minor in sorted(minors, key=lambda v: tuple(int(p) for p in v.split("."))):
+    print(minor)
+'
+}
+
+# newest_hyperpod_eks_minor [region]
+#
+# The highest minor list_hyperpod_eks_minors prints; fails when it fails.
+newest_hyperpod_eks_minor() {
+  local minors
+  minors="$(list_hyperpod_eks_minors "$@")" || return 1
+  printf '%s\n' "$minors" | tail -n 1
+}
+
+# eks_standard_support_minors <describe-cluster-versions JSON>
+#
+# Prints every ``clusterVersion`` in the response, one per line (the scan asks
+# for ``--version-status STANDARD_SUPPORT``, so these are the minors still in
+# standard support). Prints nothing for unparseable input.
+eks_standard_support_minors() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+seen = []
+for row in data.get("clusterVersions", []):
+    version = str(row.get("clusterVersion") or "")
+    if version and version not in seen:
+        seen.append(version)
+print("\n".join(seen))
+' 2>/dev/null | grep . || true
+}
+
+# eks_minor_support_end <describe-cluster-versions JSON> <minor>
+#
+# The date (``YYYY-MM-DD``) standard support ends for ``minor``, or ``unknown``
+# when the response does not carry one (a brand-new release, a minor outside
+# standard support, unparseable input).
+eks_minor_support_end() {
+  local date
+  date="$(printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+for row in data.get("clusterVersions", []):
+    if row.get("clusterVersion") == sys.argv[1]:
+        ts = str(row.get("endOfStandardSupportDate") or "")
+        print(ts.split("T", 1)[0].split(" ", 1)[0])
+        break
+' "$2" 2>/dev/null)" || date=""
+  printf '%s\n' "${date:-unknown}"
 }
 
 # extract_k8s_version [cdk_json_path]
@@ -1306,6 +1457,179 @@ for index, table in enumerate(parser.tables):
             continue
         print(f'{row[0]}|{status}|{iso(row[3])}')
 " 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# SageMaker HyperPod health-monitoring agent (HMA)
+#
+# GCO installs the HyperPod health-monitoring agent on its HyperPod nodes from
+# a copy of the HyperPod team's chart (aws/sagemaker-hyperpod-cli,
+# helm_chart/HyperPodHelmChart/charts/health-monitoring-agent): the two
+# DaemonSets and their instance-type node affinities live in
+# lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml,
+# the agent image tag and the per-Region ECR accounts in
+# gco/hyperpod_config.py. The chart is published as source only (no chart
+# index the helm-installer could consume), so nothing else notices when the
+# upstream copy moves. These helpers read the three facts from both sides;
+# the raw files are public and read without the GitHub API, so the lookup
+# needs neither credentials nor API quota.
+# ---------------------------------------------------------------------------
+
+#: Where the upstream chart's files are read from. Overridable for a fork.
+HMA_UPSTREAM_RAW_BASE="${HMA_UPSTREAM_RAW_BASE:-https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart}"
+#: The chart's DaemonSet template (the instance-type lists), its helpers
+#: (the default image tag) and the chart readme (the Region table).
+HMA_UPSTREAM_TEMPLATE_PATH="HyperPodHelmChart/charts/health-monitoring-agent/templates/health-monitoring-agent.yaml"
+HMA_UPSTREAM_HELPERS_PATH="HyperPodHelmChart/charts/health-monitoring-agent/templates/_helpers.tpl"
+HMA_UPSTREAM_README_PATH="readme.md"
+
+# fetch_hma_upstream_file template|helpers|readme
+#
+# Prints the named raw upstream file. Non-zero with no output on a transport
+# or HTTP failure (or an unknown name), so the caller skips the section
+# instead of comparing against an empty page.
+fetch_hma_upstream_file() {
+  local path
+  case "$1" in
+    template) path="$HMA_UPSTREAM_TEMPLATE_PATH" ;;
+    helpers) path="$HMA_UPSTREAM_HELPERS_PATH" ;;
+    readme) path="$HMA_UPSTREAM_README_PATH" ;;
+    *) return 1 ;;
+  esac
+  curl -fsSL --max-time 20 "${SCAN_CURL_RETRY[@]}" "${HMA_UPSTREAM_RAW_BASE}/${path}" 2>/dev/null
+}
+
+# extract_hma_instance_types <manifest-or-template> <daemonset-name>
+#
+# Prints, one per line, the ``node.kubernetes.io/instance-type`` values of the
+# named DaemonSet's required node affinity. A text scan rather than a YAML
+# load, because the upstream copy is a Helm template (``{{ .Values.namespace }}``)
+# no YAML parser accepts, and both files write the list the same way: the
+# ``- key:`` line, then ``values:`` with one ``- ml.*`` item per line (an
+# inline ``values: [...]`` list is read too). Prints nothing when the file,
+# the DaemonSet or the list is absent.
+extract_hma_instance_types() {
+  local file="$1" daemonset="$2"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+path, wanted = sys.argv[1], sys.argv[2]
+quotes = chr(34) + chr(39)
+try:
+    with open(path, encoding='utf-8') as handle:
+        text = handle.read()
+except OSError:
+    raise SystemExit(0)
+for document in re.split(r'^---[ \t]*$', text, flags=re.MULTILINE):
+    if not re.search(r'^kind:[ \t]*DaemonSet[ \t]*$', document, re.MULTILINE):
+        continue
+    name = re.search(r'^  name:[ \t]*(\S+)[ \t]*$', document, re.MULTILINE)
+    if not name or name.group(1).strip(quotes) != wanted:
+        continue
+    lines = document.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if re.match(r'^[ \t]*-[ \t]*key:[ \t]*node\.kubernetes\.io/instance-type[ \t]*$', line):
+            start = index
+            break
+    if start is None:
+        break
+    values = []
+    for index in range(start + 1, len(lines)):
+        inline = re.match(r'^[ \t]*values:[ \t]*\[(.*)\][ \t]*$', lines[index])
+        if inline:
+            values = [item.strip().strip(quotes) for item in inline.group(1).split(',') if item.strip()]
+            break
+        if re.match(r'^[ \t]*values:[ \t]*$', lines[index]):
+            for item_line in lines[index + 1:]:
+                item = re.match(r'^[ \t]*-[ \t]*(\S+)[ \t]*$', item_line)
+                if not item:
+                    break
+                values.append(item.group(1).strip(quotes))
+            break
+        if re.match(r'^[ \t]*-[ \t]*key:', lines[index]):
+            break
+    for value in values:
+        print(value)
+    break
+" "$file" "$daemonset" 2>/dev/null
+}
+
+# extract_hma_default_tag <_helpers.tpl>
+#
+# Prints the agent image tag the upstream chart deploys when no override is
+# given: the literal in ``.Values.imageTag | default \"<tag>\"``. Nothing when
+# the file or the expression is absent.
+extract_hma_default_tag() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        text = handle.read()
+except OSError:
+    raise SystemExit(0)
+m = re.search(r'\.Values\.imageTag[ \t]*\|[ \t]*default[ \t]+(\S+)', text)
+if m:
+    tag = m.group(1).strip(chr(34) + chr(39))
+    if tag:
+        print(tag)
+" "$file" 2>/dev/null
+}
+
+# extract_hma_readme_regions <readme.md>
+#
+# Prints ``region|account|tag`` for every row of the chart readme's
+# \"Supported Regions and their ECR URIs\" list, each written as
+# ``<region> (<name>): <account>.dkr.ecr.<region>.amazonaws.com/hyperpod-health-monitoring-agent:<tag>``.
+# Nothing when the file is absent or the list is not laid out that way.
+extract_hma_readme_regions() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        text = handle.read()
+except OSError:
+    raise SystemExit(0)
+row = re.compile(
+    r'^[ \t]*([a-z]{2}(?:-gov)?-[a-z]+-\d+)[ \t]*\(.*\):[ \t]*(\d{12})\.dkr\.ecr\.\1\.amazonaws\.com/'
+    r'hyperpod-health-monitoring-agent:(\S+)[ \t]*$'
+)
+seen = set()
+for line in text.splitlines():
+    m = row.match(line)
+    if m and m.group(1) not in seen:
+        seen.add(m.group(1))
+        print(f'{m.group(1)}|{m.group(2)}|{m.group(3)}')
+" "$file" 2>/dev/null
+}
+
+# extract_hma_region_accounts [hyperpod_config.py]
+#
+# Prints ``region|account`` for every entry of ``HEALTH_MONITORING_AGENT_ACCOUNTS``
+# in gco/hyperpod_config.py, read from the source text (the module imports
+# the project, so it is read rather than imported, like the PCS pins).
+# Nothing when the file or the mapping is absent.
+extract_hma_region_accounts() {
+  local file="${1:-gco/hyperpod_config.py}"
+  [ -f "$file" ] || return 0
+  python3 -c "
+import re, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as handle:
+        text = handle.read()
+except OSError:
+    raise SystemExit(0)
+m = re.search(r'^HEALTH_MONITORING_AGENT_ACCOUNTS[^=]*=[ \t]*\{(.*?)^\}', text, re.MULTILINE | re.DOTALL)
+if not m:
+    raise SystemExit(0)
+q = chr(34)
+for region, account in re.findall(q + r'([a-z]{2}(?:-gov)?-[a-z]+-\d+)' + q + r'[ \t]*:[ \t]*' + q + r'(\d{12})' + q, m.group(1)):
+    print(f'{region}|{account}')
+" "$file" 2>/dev/null
 }
 
 # read_ruby_version_pin [version_file]

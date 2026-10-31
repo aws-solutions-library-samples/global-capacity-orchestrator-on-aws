@@ -137,6 +137,11 @@ def _stub(
     stub._cost_monitoring_active = lambda: RS._cost_monitoring_active(stub)
     stub._opencost_chart_values = lambda: RS._opencost_chart_values(stub)
     stub._mlflow_active = lambda: RS._mlflow_active(stub)
+    # HyperPod decides whether the nvidia-device-plugin chart is on; the
+    # helper reads the block for the stub's Region.
+    stub.deployment_region = getattr(stub, "deployment_region", "us-east-1")
+    stub._hyperpod_config = lambda: RS._hyperpod_config(stub)
+    stub._hyperpod_active = lambda: RS._hyperpod_active(stub)
     stub._mlflow_chart_values = lambda: RS._mlflow_chart_values(stub)
     # The Slurm chart values ride the same override builder when helm.slurm
     # is on (the context strategy may enable it).

@@ -203,6 +203,9 @@ class TestActionRegistry:
                 "sqs",
                 "central-queue",
                 "schedulers",
+                # Describes the deployed HyperPod cluster and runs a Job on
+                # its node; nothing to prove once the stack is gone.
+                "hyperpod",
                 "opencost",
                 "convergence",
                 "platform-workloads",

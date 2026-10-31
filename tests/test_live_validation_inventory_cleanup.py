@@ -2048,6 +2048,13 @@ class TestProjectInventory:
                     "pcs_queues": [],
                 }
             ),
+            # HyperPod is offered in the first Region; the second has SageMaker
+            # but not HyperPod (the scanner reads that as None).
+            "_list_project_hyperpod_resources": MagicMock(
+                side_effect=lambda session, region, project_name: (
+                    {"hyperpod_clusters": ["hyperpod-cluster-arn"]} if region == _REGION else None
+                )
+            ),
             "_list_project_s3_buckets": MagicMock(return_value=[f"{_PROJECT}-assets"]),
             "_list_project_iam_resources": MagicMock(
                 return_value={
@@ -2106,6 +2113,10 @@ class TestProjectInventory:
         assert coverage["enabled_regions"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["aws_backup"] == [_REGION]
         assert coverage["scanner_regions"]["pcs"] == [_REGION]
+        # Both Regions list SageMaker; HyperPod answered in one and refused the
+        # other as not offered, which the record keeps apart from "scanned".
+        assert coverage["scanner_regions"]["hyperpod"] == [_REGION]
+        assert coverage["regions_without_service"] == {"hyperpod": ["us-west-2"]}
         assert coverage["scanner_regions"]["ec2_networking"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["s3_buckets"] == ["global"]
         assert coverage["scanner_regions"]["global_accelerators"] == ["us-west-2"]
@@ -2142,6 +2153,7 @@ class TestProjectInventory:
         assert east["pcs_clusters"] == ["pcs-cluster-arn"]
         assert east["pcs_compute_node_groups"] == ["pcs-group-arn"]
         assert east["pcs_queues"] == []
+        assert east["hyperpod_clusters"] == ["hyperpod-cluster-arn"]
         assert east["sqs_queues"] == []
         assert inventory["s3_buckets"] == [f"{_PROJECT}-assets"]
         assert inventory["iam_roles"] == ["role-arn"]
@@ -2150,8 +2162,78 @@ class TestProjectInventory:
         fakes["_list_project_ec2_networking"].assert_any_call(session, _REGION, _PROJECT, ["i-1"])
         fakes["_list_project_backup_resources"].assert_called_once_with(session, _REGION, _PROJECT)
         fakes["_list_project_pcs_resources"].assert_called_once_with(session, _REGION, _PROJECT)
+        fakes["_list_project_hyperpod_resources"].assert_any_call(session, _REGION, _PROJECT)
+        assert fakes["_list_project_hyperpod_resources"].call_count == 2  # every enabled Region
         fakes["_list_global_accelerators"].assert_called_once_with(session, "us-west-2", _PROJECT)
         fakes["_list_instances"].assert_not_called()
+
+    def test_a_service_the_sdk_lists_no_regions_for_is_placed_by_the_public_parameters(
+        self,
+    ) -> None:
+        """AWS PCS ships only an endpoint ruleset, so botocore names no Region for it.
+
+        Taking that empty list at face value scanned PCS nowhere while the
+        coverage record still called the scanner complete (the PR #496 live
+        runs recorded ``scanner_regions.pcs == []``). The public
+        global-infrastructure parameters are the list AWS publishes.
+        """
+        session = self._session(backup_regions=[_REGION], pcs_regions=[])
+        ssm = session.client.return_value
+        ssm.get_paginator.return_value.paginate.return_value = [
+            {"Parameters": [{"Name": ".../regions/us-east-1", "Value": _REGION}]},
+            {
+                "Parameters": [
+                    {"Name": ".../regions/eu-west-1", "Value": "eu-west-1"},
+                    {"Value": ""},
+                ]
+            },
+        ]
+        fakes = self._scanner_fakes()
+
+        with _patched_helpers(fakes):
+            inventory = inventory_project.collect_project_resources(
+                session,
+                enabled_regions=["us-west-2", _REGION],
+                expected_account=_ACCOUNT,
+                project_name=_PROJECT,
+                seed_region=_REGION,
+            )
+
+        session.client.assert_called_once_with("ssm", region_name=_REGION)
+        ssm.get_paginator.assert_called_once_with("get_parameters_by_path")
+        ssm.get_paginator.return_value.paginate.assert_called_once_with(
+            Path="/aws/service/global-infrastructure/services/pcs/regions"
+        )
+        # eu-west-1 is a PCS Region but not an enabled one here; us-west-2 is
+        # enabled but PCS is not offered there.
+        assert inventory["coverage"]["scanner_regions"]["pcs"] == [_REGION]
+        fakes["_list_project_pcs_resources"].assert_called_once_with(session, _REGION, _PROJECT)
+
+    def test_a_service_nobody_names_a_region_for_fails_the_collection_closed(self) -> None:
+        session = self._session(pcs_regions=[])
+        session.client.return_value.get_paginator.return_value.paginate.return_value = [
+            {"Parameters": []},
+            {},
+        ]
+
+        with (
+            _patched_helpers(self._scanner_fakes()),
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"Could not determine the Regions pcs is offered in: neither the SDK's "
+                    r"endpoint data nor the public parameters under "
+                    r"/aws/service/global-infrastructure/services/pcs/regions name any"
+                ),
+            ),
+        ):
+            inventory_project.collect_project_resources(
+                session,
+                enabled_regions=[_REGION],
+                expected_account=_ACCOUNT,
+                project_name=_PROJECT,
+                seed_region=_REGION,
+            )
 
     def test_collection_without_a_global_accelerator_region_records_no_scan_region(self) -> None:
         fakes = self._scanner_fakes()
@@ -2941,11 +3023,77 @@ class TestRetainedKmsScheduling:
             self._schedule(ctx)
         kms.schedule_key_deletion.assert_not_called()
 
-        ctx, _kms = self._environment(
-            records=[self._record()], states=["PendingDeletion"], deletion_date=None
-        )
-        with pytest.raises(RuntimeError, match="omitted its deletion date"):
+    # DescribeKey is eventually consistent: run pr496-release-799cc96b-20261030T163054Z
+    # read a key CloudFormation had just scheduled as PendingDeletion with no
+    # DeletionDate, and the whole retained sweep failed on the first destroy attempt.
+
+    def _metadata(self, state: str, deletion_date: datetime | None) -> dict[str, Any]:
+        return {"KeyMetadata": {"Arn": self._ARN, "KeyState": state, "DeletionDate": deletion_date}}
+
+    def test_deletion_date_missing_on_first_read_is_reread_on_the_bounded_schedule(
+        self,
+    ) -> None:
+        record = self._record("cloudformation-delete")
+        ctx, kms = self._environment(records=[record], states=[])
+        kms.describe_key.side_effect = [
+            self._metadata("PendingDeletion", None),
+            self._metadata("PendingDeletion", None),
+            self._metadata("PendingDeletion", _PUSHED_AT),
+        ]
+
+        with patch.object(cleanup_retained, "time") as clock:
+            result = self._schedule(ctx)
+
+        assert result["keys"] == [
+            {
+                "arn": self._ARN,
+                "state": "PendingDeletion",
+                "cleanup_policy": "cloudformation-delete",
+                "deletion_date": _PUSHED_AT.isoformat(),
+            }
+        ]
+        assert record["deletion_date"] == _PUSHED_AT.isoformat()
+        assert kms.describe_key.call_count == 3
+        assert clock.sleep.call_args_list == [
+            ((constants._KMS_DELETION_DATE_POLL_SECONDS,),),
+            ((constants._KMS_DELETION_DATE_POLL_SECONDS,),),
+        ]
+        kms.schedule_key_deletion.assert_not_called()
+
+    def test_deletion_date_still_missing_after_every_reread_fails_the_sweep(self) -> None:
+        ctx, kms = self._environment(records=[self._record()], states=[])
+        rereads = constants._KMS_DELETION_DATE_REREADS
+        kms.describe_key.side_effect = [self._metadata("PendingDeletion", None)] * (rereads + 1)
+
+        with (
+            patch.object(cleanup_retained, "time") as clock,
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    f"omitted its deletion date after {rereads} re-reads over "
+                    f"{rereads * constants._KMS_DELETION_DATE_POLL_SECONDS} s"
+                ),
+            ),
+        ):
             self._schedule(ctx)
+
+        assert kms.describe_key.call_count == rereads + 1
+        assert clock.sleep.call_count == rereads
+
+    def test_key_leaving_pending_deletion_during_the_rereads_is_refused(self) -> None:
+        ctx, kms = self._environment(records=[self._record()], states=[])
+        kms.describe_key.side_effect = [
+            self._metadata("PendingDeletion", None),
+            self._metadata("Disabled", None),
+        ]
+
+        with (
+            patch.object(cleanup_retained, "time"),
+            pytest.raises(RuntimeError, match=r"left PendingDeletion .* found Disabled"),
+        ):
+            self._schedule(ctx)
+
+        assert kms.describe_key.call_count == 2
 
 
 class TestRetainedResourceCleanup:

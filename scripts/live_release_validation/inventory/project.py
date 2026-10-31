@@ -32,6 +32,7 @@ from .scanners import (
     _list_project_backup_resources,
     _list_project_ec2_networking,
     _list_project_ecr_repositories,
+    _list_project_hyperpod_resources,
     _list_project_iam_resources,
     _list_project_kms_keys,
     _list_project_pcs_resources,
@@ -151,6 +152,41 @@ def compare_baseline(expected: dict[str, Any], actual: dict[str, Any]) -> list[d
     return differences
 
 
+#: AWS's public parameter tree naming the Regions a service is offered in.
+_SERVICE_REGIONS_PARAMETER_PATH = "/aws/service/global-infrastructure/services/{service}/regions"
+
+
+def _service_regions(session: Any, service: str, *, partition: str, seed_region: str) -> set[str]:
+    """The Regions ``service`` is offered in: the SDK's list, or AWS's public one.
+
+    botocore lists Regions only for the services in its legacy endpoint data;
+    a service that ships just an endpoint ruleset (AWS PCS) has none there,
+    and an inventory that took that empty list at face value scanned PCS in
+    no Region at all while reporting the scanner complete. For such a
+    service the public SSM parameters under
+    ``/aws/service/global-infrastructure/services/<service>/regions`` are the
+    list AWS itself publishes. Nothing answering is a failure, not an empty
+    scan: absence cannot be proved in Regions nobody can name.
+    """
+    regions = set(session.get_available_regions(service, partition_name=partition))
+    if regions:
+        return regions
+    ssm = session.client("ssm", region_name=seed_region)
+    paginator = ssm.get_paginator("get_parameters_by_path")
+    path = _SERVICE_REGIONS_PARAMETER_PATH.format(service=service)
+    for page in paginator.paginate(Path=path):
+        for parameter in page.get("Parameters") or []:
+            value = str(parameter.get("Value") or "")
+            if value:
+                regions.add(value)
+    if not regions:
+        raise RuntimeError(
+            f"Could not determine the Regions {service} is offered in: neither the SDK's "
+            f"endpoint data nor the public parameters under {path} name any"
+        )
+    return regions
+
+
 def collect_project_resources(
     session: Any,
     *,
@@ -184,9 +220,10 @@ def collect_project_resources(
         "secretsmanager",
         "backup",
         "pcs",
+        "sagemaker",
     )
     service_regions = {
-        service: set(session.get_available_regions(service, partition_name=partition))
+        service: _service_regions(session, service, partition=partition, seed_region=seed_region)
         for service in service_names
     }
     regional: dict[str, dict[str, list[Any]]] = {
@@ -302,6 +339,24 @@ def collect_project_resources(
     for region in pcs_regions:
         regional[region].update(_list_project_pcs_resources(session, region, project_name))
     completed_scanners.append("pcs")
+    # SageMaker HyperPod: the regional stack's cluster is deleted with the
+    # stack, so one left behind (a delete that never finished, a retained
+    # removal policy) is owned residue the stack listing no longer shows. The
+    # SDK lists SageMaker in more Regions than HyperPod serves; a Region whose
+    # ListClusters is "not supported in the called region" is recorded as one
+    # without the service rather than counted as scanned.
+    hyperpod_regions = sorted(set(regions) & service_regions["sagemaker"])
+    regions_without_hyperpod: list[str] = []
+    scanned_hyperpod_regions: list[str] = []
+    for region in hyperpod_regions:
+        hyperpod_resources = _list_project_hyperpod_resources(session, region, project_name)
+        if hyperpod_resources is None:
+            regions_without_hyperpod.append(region)
+            continue
+        regional[region].update(hyperpod_resources)
+        scanned_hyperpod_regions.append(region)
+    scanner_regions["hyperpod"] = scanned_hyperpod_regions
+    completed_scanners.append("hyperpod")
 
     s3_buckets = _list_project_s3_buckets(session, seed_region, project_name)
     scanner_regions["s3_buckets"] = ["global"]
@@ -327,6 +382,9 @@ def collect_project_resources(
         "required_scanners": list(_PROJECT_RESOURCE_SCANNERS),
         "completed_scanners": completed_scanners,
         "scanner_regions": scanner_regions,
+        # Enabled Regions a scanner's service lists but the service's API
+        # refused as not offered there (nothing can exist in them).
+        "regions_without_service": {"hyperpod": regions_without_hyperpod},
         "enabled_regions": regions,
         "resource_categories": list(_PROJECT_RESOURCE_CATEGORIES),
     }
