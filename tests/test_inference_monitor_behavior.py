@@ -1181,6 +1181,43 @@ def test_deployment_builder_preserves_custom_selector_with_capacity_type() -> No
     }
 
 
+def test_deployment_builder_pins_hyperpod_capacity_with_its_toleration() -> None:
+    """``capacity_type: hyperpod`` selects GCO's provider label, tolerates the
+    HyperPod taint, and drops the EKS GPU-manufacturer default selector that a
+    HyperPod node never carries."""
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {"image": "example/runtime:pinned", "gpu_count": 1, "capacity_type": "hyperpod"},
+    )
+    pod_spec = deployment.spec.template.spec
+    assert pod_spec.node_selector == {"gco.aws/capacity-provider": "hyperpod"}
+    tolerations = {(t.key, t.operator, t.value, t.effect) for t in pod_spec.tolerations}
+    assert ("gco.aws/hyperpod", "Equal", "true", "NoSchedule") in tolerations
+    assert ("nvidia.com/gpu", "Equal", "true", "NoSchedule") in tolerations
+    # The GPU request itself is unchanged: the device plugin GCO pins to the
+    # HyperPod nodes advertises nvidia.com/gpu there.
+    resources = pod_spec.containers[0].resources
+    assert resources.limits["nvidia.com/gpu"] == "1"
+
+
+def test_deployment_builder_merges_hyperpod_pin_with_a_custom_selector() -> None:
+    monitor = _make_monitor()
+    deployment = _build_deployment(
+        monitor,
+        {
+            "image": "example/runtime:pinned",
+            "gpu_count": 1,
+            "node_selector": {"gco.aws/hyperpod-instance-group": "p5"},
+            "capacity_type": "hyperpod",
+        },
+    )
+    assert deployment.spec.template.spec.node_selector == {
+        "gco.aws/hyperpod-instance-group": "p5",
+        "gco.aws/capacity-provider": "hyperpod",
+    }
+
+
 @pytest.mark.parametrize(
     ("holder", "status"),
     [("monitor-a", 409), ("", 409), ("monitor-a", 503)],
