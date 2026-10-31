@@ -1973,6 +1973,26 @@ See `examples/aurora-pgvector-job.yaml` for a complete working example that crea
 
 `gco stacks pcs enable|disable` edit the block (globally or as a `pcs_regions` overlay), `gco stacks pcs status` shows what is configured and deployed, and `gco stacks pcs preflight` checks the account before a deploy (`gco stacks deploy` runs it too). `mode: existing` with `cluster_id` points the API at a cluster you already run instead. The managed cluster mounts the regional EFS at `/home` and FSx for Lustre at `/scratch` where the Region has it, and `metrics.enabled` scrapes its Slurm metrics into the in-cluster Prometheus next to Slinky's.
 
+## Configure SageMaker HyperPod
+
+[Amazon SageMaker HyperPod](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-hyperpod.html) adds resilient GPU capacity to a regional cluster: the regional stack creates an EKS-orchestrated HyperPod cluster whose instance groups join the regional EKS cluster as nodes, with HyperPod's health monitoring and automatic node replacement behind them. Work reaches the nodes through the `gco-hyperpod` Kueue queue or `gco inference deploy --capacity-type hyperpod`. See [HYPERPOD.md](HYPERPOD.md) for the full reference.
+
+```json
+{
+  "context": {
+    "hyperpod": {
+      "enabled": true,
+      "availability_zone": "us-east-1b",
+      "instance_groups": [
+        { "name": "p5", "instance_type": "ml.p5.48xlarge", "instance_count": 4 }
+      ]
+    }
+  }
+}
+```
+
+`gco stacks hyperpod enable|disable` edit the block (globally or as a `hyperpod_regions` overlay), `gco stacks hyperpod status` shows what is configured and deployed, and `gco stacks hyperpod preflight` checks the account before a deploy (`gco stacks deploy` runs it too; `--skip-hyperpod-preflight` bypasses it). `gco capacity find-training-plans` searches the SageMaker Training Plans an instance group can launch into (`instance_groups[].training_plan_arn`).
+
 ## Configure the Vector Store
 
 GCO can provision a **globally replicated vector store**: a

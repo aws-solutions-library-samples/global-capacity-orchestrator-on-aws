@@ -108,8 +108,10 @@ included in `node_labels`.
 ## Enabling it
 
 ```bash
-# Turn it on in cdk.json (writes hyperpod.enabled and the instance groups you pass)
+# Turn it on in cdk.json; the instance-group options rewrite the block's first
+# instance group (edit cdk.json directly for several groups)
 gco stacks hyperpod enable --instance-type ml.g5.8xlarge --instance-count 1
+gco stacks hyperpod enable --region us-east-1 --availability-zone us-east-1b --training-plan-arn arn:aws:sagemaker:us-east-1:123456789012:training-plan/p5
 gco stacks deploy-all -y
 
 # Or for one deploy only, without touching cdk.json
@@ -193,13 +195,20 @@ gco stacks hyperpod status -r us-east-1
 The preflight checks, per Region, what would make the deploy fail or the
 nodes never join: the Region publishes a health-monitoring agent image, the
 account's `<instance type> for cluster usage` Service Quotas cover every
-instance group's count, each `training_plan_arn` exists and is `Active` for
-the group's instance type, the EKS cluster is `ACTIVE` and uses access
-entries, and the regional VPC has a private subnet in the requested zone. An
+instance group's count (a type with no such quota is not a HyperPod type in
+the Region), each `training_plan_arn` exists, is `Active` or `Scheduled`,
+targets HyperPod clusters, reserves the group's instance type and sits in the
+configured zone, the configured Availability Zone exists, the EKS cluster
+(once deployed) is `ACTIVE` and authenticates with access entries, and no
+HyperPod cluster of the same name that this project does not own exists. An
 AWS error while checking is a warning; only a fact that would break the
-deploy fails it. `status` shows the block as configured and, when the stack
-is deployed, the cluster's `ClusterStatus`, its instance groups with their
-current counts, and the node health labels of the nodes that joined.
+deploy fails it. `status` shows the block as configured (cluster name, node
+recovery, zone, instance groups, Kueue quotas, removal policy) and, when the
+stack is deployed, the cluster SageMaker describes under the published name:
+its `ClusterStatus`, any failure message, and every instance group's current
+and target counts. The MCP server exposes both as `hyperpod_status` and
+`hyperpod_preflight`; the jobs API reports the node health labels of the
+nodes that ran a job (see [How work reaches HyperPod nodes](#how-work-reaches-hyperpod-nodes)).
 
 ## Security
 

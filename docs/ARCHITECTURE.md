@@ -253,6 +253,7 @@ rendered as spec sheets and as the interaction diagram in
   - [trust-manager](https://cert-manager.io/docs/trust/trust-manager/) when MLflow deploys (it publishes the internal CA to MLflow's clients)
   - Slurm/Slinky and [YuniKorn](https://yunikorn.apache.org/) only when their opt-in flags are enabled
   - outside Kubernetes, an [AWS PCS](PCS.md) Slurm cluster the regional stack creates (or connects to) when `pcs.enabled` is on: the API pod reaches its controller's slurmrestd over the regional VPC, and the managed cluster's compute nodes mount the regional EFS and FSx file systems
+  - a [SageMaker HyperPod](HYPERPOD.md) cluster the regional stack creates when `hyperpod.enabled` is on, orchestrated by the EKS cluster itself: its instance groups join as nodes (labelled `gco.aws/capacity-provider=hyperpod`, tainted so only work that asks for them lands there, fronted by the `gco-hyperpod` Kueue queue), with HyperPod's health-monitoring agent on every node and the NVIDIA device plugin pinned to them
   - kube-prometheus-stack when cluster observability is enabled
   - OpenCost when cost monitoring is enabled (after kube-prometheus-stack,
     whose [Prometheus](https://prometheus.io/docs/introduction/overview/) Operator CRDs its ServiceMonitor needs)
