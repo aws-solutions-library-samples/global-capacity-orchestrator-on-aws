@@ -170,7 +170,7 @@ for a per-Region overlay). Every key is validated at synth time by
 | `instance_groups[].threads_per_core` | `1` | 1 disables hyperthreading, 2 keeps it. |
 | `instance_groups[].deep_health_checks` | `[]` | `OnStartDeepHealthChecks` SageMaker runs when an instance is created or replaced: `InstanceStress` (hardware, DCGM and EFA tests on the instance), `InstanceConnectivity` (NCCL tests across the group). Off by default because they hold each new instance for about two hours, and because SageMaker accepts `InstanceConnectivity` only for instance families with multi-node GPU networking (`CreateCluster` named G5 and G6 from 8xlarge up, P4, P5, P6 and Trn on 2026-10-31; it refuses `ml.g4dn.xlarge`). Turn them on per group for production training capacity. |
 | `instance_groups[].training_plan_arn` | `null` | A SageMaker Training Plan whose reserved capacity this group launches into (see below). |
-| `instance_groups[].root_volume_size_gb` | `100` | Root EBS volume size of every instance in the group. |
+| `instance_groups[].data_volume_size_gb` | `null` | Size of an additional EBS volume SageMaker attaches to every instance in the group and mounts at `/opt/sagemaker` (1–16384 GB); `null` attaches none. The root volume is sized by SageMaker and cannot be set here: the API accepts `RootVolume: true` only to encrypt the root volume with your own KMS key, and rejects a size with it. |
 | `queue.max_cpu` / `max_memory` / `max_gpu` | `"1000"` / `"4Ti"` / `"64"` | Nominal quotas of the `gco-hyperpod-queue` Kueue ClusterQueue (Kubernetes quantities). |
 | `removal_policy` | `"destroy"` | `retain` keeps the cluster, execution role and security group on stack deletion. |
 

@@ -186,7 +186,7 @@ class TestStatus:
                 "instance_count": 4,
                 "threads_per_core": 1,
                 "training_plan_arn": _PLAN_ARN,
-                "root_volume_size_gb": 100,
+                "data_volume_size_gb": None,
             }
         ]
         assert documents[1]["deployed"]["status"] == "InService"

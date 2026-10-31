@@ -62,7 +62,7 @@ class TestDefaults:
         # (it refused ml.g4dn.xlarge live), so a default that turns them on
         # would make the block valid only for some instance types.
         assert group["deep_health_checks"] == []
-        assert group["root_volume_size_gb"] == 100
+        assert group["data_volume_size_gb"] is None
         assert config["queue"] == {"max_cpu": "1000", "max_memory": "4Ti", "max_gpu": "64"}
 
     def test_null_over_a_nested_block_keeps_the_defaults(self) -> None:
@@ -127,8 +127,8 @@ class TestValidation:
                 r"training_plan_arn must be a SageMaker training-plan ARN",
             ),
             (
-                {"instance_groups": [{"root_volume_size_gb": 0}]},
-                r"root_volume_size_gb must be an integer between 1 and 16384",
+                {"instance_groups": [{"data_volume_size_gb": 0}]},
+                r"data_volume_size_gb must be an integer between 1 and 16384",
             ),
             (
                 {"instance_groups": [{"name": "a"}, {"name": "a"}]},
@@ -190,7 +190,7 @@ class TestValidation:
                         "threads_per_core": 2,
                         "deep_health_checks": [],
                         "training_plan_arn": arn,
-                        "root_volume_size_gb": 500,
+                        "data_volume_size_gb": 500,
                     },
                     {"name": "cpu", "instance_type": "ml.c5.xlarge", "instance_count": 0},
                 ],

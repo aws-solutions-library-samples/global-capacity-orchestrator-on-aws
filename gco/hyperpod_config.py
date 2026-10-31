@@ -30,7 +30,7 @@ Block (``hyperpod`` in cdk.json; ``hyperpod_regions.<region>`` overlays it)::
           "threads_per_core": 1,
           "deep_health_checks": [],       # opt in: ["InstanceStress", "InstanceConnectivity"]
           "training_plan_arn": null,
-          "root_volume_size_gb": 100
+          "data_volume_size_gb": null     # additional EBS volume at /opt/sagemaker
         }
       ],
       "queue": {"max_cpu": "1000", "max_memory": "4Ti", "max_gpu": "64"},
@@ -149,7 +149,7 @@ INSTANCE_GROUP_DEFAULTS: dict[str, Any] = {
     "threads_per_core": 1,
     "deep_health_checks": [],
     "training_plan_arn": None,
-    "root_volume_size_gb": 100,
+    "data_volume_size_gb": None,
 }
 
 HYPERPOD_DEFAULTS: dict[str, Any] = {
@@ -279,9 +279,15 @@ def _validate_instance_group(raw: object, path: str) -> dict[str, Any]:
         raise HyperpodConfigError(
             f"{path}.training_plan_arn must be a SageMaker training-plan ARN or null, got {arn!r}"
         )
-    group["root_volume_size_gb"] = _require_int(
-        group["root_volume_size_gb"], (1, 16384), f"{path}.root_volume_size_gb"
-    )
+    # An additional EBS volume SageMaker attaches to every instance and mounts
+    # at /opt/sagemaker (ClusterEbsVolumeConfig.VolumeSizeInGB). The root
+    # volume is sized by SageMaker: the API forbids VolumeSizeInGB together with
+    # RootVolume=True, which is only for encrypting the root volume with a
+    # customer-managed key — CreateCluster refused the pairing on the third #502
+    # release attempt.
+    size = group["data_volume_size_gb"]
+    if size is not None:
+        group["data_volume_size_gb"] = _require_int(size, (1, 16384), f"{path}.data_volume_size_gb")
     return group
 
 

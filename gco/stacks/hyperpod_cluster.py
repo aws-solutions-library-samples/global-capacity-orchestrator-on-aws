@@ -519,6 +519,10 @@ class HyperpodCluster(Construct):
         name = str(group["name"])
         checks = list(group["deep_health_checks"])
         training_plan = group.get("training_plan_arn")
+        # The additional EBS volume at /opt/sagemaker, when configured. Never the
+        # root volume: SageMaker sizes that itself and rejects VolumeSizeInGB
+        # with RootVolume=True (the third #502 release attempt).
+        data_volume = group.get("data_volume_size_gb")
         return sagemaker.CfnCluster.ClusterInstanceGroupProperty(
             instance_group_name=name,
             instance_type=str(group["instance_type"]),
@@ -540,14 +544,17 @@ class HyperpodCluster(Construct):
                     for taint in node_taints()
                 ],
             ),
-            instance_storage_configs=[
-                sagemaker.CfnCluster.ClusterInstanceStorageConfigProperty(
-                    ebs_volume_config=sagemaker.CfnCluster.ClusterEbsVolumeConfigProperty(
-                        root_volume=True,
-                        volume_size_in_gb=int(group["root_volume_size_gb"]),
+            instance_storage_configs=(
+                [
+                    sagemaker.CfnCluster.ClusterInstanceStorageConfigProperty(
+                        ebs_volume_config=sagemaker.CfnCluster.ClusterEbsVolumeConfigProperty(
+                            volume_size_in_gb=int(data_volume),
+                        )
                     )
-                )
-            ],
+                ]
+                if data_volume is not None
+                else None
+            ),
         )
 
     def _create_cluster(self, eks_cluster_arn: str, bucket: s3.IBucket) -> sagemaker.CfnCluster:

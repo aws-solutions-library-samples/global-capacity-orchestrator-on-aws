@@ -86,7 +86,7 @@ FULL: dict[str, Any] = {
             "threads_per_core": 2,
             "deep_health_checks": ["InstanceStress", "InstanceConnectivity"],
             "training_plan_arn": TRAINING_PLAN,
-            "root_volume_size_gb": 500,
+            "data_volume_size_gb": 500,
         },
         {
             "name": "cpu",
@@ -266,9 +266,10 @@ class TestHyperpodOn:
         assert p5["KubernetesConfig"]["Taints"] == [
             {"Key": "gco.aws/hyperpod", "Value": "true", "Effect": "NoSchedule"}
         ]
-        assert p5["InstanceStorageConfigs"] == [
-            {"EbsVolumeConfig": {"RootVolume": True, "VolumeSizeInGB": 500}}
-        ]
+        # The additional EBS volume at /opt/sagemaker, and only that: SageMaker
+        # sizes the root volume itself and rejects VolumeSizeInGB with
+        # RootVolume=True (the third #502 release attempt failed on it).
+        assert p5["InstanceStorageConfigs"] == [{"EbsVolumeConfig": {"VolumeSizeInGB": 500}}]
         assert p5["LifeCycleConfig"]["OnCreate"] == "on_create.sh"
         source = json.dumps(p5["LifeCycleConfig"]["SourceS3Uri"])
         assert "hyperpod/lifecycle/" in source and "RegionalSharedBucket" in source
@@ -277,7 +278,7 @@ class TestHyperpodOn:
         assert cpu["InstanceCount"] == 0
         assert "OnStartDeepHealthChecks" not in cpu
         assert "TrainingPlanArn" not in cpu
-        assert cpu["InstanceStorageConfigs"][0]["EbsVolumeConfig"]["VolumeSizeInGB"] == 100
+        assert "InstanceStorageConfigs" not in cpu
 
     def test_execution_role_has_the_managed_policy_and_exact_grants(self, synthesized) -> None:
         _stack, resources = synthesized

@@ -2427,7 +2427,7 @@ def hyperpod_status(config: Any, region: Any, all_regions: bool) -> None:
                     "instance_count": g["instance_count"],
                     "threads_per_core": g["threads_per_core"],
                     "training_plan_arn": g["training_plan_arn"],
-                    "root_volume_size_gb": g["root_volume_size_gb"],
+                    "data_volume_size_gb": g["data_volume_size_gb"],
                 }
                 for g in block["instance_groups"]
             ],
@@ -2468,7 +2468,7 @@ def _print_hyperpod_status(formatter: Any, document: Mapping[str, Any]) -> None:
             "instance_count",
             "threads_per_core",
             "training_plan_arn",
-            "root_volume_size_gb",
+            "data_volume_size_gb",
         ],
     )
     queue = document["queue"]
