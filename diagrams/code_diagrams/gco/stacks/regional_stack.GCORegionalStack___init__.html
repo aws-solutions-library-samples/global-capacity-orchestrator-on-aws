@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-10-29T20:23:35Z">
-        <meta name="gco-source-commit" content="58e51b2b4563e9e1a4f61f565bd64ce972f41231">
-        <meta name="gco-flow-digest" content="44b6dd38cce6361d">
+        <meta name="gco-generated-at" content="2026-10-31T03:37:14Z">
+        <meta name="gco-source-commit" content="69410dc0745abef57030947bdac84489fb805d23">
+        <meta name="gco-flow-digest" content="845bc8e8dd96fffc">
         <title>Regional stack constructor (VPC, EKS, ALB, SQS, EFS)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -241,11 +241,12 @@ sub1305=>subroutine: self._create_ga_registration_lambda()
 op1307=>operation: self.helm_installer_provider_log_group = logs.LogGroup(self, 'HelmInstallerProviderLogGroup', retention=logs.RetentionDays.ONE_WEEK, removal_policy=self.provider_log_group_removal_policy)
 sub1309=>subroutine: self._create_helm_installer_lambda()
 sub1311=>subroutine: self._apply_kubernetes_manifests()
-sub1313=>subroutine: self._create_transaction_search_resource()
-sub1315=>subroutine: self._create_drift_detection()
-sub1317=>subroutine: self._create_mcp_role()
-sub1319=>subroutine: self._create_outputs()
-sub1321=>subroutine: self._apply_nag_suppressions()
+sub1313=>subroutine: self._create_hyperpod()
+sub1315=>subroutine: self._create_transaction_search_resource()
+sub1317=>subroutine: self._create_drift_detection()
+sub1319=>subroutine: self._create_mcp_role()
+sub1321=>subroutine: self._create_outputs()
+sub1323=>subroutine: self._apply_nag_suppressions()
 
 sub1238->op1240
 op1240->op1242
@@ -284,6 +285,7 @@ sub1313->sub1315
 sub1315->sub1317
 sub1317->sub1319
 sub1319->sub1321
+sub1321->sub1323
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -293,17 +295,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-10-29T20:23:35Z -->
-        <!-- Generated from Git commit: 58e51b2b4563e9e1a4f61f565bd64ce972f41231 -->
+        <!-- Generated at (UTC): 2026-10-31T03:37:14Z -->
+        <!-- Generated from Git commit: 69410dc0745abef57030947bdac84489fb805d23 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-10-29T20:23:35Z">2026-10-29T20:23:35Z</time>
+            Generated at (UTC): <time datetime="2026-10-31T03:37:14Z">2026-10-31T03:37:14Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>58e51b2b4563e9e1a4f61f565bd64ce972f41231</code>
+            Source commit: <code>69410dc0745abef57030947bdac84489fb805d23</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>44b6dd38cce6361d</code>
+            Flow content SHA-256: <code>845bc8e8dd96fffc</code>
           </p>
           <div id="canvas"></div>
         </div>
