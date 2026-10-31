@@ -1488,6 +1488,38 @@ class TestDependencyVersionConsistency:
             f"(kubernetes=={eks_minor}.x or {eks_minor - 1}.x) for EKS 1.{eks_minor}"
         )
 
+    def test_kube_proxy_addon_is_pinned_for_the_cluster_minor(self):
+        """The kube-proxy add-on pin (HyperPod's mixed-compute add-ons) covers cdk.json's minor.
+
+        EKS publishes kube-proxy per Kubernetes minor, so the regional stack
+        picks ``EKS_ADDON_KUBE_PROXY_BY_MINOR[kubernetes_version]`` when a
+        Region deploys SageMaker HyperPod. A cdk.json bump without the new
+        minor's build fails here instead of at synth time in a HyperPod
+        Region (docs/MAINTENANCE.md, "Upgrading the EKS Kubernetes version"),
+        and every pinned build must belong to the minor it is filed under.
+        """
+        import json
+        import re
+
+        from gco.stacks.constants import EKS_ADDON_KUBE_PROXY_BY_MINOR, kube_proxy_addon_version
+
+        with open(PROJECT_ROOT / "cdk.json", encoding="utf-8") as f:
+            eks_version = json.load(f)["context"]["kubernetes_version"]
+        assert eks_version in EKS_ADDON_KUBE_PROXY_BY_MINOR, (
+            f"EKS_ADDON_KUBE_PROXY_BY_MINOR has no kube-proxy build for EKS {eks_version} "
+            f"(pinned: {sorted(EKS_ADDON_KUBE_PROXY_BY_MINOR)}); add one from "
+            f"`aws eks describe-addon-versions --addon-name kube-proxy "
+            f"--kubernetes-version {eks_version}`"
+        )
+        for minor, build in EKS_ADDON_KUBE_PROXY_BY_MINOR.items():
+            assert re.fullmatch(r"\d+\.\d+", minor), minor
+            assert re.fullmatch(rf"v{re.escape(minor)}\.\d+-eksbuild\.\d+", build), (
+                f"kube-proxy build {build} is filed under EKS {minor} but is not a v{minor}.x build"
+            )
+        assert kube_proxy_addon_version(eks_version) == EKS_ADDON_KUBE_PROXY_BY_MINOR[eks_version]
+        with pytest.raises(ValueError, match=r"no kube-proxy add-on build is pinned for EKS 1\.0"):
+            kube_proxy_addon_version("1.0")
+
 
 class TestHelmChartConsistency:
     """Tests that Helm chart configurations in charts.yaml are well-formed and consistent."""

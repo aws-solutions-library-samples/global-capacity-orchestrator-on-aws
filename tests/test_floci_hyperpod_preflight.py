@@ -1,15 +1,17 @@
 """Floci emulator layer: the SageMaker HyperPod preflight and status over the wire.
 
 ``gco stacks hyperpod preflight`` (``cli.hyperpod_preflight.run_preflight``)
-asks five services whether a Region can take the configured HyperPod block;
+asks six services whether a Region can take the configured HyperPod block;
 ``gco stacks hyperpod status`` (``cli.hyperpod_status``) pairs the regional
 stack's ``Hyperpod*`` outputs with the cluster SageMaker describes. Floci
 models the EKS, EC2, Service Quotas and CloudFormation halves and none of
 SageMaker's HyperPod or training-plan operations (docs/FLOCI_TESTING.md, gap
-7), so this module proves the checks that read real responses — an EKS
-cluster in each access mode, the Region's zones, a quota listing without the
-``for cluster usage`` quotas — and that every SageMaker refusal lands on the
-documented path: a warning in the preflight, a named error in the status.
+7); its SSM answers but carries none of AWS's public parameters, so the
+HyperPod node-AMI tree reads empty. This module proves the checks that read
+real responses — an EKS cluster in each access mode, the Region's zones, a
+quota listing without the ``for cluster usage`` quotas, the empty AMI tree —
+and that every SageMaker refusal lands on the documented path: a warning in
+the preflight, a named error in the status.
 """
 
 from __future__ import annotations
@@ -31,6 +33,8 @@ pytestmark = floci_test_markers()
 
 REGION = "us-east-1"
 _FAST_WAIT = {"Delay": 1, "MaxAttempts": 120}
+#: The EKS minor the preflight checks HyperPod's AMI tree for (cdk.json's, in a deployment).
+_K8S = "1.36"
 
 
 def _block(**overrides: Any) -> dict[str, Any]:
@@ -107,12 +111,19 @@ class TestPreflight:
         without HyperPod capacity reports, and the preflight has to call that
         a failure naming the type rather than pass on an empty listing.
         """
-        from cli.hyperpod_preflight import FAIL, PASS, SKIP, WARN, run_preflight
+        from cli.hyperpod_preflight import (
+            FAIL,
+            HYPERPOD_AMI_PARAMETER_ROOT,
+            PASS,
+            SKIP,
+            WARN,
+            run_preflight,
+        )
 
         project = unique_name("gcohp").replace("-", "")[:12]
         _create_eks_cluster(f"{project}-{REGION}", network, authentication_mode="API")
         try:
-            report = run_preflight(REGION, _block(), project=project)
+            report = run_preflight(REGION, _block(), project=project, kubernetes_version=_K8S)
         finally:
             _delete_eks_cluster(f"{project}-{REGION}")
 
@@ -120,6 +131,16 @@ class TestPreflight:
         assert report.region == REGION and report.cluster == f"{project}-hyperpod"
         assert checks["agent-image"] == [
             (PASS, "health-monitoring agent image published for this Region")
+        ]
+        # The emulator's SSM carries none of AWS's public parameters, so the AMI
+        # tree reads empty: a warning that names the tree, never a verdict.
+        assert checks["kubernetes-version"] == [
+            (
+                WARN,
+                "no HyperPod node AMI parameters under "
+                f"{HYPERPOD_AMI_PARAMETER_ROOT} in {REGION}; cannot confirm HyperPod "
+                f"supports EKS {_K8S}",
+            )
         ]
         assert checks["instance-types"] == [
             (
@@ -149,7 +170,13 @@ class TestPreflight:
         session = boto3.session.Session()
         apply_known_floci_gap_shims(session.events)
         project = unique_name("gcohpfree").replace("-", "")[:12]
-        report = run_preflight(REGION, _block(), project=project, client_factory=session.client)
+        report = run_preflight(
+            REGION,
+            _block(),
+            project=project,
+            kubernetes_version=_K8S,
+            client_factory=session.client,
+        )
         checks = _checks(report)
         assert checks["cluster-name"] == [(PASS, f"{project}-hyperpod is free")]
         assert checks["eks-cluster"] == [
@@ -180,7 +207,7 @@ class TestPreflight:
             ],
         )
         try:
-            report = run_preflight(REGION, block, project=project)
+            report = run_preflight(REGION, block, project=project, kubernetes_version=_K8S)
         finally:
             _delete_eks_cluster(f"{project}-{REGION}")
 

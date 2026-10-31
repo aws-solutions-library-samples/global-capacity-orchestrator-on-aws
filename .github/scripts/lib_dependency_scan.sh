@@ -473,15 +473,34 @@ if value and re.fullmatch(r'\d+\.\d+(?:\.\d+)?', value):
 " "$file" 2>/dev/null | sort -V
 }
 
-# extract_eks_addons <file>
+# extract_eks_addons <file> [k8s_version]
 #
 # Extracts EKS addon name|version pairs from the constants module.
 # Falls back to reading constants.py directly if the module can't be imported.
 # Prints one "addon_name|addon_version" per line.
+#
+# The five platform add-ons are unconditional. The three mixed-compute add-ons
+# the regional stack creates with SageMaker HyperPod (vpc-cni, kube-proxy,
+# coredns) are included too; kube-proxy is pinned per EKS minor
+# (EKS_ADDON_KUBE_PROXY_BY_MINOR), so its line carries the build for
+# ``k8s_version`` (default: cdk.json's kubernetes_version) and is omitted when
+# that minor has no pin — tests/test_integration.py fails CI on that gap, and
+# comparing another minor's build against the cluster minor's latest would
+# only report noise.
 extract_eks_addons() {
   local file="${1:-gco/stacks/regional_stack.py}"
+  local k8s_version="${2:-}"
   python3 -c "
-import sys
+import json, os, re, sys
+
+def cdk_k8s_version():
+    try:
+        with open('cdk.json') as f:
+            return str(json.load(f)['context']['kubernetes_version'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ''
+
+k8s = sys.argv[2] or cdk_k8s_version()
 try:
     from gco.stacks.constants import (
         EKS_ADDON_POD_IDENTITY_AGENT,
@@ -489,6 +508,9 @@ try:
         EKS_ADDON_EFS_CSI_DRIVER,
         EKS_ADDON_CLOUDWATCH_OBSERVABILITY,
         EKS_ADDON_FSX_CSI_DRIVER,
+        EKS_ADDON_VPC_CNI,
+        EKS_ADDON_COREDNS,
+        EKS_ADDON_KUBE_PROXY_BY_MINOR,
     )
     addons = [
         ('eks-pod-identity-agent', EKS_ADDON_POD_IDENTITY_AGENT),
@@ -496,12 +518,14 @@ try:
         ('aws-efs-csi-driver', EKS_ADDON_EFS_CSI_DRIVER),
         ('amazon-cloudwatch-observability', EKS_ADDON_CLOUDWATCH_OBSERVABILITY),
         ('aws-fsx-csi-driver', EKS_ADDON_FSX_CSI_DRIVER),
+        ('vpc-cni', EKS_ADDON_VPC_CNI),
+        ('coredns', EKS_ADDON_COREDNS),
     ]
-    for name, version in addons:
-        print(f'{name}|{version}')
+    kube_proxy = dict(EKS_ADDON_KUBE_PROXY_BY_MINOR)
 except ImportError:
     # Fallback: read constants.py directly
-    import re, os
+    addons = []
+    kube_proxy = {}
     constants_path = os.path.join(os.path.dirname(sys.argv[1]), 'constants.py')
     if os.path.exists(constants_path):
         with open(constants_path) as f:
@@ -513,18 +537,27 @@ except ImportError:
             'EKS_ADDON_EFS_CSI_DRIVER': 'aws-efs-csi-driver',
             'EKS_ADDON_CLOUDWATCH_OBSERVABILITY': 'amazon-cloudwatch-observability',
             'EKS_ADDON_FSX_CSI_DRIVER': 'aws-fsx-csi-driver',
+            'EKS_ADDON_VPC_CNI': 'vpc-cni',
+            'EKS_ADDON_COREDNS': 'coredns',
         }
         for const_name, addon_name in mapping.items():
             m = re.search(const_name + r'\s*=\s*\"([^\"]+)\"', text)
             if m:
-                print(f'{addon_name}|{m.group(1)}')
+                addons.append((addon_name, m.group(1)))
+        block = re.search(r'EKS_ADDON_KUBE_PROXY_BY_MINOR[^{]*\{(.*?)\}', text, re.DOTALL)
+        if block:
+            kube_proxy = dict(re.findall(r'\"(\d+\.\d+)\":\s*\"([^\"]+)\"', block.group(1)))
     else:
         # Last resort: scan the file for inline addon_name/addon_version pairs
         with open(sys.argv[1]) as f:
             text = f.read()
         for m in re.finditer(r'addon_name=\"([^\"]+)\".*?addon_version=\"([^\"]+)\"', text, re.DOTALL):
-            print(f'{m.group(1)}|{m.group(2)}')
-" "$file" 2>/dev/null
+            addons.append((m.group(1), m.group(2)))
+if k8s in kube_proxy:
+    addons.append(('kube-proxy', kube_proxy[k8s]))
+for name, version in addons:
+    print(f'{name}|{version}')
+" "$file" "$k8s_version" 2>/dev/null
 }
 
 # extract_helm_charts [charts_yaml_path]

@@ -36,6 +36,7 @@ When `hyperpod.enabled` is true for a Region, the regional stack
 | `AWS::EKS::AccessEntry` of type `HYPERPOD_LINUX` | How the nodes authenticate to the cluster. The EKS cluster is access-entries only; this entry takes no access policies. |
 | Security group `<project>-hyperpod-sg-<region>` | All traffic within the group (training traffic, EFA) and all traffic to and from the EKS cluster security group (kubelet and control plane, both ways). |
 | Lifecycle script | `on_create.sh` (a logging no-op; EKS orchestration bootstraps the kubelet itself) placed under `hyperpod/lifecycle/` in the regional shared bucket by a custom resource, because `SourceS3Uri` is a prefix HyperPod copies whole onto every node. |
+| `vpc-cni`, `kube-proxy` and `coredns` EKS add-ons | What makes self-managed nodes work on an EKS Auto Mode cluster. Auto Mode provides pod networking, kube-proxy and cluster DNS only for the nodes it manages, and AWS documents that a cluster mixing Auto Mode with other compute still needs these add-ons ([EKS add-ons, Considerations for Amazon EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/eks-add-ons.html)). The two DaemonSets are anti-affine to Auto Mode nodes and land only on the HyperPod nodes; CoreDNS runs on the Auto Mode nodes and publishes the `kube-dns` Service that kube-proxy on the HyperPod nodes routes to (Auto Mode's own DNS has no Service for them to reach). The CNI's network policy agent follows `eks_cluster.network_policy_enforcement`, so the HyperPod nodes enforce the shipped NetworkPolicies like the Auto Mode nodes do. Builds are pinned in `gco/stacks/constants.py` (`EKS_ADDON_VPC_CNI`, `EKS_ADDON_COREDNS`, `EKS_ADDON_KUBE_PROXY_BY_MINOR` keyed by EKS minor); a Region without HyperPod gets none of them. |
 | Kubernetes objects (via the kubectl-applier) | The fixed-name `aws-hyperpod` namespace, the health-monitoring agent `DaemonSet`s and the `deep-health-check` and `job-auto-restart` RBAC the service expects (`10-hyperpod-rbac.yaml`, `51-hyperpod-health-monitoring-agent.yaml`), and a Kueue `ResourceFlavor` / `ClusterQueue` / `LocalQueue` for the nodes (`post-helm-kueue-hyperpod-queue.yaml`). |
 | `nvidia-device-plugin` Helm chart | Advertises the GPUs on HyperPod nodes; EKS Auto Mode's built-in plugin covers only Auto Mode nodes. Pinned to the HyperPod nodes by label. |
 
@@ -106,6 +107,19 @@ the node's HyperPod labels (`sagemaker.amazonaws.com/node-health-status`,
 included in `node_labels`.
 
 ## Enabling it
+
+**The EKS minor comes first.** HyperPod picks each node's AMI from the EKS
+cluster's Kubernetes version at `CreateCluster`, and it publishes that AMI per
+minor, some weeks after EKS ships the minor (the public SSM tree
+`/aws/service/sagemaker-hyperpod/ami/x86_64/eks-<minor>-amazon-linux-2023/latest/ami-id`
+lists what exists; the
+[AMI release notes](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-hyperpod-release-ami-eks.html)
+follow it). `cdk.json` ships the newest EKS minor, which HyperPod usually does
+not support yet, so a deployment that enables HyperPod sets
+`kubernetes_version` to the newest minor the tree carries *before its first
+deploy*: EKS cannot downgrade a running cluster, and a cluster already on an
+unsupported minor has to wait for HyperPod to add it. The preflight's
+`kubernetes-version` check reads the tree and fails on a minor without an AMI.
 
 ```bash
 # Turn it on in cdk.json; the instance-group options rewrite the block's first
@@ -193,7 +207,9 @@ gco stacks hyperpod status -r us-east-1
 ```
 
 The preflight checks, per Region, what would make the deploy fail or the
-nodes never join: the Region publishes a health-monitoring agent image, the
+nodes never join: the Region publishes a health-monitoring agent image,
+HyperPod publishes a node AMI for the EKS minor the cluster runs (cdk.json
+`kubernetes_version`; see [Enabling it](#enabling-it)), the
 account's `<instance type> for cluster usage` Service Quotas cover every
 instance group's count (a type with no such quota is not a HyperPod type in
 the Region), each `training_plan_arn` exists, is `Active` or `Scheduled`,
@@ -215,8 +231,11 @@ nodes that ran a job (see [How work reaches HyperPod nodes](#how-work-reaches-hy
 - The nodes authenticate with the `HYPERPOD_LINUX` access entry of their
   execution role only; no `aws-auth` ConfigMap, no cluster-admin grants.
 - The execution role holds the AWS-managed cluster-instance policy, the
-  documented EKS-node actions, and read access to the lifecycle prefix; the
-  nodes get no credentials for the regional bucket beyond that prefix.
+  documented EKS-node actions (the VPC CNI's `AmazonEKS_CNI_Policy` actions,
+  because `aws-node` on a HyperPod node runs with the node's credentials, plus
+  image pulls and Pod Identity; `ec2:CreateTags` is scoped to network
+  interfaces), and read access to the lifecycle prefix; the nodes get no
+  credentials for the regional bucket beyond that prefix.
 - The security group admits security-group sources only (itself and the EKS
   cluster group), never a CIDR.
 - The health-monitoring agent runs non-root with every capability dropped,
@@ -242,7 +261,12 @@ group at its target count and its instance `Running`, a Job submitted through
 the GCO API to the `gco-hyperpod` queue and requesting one GPU completes, and
 the jobs API's placement report puts its pod on a `hyperpod` node. The account
 preflight runs first, and the final inventory counts HyperPod clusters as a
-residual category so one left behind fails the run. See
+residual category so one left behind fails the run. Because `cdk.json` ships
+the newest EKS minor and HyperPod's node AMI trails it, the run passes
+`gco release validate --kubernetes-version <minor>` with the newest minor the
+AMI tree carries: the clusters deploy at that minor (the same `kubernetes_version`
+CDK context a deployment sets in `cdk.json`), the preflight checks it, the
+`topology` action verifies it, and it is part of the resume identity. See
 [LIVE_RELEASE_VALIDATION.md](LIVE_RELEASE_VALIDATION.md).
 
 The preflight and status commands also run against the
@@ -256,6 +280,12 @@ stay in the unit suite.
 
 - EKS orchestration only. HyperPod's Slurm orchestration is not a GCO Slurm
   backend; [AWS PCS](PCS.md) and [Slinky](SLURM_OPERATOR.md) are.
+- The EKS minor is bounded by HyperPod's node AMIs, which trail new EKS
+  minors; a Region with HyperPod on runs the newest minor the AMI tree
+  carries, not necessarily the one `cdk.json` ships (see
+  [Enabling it](#enabling-it)). Pods on HyperPod nodes resolve DNS through
+  the `coredns` add-on's pods on the Auto Mode nodes, so a HyperPod node
+  depends on the Auto Mode node pools for DNS.
 - One Availability Zone per cluster, as HyperPod requires.
 - The EFA and Neuron device plugins GCO installs target EC2 instance types;
   EFA on HyperPod `ml.p*`/`ml.trn*` nodes needs their node affinities

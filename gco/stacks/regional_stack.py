@@ -2136,11 +2136,22 @@ class GCORegionalStack(Stack):
             eks_cluster_name=self.cluster.cluster_name,
             eks_cluster_arn=self.cluster.cluster_arn,
             eks_cluster_security_group=self.cluster.cluster_security_group,
+            kubernetes_version=self.cluster_config.kubernetes_version,
+            network_policy_enforcement=self._network_policy_enforcement(),
             shared_bucket=self.regional_shared_bucket,
             shared_bucket_key=self.regional_shared_kms_key,
             custom_resource_role=self.aws_custom_resource_role,
         )
         self.hyperpod.cluster.node.add_dependency(self.converge_trigger)
+        # The VPC CNI add-on and the kubectl-applier both write
+        # kube-system/amazon-vpc-cni (the network policy switch) with the same
+        # value. Converging after the add-on exists makes the applier's
+        # rendering the final word on both keys the live validation reads.
+        self.converge_trigger.node.add_dependency(self.hyperpod.addons["vpc-cni"])
+
+    def _network_policy_enforcement(self) -> bool:
+        """Whether ``eks_cluster.network_policy_enforcement`` keeps the policy controller on (default on)."""
+        return bool(self.config.get_eks_cluster_config().get("network_policy_enforcement", True))
 
     def _tracing_config(self) -> dict[str, Any]:
         """The validated ``tracing`` block (``enabled``, ``sample_ratio``, ...).
@@ -4618,9 +4629,7 @@ class GCORegionalStack(Stack):
         # switch (06-network-policy-controller.yaml); render the operator's
         # choice as the literal the controller reads.
         image_replacements["{{NETWORK_POLICY_ENFORCEMENT}}"] = (
-            "true"
-            if self.config.get_eks_cluster_config().get("network_policy_enforcement", True)
-            else "false"
+            "true" if self._network_policy_enforcement() else "false"
         )
 
         # Resource governance for gco-jobs namespace: ResourceQuota caps aggregate

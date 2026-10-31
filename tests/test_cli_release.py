@@ -329,6 +329,32 @@ class TestEksCapabilitiesPassThrough:
         assert fake_processes.harness_calls == []
 
 
+class TestKubernetesVersionPassThrough:
+    """`--kubernetes-version` is how a release run deploys the minor a feature it
+    turns on supports (SageMaker HyperPod's node AMI trails new EKS minors); the
+    wrapper forwards it, stripped, and says so."""
+
+    def test_the_minor_is_forwarded_and_echoed(self, fake_processes):
+        result = _invoke(*BASE, "--kubernetes-version", " 1.36 ")
+        assert result.exit_code == 0, result.output
+        command = fake_processes.harness_calls[0]["command"]
+        assert command[command.index("--kubernetes-version") + 1] == "1.36"
+        assert "kubernetes: 1.36 (this run's EKS minor, in place of cdk.json's)" in result.output
+
+    def test_absent_by_default(self, fake_processes):
+        result = _invoke(*BASE)
+        assert result.exit_code == 0, result.output
+        assert "--kubernetes-version" not in fake_processes.harness_calls[0]["command"]
+        assert "kubernetes:" not in result.output
+
+    @pytest.mark.parametrize("value", ["1", "v1.36", "1.36.0", "latest", " "])
+    def test_anything_but_a_minor_is_rejected_before_launch(self, fake_processes, value):
+        result = _invoke(*BASE, "--kubernetes-version", value)
+        assert result.exit_code != 0, value
+        assert "--kubernetes-version must be a Kubernetes minor" in result.output, result.output
+        assert fake_processes.harness_calls == []
+
+
 class TestRepoRootValidation:
     def test_refuses_a_non_gco_checkout(self, tmp_path, monkeypatch):
         bare = tmp_path / "bare"

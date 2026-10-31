@@ -15,6 +15,12 @@ asks for around the regional EKS cluster:
 - the lifecycle script HyperPod runs on every node at creation, placed in the
   regional shared bucket by a custom resource so ``SourceS3Uri`` is a prefix
   GCO owns rather than the CDK asset bucket;
+- the three EKS add-ons that make self-managed nodes work on an Auto Mode
+  cluster — ``vpc-cni`` and ``kube-proxy`` (DaemonSets that land only on the
+  HyperPod nodes) and ``coredns`` (runs on the Auto Mode nodes and publishes
+  the ``kube-dns`` Service those nodes' kube-proxy routes to) — pinned in
+  :mod:`gco.stacks.constants`, the CNI's network policy agent following
+  ``eks_cluster.network_policy_enforcement``;
 - the ``AWS::SageMaker::Cluster`` itself with ``Orchestrator.Eks`` pointing at
   the regional cluster, one instance group per configured group (labels and
   taint from :mod:`gco.hyperpod_config`, deep health checks, an optional
@@ -59,6 +65,11 @@ from gco.hyperpod_config import (
     node_labels,
     node_taints,
 )
+from gco.stacks.constants import (
+    EKS_ADDON_COREDNS,
+    EKS_ADDON_VPC_CNI,
+    kube_proxy_addon_version,
+)
 from gco.stacks.nag_suppressions import (
     NagSuppression,
     acknowledge_nag_findings,
@@ -80,17 +91,26 @@ HYPERPOD_ACCESS_ENTRY_TYPE = "HYPERPOD_LINUX"
 CLUSTER_INSTANCE_ROLE_POLICY = "AmazonSageMakerClusterInstanceRolePolicy"
 
 #: ENI, image-pull and Pod Identity actions the HyperPod EKS prerequisites
-#: document for the execution role beyond the managed policy. None of these
-#: APIs is resource-scopable in a useful way for a node role (the ENIs and
-#: images do not exist at synth time), so they are granted on ``*`` and
-#: acknowledged below.
+#: document for the execution role beyond the managed policy ("IAM role for
+#: SageMaker HyperPod", the EKS orchestration policy). The ENI actions are the
+#: VPC CNI's (``AmazonEKS_CNI_Policy``): ``aws-node`` on a HyperPod node runs
+#: with the node's credentials, and ipamd describes the instance type and
+#: attaches secondary interfaces before the first pod gets an address. None of
+#: these APIs is resource-scopable in a useful way for a node role (the ENIs
+#: and images do not exist at synth time), so they are granted on ``*`` and
+#: acknowledged below; ``ec2:CreateTags`` is scoped to network interfaces in
+#: :data:`ENI_TAG_ACTIONS`, as the documented policy does.
 EKS_NODE_ACTIONS: tuple[str, ...] = (
     "ec2:AssignPrivateIpAddresses",
+    "ec2:AttachNetworkInterface",
     "ec2:CreateNetworkInterface",
     "ec2:CreateNetworkInterfacePermission",
     "ec2:DeleteNetworkInterface",
     "ec2:DeleteNetworkInterfacePermission",
+    "ec2:DescribeInstances",
+    "ec2:DescribeInstanceTypes",
     "ec2:DescribeNetworkInterfaces",
+    "ec2:DescribeTags",
     "ec2:DescribeVpcs",
     "ec2:DescribeDhcpOptions",
     "ec2:DescribeSubnets",
@@ -98,11 +118,24 @@ EKS_NODE_ACTIONS: tuple[str, ...] = (
     "ec2:DetachNetworkInterface",
     "ec2:ModifyNetworkInterfaceAttribute",
     "ec2:UnassignPrivateIpAddresses",
+    "ecr:BatchCheckLayerAvailability",
     "ecr:BatchGetImage",
     "ecr:GetAuthorizationToken",
     "ecr:GetDownloadUrlForLayer",
     "eks-auth:AssumeRoleForPodIdentity",
 )
+
+#: The VPC CNI tags the interfaces it creates (``node.k8s.amazonaws.com/*``);
+#: the documented policy grants it on network interfaces only.
+ENI_TAG_ACTIONS: tuple[str, ...] = ("ec2:CreateTags",)
+
+#: How the mixed-compute add-ons (``vpc-cni``, ``kube-proxy``, ``coredns``)
+#: take over objects that already exist in the cluster: the kubectl-applier
+#: renders ``kube-system/amazon-vpc-cni`` (the network policy switch) before
+#: the add-on exists, and Auto Mode owns the ``policyendpoints`` CRD the CNI
+#: also ships. OVERWRITE lets EKS adopt them; the add-on renders the same
+#: network-policy value the applier does, so nothing flips.
+_MIXED_COMPUTE_ADDON_RESOLVE_CONFLICTS = "OVERWRITE"
 
 #: The cdk-nag rules that flag an all-traffic (protocol -1) ingress rule
 #: regardless of its source; the HyperPod group needs two such rules.
@@ -133,6 +166,8 @@ class HyperpodCluster(Construct):
         eks_cluster_name: str,
         eks_cluster_arn: str,
         eks_cluster_security_group: ec2.ISecurityGroup,
+        kubernetes_version: str,
+        network_policy_enforcement: bool,
         shared_bucket: s3.IBucket,
         shared_bucket_key: kms.IKey,
         custom_resource_role: iam.IRole,
@@ -145,6 +180,8 @@ class HyperpodCluster(Construct):
         self.region = region
         self.vpc = vpc
         self.eks_cluster_security_group = eks_cluster_security_group
+        self.kubernetes_version = kubernetes_version
+        self.network_policy_enforcement = network_policy_enforcement
         self.removal_policy = _removal_policy(str(config["removal_policy"]))
         self.cluster_name = cluster_name(config, project_name)
         self.subnet = self._select_subnet(subnets)
@@ -161,8 +198,53 @@ class HyperpodCluster(Construct):
         self.lifecycle_script = self._publish_lifecycle_script(
             shared_bucket, shared_bucket_key, custom_resource_role
         )
+        self.addons = self._create_mixed_compute_addons(eks_cluster_name)
         self.cluster = self._create_cluster(eks_cluster_arn, shared_bucket)
         self._outputs()
+
+    # -- mixed-compute add-ons ---------------------------------------------------
+
+    def _create_mixed_compute_addons(self, eks_cluster_name: str) -> dict[str, eks_l1.CfnAddon]:
+        """The EKS add-ons HyperPod nodes need on an Auto Mode cluster, by add-on name.
+
+        Auto Mode gives pod networking, kube-proxy and cluster DNS only to the
+        nodes it manages; HyperPod's instances are self-managed nodes to EKS,
+        so the VPC CNI and kube-proxy DaemonSets (anti-affine to Auto Mode
+        nodes, they land only on the HyperPod nodes) and CoreDNS (its pods run
+        on the Auto Mode nodes and publish the ``kube-dns`` Service kube-proxy
+        on the HyperPod nodes routes to) come from the EKS add-ons. The CNI's
+        network policy agent follows ``eks_cluster.network_policy_enforcement``
+        so the HyperPod nodes enforce the shipped NetworkPolicies the same way
+        the Auto Mode nodes do, and so the add-on renders the same
+        ``amazon-vpc-cni`` ConfigMap value the kubectl-applier does.
+        """
+        kube_proxy_version = kube_proxy_addon_version(self.kubernetes_version)
+        enforcement = "true" if self.network_policy_enforcement else "false"
+        addons: dict[str, eks_l1.CfnAddon] = {}
+        for construct_id, name, version, configuration in (
+            (
+                "VpcCniAddon",
+                "vpc-cni",
+                EKS_ADDON_VPC_CNI,
+                {"enableNetworkPolicy": enforcement},
+            ),
+            ("KubeProxyAddon", "kube-proxy", kube_proxy_version, None),
+            ("CoreDnsAddon", "coredns", EKS_ADDON_COREDNS, None),
+        ):
+            addon = eks_l1.CfnAddon(
+                self,
+                construct_id,
+                cluster_name=eks_cluster_name,
+                addon_name=name,
+                addon_version=version,
+                resolve_conflicts=_MIXED_COMPUTE_ADDON_RESOLVE_CONFLICTS,
+                preserve_on_delete=False,
+                configuration_values=(
+                    json.dumps(configuration, sort_keys=True) if configuration else None
+                ),
+            )
+            addons[name] = addon
+        return addons
 
     # -- placement -------------------------------------------------------------
 
@@ -203,6 +285,16 @@ class HyperpodCluster(Construct):
                 sid="EksNodeNetworkingAndImages",
                 actions=list(EKS_NODE_ACTIONS),
                 resources=["*"],
+            )
+        )
+        stack = Stack.of(self)
+        role.add_to_policy(
+            iam.PolicyStatement(
+                sid="EksNodeInterfaceTags",
+                actions=list(ENI_TAG_ACTIONS),
+                resources=[
+                    f"arn:{stack.partition}:ec2:{stack.region}:{stack.account}:network-interface/*"
+                ],
             )
         )
         # Exact statements rather than grant_read(): the recursive copy of the
@@ -263,6 +355,19 @@ class HyperpodCluster(Construct):
                         "shared bucket: the node lifecycle script lives there and nowhere else."
                     ),
                     applies_to=[f"Resource::<{bucket_logical_id}.Arn>/{LIFECYCLE_PREFIX}/*"],
+                ),
+                NagSuppression(
+                    id="AwsSolutions-IAM5",
+                    reason=(
+                        "ec2:CreateTags on this account's network interfaces in this Region: "
+                        "the VPC CNI on each HyperPod node tags the secondary interfaces it "
+                        "creates for pod addresses, and their ids do not exist at synth time. "
+                        "The same scope as HyperPod's documented EKS execution-role policy."
+                    ),
+                    applies_to=[
+                        "Resource::arn:<AWS::Partition>:ec2:<AWS::Region>:<AWS::AccountId>:"
+                        "network-interface/*"
+                    ],
                 ),
             ],
         )
@@ -451,6 +556,12 @@ class HyperpodCluster(Construct):
         cluster.node.add_dependency(self.access_entry)
         cluster.node.add_dependency(self.lifecycle_script)
         cluster.node.add_dependency(self.security_group)
+        # The CNI and kube-proxy DaemonSets exist before the first node joins,
+        # so it turns Ready as soon as the kubelet registers (and, on stack
+        # deletion, the nodes are gone before their networking is removed).
+        # CoreDNS runs on the Auto Mode nodes and needs no ordering.
+        cluster.node.add_dependency(self.addons["vpc-cni"])
+        cluster.node.add_dependency(self.addons["kube-proxy"])
         cluster.apply_removal_policy(self.removal_policy)
         return cluster
 

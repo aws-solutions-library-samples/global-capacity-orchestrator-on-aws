@@ -19,6 +19,7 @@ from ..constants import (
 )
 from ..context import (
     _direct_regional_access_enabled,
+    effective_kubernetes_version,
 )
 from ..inventory import (
     describe_stack,
@@ -31,17 +32,13 @@ from ..ownership.stacks import (
 
 
 def _expected_kubernetes_version(ctx: RunContext) -> str:
-    """The ``kubernetes_version`` the run deployed with, from cdk.json's context.
+    """The ``kubernetes_version`` the run deployed with (the override, else cdk.json's).
 
-    The runner loads ``cdk.json`` once (``RunContext.cdk_context``); a context
-    without the key, or with a non-string value, is a broken checkout rather
-    than something to default, so it fails the action instead of letting the
-    cluster-version comparison pass vacuously.
+    A cdk.json without the key fails the action rather than letting the
+    cluster-version comparison pass vacuously; see
+    :func:`~scripts.live_release_validation.context.effective_kubernetes_version`.
     """
-    version = ctx.cdk_context.get("kubernetes_version")
-    if not isinstance(version, str) or not version.strip():
-        raise RuntimeError("cdk.json context.kubernetes_version is missing or not a string")
-    return version.strip()
+    return effective_kubernetes_version(ctx)
 
 
 def action_topology(ctx: RunContext) -> dict[str, Any]:
@@ -119,12 +116,18 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
         # The cluster minor is the one thing a Kubernetes upgrade PR changes
         # that nothing else in this run would notice: every add-on, probe and
         # Job below passes just as well on the previous minor. Compare it with
-        # cdk.json so the run proves the version it deployed, not just that a
-        # cluster came up.
+        # the minor the run deployed (cdk.json's, or --kubernetes-version) so
+        # the run proves the version it deployed, not just that a cluster came
+        # up.
         if cluster.get("version") != expected_version:
+            source = (
+                "the run's --kubernetes-version"
+                if getattr(ctx.settings, "kubernetes_version_override", "")
+                else "cdk.json kubernetes_version"
+            )
             raise RuntimeError(
                 f"EKS cluster {name} runs Kubernetes {cluster.get('version')!r}; "
-                f"cdk.json kubernetes_version is {expected_version!r}"
+                f"{source} is {expected_version!r}"
             )
         clusters[region] = {
             "name": name,

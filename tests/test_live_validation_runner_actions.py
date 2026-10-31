@@ -2444,6 +2444,33 @@ class TestMainSettings:
         )
         assert settings.min_free_disk_gib == 0
 
+    def test_kubernetes_version_override_is_cdk_context_and_identity(self, tmp_path: Path) -> None:
+        """``--kubernetes-version`` rides every CDK invocation and pins the resume identity."""
+        root = _fake_repo(tmp_path)
+        default = self._settings(tmp_path, _cli_argv("--repo-root", str(root), actions="preflight"))
+        assert default.kubernetes_version_override == ""
+        assert "kubernetes_version" not in default.extra_cdk_context()
+
+        settings = self._settings(
+            tmp_path,
+            _cli_argv(
+                "--repo-root", str(root), "--kubernetes-version", " 1.36 ", actions="preflight"
+            ),
+        )
+        assert settings.kubernetes_version_override == "1.36"
+        assert settings.extra_cdk_context()["kubernetes_version"] == "1.36"
+        assert settings.identity()["extra_cdk_context"]["kubernetes_version"] == "1.36"
+
+    @pytest.mark.parametrize("value", ["1", "v1.36", "1.36.0", "latest", ""])
+    def test_kubernetes_version_must_be_a_minor(
+        self, tmp_path: Path, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        parser = live_main._build_parser()
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(_cli_argv("--kubernetes-version", value, actions="preflight"))
+        assert excinfo.value.code == 2
+        assert f"expected a Kubernetes minor such as 1.36, got {value!r}" in capsys.readouterr().err
+
     def test_explicit_paths_resume_and_all_schedulers(self, tmp_path: Path) -> None:
         root = _fake_repo(tmp_path)
 
@@ -4632,6 +4659,30 @@ class TestActionTopology:
             result = actions_topology.action_topology(ctx)
 
         assert result["clusters"]["us-east-1"]["version"] == "1.33"
+
+    def test_the_runs_kubernetes_version_override_is_the_expected_minor(self) -> None:
+        """``--kubernetes-version`` is what the deploy carried, so it is what the cluster must run."""
+        ctx = self._ctx()
+        ctx.cdk_context["kubernetes_version"] = "1.34"  # cdk.json says one thing...
+        ctx.settings.kubernetes_version_override = " 1.33 "  # ...the run deployed another
+
+        with self._checks():
+            result = actions_topology.action_topology(ctx)
+        assert result["clusters"]["us-east-1"]["version"] == "1.33"
+
+        ctx = self._ctx()
+        ctx.settings.kubernetes_version_override = "1.32"
+        with (
+            self._checks(),
+            pytest.raises(
+                RuntimeError,
+                match=re.escape(
+                    "gco-live-us-east-1 runs Kubernetes '1.33'; "
+                    "the run's --kubernetes-version is '1.32'"
+                ),
+            ),
+        ):
+            actions_topology.action_topology(ctx)
 
     @pytest.mark.parametrize("value", [None, "", "   ", 1.33, ["1.33"]], ids=repr)
     def test_a_missing_or_non_string_kubernetes_version_fails_before_the_describe(

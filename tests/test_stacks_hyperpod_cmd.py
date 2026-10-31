@@ -29,12 +29,16 @@ _ARN = "arn:aws:sagemaker:us-east-1:123456789012:cluster/abc123"
 _PLAN_ARN = "arn:aws:sagemaker:us-east-1:123456789012:training-plan/p5-plan"
 
 
+_K8S = "1.36"
+
+
 def _write_cdk_json(path: Path, **context: Any) -> Path:
     document = {
         "app": "python3 app.py",
         "context": {
             "project_name": _PROJECT,
             "deployment_regions": {"global": "us-east-1", "regional": list(_REGIONS)},
+            "kubernetes_version": _K8S,
             **context,
         },
     }
@@ -401,11 +405,24 @@ class TestPreflightCommand:
         run.assert_called_once()
         assert run.call_args.args[0] == "us-east-1"
         assert run.call_args.args[1]["enabled"] is True
-        assert run.call_args.kwargs == {"project": _PROJECT}
+        # The cluster minor from cdk.json rides along for the kubernetes-version check.
+        assert run.call_args.kwargs == {"project": _PROJECT, "kubernetes_version": _K8S}
         assert f"SageMaker HyperPod preflight — us-east-1 (enabled): {_CLUSTER}" in result.output
         assert "✓ agent-image" in result.output
         assert "! instance-types" in result.output
         assert "ready: no failures" in result.output
+
+    def test_a_cdk_json_without_the_cluster_minor_is_an_error(self, workdir: Path) -> None:
+        """The kubernetes-version check needs the minor; a cdk.json without it fails like a bad block."""
+        path = _write_cdk_json(workdir / "cdk.json", hyperpod={"enabled": True})
+        document = json.loads(path.read_text(encoding="utf-8"))
+        del document["context"]["kubernetes_version"]
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with patch("cli.hyperpod_preflight.run_preflight") as run:
+            result = _invoke(["stacks", "hyperpod", "preflight"])
+        assert result.exit_code == 1
+        run.assert_not_called()
+        assert "[us-east-1] cdk.json context.kubernetes_version is missing" in result.output
 
     def test_a_failure_in_one_region_exits_1_with_json(self, workdir: Path) -> None:
         _write_cdk_json(workdir / "cdk.json", hyperpod={"enabled": True})

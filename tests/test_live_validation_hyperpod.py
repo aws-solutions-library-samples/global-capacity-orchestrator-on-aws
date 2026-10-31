@@ -41,8 +41,14 @@ def _ctx(
     regions: tuple[str, ...] = (_REGION,),
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        settings=SimpleNamespace(run_id="run-123", hyperpod_overrides_json=overrides),
-        cdk_context={"api_gateway": {"regional_api_enabled": True}, **(cdk_context or {})},
+        settings=SimpleNamespace(
+            run_id="run-123", hyperpod_overrides_json=overrides, kubernetes_version_override=""
+        ),
+        cdk_context={
+            "api_gateway": {"regional_api_enabled": True},
+            "kubernetes_version": "1.37",
+            **(cdk_context or {}),
+        },
         deployment_regions=regions,
         config=SimpleNamespace(project_name=_PROJECT, global_region=_REGION),
         session=MagicMock(),
@@ -373,8 +379,8 @@ class TestPreflightStep:
         }
         calls: list[tuple[str, Mapping[str, Any], str, Any]] = []
 
-        def fake_run_preflight(region, config, *, project, client_factory):
-            calls.append((region, config, project, client_factory))
+        def fake_run_preflight(region, config, *, project, kubernetes_version, client_factory):
+            calls.append((region, config, project, kubernetes_version, client_factory))
             return reports[region]
 
         with patch_live_validation_helper("run_hyperpod_preflight", side_effect=fake_run_preflight):
@@ -386,10 +392,34 @@ class TestPreflightStep:
             call[1]["instance_groups"][0]["instance_type"] == "ml.g4dn.xlarge" for call in calls
         )
         assert all(call[2] == _PROJECT for call in calls)
-        assert all(call[3] is ctx.session.client for call in calls)
+        # The minor the checks are made for is cdk.json's unless the run overrides it.
+        assert all(call[3] == "1.37" for call in calls)
+        assert all(call[4] is ctx.session.client for call in calls)
         assert summary["ok"] is True
+        assert summary["kubernetes_version"] == "1.37"
         assert [r["region"] for r in summary["regions"]] == [_REGION, "eu-west-1"]
         assert summary["regions_without_hyperpod"] == []
+
+    def test_the_runs_kubernetes_version_override_is_what_the_checks_see(self) -> None:
+        """``--kubernetes-version`` is the minor the deploy carries, so HyperPod's AMI check uses it."""
+        ctx = _ctx()
+        ctx.settings.kubernetes_version_override = " 1.36 "
+        with patch_live_validation_helper(
+            "run_hyperpod_preflight", return_value=_report(_REGION, ("agent-image", PASS, "ok"))
+        ) as run:
+            summary = actions_preflight._hyperpod_preflight(ctx)
+        assert run.call_args.kwargs["kubernetes_version"] == "1.36"
+        assert summary["kubernetes_version"] == "1.36"
+
+    def test_a_cdk_json_without_the_minor_fails_before_any_check(self) -> None:
+        ctx = _ctx()
+        del ctx.cdk_context["kubernetes_version"]
+        with (
+            patch_live_validation_helper("run_hyperpod_preflight") as run,
+            pytest.raises(RuntimeError, match="kubernetes_version is missing or not a string"),
+        ):
+            actions_preflight._hyperpod_preflight(ctx)
+        run.assert_not_called()
 
     def test_regions_without_hyperpod_are_recorded_and_not_checked(self) -> None:
         ctx = _ctx(regions=(_REGION, "eu-west-1"), overrides="")

@@ -221,8 +221,26 @@ shipping a skew.
    [Version-skew rules](#version-skew-rules)), and the monthly dependency
    scan reports that lag under **Version Consistency** until the pin catches
    up. Do not pin a pre-release to close the gap.
-3. `gco/stacks/constants.py` — update the five `EKS_ADDON_*` constants to builds
-   published for the new minor (see [validating add-ons](#validating-add-on-versions)).
+3. `gco/stacks/constants.py` — update the `EKS_ADDON_*` constants to builds
+   published for the new minor (see [validating add-ons](#validating-add-on-versions)):
+   the five platform add-ons, and the two version-independent mixed-compute
+   add-ons SageMaker HyperPod needs (`EKS_ADDON_VPC_CNI`, `EKS_ADDON_COREDNS`).
+   kube-proxy is published per Kubernetes minor, so add the new minor's build
+   to `EKS_ADDON_KUBE_PROXY_BY_MINOR` (keep the previous minors a deployment
+   may still run — a HyperPod Region stays on the newest minor HyperPod
+   supports, see below);
+   `tests/test_integration.py::test_kube_proxy_addon_is_pinned_for_the_cluster_minor`
+   fails the bump until the cdk.json minor has an entry.
+   **SageMaker HyperPod gates the minor a Region can run.** HyperPod picks
+   each node's AMI from the cluster's Kubernetes version and publishes that AMI
+   per minor, weeks after EKS ships it (`aws ssm get-parameters-by-path --path
+   /aws/service/sagemaker-hyperpod/ami/x86_64 --recursive` lists the
+   `eks-<minor>-amazon-linux-2023` leaves that exist). Moving `cdk.json` is
+   still right — a Region with HyperPod on pins `kubernetes_version` to the
+   newest minor the tree carries, the `kubernetes-version` preflight check
+   enforces it, and `gco release validate --kubernetes-version` deploys the
+   release run at that minor — but a HyperPod Region cannot follow the bump
+   until the AMI exists, and EKS cannot downgrade a cluster that already did.
 4. Check whether the pinned `aws-cdk-lib` exposes
    `eks.KubernetesVersion.V1_<minor>`. The enum usually trails a new EKS minor
    by a release or two, and that is expected and harmless: `GCORegionalStack`
@@ -287,7 +305,8 @@ Query the ones supported for the new minor (recipe also in
 ```bash
 K8S_VERSION="1.37"  # the minor you are moving to
 for addon in eks-pod-identity-agent metrics-server aws-efs-csi-driver \
-             amazon-cloudwatch-observability aws-fsx-csi-driver; do
+             amazon-cloudwatch-observability aws-fsx-csi-driver \
+             vpc-cni kube-proxy coredns; do
   echo "=== $addon ==="
   aws eks describe-addon-versions \
     --addon-name "$addon" \
@@ -296,6 +315,14 @@ for addon in eks-pod-identity-agent metrics-server aws-efs-csi-driver \
     --output text
 done
 ```
+
+The last three are the mixed-compute add-ons the regional stack creates only
+with SageMaker HyperPod on (`docs/HYPERPOD.md`, "What gets deployed"). Their
+`computeTypes` in the same `describe-addon-versions` output are the contract:
+`vpc-cni` and `kube-proxy` must *not* list `auto` (their DaemonSets stay off
+the Auto Mode nodes), `coredns` must list it (its pods run there). The
+`kube-proxy` build goes under the new minor's key in
+`EKS_ADDON_KUBE_PROXY_BY_MINOR`.
 
 When the `metrics-server` pin moves past the `v0.9` line, re-check which
 resource-metrics API versions the new release registers

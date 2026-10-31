@@ -760,6 +760,56 @@ STUB
     [[ "$output" == *"efs-csi"* ]] || [[ "$output" == *"aws-efs"* ]]
 }
 
+@test "extract_eks_addons: includes the HyperPod mixed-compute add-ons, kube-proxy for the cdk.json minor" {
+    run extract_eks_addons "gco/stacks/regional_stack.py"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"vpc-cni|v"* ]]
+    [[ "$output" == *"coredns|v"* ]]
+    local minor
+    minor="$(extract_k8s_version cdk.json)"
+    # kube-proxy is pinned per EKS minor; the line carries the cluster minor's build.
+    [[ "$output" == *"kube-proxy|v${minor}."* ]]
+}
+
+@test "extract_eks_addons: kube-proxy follows the requested minor and drops out when unpinned" {
+    run extract_eks_addons "gco/stacks/regional_stack.py" "1.36"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kube-proxy|v1.36."* ]]
+    run extract_eks_addons "gco/stacks/regional_stack.py" "1.99"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"kube-proxy|"* ]]
+    [[ "$output" == *"vpc-cni|v"* ]]
+}
+
+@test "extract_eks_addons: regex fallback reads every pin, kube-proxy included, without importing gco" {
+    # A constants.py the import path cannot see: the fallback parses the
+    # string constants and the per-minor kube-proxy mapping from the text.
+    run bash -c '
+        source .github/scripts/lib_dependency_scan.sh
+        dir="$(mktemp -d)"
+        cat > "$dir/constants.py" <<EOF
+EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.3"
+EKS_ADDON_VPC_CNI = "v1.23.2-eksbuild.8"
+EKS_ADDON_COREDNS = "v1.14.7-eksbuild.22"
+EKS_ADDON_KUBE_PROXY_BY_MINOR: Mapping[str, str] = MappingProxyType(
+    {
+        "1.36": "v1.36.0-eksbuild.58",
+        "1.37": "v1.37.0-eksbuild.32",
+    }
+)
+EOF
+        echo "" > "$dir/regional_stack.py"
+        PYTHONPATH=/nonexistent extract_eks_addons "$dir/regional_stack.py" "1.36"
+        rm -rf "$dir"
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"eks-pod-identity-agent|v1.4.0-eksbuild.3"* ]]
+    [[ "$output" == *"vpc-cni|v1.23.2-eksbuild.8"* ]]
+    [[ "$output" == *"coredns|v1.14.7-eksbuild.22"* ]]
+    [[ "$output" == *"kube-proxy|v1.36.0-eksbuild.58"* ]]
+    [[ "$output" != *"v1.37.0"* ]]
+}
+
 @test "extract_eks_addons: returns empty for file with no addons" {
     # Force the regex fallback path
     run bash -c '

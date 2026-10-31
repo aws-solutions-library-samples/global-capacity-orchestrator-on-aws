@@ -188,6 +188,15 @@ class RunSettings:
     #: GPU instance group (``checks/hyperpod.py``) so the ``hyperpod`` action
     #: proves the node joins and runs work; part of the resume identity.
     hyperpod_overrides_json: str = ""
+    #: The EKS minor this run deploys the regional clusters at
+    #: (``--kubernetes-version``), threaded to CDK as the ``kubernetes_version``
+    #: context in place of cdk.json's, or ``""`` to deploy cdk.json's minor. A
+    #: feature the run turns on can trail EKS — SageMaker HyperPod publishes
+    #: its node AMI per minor, after the minor ships — and the override lets
+    #: the run prove that feature on the newest minor it supports without
+    #: moving the checked-in default. The ``topology`` action compares the
+    #: deployed clusters against this minor; part of the resume identity.
+    kubernetes_version_override: str = ""
 
     # First-class inference action contract. ``inference_enabled`` is explicit
     # because sibling harnesses reuse RunSettings with their own ``all`` action.
@@ -286,6 +295,8 @@ class RunSettings:
             context["pcs_overrides"] = self.pcs_overrides_json
         if self.hyperpod_overrides_json:
             context["hyperpod_overrides"] = self.hyperpod_overrides_json
+        if self.kubernetes_version_override:
+            context["kubernetes_version"] = self.kubernetes_version_override
         return context
 
     def identity(self) -> dict[str, Any]:

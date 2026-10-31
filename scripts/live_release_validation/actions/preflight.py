@@ -26,6 +26,7 @@ from ..context import (
     _run_git,
     _topology_regions,
     _validate_profile,
+    effective_kubernetes_version,
 )
 from ..inventory import (
     collect_project_stacks,
@@ -129,23 +130,32 @@ def _pcs_preflight(ctx: RunContext) -> dict[str, Any]:
 def _hyperpod_preflight(ctx: RunContext) -> dict[str, Any]:
     """Run the SageMaker HyperPod account preflight for every deployment Region with it on.
 
-    Returns the per-Region summaries (``cli.hyperpod_preflight.summarize``);
+    Returns the per-Region summaries (``cli.hyperpod_preflight.summarize``)
+    plus, when any Region was checked, the EKS minor the checks were made
+    for — the run's ``--kubernetes-version`` override, else cdk.json's, which
+    is what the deploy carries and what HyperPod must publish a node AMI for;
     raises when a Region has a failure, with the failing checks named.
     """
     reports = []
+    kubernetes_version: str | None = None
     for region in ctx.deployment_regions:
         config = effective_hyperpod_config(ctx, region)
         if not hyperpod_enabled(config):
             continue
+        if kubernetes_version is None:
+            kubernetes_version = effective_kubernetes_version(ctx)
         reports.append(
             run_hyperpod_preflight(
                 region,
                 config,
                 project=ctx.config.project_name,
+                kubernetes_version=kubernetes_version,
                 client_factory=ctx.session.client,
             )
         )
     summary = summarize_hyperpod(reports)
+    if kubernetes_version is not None:
+        summary["kubernetes_version"] = kubernetes_version
     summary["regions_without_hyperpod"] = [
         region
         for region in ctx.deployment_regions

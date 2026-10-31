@@ -617,7 +617,7 @@ The console output shows each surface's drift inline. To trigger the exact workf
 
 - **New Docker image source** — add a `grep … >> "$ALL_IMAGES"` block alongside the existing ones. Anything with a semver tag is picked up automatically.
 - **New Helm chart** — nothing to change; the script walks every entry in `lambda/helm-installer/charts.yaml`.
-- **New EKS add-on** — add the constant in `gco/stacks/constants.py` and reference it in `regional_stack.py`. The scanner imports from the constants module.
+- **New EKS add-on** — add the constant in `gco/stacks/constants.py`, reference it in `regional_stack.py` (or `hyperpod_cluster.py` for the HyperPod-only mixed-compute add-ons), and list it in `extract_eks_addons` (`lib_dependency_scan.sh`), which imports the constants module by name; kube-proxy is pinned per EKS minor (`EKS_ADDON_KUBE_PROXY_BY_MINOR`) and the scanner reports the cdk.json minor's build.
 - **New Aurora engine version** — update the plain `AURORA_POSTGRES_VERSION` string in `gco/stacks/constants.py`; the stack applies it with `AuroraPostgresEngineVersion.of()`, so no aws-cdk-lib enum needs to exist.
 - **New pre-commit hook** — nothing to change; `extract_precommit_hooks` walks every `repo:` block in `.pre-commit-config.yaml` and the GitHub-tags lookup picks up the hook automatically (as long as the upstream lives on GitHub and tags semver-shaped releases).
 - **New CDK enum constant** — add the constant in `gco/stacks/constants.py`, then add a comparison block in `dependency-scan.sh`'s "Checking CDK enum constants" section that calls a new `get_latest_<name>` helper from `lib_dependency_scan.sh`. Pattern-match the existing `LAMBDA_PYTHON_RUNTIME` block.

@@ -2228,6 +2228,10 @@ class _PreflightFeature:
     importer: Callable[[], ModuleType]  # the preflight module under cli/
     loader: str  # module function: (region, *, force_enabled) -> validated block
     error: str  # module exception for a block that cannot be read or validated
+    #: Module function ``() -> dict`` of extra keyword arguments ``run_preflight``
+    #: takes beyond the block (HyperPod: the cluster minor from cdk.json), or
+    #: ``None`` when the block is all it needs.
+    run_kwargs: str | None = None
 
     def module(self) -> ModuleType:
         return self.importer()
@@ -2238,6 +2242,12 @@ class _PreflightFeature:
             region, force_enabled=force_enabled
         )
         return block
+
+    def run(self, region: str, block: Mapping[str, Any], *, project: str) -> Any:
+        """The module's ``run_preflight`` for one Region, or raise the module's error."""
+        module = self.module()
+        kwargs: dict[str, Any] = getattr(module, self.run_kwargs)() if self.run_kwargs else {}
+        return module.run_preflight(region, block, project=project, **kwargs)
 
     def error_type(self) -> type[Exception]:
         error: type[Exception] = getattr(self.module(), self.error)
@@ -2259,25 +2269,24 @@ _HYPERPOD_PREFLIGHT = _PreflightFeature(
     importer=_import_hyperpod_preflight,
     loader="load_hyperpod_config",
     error="HyperpodPreflightError",
+    run_kwargs="preflight_kwargs",
 )
 
 
 def _preflight_reports(
     formatter: Any, feature: _PreflightFeature, regions: list[str], *, force_enabled: bool
 ) -> tuple[list[Any], int]:
-    """Run the feature's preflight for each region; a bad block counts as an error."""
-    module = feature.module()
+    """Run the feature's preflight for each region; a bad block (or cdk.json) counts as an error."""
     project = _project_name()
     reports: list[Any] = []
     errors = 0
     for target in regions:
         try:
             block = feature.load(target, force_enabled=force_enabled)
+            reports.append(feature.run(target, block, project=project))
         except feature.error_type() as exc:
             formatter.print_error(f"[{target}] {exc}")
             errors += 1
-            continue
-        reports.append(module.run_preflight(target, block, project=project))
     return reports, errors
 
 

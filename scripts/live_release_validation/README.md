@@ -94,7 +94,13 @@ placement report, recorded for every probe) must put the pod on a `hyperpod`
 node. `preflight` runs `cli.hyperpod_preflight` for the merged block before
 `deploy` (`_hyperpod_preflight`), and the inventory's `hyperpod` scanner
 claims HyperPod clusters by project name or `gco:project` tag so one left
-behind is residue.
+behind is residue. HyperPod publishes its node AMI per EKS minor, after the
+minor ships, and cdk.json ships the newest minor, so a release run passes
+`--kubernetes-version <minor>`: `__main__.py` threads it to every CDK
+invocation as the `kubernetes_version` context (`RunSettings.kubernetes_version_override`,
+part of the resume identity through `extra_cdk_context()`), the preflight
+checks HyperPod's AMI tree for that minor, and `topology` compares the
+deployed clusters against it (`context.effective_kubernetes_version`).
 
 The two cluster-facing actions share their kubectl plumbing in
 `checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated

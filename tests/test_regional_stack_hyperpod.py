@@ -12,9 +12,14 @@ through :class:`gco.stacks.hyperpod_cluster.HyperpodCluster`:
   lifecycle script and the optional Training Plan; the execution role with
   the managed policy and exact grants; the HYPERPOD_LINUX access entry; the
   node security group and the reciprocal EKS rule; the lifecycle script put
-  into the regional shared bucket; the dependency on the convergence
-  trigger; the replacements and the chart; the exact-key outputs;
-* construct-level guards (zone selection, no subnets).
+  into the regional shared bucket; the ``vpc-cni``, ``kube-proxy`` and
+  ``coredns`` EKS add-ons that make self-managed nodes work on the Auto Mode
+  cluster (pinned builds, kube-proxy by cluster minor, the CNI's network
+  policy agent following ``eks_cluster.network_policy_enforcement``, the
+  DaemonSets ordered before the SageMaker cluster); the dependency on the
+  convergence trigger; the replacements and the chart; the exact-key outputs;
+* construct-level guards (zone selection, no subnets, an EKS minor without a
+  kube-proxy pin, network policy off).
 
 Stacks synthesize against ``MockConfigLoader`` with Docker image assets and
 the Helm installer patched out, like ``tests/test_regional_stack_pcs.py``.
@@ -35,9 +40,31 @@ from aws_cdk import aws_kms as kms
 from aws_cdk import aws_s3 as s3
 
 from gco import hyperpod_config as hp
+from gco.stacks import constants
 from gco.stacks import hyperpod_cluster as hc
 from gco.stacks import regional_stack as rs
 from tests.test_regional_stack import MockConfigLoader, TestRegionalStackSynthesis
+
+#: ``AmazonEKS_CNI_Policy`` as published (the VPC CNI's needs): HyperPod's
+#: documented EKS execution-role policy is this list plus ECR and Pod Identity.
+_CNI_POLICY_ACTIONS = frozenset(
+    {
+        "ec2:AssignPrivateIpAddresses",
+        "ec2:AttachNetworkInterface",
+        "ec2:CreateNetworkInterface",
+        "ec2:CreateTags",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeTags",
+        "ec2:DetachNetworkInterface",
+        "ec2:ModifyNetworkInterfaceAttribute",
+        "ec2:UnassignPrivateIpAddresses",
+    }
+)
 
 _ACCOUNT = "123456789012"
 _REGION = "us-east-1"
@@ -149,6 +176,12 @@ class TestHyperpodOff:
         assert not [key for key in replacements if key.startswith("{{HYPERPOD_")]
         assert "nvidia-device-plugin" not in stack._get_enabled_helm_charts()
         assert not [key for key in _outputs(stack) if key.startswith("Hyperpod")]
+        # A Region without HyperPod stays a pure Auto Mode cluster: none of the
+        # mixed-compute add-ons (Auto Mode provides networking and DNS itself).
+        addon_names = {
+            r["Properties"]["AddonName"] for r in _of_type(resources, "AWS::EKS::Addon").values()
+        }
+        assert not addon_names & {"vpc-cni", "kube-proxy", "coredns"}
 
     def test_config_doubles_without_the_getter_read_as_off(self) -> None:
         app = cdk.App(context=dict(_AZ_CONTEXT))
@@ -258,6 +291,15 @@ class TestHyperpodOn:
         node = _by_sid(statements, "EksNodeNetworkingAndImages")
         assert set(node["Action"]) == set(hc.EKS_NODE_ACTIONS)
         assert node["Resource"] == "*"
+        # HyperPod's documented EKS execution-role policy is the VPC CNI's
+        # policy plus image pulls and Pod Identity: aws-node runs on the nodes
+        # with the node role, so every AmazonEKS_CNI_Policy action is present.
+        assert _CNI_POLICY_ACTIONS.issubset({*hc.EKS_NODE_ACTIONS, *hc.ENI_TAG_ACTIONS})
+        tags = _by_sid(statements, "EksNodeInterfaceTags")
+        assert tags["Action"] == "ec2:CreateTags"
+        assert json.dumps(tags["Resource"]).endswith(
+            f':ec2:{_REGION}:{_ACCOUNT}:network-interface/*"]]}}'
+        )
         read = _by_sid(statements, "HyperpodLifecycleScriptRead")
         assert read["Action"] == "s3:GetObject"
         assert "hyperpod/lifecycle/*" in json.dumps(read["Resource"])
@@ -349,6 +391,49 @@ class TestHyperpodOn:
         assert outputs["HyperpodClusterName"]["Value"] == "research-hyperpod"
         assert json.loads(outputs["HyperpodInstanceGroups"]["Value"]) == ["p5", "cpu"]
 
+    def test_mixed_compute_addons_make_the_nodes_usable_on_auto_mode(self, synthesized) -> None:
+        """The VPC CNI, kube-proxy and CoreDNS add-ons exist only with HyperPod on.
+
+        Auto Mode serves networking and DNS only to its own nodes; the three
+        add-ons are what let SageMaker's instances run pods. The DaemonSets
+        gate the SageMaker cluster (a joining node turns Ready at once);
+        CoreDNS runs on the Auto Mode nodes and is not ordered.
+        """
+        stack, resources = synthesized
+        assert stack.hyperpod is not None
+        addons = {
+            r["Properties"]["AddonName"]: r
+            for r in _of_type(resources, "AWS::EKS::Addon").values()
+            if r["Properties"]["AddonName"] in {"vpc-cni", "kube-proxy", "coredns"}
+        }
+        assert set(addons) == {"vpc-cni", "kube-proxy", "coredns"}
+        assert addons["vpc-cni"]["Properties"]["AddonVersion"] == constants.EKS_ADDON_VPC_CNI
+        assert addons["coredns"]["Properties"]["AddonVersion"] == constants.EKS_ADDON_COREDNS
+        # MockConfigLoader deploys 1.37; kube-proxy follows the cluster minor.
+        kube_proxy = addons["kube-proxy"]["Properties"]["AddonVersion"]
+        assert kube_proxy == constants.EKS_ADDON_KUBE_PROXY_BY_MINOR["1.37"]
+        for name, addon in addons.items():
+            props = addon["Properties"]
+            assert props["ResolveConflicts"] == "OVERWRITE", name
+            assert props["PreserveOnDelete"] is False, name
+            assert "GCOEksCluster" in json.dumps(props["ClusterName"]), name
+        assert json.loads(addons["vpc-cni"]["Properties"]["ConfigurationValues"]) == {
+            "enableNetworkPolicy": "true"
+        }
+        assert "ConfigurationValues" not in addons["kube-proxy"]["Properties"]
+        assert "ConfigurationValues" not in addons["coredns"]["Properties"]
+        [cluster] = _of_type(resources, "AWS::SageMaker::Cluster").values()
+        depends = set(cluster["DependsOn"])
+        assert any(dep.startswith("HyperpodVpcCniAddon") for dep in depends)
+        assert any(dep.startswith("HyperpodKubeProxyAddon") for dep in depends)
+        assert not any(dep.startswith("HyperpodCoreDnsAddon") for dep in depends)
+        assert set(stack.hyperpod.addons) == {"vpc-cni", "kube-proxy", "coredns"}
+        # The applier converges after the CNI add-on exists: both write the
+        # kube-system/amazon-vpc-cni switch, and the applier's rendering is final.
+        converge = resources["HelmInstallCharts"]["DependsOn"]
+        assert any(dep.startswith("HyperpodVpcCniAddon") for dep in converge)
+        assert not any(dep.startswith("HyperpodKubeProxyAddon") for dep in converge)
+
     def test_default_block_names_the_cluster_after_the_project(self) -> None:
         stack, resources = _synth({"enabled": True})
         [cluster] = _of_type(resources, "AWS::SageMaker::Cluster").values()
@@ -375,10 +460,49 @@ class TestConstructGuards:
             "eks_cluster_name": "gco-test",
             "eks_cluster_arn": f"arn:aws:eks:{_REGION}:{_ACCOUNT}:cluster/gco-test",
             "eks_cluster_security_group": sg,
+            "kubernetes_version": "1.36",
+            "network_policy_enforcement": True,
             "shared_bucket": bucket,
             "shared_bucket_key": key,
             "custom_resource_role": role,
         }
+
+    def test_unpinned_kube_proxy_minor_is_refused_at_synth(self) -> None:
+        stack, kwargs = self._bare_stack()
+        kwargs["kubernetes_version"] = "1.99"
+        with pytest.raises(ValueError, match=r"no kube-proxy add-on build is pinned for EKS 1\.99"):
+            hc.HyperpodCluster(
+                stack,
+                "Hyperpod",
+                config=hp.validate_hyperpod_config({"enabled": True}),
+                project_name="gco",
+                region=_REGION,
+                **kwargs,
+            )
+
+    def test_network_policy_off_turns_the_cni_agent_off(self) -> None:
+        stack, kwargs = self._bare_stack()
+        kwargs["network_policy_enforcement"] = False
+        construct = hc.HyperpodCluster(
+            stack,
+            "Hyperpod",
+            config=hp.validate_hyperpod_config({"enabled": True}),
+            project_name="gco",
+            region=_REGION,
+            **kwargs,
+        )
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        [cni] = [
+            r
+            for r in _of_type(resources, "AWS::EKS::Addon").values()
+            if r["Properties"]["AddonName"] == "vpc-cni"
+        ]
+        assert json.loads(cni["Properties"]["ConfigurationValues"]) == {
+            "enableNetworkPolicy": "false"
+        }
+        assert construct.addons["kube-proxy"].addon_version == constants.kube_proxy_addon_version(
+            "1.36"
+        )
 
     def test_unknown_zone_names_the_available_ones(self) -> None:
         stack, kwargs = self._bare_stack()

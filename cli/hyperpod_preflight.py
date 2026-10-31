@@ -10,6 +10,12 @@ Checks, per Region:
 
 - ``agent-image``: SageMaker HyperPod publishes a health-monitoring agent
   image for the Region (the regional stack refuses to synthesize otherwise).
+- ``kubernetes-version``: SageMaker HyperPod publishes a node AMI for the EKS
+  minor the cluster runs (cdk.json ``kubernetes_version``). HyperPod picks
+  the AMI from the cluster's version at ``CreateCluster``; a minor without one
+  (the newest EKS minor, until HyperPod catches up) fails the deploy an hour
+  in. Read from the public SSM tree
+  ``/aws/service/sagemaker-hyperpod/ami/x86_64/eks-<minor>-...``.
 - ``instance-types``: every instance group's ``<type> for cluster usage``
   Service Quota covers its ``instance_count``; a type with no such quota is
   not a HyperPod type in this Region.
@@ -25,6 +31,7 @@ Checks, per Region:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +68,7 @@ from .pcs_preflight import (
 
 __all__ = [
     "FAIL",
+    "HYPERPOD_AMI_PARAMETER_ROOT",
     "PASS",
     "SKIP",
     "WARN",
@@ -68,6 +76,8 @@ __all__ = [
     "HyperpodPreflightError",
     "HyperpodPreflightReport",
     "load_hyperpod_config",
+    "load_kubernetes_version",
+    "preflight_kwargs",
     "project_name",
     "raw_hyperpod_config",
     "render_report",
@@ -78,6 +88,12 @@ __all__ = [
 #: Training-plan states an instance group can launch into.
 _USABLE_PLAN_STATES = frozenset({"Active", "Scheduled"})
 _HYPERPOD_TARGET = "hyperpod-cluster"
+
+#: The public SSM tree of HyperPod node AMIs for EKS orchestration, one leaf per
+#: EKS minor (``.../eks-1.36-amazon-linux-2023/latest/ami-id``). Which minors
+#: appear is what HyperPod supports; the docs page lags the tree.
+HYPERPOD_AMI_PARAMETER_ROOT = "/aws/service/sagemaker-hyperpod/ami/x86_64"
+_HYPERPOD_AMI_MINOR = re.compile(r"/eks-(\d+\.\d+)-amazon-linux-(?:2|2023)/latest/ami-id$")
 
 
 class HyperpodPreflightError(RuntimeError):
@@ -149,9 +165,86 @@ def load_hyperpod_config(
     return config
 
 
+def load_kubernetes_version(*, cdk_json_path: Path | None = None) -> str:
+    """cdk.json ``context.kubernetes_version``, the minor the regional clusters run.
+
+    The config loader requires the key, so a cdk.json without it (or with a
+    non-string) is a broken checkout rather than something to default.
+    """
+    try:
+        context = _cdk_context(cdk_json_path)
+    except PcsPreflightError as exc:  # a missing or unparsable cdk.json
+        raise HyperpodPreflightError(str(exc)) from exc
+    version = context.get("kubernetes_version")
+    if not isinstance(version, str) or not version.strip():
+        raise HyperpodPreflightError(
+            "cdk.json context.kubernetes_version is missing or not a string"
+        )
+    return version.strip()
+
+
+def preflight_kwargs(*, cdk_json_path: Path | None = None) -> dict[str, Any]:
+    """The keyword arguments :func:`run_preflight` needs beyond the block: the cluster minor.
+
+    ``gco stacks hyperpod preflight`` and the deploy hook call this through
+    the generic preflight-feature wiring in ``cli/commands/stacks_cmd.py``.
+    """
+    return {"kubernetes_version": load_kubernetes_version(cdk_json_path=cdk_json_path)}
+
+
 # ---------------------------------------------------------------------------
 # Live checks
 # ---------------------------------------------------------------------------
+
+
+def _minor_key(minor: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in minor.split("."))
+
+
+def _hyperpod_eks_minors(checker: _Checker) -> list[str] | None:
+    """The EKS minors HyperPod publishes a node AMI for in the Region, ascending."""
+
+    def collect() -> list[str]:
+        minors: set[str] = set()
+        paginator = checker.client("ssm").get_paginator("get_parameters_by_path")
+        for page in paginator.paginate(Path=HYPERPOD_AMI_PARAMETER_ROOT, Recursive=True):
+            for parameter in page.get("Parameters") or []:
+                match = _HYPERPOD_AMI_MINOR.search(str(parameter.get("Name") or ""))
+                if match:
+                    minors.add(match.group(1))
+        return sorted(minors, key=_minor_key)
+
+    result = checker.guarded("kubernetes-version", collect)
+    return list(result) if isinstance(result, list) else None
+
+
+def _check_kubernetes_version(checker: _Checker, kubernetes_version: str) -> None:
+    minors = _hyperpod_eks_minors(checker)
+    if minors is None:
+        return  # the warning is already recorded
+    if not minors:
+        checker.add(
+            "kubernetes-version",
+            WARN,
+            f"no HyperPod node AMI parameters under {HYPERPOD_AMI_PARAMETER_ROOT} in "
+            f"{checker.region}; cannot confirm HyperPod supports EKS {kubernetes_version}",
+        )
+    elif kubernetes_version in minors:
+        checker.add(
+            "kubernetes-version",
+            PASS,
+            f"EKS {kubernetes_version}: HyperPod publishes a node AMI (newest {minors[-1]})",
+        )
+    else:
+        checker.add(
+            "kubernetes-version",
+            FAIL,
+            f"EKS {kubernetes_version}: SageMaker HyperPod publishes no node AMI for this "
+            f"minor in {checker.region} (it does for {', '.join(minors)}), so CreateCluster "
+            f"would fail; deploy the cluster at a supported minor (cdk.json "
+            f"kubernetes_version, or --kubernetes-version on gco release validate) — EKS "
+            "cannot downgrade a running cluster",
+        )
 
 
 def _check_agent_image(checker: _Checker) -> None:
@@ -388,12 +481,18 @@ def run_preflight(
     config: Mapping[str, Any],
     *,
     project: str,
+    kubernetes_version: str,
     client_factory: ClientFactory = boto3.client,
 ) -> HyperpodPreflightReport:
-    """Check the validated ``hyperpod`` block for ``region`` against the live account."""
+    """Check the validated ``hyperpod`` block for ``region`` against the live account.
+
+    ``kubernetes_version`` is the minor the regional cluster runs or will be
+    deployed at (cdk.json ``kubernetes_version``, or the run's override).
+    """
     checker = _Checker(region, client_factory)
     name = cluster_name(config, project)
     _check_agent_image(checker)
+    _check_kubernetes_version(checker, kubernetes_version)
     _check_instance_types(checker, config)
     _check_training_plans(checker, config)
     _check_availability_zone(checker, config)

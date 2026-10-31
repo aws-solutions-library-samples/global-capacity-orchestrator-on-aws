@@ -32,6 +32,9 @@ _PLAN_NAME = "p5-plan"
 _PLAN_ARN = f"arn:aws:sagemaker:{_REGION}:123456789012:training-plan/{_PLAN_NAME}"
 _ZONE = "us-east-1a"
 _NOW = datetime(2026, 10, 1, tzinfo=UTC)
+#: The minor the cluster runs in these tests, and the minors HyperPod's AMI tree carries.
+_K8S = "1.36"
+_AMI_MINORS = ("1.34", "1.35", "1.36")
 
 
 class _Clients:
@@ -43,7 +46,7 @@ class _Clients:
         }
         self.clients = {
             service: boto3.client(service, **kwargs)
-            for service in ("service-quotas", "sagemaker", "ec2", "eks")
+            for service in ("service-quotas", "sagemaker", "ec2", "eks", "ssm")
         }
         self.stubs = {service: Stubber(client) for service, client in self.clients.items()}
         self.requested: list[str] = []
@@ -206,6 +209,40 @@ def _expect_tags(clients: _Clients, tags: dict[str, str]) -> None:
     )
 
 
+def _ami_parameter(minor: str, flavor: str = "amazon-linux-2023") -> dict[str, Any]:
+    return {
+        "Name": f"{pf.HYPERPOD_AMI_PARAMETER_ROOT}/eks-{minor}-{flavor}/latest/ami-id",
+        "Type": "String",
+        "Value": "ami-0123456789abcdef0",
+    }
+
+
+def _expect_ami_tree(clients: _Clients, *pages: list[dict[str, Any]]) -> None:
+    tokens = [None, *[f"ami-token-{i}" for i in range(1, len(pages))]]
+    for index, (page, token) in enumerate(zip(pages, tokens, strict=True)):
+        response: dict[str, Any] = {"Parameters": page}
+        if index + 1 < len(pages):
+            response["NextToken"] = tokens[index + 1]
+        expected: dict[str, Any] = {"Path": pf.HYPERPOD_AMI_PARAMETER_ROOT, "Recursive": True}
+        if token:
+            expected["NextToken"] = token
+        clients["ssm"].add_response("get_parameters_by_path", response, expected)
+
+
+def _expect_default_ami_tree(clients: _Clients) -> None:
+    _expect_ami_tree(
+        clients,
+        [
+            *[_ami_parameter(minor) for minor in _AMI_MINORS],
+            {
+                "Name": f"{pf.HYPERPOD_AMI_PARAMETER_ROOT}/slurm-ubuntu-22.04/latest/ami-id",
+                "Type": "String",
+                "Value": "ami-0fedcba9876543210",
+            },
+        ],
+    )
+
+
 def _expect_happy_path(clients: _Clients, *, zone: bool = False, plan: bool = False) -> None:
     _expect_default_quotas(clients)
     if plan:
@@ -216,8 +253,23 @@ def _expect_happy_path(clients: _Clients, *, zone: bool = False, plan: bool = Fa
     _expect_clusters(clients, [])
 
 
-def _run(clients: _Clients, config: dict[str, Any]) -> pf.HyperpodPreflightReport:
-    return pf.run_preflight(_REGION, config, project=_PROJECT, client_factory=clients.factory)
+def _run(
+    clients: _Clients,
+    config: dict[str, Any],
+    *,
+    kubernetes_version: str = _K8S,
+    ami_tree: bool = True,
+) -> pf.HyperpodPreflightReport:
+    """Run the preflight; by default the AMI tree carries ``_AMI_MINORS`` (one SSM page)."""
+    if ami_tree:
+        _expect_default_ami_tree(clients)
+    return pf.run_preflight(
+        _REGION,
+        config,
+        project=_PROJECT,
+        kubernetes_version=kubernetes_version,
+        client_factory=clients.factory,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +332,26 @@ def test_load_config_missing_and_broken_cdk_json_are_hyperpod_errors(tmp_path: P
         pf.load_hyperpod_config(_REGION, cdk_json_path=broken)
 
 
+def test_load_kubernetes_version_reads_the_cluster_minor(tmp_path: Path) -> None:
+    path = _write_cdk_json(tmp_path, {"kubernetes_version": " 1.36 "})
+    assert pf.load_kubernetes_version(cdk_json_path=path) == "1.36"
+    assert pf.preflight_kwargs(cdk_json_path=path) == {"kubernetes_version": "1.36"}
+
+
+@pytest.mark.parametrize("context", [{}, {"kubernetes_version": 1.36}, {"kubernetes_version": ""}])
+def test_load_kubernetes_version_requires_a_string_minor(
+    tmp_path: Path, context: dict[str, Any]
+) -> None:
+    path = _write_cdk_json(tmp_path, context)
+    with pytest.raises(pf.HyperpodPreflightError, match="kubernetes_version is missing or not"):
+        pf.load_kubernetes_version(cdk_json_path=path)
+
+
+def test_load_kubernetes_version_missing_cdk_json_is_a_hyperpod_error(tmp_path: Path) -> None:
+    with pytest.raises(pf.HyperpodPreflightError, match=r"cdk\.json not found"):
+        pf.preflight_kwargs(cdk_json_path=tmp_path / "missing.json")
+
+
 def test_project_name_is_re_exported() -> None:
     assert pf.project_name is not None
     assert "project_name" in pf.__all__
@@ -299,6 +371,7 @@ def test_happy_path_passes_every_check(clients: _Clients) -> None:
     assert report.cluster == _CLUSTER_NAME
     assert [(c.name, c.status) for c in report.checks] == [
         ("agent-image", pf.PASS),
+        ("kubernetes-version", pf.PASS),
         ("instance-types", pf.PASS),
         ("training-plans", pf.SKIP),
         ("availability-zone", pf.SKIP),
@@ -306,12 +379,16 @@ def test_happy_path_passes_every_check(clients: _Clients) -> None:
         ("cluster-name", pf.PASS),
     ]
     assert (
+        _by_name(report, "kubernetes-version")[0].detail
+        == "EKS 1.36: HyperPod publishes a node AMI (newest 1.36)"
+    )
+    assert (
         _by_name(report, "instance-types")[0].detail
         == "ml.g5.8xlarge: 2 of 4 quota for cluster usage"
     )
     assert _by_name(report, "cluster-name")[0].detail == f"{_CLUSTER_NAME} is free"
     # Clients are created lazily, in the order the checks first need them.
-    assert clients.requested == ["service-quotas", "eks", "sagemaker"]
+    assert clients.requested == ["ssm", "service-quotas", "eks", "sagemaker"]
 
 
 def test_report_dict_and_summary(clients: _Clients) -> None:
@@ -377,6 +454,76 @@ def test_region_without_an_agent_image_fails() -> None:
     assert f"no health-monitoring agent for {region}" in checker.checks[0].detail
     assert "us-east-1" in checker.checks[0].detail
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# kubernetes-version
+# ---------------------------------------------------------------------------
+
+
+def test_kubernetes_version_without_a_hyperpod_ami_fails(clients: _Clients) -> None:
+    """The newest EKS minor has no HyperPod AMI until the service catches up: CreateCluster would fail."""
+    _expect_happy_path(clients)
+    report = _run(clients, _config(), kubernetes_version="1.37")
+    [check] = _by_name(report, "kubernetes-version")
+    assert check.status == pf.FAIL
+    assert check.detail == (
+        f"EKS 1.37: SageMaker HyperPod publishes no node AMI for this minor in {_REGION} "
+        "(it does for 1.34, 1.35, 1.36), so CreateCluster would fail; deploy the cluster at a "
+        "supported minor (cdk.json kubernetes_version, or --kubernetes-version on gco release "
+        "validate) — EKS cannot downgrade a running cluster"
+    )
+    assert not report.ok
+
+
+def test_kubernetes_version_tree_is_paginated_deduplicated_and_sorted(clients: _Clients) -> None:
+    """Both AMI flavors of a minor count once; other HyperPod AMIs (Slurm) are ignored."""
+    _expect_ami_tree(
+        clients,
+        [_ami_parameter("1.36"), _ami_parameter("1.32", "amazon-linux-2"), _ami_parameter("1.9")],
+        [
+            _ami_parameter("1.32"),
+            {
+                "Name": f"{pf.HYPERPOD_AMI_PARAMETER_ROOT}/slurm-trainium-ubuntu-22.04/latest/ami-id",
+                "Type": "String",
+                "Value": "ami-0fedcba9876543210",
+            },
+            {"Type": "String", "Value": "ami-0fedcba9876543210"},  # a leaf without a name
+        ],
+    )
+    _expect_happy_path(clients)
+    report = _run(clients, _config(), kubernetes_version="1.35", ami_tree=False)
+    [check] = _by_name(report, "kubernetes-version")
+    assert check.status == pf.FAIL
+    assert "(it does for 1.9, 1.32, 1.36)" in check.detail  # numeric order, not lexical
+
+
+def test_kubernetes_version_empty_tree_warns(clients: _Clients) -> None:
+    _expect_ami_tree(clients, [])
+    _expect_happy_path(clients)
+    report = _run(clients, _config(), ami_tree=False)
+    [check] = _by_name(report, "kubernetes-version")
+    assert check.status == pf.WARN
+    assert check.detail == (
+        f"no HyperPod node AMI parameters under {pf.HYPERPOD_AMI_PARAMETER_ROOT} in {_REGION}; "
+        f"cannot confirm HyperPod supports EKS {_K8S}"
+    )
+    assert report.ok
+
+
+def test_kubernetes_version_denied_tree_warns(clients: _Clients) -> None:
+    clients["ssm"].add_client_error(
+        "get_parameters_by_path",
+        service_error_code="AccessDeniedException",
+        service_message="no ssm",
+        expected_params={"Path": pf.HYPERPOD_AMI_PARAMETER_ROOT, "Recursive": True},
+    )
+    _expect_happy_path(clients)
+    report = _run(clients, _config(), ami_tree=False)
+    assert _by_name(report, "kubernetes-version") == [
+        pf.Check("kubernetes-version", pf.WARN, "could not check: AccessDeniedException: no ssm")
+    ]
+    assert report.ok
 
 
 # ---------------------------------------------------------------------------
