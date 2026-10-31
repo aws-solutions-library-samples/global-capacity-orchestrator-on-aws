@@ -228,13 +228,14 @@ nodes that ran a job (see [How work reaches HyperPod nodes](#how-work-reaches-hy
 ## Live release validation
 
 Every release run deploys HyperPod through the run-scoped `hyperpod_overrides`
-context and the `hyperpod` action proves it end to end: the cluster is
-`InService`, every instance is `Running`, every node carries
-`sagemaker.amazonaws.com/node-health-status=Schedulable`, and a Job submitted
-through the GCO API to the `gco-hyperpod` queue completes on a HyperPod node
-(the jobs API's placement report says so). Teardown proves the cluster is
-gone; the final inventory counts HyperPod clusters as a residual category.
-See [LIVE_RELEASE_VALIDATION.md](LIVE_RELEASE_VALIDATION.md).
+context (one `ml.g4dn.xlarge` instance group) and the `hyperpod` action proves
+it end to end: SageMaker describes the cluster `InService` with the instance
+group at its target count and its instance `Running`, a Job submitted through
+the GCO API to the `gco-hyperpod` queue and requesting one GPU completes, and
+the jobs API's placement report puts its pod on a `hyperpod` node. The account
+preflight runs first, and the final inventory counts HyperPod clusters as a
+residual category so one left behind fails the run. See
+[LIVE_RELEASE_VALIDATION.md](LIVE_RELEASE_VALIDATION.md).
 
 ## Limitations
 

@@ -120,6 +120,8 @@ TRAINING_PLAN_ARN_PATTERN = re.compile(
 )
 #: Kubernetes quantity, as the Kueue ClusterQueue nominal quotas accept it.
 QUANTITY_PATTERN = re.compile(r"^[0-9]+(\.[0-9]+)?([EPTGMk]i?|m)?$")
+#: An Availability Zone name (``us-east-1a``), the only zone form a cluster takes.
+AVAILABILITY_ZONE_PATTERN = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d[a-z]$")
 
 #: Kueue objects the gated manifest ships when HyperPod and Kueue are both on.
 HYPERPOD_RESOURCE_FLAVOR = "gco-hyperpod-flavor"
@@ -308,7 +310,7 @@ def validate_hyperpod_config(raw: object) -> dict[str, Any]:
     )
     zone = config["availability_zone"]
     if zone is not None and (
-        not isinstance(zone, str) or not re.match(r"^[a-z]{2}(-[a-z]+)+-\d[a-z]$", zone)
+        not isinstance(zone, str) or not AVAILABILITY_ZONE_PATTERN.match(zone)
     ):
         raise HyperpodConfigError(
             f"hyperpod.availability_zone must be an Availability Zone name such as us-east-1a "

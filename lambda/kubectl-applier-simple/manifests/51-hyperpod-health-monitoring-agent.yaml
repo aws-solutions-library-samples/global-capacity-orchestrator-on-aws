@@ -25,6 +25,14 @@ kind: DaemonSet
 metadata:
   name: health-monitoring-agent
   namespace: aws-hyperpod
+  annotations:
+    checkov.io/skip1: CKV_K8S_8=No health endpoint; the upstream HyperPod chart defines no probes and the kubelet restarts the agent on exit
+    checkov.io/skip2: CKV_K8S_9=The agent exposes no readiness endpoint (see CKV_K8S_8); it serves no traffic
+    checkov.io/skip3: CKV_K8S_14=Rendered by the applier from the Region's HyperPod ECR account with the tag pinned in gco/hyperpod_config.py
+    checkov.io/skip4: CKV_K8S_43=The pinned tag is published to a different ECR account per Region, so one digest cannot be checked in
+    checkov.io/skip5: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the image on restart
+    checkov.io/skip6: CKV_K8S_38=The agent labels Nodes through the API with its ServiceAccount (10-hyperpod-rbac.yaml); the token is its contract
+    checkov.io/skip7: CKV_K8S_40=The upstream chart's UID 1000:2000, which the agent's host log and kmsg mounts are set up for
   labels:
     app: health-monitoring-agent
     project: gco
@@ -171,6 +179,14 @@ kind: DaemonSet
 metadata:
   name: health-monitoring-agent-non-nvidia
   namespace: aws-hyperpod
+  annotations:
+    checkov.io/skip1: CKV_K8S_8=No health endpoint; the upstream HyperPod chart defines no probes and the kubelet restarts the agent on exit
+    checkov.io/skip2: CKV_K8S_9=The agent exposes no readiness endpoint (see CKV_K8S_8); it serves no traffic
+    checkov.io/skip3: CKV_K8S_14=Rendered by the applier from the Region's HyperPod ECR account with the tag pinned in gco/hyperpod_config.py
+    checkov.io/skip4: CKV_K8S_43=The pinned tag is published to a different ECR account per Region, so one digest cannot be checked in
+    checkov.io/skip5: CKV_K8S_15=Pinned immutable tag; IfNotPresent avoids re-pulling the image on restart
+    checkov.io/skip6: CKV_K8S_38=The agent labels Nodes through the API with its ServiceAccount (10-hyperpod-rbac.yaml); the token is its contract
+    checkov.io/skip7: CKV_K8S_40=The upstream chart's UID 1000:2000, which the agent's host log and kmsg mounts are set up for
   labels:
     app: health-monitoring-agent-non-nvidia
     project: gco
