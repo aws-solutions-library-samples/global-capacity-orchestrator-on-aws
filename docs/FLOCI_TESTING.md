@@ -201,8 +201,10 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    from `…/services/pcs/regions` and fails the collection closed when nothing
    names one — the fix for live runs that had scanned PCS in zero Regions
    while reporting the scanner complete. The shim answers that one path with
-   the list real AWS gave on 2026-10-31 and lets every other parameter read
-   reach the emulator.
+   a fixture list — the Regions the emulator enables, deliberately not a
+   copy of AWS's (production reads the live parameters, so there is no list
+   to keep in sync) — and lets every other parameter read reach the
+   emulator.
 9. **AWS PCS** is absent from the catalog entirely: `ListClusters`,
    `GetCluster` and `CreateCluster` answer `UnknownOperationException`
    (probed 2026-10-31). The shim answers `ListClusters` with the empty page

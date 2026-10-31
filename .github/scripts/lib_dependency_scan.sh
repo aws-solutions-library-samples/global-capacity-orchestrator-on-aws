@@ -594,6 +594,124 @@ for name, cfg in (data or {}).get('charts', {}).items():
 " "$file" 2>/dev/null
 }
 
+# extract_kube_proxy_pins [constants_py_path]
+#
+# Prints every entry of ``EKS_ADDON_KUBE_PROXY_BY_MINOR`` (the kube-proxy
+# add-on build pinned per EKS minor for the SageMaker HyperPod mixed-compute
+# add-ons) as ``minor|build``, minors in numeric order. Imports the constants
+# module when it can and falls back to reading the mapping literal from the
+# source file, like extract_eks_addons. Prints nothing when neither works.
+extract_kube_proxy_pins() {
+  local file="${1:-gco/stacks/constants.py}"
+  python3 -c "
+import re, sys
+
+def minor_key(minor):
+    return tuple(int(part) for part in minor.split('.'))
+
+try:
+    from gco.stacks.constants import EKS_ADDON_KUBE_PROXY_BY_MINOR
+    pins = dict(EKS_ADDON_KUBE_PROXY_BY_MINOR)
+except ImportError:
+    pins = {}
+    try:
+        with open(sys.argv[1]) as f:
+            text = f.read()
+    except OSError:
+        sys.exit(0)
+    block = re.search(r'EKS_ADDON_KUBE_PROXY_BY_MINOR[^{]*\{(.*?)\}', text, re.DOTALL)
+    if block:
+        pins = dict(re.findall(r'\"(\d+\.\d+)\":\s*\"([^\"]+)\"', block.group(1)))
+for minor in sorted(pins, key=minor_key):
+    print(f'{minor}|{pins[minor]}')
+" "$file" 2>/dev/null
+}
+
+# list_hyperpod_eks_minors [region]
+#
+# Prints the EKS minors SageMaker HyperPod publishes a node AMI for, one per
+# line in numeric order, from the public SSM tree
+# ``/aws/service/sagemaker-hyperpod/ami/x86_64`` (one
+# ``eks-<minor>-amazon-linux-{2,2023}/latest/ami-id`` leaf per minor; the
+# Slurm leaves are ignored). HyperPod picks each node's AMI from the cluster's
+# minor at CreateCluster, so this list is what HyperPod supports — the docs
+# page lags it. IAM: ``ssm:GetParametersByPath``. Fails (non-zero, nothing
+# printed) when the tree cannot be read, parsed, or names no EKS minor.
+list_hyperpod_eks_minors() {
+  local region="${1:-us-east-1}" names
+  names="$(aws ssm get-parameters-by-path --path /aws/service/sagemaker-hyperpod/ami/x86_64 \
+    --recursive --region "$region" --query 'Parameters[].Name' --output json 2>/dev/null)" || return 1
+  [ -n "$names" ] || return 1
+  printf '%s' "$names" | python3 -c '
+import json, re, sys
+try:
+    names = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+minors = set()
+for name in names or []:
+    match = re.search(r"/eks-(\d+\.\d+)-amazon-linux-(?:2|2023)/latest/ami-id$", str(name))
+    if match:
+        minors.add(match.group(1))
+if not minors:
+    sys.exit(1)
+for minor in sorted(minors, key=lambda v: tuple(int(p) for p in v.split("."))):
+    print(minor)
+'
+}
+
+# newest_hyperpod_eks_minor [region]
+#
+# The highest minor list_hyperpod_eks_minors prints; fails when it fails.
+newest_hyperpod_eks_minor() {
+  local minors
+  minors="$(list_hyperpod_eks_minors "$@")" || return 1
+  printf '%s\n' "$minors" | tail -n 1
+}
+
+# eks_standard_support_minors <describe-cluster-versions JSON>
+#
+# Prints every ``clusterVersion`` in the response, one per line (the scan asks
+# for ``--version-status STANDARD_SUPPORT``, so these are the minors still in
+# standard support). Prints nothing for unparseable input.
+eks_standard_support_minors() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+seen = []
+for row in data.get("clusterVersions", []):
+    version = str(row.get("clusterVersion") or "")
+    if version and version not in seen:
+        seen.append(version)
+print("\n".join(seen))
+' 2>/dev/null | grep . || true
+}
+
+# eks_minor_support_end <describe-cluster-versions JSON> <minor>
+#
+# The date (``YYYY-MM-DD``) standard support ends for ``minor``, or ``unknown``
+# when the response does not carry one (a brand-new release, a minor outside
+# standard support, unparseable input).
+eks_minor_support_end() {
+  local date
+  date="$(printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+for row in data.get("clusterVersions", []):
+    if row.get("clusterVersion") == sys.argv[1]:
+        ts = str(row.get("endOfStandardSupportDate") or "")
+        print(ts.split("T", 1)[0].split(" ", 1)[0])
+        break
+' "$2" 2>/dev/null)" || date=""
+  printf '%s\n' "${date:-unknown}"
+}
+
 # extract_k8s_version [cdk_json_path]
 #
 # Reads the kubernetes_version from cdk.json. Falls back to "1.37".

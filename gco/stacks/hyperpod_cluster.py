@@ -14,7 +14,8 @@ asks for around the regional EKS cluster:
   security group for the kubelet and the control plane);
 - the lifecycle script HyperPod runs on every node at creation, placed in the
   regional shared bucket by a custom resource so ``SourceS3Uri`` is a prefix
-  GCO owns rather than the CDK asset bucket;
+  GCO owns rather than the CDK asset bucket (and removed before the bucket's
+  own emptying on teardown, so the versioned bucket can be deleted);
 - the three EKS add-ons that make self-managed nodes work on an Auto Mode
   cluster — ``vpc-cni`` and ``kube-proxy`` (DaemonSets that land only on the
   HyperPod nodes) and ``coredns`` (runs on the Auto Mode nodes and publishes
@@ -44,7 +45,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from aws_cdk import CfnElement, CfnOutput, RemovalPolicy, Stack
+from aws_cdk import CfnElement, CfnOutput, CfnResource, RemovalPolicy, Stack
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_eks as eks_l1
 from aws_cdk import aws_iam as iam
@@ -490,6 +491,24 @@ class HyperpodCluster(Construct):
             role=role,
         )
         resource.node.add_dependency(role)
+        # The bucket is versioned, so that deleteObject writes a delete marker
+        # rather than freeing the key — and a bucket holding a marker cannot be
+        # deleted. On a stack delete (or a failed first deploy's rollback) the
+        # bucket's own auto-delete custom resource empties it, markers
+        # included, immediately before the bucket goes; this resource is
+        # deleted only after the SageMaker cluster that depends on it, so left
+        # to CloudFormation's ordering it wrote its marker *after* the bucket
+        # had been emptied, and the bucket's deletion failed (the first live
+        # run). Depending on the auto-delete resource makes CloudFormation
+        # delete this one first, so the emptying runs last and finds the
+        # marker. A retained bucket has no auto-delete resource and is never
+        # deleted, so there is nothing to order.
+        for child in bucket.node.find_all():
+            if (
+                isinstance(child, CfnResource)
+                and child.cfn_resource_type == "Custom::S3AutoDeleteObjects"
+            ):
+                resource.node.add_dependency(child)
         return resource
 
     # -- the cluster -----------------------------------------------------------

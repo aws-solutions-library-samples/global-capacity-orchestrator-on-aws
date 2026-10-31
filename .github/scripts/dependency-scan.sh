@@ -719,14 +719,24 @@ ADDON_COUNT="$(wc -l < "$ADDON_RESULTS" 2>/dev/null | tr -d ' ')"
 # when standard support for the currently-pinned minor ends so the
 # upgrade urgency is visible in the PR.
 #
-# IAM action: ``eks:DescribeClusterVersions``. Same credential preflight
-# as the EKS add-on / Aurora / EMR checks.
+# The same surface then checks the per-minor kube-proxy pins
+# (``EKS_ADDON_KUBE_PROXY_BY_MINOR`` in gco/stacks/constants.py) and the
+# newest minor SageMaker HyperPod publishes a node AMI for, so the minor a
+# HyperPod Region actually runs is maintained by the scan rather than by
+# memory.
+#
+# IAM actions: ``eks:DescribeClusterVersions``, ``eks:DescribeAddonVersions``,
+# ``ssm:GetParametersByPath``. Same credential preflight as the EKS add-on /
+# Aurora / EMR checks.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking EKS Kubernetes version ==="
 
 EKS_K8S_RESULTS="$(mktemp)"
 EKS_K8S_SKIP_REASON=""
+# The newest EKS minor HyperPod supports; "" until the lookup below succeeds.
+# The Version Consistency surface reads it, outside this block.
+HYPERPOD_NEWEST_K8S=""
 
 if ! aws sts get-caller-identity >/dev/null 2>&1; then
   EKS_K8S_SKIP_REASON="No AWS credentials available (scan needs eks:DescribeClusterVersions). Configure OIDC to enable."
@@ -797,6 +807,65 @@ for row in data.get('clusterVersions', []):
 
         echo "  - kubernetes_version: ${CURRENT_K8S} -> ${LATEST_K8S} (std support ends ${EOS_DATE:-unknown})"
         echo "kubernetes_version|${CURRENT_K8S}|${LATEST_K8S}|${EOS_DATE:-unknown}" >> "$EKS_K8S_RESULTS"
+      fi
+
+      # kube-proxy is pinned per EKS minor (EKS_ADDON_KUBE_PROXY_BY_MINOR, the
+      # SageMaker HyperPod mixed-compute add-ons) because EKS publishes it per
+      # minor. The add-on check above compares the cdk.json minor's build like
+      # any other add-on; this one covers every *other* pinned minor, which is
+      # where the minor HyperPod Regions actually run lives (HyperPod's node
+      # AMI trails new EKS minors, so a HyperPod Region sits on the newest
+      # minor HyperPod supports, usually one behind cdk.json). An entry for a
+      # minor EKS no longer keeps in standard support is reported to retire;
+      # a stale build is reported like an add-on drift.
+      STANDARD_K8S_MINORS="$(eks_standard_support_minors "$CLUSTER_VERSIONS_JSON")"
+      KUBE_PROXY_PINS="$(extract_kube_proxy_pins gco/stacks/constants.py)"
+      while IFS='|' read -r kp_minor kp_build; do
+        [ -n "$kp_minor" ] || continue
+        [ "$kp_minor" = "$CURRENT_K8S" ] && continue
+        if ! grep -qx -- "$kp_minor" <<< "$STANDARD_K8S_MINORS"; then
+          echo "  - kube-proxy@${kp_minor}: ${kp_build} is pinned for a minor outside EKS standard support; retire the entry"
+          echo "kube-proxy@${kp_minor}|${kp_build}|retire (EKS ${kp_minor} is out of standard support)|ended" >> "$EKS_K8S_RESULTS"
+          continue
+        fi
+        kp_latest="$(aws eks describe-addon-versions \
+          --addon-name kube-proxy \
+          --kubernetes-version "$kp_minor" \
+          --query 'addons[0].addonVersions[0].addonVersion' \
+          --output text 2>/dev/null)" || kp_latest=""
+        if ! [[ "$kp_latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-eksbuild\.[0-9]+$ ]]; then
+          mark_scan_incomplete "kube-proxy add-on lookup for EKS ${kp_minor} failed or returned an invalid version."
+          continue
+        fi
+        if [ "$kp_build" != "$kp_latest" ]; then
+          echo "  - kube-proxy@${kp_minor}: ${kp_build} -> ${kp_latest}"
+          echo "kube-proxy@${kp_minor}|${kp_build}|${kp_latest}|$(eks_minor_support_end "$CLUSTER_VERSIONS_JSON" "$kp_minor")" >> "$EKS_K8S_RESULTS"
+        fi
+      done <<< "$KUBE_PROXY_PINS"
+
+      # SageMaker HyperPod picks each node's AMI from the cluster's minor and
+      # publishes that AMI per minor, weeks after EKS ships it; the public SSM
+      # tree is the list of minors HyperPod supports (the docs page lags it).
+      # While its newest minor trails cdk.json's, that is the minor a Region
+      # with HyperPod on must run, so it needs a kube-proxy pin here, and the
+      # Version Consistency surface says so (further down) — the way the
+      # kubernetes client lag is reported — so nobody has to remember which
+      # minor that is. A tree at or ahead of cdk.json's minor needs nothing:
+      # the cluster runs cdk.json's minor, whose pin the add-on check above
+      # and tests/test_integration.py already cover.
+      HYPERPOD_NEWEST_K8S="$(newest_hyperpod_eks_minor us-east-1)" || HYPERPOD_NEWEST_K8S=""
+      if [ -z "$HYPERPOD_NEWEST_K8S" ]; then
+        mark_scan_incomplete "HyperPod node AMI lookup failed (ssm get-parameters-by-path /aws/service/sagemaker-hyperpod/ami/x86_64)."
+      elif [ "$(compare_semver "$CURRENT_K8S" "$HYPERPOD_NEWEST_K8S")" = "older" ] \
+           && ! grep -q -- "^${HYPERPOD_NEWEST_K8S}|" <<< "$KUBE_PROXY_PINS"; then
+        kp_latest="$(aws eks describe-addon-versions \
+          --addon-name kube-proxy \
+          --kubernetes-version "$HYPERPOD_NEWEST_K8S" \
+          --query 'addons[0].addonVersions[0].addonVersion' \
+          --output text 2>/dev/null)" || kp_latest=""
+        [[ "$kp_latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-eksbuild\.[0-9]+$ ]] || kp_latest="unknown"
+        echo "  - kube-proxy@${HYPERPOD_NEWEST_K8S}: no pin for the newest minor HyperPod supports; add ${kp_latest} to EKS_ADDON_KUBE_PROXY_BY_MINOR"
+        echo "kube-proxy@${HYPERPOD_NEWEST_K8S}|missing (the newest minor HyperPod supports)|${kp_latest}|$(eks_minor_support_end "$CLUSTER_VERSIONS_JSON" "$HYPERPOD_NEWEST_K8S")" >> "$EKS_K8S_RESULTS"
       fi
     fi
   fi
@@ -2349,6 +2418,19 @@ if [ -n "$K8S_CLIENT_PROBLEM" ]; then
   echo "kubernetes Python client (pyproject.toml / cdk.json)|${K8S_CLIENT_PROBLEM}" >> "$CONSISTENCY_RESULTS"
 fi
 
+# SageMaker HyperPod's node AMI trails new EKS minors by weeks, so a Region
+# with HyperPod on runs the newest minor HyperPod supports (the EKS version
+# check looked it up) rather than cdk.json's — via ``gco release validate
+# --kubernetes-version`` and the ``kubernetes_version`` CDK context. Like the
+# client lag above, the gap is a standing fact nobody would otherwise be
+# reminded of; it closes on its own when HyperPod catches up.
+HYPERPOD_K8S_LAG_CURRENT="$(extract_k8s_version cdk.json)"
+if [ -n "$HYPERPOD_NEWEST_K8S" ] \
+   && [ "$(compare_semver "$HYPERPOD_K8S_LAG_CURRENT" "$HYPERPOD_NEWEST_K8S")" = "older" ]; then
+  echo "  - HyperPod EKS minor vs cdk.json: HyperPod node AMIs stop at ${HYPERPOD_NEWEST_K8S}, cdk.json pins ${HYPERPOD_K8S_LAG_CURRENT}"
+  echo "SageMaker HyperPod EKS minor (cdk.json / HyperPod node AMIs)|HyperPod node AMIs stop at ${HYPERPOD_NEWEST_K8S}; cdk.json kubernetes_version is ${HYPERPOD_K8S_LAG_CURRENT}. A Region with HyperPod on runs ${HYPERPOD_NEWEST_K8S} (gco release validate --kubernetes-version ${HYPERPOD_NEWEST_K8S})" >> "$CONSISTENCY_RESULTS"
+fi
+
 # Build-backend pins must use the same exact ``==`` shape as every other
 # Python dependency in pyproject.toml, or the version resolved inside
 # pip's build isolation floats with upstream releases. An empty result is
@@ -3039,9 +3121,14 @@ rm -f "$FINDINGS_SURFACES"
   if [ "$EKS_K8S_COUNT" -gt 0 ]; then
     echo "## EKS Kubernetes Version"
     echo ""
-    echo "The Kubernetes minor pinned in \`cdk.json::kubernetes_version\` is behind"
-    echo "the latest release still in EKS **standard support**. Upgrade before"
+    echo "A \`kubernetes_version\` row means the minor pinned in \`cdk.json\` is behind"
+    echo "the latest release still in EKS **standard support**; upgrade before"
     echo "standard support ends to avoid the extended-support pricing uplift."
+    echo "A \`kube-proxy@<minor>\` row is an entry of \`EKS_ADDON_KUBE_PROXY_BY_MINOR\`"
+    echo "(\`gco/stacks/constants.py\`, the SageMaker HyperPod mixed-compute add-ons)"
+    echo "whose build is stale for its minor, whose minor left standard support"
+    echo "(retire it), or that is missing for the newest minor HyperPod supports"
+    echo "(add it). See \`docs/MAINTENANCE.md\`."
     echo ""
     eks_disp="$(mktemp)"
     while IFS='|' read -r pin cur lat eos; do

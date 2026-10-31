@@ -74,39 +74,19 @@ _NO_HYPERPOD_CLUSTERS_JSON = json.dumps({"ClusterSummaries": []}).encode()
 # included.
 _NO_PCS_CLUSTERS_JSON = json.dumps({"clusters": []}).encode()
 
-# The Regions AWS PCS is offered in, as the public parameters under
-# /aws/service/global-infrastructure/services/pcs/regions listed them on
-# 2026-10-31 (aws partition; the tree also names the GovCloud Regions). Only
-# the Regions the emulator enables matter to a Floci run; the list is kept
-# whole so the shim answers what real AWS answered.
+# The Regions the shim says AWS PCS is offered in: a fixture, not a copy of
+# AWS's list. Real AWS serves the live list under
+# /aws/service/global-infrastructure/services/pcs/regions and the inventory
+# reads it from there, so nothing here has to track service expansion. The
+# fixture is the shape the Floci tests need — the Regions the emulator
+# enables (where the pcs scanner must run) and a Region PCS is not offered in
+# left out (us-west-1), which is what proves the inventory took the
+# parameters' list and not botocore's every-Region one.
 _PCS_REGIONS_PARAMETER_PATH = "/aws/service/global-infrastructure/services/pcs/regions"
-_PCS_REGIONS_2026_10_31 = (
-    "af-south-1",
-    "ap-northeast-1",
-    "ap-northeast-2",
-    "ap-northeast-3",
-    "ap-south-1",
-    "ap-south-2",
-    "ap-southeast-1",
-    "ap-southeast-2",
-    "ap-southeast-3",
-    "ap-southeast-4",
-    "ap-southeast-5",
-    "ap-southeast-6",
-    "ca-central-1",
-    "eu-central-1",
-    "eu-north-1",
-    "eu-south-1",
-    "eu-south-2",
+_PCS_REGIONS_FIXTURE = (
     "eu-west-1",
-    "eu-west-2",
-    "eu-west-3",
-    "sa-east-1",
     "us-east-1",
     "us-east-2",
-    "us-gov-east-1",
-    "us-gov-west-1",
-    "us-west-2",
 )
 
 
@@ -231,16 +211,17 @@ def shim_floci_sagemaker_list_clusters(events) -> None:
 
 
 def shim_floci_pcs_service_regions(events) -> None:
-    """Answer the public ``…/services/pcs/regions`` parameters with AWS's list.
+    """Answer the public ``…/services/pcs/regions`` parameters with a fixture list.
 
     Floci 2.2.0 serves none of the public global-infrastructure parameters
     (``GetParametersByPath`` under that tree answers an empty page). The
     harness inventory reads AWS PCS's Regions from exactly that path, because
     botocore's endpoint data names no Region for PCS, and fails the
     collection closed when nothing names one. The shim answers only the PCS
-    path, with the list real AWS gave on 2026-10-31; every other
-    ``GetParametersByPath`` (the harness's own parameters, the CloudFormation
-    fixtures' SSM markers) reaches the emulator.
+    path, with the Regions the emulator enables (``_PCS_REGIONS_FIXTURE``,
+    deliberately not a copy of AWS's list, which production reads live);
+    every other ``GetParametersByPath`` (the harness's own parameters, the
+    CloudFormation fixtures' SSM markers) reaches the emulator.
     """
 
     def _synthesize(request, **_kwargs):
@@ -262,7 +243,7 @@ def shim_floci_pcs_service_regions(events) -> None:
                 "DataType": "text",
                 "ARN": f"arn:aws:ssm:us-east-1::parameter{_PCS_REGIONS_PARAMETER_PATH}/{region}",
             }
-            for region in _PCS_REGIONS_2026_10_31
+            for region in _PCS_REGIONS_FIXTURE
         ]
         return _local_response(
             request, json.dumps({"Parameters": parameters}).encode(), "application/x-amz-json-1.1"

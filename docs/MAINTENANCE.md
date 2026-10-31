@@ -230,7 +230,12 @@ shipping a skew.
    may still run — a HyperPod Region stays on the newest minor HyperPod
    supports, see below);
    `tests/test_integration.py::test_kube_proxy_addon_is_pinned_for_the_cluster_minor`
-   fails the bump until the cdk.json minor has an entry.
+   fails the bump until the cdk.json minor has an entry. The mapping is not a
+   list to keep in your head: the monthly `deps-scan` **EKS Kubernetes
+   Version** row compares every other entry's build against EKS, tells you to
+   retire an entry whose minor left standard support, and reports the newest
+   minor HyperPod supports as missing (with the build to add) when it has no
+   entry; while that minor trails `cdk.json`, **Version Consistency** says so.
    **SageMaker HyperPod gates the minor a Region can run.** HyperPod picks
    each node's AMI from the cluster's Kubernetes version and publishes that AMI
    per minor, weeks after EKS ships it (`aws ssm get-parameters-by-path --path

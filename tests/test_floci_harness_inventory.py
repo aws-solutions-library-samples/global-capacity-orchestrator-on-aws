@@ -85,10 +85,11 @@ class TestRegionDiscovery:
 
         The inventory falls back to the public parameters under
         ``/aws/service/global-infrastructure/services/pcs/regions`` (served
-        here by the documented gap shim with the list real AWS gave) and must
-        come back with PCS's Regions, not botocore's every-Region list: the
-        PR #496 live runs scanned PCS in zero Regions because the empty SDK
-        list was taken at face value.
+        here by the documented gap shim with a fixture list: the Regions the
+        emulator enables, without us-west-1) and must come back with the
+        parameters' Regions, not botocore's every-Region list: the PR #496
+        live runs scanned PCS in zero Regions because the empty SDK list was
+        taken at face value.
         """
         from scripts.live_release_validation.inventory.project import _service_regions
 
@@ -99,8 +100,8 @@ class TestRegionDiscovery:
         pcs_regions = _service_regions(
             harness_session, "pcs", partition="aws", seed_region="us-east-1"
         )
-        assert {"us-east-1", "us-east-2", "eu-west-1"} <= pcs_regions
-        assert "us-west-1" not in pcs_regions, "PCS is not offered in us-west-1"
+        assert pcs_regions == {"us-east-1", "us-east-2", "eu-west-1"}
+        assert "us-west-1" not in pcs_regions, "the fixture list leaves us-west-1 out"
         # A service botocore does know needs no parameter read at all.
         sagemaker_regions = _service_regions(
             harness_session, "sagemaker", partition="aws", seed_region="us-east-1"

@@ -112,9 +112,12 @@ class _HyperpodConfig(MockConfigLoader):
 
 
 def _synth(
-    hyperpod: dict[str, Any] | None, *, name: str = "gco-test-us-east-1"
+    hyperpod: dict[str, Any] | None,
+    *,
+    name: str = "gco-test-us-east-1",
+    context: dict[str, Any] | None = None,
 ) -> tuple[rs.GCORegionalStack, dict[str, Any]]:
-    app = cdk.App(context=dict(_AZ_CONTEXT))
+    app = cdk.App(context={**_AZ_CONTEXT, **(context or {})})
     config = _HyperpodConfig(app, hyperpod=hyperpod)
     with (
         patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
@@ -366,6 +369,33 @@ class TestHyperpodOn:
             "kms:GenerateDataKey",
             "kms:Decrypt",
         }
+        # The bucket is versioned, so the delete call leaves a delete marker;
+        # the resource must therefore be deleted before the bucket's
+        # auto-delete resource empties the bucket (which removes markers too),
+        # or the bucket's own deletion fails on the marker — which is how the
+        # first live run's rollback ended. Depending on that resource is what
+        # makes CloudFormation delete this one first.
+        [auto_delete_id] = [
+            k
+            for k, v in resources.items()
+            if v["Type"] == "Custom::S3AutoDeleteObjects"
+            and k.startswith("RegionalSharedBucketAutoDeleteObjects")
+        ]
+        assert auto_delete_id in resource["DependsOn"]
+
+    def test_lifecycle_script_has_nothing_to_order_against_a_retained_bucket(self) -> None:
+        """A retained bucket is never emptied or deleted: no auto-delete resource, no dependency."""
+        _stack, resources = _synth(
+            FULL, context={"regional_shared_bucket": {"removal_policy": "retain"}}
+        )
+        [(_logical_id, resource)] = [
+            (k, v)
+            for k, v in resources.items()
+            if v["Type"] == "Custom::AWS" and k.startswith("HyperpodLifecycleScript")
+        ]
+        assert not [k for k in resources if k.startswith("RegionalSharedBucketAutoDeleteObjects")]
+        assert not [dep for dep in resource["DependsOn"] if "AutoDeleteObjects" in dep]
+        assert "deleteObject" in json.dumps(resource["Properties"]["Delete"])
 
     def test_replacements_chart_and_outputs(self, synthesized) -> None:
         stack, resources = synthesized

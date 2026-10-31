@@ -305,18 +305,33 @@ case "${1:-} ${2:-}" in
         ;;
     "eks describe-addon-versions")
         [ "${FAKE_AWS_ADDON:-ok}" = "invalid" ] && { echo "None"; exit 0; }
-        name=""
-        while [ "$#" -gt 0 ]; do [ "$1" = "--addon-name" ] && name="$2"; shift; done
-        answer eks-addon "$name" "v1.0.0-eksbuild.1"; echo
+        name="" minor=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in --addon-name) name="$2" ;; --kubernetes-version) minor="$2" ;; esac
+            shift
+        done
+        if [ "$name" = "kube-proxy" ]; then
+            # EKS publishes kube-proxy per minor: the tree's pin for the minor
+            # asked about (a minor it never pinned gets a build of its own).
+            answer kube-proxy "$minor" "v${minor}.0-eksbuild.1"; echo
+        else
+            answer eks-addon "$name" "v1.0.0-eksbuild.1"; echo
+        fi
         ;;
     "eks describe-cluster-versions")
         case "${FAKE_AWS_K8S:-ok}" in
             fail) echo "An error occurred (AccessDeniedException) when calling DescribeClusterVersions" >&2; exit 254 ;;
             empty) echo '{"clusterVersions": []}' ;;
             *)
+                # Standard support spans the pinned minor and the two before
+                # it, as EKS keeps about fourteen months of minors there.
                 current="$(catalog_get k8s current)"
                 latest="$(answer k8s current 1.37)"
-                printf '{"clusterVersions": [{"clusterVersion": "%s", "endOfStandardSupportDate": "2027-01-15T00:00:00+00:00"}, {"clusterVersion": "%s", "endOfStandardSupportDate": "2028-01-15T00:00:00+00:00"}]}\n' "$current" "$latest"
+                older=""
+                if [[ "$current" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+                    older=", {\"clusterVersion\": \"${BASH_REMATCH[1]}.$((BASH_REMATCH[2] - 1))\", \"endOfStandardSupportDate\": \"2026-09-15T00:00:00+00:00\"}, {\"clusterVersion\": \"${BASH_REMATCH[1]}.$((BASH_REMATCH[2] - 2))\", \"endOfStandardSupportDate\": \"2026-05-15T00:00:00+00:00\"}"
+                fi
+                printf '{"clusterVersions": [{"clusterVersion": "%s", "endOfStandardSupportDate": "2027-01-15T00:00:00+00:00"}, {"clusterVersion": "%s", "endOfStandardSupportDate": "2028-01-15T00:00:00+00:00"}%s]}\n' "$current" "$latest" "$older"
                 ;;
         esac
         ;;
@@ -406,13 +421,46 @@ case "${1:-} ${2:-}" in
         json_list "${keys[@]+"${keys[@]}"}"; echo
         ;;
     "ssm get-parameters-by-path")
-        # The public /aws/service/pcs/ami tree: the pinned DLAMI base for both
-        # architectures, plus a newer base of the same OS line under drift.
-        [ "${FAKE_AWS_PCS_AMI:-ok}" = "fail" ] && { echo "An error occurred (AccessDeniedException) when calling the GetParametersByPath operation" >&2; exit 254; }
-        family="$(catalog_get pcs-ami dlami)"
-        names=("/aws/service/pcs/ami/${family}/x86_64/latest/ami-id" "/aws/service/pcs/ami/${family}/arm64/latest/ami-id")
-        [ "${FAKE_DRIFT:-0}" = "1" ] && names+=("/aws/service/pcs/ami/$(bump "$family")/x86_64/latest/ami-id")
-        json_list "${names[@]}"; echo
+        path=""
+        while [ "$#" -gt 0 ]; do [ "$1" = "--path" ] && path="$2"; shift; done
+        case "$path" in
+            /aws/service/sagemaker-hyperpod/ami/*)
+                # The public HyperPod node AMI tree: an EKS leaf per minor
+                # HyperPod supports — cdk.json's minor and the two before it,
+                # plus the next minor under drift (HyperPod ahead of cdk.json)
+                # — beside the Slurm leaf. FAKE_HYPERPOD_AMI=trailing stops
+                # one minor short of cdk.json's; =unpinned stops two short, at
+                # a minor the fixture pins no kube-proxy build for; =empty
+                # answers an empty tree; =fail refuses the read.
+                [ "${FAKE_HYPERPOD_AMI:-ok}" = "fail" ] && { echo "An error occurred (AccessDeniedException) when calling the GetParametersByPath operation" >&2; exit 254; }
+                [ "${FAKE_HYPERPOD_AMI:-ok}" = "empty" ] && { echo "[]"; exit 0; }
+                current="$(catalog_get k8s current)"
+                names=("${path}/slurm-amazon-linux-2023/latest/ami-id")
+                if [[ "$current" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+                    major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"
+                    names+=("${path}/eks-${major}.$((minor - 2))-amazon-linux-2023/latest/ami-id")
+                    [ "${FAKE_HYPERPOD_AMI:-ok}" = "unpinned" ] || names+=("${path}/eks-${major}.$((minor - 1))-amazon-linux-2023/latest/ami-id")
+                    case "${FAKE_HYPERPOD_AMI:-ok}" in
+                        trailing|unpinned) ;;
+                        *)
+                            names+=("${path}/eks-${current}-amazon-linux-2/latest/ami-id" "${path}/eks-${current}-amazon-linux-2023/latest/ami-id")
+                            [ "${FAKE_DRIFT:-0}" = "1" ] && names+=("${path}/eks-$(bump "$current")-amazon-linux-2023/latest/ami-id")
+                            ;;
+                    esac
+                fi
+                json_list "${names[@]}"; echo
+                ;;
+            *)
+                # The public /aws/service/pcs/ami tree: the pinned DLAMI base
+                # for both architectures, plus a newer base of the same OS
+                # line under drift.
+                [ "${FAKE_AWS_PCS_AMI:-ok}" = "fail" ] && { echo "An error occurred (AccessDeniedException) when calling the GetParametersByPath operation" >&2; exit 254; }
+                family="$(catalog_get pcs-ami dlami)"
+                names=("/aws/service/pcs/ami/${family}/x86_64/latest/ami-id" "/aws/service/pcs/ami/${family}/arm64/latest/ami-id")
+                [ "${FAKE_DRIFT:-0}" = "1" ] && names+=("/aws/service/pcs/ami/$(bump "$family")/x86_64/latest/ami-id")
+                json_list "${names[@]}"; echo
+                ;;
+        esac
         ;;
     "ec2 describe-images")
         # Amazon's PCS sample AMIs: the pinned OS base for both architectures,
@@ -703,6 +751,7 @@ PY
                 fi
             done
             extract_eks_addons gco/stacks/regional_stack.py | sed 's/^/eks-addon|/'
+            extract_kube_proxy_pins gco/stacks/constants.py | sed 's/^/kube-proxy|/'
             echo "k8s|current|$(extract_k8s_version cdk.json)"
             extract_aurora_versions gco/stacks/regional_stack.py | sed 's/^/aurora|current|/'
             extract_emr_versions gco/stacks/constants.py | sed 's/^/emr|current|/'
@@ -827,12 +876,25 @@ YAML
              "embedding_model_id": "amazon.titan-embed-text-v2:0"},
  "vector_store": {"embedding_model_id": "amazon.titan-embed-text-v2:0"}}}
 JSON
+    # Importable as well as readable: the catalog build imports it from the
+    # fixture tree, the scan under test reads it (gco shadowed) as text.
     cat > "$root/gco/stacks/constants.py" <<'PY'
+from collections.abc import Mapping
+from types import MappingProxyType
+
 EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.1"
 EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.7"
 EKS_ADDON_EFS_CSI_DRIVER = "v3.4.2-eksbuild.1"
 EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.6.0-eksbuild.1"
 EKS_ADDON_FSX_CSI_DRIVER = "v1.10.0-eksbuild.1"
+EKS_ADDON_VPC_CNI = "v1.23.0-eksbuild.1"
+EKS_ADDON_COREDNS = "v1.14.0-eksbuild.1"
+EKS_ADDON_KUBE_PROXY_BY_MINOR: Mapping[str, str] = MappingProxyType(
+    {
+        "1.36": "v1.36.0-eksbuild.1",
+        "1.37": "v1.37.0-eksbuild.1",
+    }
+)
 AURORA_POSTGRES_VERSION = "17.10"
 EMR_SERVERLESS_RELEASE_LABEL = "emr-7.14.0"
 LAMBDA_PYTHON_RUNTIME = "PYTHON_3_14"
@@ -1098,6 +1160,14 @@ findings_path() {
     grep -q '^helm repo add keda https://kedacore.github.io/charts --force-update' "$CALLS"
     grep -q '^helm show chart oci://registry.k8s.io/kueue/charts/kueue' "$CALLS"
     grep -q '^aws eks describe-addon-versions --addon-name metrics-server --kubernetes-version 1.37' "$CALLS"
+    # kube-proxy is pinned per minor: the cdk.json minor's build goes through
+    # the add-on check, every other pinned minor through the EKS version check
+    # (one lookup each, none for the cdk.json minor twice), and the HyperPod
+    # node AMI tree names the minor a HyperPod Region runs.
+    grep -q '^aws eks describe-addon-versions --addon-name kube-proxy --kubernetes-version 1.37' "$CALLS"
+    grep -q '^aws eks describe-addon-versions --addon-name kube-proxy --kubernetes-version 1.36' "$CALLS"
+    [ "$(grep -c '^aws eks describe-addon-versions --addon-name kube-proxy' "$CALLS")" = "2" ]
+    grep -q '^aws ssm get-parameters-by-path --path /aws/service/sagemaker-hyperpod/ami/x86_64 --recursive --region us-east-1' "$CALLS"
     grep -q '^aws bedrock list-foundation-models --by-output-modality EMBEDDING' "$CALLS"
     grep -q '^curl https://docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html$' "$CALLS"
     grep -q '^aws s3api list-objects-v2 --bucket aws-pcs-repo-us-east-1 --prefix aws-pcs-node-lifecycle-scripts/ --region us-east-1' "$CALLS"
@@ -1130,7 +1200,16 @@ findings_path() {
     [[ "$output" == *"  - keda (keda): 2.20.2 -> 3.20.2"* ]]
     [[ "$output" == *"  - kueue (kueue): 0.19.2 -> 1.19.2"* ]]
     [[ "$output" == *"  - metrics-server: v0.9.0-eksbuild.7 -> v1.9.0-eksbuild.7"* ]]
+    [[ "$output" == *"  - vpc-cni: v1.23.0-eksbuild.1 -> v2.23.0-eksbuild.1"* ]]
+    [[ "$output" == *"  - coredns: v1.14.0-eksbuild.1 -> v2.14.0-eksbuild.1"* ]]
+    [[ "$output" == *"  - kube-proxy: v1.37.0-eksbuild.1 -> v2.37.0-eksbuild.1"* ]]
     [[ "$output" == *"  - kubernetes_version: 1.37 -> 2.37 (std support ends 2027-01-15)"* ]]
+    # The other pinned minor's kube-proxy build is the EKS version section's
+    # row, with that minor's own standard-support end. The HyperPod AMI tree
+    # reaching past cdk.json's minor asks nothing of the pins.
+    [[ "$output" == *"  - kube-proxy@1.36: v1.36.0-eksbuild.1 -> v2.36.0-eksbuild.1"* ]]
+    [[ "$output" != *"kube-proxy@2.37"* ]]
+    [[ "$output" != *"HyperPod node AMIs stop at"* ]]
     [[ "$output" == *"  - aurora-postgresql: 17.10 -> 18.10"* ]]
     [[ "$output" == *"  - emr-serverless: emr-7.14.0 -> emr-7.14.1"* ]]
     [[ "$output" == *"  - bedrock mission_default_model_id: global.anthropic.claude-opus-5 -> global.anthropic.claude-opus-6"* ]]
@@ -1230,6 +1309,8 @@ findings_path() {
     [ "$(jq -r '.surfaces[] | select(.surface == "npm Packages") | .findings[] | select(.package == "aws-cdk") | "\(.graph) \(.current) \(.latest)"' "$findings")" = ". 2.1140.0 3.1140.0" ]
     [ "$(jq -r '.surfaces[] | select(.surface == "EMR Serverless") | .findings[0] | "\(.release) \(.current) \(.latest)"' "$findings")" = "emr-serverless emr-7.14.0 emr-7.14.1" ]
     [ "$(jq -r '.surfaces[] | select(.surface == "EKS Kubernetes Version") | .findings[0].standard_support_ends' "$findings")" = "2027-01-15" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "EKS Kubernetes Version") | .findings[1] | "\(.pin) \(.current) \(.latest) \(.standard_support_ends)"' "$findings")" = "kube-proxy@1.36 v1.36.0-eksbuild.1 v2.36.0-eksbuild.1 2026-09-15" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "EKS Kubernetes Version") | .count' "$findings")" = "2" ]
     [ "$(jq -r '.surfaces[] | select(.surface == "PCS Slurm Versions") | .urgency + " " + (.count | tostring) + " " + (.findings[0] | keys | join(","))' "$findings")" = "act soon 1 action,current,pin,upstream" ]
     [ "$(jq -r '.surfaces[] | select(.surface == "PCS Lifecycle Scripts and AMIs") | .findings[] | select(.pin | startswith("SAMPLE_NAME_PATTERN")) | .latest' "$findings")" = "al2024 (newer sample AMI base)" ]
     [[ "$(jq -r '.surfaces[] | select(.surface == "Accelerator Catalog and NodePools") | .offline_report_markdown' "$findings")" == *"Retire p2 from the GPU pool"* ]]
@@ -1668,7 +1749,12 @@ YAML
     [ "$status" -eq 0 ]
     [[ "$output" == *"INCOMPLETE: Helm chart parser emitted an incomplete record from lambda/helm-installer/charts.yaml."* ]]
     [[ "$output" == *"EKS add-on lookup failed or returned an invalid version for eks-pod-identity-agent."* ]]
-    [ "$(grep -c '^aws eks describe-addon-versions' "$CALLS")" -eq 1 ]
+    # The add-on section stops at its first bad answer; the EKS version
+    # section's per-minor kube-proxy lookup is its own call and degrades as
+    # an incomplete lookup rather than a verdict.
+    [ "$(grep '^aws eks describe-addon-versions' "$CALLS" | grep -vc -- '--addon-name kube-proxy --kubernetes-version 1.36')" -eq 1 ]
+    [[ "$output" == *"INCOMPLETE: kube-proxy add-on lookup for EKS 1.36 failed or returned an invalid version."* ]]
+    [[ "$output" != *"kube-proxy@1.36:"* ]]
 
     # A chart the index search knows nothing about (the catalog still
     # describes the previous charts.yaml, so the fake index has no entry).
@@ -1935,6 +2021,74 @@ PY
     [ "$status" -eq 0 ]
     [[ "$output" == *"Could not read HEALTH_MONITORING_AGENT_TAG and HEALTH_MONITORING_AGENT_ACCOUNTS from gco/hyperpod_config.py."* ]]
     [[ "$output" == *"HyperPod health agent:    (skipped)"* ]]
+}
+
+@test "the HyperPod EKS minor check names the minor a HyperPod Region runs, the kube-proxy pin it lacks or should retire, and degrades by name" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    build_catalog "$root"
+
+    # HyperPod's node AMIs stop one minor short of cdk.json's. The lag is a
+    # standing consistency fact, not drift; that minor has its kube-proxy
+    # pin, so the EKS version section has nothing to add.
+    run_scan "$root" FAKE_HYPERPOD_AMI=trailing
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - HyperPod EKS minor vs cdk.json: HyperPod node AMIs stop at 1.36, cdk.json pins 1.37"* ]]
+    [[ "$output" == *"EKS Kubernetes version:   0"* ]]
+    [[ "$output" != *"kube-proxy@"* ]]
+    [[ "$output" != *"INCOMPLETE:"* ]]
+    grep -qx 'scan_complete=true' "$GITHUB_OUTPUT"
+    grep -qx 'has_drift=true' "$GITHUB_OUTPUT"
+    grep -qF -- "| SageMaker HyperPod EKS minor (cdk.json / HyperPod node AMIs) | HyperPod node AMIs stop at 1.36; cdk.json kubernetes_version is 1.37. A Region with HyperPod on runs 1.36 (gco release validate --kubernetes-version 1.36) |" "$(report_path)"
+    local findings
+    findings="$(findings_path)"
+    [ "$(jq -r '.surfaces[] | select(.surface == "Version Consistency") | .count' "$findings")" = "1" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "Version Consistency") | .findings[0].what' "$findings")" = "SageMaker HyperPod EKS minor (cdk.json / HyperPod node AMIs)" ]
+
+    # Two minors short, at a minor the tree pins no kube-proxy build for: the
+    # EKS version section names the build to add and that minor's support
+    # end, beside the lag row.
+    run_scan "$root" FAKE_HYPERPOD_AMI=unpinned
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - kube-proxy@1.35: no pin for the newest minor HyperPod supports; add v1.35.0-eksbuild.1 to EKS_ADDON_KUBE_PROXY_BY_MINOR"* ]]
+    [[ "$output" == *"HyperPod node AMIs stop at 1.35, cdk.json pins 1.37"* ]]
+    [[ "$output" == *"EKS Kubernetes version:   1"* ]]
+    grep -q -- '^aws eks describe-addon-versions --addon-name kube-proxy --kubernetes-version 1.35' "$CALLS"
+    grep -qF -- "| \`kube-proxy@1.35\` | missing (the newest minor HyperPod supports) | v1.35.0-eksbuild.1 | 2026-05-15 |" "$(report_path)"
+    grep -qF -- "A \`kube-proxy@<minor>\` row is an entry of \`EKS_ADDON_KUBE_PROXY_BY_MINOR\`" "$(report_path)"
+
+    # An empty tree and a refused read are incomplete lookups, not verdicts.
+    run_scan "$root" FAKE_HYPERPOD_AMI=empty
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCOMPLETE: HyperPod node AMI lookup failed (ssm get-parameters-by-path /aws/service/sagemaker-hyperpod/ami/x86_64)."* ]]
+    [[ "$output" != *"HyperPod node AMIs stop at"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+    run_scan "$root" FAKE_HYPERPOD_AMI=fail
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCOMPLETE: HyperPod node AMI lookup failed (ssm get-parameters-by-path /aws/service/sagemaker-hyperpod/ami/x86_64)."* ]]
+
+    # A pin for a minor EKS no longer keeps in standard support is a row to
+    # retire; its build is looked up nowhere.
+    "$REAL_PYTHON3" - "$root/gco/stacks/constants.py" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+text = text.replace(
+    '        "1.36": "v1.36.0-eksbuild.1",\n',
+    '        "1.34": "v1.34.0-eksbuild.1",\n        "1.36": "v1.36.0-eksbuild.1",\n',
+)
+with open(path, "w") as f:
+    f.write(text)
+PY
+    build_catalog "$root"
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - kube-proxy@1.34: v1.34.0-eksbuild.1 is pinned for a minor outside EKS standard support; retire the entry"* ]]
+    [[ "$output" == *"EKS Kubernetes version:   1"* ]]
+    [[ "$output" != *"INCOMPLETE:"* ]]
+    ! grep -q -- '--addon-name kube-proxy --kubernetes-version 1.34' "$CALLS"
+    grep -qF -- "| \`kube-proxy@1.34\` | v1.34.0-eksbuild.1 | retire (EKS 1.34 is out of standard support) | ended |" "$(report_path)"
 }
 
 @test "engine packages that went unhealthy are drift; companions the registry cannot answer for are a skip" {
