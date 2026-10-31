@@ -2162,6 +2162,74 @@ class TestProjectInventory:
         fakes["_list_global_accelerators"].assert_called_once_with(session, "us-west-2", _PROJECT)
         fakes["_list_instances"].assert_not_called()
 
+    def test_a_service_the_sdk_lists_no_regions_for_is_placed_by_the_public_parameters(
+        self,
+    ) -> None:
+        """AWS PCS ships only an endpoint ruleset, so botocore names no Region for it.
+
+        Taking that empty list at face value scanned PCS nowhere while the
+        coverage record still called the scanner complete (the PR #496 live
+        runs recorded ``scanner_regions.pcs == []``). The public
+        global-infrastructure parameters are the list AWS publishes.
+        """
+        session = self._session(backup_regions=[_REGION], pcs_regions=[])
+        ssm = session.client.return_value
+        ssm.get_paginator.return_value.paginate.return_value = [
+            {"Parameters": [{"Name": ".../regions/us-east-1", "Value": _REGION}]},
+            {
+                "Parameters": [
+                    {"Name": ".../regions/eu-west-1", "Value": "eu-west-1"},
+                    {"Value": ""},
+                ]
+            },
+        ]
+        fakes = self._scanner_fakes()
+
+        with _patched_helpers(fakes):
+            inventory = inventory_project.collect_project_resources(
+                session,
+                enabled_regions=["us-west-2", _REGION],
+                expected_account=_ACCOUNT,
+                project_name=_PROJECT,
+                seed_region=_REGION,
+            )
+
+        session.client.assert_called_once_with("ssm", region_name=_REGION)
+        ssm.get_paginator.assert_called_once_with("get_parameters_by_path")
+        ssm.get_paginator.return_value.paginate.assert_called_once_with(
+            Path="/aws/service/global-infrastructure/services/pcs/regions"
+        )
+        # eu-west-1 is a PCS Region but not an enabled one here; us-west-2 is
+        # enabled but PCS is not offered there.
+        assert inventory["coverage"]["scanner_regions"]["pcs"] == [_REGION]
+        fakes["_list_project_pcs_resources"].assert_called_once_with(session, _REGION, _PROJECT)
+
+    def test_a_service_nobody_names_a_region_for_fails_the_collection_closed(self) -> None:
+        session = self._session(pcs_regions=[])
+        session.client.return_value.get_paginator.return_value.paginate.return_value = [
+            {"Parameters": []},
+            {},
+        ]
+
+        with (
+            _patched_helpers(self._scanner_fakes()),
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"Could not determine the Regions pcs is offered in: neither the SDK's "
+                    r"endpoint data nor the public parameters under "
+                    r"/aws/service/global-infrastructure/services/pcs/regions name any"
+                ),
+            ),
+        ):
+            inventory_project.collect_project_resources(
+                session,
+                enabled_regions=[_REGION],
+                expected_account=_ACCOUNT,
+                project_name=_PROJECT,
+                seed_region=_REGION,
+            )
+
     def test_collection_without_a_global_accelerator_region_records_no_scan_region(self) -> None:
         fakes = self._scanner_fakes()
         fakes["_global_accelerator_control_region"] = MagicMock(return_value=None)

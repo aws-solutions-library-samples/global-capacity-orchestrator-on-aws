@@ -74,7 +74,12 @@ instances PCS launched to leave `shutting-down` and for their tagged root
 volumes to finish deleting, which the inventory would otherwise count as
 present. The inventory's `pcs` scanner (`inventory/scanners.py`)
 claims clusters by project name or `gco:project` tag and everything PCS keeps
-under them.
+under them. It runs in every enabled Region PCS is offered in: botocore lists
+no Region for PCS (the service ships only an endpoint ruleset), so
+`inventory/project.py` reads the list from AWS's public parameters under
+`/aws/service/global-infrastructure/services/pcs/regions` and fails the
+collection when neither source names one, rather than scanning nowhere and
+calling the scanner complete.
 
 The `hyperpod` action (`actions/hyperpod.py`, checks in `checks/hyperpod.py`)
 proves the SageMaker HyperPod capacity every release run deploys through the
