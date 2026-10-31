@@ -245,6 +245,13 @@ preflight runs first, and the final inventory counts HyperPod clusters as a
 residual category so one left behind fails the run. See
 [LIVE_RELEASE_VALIDATION.md](LIVE_RELEASE_VALIDATION.md).
 
+The preflight and status commands also run against the
+[Floci emulator](FLOCI_TESTING.md) in CI for the halves it models (EKS access
+mode, the zone, a real Service Quotas page, CloudFormation outputs); SageMaker's
+HyperPod and training-plan operations are not modeled there, so those tests
+prove each refusal lands on the documented path and the cluster-facing checks
+stay in the unit suite.
+
 ## Limitations
 
 - EKS orchestration only. HyperPod's Slurm orchestration is not a GCO Slurm

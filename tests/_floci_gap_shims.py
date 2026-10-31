@@ -1,6 +1,6 @@
 """Documented Floci-gap shims, importable without pytest.
 
-Four emulator gaps affect GCO's AWS surface (each probed empirically; see
+Six emulator gaps affect GCO's AWS surface (each probed empirically; see
 docs/FLOCI_TESTING.md):
 
 * CloudFormation ``GetStackPolicy`` responses omit the
@@ -20,6 +20,13 @@ docs/FLOCI_TESTING.md):
   SageMaker actions Floci 2.2.0 models (``ValidationException: Action
   ListClusters is not supported``), while the harness's inventory lists the
   project's HyperPod clusters in every Region to prove them absent.
+* The public global-infrastructure parameters
+  (``/aws/service/global-infrastructure/services/<service>/regions``) are not
+  served: ``GetParametersByPath`` answers an empty page. The inventory reads
+  AWS PCS's Regions there because botocore names none for it.
+* AWS PCS is absent from the catalog entirely (``UnknownOperationException``
+  on ``ListClusters``, ``GetCluster`` and ``CreateCluster``), while the
+  inventory lists the project's PCS clusters in every PCS Region.
 
 Each shim registers a botocore ``before-send`` handler that answers exactly
 one read-only operation with the response real AWS would give for the
@@ -61,6 +68,46 @@ _DEFAULT_TRACE_SEGMENT_DESTINATION_JSON = json.dumps(
 # an emulator account is: Floci models no SageMaker CreateCluster either, so
 # nothing in a Floci run can have created one.
 _NO_HYPERPOD_CLUSTERS_JSON = json.dumps({"ClusterSummaries": []}).encode()
+
+# What PCS ListClusters returns for an account with no clusters, which an
+# emulator account is: PCS is absent from Floci's catalog, CreateCluster
+# included.
+_NO_PCS_CLUSTERS_JSON = json.dumps({"clusters": []}).encode()
+
+# The Regions AWS PCS is offered in, as the public parameters under
+# /aws/service/global-infrastructure/services/pcs/regions listed them on
+# 2026-10-31 (aws partition; the tree also names the GovCloud Regions). Only
+# the Regions the emulator enables matter to a Floci run; the list is kept
+# whole so the shim answers what real AWS answered.
+_PCS_REGIONS_PARAMETER_PATH = "/aws/service/global-infrastructure/services/pcs/regions"
+_PCS_REGIONS_2026_10_31 = (
+    "af-south-1",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-southeast-4",
+    "ap-southeast-5",
+    "ap-southeast-6",
+    "ca-central-1",
+    "eu-central-1",
+    "eu-north-1",
+    "eu-south-1",
+    "eu-south-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "sa-east-1",
+    "us-east-1",
+    "us-east-2",
+    "us-gov-east-1",
+    "us-gov-west-1",
+    "us-west-2",
+)
 
 
 def _local_response(request, body: bytes, content_type: str) -> AWSResponse:
@@ -183,9 +230,70 @@ def shim_floci_sagemaker_list_clusters(events) -> None:
     events.register("before-send.sagemaker.ListClusters", _synthesize)
 
 
+def shim_floci_pcs_service_regions(events) -> None:
+    """Answer the public ``…/services/pcs/regions`` parameters with AWS's list.
+
+    Floci 2.2.0 serves none of the public global-infrastructure parameters
+    (``GetParametersByPath`` under that tree answers an empty page). The
+    harness inventory reads AWS PCS's Regions from exactly that path, because
+    botocore's endpoint data names no Region for PCS, and fails the
+    collection closed when nothing names one. The shim answers only the PCS
+    path, with the list real AWS gave on 2026-10-31; every other
+    ``GetParametersByPath`` (the harness's own parameters, the CloudFormation
+    fixtures' SSM markers) reaches the emulator.
+    """
+
+    def _synthesize(request, **_kwargs):
+        body = request.body
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="replace")
+        try:
+            path = str(json.loads(body or "{}").get("Path") or "")
+        except ValueError:
+            return None
+        if path.rstrip("/") != _PCS_REGIONS_PARAMETER_PATH:
+            return None  # not the PCS Region list; let the emulator answer
+        parameters = [
+            {
+                "Name": f"{_PCS_REGIONS_PARAMETER_PATH}/{region}",
+                "Type": "String",
+                "Value": region,
+                "Version": 1,
+                "DataType": "text",
+                "ARN": f"arn:aws:ssm:us-east-1::parameter{_PCS_REGIONS_PARAMETER_PATH}/{region}",
+            }
+            for region in _PCS_REGIONS_2026_10_31
+        ]
+        return _local_response(
+            request, json.dumps({"Parameters": parameters}).encode(), "application/x-amz-json-1.1"
+        )
+
+    events.register("before-send.ssm.GetParametersByPath", _synthesize)
+
+
+def shim_floci_pcs_list_clusters(events) -> None:
+    """Answer AWS PCS ``ListClusters`` with the no-clusters shape.
+
+    PCS is absent from Floci 2.2.0's catalog: ``ListClusters``, ``GetCluster``
+    and ``CreateCluster`` all answer ``UnknownOperationException``. The
+    harness inventory lists every PCS Region's clusters to prove the
+    project's absent; real AWS returns an empty page for an account with no
+    clusters, and an emulator account can have none. Every other PCS
+    operation stays unshimmed (``cli.pcs_preflight`` and the PCS backend's
+    ``GetCluster`` keep their coverage in patched-client unit tests).
+    """
+
+    def _synthesize(request, **_kwargs):
+        return _local_response(request, _NO_PCS_CLUSTERS_JSON, "application/x-amz-json-1.0")
+
+    events.register("before-send.pcs.ListClusters", _synthesize)
+
+
 def apply_known_floci_gap_shims(events) -> None:
     """Install every documented Floci-gap shim on a botocore event system."""
     shim_floci_get_stack_policy(events)
     shim_floci_zone_id_lookup(events)
     shim_floci_missing_xray(events)
     shim_floci_sagemaker_list_clusters(events)
+    shim_floci_pcs_service_regions(events)
+    shim_floci_pcs_list_clusters(events)

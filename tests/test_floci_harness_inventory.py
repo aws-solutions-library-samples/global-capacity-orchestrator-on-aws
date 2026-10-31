@@ -78,6 +78,35 @@ class TestRegionDiscovery:
             f"to a usable region list, got {regions}"
         )
 
+    def test_a_service_without_sdk_endpoint_data_is_placed_by_the_public_parameters(
+        self, harness_session
+    ):
+        """AWS PCS ships only an endpoint ruleset, so botocore names no Region for it.
+
+        The inventory falls back to the public parameters under
+        ``/aws/service/global-infrastructure/services/pcs/regions`` (served
+        here by the documented gap shim with the list real AWS gave) and must
+        come back with PCS's Regions, not botocore's every-Region list: the
+        PR #496 live runs scanned PCS in zero Regions because the empty SDK
+        list was taken at face value.
+        """
+        from scripts.live_release_validation.inventory.project import _service_regions
+
+        assert harness_session.get_available_regions("pcs", partition_name="aws") == [], (
+            "botocore now lists PCS Regions; the public-parameter fallback and its shim "
+            "can be retired"
+        )
+        pcs_regions = _service_regions(
+            harness_session, "pcs", partition="aws", seed_region="us-east-1"
+        )
+        assert {"us-east-1", "us-east-2", "eu-west-1"} <= pcs_regions
+        assert "us-west-1" not in pcs_regions, "PCS is not offered in us-west-1"
+        # A service botocore does know needs no parameter read at all.
+        sagemaker_regions = _service_regions(
+            harness_session, "sagemaker", partition="aws", seed_region="us-east-1"
+        )
+        assert "us-west-1" in sagemaker_regions
+
 
 class TestProjectResourceScanners:
     def test_created_resources_are_seen_and_absence_is_proven_after_cleanup(
@@ -140,6 +169,20 @@ class TestProjectResourceScanners:
         )
         assert volume_id in inventory["regional"][region]["cluster_volumes"]
         assert project_resources_are_absent(inventory) is False
+        # The AWS PCS and SageMaker HyperPod scanners ran in this Region (PCS
+        # placed by the public parameters, HyperPod by botocore), each listing
+        # its service for real through the documented ListClusters shims and
+        # finding nothing of the project's: the categories exist and are empty.
+        scanner_regions = inventory["coverage"]["scanner_regions"]
+        assert scanner_regions["pcs"] == [region], scanner_regions
+        assert scanner_regions["hyperpod"] == [region], scanner_regions
+        for category in (
+            "pcs_clusters",
+            "pcs_compute_node_groups",
+            "pcs_queues",
+            "hyperpod_clusters",
+        ):
+            assert inventory["regional"][region][category] == [], category
 
         # Tear the project down and require the scanners to PROVE absence —
         # the exact final-inventory gate that authorizes calling a validation
