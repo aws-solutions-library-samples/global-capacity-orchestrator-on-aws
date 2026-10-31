@@ -145,9 +145,9 @@ def test_the_driver_suite_gets_a_shard_to_itself(split: Any) -> None:
     """
     driver = "tests/BATS/test_dependency_scan_driver.bats"
     counts = split.collect_counts()
-    groups = split.balance(split.weigh(counts), 4)
+    groups = split.balance(split.weigh(counts), 5)
     assert [driver] in groups, "the driver suite should be alone in its shard"
-    by_count = split.balance(counts, 4)
+    by_count = split.balance(counts, 5)
     assert [driver] not in by_count, (
         "if counts alone isolate the driver, the weight is no longer needed"
     )
@@ -209,16 +209,18 @@ def test_workflow_shard_matrix_is_a_contiguous_range(workflow: dict[str, Any]) -
     )
 
 
-def test_workflow_uses_four_shards_that_do_not_fail_fast(workflow: dict[str, Any]) -> None:
-    """Four cells: the heaviest suite alone, the second heaviest alone, the rest in two.
+def test_workflow_uses_five_shards_that_do_not_fail_fast(workflow: dict[str, Any]) -> None:
+    """Five cells: the heaviest suite alone, the second heaviest alone, the rest in three.
 
-    On the 2026-10-30 timings that is 440 s, 364 s, 175 s and 202 s of
-    plain-plus-traced running against 1,260 s for the single job. A fifth
-    shard would not shorten the longest cell, which is one file.
+    On the 2026-10-31 timings the two single-suite cells run 597 s and 329 s
+    of plain-plus-traced work and the other three about two minutes each,
+    against 1,260 s for the single job this replaced. The longest cell is one
+    file, so no shard count shortens it further; the fifth shard shortens
+    the rest.
     """
     job = _shard_job(workflow)
     assert job["strategy"]["fail-fast"] is False
-    assert job["strategy"]["matrix"]["shard"] == [1, 2, 3, 4]
+    assert job["strategy"]["matrix"]["shard"] == [1, 2, 3, 4, 5]
 
 
 def test_workflow_derives_shard_total_from_the_matrix(workflow: dict[str, Any]) -> None:

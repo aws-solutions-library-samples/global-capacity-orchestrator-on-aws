@@ -25,11 +25,11 @@ not typical, with the measurement it came from, so a reader can re-measure.
 
 Usage::
 
-    # Files for shard 1 of 4, one per line
-    python3 scripts/split_bats.py --shard 1 --of 4
+    # Files for shard 1 of 5, one per line
+    python3 scripts/split_bats.py --shard 1 --of 5
 
     # What the partition looks like, without running anything
-    python3 scripts/split_bats.py --of 4 --summary
+    python3 scripts/split_bats.py --of 5 --summary
 
 Standard library only: the job that runs it has bats, Ruby and the runner's
 python3, not the project's virtualenv. Exits non-zero if the suite directory
