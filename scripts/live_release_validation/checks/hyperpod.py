@@ -40,10 +40,20 @@ from .jobs import _run_api_transport_lifecycle
 #: The ``hyperpod_overrides`` context every release-run CDK invocation carries:
 #: the cheapest GPU type the HyperPod ``for cluster usage`` quotas commonly
 #: allow, one instance, so the proof costs a single small node for the run.
+#: Deep health checks stay off, and explicitly so rather than by the block's
+#: default: SageMaker refuses ``InstanceConnectivity`` for ``ml.g4dn.xlarge``
+#: (``CreateCluster`` failed the second #502 release attempt with the list of
+#: families it accepts), and the checks hold a new instance for about two
+#: hours, which a release run proving the node path has no use for.
 RELEASE_HYPERPOD_OVERRIDES: dict[str, Any] = {
     "enabled": True,
     "instance_groups": [
-        {"name": "gco-hyperpod", "instance_type": "ml.g4dn.xlarge", "instance_count": 1}
+        {
+            "name": "gco-hyperpod",
+            "instance_type": "ml.g4dn.xlarge",
+            "instance_count": 1,
+            "deep_health_checks": [],
+        }
     ],
 }
 

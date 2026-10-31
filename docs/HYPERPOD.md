@@ -168,7 +168,7 @@ for a per-Region overlay). Every key is validated at synth time by
 | `instance_groups[].instance_type` | `ml.g5.8xlarge` | A HyperPod (`ml.*`) instance type. |
 | `instance_groups[].instance_count` | `1` | Instances in the group (0–10000; 0 keeps the group defined but empty). |
 | `instance_groups[].threads_per_core` | `1` | 1 disables hyperthreading, 2 keeps it. |
-| `instance_groups[].deep_health_checks` | `["InstanceStress", "InstanceConnectivity"]` | `OnStartDeepHealthChecks` run when an instance is created or replaced; `[]` skips them. |
+| `instance_groups[].deep_health_checks` | `[]` | `OnStartDeepHealthChecks` SageMaker runs when an instance is created or replaced: `InstanceStress` (hardware, DCGM and EFA tests on the instance), `InstanceConnectivity` (NCCL tests across the group). Off by default because they hold each new instance for about two hours, and because SageMaker accepts `InstanceConnectivity` only for instance families with multi-node GPU networking (`CreateCluster` named G5 and G6 from 8xlarge up, P4, P5, P6 and Trn on 2026-10-31; it refuses `ml.g4dn.xlarge`). Turn them on per group for production training capacity. |
 | `instance_groups[].training_plan_arn` | `null` | A SageMaker Training Plan whose reserved capacity this group launches into (see below). |
 | `instance_groups[].root_volume_size_gb` | `100` | Root EBS volume size of every instance in the group. |
 | `queue.max_cpu` / `max_memory` / `max_gpu` | `"1000"` / `"4Ti"` / `"64"` | Nominal quotas of the `gco-hyperpod-queue` Kueue ClusterQueue (Kubernetes quantities). |
@@ -255,7 +255,7 @@ nodes that ran a job (see [How work reaches HyperPod nodes](#how-work-reaches-hy
 ## Live release validation
 
 Every release run deploys HyperPod through the run-scoped `hyperpod_overrides`
-context (one `ml.g4dn.xlarge` instance group) and the `hyperpod` action proves
+context (one `ml.g4dn.xlarge` instance group, deep health checks off) and the `hyperpod` action proves
 it end to end: SageMaker describes the cluster `InService` with the instance
 group at its target count and its instance `Running`, a Job submitted through
 the GCO API to the `gco-hyperpod` queue and requesting one GPU completes, and

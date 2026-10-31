@@ -118,8 +118,12 @@ def _lifecycle(capacity_type: str | None = "hyperpod") -> dict[str, Any]:
 
 class TestOverridesAndConfig:
     def test_the_release_override_is_canonical_json(self) -> None:
+        # Deep health checks are off by name, not by the block's default:
+        # SageMaker refuses InstanceConnectivity for ml.g4dn.xlarge (the second
+        # #502 release attempt failed CreateCluster on it) and the checks would
+        # hold the run's one node for about two hours.
         assert _OVERRIDES == (
-            '{"enabled":true,"instance_groups":[{"instance_count":1,'
+            '{"enabled":true,"instance_groups":[{"deep_health_checks":[],"instance_count":1,'
             '"instance_type":"ml.g4dn.xlarge","name":"gco-hyperpod"}]}'
         )
         assert json.loads(_OVERRIDES) == checks_hyperpod.RELEASE_HYPERPOD_OVERRIDES

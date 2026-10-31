@@ -28,7 +28,7 @@ Block (``hyperpod`` in cdk.json; ``hyperpod_regions.<region>`` overlays it)::
           "instance_type": "ml.g5.8xlarge",
           "instance_count": 1,
           "threads_per_core": 1,
-          "deep_health_checks": ["InstanceStress", "InstanceConnectivity"],
+          "deep_health_checks": [],       # opt in: ["InstanceStress", "InstanceConnectivity"]
           "training_plan_arn": null,
           "root_volume_size_gb": 100
         }
@@ -105,7 +105,14 @@ HEALTH_MONITORING_AGENT_ACCOUNTS: Mapping[str, str] = {
     "sa-east-1": "025066253954",
 }
 
-#: ``OnStartDeepHealthChecks`` values the API accepts.
+#: ``OnStartDeepHealthChecks`` values the API accepts. Off by default (see
+#: :data:`INSTANCE_GROUP_DEFAULTS`): SageMaker runs them on every instance it
+#: creates or replaces and holds the instance for about two hours while they
+#: run, and it accepts ``InstanceConnectivity`` only for instance families
+#: with multi-node GPU networking (``CreateCluster`` named G5 and G6 from
+#: 8xlarge up, P4, P5, P6 and Trn on 2026-10-31, and refused ``ml.g4dn.xlarge``
+#: with that list). The service validates the pairing; GCO does not keep a
+#: copy of the family list.
 DEEP_HEALTH_CHECK_TYPES: tuple[str, ...] = ("InstanceStress", "InstanceConnectivity")
 NODE_RECOVERY_MODES: tuple[str, ...] = ("Automatic", "None")
 REMOVAL_POLICIES: tuple[str, ...] = ("destroy", "retain")
@@ -140,7 +147,7 @@ INSTANCE_GROUP_DEFAULTS: dict[str, Any] = {
     "instance_type": "ml.g5.8xlarge",
     "instance_count": 1,
     "threads_per_core": 1,
-    "deep_health_checks": list(DEEP_HEALTH_CHECK_TYPES),
+    "deep_health_checks": [],
     "training_plan_arn": None,
     "root_volume_size_gb": 100,
 }

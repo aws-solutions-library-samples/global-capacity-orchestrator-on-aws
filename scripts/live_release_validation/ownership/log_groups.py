@@ -69,12 +69,15 @@ def _settle_rolling_back_stack(
     groups, the EKS control-plane and Container Insights groups) survived the
     teardown unowned, and the final inventory reported them as residue.
 
-    Nothing can be done with the stack until the rollback settles anyway
-    (``DeleteStack`` is refused in the meantime), so waiting here costs the
-    teardown nothing. Returns the settled stack (``None`` when it disappeared
-    while waiting); the caller's rolled-back handling then reads the terminal
-    tombstones. Fails closed when the rollback outlasts the budget rather than
-    deriving authority from a rollback still in flight.
+    The wait is not free: CloudFormation accepts ``DeleteStack`` during a
+    rollback (that first teardown issued it 28 minutes into one, and the stack
+    went straight from ``ROLLBACK_IN_PROGRESS`` to ``DELETE_IN_PROGRESS``), so
+    this costs the remainder of the rollback. It buys the only authority there
+    is over the groups the rollback leaves behind. Returns the settled stack
+    (``None`` when it disappeared while waiting); the caller's rolled-back
+    handling then reads the terminal tombstones. Fails closed when the
+    rollback outlasts the budget rather than deriving authority from a
+    rollback still in flight.
     """
     status = str((live_stack or {}).get("status") or "")
     if status not in _ROLLBACK_IN_PROGRESS_STATUSES:

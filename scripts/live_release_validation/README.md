@@ -84,8 +84,8 @@ calling the scanner complete.
 The `hyperpod` action (`actions/hyperpod.py`, checks in `checks/hyperpod.py`)
 proves the SageMaker HyperPod capacity every release run deploys through the
 `hyperpod_overrides` CDK context (`hyperpod_overrides_json()`: one
-`ml.g4dn.xlarge` instance group, part of the resume identity like the other
-fixed overrides): SageMaker must describe the stack's cluster `InService` with
+`ml.g4dn.xlarge` instance group with deep health checks off, part of the
+resume identity like the other fixed overrides): SageMaker must describe the stack's cluster `InService` with
 the instance group at its target count and its instance `Running`; the
 `manifests/hyperpod-smoke-job.yaml` probe, labelled for the `gco-hyperpod`
 Kueue queue and requesting one GPU, must complete through the shared

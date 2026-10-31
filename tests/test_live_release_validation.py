@@ -5123,8 +5123,8 @@ class TestLocalOnlyRuntime:
             "tracing_overrides": '{"sample_ratio":1.0}',
             "pcs_overrides": '{"enabled":true,"managed":{"metrics":{"enabled":true}}}',
             "hyperpod_overrides": (
-                '{"enabled":true,"instance_groups":[{"instance_count":1,'
-                '"instance_type":"ml.g4dn.xlarge","name":"gco-hyperpod"}]}'
+                '{"enabled":true,"instance_groups":[{"deep_health_checks":[],'
+                '"instance_count":1,"instance_type":"ml.g4dn.xlarge","name":"gco-hyperpod"}]}'
             ),
         }
         identity = full_identity["inference"]

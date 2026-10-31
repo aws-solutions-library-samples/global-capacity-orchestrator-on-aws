@@ -57,7 +57,11 @@ class TestDefaults:
         config = _validate({"enabled": True, "instance_groups": [{"name": "gpu"}]})
         group = config["instance_groups"][0]
         assert group["instance_type"] == "ml.g5.8xlarge"
-        assert group["deep_health_checks"] == ["InstanceStress", "InstanceConnectivity"]
+        # Opt in: SageMaker holds a new instance for about two hours while they
+        # run and accepts InstanceConnectivity only on multi-node-GPU families
+        # (it refused ml.g4dn.xlarge live), so a default that turns them on
+        # would make the block valid only for some instance types.
+        assert group["deep_health_checks"] == []
         assert group["root_volume_size_gb"] == 100
         assert config["queue"] == {"max_cpu": "1000", "max_memory": "4Ti", "max_gpu": "64"}
 
