@@ -511,3 +511,31 @@ class TestHyperpodScanner:
         assert inventory_scanners._list_project_hyperpod_resources(session, _REGION, _PROJECT) == {
             "hyperpod_clusters": []
         }
+
+    def test_a_region_without_hyperpod_reads_as_none_and_other_errors_raise(self) -> None:
+        """SageMaker Regions without HyperPod answer ListClusters with UnknownOperationException.
+
+        That is the service saying nothing can exist there (eu-west-3 and
+        ap-northeast-3 did so in the first live baseline of PR #502); a
+        denied call is still a failure, never an empty scan.
+        """
+        from botocore.exceptions import ClientError
+
+        def refused(code: str) -> MagicMock:
+            session = MagicMock()
+            paginator = session.client.return_value.get_paginator.return_value
+            paginator.paginate.side_effect = ClientError(
+                {"Error": {"Code": code, "Message": "no"}}, "ListClusters"
+            )
+            return session
+
+        assert (
+            inventory_scanners._list_project_hyperpod_resources(
+                refused("UnknownOperationException"), "eu-west-3", _PROJECT
+            )
+            is None
+        )
+        with pytest.raises(ClientError, match="AccessDeniedException"):
+            inventory_scanners._list_project_hyperpod_resources(
+                refused("AccessDeniedException"), _REGION, _PROJECT
+            )

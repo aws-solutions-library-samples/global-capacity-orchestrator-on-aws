@@ -341,11 +341,21 @@ def collect_project_resources(
     completed_scanners.append("pcs")
     # SageMaker HyperPod: the regional stack's cluster is deleted with the
     # stack, so one left behind (a delete that never finished, a retained
-    # removal policy) is owned residue the stack listing no longer shows.
+    # removal policy) is owned residue the stack listing no longer shows. The
+    # SDK lists SageMaker in more Regions than HyperPod serves; a Region whose
+    # ListClusters is "not supported in the called region" is recorded as one
+    # without the service rather than counted as scanned.
     hyperpod_regions = sorted(set(regions) & service_regions["sagemaker"])
-    scanner_regions["hyperpod"] = hyperpod_regions
+    regions_without_hyperpod: list[str] = []
+    scanned_hyperpod_regions: list[str] = []
     for region in hyperpod_regions:
-        regional[region].update(_list_project_hyperpod_resources(session, region, project_name))
+        hyperpod_resources = _list_project_hyperpod_resources(session, region, project_name)
+        if hyperpod_resources is None:
+            regions_without_hyperpod.append(region)
+            continue
+        regional[region].update(hyperpod_resources)
+        scanned_hyperpod_regions.append(region)
+    scanner_regions["hyperpod"] = scanned_hyperpod_regions
     completed_scanners.append("hyperpod")
 
     s3_buckets = _list_project_s3_buckets(session, seed_region, project_name)
@@ -372,6 +382,9 @@ def collect_project_resources(
         "required_scanners": list(_PROJECT_RESOURCE_SCANNERS),
         "completed_scanners": completed_scanners,
         "scanner_regions": scanner_regions,
+        # Enabled Regions a scanner's service lists but the service's API
+        # refused as not offered there (nothing can exist in them).
+        "regions_without_service": {"hyperpod": regions_without_hyperpod},
         "enabled_regions": regions,
         "resource_categories": list(_PROJECT_RESOURCE_CATEGORIES),
     }

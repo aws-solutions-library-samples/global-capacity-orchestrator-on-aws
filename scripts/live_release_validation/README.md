@@ -94,7 +94,12 @@ placement report, recorded for every probe) must put the pod on a `hyperpod`
 node. `preflight` runs `cli.hyperpod_preflight` for the merged block before
 `deploy` (`_hyperpod_preflight`), and the inventory's `hyperpod` scanner
 claims HyperPod clusters by project name or `gco:project` tag so one left
-behind is residue. HyperPod publishes its node AMI per EKS minor, after the
+behind is residue. The SDK lists SageMaker in more Regions than HyperPod
+serves; where `ListClusters` answers `UnknownOperationException` ("not
+supported in the called region") the scanner reads the Region as one without
+the service and the coverage record names it under
+`regions_without_service.hyperpod` instead of counting it as scanned — any
+other error still fails the collection. HyperPod publishes its node AMI per EKS minor, after the
 minor ships, and cdk.json ships the newest minor, so a release run passes
 `--kubernetes-version <minor>`: `__main__.py` threads it to every CDK
 invocation as the `kubernetes_version` context (`RunSettings.kubernetes_version_override`,

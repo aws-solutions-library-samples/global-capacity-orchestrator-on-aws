@@ -2048,10 +2048,12 @@ class TestProjectInventory:
                     "pcs_queues": [],
                 }
             ),
+            # HyperPod is offered in the first Region; the second has SageMaker
+            # but not HyperPod (the scanner reads that as None).
             "_list_project_hyperpod_resources": MagicMock(
-                side_effect=lambda session, region, project_name: {
-                    "hyperpod_clusters": ["hyperpod-cluster-arn"] if region == _REGION else []
-                }
+                side_effect=lambda session, region, project_name: (
+                    {"hyperpod_clusters": ["hyperpod-cluster-arn"]} if region == _REGION else None
+                )
             ),
             "_list_project_s3_buckets": MagicMock(return_value=[f"{_PROJECT}-assets"]),
             "_list_project_iam_resources": MagicMock(
@@ -2111,7 +2113,10 @@ class TestProjectInventory:
         assert coverage["enabled_regions"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["aws_backup"] == [_REGION]
         assert coverage["scanner_regions"]["pcs"] == [_REGION]
-        assert coverage["scanner_regions"]["hyperpod"] == [_REGION, "us-west-2"]
+        # Both Regions list SageMaker; HyperPod answered in one and refused the
+        # other as not offered, which the record keeps apart from "scanned".
+        assert coverage["scanner_regions"]["hyperpod"] == [_REGION]
+        assert coverage["regions_without_service"] == {"hyperpod": ["us-west-2"]}
         assert coverage["scanner_regions"]["ec2_networking"] == [_REGION, "us-west-2"]
         assert coverage["scanner_regions"]["s3_buckets"] == ["global"]
         assert coverage["scanner_regions"]["global_accelerators"] == ["us-west-2"]

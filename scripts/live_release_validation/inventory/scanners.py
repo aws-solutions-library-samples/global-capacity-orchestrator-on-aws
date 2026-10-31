@@ -779,33 +779,50 @@ def _hyperpod_tags(client: Any, arn: str) -> dict[str, str]:
     return _tags_to_dict(client.list_tags(ResourceArn=arn).get("Tags") or [])
 
 
+#: SageMaker's answer to a HyperPod call in a Region that has SageMaker but not
+#: HyperPod (eu-west-3 and ap-northeast-3 on 2026-10-31): the operation does
+#: not exist there, so there is nothing to own. Every other error still raises.
+_HYPERPOD_NOT_OFFERED_ERROR = "UnknownOperationException"
+
+
 def _list_project_hyperpod_resources(
     session: Any,
     region: str,
     project_name: str,
-) -> dict[str, list[str]]:
-    """SageMaker HyperPod clusters the project owns, by ARN.
+) -> dict[str, list[str]] | None:
+    """SageMaker HyperPod clusters the project owns, by ARN; ``None`` where HyperPod is not offered.
 
     A cluster is owned by name (``<project>-hyperpod``, or whatever the block
     names under the project prefix) or by the ``gco:project`` / CloudFormation
     stack tags the regional stack puts on it. Instance groups and instances
     have no ARN of their own and go with the cluster, so one category covers
     the residue. A cluster that merely shares the account stays out.
+
+    The SDK lists SageMaker in more Regions than HyperPod serves; in the
+    others ``ListClusters`` is ``UnknownOperationException`` ("not supported
+    in the called region"), which is the service saying nothing can exist
+    there. That reads as ``None`` so the coverage record can name the Region
+    as one without the service; any other error is still a failure.
     """
     client = session.client("sagemaker", region_name=region)
     owned: set[str] = set()
-    for page in client.get_paginator("list_clusters").paginate():
-        for summary in page.get("ClusterSummaries", []):
-            name = str(summary.get("ClusterName") or "")
-            arn = str(summary.get("ClusterArn") or "")
-            if not name or not arn:
-                raise RuntimeError(
-                    f"SageMaker returned a HyperPod cluster without identity in {region}"
-                )
-            if _project_owned_name(name, project_name) or _tags_are_project_owned(
-                _hyperpod_tags(client, arn), project_name
-            ):
-                owned.add(arn)
+    try:
+        for page in client.get_paginator("list_clusters").paginate():
+            for summary in page.get("ClusterSummaries", []):
+                name = str(summary.get("ClusterName") or "")
+                arn = str(summary.get("ClusterArn") or "")
+                if not name or not arn:
+                    raise RuntimeError(
+                        f"SageMaker returned a HyperPod cluster without identity in {region}"
+                    )
+                if _project_owned_name(name, project_name) or _tags_are_project_owned(
+                    _hyperpod_tags(client, arn), project_name
+                ):
+                    owned.add(arn)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == _HYPERPOD_NOT_OFFERED_ERROR:
+            return None
+        raise
     return {"hyperpod_clusters": sorted(owned)}
 
 
