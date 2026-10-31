@@ -209,8 +209,9 @@ case "$url" in
         # readme's Region list. FAKE_DRIFT=1 adds one type to each list (the
         # first entry, one generation newer), bumps the tag and adds a Region;
         # FAKE_HMA=retire drops the first type of each list instead;
-        # =account-moved changes the first Region's account; =no-lists answers
-        # a template without the affinities; =fail refuses every file.
+        # =account-moved changes the first Region's account; =region-dropped
+        # leaves the last Region out of the readme; =no-lists answers a
+        # template without the affinities; =fail refuses every file.
         [ "${FAKE_HMA:-ok}" = "fail" ] && { reply 404 ''; exit 22; }
         hma_daemonset() {
             local name="$1" first=1 body
@@ -269,8 +270,10 @@ spec:
                 rows="- **Supported Regions and their ECR URIs**:
 "
                 first=1
+                last_region="$(grep '^hma-region|' "$FAKE_CATALOG" | tail -1 | cut -d'|' -f2)"
                 while IFS='|' read -r region account; do
                     [ -n "$region" ] || continue
+                    [ "${FAKE_HMA:-ok}" = "region-dropped" ] && [ "$region" = "$last_region" ] && continue
                     if [ "$first" -eq 1 ]; then
                         first=0
                         [ "${FAKE_HMA:-ok}" = "account-moved" ] && account="999999999999"
@@ -1888,6 +1891,13 @@ YAML
     [[ "$output" == *"  - HEALTH_MONITORING_AGENT_ACCOUNTS: 2 -> 2 Regions (update the account for us-east-1)"* ]]
     [[ "$output" == *"HyperPod health agent:    1"* ]]
     grep -qF -- "| HEALTH_MONITORING_AGENT_ACCOUNTS (gco/hyperpod_config.py) | 2 Regions | 2 Regions | update the account for us-east-1 |" "$(report_path)"
+
+    # A Region the readme no longer publishes to is a removal.
+    run_scan "$root" FAKE_HMA=region-dropped
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - HEALTH_MONITORING_AGENT_ACCOUNTS: 2 -> 1 Regions (remove eu-west-1)"* ]]
+    [[ "$output" == *"HyperPod health agent:    1"* ]]
+    grep -qF -- "| HEALTH_MONITORING_AGENT_ACCOUNTS (gco/hyperpod_config.py) | 2 Regions | 1 Regions | remove eu-west-1 |" "$(report_path)"
 
     # A chart whose layout no longer carries the lists is a skip, not a verdict.
     run_scan "$root" FAKE_HMA=no-lists
