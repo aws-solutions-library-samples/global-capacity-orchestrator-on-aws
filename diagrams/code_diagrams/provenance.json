@@ -92,9 +92,9 @@
       "source_commit": "95213a3dfe214f41ea8e3977b79711b1be061ac0"
     },
     "gco/services/queue_processor.py": {
-      "digest": "d7434393bfb16dfac66a1942118ffbce894efed252f5f263d71070a72588564b",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "3503e14e09c5267bb37696089e46d3411d70e9801097d8926c0e3df72437fca5",
+      "generated_at": "2026-11-01T00:48:22Z",
+      "source_commit": "f6b3e38195627b51e21c8bc4a141943bc9c9ca62"
     },
     "gco/services/request_size_middleware.py": {
       "digest": "6e8ece973df61e63706e7e654dd1387f21175f8b60ff7dca31f2f2a34e3af8a6",
