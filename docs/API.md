@@ -781,7 +781,7 @@ gco jobs get training-job -r us-west-2 -n ml-jobs
 |-------|-------------|
 | `node_name` | Node the earliest-created scheduled pod landed on, from the pod's `spec.nodeName` |
 | `node_instance_type` | That node's `node.kubernetes.io/instance-type` label |
-| `node_capacity_type` | That node's `karpenter.sh/capacity-type` label — `spot` or `on-demand` |
+| `node_capacity_type` | That node's `karpenter.sh/capacity-type` label — `spot` or `on-demand`; `hyperpod` for a [SageMaker HyperPod](HYPERPOD.md) node (labelled `gco.aws/capacity-provider=hyperpod`, no Karpenter label) |
 | `node_labels` | That node's placement labels: instance type, capacity type, zone, region, arch, NodePool |
 | `nodes` | Every node the job's pods landed on, with the pods on each. A job that was retried onto a different instance type shows both |
 | `pod_phase` | The phase every pod shares (`Pending`, `Running`, `Succeeded`, `Failed`, `Unknown`). `null` as soon as the pods disagree, so it never summarizes a `Pending` pod away behind a `Running` one; read `pod_phases` then |

@@ -739,6 +739,47 @@ class TestInfrastructureDeployTools:
         assert {argv[i + 1] for i in tag_indices} == {"Environment=prod", "Owner=ml"}
 
     @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"})
+    def test_deploy_stack_argv_forwards_the_preflight_skips(self):
+        importlib.reload(run_mcp)
+        with patch("tools.stacks._run_long_task", new_callable=AsyncMock) as mock_task:
+            mock_task.return_value = '{"status": "ok", "completes": 0}'
+            asyncio.run(
+                run_mcp.deploy_stack(
+                    stack_name="gco-us-east-1",
+                    skip_pcs_preflight=True,
+                    skip_hyperpod_preflight=True,
+                    ctx=_FakeCtx(),
+                    progress=_FakeProgress(),
+                )
+            )
+            plain = mock_task.call_args.args[0]
+            assert plain[-2:] == ["--skip-pcs-preflight", "--skip-hyperpod-preflight"]
+            asyncio.run(
+                run_mcp.deploy_stack(
+                    stack_name="gco-us-east-1", ctx=_FakeCtx(), progress=_FakeProgress()
+                )
+            )
+        # Off by default: the preflights run.
+        assert "--skip-pcs-preflight" not in mock_task.call_args.args[0]
+        assert "--skip-hyperpod-preflight" not in mock_task.call_args.args[0]
+
+    @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"})
+    def test_deploy_all_argv_forwards_the_preflight_skips(self):
+        importlib.reload(run_mcp)
+        with patch("tools.stacks._run_long_task", new_callable=AsyncMock) as mock_task:
+            mock_task.return_value = '{"status": "ok", "completes": 0}'
+            asyncio.run(
+                run_mcp.deploy_all(
+                    skip_pcs_preflight=True,
+                    skip_hyperpod_preflight=True,
+                    ctx=_FakeCtx(),
+                    progress=_FakeProgress(),
+                )
+            )
+        argv = mock_task.call_args.args[0]
+        assert argv[-2:] == ["--skip-pcs-preflight", "--skip-hyperpod-preflight"]
+
+    @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"})
     def test_deploy_all_argv_includes_yes_but_not_require_approval(self):
         # Same Click-flag mismatch as deploy_stack: ``gco stacks deploy-all``
         # doesn't accept ``--require-approval``.

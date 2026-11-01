@@ -3059,11 +3059,12 @@ class TestCapacityBlockTrend:
             checker = CapacityChecker()
             now = datetime.now(UTC)
 
-            # All offerings in the same week
+            # All offerings start on the same day
             offerings = [
-                {"StartDate": now + timedelta(days=1)},
-                {"StartDate": now + timedelta(days=2)},
-                {"StartDate": now + timedelta(days=3)},
+                {"StartDate": now + timedelta(days=1, hours=1)},
+                {"StartDate": now + timedelta(days=1, hours=2)},
+                {"StartDate": now + timedelta(days=1, hours=3)},
+                {"StartDate": None},
             ]
 
             with patch.object(checker, "_session") as mock_session:
@@ -3075,6 +3076,96 @@ class TestCapacityBlockTrend:
 
                 trend = checker.get_capacity_block_trend("p4d.24xlarge", "us-east-1")
                 assert trend == 0.0
+
+    # EC2 only answers DescribeCapacityBlockOfferings for a window that ends within
+    # about nine days (live, us-east-1, 2026-10-30 22:09Z: "End date must not be
+    # later than Sun Nov 08 22:09:44 UTC 2026"). The 182-day request was refused in
+    # every Region, so the trend was 0.0 everywhere until the method honoured the
+    # end date EC2 names.
+    _LIVE_REFUSAL = (
+        "The end date is not valid. End date must not be later than {date}. "
+        "Specify a new end date and try again."
+    )
+
+    @staticmethod
+    def _refusal(message: str):
+        from botocore.exceptions import ClientError
+
+        return ClientError(
+            {"Error": {"Code": "InvalidParameterValue", "Message": message}},
+            "DescribeCapacityBlockOfferings",
+        )
+
+    def test_latest_accepted_end_date_is_parsed_from_the_live_refusal(self):
+        from datetime import UTC, datetime
+
+        from cli.capacity.checker import _latest_accepted_end_date
+
+        error = self._refusal(self._LIVE_REFUSAL.format(date="Sun Nov 08 22:09:44 UTC 2026"))
+        assert _latest_accepted_end_date(error) == datetime(2026, 11, 8, 22, 9, 44, tzinfo=UTC)
+        assert _latest_accepted_end_date(self._refusal("The instance count is not valid")) is None
+
+    def test_window_is_narrowed_to_the_end_date_ec2_accepts(self):
+        """A refused 182-day window is retried once, ending where EC2 said it may."""
+        from datetime import UTC, datetime, timedelta
+
+        from cli.capacity import CapacityChecker
+        from cli.capacity.blocks import MAX_DURATION_DAYS
+
+        with patch("cli.capacity.checker.get_config") as mock_config:
+            mock_config.return_value = MagicMock()
+            checker = CapacityChecker()
+            now = datetime.now(UTC)
+            latest_end = (now + timedelta(days=9)).replace(microsecond=0)
+            # Day N of the nine-day window carries N offerings: a clear upward ramp.
+            offerings = [
+                {"StartDate": now + timedelta(days=day, hours=1)}
+                for day in range(1, 9)
+                for _ in range(day)
+            ]
+
+            with patch.object(checker, "_session") as mock_session:
+                mock_ec2 = MagicMock()
+                mock_session.client.return_value = mock_ec2
+                mock_ec2.describe_capacity_block_offerings.side_effect = [
+                    self._refusal(
+                        self._LIVE_REFUSAL.format(
+                            date=latest_end.strftime("%a %b %d %H:%M:%S UTC %Y")
+                        )
+                    ),
+                    {"CapacityBlockOfferings": offerings},
+                ]
+
+                trend = checker.get_capacity_block_trend("p4d.24xlarge", "us-east-1")
+
+            assert trend > 0, f"Expected positive trend, got {trend}"
+            first, second = mock_ec2.describe_capacity_block_offerings.call_args_list
+            assert first.kwargs["EndDateRange"] - first.kwargs["StartDateRange"] == timedelta(
+                days=MAX_DURATION_DAYS
+            )
+            assert second.kwargs["EndDateRange"] == latest_end
+            assert second.kwargs["StartDateRange"] == first.kwargs["StartDateRange"]
+            assert second.kwargs["CapacityDurationHours"] == 24
+
+    def test_refusal_without_a_usable_end_date_returns_zero_after_one_call(self):
+        """Other parameter refusals, and an end date already behind us, are not retried."""
+        from cli.capacity import CapacityChecker
+
+        with patch("cli.capacity.checker.get_config") as mock_config:
+            mock_config.return_value = MagicMock()
+            checker = CapacityChecker()
+
+            for message in (
+                "The instance count is not valid",
+                self._LIVE_REFUSAL.format(date="Thu Jan 01 00:00:00 UTC 2026"),
+            ):
+                with patch.object(checker, "_session") as mock_session:
+                    mock_ec2 = MagicMock()
+                    mock_session.client.return_value = mock_ec2
+                    mock_ec2.describe_capacity_block_offerings.side_effect = self._refusal(message)
+
+                    assert checker.get_capacity_block_trend("p4d.24xlarge", "us-east-1") == 0.0
+                    assert mock_ec2.describe_capacity_block_offerings.call_count == 1
 
 
 class TestWeightedRecommendRegion:

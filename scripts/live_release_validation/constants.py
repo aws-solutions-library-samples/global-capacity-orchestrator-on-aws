@@ -53,6 +53,11 @@ _EKS_KEY_LOGICAL_ID = "EksSecretsEncryptionKey74AFFE88"
 
 
 _KMS_PENDING_WINDOW_DAYS = 7
+# ``DescribeKey`` is eventually consistent: a key can read ``PendingDeletion``
+# before its ``DeletionDate`` is visible. Re-read on this bounded schedule
+# (6 x 10 s) before treating the missing date as a failure.
+_KMS_DELETION_DATE_REREADS = 6
+_KMS_DELETION_DATE_POLL_SECONDS = 10
 
 
 _LOG_CLEANUP_TOKEN_TAG = "GcoLiveValidationCleanupToken"  # nosec B105  # AWS tag key, not a secret
@@ -86,6 +91,17 @@ _LOG_CLEANUP_STACK_POLL_ATTEMPTS = 120
 
 
 _LOG_CLEANUP_STACK_POLL_SECONDS = 5
+
+
+# A failed deploy settles as soon as its stack reports ROLLBACK_IN_PROGRESS,
+# and the teardown derives log-group authority right after workload cleanup,
+# while CloudFormation is still walking the rollback. Wait for it to reach a
+# terminal status first (a regional stack's rollback deletes an EKS cluster;
+# the one observed live took 28 minutes), polling at this cadence: 90 minutes.
+_STACK_ROLLBACK_SETTLE_POLL_ATTEMPTS = 360
+
+
+_STACK_ROLLBACK_SETTLE_POLL_SECONDS = 15
 
 
 _LOG_GROUP_OBSERVATION_ATTEMPTS = 6
@@ -127,7 +143,14 @@ _LOG_GROUP_SOURCE_TYPES = {
     "AWS::EKS::Cluster",
     "AWS::Lambda::Function",
     "AWS::Logs::LogGroup",
+    "AWS::SageMaker::Cluster",
 }
+
+#: Where SageMaker HyperPod writes a cluster's node logs: the service creates
+#: ``/aws/sagemaker/Clusters/<cluster name>/<cluster id>`` with the cluster
+#: and never deletes it, so it is derived from the stack's cluster resource
+#: and owned like the EKS control-plane group.
+_HYPERPOD_LOG_GROUP_PREFIX = "/aws/sagemaker/Clusters"
 
 
 _EKS_LOG_GROUP_SUFFIXES = ("application", "dataplane", "host", "performance")

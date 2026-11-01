@@ -70,6 +70,7 @@ class TestDefaults:
             "dir": "/home/ec2-user",
             "shell": "/bin/bash",
             "gecos": None,
+            "create_user": False,
         }
         managed = config["managed"]
         assert managed["cluster_name"] is None
@@ -281,6 +282,32 @@ class TestIdentity:
         with pytest.raises(pc.PcsConfigError, match=r"pcs\.identity\.gecos must be a string"):
             _validate({"identity": {"gecos": 5}})
         assert _validate({"identity": {"gecos": "HPC"}})["identity"]["gecos"] == "HPC"
+
+    def test_gecos_must_not_contain_a_colon(self) -> None:
+        # The passwd(5) field separator; useradd would refuse it on the node.
+        with pytest.raises(pc.PcsConfigError, match=r"pcs\.identity\.gecos must not contain ':'"):
+            _validate({"identity": {"gecos": "HPC:identity"}})
+
+    def test_create_user_is_a_boolean_that_needs_the_shared_home(self) -> None:
+        assert _validate({"identity": {"create_user": True}})["identity"]["create_user"] is True
+        with pytest.raises(
+            pc.PcsConfigError, match=r"pcs\.identity\.create_user must be a boolean"
+        ):
+            _validate({"identity": {"create_user": "yes"}})
+        with pytest.raises(
+            pc.PcsConfigError, match=r"pcs\.identity\.create_user must be a boolean"
+        ):
+            _validate({"identity": {"create_user": 1}})
+        no_home = _managed(storage={"home": "none", "scratch": "none"})
+        no_home["identity"] = {"create_user": True, "dir": "/local/hpc"}
+        with pytest.raises(
+            pc.PcsConfigError,
+            match=r"pcs\.identity\.create_user needs the shared EFS home",
+        ):
+            _validate(no_home)
+        # Existing mode has no managed nodes; the flag is accepted and inert.
+        existing = _on(mode="existing", cluster_id="pcs_abc", identity={"create_user": True})
+        assert _validate(existing)["identity"]["create_user"] is True
 
 
 # ---------------------------------------------------------------------------

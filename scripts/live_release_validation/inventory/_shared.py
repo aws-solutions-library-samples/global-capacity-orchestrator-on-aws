@@ -54,6 +54,7 @@ _REGIONAL_PROJECT_RESOURCE_CATEGORIES = (
     "pcs_clusters",
     "pcs_compute_node_groups",
     "pcs_queues",
+    "hyperpod_clusters",
 )
 
 
@@ -95,6 +96,7 @@ _PROJECT_RESOURCE_SCANNERS = (
     "cluster_volumes",
     "aws_backup",
     "pcs",
+    "hyperpod",
     "s3_buckets",
     "iam",
     "global_accelerators",

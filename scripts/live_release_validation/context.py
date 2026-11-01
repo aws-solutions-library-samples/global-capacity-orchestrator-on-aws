@@ -58,6 +58,25 @@ def _topology_regions(ctx: RunContext) -> tuple[str, ...]:
     )
 
 
+def effective_kubernetes_version(ctx: RunContext) -> str:
+    """The EKS minor this run deploys and verifies the regional clusters at.
+
+    The run's ``--kubernetes-version`` override when set (it is the
+    ``kubernetes_version`` CDK context every deploy of the run carried),
+    otherwise cdk.json's. The runner loads ``cdk.json`` once
+    (``RunContext.cdk_context``); a context without the key, or with a
+    non-string value, is a broken checkout rather than something to default,
+    so it raises instead of letting a version comparison pass vacuously.
+    """
+    override = getattr(ctx.settings, "kubernetes_version_override", "")
+    if isinstance(override, str) and override.strip():
+        return override.strip()
+    version = ctx.cdk_context.get("kubernetes_version")
+    if not isinstance(version, str) or not version.strip():
+        raise RuntimeError("cdk.json context.kubernetes_version is missing or not a string")
+    return version.strip()
+
+
 def _direct_regional_access_enabled(ctx: RunContext) -> bool:
     partition = ctx.session.get_partition_for_region(ctx.config.global_region)
     if not partition:

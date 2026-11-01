@@ -77,7 +77,7 @@ def test_partition_covers_every_file_exactly_once(split: Any, shards: int) -> No
     assert len(flattened) == len(set(flattened)), "a file landed in more than one shard"
 
 
-@pytest.mark.parametrize("shards", [2, 3, 4])
+@pytest.mark.parametrize("shards", [2, 3, 4, 5])
 def test_shards_are_reasonably_balanced(split: Any, shards: int) -> None:
     """No shard carries wildly more tests than the lightest one.
 
@@ -147,17 +147,20 @@ def test_workflow_shard_matrix_is_a_contiguous_range(workflow: dict[str, Any]) -
     )
 
 
-def test_workflow_uses_four_nonempty_shards(workflow: dict[str, Any]) -> None:
-    """The matrix has exactly four dynamic cells.
+def test_workflow_uses_five_nonempty_shards(workflow: dict[str, Any]) -> None:
+    """The matrix has exactly five dynamic cells.
 
     Three shards ran about eight minutes each once the suite passed 5,400
-    tests; four keeps every cell under the runner's twenty-minute budget with
-    headroom, at the cost of one more setup. Changing this number is the
-    whole change — ``--of`` and the artifact glob follow the matrix.
+    tests; four held every cell under the runner's twenty-minute budget until
+    the suite passed 19,000 tests and the slices took 8.6 to 9.5 minutes
+    (13 for shard one, which also runs the whole-repository policy checks, on
+    2026-10-31). Five brings each slice back to about seven minutes, at the
+    cost of one more setup. Changing this number is the whole change —
+    ``--of`` and the artifact glob follow the matrix.
     """
     job = _shard_job(workflow)
     assert job["strategy"]["fail-fast"] is False
-    assert job["strategy"]["matrix"]["shard"] == [1, 2, 3, 4]
+    assert job["strategy"]["matrix"]["shard"] == [1, 2, 3, 4, 5]
 
 
 def test_shard_checkout_contains_diagram_source_history(workflow: dict[str, Any]) -> None:

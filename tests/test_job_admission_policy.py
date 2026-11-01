@@ -25,6 +25,7 @@ from gco.job_admission import (
     check_resource_caps,
     check_security_context,
     check_tolerations,
+    hyperpod_routing,
     parse_cpu_millicores,
     parse_memory_bytes,
     weighted_pod_specs,
@@ -245,6 +246,122 @@ class TestQuantityParsersMatchTheGate:
     )
     def test_memory(self, value: str, expected: int) -> None:
         assert parse_memory_bytes(value) == expected
+
+
+def _hyperpod_toleration() -> dict[str, str]:
+    return {"key": "gco.aws/hyperpod", "operator": "Equal", "value": "true", "effect": "NoSchedule"}
+
+
+class TestHyperpodRouting:
+    """Workloads routed to SageMaker HyperPod nodes are held to the HyperPod taint.
+
+    HyperPod nodes carry ``gco.aws/hyperpod=true:NoSchedule`` and none of the
+    accelerator taints, so the accelerator rule is a false rejection for them.
+    The live failure this pins: the fourth #502 release attempt's probe Job —
+    ``kueue.x-k8s.io/queue-name: gco-hyperpod``, one GPU, no tolerations,
+    exactly docs/HYPERPOD.md's "a Job needs nothing but the queue name" — was
+    rejected at admission for the ``nvidia.com/gpu`` taint it would never meet.
+    """
+
+    @staticmethod
+    def _queued(manifest: dict[str, Any]) -> dict[str, Any]:
+        manifest["metadata"]["labels"] = {"kueue.x-k8s.io/queue-name": "gco-hyperpod"}
+        return manifest
+
+    @staticmethod
+    def _selecting(manifest: dict[str, Any]) -> dict[str, Any]:
+        manifest["spec"]["template"]["spec"]["nodeSelector"] = {
+            "gco.aws/capacity-provider": "hyperpod"
+        }
+        return manifest
+
+    def test_the_hyperpod_queue_needs_no_toleration_at_all(self, processor) -> None:
+        manifest = self._queued(_gpu_job())
+        assert hyperpod_routing(manifest, [manifest["spec"]["template"]["spec"]]) == "queue"
+        assert check_tolerations(manifest) == (True, None)
+        assert processor._validate_tolerations(manifest) == (True, None)
+
+    def test_another_queue_is_held_to_the_accelerator_rule(self) -> None:
+        manifest = _gpu_job()
+        manifest["metadata"]["labels"] = {"kueue.x-k8s.io/queue-name": "gco-default"}
+        ok, message = check_tolerations(manifest)
+        assert not ok
+        assert "nvidia.com/gpu=true:NoSchedule" in (message or "")
+
+    def test_selecting_the_nodes_requires_the_hyperpod_toleration(self) -> None:
+        # The "any other scheduler" path of docs/HYPERPOD.md: the author sets
+        # the node selector and the toleration. Without the toleration the pod
+        # stays Pending forever, which is what this check exists to catch.
+        manifest = self._selecting(_gpu_job())
+        assert hyperpod_routing(manifest, [manifest["spec"]["template"]["spec"]]) == "selector"
+        ok, message = check_tolerations(manifest)
+        assert not ok
+        assert message is not None
+        assert "gco.aws/hyperpod=true:NoSchedule" in message
+        assert "nvidia.com/gpu" not in message
+        assert "kueue.x-k8s.io/queue-name: gco-hyperpod" in message
+
+        with_toleration = self._selecting(_gpu_job(tolerations=[_hyperpod_toleration()]))
+        assert check_tolerations(with_toleration) == (True, None)
+        exists = self._selecting(
+            _gpu_job(tolerations=[{"key": "gco.aws/hyperpod", "operator": "Exists"}])
+        )
+        assert check_tolerations(exists) == (True, None)
+
+    def test_a_cpu_job_selecting_the_nodes_is_held_to_the_taint_too(self) -> None:
+        manifest = self._selecting(
+            {
+                "apiVersion": "batch/v1",
+                "kind": "Job",
+                "metadata": {"name": "j", "namespace": "gco-jobs"},
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [{"name": "c", "image": "docker.io/library/busybox"}]
+                        }
+                    }
+                },
+            }
+        )
+        ok, message = check_tolerations(manifest)
+        assert not ok
+        assert "gco.aws/hyperpod=true:NoSchedule" in (message or "")
+
+    def test_only_a_manifest_whose_every_pod_spec_selects_hyperpod_is_routed(self) -> None:
+        selecting = {"nodeSelector": {"gco.aws/capacity-provider": "hyperpod"}, "containers": []}
+        other = {"nodeSelector": {"gco.aws/capacity-provider": "karpenter"}, "containers": []}
+        manifest: dict[str, Any] = {"kind": "TrainJob", "metadata": {}}
+        assert hyperpod_routing(manifest, [selecting, selecting]) == "selector"
+        assert hyperpod_routing(manifest, [selecting, other]) is None
+        assert hyperpod_routing(manifest, [{"containers": []}]) is None
+        assert (
+            hyperpod_routing(manifest, [{"nodeSelector": "not-a-dict", "containers": []}]) is None
+        )
+        assert hyperpod_routing(manifest, []) is None
+        assert hyperpod_routing({"kind": "Job"}, [selecting]) == "selector"
+        assert hyperpod_routing({"kind": "Job", "metadata": {"labels": "oops"}}, [other]) is None
+
+    def test_the_sqs_path_routes_the_same_way(self, monkeypatch) -> None:
+        import importlib
+
+        import gco.services.queue_processor as qp
+
+        monkeypatch.delenv("REQUIRE_ACCELERATOR_TOLERATION", raising=False)
+        qp = importlib.reload(qp)
+        # The SQS path spells "valid" as (True, "") where the REST path says
+        # (True, None); the verdicts and the rejection text must agree.
+        queued = self._queued(_gpu_job())
+        assert qp.validate_manifest(queued)[0] is True
+        assert check_tolerations(queued)[0] is True
+        selecting = self._selecting(_gpu_job())
+        sqs_ok, sqs_reason = qp.validate_manifest(selecting)
+        rest_ok, rest_reason = check_tolerations(selecting)
+        assert (sqs_ok, rest_ok) == (False, False)
+        assert "gco.aws/hyperpod=true:NoSchedule" in sqs_reason
+        assert sqs_reason == rest_reason
+        tolerating = self._selecting(_gpu_job(tolerations=[_hyperpod_toleration()]))
+        assert qp.validate_manifest(tolerating)[0] is True
+        assert check_tolerations(tolerating)[0] is True
 
 
 class TestNoKubernetesImport:

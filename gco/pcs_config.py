@@ -279,6 +279,12 @@ PCS_DEFAULTS: dict[str, Any] = {
         "dir": None,
         "shell": "/bin/bash",
         "gecos": None,
+        # Have the ensure-identity-home lifecycle action add the identity to
+        # every managed compute node (groupadd/useradd with the uid, gid,
+        # shell and gecos above) when the uid is not taken. Off by default:
+        # the default identity is the AMI's first user. Needs the shared EFS
+        # home (storage.home: efs), where the action runs.
+        "create_user": False,
     },
     "managed": {
         # PCS cluster name; null = "<project_name>-pcs". Changing it replaces
@@ -740,6 +746,16 @@ def _validate_identity(
     identity["shell"] = shell
     if identity["gecos"] is not None and not isinstance(identity["gecos"], str):
         raise PcsConfigError(f"{path}.gecos must be a string, got {identity['gecos']!r}")
+    if ":" in (identity["gecos"] or ""):
+        raise PcsConfigError(f"{path}.gecos must not contain ':', got {identity['gecos']!r}")
+    create_user = identity["create_user"]
+    if type(create_user) is not bool:
+        raise PcsConfigError(f"{path}.create_user must be a boolean, got {create_user!r}")
+    if create_user and home_required:
+        raise PcsConfigError(
+            f"{path}.create_user needs the shared EFS home (pcs.managed.storage.home: efs): the "
+            "ensure-identity-home lifecycle action that creates the user only runs there"
+        )
     return identity
 
 

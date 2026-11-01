@@ -28,6 +28,7 @@ literal zones and node groups can be pinned to one.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -1201,6 +1202,63 @@ class TestManagedModeStorageAndLifecycle:
 
 
 class TestManagedModeNodeRole:
+    def test_the_identity_action_creates_the_user_and_names_a_different_directory(self) -> None:
+        """``identity.create_user`` adds ``--create-user`` with the shell and GECOS;
+        a home directory whose basename is not the user name travels as ``--dir``."""
+        block = copy.deepcopy(MANAGED_FULL)
+        block["identity"] = {
+            "name": "hpcuser",
+            "uid": 2000,
+            "gid": 3000,
+            "dir": "/home/hpc",
+            "shell": "/bin/zsh",
+            "gecos": "HPC identity",
+            "create_user": True,
+        }
+        _stack, resources = _synth(
+            block, name="pcs-create-user", fsx_enabled=True, context={**_SLINKY_OFF, **_AZ_CONTEXT}
+        )
+        groups = _named(resources, "AWS::PCS::ComputeNodeGroup")
+        scripts = groups["gco-compute"]["Properties"]["NodeLifecycleActions"]["Stages"][
+            "NodeBootstrapped"
+        ]
+        [identity] = [s for s in scripts if s["Name"] == "ensure-identity-home"]
+        assert identity["Arguments"] == [
+            "--home-base",
+            "/home",
+            "--name",
+            "hpcuser",
+            "--uid",
+            "2000",
+            "--gid",
+            "3000",
+            "--dir",
+            "hpc",
+            "--create-user",
+            "--shell",
+            "/bin/zsh",
+            "--gecos",
+            "HPC identity",
+        ]
+
+    def test_the_identity_action_without_a_gecos_omits_the_flag(self) -> None:
+        block = copy.deepcopy(MANAGED_FULL)
+        block["identity"] = {"name": "hpc", "uid": 2000, "gid": 3000, "create_user": True}
+        _stack, resources = _synth(
+            block,
+            name="pcs-create-user-plain",
+            fsx_enabled=True,
+            context={**_SLINKY_OFF, **_AZ_CONTEXT},
+        )
+        groups = _named(resources, "AWS::PCS::ComputeNodeGroup")
+        scripts = groups["gco-compute"]["Properties"]["NodeLifecycleActions"]["Stages"][
+            "NodeBootstrapped"
+        ]
+        [identity] = [s for s in scripts if s["Name"] == "ensure-identity-home"]
+        assert identity["Arguments"][-3:] == ["--create-user", "--shell", "/bin/bash"]
+        assert "--dir" not in identity["Arguments"]
+        assert "--gecos" not in identity["Arguments"]
+
     def test_the_role_path_and_managed_policies(self, pcs_managed_full) -> None:
         stack, resources = pcs_managed_full
         [(role_id, role)] = [

@@ -26,7 +26,7 @@ guide: how the code is organized and where a new check belongs.
 | `registry.py` | The ordered action registry: names, descriptions, dependencies, handlers. Single source of truth for `--actions`. |
 | `runner.py` | Executes selected actions, checkpoints after each, and guarantees cleanup + reporting once runtime construction succeeds; bootstrap failures report cleanup blocked with an exact recovery command. |
 | `models.py` | Main `RunSettings`, `RunCheckpoint`, `RunContext`, `ActionResult`, and `ValidationReport` types. |
-| `artifact_io.py` | Owner-only report/checkpoint directory validation and atomic text writes. |
+| `artifact_io.py` | Owner-only report/checkpoint directory validation (the reports, the checkpoint, the isolated `kubeconfig`, and the run's own `model-repositories/` directory are the only entries a resume accepts) and atomic text writes. |
 | `inference_contract.py` | Strict vLLM/SGLang/Triton request, structured-decision (`/v1/systemone`), probe, endpoint, and resume-identity helpers used by main `RunSettings`. |
 | `actions/` | One module per action. This is the "test case" layer. |
 | `checks/` | Reusable validation helpers (polling, waiting, payload validation) shared by actions. |
@@ -59,6 +59,15 @@ skipped with their configuration source unless the run passes
 the `helm_enabled_overrides` context so the deployed chart set, the applier's
 gated manifests, and the probes all resolve enablement identically.
 
+The lifecycle's checkpointed record moves `registered → prepared → submitting
+→ submitted → appeared → deleted`. A submission the manifest API refuses with
+proof it created nothing (`ManifestSubmissionError.nothing_created()`: a 4xx
+whose every reported resource failed, or that reports none) goes to
+`not_submitted` with the answer kept as `submission_rejection`, so teardown
+confirms the absence with one lookup and a resume refuses to replay the
+immutable envelope; any other failed POST stays `submitting` for the
+fail-closed reconciliation that ends in `blocked`.
+
 The same action proves the AWS PCS Slurm backend (`checks/pcs.py`), which
 every release run deploys in managed mode with its metrics scrape on through
 the `pcs_overrides` CDK context (`pcs_overrides_json()`, deep-merged over the
@@ -74,7 +83,38 @@ instances PCS launched to leave `shutting-down` and for their tagged root
 volumes to finish deleting, which the inventory would otherwise count as
 present. The inventory's `pcs` scanner (`inventory/scanners.py`)
 claims clusters by project name or `gco:project` tag and everything PCS keeps
-under them.
+under them. It runs in every enabled Region PCS is offered in: botocore lists
+no Region for PCS (the service ships only an endpoint ruleset), so
+`inventory/project.py` reads the list from AWS's public parameters under
+`/aws/service/global-infrastructure/services/pcs/regions` and fails the
+collection when neither source names one, rather than scanning nowhere and
+calling the scanner complete.
+
+The `hyperpod` action (`actions/hyperpod.py`, checks in `checks/hyperpod.py`)
+proves the SageMaker HyperPod capacity every release run deploys through the
+`hyperpod_overrides` CDK context (`hyperpod_overrides_json()`: one
+`ml.g4dn.xlarge` instance group with deep health checks off, part of the
+resume identity like the other fixed overrides): SageMaker must describe the stack's cluster `InService` with
+the instance group at its target count and its instance `Running`; the
+`manifests/hyperpod-smoke-job.yaml` probe, labelled for the `gco-hyperpod`
+Kueue queue and requesting one GPU, must complete through the shared
+API-transport lifecycle; and the lifecycle's `scheduling` evidence (the API's
+placement report, recorded for every probe) must put the pod on a `hyperpod`
+node. `preflight` runs `cli.hyperpod_preflight` for the merged block before
+`deploy` (`_hyperpod_preflight`), and the inventory's `hyperpod` scanner
+claims HyperPod clusters by project name or `gco:project` tag so one left
+behind is residue. The SDK lists SageMaker in more Regions than HyperPod
+serves; where `ListClusters` answers `UnknownOperationException` ("not
+supported in the called region") the scanner reads the Region as one without
+the service and the coverage record names it under
+`regions_without_service.hyperpod` instead of counting it as scanned — any
+other error still fails the collection. HyperPod publishes its node AMI per EKS minor, after the
+minor ships, and cdk.json ships the newest minor, so a release run passes
+`--kubernetes-version <minor>`: `__main__.py` threads it to every CDK
+invocation as the `kubernetes_version` context (`RunSettings.kubernetes_version_override`,
+part of the resume identity through `extra_cdk_context()`), the preflight
+checks HyperPod's AMI tree for that minor, and `topology` compares the
+deployed clusters against it (`context.effective_kubernetes_version`).
 
 The two cluster-facing actions share their kubectl plumbing in
 `checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated

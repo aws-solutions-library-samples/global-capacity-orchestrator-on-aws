@@ -26,6 +26,7 @@ from .actions import (
     action_destroy,
     action_eks_capabilities,
     action_final_inventory,
+    action_hyperpod,
     action_inference,
     action_network_posture,
     action_opencost,
@@ -114,6 +115,12 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Prove every enabled batch scheduler against a scheduling-gated workload",
             ("topology",),
             action_schedulers,
+        ),
+        ActionDefinition(
+            "hyperpod",
+            "Prove the SageMaker HyperPod instance group joined the cluster and runs work",
+            ("topology",),
+            action_hyperpod,
         ),
         ActionDefinition(
             "opencost",

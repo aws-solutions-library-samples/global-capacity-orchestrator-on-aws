@@ -567,10 +567,11 @@ def compute_weighted_score(
         queue_depth: Number of pending jobs in the region's queue
         gpu_utilization: GPU utilization percentage (0-100)
         running_jobs: Number of currently running jobs
-        capacity_block_trend: Trend of capacity block offerings over a 26-week window
-            (-1 to 1). Positive means capacity is growing (regression slope positive),
-            negative means shrinking. Derived from linear regression over weekly
-            offering counts from the describe-capacity-block-offerings API.
+        capacity_block_trend: Trend of capacity block offerings over the window EC2
+            answers (about nine days; -1 to 1). Positive means capacity is growing
+            (regression slope positive), negative means shrinking. Derived from linear
+            regression over daily offering counts from the
+            describe-capacity-block-offerings API.
         weights: Optional custom weights dict. Keys: spot_placement, spot_price,
                  queue_depth, gpu_utilization, running_jobs, capacity_blocks.
                  Values should sum to 1.0.

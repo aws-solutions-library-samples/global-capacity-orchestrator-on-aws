@@ -24,6 +24,13 @@ REPORT_FILENAMES = frozenset(
         "kubeconfig",
     }
 )
+# The one subdirectory a run writes next to its reports: the generated Triton
+# model repositories the inference action uploads (checks/inference_scenarios).
+# Created owner-only, and accepted by ensure_private_run_directory as the run's
+# own; the fourth #502 release attempt could not resume past its inference
+# action until this entry was recognised.
+MODEL_REPOSITORIES_DIRNAME = "model-repositories"
+RUN_DIRECTORY_NAMES = frozenset({MODEL_REPOSITORIES_DIRNAME})
 
 
 def _validate_private_regular_metadata(metadata: os.stat_result, path: Path) -> None:
@@ -124,6 +131,9 @@ def ensure_private_run_directory(directory: Path, checkpoint_path: Path) -> None
                 for allowed_name in allowed_names
             )
             entry = directory / name
+            if name in RUN_DIRECTORY_NAMES:
+                _validate_private_directory_metadata(metadata, entry)
+                continue
             if name not in allowed_names and not is_temporary:
                 raise ValueError(
                     "Live-validation output directory contains an unrelated entry and is not "

@@ -1,0 +1,160 @@
+# SageMaker HyperPod (EKS orchestration): the namespace and RBAC the service
+# expects on the EKS cluster before its instance groups join as nodes.
+#
+# HyperPod's own Helm chart (aws/sagemaker-hyperpod-cli, HyperPodHelmChart)
+# ships these objects; GCO applies them as raw manifests so they converge and
+# prune with the rest of the add-on layer. The `aws-hyperpod` namespace name
+# is fixed by the service. Three identities:
+#
+# - health-monitoring-agent: the DaemonSet in 51-hyperpod-health-monitoring-
+#   agent.yaml reads nodes, patches node conditions and emits events.
+# - deep-health-check-service-account: the deep health checks HyperPod runs on
+#   instance creation (InstanceStress, InstanceConnectivity) and on demand.
+# - job-auto-restart: HyperPod's control plane acts as the Kubernetes user
+#   `hyperpod-service-linked-role` (its HYPERPOD_LINUX access entry) to
+#   restart PyTorchJobs on a replaced node; the ServiceAccount of the same
+#   name is the chart's shape and is kept for parity.
+#
+# Gated on {{HYPERPOD_ENABLED}}: the kubectl-applier skips this file while the
+# placeholder is unreplaced (HyperPod off) and prunes every object below (see
+# _FEATURE_RESOURCE_INVENTORY in handler.py).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aws-hyperpod
+  labels:
+    project: gco
+    gco.io/hyperpod-enabled: "{{HYPERPOD_ENABLED}}"
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: health-monitoring-agent
+  namespace: aws-hyperpod
+  labels:
+    project: gco
+automountServiceAccountToken: true
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: health-monitoring-agent
+  labels:
+    project: gco
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/status"]
+    verbs: ["patch"]
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: health-monitoring-agent
+  labels:
+    project: gco
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: health-monitoring-agent
+subjects:
+  - kind: ServiceAccount
+    name: health-monitoring-agent
+    namespace: aws-hyperpod
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: deep-health-check-service-account
+  namespace: aws-hyperpod
+  labels:
+    project: gco
+automountServiceAccountToken: true
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: deep-health-check-service-account-role
+  labels:
+    project: gco
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: deep-health-check-service-account-role-binding
+  labels:
+    project: gco
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: deep-health-check-service-account-role
+subjects:
+  - kind: ServiceAccount
+    name: deep-health-check-service-account
+    namespace: aws-hyperpod
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: job-auto-restart
+  namespace: aws-hyperpod
+  labels:
+    project: gco
+automountServiceAccountToken: false
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: job-auto-restart
+  labels:
+    project: gco
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/status", "pods", "pods/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/status"]
+    verbs: ["patch"]
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create"]
+  - apiGroups: ["kubeflow.org"]
+    resources: ["pytorchjobs", "pytorchjobs/status"]
+    verbs: ["get", "list", "watch", "delete", "patch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "delete"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: job-auto-restart
+  labels:
+    project: gco
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: job-auto-restart
+subjects:
+  - kind: User
+    name: hyperpod-service-linked-role
+    apiGroup: rbac.authorization.k8s.io

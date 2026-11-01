@@ -26,6 +26,7 @@ from .deploy import action_deploy
 from .destroy import action_destroy, destroy_deployment
 from .eks_capabilities import action_eks_capabilities
 from .final_inventory import action_final_inventory
+from .hyperpod import action_hyperpod
 from .inference import action_inference
 from .jobs import action_api_lifecycle, action_sqs_lifecycle
 from .network_posture import action_network_posture
@@ -46,6 +47,7 @@ __all__ = [
     "action_destroy",
     "action_eks_capabilities",
     "action_final_inventory",
+    "action_hyperpod",
     "action_inference",
     "action_network_posture",
     "action_opencost",

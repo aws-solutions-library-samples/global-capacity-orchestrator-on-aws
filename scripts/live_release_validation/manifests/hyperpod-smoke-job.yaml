@@ -1,0 +1,67 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gco-live-hyperpod-__RUN_TOKEN__
+  namespace: gco-jobs
+  annotations:
+    # The cluster-managed gco-jobs/default-deny-ingress policy selects all pods.
+    checkov.io/skip1: CKV2_K8S_6=Protected by the cluster-managed gco-jobs default-deny-ingress NetworkPolicy
+  labels:
+    app.kubernetes.io/name: gco-live-release-validation
+    gco.aws/validation-run: __RUN_TOKEN__
+    gco.aws/validation-path: hyperpod
+    # Kueue suspends the Job at admission and only unsuspends it once the
+    # gco-hyperpod LocalQueue -> gco-hyperpod-queue admits it onto the
+    # gco-hyperpod-flavor, which injects the HyperPod node selector and the
+    # toleration for the taint every HyperPod node carries. Completion proves
+    # the node joined the cluster and the queue put the work there; the API's
+    # placement report then confirms the node's capacity type.
+    kueue.x-k8s.io/queue-name: gco-hyperpod
+spec:
+  backoffLimit: 0
+  # A node drain is not a workload failure (see kueue-smoke-job.yaml).
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+            status: "True"
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gco-live-release-validation
+        gco.aws/validation-run: __RUN_TOKEN__
+        gco.aws/validation-path: hyperpod
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoke
+          # BusyBox 1.38.0 multi-platform index from the official Docker Hub tag API:
+          # https://hub.docker.com/v2/repositories/library/busybox/tags/1.38.0
+          image: docker.io/library/busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo GCO_LIVE_HYPERPOD___RUN_TOKEN__"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+              # One GPU: the device plugin GCO pins to the HyperPod nodes must
+              # advertise it, or the Job never schedules.
+              nvidia.com/gpu: 1
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              nvidia.com/gpu: 1

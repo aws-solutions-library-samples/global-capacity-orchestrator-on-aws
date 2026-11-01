@@ -438,6 +438,80 @@ def test_capacity_find_blocks_minimal_omits_every_optional_flag() -> None:
         )
 
 
+def test_capacity_find_training_plans_forwards_every_option() -> None:
+    kwargs = {
+        "instance_type": "p5",
+        "regions": ["us-east-1", "us-west-2"],
+        "count": 4,
+        "duration_hours": 168,
+        "duration_days": 0,
+        "start_after": "2026-11-10",
+        "end_before": "2026-11-30",
+        "target": "training-job",
+    }
+    expected = (
+        "capacity",
+        "find-training-plans",
+        "-i",
+        "p5",
+        "-r",
+        "us-east-1",
+        "-r",
+        "us-west-2",
+        "-c",
+        "4",
+        "--duration-hours",
+        "168",
+        "--duration-days",
+        "0",
+        "--start-after",
+        "2026-11-10",
+        "--end-before",
+        "2026-11-30",
+        "--target",
+        "training-job",
+    )
+    with _isolated_tool_module("capacity") as loaded:
+        _assert_cli_call(loaded, "find_training_plans", (), kwargs, expected)
+
+
+def test_capacity_find_training_plans_minimal_omits_every_optional_flag() -> None:
+    with _isolated_tool_module("capacity") as loaded:
+        _assert_cli_call(
+            loaded,
+            "find_training_plans",
+            ("ml.p5.48xlarge",),
+            {},
+            ("capacity", "find-training-plans", "-i", "ml.p5.48xlarge"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_argv"),
+    [
+        ({}, ("capacity", "training-plans")),
+        (
+            {"regions": ["us-east-1"], "instance_type": "ml.p5.48xlarge", "status": "Active"},
+            (
+                "capacity",
+                "training-plans",
+                "-r",
+                "us-east-1",
+                "-i",
+                "ml.p5.48xlarge",
+                "--status",
+                "Active",
+            ),
+        ),
+    ],
+)
+def test_capacity_list_training_plans(
+    kwargs: dict[str, Any], expected_argv: tuple[str, ...]
+) -> None:
+    with _isolated_tool_module("capacity") as loaded:
+        _assert_cli_call(loaded, "list_training_plans", (), kwargs, expected_argv)
+
+
 @pytest.mark.parametrize(
     ("function_name", "subcommand"),
     [
@@ -1224,6 +1298,32 @@ def test_stacks_expected_count_swallows_loader_failure() -> None:
             (),
             {"region": "ignored", "all_regions": True},
             ("stacks", "capabilities", "status", "--all-regions"),
+        ),
+        ("hyperpod_status", (), {}, ("stacks", "hyperpod", "status")),
+        (
+            "hyperpod_status",
+            (),
+            {"region": "us-east-1"},
+            ("stacks", "hyperpod", "status", "-r", "us-east-1"),
+        ),
+        (
+            "hyperpod_status",
+            (),
+            {"region": "ignored", "all_regions": True},
+            ("stacks", "hyperpod", "status", "--all-regions"),
+        ),
+        ("hyperpod_preflight", (), {}, ("stacks", "hyperpod", "preflight")),
+        (
+            "hyperpod_preflight",
+            (),
+            {"region": "eu-west-1"},
+            ("stacks", "hyperpod", "preflight", "-r", "eu-west-1"),
+        ),
+        (
+            "hyperpod_preflight",
+            (),
+            {"region": "ignored", "all_regions": True},
+            ("stacks", "hyperpod", "preflight", "--all-regions"),
         ),
     ],
 )

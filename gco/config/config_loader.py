@@ -46,6 +46,14 @@ from gco.eks_capabilities_config import (
     parse_eks_capabilities_overrides,
     validate_eks_capabilities_config,
 )
+from gco.hyperpod_config import (
+    HYPERPOD_FEATURE_KEY,
+    HYPERPOD_OVERRIDES_CONTEXT_KEY,
+    HYPERPOD_REGIONS_KEY,
+    HyperpodConfigError,
+    apply_hyperpod_overrides,
+    validate_hyperpod_config,
+)
 from gco.inference_proxy_config import (
     INFERENCE_PROXY_MAX_REPLICAS_DEFAULT,
     INFERENCE_PROXY_MIN_REPLICAS_DEFAULT,
@@ -137,9 +145,9 @@ FEATURE_OVERRIDE_CONTEXT_KEY = "feature_enabled_overrides"
 #: The cdk.json blocks whose ``enabled`` flag the override may force on. Kept
 #: deliberately narrow: each of these is a self-contained regional feature the
 #: examples or the live validation harness exercise (Aurora pgvector, Valkey
-#: Serverless, FSx for Lustre, the vector store, AWS PCS).
+#: Serverless, FSx for Lustre, the vector store, AWS PCS, SageMaker HyperPod).
 FEATURE_OVERRIDE_KEYS = frozenset(
-    {"aurora_pgvector", "valkey", "fsx_lustre", "vector_store", "pcs"}
+    {"aurora_pgvector", "valkey", "fsx_lustre", "vector_store", "pcs", "hyperpod"}
 )
 
 
@@ -373,6 +381,7 @@ class ConfigLoader:
         self._validate_slurm_config()
         # Validate the AWS PCS block (pcs / pcs_regions)
         self._validate_pcs_config()
+        self._validate_hyperpod_config()
 
         # Validate analytics environment config (optional block)
         self._validate_analytics_environment_config()
@@ -1182,6 +1191,68 @@ class ConfigLoader:
         except PcsConfigError as exc:
             raise ConfigValidationError(str(exc)) from exc
         if self._feature_override_enabled(PCS_FEATURE_KEY):
+            config["enabled"] = True
+        return config
+
+    def _raw_hyperpod_config(self, region: str | None = None) -> object:
+        """The cdk.json ``hyperpod`` block with the region's ``hyperpod_regions`` overlay applied.
+
+        Same layering as :meth:`_raw_pcs_config`: the per-region overlay is a
+        patch over the global block, and the run-scoped ``hyperpod_overrides``
+        context (a JSON object) is merged last.
+        """
+        global_raw = self.app.node.try_get_context(HYPERPOD_FEATURE_KEY)
+        overrides = self.app.node.try_get_context(HYPERPOD_OVERRIDES_CONTEXT_KEY)
+        try:
+            if region is None:
+                return apply_hyperpod_overrides(global_raw, overrides)
+            overlays = self.app.node.try_get_context(HYPERPOD_REGIONS_KEY)
+            if not isinstance(overlays, dict) or region not in overlays:
+                return apply_hyperpod_overrides(global_raw, overrides)
+            overlay = overlays[region]
+            if not isinstance(overlay, dict):
+                raise ConfigValidationError(
+                    f"{HYPERPOD_REGIONS_KEY}.{region} must be an object, got {overlay!r}"
+                )
+            base: dict[str, Any] = global_raw if isinstance(global_raw, dict) else {}
+            return apply_hyperpod_overrides(_deep_merge(base, overlay), overrides)
+        except HyperpodConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def _validate_hyperpod_config(self) -> None:
+        """Validate the optional SageMaker HyperPod block (``hyperpod`` and ``hyperpod_regions``).
+
+        HyperPod is off by default, so an absent block is valid. The shape
+        rules live in :mod:`gco.hyperpod_config`; the global block and every
+        per-region overlay are validated separately so the error names the
+        region whose overlay is wrong.
+        """
+        overlays = self.app.node.try_get_context(HYPERPOD_REGIONS_KEY)
+        if overlays is not None and not isinstance(overlays, dict):
+            raise ConfigValidationError(
+                f"{HYPERPOD_REGIONS_KEY} must be an object keyed by region, got {overlays!r}"
+            )
+        try:
+            validate_hyperpod_config(self._raw_hyperpod_config())
+            for region in sorted(overlays or {}):
+                validate_hyperpod_config(self._raw_hyperpod_config(str(region)))
+        except HyperpodConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def get_hyperpod_config(self, region: str | None = None) -> dict[str, Any]:
+        """Return the ``hyperpod`` block for a region with defaults merged in.
+
+        Keys: ``enabled``, ``cluster_name``, ``node_recovery``,
+        ``availability_zone``, ``instance_groups``, ``queue``, ``removal_policy``
+        (see :data:`gco.hyperpod_config.HYPERPOD_DEFAULTS`). ``region`` applies
+        that region's ``hyperpod_regions`` overlay; the run-scoped
+        ``feature_enabled_overrides=hyperpod`` context forces ``enabled`` on.
+        """
+        try:
+            config = validate_hyperpod_config(self._raw_hyperpod_config(region))
+        except HyperpodConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+        if self._feature_override_enabled(HYPERPOD_FEATURE_KEY):
             config["enabled"] = True
         return config
 

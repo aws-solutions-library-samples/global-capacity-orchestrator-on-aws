@@ -9,6 +9,7 @@ for Kubernetes manifest submission.
 Key Features:
 - Multi-region deployment with automatic failover
 - EKS Auto Mode with GPU support (x86 and ARM)
+- Optional AWS PCS Slurm clusters and SageMaker HyperPod instance groups per region
 - IAM-authenticated API Gateway entry point
 - Secure request validation with short-lived HMAC envelopes
 - CloudWatch monitoring and alerting

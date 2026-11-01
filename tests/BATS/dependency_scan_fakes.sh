@@ -25,7 +25,8 @@
 #   image|<registry>/<repo>|<tag>      digest|<repo:tag>|<sha256 hex>
 #   helm|<name>/<chart>|<version>      helm-oci|<repo_url>/<chart>|<version>
 #   eks-addon|<name>|<version>         k8s|current|<version>
-#   aurora|current|<version>           emr|current|<label>
+#   kube-proxy|<minor>|<version>       aurora|current|<version>
+#   emr|current|<label>
 #   bedrock-profile|<leaf>|<id>        bedrock-embedding|<block>|<id>
 #   cdk-enum|<constant>|<member>
 #

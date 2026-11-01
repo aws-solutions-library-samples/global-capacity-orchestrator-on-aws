@@ -25,6 +25,7 @@ from ..ownership.ecr import (
 from ..ownership.efs_automatic_backups import (
     _strip_accepted_efs_automatic_backup_recovery_points,
 )
+from ..ownership.hyperpod_clusters import _strip_deleted_hyperpod_clusters
 from ..ownership.transaction_search import (
     TRANSACTION_SEARCH_BASELINE_STATE_KEY,
     _capture_transaction_search_baseline,
@@ -98,6 +99,10 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         ctx,
         disallowed_inventory,
     )
+    disallowed_inventory, accepted_deleted_hyperpod_clusters = _strip_deleted_hyperpod_clusters(
+        ctx,
+        disallowed_inventory,
+    )
     if not project_resources_are_absent(disallowed_inventory):
         raise RuntimeError(
             "Fresh baseline contains project resources not owned by this run: "
@@ -120,5 +125,6 @@ def action_baseline(ctx: RunContext) -> dict[str, Any]:
         "accepted_expired_dynamodb_streams": accepted_expired_streams,
         "accepted_deleted_vpc_endpoints": accepted_deleted_vpc_endpoints,
         "accepted_deleted_volumes": accepted_deleted_volumes,
+        "accepted_deleted_hyperpod_clusters": accepted_deleted_hyperpod_clusters,
         "transaction_search": transaction_search,
     }

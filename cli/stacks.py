@@ -75,8 +75,8 @@ from gco.stacks.constants import (
 from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-30T09:51:11Z
-# Generated from Git commit: ea3bb60a33c82d9e7f7839e5eb84540d1c8a3bd0
+# Generated at (UTC): 2026-11-01T02:44:41Z
+# Generated from Git commit: d1a35a0d3198473029a90670b9500430b852154d
 # Flowchart(s) generated from this file:
 #   * ``StackManager.deploy_orchestrated`` -> ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.html``
 #     (PNG: ``diagrams/code_diagrams/cli/stacks.StackManager_deploy_orchestrated.png``)
@@ -5881,12 +5881,15 @@ class StackManager:
     #
     # CloudFormation only deletes the log groups it modeled. Lambda default
     # groups (``/aws/lambda/<function>``), the EKS control-plane group
-    # (``/aws/eks/<cluster>/cluster``), and the Container Insights groups
-    # (``/aws/containerinsights/<cluster>/…``) are created out-of-band by
-    # the services themselves, so ``destroy-all`` used to report success
-    # while leaving them behind — a real teardown orphaned 22 of them plus
-    # the ephemeral-bastion IAM role/profile, which then failed the live
-    # release validation's clean-account baseline gate.
+    # (``/aws/eks/<cluster>/cluster``), the Container Insights groups
+    # (``/aws/containerinsights/<cluster>/…``) and a SageMaker HyperPod
+    # cluster's node-log group (``/aws/sagemaker/Clusters/<name>/<id>``) are
+    # created out-of-band by the services themselves, so ``destroy-all`` used
+    # to report success while leaving them behind — a real teardown orphaned
+    # 22 of them plus the ephemeral-bastion IAM role/profile, which then
+    # failed the live release validation's clean-account baseline gate, and
+    # the fourth #502 release attempt's final inventory found the HyperPod
+    # group the same way.
     #
     # The cleanup below deletes ONLY exact names derived from the project's
     # own stack resources, captured while the stacks still exist, and only
@@ -5899,10 +5902,21 @@ class StackManager:
     # ``AWS::Logs::LogGroup`` resource is deliberately absent here —
     # CloudFormation owns those directly.
     _EKS_CONTAINER_INSIGHTS_SUFFIXES = ("application", "dataplane", "host", "performance")
+    # Where SageMaker HyperPod writes a cluster's node logs:
+    # ``/aws/sagemaker/Clusters/<cluster name>/<cluster id>``, created with the
+    # cluster and never deleted by the service.
+    _HYPERPOD_LOG_GROUP_PREFIX = "/aws/sagemaker/Clusters"
 
     @staticmethod
-    def _implicit_log_group_names(resource_type: str, physical_id: str) -> tuple[str, ...]:
-        """Exact implicit log-group names a stack resource creates out-of-band."""
+    def _implicit_log_group_names(
+        resource_type: str, physical_id: str, cluster_name: str | None = None
+    ) -> tuple[str, ...]:
+        """Exact implicit log-group names a stack resource creates out-of-band.
+
+        A HyperPod cluster's group carries the cluster *name*, which the
+        resource's physical id (the cluster ARN) lacks; the caller passes it
+        from ``describe_cluster`` and gets nothing back without it.
+        """
         if resource_type == "AWS::Lambda::Function":
             return (f"/aws/lambda/{physical_id}",)
         if resource_type == "AWS::EKS::Cluster":
@@ -5913,7 +5927,32 @@ class StackManager:
                     for suffix in StackManager._EKS_CONTAINER_INSIGHTS_SUFFIXES
                 ),
             )
+        if resource_type == "AWS::SageMaker::Cluster" and cluster_name and "/" not in cluster_name:
+            cluster_id = physical_id.rsplit("/", 1)[-1]
+            if ":cluster/" in physical_id and cluster_id:
+                return (f"{StackManager._HYPERPOD_LOG_GROUP_PREFIX}/{cluster_name}/{cluster_id}",)
         return ()
+
+    @staticmethod
+    def _hyperpod_cluster_name(region: str, cluster_arn: str) -> str | None:
+        """The name of a live HyperPod cluster, or ``None`` when the service cannot say.
+
+        ``describe_cluster`` accepts the ARN. Best-effort like the rest of the
+        collection: a cluster the service no longer knows, or a refused read,
+        leaves the group unnamed and uncollected rather than blocking the
+        destroy.
+        """
+        import boto3
+
+        try:
+            cluster = boto3.client("sagemaker", region_name=region).describe_cluster(
+                ClusterName=cluster_arn
+            )
+        except Exception as exc:  # best-effort collection
+            logger.warning("Could not describe HyperPod cluster %s: %s", cluster_arn, exc)
+            return None
+        name = str(cluster.get("ClusterName") or "")
+        return name or None
 
     def _collect_implicit_log_groups(self, stacks: Collection[str]) -> dict[str, dict[str, Any]]:
         """Derive per-stack implicit log-group names while the stacks are live.
@@ -5936,7 +5975,14 @@ class StackManager:
                         physical_id = str(item.get("PhysicalResourceId") or "")
                         if not physical_id:
                             continue
-                        names.extend(self._implicit_log_group_names(resource_type, physical_id))
+                        cluster_name = (
+                            self._hyperpod_cluster_name(region, physical_id)
+                            if resource_type == "AWS::SageMaker::Cluster"
+                            else None
+                        )
+                        names.extend(
+                            self._implicit_log_group_names(resource_type, physical_id, cluster_name)
+                        )
                 if names:
                     collected[stack_name] = {"region": region, "log_groups": sorted(set(names))}
             except Exception as exc:  # best-effort collection
@@ -6993,6 +7039,27 @@ def get_pcs_config(region: str | None = None) -> dict[str, Any]:
 def update_pcs_config(settings: dict[str, Any], region: str | None = None) -> None:
     """Update the AWS PCS block in cdk.json (global, or the region's overlay)."""
     _update_feature_config("pcs", settings, _PCS_DEFAULTS, region)
+
+
+_HYPERPOD_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "cluster_name": None,
+    "availability_zone": None,
+}
+
+
+def get_hyperpod_config(region: str | None = None) -> dict[str, Any]:
+    """Get the raw SageMaker HyperPod block from cdk.json (``hyperpod`` with the region's overlay).
+
+    The top-level keys only, as written; ``gco stacks hyperpod status`` and
+    the preflight validate the whole block through :mod:`gco.hyperpod_config`.
+    """
+    return _get_feature_config("hyperpod", _HYPERPOD_DEFAULTS, region)
+
+
+def update_hyperpod_config(settings: dict[str, Any], region: str | None = None) -> None:
+    """Update the SageMaker HyperPod block in cdk.json (global, or the region's overlay)."""
+    _update_feature_config("hyperpod", settings, _HYPERPOD_DEFAULTS, region)
 
 
 # =============================================================================

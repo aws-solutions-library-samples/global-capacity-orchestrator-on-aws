@@ -1,0 +1,68 @@
+# Kueue queue topology for the SageMaker HyperPod nodes.
+#
+# The default topology (post-helm-kueue-default-queues.yaml) admits work onto
+# the Karpenter node pools. HyperPod nodes carry the gco.aws/capacity-provider
+# =hyperpod label and the gco.aws/hyperpod=true:NoSchedule taint, so nothing
+# lands on them by accident; this flavor is how a job asks for them. Kueue
+# injects the flavor's nodeLabels as a nodeSelector and its tolerations into
+# every admitted workload, so a Job only needs
+# `kueue.x-k8s.io/queue-name: gco-hyperpod` to run on HyperPod capacity.
+#
+# The ClusterQueue's nominal quotas come from cdk.json hyperpod.queue; they
+# are admission caps, the instance groups are the real limit.
+#
+# Gated on both {{KUEUE_ENABLED}} and {{HYPERPOD_ENABLED}}: disabling either
+# leaves a placeholder unreplaced, the applier skips the file and prunes the
+# three objects (see _FEATURE_RESOURCE_INVENTORY in handler.py).
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: gco-hyperpod-flavor
+  labels:
+    project: gco
+    gco.io/kueue-enabled: "{{KUEUE_ENABLED}}"
+    gco.io/hyperpod-enabled: "{{HYPERPOD_ENABLED}}"
+spec:
+  nodeLabels:
+    gco.aws/capacity-provider: hyperpod
+  tolerations:
+    - key: gco.aws/hyperpod
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: gco-hyperpod-queue
+  labels:
+    project: gco
+    gco.io/kueue-enabled: "{{KUEUE_ENABLED}}"
+    gco.io/hyperpod-enabled: "{{HYPERPOD_ENABLED}}"
+spec:
+  namespaceSelector: {}
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+      flavors:
+        - name: gco-hyperpod-flavor
+          resources:
+            - name: "cpu"
+              nominalQuota: "{{HYPERPOD_QUEUE_MAX_CPU}}"
+            - name: "memory"
+              nominalQuota: "{{HYPERPOD_QUEUE_MAX_MEMORY}}"
+            - name: "nvidia.com/gpu"
+              nominalQuota: "{{HYPERPOD_QUEUE_MAX_GPU}}"
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: gco-hyperpod
+  namespace: gco-jobs
+  labels:
+    project: gco
+    gco.io/kueue-enabled: "{{KUEUE_ENABLED}}"
+    gco.io/hyperpod-enabled: "{{HYPERPOD_ENABLED}}"
+spec:
+  clusterQueue: gco-hyperpod-queue

@@ -760,6 +760,61 @@ STUB
     [[ "$output" == *"efs-csi"* ]] || [[ "$output" == *"aws-efs"* ]]
 }
 
+@test "extract_eks_addons: includes the HyperPod mixed-compute add-ons, kube-proxy for the cdk.json minor" {
+    run extract_eks_addons "gco/stacks/regional_stack.py"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"vpc-cni|v"* ]]
+    [[ "$output" == *"coredns|v"* ]]
+    local minor
+    minor="$(extract_k8s_version cdk.json)"
+    # kube-proxy is pinned per EKS minor; the line carries the cluster minor's build.
+    [[ "$output" == *"kube-proxy|v${minor}."* ]]
+}
+
+@test "extract_eks_addons: kube-proxy follows the requested minor and drops out when unpinned" {
+    run extract_eks_addons "gco/stacks/regional_stack.py" "1.36"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kube-proxy|v1.36."* ]]
+    run extract_eks_addons "gco/stacks/regional_stack.py" "1.99"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"kube-proxy|"* ]]
+    [[ "$output" == *"vpc-cni|v"* ]]
+}
+
+@test "extract_eks_addons: regex fallback reads every pin, kube-proxy included, without importing gco" {
+    # A constants.py the import path cannot see — run from a directory with
+    # no gco package, the package shadowed on PYTHONPATH — so the fallback
+    # must parse the string constants and the per-minor kube-proxy mapping
+    # from the text. The fixture's builds differ from the committed ones.
+    run bash -c '
+        source "$PWD/.github/scripts/lib_dependency_scan.sh"
+        dir="$(mktemp -d)"
+        mkdir -p "$dir/shadow/gco"
+        printf "raise ImportError(\"gco is not importable here\")\n" > "$dir/shadow/gco/__init__.py"
+        cat > "$dir/constants.py" <<EOF
+EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.99"
+EKS_ADDON_VPC_CNI = "v1.23.2-eksbuild.99"
+EKS_ADDON_COREDNS = "v1.14.7-eksbuild.99"
+EKS_ADDON_KUBE_PROXY_BY_MINOR: Mapping[str, str] = MappingProxyType(
+    {
+        "1.36": "v1.36.0-eksbuild.99",
+        "1.37": "v1.37.0-eksbuild.98",
+    }
+)
+EOF
+        echo "" > "$dir/regional_stack.py"
+        cd "$dir"
+        PYTHONPATH="$dir/shadow" extract_eks_addons "$dir/regional_stack.py" "1.36"
+        rm -rf "$dir"
+    '
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"eks-pod-identity-agent|v1.4.0-eksbuild.99"* ]]
+    [[ "$output" == *"vpc-cni|v1.23.2-eksbuild.99"* ]]
+    [[ "$output" == *"coredns|v1.14.7-eksbuild.99"* ]]
+    [[ "$output" == *"kube-proxy|v1.36.0-eksbuild.99"* ]]
+    [[ "$output" != *"v1.37.0"* ]]
+}
+
 @test "extract_eks_addons: returns empty for file with no addons" {
     # Force the regex fallback path
     run bash -c '
@@ -777,6 +832,118 @@ for m in re.finditer(r\"addon_name=\\\"([^\\\"]+)\\\".*?addon_version=\\\"([^\\\
     '
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+# ── extract_kube_proxy_pins ──────────────────────────────────────────────────
+
+@test "extract_kube_proxy_pins: every pinned minor of the committed mapping, in numeric order, cdk.json's among them" {
+    run extract_kube_proxy_pins gco/stacks/constants.py
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    local line minor
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[0-9]+\.[0-9]+\|v[0-9]+\.[0-9]+\.[0-9]+-eksbuild\.[0-9]+$ ]]
+    done <<< "$output"
+    minor="$(extract_k8s_version cdk.json)"
+    [[ "$output" == *"${minor}|v${minor}."* ]]
+    [ "$output" = "$(sort -t'|' -k1,1V <<< "$output")" ]
+}
+
+@test "extract_kube_proxy_pins: the regex fallback reads the mapping literal without importing gco; nothing for no mapping or no file" {
+    # Run from a directory with no gco package, with the package shadowed on
+    # PYTHONPATH (an editable install elsewhere would otherwise answer the
+    # import), so the mapping can only come from the file's text.
+    run bash -c '
+        source "$PWD/.github/scripts/lib_dependency_scan.sh"
+        dir="$(mktemp -d)"
+        mkdir -p "$dir/shadow/gco"
+        printf "raise ImportError(\"gco is not importable here\")\n" > "$dir/shadow/gco/__init__.py"
+        cat > "$dir/constants.py" <<EOF
+EKS_ADDON_KUBE_PROXY_BY_MINOR: Mapping[str, str] = MappingProxyType(
+    {
+        "1.10": "v1.10.0-eksbuild.3",
+        "1.9": "v1.9.0-eksbuild.58",
+        "1.37": "v1.37.0-eksbuild.32",
+    }
+)
+EOF
+        cd "$dir"
+        export PYTHONPATH="$dir/shadow"
+        extract_kube_proxy_pins "$dir/constants.py"
+        echo "--"
+        echo "EKS_ADDON_VPC_CNI = \"v1.23.2-eksbuild.8\"" > "$dir/constants.py"
+        extract_kube_proxy_pins "$dir/constants.py"
+        echo "--"
+        extract_kube_proxy_pins "$dir/missing.py"
+        rm -rf "$dir"
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf '1.9|v1.9.0-eksbuild.58\n1.10|v1.10.0-eksbuild.3\n1.37|v1.37.0-eksbuild.32\n--\n--')" ]
+}
+
+# ── HyperPod EKS minors and EKS standard support ─────────────────────────────
+
+_write_hyperpod_aws_stub() {
+    # $1: directory for the stub. HYPERPOD_STUB_MODE: ok|slurm-only|fail|null|bad-json.
+    cat > "$1/aws" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${HYPERPOD_STUB_CALLS}"
+case "${HYPERPOD_STUB_MODE}" in
+    fail) echo "An error occurred (AccessDeniedException) when calling the GetParametersByPath operation" >&2; exit 254 ;;
+    null) echo null ;;
+    bad-json) echo '["unterminated' ;;
+    slurm-only) echo '["/aws/service/sagemaker-hyperpod/ami/x86_64/slurm-amazon-linux-2023/latest/ami-id"]' ;;
+    *)
+        echo '["/aws/service/sagemaker-hyperpod/ami/x86_64/eks-1.36-amazon-linux-2/latest/ami-id", "/aws/service/sagemaker-hyperpod/ami/x86_64/eks-1.9-amazon-linux-2023/latest/ami-id", "/aws/service/sagemaker-hyperpod/ami/x86_64/eks-1.36-amazon-linux-2023/latest/ami-id", "/aws/service/sagemaker-hyperpod/ami/x86_64/eks-1.35-amazon-linux-2023/latest/ami-id", "/aws/service/sagemaker-hyperpod/ami/x86_64/slurm-amazon-linux-2023/latest/ami-id", "/aws/service/sagemaker-hyperpod/ami/x86_64/eks-1.28-amazon-linux-2/other"]' ;;
+esac
+STUB
+    chmod +x "$1/aws"
+}
+
+@test "list_hyperpod_eks_minors and newest_hyperpod_eks_minor: the EKS leaves' minors, deduplicated and in numeric order, from one recursive read" {
+    tmpdir="$(mktemp -d)"
+    _write_hyperpod_aws_stub "$tmpdir"
+    export HYPERPOD_STUB_CALLS="$tmpdir/calls" HYPERPOD_STUB_MODE=ok
+    PATH="$tmpdir:$PATH" run list_hyperpod_eks_minors us-west-2
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf '1.9\n1.35\n1.36')" ]
+    grep -qxF -- 'ssm get-parameters-by-path --path /aws/service/sagemaker-hyperpod/ami/x86_64 --recursive --region us-west-2 --query Parameters[].Name --output json' "$tmpdir/calls"
+    PATH="$tmpdir:$PATH" run newest_hyperpod_eks_minor
+    [ "$status" -eq 0 ]
+    [ "$output" = "1.36" ]
+    grep -q -- '--region us-east-1' "$tmpdir/calls"
+    rm -rf "$tmpdir"
+}
+
+@test "list_hyperpod_eks_minors and newest_hyperpod_eks_minor: a refused read, an empty or Slurm-only tree and bad JSON all fail with nothing printed" {
+    tmpdir="$(mktemp -d)"
+    _write_hyperpod_aws_stub "$tmpdir"
+    export HYPERPOD_STUB_CALLS="$tmpdir/calls"
+    local mode
+    for mode in fail null slurm-only bad-json; do
+        HYPERPOD_STUB_MODE="$mode" PATH="$tmpdir:$PATH" run list_hyperpod_eks_minors us-east-1
+        [ "$status" -ne 0 ]
+        [ -z "$output" ]
+        HYPERPOD_STUB_MODE="$mode" PATH="$tmpdir:$PATH" run newest_hyperpod_eks_minor us-east-1
+        [ "$status" -ne 0 ]
+        [ -z "$output" ]
+    done
+    rm -rf "$tmpdir"
+}
+
+@test "eks_standard_support_minors and eks_minor_support_end: the minors and dates of a describe-cluster-versions response" {
+    local json='{"clusterVersions": [{"clusterVersion": "1.37", "endOfStandardSupportDate": "2027-01-15T00:00:00+00:00"}, {"clusterVersion": "1.36", "endOfStandardSupportDate": "2026-09-15 00:00:00+00:00"}, {"clusterVersion": "1.35"}, {"clusterVersion": "1.36", "endOfStandardSupportDate": "2026-09-15T00:00:00+00:00"}, {"other": "row"}]}'
+    [ "$(eks_standard_support_minors "$json")" = "$(printf '1.37\n1.36\n1.35')" ]
+    [ "$(eks_minor_support_end "$json" 1.37)" = "2027-01-15" ]
+    [ "$(eks_minor_support_end "$json" 1.36)" = "2026-09-15" ]
+    # A minor with no published date, one the response does not carry, and
+    # input that is not JSON all read as unknown; the minors of a bad
+    # response are nothing.
+    [ "$(eks_minor_support_end "$json" 1.35)" = "unknown" ]
+    [ "$(eks_minor_support_end "$json" 1.34)" = "unknown" ]
+    [ "$(eks_minor_support_end "not json" 1.37)" = "unknown" ]
+    [ -z "$(eks_standard_support_minors "not json")" ]
+    [ -z "$(eks_standard_support_minors '{"clusterVersions": []}')" ]
 }
 
 # ── extract_helm_charts ──────────────────────────────────────────────────────
@@ -4803,6 +4970,235 @@ _make_pcs_docs_curl() {
     PATH="$tmpdir:$PATH" run fetch_pcs_slurm_versions
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+# ── HyperPod health-monitoring agent (the chart copy) ───────────────────────
+
+HMA_MANIFEST_PATH="lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml"
+
+_write_hma_template() {
+    # $1: file to write. A Helm template shaped like the upstream chart's:
+    # un-parseable as YAML, two DaemonSets, the instance-type expression after
+    # another matchExpression, and a quoted item.
+    cat > "$1" <<'TPL'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: health-monitoring-agent
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent
+  namespace: {{ .Values.namespace }}
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: gco.aws/capacity-provider
+                    operator: In
+                    values: ["hyperpod"]
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - ml.p5.48xlarge
+                      - "ml.g5.xlarge"
+                      - ml.g6e.48xlarge
+      containers:
+        - name: health-monitoring-agent
+          image: {{ include "health-monitoring-agent.imageUri" . }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent-non-nvidia
+  namespace: {{ .Values.namespace }}
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values: [ml.trn1.32xlarge, "ml.trn2.48xlarge"]
+      containers:
+        - name: health-monitoring-agent-non-nvidia
+          image: {{ include "health-monitoring-agent.imageUri" . }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: health-monitoring-agent-listless
+  namespace: {{ .Values.namespace }}
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node.kubernetes.io/instance-type
+                    operator: Exists
+                  - key: other
+                    operator: In
+                    values:
+                      - not-the-list
+TPL
+}
+
+@test "extract_hma_instance_types: each DaemonSet's list, block or inline, quoted or not; nothing otherwise" {
+    tmpdir="$(mktemp -d)"
+    _write_hma_template "$tmpdir/template.yaml"
+    run extract_hma_instance_types "$tmpdir/template.yaml" health-monitoring-agent
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'ml.p5.48xlarge\nml.g5.xlarge\nml.g6e.48xlarge')" ]
+    run extract_hma_instance_types "$tmpdir/template.yaml" health-monitoring-agent-non-nvidia
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'ml.trn1.32xlarge\nml.trn2.48xlarge')" ]
+    # An expression without values, a DaemonSet that does not exist, a
+    # ServiceAccount of the same name, a missing file: all nothing.
+    for probe in health-monitoring-agent-listless health-monitoring-agent-ghost; do
+        run extract_hma_instance_types "$tmpdir/template.yaml" "$probe"
+        [ "$status" -eq 0 ]
+        [ -z "$output" ]
+    done
+    run extract_hma_instance_types "$tmpdir/missing.yaml" health-monitoring-agent
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_hma_instance_types: the committed manifest lists ml.* types once each, with no type in both DaemonSets" {
+    nvidia="$(extract_hma_instance_types "$REPO_ROOT/$HMA_MANIFEST_PATH" health-monitoring-agent)"
+    neuron="$(extract_hma_instance_types "$REPO_ROOT/$HMA_MANIFEST_PATH" health-monitoring-agent-non-nvidia)"
+    [ -n "$nvidia" ] && [ -n "$neuron" ]
+    for itype in $nvidia $neuron; do
+        [[ "$itype" =~ ^ml\.[a-z0-9]+(-[a-z0-9]+)?\.[a-z0-9]+$ ]]
+    done
+    # No duplicates within a list, no overlap between the two.
+    [ "$(printf '%s\n' "$nvidia" | sort | uniq -d | wc -l | tr -d ' ')" -eq 0 ]
+    [ "$(printf '%s\n' "$neuron" | sort | uniq -d | wc -l | tr -d ' ')" -eq 0 ]
+    [ -z "$(comm -12 <(printf '%s\n' "$nvidia" | sort) <(printf '%s\n' "$neuron" | sort))" ]
+    # The NVIDIA list is GPU families, the other Trainium and Inferentia.
+    for itype in $nvidia; do [[ "$itype" =~ ^ml\.(p|g|gr)[0-9] ]]; done
+    for itype in $neuron; do [[ "$itype" =~ ^ml\.(trn|inf)[0-9] ]]; done
+}
+
+@test "extract_hma_default_tag: the chart's default image tag; nothing without one" {
+    tmpdir="$(mktemp -d)"
+    printf '{{- define "health-monitoring-agent.imageUri" -}}\n{{- $imageTag := .Values.imageTag | default "1.0.2710.0_1.0.501.0" -}}\n{{- end }}\n' > "$tmpdir/_helpers.tpl"
+    run extract_hma_default_tag "$tmpdir/_helpers.tpl"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1.0.2710.0_1.0.501.0" ]
+    printf '{{- $imageTag := .Values.imageTag -}}\n' > "$tmpdir/_helpers.tpl"
+    run extract_hma_default_tag "$tmpdir/_helpers.tpl"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_hma_default_tag "$tmpdir/missing.tpl"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_hma_readme_regions: region|account|tag per ECR URI row, first mention wins; nothing otherwise" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/readme.md" <<'MD'
+- **Supported Regions and their ECR URIs**:
+  ```
+  us-east-1 (US East (N. Virginia)):      111122223333.dkr.ecr.us-east-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+  eu-west-1 (Europe (Ireland)):           444455556666.dkr.ecr.eu-west-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+  us-east-1 (US East (N. Virginia)):      999999999999.dkr.ecr.us-east-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+  us-west-2 (US West (Oregon)):           111122223333.dkr.ecr.eu-west-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+  ```
+  helm install hma 111122223333.dkr.ecr.us-east-1.amazonaws.com/hyperpod-health-monitoring-agent:1.0.2710.0_1.0.501.0
+MD
+    run extract_hma_readme_regions "$tmpdir/readme.md"
+    [ "$status" -eq 0 ]
+    # The duplicate us-east-1 row and the row whose URI names another Region
+    # are both dropped; the prose line is not a row.
+    [ "$output" = "$(printf 'us-east-1|111122223333|1.0.2710.0_1.0.501.0\neu-west-1|444455556666|1.0.2710.0_1.0.501.0')" ]
+    printf '# HyperPod Helm chart\n' > "$tmpdir/readme.md"
+    run extract_hma_readme_regions "$tmpdir/readme.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_hma_readme_regions "$tmpdir/missing.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+}
+
+@test "extract_hma_region_accounts: region|account per mapping entry, read without importing; the committed module parses" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/hyperpod_config.py" <<'PY'
+from gco.config import load  # not importable here
+HEALTH_MONITORING_AGENT_TAG = "1.0.2710.0_1.0.501.0"
+HEALTH_MONITORING_AGENT_ACCOUNTS: Mapping[str, str] = {
+    "us-east-1": "111122223333",  # trailing comment
+    "us-gov-west-1": "444455556666",
+}
+OTHER_ACCOUNTS = {"eu-west-1": "777788889999"}
+PY
+    run extract_hma_region_accounts "$tmpdir/hyperpod_config.py"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf 'us-east-1|111122223333\nus-gov-west-1|444455556666')" ]
+    printf 'HEALTH_MONITORING_AGENT_TAG = "1.0.0.0_1.0.0.0"\n' > "$tmpdir/hyperpod_config.py"
+    run extract_hma_region_accounts "$tmpdir/hyperpod_config.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run extract_hma_region_accounts "$tmpdir/missing.py"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$tmpdir"
+
+    run extract_hma_region_accounts "$REPO_ROOT/gco/hyperpod_config.py"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"us-east-1|"* ]]
+    while IFS='|' read -r region account; do
+        [[ "$region" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
+        [[ "$account" =~ ^[0-9]{12}$ ]]
+    done <<< "$output"
+    # The tag pin the same surface reads is a plain string constant.
+    [[ "$(extract_python_string_constant HEALTH_MONITORING_AGENT_TAG "$REPO_ROOT/gco/hyperpod_config.py")" =~ ^[0-9][0-9._]+$ ]]
+}
+
+@test "fetch_hma_upstream_file: one raw chart file per name through the retrying curl; an unknown name fails" {
+    tmpdir="$(mktemp -d)"
+    cat > "$tmpdir/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${HMA_STUB_CALLS}"
+[ "${HMA_STUB_MODE:-ok}" = "fail" ] && exit 22
+echo "body of ${*: -1}"
+STUB
+    chmod +x "$tmpdir/curl"
+    export HMA_STUB_CALLS="$tmpdir/calls"
+    PATH="$tmpdir:$PATH" run fetch_hma_upstream_file template
+    [ "$status" -eq 0 ]
+    [ "$output" = "body of https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/HyperPodHelmChart/charts/health-monitoring-agent/templates/health-monitoring-agent.yaml" ]
+    PATH="$tmpdir:$PATH" run fetch_hma_upstream_file helpers
+    [ "$output" = "body of https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/HyperPodHelmChart/charts/health-monitoring-agent/templates/_helpers.tpl" ]
+    PATH="$tmpdir:$PATH" run fetch_hma_upstream_file readme
+    [ "$output" = "body of https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/readme.md" ]
+    grep -q -- '--retry 2 --retry-connrefused --retry-max-time 30' "$tmpdir/calls"
+    PATH="$tmpdir:$PATH" run fetch_hma_upstream_file values
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    HMA_STUB_MODE=fail PATH="$tmpdir:$PATH" run fetch_hma_upstream_file template
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    # A fork can point the lookup elsewhere.
+    HMA_UPSTREAM_RAW_BASE="https://example.invalid/chart" PATH="$tmpdir:$PATH" run fetch_hma_upstream_file readme
+    [ "$output" = "body of https://example.invalid/chart/readme.md" ]
     rm -rf "$tmpdir"
 }
 

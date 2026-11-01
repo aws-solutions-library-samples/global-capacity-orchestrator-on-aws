@@ -19,6 +19,7 @@ from gco.inference_proxy_config import (
 )
 
 from .checks.eks_capabilities import build_eks_capabilities_overrides, overrides_json
+from .checks.hyperpod import hyperpod_overrides_json
 from .checks.pcs import pcs_overrides_json
 from .checks.schedulers import OPTIONAL_SCHEDULERS
 from .checks.tracing import tracing_overrides_json
@@ -39,6 +40,16 @@ from .runner import LiveValidationRunner, require_local_execution
 _repository_root = repository_root
 _split_actions = split_csv_names
 _path_from_root = path_from_root
+
+_KUBERNETES_MINOR = re.compile(r"^\d+\.\d+$")
+
+
+def _kubernetes_minor(value: str) -> str:
+    """``--kubernetes-version``: a ``major.minor`` the way cdk.json spells it (``1.36``)."""
+    candidate = value.strip()
+    if not _KUBERNETES_MINOR.fullmatch(candidate):
+        raise argparse.ArgumentTypeError(f"expected a Kubernetes minor such as 1.36, got {value!r}")
+    return candidate
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -146,6 +157,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Enable off-by-default EKS Capabilities for this run's deploy so the "
             "eks-capabilities action can prove each one attaches ACTIVE (ack, kro, or all)"
+        ),
+    )
+    parser.add_argument(
+        "--kubernetes-version",
+        type=_kubernetes_minor,
+        default=None,  # argparse would run a string default through type=
+        metavar="MINOR",
+        help=(
+            "Deploy this run's regional EKS clusters at this Kubernetes minor (for "
+            "example 1.36) instead of cdk.json's kubernetes_version: the same CDK "
+            "context a deployment sets in cdk.json. For a feature the run turns on "
+            "that trails EKS, such as SageMaker HyperPod, whose node AMI for a new "
+            "minor follows the minor; the topology action then verifies this minor"
         ),
     )
     parser.add_argument(
@@ -371,6 +395,10 @@ def _settings_from_args(
         # ... and deploys the AWS PCS Slurm backend, so the schedulers action
         # proves it: PCS is not opt-in for a release.
         pcs_overrides_json=pcs_overrides_json(),
+        # ... and a one-instance SageMaker HyperPod cluster joined to the
+        # regional EKS cluster, so the hyperpod action proves the node path.
+        hyperpod_overrides_json=hyperpod_overrides_json(),
+        kubernetes_version_override=args.kubernetes_version or "",
         inference_enabled=inference_enabled,
         selected_region=args.inference_region or "",
         inference_runtimes=runtimes,

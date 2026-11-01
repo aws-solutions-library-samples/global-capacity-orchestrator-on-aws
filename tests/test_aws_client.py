@@ -448,6 +448,72 @@ class TestGCOAWSClientRequests:
                         namespace="default",
                     )
 
+    def test_submit_manifests_error_carries_status_and_resource_outcomes(self):
+        """The error keeps the API's message and attaches the evidence a caller
+        needs to know whether anything was created."""
+        from cli.aws_client import ApiEndpoint, GCOAWSClient, ManifestSubmissionError
+
+        with patch("cli.aws_client.get_config") as mock_config:
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+            with (
+                patch("boto3.Session") as mock_session,
+                patch("requests.request") as mock_request,
+                patch("cli.aws_client.SigV4Auth"),
+            ):
+                mock_session.return_value.get_credentials.return_value = MagicMock()
+                mock_response = MagicMock()
+                mock_response.ok = False
+                mock_response.status_code = 400
+                mock_response.reason = "Bad Request"
+                mock_response.json.return_value = {
+                    "success": False,
+                    "resources": [
+                        {
+                            "name": "my-job",
+                            "status": "failed",
+                            "message": "Manifest 1 validation failed: no toleration",
+                        },
+                        "not-a-resource",
+                    ],
+                }
+                mock_request.return_value = mock_response
+                client = GCOAWSClient()
+                client._api_endpoint_cache = ApiEndpoint(
+                    url="https://api.example.com/prod", region="us-east-1", api_id="test"
+                )
+                client._cache_timestamp = time.time()
+                with pytest.raises(ManifestSubmissionError) as excinfo:
+                    client.submit_manifests(manifests=[{"kind": "Job"}], namespace="default")
+                error = excinfo.value
+                assert isinstance(error, RuntimeError)
+                assert str(error) == "my-job: Manifest 1 validation failed: no toleration"
+                assert error.status_code == 400
+                assert error.resources == [
+                    {
+                        "name": "my-job",
+                        "status": "failed",
+                        "message": "Manifest 1 validation failed: no toleration",
+                    }
+                ]
+                assert error.nothing_created() is True
+
+    def test_manifest_submission_error_proof_of_non_creation(self):
+        from cli.aws_client import ManifestSubmissionError
+
+        failed = {"name": "a", "status": "failed"}
+        created = {"name": "b", "status": "created"}
+        # A 4xx with every resource failed, or with none reported, created nothing.
+        assert ManifestSubmissionError(400, "x", [failed]).nothing_created() is True
+        assert ManifestSubmissionError(403, "forbidden", []).nothing_created() is True
+        assert ManifestSubmissionError(400, "x", None).nothing_created() is True
+        # A 4xx that reports an applied resource did create something.
+        assert ManifestSubmissionError(400, "x", [created, failed]).nothing_created() is False
+        # A 5xx is never proof: the apply may have run before the answer failed.
+        assert ManifestSubmissionError(502, "bad gateway", []).nothing_created() is False
+        assert ManifestSubmissionError(500, "boom", [failed]).nothing_created() is False
+        # Non-dict entries are dropped rather than trusted.
+        assert ManifestSubmissionError(400, "x", ["junk", failed]).resources == [failed]
+
     def test_submit_manifests_error_with_message(self):
         """Test submitting manifests with simple error message."""
         from cli.aws_client import ApiEndpoint, GCOAWSClient

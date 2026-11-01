@@ -201,6 +201,45 @@ class TestCollectPodScheduling:
         }
         assert "beta.kubernetes.io/os" not in info["node_labels"]
 
+    def test_a_hyperpod_node_reports_hyperpod_as_its_capacity_type(self) -> None:
+        """A HyperPod node has no Karpenter label; GCO's provider label stands in,
+        and HyperPod's own health labels ride along with the instance group."""
+        labels = {
+            NODE_INSTANCE_TYPE_LABEL: "ml.p5.48xlarge",
+            "gco.aws/capacity-provider": "hyperpod",
+            "gco.aws/hyperpod-instance-group": "p5",
+            "sagemaker.amazonaws.com/node-health-status": "Schedulable",
+            "sagemaker.amazonaws.com/deep-health-check-status": "Passed",
+            "topology.kubernetes.io/zone": "us-east-1b",
+            "beta.kubernetes.io/os": "linux",
+        }
+        core_v1 = _core_v1({"hp-1": _node(labels)})
+        info = _collect_pod_scheduling(core_v1, [_pod("trainer-abc", "hp-1")])
+        assert info["node_capacity_type"] == "hyperpod"
+        assert info["nodes"][0]["capacity_type"] == "hyperpod"
+        assert info["node_labels"] == {
+            NODE_INSTANCE_TYPE_LABEL: "ml.p5.48xlarge",
+            "gco.aws/capacity-provider": "hyperpod",
+            "gco.aws/hyperpod-instance-group": "p5",
+            "sagemaker.amazonaws.com/node-health-status": "Schedulable",
+            "sagemaker.amazonaws.com/deep-health-check-status": "Passed",
+            "topology.kubernetes.io/zone": "us-east-1b",
+        }
+
+    def test_karpenters_label_wins_over_a_stray_provider_label(self) -> None:
+        labels = {
+            **_gpu_node_labels(CHEAPEST_MEMBER, "spot"),
+            "gco.aws/capacity-provider": "hyperpod",
+        }
+        core_v1 = _core_v1({"n1": _node(labels)})
+        info = _collect_pod_scheduling(core_v1, [_pod("p1", "n1")])
+        assert info["node_capacity_type"] == "spot"
+
+    def test_an_unknown_provider_label_reports_no_capacity_type(self) -> None:
+        core_v1 = _core_v1({"n1": _node({"gco.aws/capacity-provider": "something-else"})})
+        info = _collect_pod_scheduling(core_v1, [_pod("p1", "n1")])
+        assert info["node_capacity_type"] is None
+
     def test_reads_each_distinct_node_exactly_once(self) -> None:
         """The cost of this feature is one Node read per *distinct* node."""
         core_v1 = _core_v1(

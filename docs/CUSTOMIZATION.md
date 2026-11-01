@@ -1447,6 +1447,7 @@ GCO installs add-ons in dependency order through the Helm installer. KEDA is a m
 | [Slurm](SLURM_OPERATOR.md) (Slinky) | Disabled | Slurm operator plus a cluster configured from one `helm.slurm` block: autoscaled CPU/GPU partitions on GCO's node pools, accounting with S3 backups, a login pod, metrics and alerts, and the `/api/v1/slurm` routes behind `gco slurm` — see the [configuration reference](SLURM_OPERATOR.md#configuration-reference) |
 | [YuniKorn](https://yunikorn.apache.org/) | Disabled | App-aware scheduler with hierarchical queues |
 | [AWS PCS](PCS.md) (`pcs` block, not a chart) | Disabled | AWS Parallel Computing Service as a second Slurm backend behind the same `/api/v1/slurm` routes, `gco slurm` CLI and tools: a managed cluster with EC2 node groups (EFA, placement groups, Spot, Capacity Blocks), queues, a login node and EFS/FSx storage, or an existing cluster you run — see the [configuration reference](PCS.md#configuration-reference) |
+| [SageMaker HyperPod](HYPERPOD.md) (`hyperpod` block, not a chart) | Disabled | Amazon SageMaker HyperPod as EKS-orchestrated GPU capacity: an `AWS::SageMaker::Cluster` whose instance groups join the regional EKS cluster as tainted, labelled nodes with deep health checks and automatic node recovery; a Kueue `gco-hyperpod` queue and `--capacity-type hyperpod` route work to them; Training Plans reserve the capacity. `gco stacks hyperpod enable` or `--enable hyperpod`. |
 | [Argo CD](https://argo-cd.readthedocs.io/en/stable/) | Disabled | Self-managed GitOps controller in namespaced mode, fenced to `gco-jobs` and `gco-inference`, with an optional root Application per cluster and a repo-server autoscaler (`helm.argocd.gitops`, `helm.argocd.repo_server`) — see [GitOps with Argo CD](GITOPS.md) |
 | [Crossplane](https://docs.crossplane.io/) + Crossview | Disabled | Crossplane v2 and its dashboard under one toggle; composite resources compose tenant workloads in the tenant namespaces only — see [Crossplane](CROSSPLANE.md) |
 | [Kueue](https://kueue.sigs.k8s.io/) | Enabled | Job queueing with quotas and fair sharing; installed last |
@@ -1647,14 +1648,14 @@ Sometimes you want a feature on for **one run** without changing that shipped po
 
 ```bash
 # One run with every optional feature on; cdk.json is not modified.
-gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs
+gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs,hyperpod
 ```
 
 Names are validated before any AWS call, so a typo fails immediately rather than deploying without the feature you asked for. Repeated and comma-joined forms are equivalent (`--enable valkey --enable slurm` = `--enable valkey,slurm`).
 
 | Category | Valid names | CDK context key |
 |----------|-------------|-----------------|
-| Infrastructure features | `aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store`, `pcs` | `feature_enabled_overrides` |
+| Infrastructure features | `aurora_pgvector`, `valkey`, `fsx_lustre`, `vector_store`, `pcs`, `hyperpod` | `feature_enabled_overrides` |
 | Helm charts | `argocd`, `aws_efa_device_plugin`, `aws_load_balancer_controller`, `aws_neuron_device_plugin`, `cert_manager`, `crossplane`, `keda`, `kubeflow_trainer`, `kuberay`, `kueue`, `slurm`, `volcano`, `yunikorn` | `helm_enabled_overrides` |
 
 Two properties matter:
@@ -1971,6 +1972,26 @@ See `examples/aurora-pgvector-job.yaml` for a complete working example that crea
 ```
 
 `gco stacks pcs enable|disable` edit the block (globally or as a `pcs_regions` overlay), `gco stacks pcs status` shows what is configured and deployed, and `gco stacks pcs preflight` checks the account before a deploy (`gco stacks deploy` runs it too). `mode: existing` with `cluster_id` points the API at a cluster you already run instead. The managed cluster mounts the regional EFS at `/home` and FSx for Lustre at `/scratch` where the Region has it, and `metrics.enabled` scrapes its Slurm metrics into the in-cluster Prometheus next to Slinky's.
+
+## Configure SageMaker HyperPod
+
+[Amazon SageMaker HyperPod](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-hyperpod.html) adds resilient GPU capacity to a regional cluster: the regional stack creates an EKS-orchestrated HyperPod cluster whose instance groups join the regional EKS cluster as nodes, with HyperPod's health monitoring and automatic node replacement behind them. Work reaches the nodes through the `gco-hyperpod` Kueue queue or `gco inference deploy --capacity-type hyperpod`. See [HYPERPOD.md](HYPERPOD.md) for the full reference.
+
+```json
+{
+  "context": {
+    "hyperpod": {
+      "enabled": true,
+      "availability_zone": "us-east-1b",
+      "instance_groups": [
+        { "name": "p5", "instance_type": "ml.p5.48xlarge", "instance_count": 4 }
+      ]
+    }
+  }
+}
+```
+
+`gco stacks hyperpod enable|disable` edit the block (globally or as a `hyperpod_regions` overlay), `gco stacks hyperpod status` shows what is configured and deployed, and `gco stacks hyperpod preflight` checks the account before a deploy (`gco stacks deploy` runs it too; `--skip-hyperpod-preflight` bypasses it). `gco capacity find-training-plans` searches the SageMaker Training Plans an instance group can launch into (`instance_groups[].training_plan_arn`).
 
 ## Configure the Vector Store
 

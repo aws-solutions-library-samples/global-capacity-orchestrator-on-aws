@@ -924,13 +924,17 @@ gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 --capacity
 
 # Pin to on-demand (guaranteed availability)
 gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 --capacity-type on-demand
+
+# Pin to the Region's SageMaker HyperPod nodes (cdk.json hyperpod)
+gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 --capacity-type hyperpod
 ```
 
-`--capacity-type` is a hard pin: the inference monitor turns it into a `karpenter.sh/capacity-type` node selector on the endpoint's Deployment, and the pods schedule only on nodes of that type.
+`--capacity-type` is a hard pin: the inference monitor turns `spot` / `on-demand` into a `karpenter.sh/capacity-type` node selector on the endpoint's Deployment, and `hyperpod` into a `gco.aws/capacity-provider=hyperpod` selector plus the toleration for the taint every [SageMaker HyperPod](HYPERPOD.md) node carries; the pods schedule only on nodes of that type.
 
 - **Unset (the default):** no selector is added. The GPU NodePools allow both capacity types, so when Karpenter launches a node for the pod it tries Spot first and falls back to On-Demand (the [NodePool capacity type ordering](https://karpenter.sh/docs/concepts/nodepools/)). That ordering only applies to new nodes: a pod can land on any existing node with room, whatever its capacity type, and because the GPU pools consolidate `WhenEmpty`, a pod that landed on On-Demand is not moved to Spot later.
 - **`spot`:** Spot only, no fallback. Pods stay Pending while Spot is unavailable.
 - **`on-demand`:** On-Demand only. Recommended for production and for single-replica endpoints, which cannot tolerate a Spot interruption.
+- **`hyperpod`:** the Region's SageMaker HyperPod instance groups only (`cdk.json` `hyperpod`), with HyperPod's health monitoring and node recovery behind the endpoint. Pods stay Pending until a HyperPod node has room; the default GPU node selector is dropped because HyperPod nodes carry none of the EKS GPU labels.
 
 When to pin to spot:
 

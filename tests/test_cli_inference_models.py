@@ -52,6 +52,29 @@ class TestInferenceDeploy:
         assert result.exit_code == 0
         assert "registered for deployment" in result.output
 
+    @pytest.mark.parametrize("capacity_type", ["spot", "on-demand", "hyperpod"])
+    def test_deploy_capacity_type_choices_reach_the_manager(self, runner, capacity_type):
+        mock_mgr = MagicMock()
+        mock_mgr.deploy.return_value = {
+            "endpoint_name": "my-ep",
+            "target_regions": ["us-east-1"],
+            "ingress_path": "/inference/my-ep",
+        }
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(
+                cli,
+                ["inference", "deploy", "my-ep", "-i", "img:v1", "--capacity-type", capacity_type],
+            )
+        assert result.exit_code == 0, result.output
+        assert mock_mgr.deploy.call_args.kwargs["capacity_type"] == capacity_type
+
+    def test_deploy_rejects_an_unknown_capacity_type(self, runner):
+        result = runner.invoke(
+            cli, ["inference", "deploy", "my-ep", "-i", "img:v1", "--capacity-type", "reserved"]
+        )
+        assert result.exit_code == 2
+        assert "hyperpod" in result.output  # the choices are listed
+
     def test_documented_sglang_deploy_persists_runtime_contract(self, runner):
         mock_mgr = MagicMock()
         mock_mgr.deploy.return_value = {

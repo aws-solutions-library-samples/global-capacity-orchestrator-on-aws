@@ -187,9 +187,12 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 152 read-only or low-risk
-        # tools (151 before slurm_backends, which came with the AWS PCS
-        # backend; 144 before the seven Slurm tools slurm_status / partitions /
+        # The default registry intentionally contains 156 read-only or low-risk
+        # tools (152 before hyperpod_status + hyperpod_preflight +
+        # find_training_plans + list_training_plans, which came with the
+        # SageMaker HyperPod backend; 151 before slurm_backends, which came
+        # with the AWS PCS backend; 144 before the seven Slurm tools
+        # slurm_status / partitions /
         # nodes / queue / job / accounting / submit; 142 before
         # add_inference_region + remove_inference_region;
         # 139 before the platform add-on status trio
@@ -201,8 +204,8 @@ class TestToolRegistration:
         # infrastructure deploy (4), infrastructure destroy (2), local metrics
         # (1), semantic progress (1), local storage sync (1), config
         # management (11), Mission (10), and Swarm (6). The all-flags ceiling
-        # is therefore 211.
-        base_count = 152
+        # is therefore 215.
+        base_count = 156
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -277,6 +280,8 @@ class TestToolRegistration:
             "reservation_check",
             "find_capacity_blocks",
             "find_capacity_reservations",
+            "find_training_plans",
+            "list_training_plans",
             "capacity_history_show",
             "capacity_history_stats",
             "capacity_history_patterns",
@@ -329,6 +334,8 @@ class TestToolRegistration:
             "stack_status",
             "fsx_status",
             "addons_status",
+            "hyperpod_status",
+            "hyperpod_preflight",
             # Mutating
             "setup_cluster_access",
             # ── Fleet status (read-only) ──
@@ -1061,7 +1068,7 @@ class TestInferenceTools:
 
     def test_deploy_inference_capacity_type_reaches_the_cli_as_two_tokens(self):
         """``--capacity-type <value>`` is appended only when the parameter is set."""
-        for value in ("spot", "on-demand"):
+        for value in ("spot", "on-demand", "hyperpod"):
             with patch("cli_runner.subprocess.run") as mock:
                 mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
                 run_mcp.deploy_inference("my-llm", "img:v1", capacity_type=value)

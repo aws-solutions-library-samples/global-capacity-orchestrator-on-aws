@@ -456,6 +456,55 @@ CONFIGS.extend(
             },
         ),
         (
+            # SageMaker HyperPod on: the AWS::SageMaker::Cluster orchestrated by
+            # the regional EKS cluster, the HYPERPOD_LINUX access entry, the
+            # execution role (managed policy plus the exact lifecycle-script
+            # grants), the node security group and its reciprocal EKS rule,
+            # the lifecycle-script custom resource, the {{HYPERPOD_*}} gates
+            # and the NVIDIA device plugin chart. Two instance groups: a GPU
+            # one with deep health checks and a CPU one sized to zero. Also in
+            # NAG_CONFIGS for the role and security-group acknowledgments.
+            "hyperpod-enabled",
+            {
+                "hyperpod": {
+                    "enabled": True,
+                    "instance_groups": [
+                        {"name": "accelerated", "instance_type": "ml.g5.8xlarge"},
+                        {
+                            "name": "cpu",
+                            "instance_type": "ml.c5.xlarge",
+                            "instance_count": 0,
+                            "deep_health_checks": [],
+                        },
+                    ],
+                },
+            },
+        ),
+        (
+            # The per-Region overlay: the global block leaves HyperPod off and
+            # the overlay turns it on for one Region with its own cluster name,
+            # a retained removal policy, a tighter GPU quota and a single
+            # instance group, the same deep-merge pcs_regions does. (A
+            # concrete availability_zone needs the VPC's real zones, which the
+            # matrix synth does not have; tests/test_regional_stack_hyperpod.py
+            # covers the zone-to-subnet selection with AZ context.)
+            "hyperpod-regions-overlay",
+            {
+                "hyperpod": {"enabled": False, "node_recovery": "None"},
+                "hyperpod_regions": {
+                    "us-east-1": {
+                        "enabled": True,
+                        "cluster_name": "gco-matrix-hyperpod",
+                        "removal_policy": "retain",
+                        "queue": {"max_gpu": "8"},
+                        "instance_groups": [
+                            {"name": "p5", "instance_type": "ml.p5.48xlarge", "instance_count": 2}
+                        ],
+                    }
+                },
+            },
+        ),
+        (
             "helm-minimal",
             {
                 "helm": {
@@ -940,6 +989,14 @@ MATRIX_COVERAGE_ALLOWLIST: dict[str, str] = {
         "validating, so it reaches the same loader path the pcs-* entries above "
         "vary; the parse and merge order are pinned in tests/test_pcs_config.py."
     ),
+    "hyperpod_overrides": (
+        "Run-scoped sibling of the hyperpod block, like pcs_overrides: a JSON "
+        "object the live-validation harness deep-merges over hyperpod (after the "
+        "hyperpod_regions overlay) for one deploy, so every release run deploys a "
+        "one-instance cluster. _raw_hyperpod_config merges it before validating, so "
+        "it reaches the same loader path the hyperpod-* entries above vary; the "
+        "parse and merge order are pinned in tests/test_hyperpod_config.py."
+    ),
 }
 
 
@@ -1033,6 +1090,10 @@ _NAG_CONFIG_NAMES = {
     # its cr.Provider role.
     "pcs-existing",
     "pcs-managed-with-slinky-and-fsx",
+    # The HyperPod execution role (Resource::* for the documented ENI/ECR/Pod
+    # Identity actions, the lifecycle-script prefix) and the all-traffic
+    # security-group rules carry scoped acknowledgments that must stay exact.
+    "hyperpod-enabled",
 }
 
 NAG_CONFIGS: list[tuple[str, dict[str, Any]]] = [

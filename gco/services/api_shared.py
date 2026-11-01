@@ -10,6 +10,7 @@ manifest_api.py and the routers.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
 
@@ -17,6 +18,13 @@ from fastapi import HTTPException
 from kubernetes.client.models import CoreV1Event, V1Job, V1Pod
 from pydantic import BaseModel, Field
 
+from gco.hyperpod_config import (
+    CAPACITY_PROVIDER_HYPERPOD,
+    CAPACITY_PROVIDER_LABEL,
+    DEEP_HEALTH_CHECK_STATUS_LABEL,
+    INSTANCE_GROUP_LABEL,
+    NODE_HEALTH_STATUS_LABEL,
+)
 from gco.services.manifest_processor import ManifestProcessor
 from gco.services.metrics_publisher import ManifestProcessorMetrics
 from gco.services.request_context import current_request_id
@@ -435,9 +443,16 @@ NODE_INSTANCE_TYPE_LABEL = "node.kubernetes.io/instance-type"
 # cost against an estimate, and for explaining an interrupted run.
 NODE_CAPACITY_TYPE_LABEL = "karpenter.sh/capacity-type"
 
+# A SageMaker HyperPod node carries no Karpenter label; GCO labels it with the
+# capacity provider instead (see gco/hyperpod_config.py), and the placement
+# report calls its capacity type ``hyperpod`` so the three kinds of node a
+# pod can land on read alike.
+NODE_CAPACITY_TYPE_HYPERPOD = CAPACITY_PROVIDER_HYPERPOD
+
 # Reported alongside the two above because they cost nothing extra (they come
 # from the same Node read) and answer the immediate follow-up questions:
-# which AZ, which CPU architecture, which Karpenter NodePool provisioned it.
+# which AZ, which CPU architecture, which Karpenter NodePool provisioned it,
+# or which HyperPod instance group and what HyperPod's health checks say.
 _REPORTED_NODE_LABELS: tuple[str, ...] = (
     NODE_INSTANCE_TYPE_LABEL,
     NODE_CAPACITY_TYPE_LABEL,
@@ -445,7 +460,21 @@ _REPORTED_NODE_LABELS: tuple[str, ...] = (
     "topology.kubernetes.io/region",
     "kubernetes.io/arch",
     "karpenter.sh/nodepool",
+    CAPACITY_PROVIDER_LABEL,
+    INSTANCE_GROUP_LABEL,
+    NODE_HEALTH_STATUS_LABEL,
+    DEEP_HEALTH_CHECK_STATUS_LABEL,
 )
+
+
+def _node_capacity_type(labels: Mapping[str, str]) -> str | None:
+    """``spot`` / ``on-demand`` from Karpenter's label, ``hyperpod`` from GCO's provider label."""
+    karpenter = labels.get(NODE_CAPACITY_TYPE_LABEL)
+    if karpenter:
+        return karpenter
+    if labels.get(CAPACITY_PROVIDER_LABEL) == CAPACITY_PROVIDER_HYPERPOD:
+        return NODE_CAPACITY_TYPE_HYPERPOD
+    return None
 
 
 def _empty_scheduling_info() -> dict[str, Any]:
@@ -528,7 +557,7 @@ def _parse_node_to_dict(node: Any, name: str) -> dict[str, Any]:
     return {
         "name": name,
         "instance_type": labels.get(NODE_INSTANCE_TYPE_LABEL),
-        "capacity_type": labels.get(NODE_CAPACITY_TYPE_LABEL),
+        "capacity_type": _node_capacity_type(labels),
         "labels": {key: labels[key] for key in _REPORTED_NODE_LABELS if labels.get(key)},
     }
 

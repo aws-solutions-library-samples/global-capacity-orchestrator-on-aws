@@ -31,6 +31,12 @@ import logging
 from collections.abc import Collection
 from typing import Any, NamedTuple
 
+from gco.hyperpod_config import (
+    CAPACITY_PROVIDER_HYPERPOD,
+    CAPACITY_PROVIDER_LABEL,
+    HYPERPOD_LOCAL_QUEUE,
+    HYPERPOD_TAINT_KEY,
+)
 from gco.services.structured_logging import sanitize_log_value
 
 logger = logging.getLogger(__name__)
@@ -43,6 +49,11 @@ logger = logging.getLogger(__name__)
 # Taint key == resource key for all three. Kept in sync with the mirror in
 # gco/services/queue_processor.py::ACCELERATOR_TAINTS.
 ACCELERATOR_TAINTS = ("nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa")
+# The Kueue label that routes a workload to a LocalQueue. A Job labelled for
+# the HyperPod queue (gco.hyperpod_config.HYPERPOD_LOCAL_QUEUE) is admitted onto
+# the HyperPod ResourceFlavor, which injects the HyperPod node selector and
+# toleration itself.
+KUEUE_QUEUE_NAME_LABEL = "kueue.x-k8s.io/queue-name"
 # Exact pinned group/version for the Kubeflow Trainer v2 TrainJob kind.
 # Kept in lockstep with the kubeflow-trainer chart in
 # lambda/helm-installer/charts.yaml and the extracted runtime manifest in
@@ -777,6 +788,31 @@ def check_security_context(
         return False, f"Security context error: {e}"
 
 
+def hyperpod_routing(manifest: dict[str, Any], pod_specs: list[dict[str, Any]]) -> str | None:
+    """How *manifest* reaches SageMaker HyperPod nodes, or ``None`` if it does not.
+
+    ``"queue"``: the workload is labelled for the HyperPod Kueue LocalQueue
+    (``kueue.x-k8s.io/queue-name: gco-hyperpod``); Kueue admits it onto the
+    HyperPod ResourceFlavor, which injects the node selector and the
+    toleration. ``"selector"``: every pod spec selects HyperPod nodes itself
+    (``nodeSelector`` ``gco.aws/capacity-provider: hyperpod``), the "any other
+    scheduler" path of docs/HYPERPOD.md, where the toleration is the author's
+    job. Anything else, including a manifest only some of whose pod specs
+    select HyperPod, is ``None``.
+    """
+    metadata = manifest.get("metadata")
+    labels = (metadata.get("labels") if isinstance(metadata, dict) else None) or {}
+    if isinstance(labels, dict) and labels.get(KUEUE_QUEUE_NAME_LABEL) == HYPERPOD_LOCAL_QUEUE:
+        return "queue"
+    if pod_specs and all(
+        isinstance(spec.get("nodeSelector"), dict)
+        and spec["nodeSelector"].get(CAPACITY_PROVIDER_LABEL) == CAPACITY_PROVIDER_HYPERPOD
+        for spec in pod_specs
+    ):
+        return "selector"
+    return None
+
+
 def check_tolerations(
     manifest: dict[str, Any], policy: JobValidationPolicy | None = None
 ) -> tuple[bool, str | None]:
@@ -787,6 +823,17 @@ def check_tolerations(
     requesting one of these resources but lacking a matching toleration would
     stay Pending forever, so we reject it at admission with an actionable
     message instead.
+
+    SageMaker HyperPod nodes carry none of those taints; the one taint they
+    carry is ``gco.aws/hyperpod=true:NoSchedule``. A workload routed to them
+    (:func:`hyperpod_routing`) is therefore held to that taint instead: a Job
+    labelled for the ``gco-hyperpod`` Kueue queue needs no toleration at all,
+    because the HyperPod ResourceFlavor injects it (docs/HYPERPOD.md, "A Job
+    needs nothing but the queue name" — the fourth #502 release attempt's probe
+    Job, exactly that shape plus one GPU, was rejected here for the
+    ``nvidia.com/gpu`` taint it would never meet); a Job that selects the nodes
+    itself must tolerate ``gco.aws/hyperpod`` or it stays Pending forever, the
+    same failure this check exists to catch early.
 
     For a TrainJob the accelerator request usually lives in
     ``spec.trainer.resourcesPerNode`` while the toleration can only be expressed
@@ -816,6 +863,22 @@ def check_tolerations(
     for pod_spec in pod_specs:
         requested.update(requested_accelerators(pod_spec))
         tolerations.extend(pod_spec.get("tolerations", []) or [])
+
+    routing = hyperpod_routing(manifest, pod_specs)
+    if routing == "queue":
+        return True, None
+    if routing == "selector":
+        if _toleration_matches(tolerations, HYPERPOD_TAINT_KEY):
+            return True, None
+        return (
+            False,
+            f"Job selects SageMaker HyperPod nodes ({CAPACITY_PROVIDER_LABEL}="
+            f"{CAPACITY_PROVIDER_HYPERPOD}) but no matching toleration for taint "
+            f"{HYPERPOD_TAINT_KEY}=true:NoSchedule was found. add a matching toleration "
+            f"(e.g. key '{HYPERPOD_TAINT_KEY}', operator 'Equal', value 'true', effect "
+            f"'NoSchedule'), or label the Job {KUEUE_QUEUE_NAME_LABEL}: "
+            f"{HYPERPOD_LOCAL_QUEUE} and let Kueue inject it; see docs/HYPERPOD.md",
+        )
     if not requested:
         return True, None
 

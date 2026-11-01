@@ -8,9 +8,11 @@
 platform. You hand it a Kubernetes manifest; it validates the manifest,
 finds a Region with capacity, provisions matching NVIDIA GPU, AWS Trainium,
 AWS Inferentia, or CPU (amd64 and arm64/Graviton) nodes, runs the workload,
-and keeps the outputs after the pods are gone. Inference endpoints deploy to
-every configured Region with one command, and an AI agent can drive all of
-it for you through the project's own MCP server.
+and keeps the outputs after the pods are gone. A Region can also attach an
+AWS PCS Slurm cluster or SageMaker HyperPod instance groups behind the same
+API. Inference endpoints deploy to every configured Region with one command,
+and an AI agent can drive all of it for you through the project's own MCP
+server.
 
 ## Try it
 

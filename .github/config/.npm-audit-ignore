@@ -58,3 +58,25 @@
 .|brace-expansion|GHSA-6j4f-fj2g-mc7p|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-11-29
 .|brace-expansion|GHSA-q2hr-2g5m-vwhr|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-11-29
 .|brace-expansion|GHSA-qhr7-859c-m2p7|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-11-29
+# GHSA-g3hv-75wg-m249 (CVE-2026-118764, moderate): minimatch denial of
+# service through globparts amplification, published 2026-10-30 23:09 UTC and
+# fixed in 11.0.1 (no fix on the 10.x line).
+#
+# The one reported copy is minimatch 10.2.5, which aws-cdk-lib 2.272.0 bundles
+# inside its published tarball (the same bundled copy that pulls in the
+# brace-expansion 5.0.9 above). As with those three entries, the root graph
+# reaches aws-cdk-lib only through cdk-dia; a bundled copy is out of reach of
+# `npm audit fix` and `overrides`, and the only "fix" npm offers is a downgrade
+# of cdk-dia to 0.11.0, which predates the aws-cdk-lib dependency and does not
+# render this repository's stacks.
+#
+# Low risk, for the same reason as the brace-expansion entries: cdk-dia never
+# loads aws-cdk-lib at runtime (it imports a type declaration only), diagram
+# generation is contributor/CI tooling that never runs in a deployed service,
+# and the impact is availability only.
+#
+# Remove this entry and refresh package-lock.json as soon as an aws-cdk-lib
+# release bundles minimatch >= 11.0.1; the four aws-cdk-lib entries in this
+# file clear together.
+# Advisory: https://github.com/advisories/GHSA-g3hv-75wg-m249
+.|minimatch|GHSA-g3hv-75wg-m249|node_modules/aws-cdk-lib/node_modules/minimatch|exp:2026-11-29

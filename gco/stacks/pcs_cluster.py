@@ -1093,6 +1093,25 @@ class PcsCluster(Construct):
             )
         if self.identity_home_asset is not None:
             identity = self.identity
+            directory = PurePosixPath(str(identity["dir"])).name
+            arguments = [
+                "--home-base",
+                PCS_HOME_MOUNT_PATH,
+                "--name",
+                str(identity["name"]),
+                "--uid",
+                str(identity["uid"]),
+                "--gid",
+                str(identity["gid"]),
+            ]
+            if directory != identity["name"]:
+                arguments += ["--dir", directory]
+            if identity["create_user"]:
+                # The identity is not on the AMI: the action adds it to every
+                # node before creating the home (see the script's header).
+                arguments += ["--create-user", "--shell", str(identity["shell"])]
+                if identity["gecos"]:
+                    arguments += ["--gecos", str(identity["gecos"])]
             scripts.append(
                 script(
                     name="ensure-identity-home",
@@ -1100,16 +1119,7 @@ class PcsCluster(Construct):
                         script_location=self.identity_home_asset.s3_object_url,
                         checksum=hashlib.sha256(IDENTITY_HOME_SCRIPT.read_bytes()).hexdigest(),
                     ),
-                    arguments=[
-                        "--home-base",
-                        PCS_HOME_MOUNT_PATH,
-                        "--name",
-                        PurePosixPath(str(identity["dir"])).name,
-                        "--uid",
-                        str(identity["uid"]),
-                        "--gid",
-                        str(identity["gid"]),
-                    ],
+                    arguments=arguments,
                     execution_policy="EVERY_BOOT",
                     on_error="TERMINATE",
                 )

@@ -86,6 +86,13 @@ from kubernetes import client, config, dynamic
 from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
+from gco.hyperpod_config import (
+    CAPACITY_PROVIDER_HYPERPOD,
+    CAPACITY_PROVIDER_LABEL,
+    HYPERPOD_LOCAL_QUEUE,
+    HYPERPOD_TAINT_KEY,
+)
+from gco.job_admission import KUEUE_QUEUE_NAME_LABEL, hyperpod_routing
 from gco.job_envelope import DEFAULT_JOB_NAMESPACE
 from gco.manifest_security_policy import parse_boolean_environment
 from gco.models import ResourceStatus
@@ -102,8 +109,8 @@ from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStore
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-11-01T00:48:22Z
+# Generated from Git commit: f6b3e38195627b51e21c8bc4a141943bc9c9ca62
 # Flowchart(s) generated from this file:
 #   * ``validate_manifest`` -> ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.png``)
@@ -539,6 +546,27 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
             for pod_spec, _multiplier in weighted_pod_specs:
                 requested_taints.update(_requested_accelerators(pod_spec))
                 tolerations.extend(pod_spec.get("tolerations", []) or [])
+            # A workload routed to SageMaker HyperPod nodes meets none of the
+            # accelerator taints, only gco.aws/hyperpod: the Kueue queue path
+            # has the ResourceFlavor inject that toleration, the node-selector
+            # path must carry it. One definition of "routed to HyperPod", shared
+            # with the REST path (gco.job_admission.hyperpod_routing).
+            routing = hyperpod_routing(m, [spec for spec, _multiplier in weighted_pod_specs])
+            if routing == "queue":
+                requested_taints = set()
+            elif routing == "selector":
+                if not _toleration_matches(tolerations, HYPERPOD_TAINT_KEY):
+                    return (
+                        False,
+                        f"Job selects SageMaker HyperPod nodes ({CAPACITY_PROVIDER_LABEL}="
+                        f"{CAPACITY_PROVIDER_HYPERPOD}) but no matching toleration for taint "
+                        f"{HYPERPOD_TAINT_KEY}=true:NoSchedule was found. add a matching "
+                        f"toleration (e.g. key '{HYPERPOD_TAINT_KEY}', operator 'Equal', "
+                        f"value 'true', effect 'NoSchedule'), or label the Job "
+                        f"{KUEUE_QUEUE_NAME_LABEL}: {HYPERPOD_LOCAL_QUEUE} and let Kueue "
+                        "inject it; see docs/HYPERPOD.md",
+                    )
+                requested_taints = set()
             for taint in requested_taints:
                 if not _toleration_matches(tolerations, taint):
                     hint = (

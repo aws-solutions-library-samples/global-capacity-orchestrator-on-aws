@@ -424,6 +424,8 @@ class TestReactivateDeletedRecord:
             submission={"x": 1},
             deleted_at=5.0,
             validation_evidence={"y": 2},
+            submission_rejected_at=4.0,
+            submission_rejection={"status_code": 400},
         )
         ctx.aws_client.make_authenticated_request.return_value = _response(404)
         ctx.persist_callback.reset_mock()
@@ -435,6 +437,8 @@ class TestReactivateDeletedRecord:
         assert "submission" not in record
         assert "deleted_at" not in record
         assert "validation_evidence" not in record
+        assert "submission_rejected_at" not in record
+        assert "submission_rejection" not in record
         ctx.persist_callback.assert_called_once_with(ctx.checkpoint)
 
     def test_absent_job_without_uid_keeps_no_history(self, tmp_path: Path) -> None:
@@ -663,6 +667,51 @@ class TestDeleteOwnedJob:
         ctx.aws_client.make_authenticated_request.return_value = _response(404)
         with pytest.raises(RuntimeError, match="no immutable Kubernetes UID was observed"):
             checks_jobs._delete_owned_job(ctx, record)
+
+    def test_rejected_submission_is_absent_without_a_reconciliation_wait(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The API refused the POST with proof it created nothing (fourth #502 attempt).
+
+        The record never waits out the reconciliation window: one lookup
+        confirms absence and the Job is marked deleted, with the API's answer
+        carried into the deletion evidence. A Job that exists despite the
+        recorded rejection carries the run's labels, so the lookup binds its
+        UID and the deletion runs under that authority.
+        """
+        ctx = _job_context(tmp_path)
+        _install_clock(monkeypatch, checks_jobs, models_module)
+        record = _register(ctx)
+        rejection = {"status_code": 400, "message": "Manifest 1 validation failed", "resources": []}
+        record["submission_state"] = "not_submitted"
+        record["submission_rejection"] = rejection
+        record["submission_reconcile_deadline"] = 999.0
+        ctx.aws_client.make_authenticated_request.return_value = _response(404)
+        assert checks_jobs._delete_owned_job(ctx, record) == {
+            "not_submitted": True,
+            "already_absent": True,
+            "submission_rejection": rejection,
+        }
+        assert ctx.aws_client.make_authenticated_request.call_count == 1
+        assert record["submission_state"] == "deleted"
+
+        contradicted = _register(ctx, name="gco-live-api-run-123-b")
+        contradicted["submission_state"] = "not_submitted"
+        contradicted["submission_rejection"] = rejection
+        ctx.aws_client.make_authenticated_request.side_effect = [
+            _response(200, _job_payload(contradicted, uid="uid-9")),
+            _response(404),
+            _response(404),
+            _response(404),
+            _response(404),
+        ]
+        assert checks_jobs._delete_owned_job(ctx, contradicted) == {
+            "authoritative_404_after_uid_observation": True
+        }
+        delete_call = ctx.aws_client.make_authenticated_request.call_args_list[2].kwargs
+        assert delete_call["method"] == "DELETE"
+        assert delete_call["path"].endswith("/gco-live-api-run-123-b?expected_uid=uid-9")
+        assert contradicted["submission_state"] == "deleted"
 
     def test_submitted_without_uid_waits_for_appearance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -934,6 +983,72 @@ class TestApiTransportLifecycle:
             self._run(ctx)
         assert ctx.checkpoint.state["jobs"][0]["submission_state"] == "submitting"
 
+    def test_an_admission_rejection_is_recorded_as_nothing_created(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 400 whose every reported resource failed is authoritative absence.
+
+        The fourth #502 release attempt: the probe Job was refused at admission
+        and the record sat in ``submitting``, so teardown waited out the
+        reconciliation window and blocked on "may have escaped" with every
+        stack still deployed. The record now lands in ``not_submitted`` with
+        the API's answer as evidence; the action still fails with its message.
+        """
+        from cli.aws_client import ManifestSubmissionError
+
+        ctx = _job_context(tmp_path)
+        _install_clock(monkeypatch, checks_jobs, models_module)
+        ctx.aws_client.make_authenticated_request.return_value = _response(404)
+        resources = [
+            {
+                "name": "gco-live-api-run-123",
+                "namespace": "gco-jobs",
+                "status": "failed",
+                "message": "Manifest 1 validation failed: Job requests accelerator",
+            }
+        ]
+        ctx.job_manager.submit_job.side_effect = ManifestSubmissionError(
+            400, "gco-live-api-run-123: Manifest 1 validation failed", resources
+        )
+        with pytest.raises(ManifestSubmissionError, match="validation failed"):
+            self._run(ctx)
+        record = ctx.checkpoint.state["jobs"][0]
+        assert record["submission_state"] == "not_submitted"
+        assert record["submission_rejection"] == {
+            "status_code": 400,
+            "message": "gco-live-api-run-123: Manifest 1 validation failed",
+            "resources": resources,
+        }
+        assert record["submission_attempts"] == 1
+
+    def test_a_failed_post_without_proof_stays_submitting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 5xx, or a 4xx that reports an applied resource, may have landed."""
+        from cli.aws_client import ManifestSubmissionError
+
+        for error in (
+            ManifestSubmissionError(502, "502 Bad Gateway", []),
+            ManifestSubmissionError(
+                400,
+                "second: Manifest 2 validation failed",
+                [
+                    {"name": "gco-live-api-run-123", "status": "created"},
+                    {"name": "second", "status": "failed"},
+                ],
+            ),
+            RuntimeError("connection reset"),
+        ):
+            ctx = _job_context(tmp_path)
+            _install_clock(monkeypatch, checks_jobs, models_module)
+            ctx.aws_client.make_authenticated_request.return_value = _response(404)
+            ctx.job_manager.submit_job.side_effect = error
+            with pytest.raises(type(error)):
+                self._run(ctx)
+            record = ctx.checkpoint.state["jobs"][0]
+            assert record["submission_state"] == "submitting"
+            assert "submission_rejection" not in record
+
     def test_submission_region_mismatch_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1041,6 +1156,61 @@ class TestApiTransportLifecycle:
         ctx.aws_client.make_authenticated_request.return_value = _response(404)
         with pytest.raises(RuntimeError, match="api submission blocked"):
             self._run(ctx)
+
+    def test_rejected_resume_is_terminal_and_not_replayed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The immutable envelope would meet the same rejection; it is not re-POSTed."""
+        ctx = self._resume_context(
+            tmp_path,
+            monkeypatch,
+            "not_submitted",
+            submission_rejection={
+                "status_code": 400,
+                "message": "Manifest 1 validation failed: no toleration",
+                "resources": [],
+            },
+        )
+        ctx.aws_client.make_authenticated_request.return_value = _response(404)
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                r"api submission was rejected by the API on a previous attempt \(HTTP 400\): "
+                r"Manifest 1 validation failed: no toleration; the checkpointed envelope is "
+                r"immutable, so it is not replayed$"
+            ),
+        ):
+            self._run(ctx)
+        ctx.job_manager.submit_job.assert_not_called()
+        assert ctx.checkpoint.state["jobs"][0]["submission_state"] == "not_submitted"
+
+    def test_rejected_resume_names_a_job_that_exists_anyway(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Job contradicting the proof of non-creation is never silently validated.
+
+        The lookup binds its UID (it carries the run's labels), so teardown can
+        delete it; the action itself fails and names the contradiction.
+        """
+        ctx = self._resume_context(
+            tmp_path, monkeypatch, "not_submitted", submission_rejection="odd"
+        )
+        template = self._template_record()
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200, _job_payload(template, uid="uid-1")
+        )
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                r"\(HTTP None\): None; .* exists despite the recorded proof of "
+                r"non-creation and is bound to UID 'uid-1' for cleanup"
+            ),
+        ):
+            self._run(ctx)
+        ctx.job_manager.submit_job.assert_not_called()
+        record = ctx.checkpoint.state["jobs"][0]
+        assert record["submission_state"] == "appeared"
+        assert record["uid"] == "uid-1"
 
     def test_unexpected_state_cannot_submit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

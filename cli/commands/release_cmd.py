@@ -47,6 +47,8 @@ from gco.eks_capabilities_config import EKS_CAPABILITY_TYPES
 from .._image_reference import immutable_sha256_digest
 
 _ACCOUNT_RE = re.compile(r"\d{12}")
+#: ``--kubernetes-version``: a ``major.minor`` the way cdk.json spells it (``1.36``).
+_KUBERNETES_MINOR_RE = re.compile(r"\d+\.\d+")
 
 #: The consent flag's exact name, referenced from error messages and docs.
 CONSENT_FLAG = "--i-understand-this-deploys-and-destroys-infrastructure"
@@ -163,6 +165,19 @@ def release() -> None:
     ),
 )
 @click.option(
+    "--kubernetes-version",
+    "kubernetes_version",
+    default=None,
+    metavar="MINOR",
+    help=(
+        "Deploy this run's regional EKS clusters at this Kubernetes minor (for example "
+        "1.36) instead of cdk.json's kubernetes_version — the same CDK context a "
+        "deployment sets in cdk.json. For a feature the run turns on that trails EKS: "
+        "SageMaker HyperPod publishes its node AMI per minor, after the minor ships. "
+        "The topology action then verifies this minor."
+    ),
+)
+@click.option(
     "--profile",
     type=click.Choice(["configured", "single-region", "multi-region"]),
     default="configured",
@@ -213,6 +228,7 @@ def release_validate(
     inference_gpu_count: int,
     optional_schedulers: str | None,
     eks_capabilities: str | None,
+    kubernetes_version: str | None,
     profile: str,
     run_id: str | None,
     report_dir: Path | None,
@@ -272,6 +288,13 @@ def release_validate(
         )
     if "all" in capability_names and len(capability_names) != 1:
         _fail("--eks-capabilities 'all' cannot be combined with individual names")
+    if kubernetes_version is not None and not _KUBERNETES_MINOR_RE.fullmatch(
+        kubernetes_version.strip()
+    ):
+        _fail(
+            "--kubernetes-version must be a Kubernetes minor the way cdk.json spells it "
+            f"(for example 1.36); got {kubernetes_version!r}"
+        )
     if inference_selected:
         required_inference = {
             "--inference-region": inference_region,
@@ -376,6 +399,8 @@ def release_validate(
         command.extend(["--optional-schedulers", optional_schedulers])
     if eks_capabilities:
         command.extend(["--eks-capabilities", eks_capabilities])
+    if kubernetes_version is not None:
+        command.extend(["--kubernetes-version", kubernetes_version.strip()])
     if resume:
         command.append("--resume")
     for name in protected_stack:
@@ -390,6 +415,10 @@ def release_validate(
         click.echo(f"schedulers: {optional_schedulers} (force-enabled for this run)")
     if eks_capabilities:
         click.echo(f"capabilities: {eks_capabilities} (enabled for this run)")
+    if kubernetes_version is not None:
+        click.echo(
+            f"kubernetes: {kubernetes_version.strip()} (this run's EKS minor, in place of cdk.json's)"
+        )
     click.echo(f"report-dir: {resolved_report_dir}")
     if emulator_endpoint:
         click.echo(f"emulator:   {emulator_endpoint} (verified by the harness before use)")

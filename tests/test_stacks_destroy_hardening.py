@@ -821,6 +821,51 @@ class TestImplicitLogGroupCleanup:
         assert StackManager._implicit_log_group_names("AWS::Logs::LogGroup", "/gco/api") == ()
         assert StackManager._implicit_log_group_names("AWS::SQS::Queue", "gco-jobs") == ()
 
+    def test_hyperpod_cluster_derives_its_node_log_group_from_arn_and_name(self):
+        """``/aws/sagemaker/Clusters/<name>/<id>`` needs the name the ARN lacks.
+
+        HyperPod creates the group with the cluster and never deletes it; the
+        fourth #502 release attempt's final inventory found it after the stack
+        was gone.
+        """
+        from cli.stacks import StackManager
+
+        arn = "arn:aws:sagemaker:us-east-1:111111111111:cluster/2b6s56ajc992"
+        assert StackManager._implicit_log_group_names(
+            "AWS::SageMaker::Cluster", arn, "gco-hyperpod"
+        ) == ("/aws/sagemaker/Clusters/gco-hyperpod/2b6s56ajc992",)
+        assert StackManager._implicit_log_group_names("AWS::SageMaker::Cluster", arn) == ()
+        assert StackManager._implicit_log_group_names("AWS::SageMaker::Cluster", arn, "") == ()
+        assert StackManager._implicit_log_group_names("AWS::SageMaker::Cluster", arn, "a/b") == ()
+        assert (
+            StackManager._implicit_log_group_names(
+                "AWS::SageMaker::Cluster", "gco-hyperpod", "gco-hyperpod"
+            )
+            == ()
+        )
+        assert StackManager._implicit_log_group_names(
+            "AWS::EKS::Cluster", "gco-us-east-1", "x"
+        ) == StackManager._implicit_log_group_names("AWS::EKS::Cluster", "gco-us-east-1")
+
+    def test_hyperpod_cluster_name_comes_from_the_service_and_degrades_to_none(self):
+        from cli.stacks import StackManager
+
+        arn = "arn:aws:sagemaker:us-east-1:111111111111:cluster/2b6s56ajc992"
+        sagemaker = MagicMock()
+        sagemaker.describe_cluster.return_value = {"ClusterName": "gco-hyperpod", "ClusterArn": arn}
+        with patch("boto3.client", return_value=sagemaker) as client:
+            assert StackManager._hyperpod_cluster_name("us-east-1", arn) == "gco-hyperpod"
+        client.assert_called_once_with("sagemaker", region_name="us-east-1")
+        sagemaker.describe_cluster.assert_called_once_with(ClusterName=arn)
+
+        sagemaker.describe_cluster.return_value = {"ClusterArn": arn}
+        with patch("boto3.client", return_value=sagemaker):
+            assert StackManager._hyperpod_cluster_name("us-east-1", arn) is None
+
+        sagemaker.describe_cluster.side_effect = RuntimeError("ResourceNotFound")
+        with patch("boto3.client", return_value=sagemaker):
+            assert StackManager._hyperpod_cluster_name("us-east-1", arn) is None
+
     # -- collection ----------------------------------------------------
 
     def _stack_target(self, resources):
@@ -833,6 +878,7 @@ class TestImplicitLogGroupCleanup:
 
     def test_collects_exact_names_from_live_stack_resources(self):
         manager = self._manager()
+        cluster_arn = "arn:aws:sagemaker:us-east-1:111111111111:cluster/2b6s56ajc992"
         target = self._stack_target(
             [
                 {
@@ -842,11 +888,20 @@ class TestImplicitLogGroupCleanup:
                 {"ResourceType": "AWS::EKS::Cluster", "PhysicalResourceId": "gco-us-east-1"},
                 {"ResourceType": "AWS::Logs::LogGroup", "PhysicalResourceId": "/gco/explicit"},
                 {"ResourceType": "AWS::Lambda::Function", "PhysicalResourceId": ""},
+                {"ResourceType": "AWS::SageMaker::Cluster", "PhysicalResourceId": cluster_arn},
             ]
         )
-        with patch.object(manager, "_describe_stack_target", return_value=target):
+        with (
+            patch.object(manager, "_describe_stack_target", return_value=target),
+            patch.object(
+                manager, "_hyperpod_cluster_name", return_value="gco-hyperpod"
+            ) as cluster_name,
+        ):
             collected = manager._collect_implicit_log_groups(["gco-us-east-1"])
 
+        # The HyperPod cluster's name is asked of the service exactly once,
+        # for the cluster resource alone.
+        cluster_name.assert_called_once_with("us-east-1", cluster_arn)
         assert collected == {
             "gco-us-east-1": {
                 "region": "us-east-1",
@@ -857,6 +912,7 @@ class TestImplicitLogGroupCleanup:
                     "/aws/containerinsights/gco-us-east-1/performance",
                     "/aws/eks/gco-us-east-1/cluster",
                     "/aws/lambda/gco-helm-us-east-1",
+                    "/aws/sagemaker/Clusters/gco-hyperpod/2b6s56ajc992",
                 ],
             }
         }

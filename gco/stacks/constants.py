@@ -365,6 +365,57 @@ EKS_ADDON_FSX_CSI_DRIVER = "v1.10.0-eksbuild.2"
 """Amazon FSx CSI Driver — mounts FSx for Lustre file systems as Kubernetes persistent volumes."""
 
 # ---------------------------------------------------------------------------
+# Mixed-compute add-ons (only with SageMaker HyperPod)
+# ---------------------------------------------------------------------------
+# EKS Auto Mode provides pod networking, kube-proxy and cluster DNS only for
+# the nodes it manages. HyperPod instance groups are SageMaker-launched EC2
+# instances — self-managed nodes to EKS — and AWS documents that in a cluster
+# that mixes Auto Mode with other compute the VPC CNI, kube-proxy and CoreDNS
+# add-ons "remain necessary" (EKS User Guide, "Amazon EKS add-ons",
+# Considerations for Amazon EKS Auto Mode). Their manifests carry anti-affinity
+# against ``eks.amazonaws.com/compute-type=auto``: the two DaemonSets land only
+# on the HyperPod nodes, and CoreDNS (whose ``computeTypes`` include ``auto``)
+# runs on the Auto Mode nodes and publishes the ``kube-dns`` Service that
+# kube-proxy on the HyperPod nodes routes to — Auto Mode's own cluster DNS has
+# no Service for them to reach. ``HyperpodCluster`` creates the three only when
+# ``hyperpod.enabled``; a Region without HyperPod stays a pure Auto Mode cluster.
+
+EKS_ADDON_VPC_CNI = "v1.23.2-eksbuild.8"
+"""Amazon VPC CNI — pod networking on the HyperPod nodes (``aws-node``, node role credentials)."""
+
+EKS_ADDON_COREDNS = "v1.14.7-eksbuild.22"
+"""CoreDNS — cluster DNS for pods on the HyperPod nodes; its pods run on the Auto Mode nodes."""
+
+EKS_ADDON_KUBE_PROXY_BY_MINOR: Mapping[str, str] = MappingProxyType(
+    {
+        "1.35": "v1.35.3-eksbuild.62",
+        "1.36": "v1.36.0-eksbuild.58",
+        "1.37": "v1.37.0-eksbuild.32",
+    }
+)
+"""kube-proxy builds per EKS minor — EKS publishes kube-proxy per Kubernetes minor.
+
+The regional stack picks the entry for ``cdk.json`` ``kubernetes_version``
+(:func:`kube_proxy_addon_version`); an EKS upgrade adds the new minor here
+(docs/MAINTENANCE.md, "Upgrading the EKS Kubernetes version").
+"""
+
+
+def kube_proxy_addon_version(kubernetes_version: str) -> str:
+    """The kube-proxy add-on build pinned for ``kubernetes_version`` (``"1.36"``)."""
+    try:
+        return EKS_ADDON_KUBE_PROXY_BY_MINOR[kubernetes_version]
+    except KeyError:
+        known = ", ".join(sorted(EKS_ADDON_KUBE_PROXY_BY_MINOR))
+        raise ValueError(
+            f"no kube-proxy add-on build is pinned for EKS {kubernetes_version} "
+            f"(pinned: {known}); add it to EKS_ADDON_KUBE_PROXY_BY_MINOR in "
+            "gco/stacks/constants.py — see docs/MAINTENANCE.md, "
+            "'Upgrading the EKS Kubernetes version'"
+        ) from None
+
+
+# ---------------------------------------------------------------------------
 # EKS Cluster Subnet Constraints
 # ---------------------------------------------------------------------------
 # A few Availability Zones cannot host the subnets you pass when creating an

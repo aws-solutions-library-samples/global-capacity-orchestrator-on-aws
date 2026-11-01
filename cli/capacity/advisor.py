@@ -324,7 +324,8 @@ class BedrockCapacityAdvisor:
                         "Failed to list capacity blocks for %s in %s: %s", instance_type, region, e
                     )
 
-        # Capacity block availability trends (26-week regression per instance type per region)
+        # Capacity block availability trends (daily offering-count regression over the
+        # window EC2 answers, about nine days, per instance type per region)
         data["capacity_block_trends"] = {}
         for instance_type in instance_types:
             data["capacity_block_trends"][instance_type] = {}
@@ -537,11 +538,14 @@ IMPORTANT DISCLAIMERS:
                         )
             prompt += "\n"
 
-        # Capacity block availability trends (26-week offering-density regression)
+        # Capacity block availability trends (daily offering-density regression)
         block_trends = capacity_data.get("capacity_block_trends", {})
         has_block_trends = any(bool(regions_data) for regions_data in block_trends.values())
         if has_block_trends:
-            prompt += "CAPACITY BLOCK AVAILABILITY TRENDS (26-week, near-term vs far-term):\n"
+            prompt += (
+                "CAPACITY BLOCK AVAILABILITY TRENDS "
+                "(daily offering counts over the window EC2 answers, about nine days):\n"
+            )
             for instance_type, regions_data in block_trends.items():
                 for region, trend in regions_data.items():
                     prompt += (

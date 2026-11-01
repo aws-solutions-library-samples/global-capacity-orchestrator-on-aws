@@ -262,6 +262,11 @@ _QUANTITY_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
         "{{QUOTA_MAX_CPU}}",
         "{{QUOTA_MAX_MEMORY}}",
         "{{QUOTA_MAX_GPU}}",
+        # The HyperPod ClusterQueue's nominal quotas
+        # (post-helm-kueue-hyperpod-queue.yaml), from cdk.json hyperpod.queue.
+        "{{HYPERPOD_QUEUE_MAX_CPU}}",
+        "{{HYPERPOD_QUEUE_MAX_MEMORY}}",
+        "{{HYPERPOD_QUEUE_MAX_GPU}}",
         # The Slurm accounting database's volumeClaimTemplate size
         # (29-slurm-accounting-db.yaml).
         "{{SLURM_ACCOUNTING_DB_STORAGE_SIZE}}",

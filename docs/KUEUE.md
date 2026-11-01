@@ -122,8 +122,14 @@ is enabled: ResourceFlavor `gco-default-flavor`, ClusterQueue
 LocalQueue `gco-default` in `gco-jobs` (applied by
 `post-helm-kueue-default-queues.yaml`). Label a Job with
 `kueue.x-k8s.io/queue-name: gco-default` and it queues immediately — no
-hand-applied queue objects required. The examples below build a custom
-`user-queue` topology instead, which is the pattern for team-specific quotas.
+hand-applied queue objects required. With [SageMaker HyperPod](HYPERPOD.md)
+on as well, a second topology is applied next to it: ResourceFlavor
+`gco-hyperpod-flavor` (the HyperPod node label as `nodeLabels`, the HyperPod
+taint as a toleration), ClusterQueue `gco-hyperpod-queue` (quotas from
+`hyperpod.queue`) and LocalQueue `gco-hyperpod` in `gco-jobs`; a Job labelled
+`kueue.x-k8s.io/queue-name: gco-hyperpod` runs on the HyperPod nodes with no
+other change. The examples below build a custom `user-queue` topology
+instead, which is the pattern for team-specific quotas.
 
 Add the `kueue.x-k8s.io/queue-name` label and set resource limits to your Job:
 

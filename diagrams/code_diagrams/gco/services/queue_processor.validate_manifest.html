@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="30993bb58713ee8b">
+        <meta name="gco-generated-at" content="2026-11-01T00:48:22Z">
+        <meta name="gco-source-commit" content="f6b3e38195627b51e21c8bc4a141943bc9c9ca62">
+        <meta name="gco-flow-digest" content="c7d5e4799914dd6d">
         <title>SQS job prevalidation (kinds, TrainJob decomposition, security, weighted caps)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,266 +208,284 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4297=>operation: 'Validate a manifest before applying it to the cluster.\n\n    The queue processor mirrors the security checks performed by the REST\n    `manifest_processor` service (``gco/services/manifest_processor.py``)\n    so that the SQS path cannot bypass them. Checks performed:\n\n    1. **Namespace allowlist** — manifest namespace must be in\n       ``ALLOWED_NAMESPACES`` (from ``ALLOWED_NAMESPACES`` env var,\n       populated from ``cdk.json::job_validation_policy.allowed_namespaces``,\n       shared with the REST manifest_processor).\n\n    2. **Pod-level security policy** (configurable via cdk.json::\n       job_validation_policy.manifest_security_policy, shared between both\n       services). Rejects ``hostNetwork``, ``hostPID``, ``hostIPC``,\n       ``hostPath`` volumes, privileged pod security context, and\n       (if ``BLOCK_RUN_AS_ROOT``) pod-level ``runAsUser: 0``.\n\n    3. **Container-level security policy** — for every container kind\n       (regular, init, ephemeral) rejects ``privileged``,\n       ``allowPrivilegeEscalation``, ``capabilities.add``, and (if\n       ``BLOCK_RUN_AS_ROOT``) container-level ``runAsUser: 0``. Iterating\n       every container kind catches the classic "smuggle it via an init\n       container" bypass.\n\n    4. **Image registry allowlist** — every container\'s image must come\n       from ``TRUSTED_REGISTRIES`` (registry domains like ``nvcr.io``)\n       or ``TRUSTED_DOCKERHUB_ORGS`` (Docker Hub orgs like ``nvidia``).\n       Official Docker Hub images with no slash are always allowed. Empty or\n       missing allowlists use the shared secure defaults. Keep explicit lists\n       in sync with ``cdk.json::job_validation_policy.trusted_registries`` and\n       ``trusted_dockerhub_orgs`` — CDK wires the same config into both\n       services.\n\n    5. **Resource caps** — the TOTAL CPU, memory, and GPU across ALL\n       containers (regular + init + ephemeral) must not exceed\n       ``MAX_CPU``, ``MAX_MEMORY``, and ``MAX_GPU``. This matches\n       ``manifest_processor._validate_resource_limits`` — K8s accounts\n       init/ephemeral resources differently at scheduling time, but\n       from an enforcement perspective we sum them so an operator\'s\n       ``max_*_per_manifest`` budget is a hard cap regardless of where\n       the request is placed.\n\n    A TrainJob has no single pod spec: checks 2-5 run over its decomposition\n    (synthetic ``spec.trainer`` view plus every pod spec embedded in\n    ``runtimePatches`` — see ``manifest_processor.TrainJobPodSpecs``), with\n    the trainer view\'s resources counted once per ``numNodes`` for check 5\n    and accelerator tolerations unioned across views for the toleration\n    check.\n\n    Returns:\n        ``(True, "")`` if the manifest is accepted, otherwise\n        ``(False, reason)`` where ``reason`` is a human-readable string.\n    '
-op4299=>operation: kind = m.get('kind')
-cond4302=>condition: if not kind
-io4309=>inputoutput: output: (False, "missing 'kind'")
-e4307=>end: end function return
-op4315=>operation: api = m.get('apiVersion')
-cond4318=>condition: if not api
-io4325=>inputoutput: output: (False, "missing 'apiVersion'")
-e4323=>end: end function return
-op4331=>operation: meta = m.get('metadata')
-cond4334=>condition: if not isinstance(meta, dict) or not meta.get('name')
-io4341=>inputoutput: output: (False, "missing 'metadata.name'")
-e4339=>end: end function return
-op4347=>operation: ns = meta.get('namespace', 'gco-jobs')
-cond4350=>condition: if ns not in ALLOWED_NAMESPACES
-io4357=>inputoutput: output: (False, f"namespace '{ns}' not in allowed list {ALLOWED_NAMESPACES}")
-e4355=>end: end function return
-op4363=>operation: kind_valid, kind_error = validate_resource_kind(m, ALLOWED_KINDS)
-cond4366=>condition: if not kind_valid
-io4373=>inputoutput: output: (False, kind_error or 'resource kind is not allowed')
-e4371=>end: end function return
-op4379=>operation: weighted_pod_specs: list[tuple[dict[str, Any], int]] = []
-cond4382=>condition: if kind == 'TrainJob'
-op4386=>operation: trainjob_specs = extract_trainjob_pod_specs(m)
-cond4389=>operation: weighted_pod_specs.append((trainjob_specs.trainer, trainjob_specs.num_nodes)) if  trainjob_specs.trainer is not None
-sub4399=>subroutine: weighted_pod_specs.extend(((item, 1) for item in trainjob_specs.embedded))
-op4401=>operation: toleration_hint_example = 'examples/kubeflow-trainjob.yaml (GPU variant, via runtimePatches)'
-cond4438=>condition: if weighted_pod_specs
-cond4443=>condition: if REQUIRE_ACCELERATOR_TOLERATION
-op4447=>operation: requested_taints: set[str] = set()
-op4449=>operation: tolerations: list[dict[str, Any]] = []
-cond4452=>condition: for pod_spec, _multiplier in weighted_pod_specs
-sub4456=>subroutine: requested_taints.update(_requested_accelerators(pod_spec))
-sub4458=>subroutine: tolerations.extend(pod_spec.get('tolerations', []) or [])
-cond4463=>condition: for taint in requested_taints
-cond4468=>condition: if not _toleration_matches(tolerations, taint)
-op4472=>operation: hint = f"add a matching toleration (e.g. key '{taint}', operator 'Exists', effect 'NoSchedule'); see {toleration_hint_example}"
-io4477=>inputoutput: output: (False, f"Job requests accelerator '{taint}' but no matching toleration for taint {taint}=true:NoSchedule was found. {hint}")
-e4475=>end: end function return
-cond4489=>condition: for pod_spec, _multiplier in weighted_pod_specs
-cond4494=>condition: if BLOCK_HOST_NETWORK and pod_spec.get('hostNetwork', False)
-io4501=>inputoutput: output: (False, 'hostNetwork is not permitted')
-e4499=>end: end function return
-cond4508=>condition: if BLOCK_HOST_PID and pod_spec.get('hostPID', False)
-io4515=>inputoutput: output: (False, 'hostPID is not permitted')
-e4513=>end: end function return
-cond4522=>condition: if BLOCK_HOST_IPC and pod_spec.get('hostIPC', False)
-io4529=>inputoutput: output: (False, 'hostIPC is not permitted')
-e4527=>end: end function return
-cond4536=>condition: if BLOCK_HOST_PATH
-cond4541=>condition: for volume in pod_spec.get('volumes', []) or []
-cond4546=>condition: if volume.get('hostPath') is not None
-io4553=>inputoutput: output: (False, 'hostPath volumes are not permitted')
-e4551=>end: end function return
-op4564=>operation: pod_security_context = pod_spec.get('securityContext', {}) or {}
-cond4567=>condition: if BLOCK_PRIVILEGED and pod_security_context.get('privileged', False)
-io4574=>inputoutput: output: (False, 'privileged pod security context is not permitted')
-e4572=>end: end function return
-cond4581=>condition: if BLOCK_RUN_AS_ROOT
-op4585=>operation: pod_run_as_user = pod_security_context.get('runAsUser')
-cond4588=>condition: if pod_run_as_user is not None and pod_run_as_user == 0
-io4595=>inputoutput: output: (False, 'running as root (runAsUser: 0) is not permitted')
-e4593=>end: end function return
-cond4605=>condition: for container_type, c in _iter_containers(pod_spec)
-op4609=>operation: cname = c.get('name', 'unknown')
-op4611=>operation: sc = c.get('securityContext', {}) or {}
-cond4614=>condition: if BLOCK_PRIVILEGED and sc.get('privileged', False)
-io4621=>inputoutput: output: (False, f"{container_type} '{cname}': privileged containers are not permitted")
-e4619=>end: end function return
-cond4628=>condition: if BLOCK_PRIVILEGE_ESCALATION and sc.get('allowPrivilegeEscalation', False)
-io4635=>inputoutput: output: (False, f"{container_type} '{cname}': allowPrivilegeEscalation is not permitted")
-e4633=>end: end function return
-cond4642=>condition: if BLOCK_ADDED_CAPABILITIES
-op4646=>operation: added_caps = (sc.get('capabilities', {}) or {}).get('add', []) or []
-cond4649=>condition: if added_caps
-io4656=>inputoutput: output: (False, f"{container_type} '{cname}': added capabilities are not permitted")
-e4654=>end: end function return
-cond4666=>condition: if BLOCK_RUN_AS_ROOT
-op4670=>operation: ras = sc.get('runAsUser')
-cond4673=>condition: if ras is not None and ras == 0
-io4680=>inputoutput: output: (False, f"{container_type} '{cname}': running as root (runAsUser: 0) is not permitted")
-e4678=>end: end function return
-cond4692=>condition: for container_type, c in _iter_containers(pod_spec)
-op4696=>operation: image = c.get('image', '')
-cond4699=>condition: if not _is_image_trusted(image)
-op4703=>operation: cname = c.get('name', 'unknown')
-io4708=>inputoutput: output: (False, f"{container_type} '{cname}': untrusted image source '{image}'")
-e4706=>end: end function return
-op4718=>operation: total_gpu = 0
-op4720=>operation: total_cpu = 0
-op4722=>operation: total_memory = 0
-cond4725=>condition: for pod_spec, multiplier in weighted_pod_specs
-cond4730=>condition: for _container_type, c in _iter_containers(pod_spec)
-op4734=>operation: res = c.get('resources', {}) or {}
-op4736=>operation: limits = res.get('limits', {}) or {}
-op4738=>operation: requests = res.get('requests', {}) or {}
-op4740=>operation: gpu = limits.get('nvidia.com/gpu') or requests.get('nvidia.com/gpu', '0')
-op4742=>operation: total_gpu += multiplier * int(gpu)
-op4744=>operation: cpu_str = limits.get('cpu') or requests.get('cpu', '0')
-cond4747=>condition: if isinstance(cpu_str, str) and cpu_str.endswith('m')
-op4751=>operation: total_cpu += multiplier * int(cpu_str[:-1])
-op4758=>operation: mem_str = limits.get('memory') or requests.get('memory', '0')
-op4760=>operation: mem_bytes = _parse_memory_string(str(mem_str))
-op4762=>operation: total_memory += multiplier * mem_bytes
-op4755=>operation: total_cpu += multiplier * int(float(cpu_str) * 1000)
-op4768=>operation: errors = []
-cond4771=>operation: errors.append(f'GPU {total_gpu} exceeds max {MAX_GPU}') if  total_gpu > MAX_GPU
-cond4782=>operation: errors.append(f'CPU {total_cpu}m exceeds max {MAX_CPU}m') if  total_cpu > MAX_CPU
-cond4793=>operation: errors.append(f'Memory {total_memory / 1024 ** 3:.0f}Gi exceeds max {MAX_MEMORY / 1024 ** 3:.0f}Gi') if  total_memory > MAX_MEMORY
-cond4804=>condition: if errors
-op4808=>operation: hint = 'To raise limits, update queue_processor in cdk.json and redeploy (see examples/README.md#troubleshooting)'
-io4813=>inputoutput: output: (False, '; '.join(errors) + f'. {hint}')
-e4811=>end: end function return
-io4825=>inputoutput: output: (True, '')
-e4823=>end: end function return
-op4405=>operation: pod_spec = _extract_pod_spec(m)
-op4407=>operation: workload_kinds = {'Job', 'CronJob', 'Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet', 'Pod'}
-cond4410=>condition: if kind in workload_kinds and pod_spec is None
-io4417=>inputoutput: output: (False, f'{kind} manifest must contain a valid pod spec')
-e4415=>end: end function return
-cond4424=>operation: weighted_pod_specs.append((pod_spec, 1)) if  pod_spec is not None
-op4434=>operation: toleration_hint_example = 'examples/gpu-job.yaml'
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Validate a manifest before applying it to the cluster.\n\n    The queue processor mirrors the security checks performed by the REST\n    `manifest_processor` service (``gco/services/manifest_processor.py``)\n    so that the SQS path cannot bypass them. Checks performed:\n\n    1. **Namespace allowlist** — manifest namespace must be in\n       ``ALLOWED_NAMESPACES`` (from ``ALLOWED_NAMESPACES`` env var,\n       populated from ``cdk.json::job_validation_policy.allowed_namespaces``,\n       shared with the REST manifest_processor).\n\n    2. **Pod-level security policy** (configurable via cdk.json::\n       job_validation_policy.manifest_security_policy, shared between both\n       services). Rejects ``hostNetwork``, ``hostPID``, ``hostIPC``,\n       ``hostPath`` volumes, privileged pod security context, and\n       (if ``BLOCK_RUN_AS_ROOT``) pod-level ``runAsUser: 0``.\n\n    3. **Container-level security policy** — for every container kind\n       (regular, init, ephemeral) rejects ``privileged``,\n       ``allowPrivilegeEscalation``, ``capabilities.add``, and (if\n       ``BLOCK_RUN_AS_ROOT``) container-level ``runAsUser: 0``. Iterating\n       every container kind catches the classic "smuggle it via an init\n       container" bypass.\n\n    4. **Image registry allowlist** — every container\'s image must come\n       from ``TRUSTED_REGISTRIES`` (registry domains like ``nvcr.io``)\n       or ``TRUSTED_DOCKERHUB_ORGS`` (Docker Hub orgs like ``nvidia``).\n       Official Docker Hub images with no slash are always allowed. Empty or\n       missing allowlists use the shared secure defaults. Keep explicit lists\n       in sync with ``cdk.json::job_validation_policy.trusted_registries`` and\n       ``trusted_dockerhub_orgs`` — CDK wires the same config into both\n       services.\n\n    5. **Resource caps** — the TOTAL CPU, memory, and GPU across ALL\n       containers (regular + init + ephemeral) must not exceed\n       ``MAX_CPU``, ``MAX_MEMORY``, and ``MAX_GPU``. This matches\n       ``manifest_processor._validate_resource_limits`` — K8s accounts\n       init/ephemeral resources differently at scheduling time, but\n       from an enforcement perspective we sum them so an operator\'s\n       ``max_*_per_manifest`` budget is a hard cap regardless of where\n       the request is placed.\n\n    A TrainJob has no single pod spec: checks 2-5 run over its decomposition\n    (synthetic ``spec.trainer`` view plus every pod spec embedded in\n    ``runtimePatches`` — see ``manifest_processor.TrainJobPodSpecs``), with\n    the trainer view\'s resources counted once per ``numNodes`` for check 5\n    and accelerator tolerations unioned across views for the toleration\n    check.\n\n    Returns:\n        ``(True, "")`` if the manifest is accepted, otherwise\n        ``(False, reason)`` where ``reason`` is a human-readable string.\n    '
+op4=>operation: kind = m.get('kind')
+cond7=>condition: if not kind
+io14=>inputoutput: output: (False, "missing 'kind'")
+e12=>end: end function return
+op20=>operation: api = m.get('apiVersion')
+cond23=>condition: if not api
+io30=>inputoutput: output: (False, "missing 'apiVersion'")
+e28=>end: end function return
+op36=>operation: meta = m.get('metadata')
+cond39=>condition: if not isinstance(meta, dict) or not meta.get('name')
+io46=>inputoutput: output: (False, "missing 'metadata.name'")
+e44=>end: end function return
+op52=>operation: ns = meta.get('namespace', 'gco-jobs')
+cond55=>condition: if ns not in ALLOWED_NAMESPACES
+io62=>inputoutput: output: (False, f"namespace '{ns}' not in allowed list {ALLOWED_NAMESPACES}")
+e60=>end: end function return
+op68=>operation: kind_valid, kind_error = validate_resource_kind(m, ALLOWED_KINDS)
+cond71=>condition: if not kind_valid
+io78=>inputoutput: output: (False, kind_error or 'resource kind is not allowed')
+e76=>end: end function return
+op84=>operation: weighted_pod_specs: list[tuple[dict[str, Any], int]] = []
+cond87=>condition: if kind == 'TrainJob'
+op91=>operation: trainjob_specs = extract_trainjob_pod_specs(m)
+cond94=>operation: weighted_pod_specs.append((trainjob_specs.trainer, trainjob_specs.num_nodes)) if  trainjob_specs.trainer is not None
+sub104=>subroutine: weighted_pod_specs.extend(((item, 1) for item in trainjob_specs.embedded))
+op106=>operation: toleration_hint_example = 'examples/kubeflow-trainjob.yaml (GPU variant, via runtimePatches)'
+cond143=>condition: if weighted_pod_specs
+cond148=>condition: if REQUIRE_ACCELERATOR_TOLERATION
+op152=>operation: requested_taints: set[str] = set()
+op154=>operation: tolerations: list[dict[str, Any]] = []
+cond157=>condition: for pod_spec, _multiplier in weighted_pod_specs
+sub161=>subroutine: requested_taints.update(_requested_accelerators(pod_spec))
+sub163=>subroutine: tolerations.extend(pod_spec.get('tolerations', []) or [])
+op167=>operation: routing = hyperpod_routing(m, [spec for spec, _multiplier in weighted_pod_specs])
+cond170=>condition: if routing == 'queue'
+op174=>operation: requested_taints = set()
+cond204=>condition: for taint in requested_taints
+cond209=>condition: if not _toleration_matches(tolerations, taint)
+op213=>operation: hint = f"add a matching toleration (e.g. key '{taint}', operator 'Exists', effect 'NoSchedule'); see {toleration_hint_example}"
+io218=>inputoutput: output: (False, f"Job requests accelerator '{taint}' but no matching toleration for taint {taint}=true:NoSchedule was found. {hint}")
+e216=>end: end function return
+cond230=>condition: for pod_spec, _multiplier in weighted_pod_specs
+cond235=>condition: if BLOCK_HOST_NETWORK and pod_spec.get('hostNetwork', False)
+io242=>inputoutput: output: (False, 'hostNetwork is not permitted')
+e240=>end: end function return
+cond249=>condition: if BLOCK_HOST_PID and pod_spec.get('hostPID', False)
+io256=>inputoutput: output: (False, 'hostPID is not permitted')
+e254=>end: end function return
+cond263=>condition: if BLOCK_HOST_IPC and pod_spec.get('hostIPC', False)
+io270=>inputoutput: output: (False, 'hostIPC is not permitted')
+e268=>end: end function return
+cond277=>condition: if BLOCK_HOST_PATH
+cond282=>condition: for volume in pod_spec.get('volumes', []) or []
+cond287=>condition: if volume.get('hostPath') is not None
+io294=>inputoutput: output: (False, 'hostPath volumes are not permitted')
+e292=>end: end function return
+op305=>operation: pod_security_context = pod_spec.get('securityContext', {}) or {}
+cond308=>condition: if BLOCK_PRIVILEGED and pod_security_context.get('privileged', False)
+io315=>inputoutput: output: (False, 'privileged pod security context is not permitted')
+e313=>end: end function return
+cond322=>condition: if BLOCK_RUN_AS_ROOT
+op326=>operation: pod_run_as_user = pod_security_context.get('runAsUser')
+cond329=>condition: if pod_run_as_user is not None and pod_run_as_user == 0
+io336=>inputoutput: output: (False, 'running as root (runAsUser: 0) is not permitted')
+e334=>end: end function return
+cond346=>condition: for container_type, c in _iter_containers(pod_spec)
+op350=>operation: cname = c.get('name', 'unknown')
+op352=>operation: sc = c.get('securityContext', {}) or {}
+cond355=>condition: if BLOCK_PRIVILEGED and sc.get('privileged', False)
+io362=>inputoutput: output: (False, f"{container_type} '{cname}': privileged containers are not permitted")
+e360=>end: end function return
+cond369=>condition: if BLOCK_PRIVILEGE_ESCALATION and sc.get('allowPrivilegeEscalation', False)
+io376=>inputoutput: output: (False, f"{container_type} '{cname}': allowPrivilegeEscalation is not permitted")
+e374=>end: end function return
+cond383=>condition: if BLOCK_ADDED_CAPABILITIES
+op387=>operation: added_caps = (sc.get('capabilities', {}) or {}).get('add', []) or []
+cond390=>condition: if added_caps
+io397=>inputoutput: output: (False, f"{container_type} '{cname}': added capabilities are not permitted")
+e395=>end: end function return
+cond407=>condition: if BLOCK_RUN_AS_ROOT
+op411=>operation: ras = sc.get('runAsUser')
+cond414=>condition: if ras is not None and ras == 0
+io421=>inputoutput: output: (False, f"{container_type} '{cname}': running as root (runAsUser: 0) is not permitted")
+e419=>end: end function return
+cond433=>condition: for container_type, c in _iter_containers(pod_spec)
+op437=>operation: image = c.get('image', '')
+cond440=>condition: if not _is_image_trusted(image)
+op444=>operation: cname = c.get('name', 'unknown')
+io449=>inputoutput: output: (False, f"{container_type} '{cname}': untrusted image source '{image}'")
+e447=>end: end function return
+op459=>operation: total_gpu = 0
+op461=>operation: total_cpu = 0
+op463=>operation: total_memory = 0
+cond466=>condition: for pod_spec, multiplier in weighted_pod_specs
+cond471=>condition: for _container_type, c in _iter_containers(pod_spec)
+op475=>operation: res = c.get('resources', {}) or {}
+op477=>operation: limits = res.get('limits', {}) or {}
+op479=>operation: requests = res.get('requests', {}) or {}
+op481=>operation: gpu = limits.get('nvidia.com/gpu') or requests.get('nvidia.com/gpu', '0')
+op483=>operation: total_gpu += multiplier * int(gpu)
+op485=>operation: cpu_str = limits.get('cpu') or requests.get('cpu', '0')
+cond488=>condition: if isinstance(cpu_str, str) and cpu_str.endswith('m')
+op492=>operation: total_cpu += multiplier * int(cpu_str[:-1])
+op499=>operation: mem_str = limits.get('memory') or requests.get('memory', '0')
+op501=>operation: mem_bytes = _parse_memory_string(str(mem_str))
+op503=>operation: total_memory += multiplier * mem_bytes
+op496=>operation: total_cpu += multiplier * int(float(cpu_str) * 1000)
+op509=>operation: errors = []
+cond512=>operation: errors.append(f'GPU {total_gpu} exceeds max {MAX_GPU}') if  total_gpu > MAX_GPU
+cond523=>operation: errors.append(f'CPU {total_cpu}m exceeds max {MAX_CPU}m') if  total_cpu > MAX_CPU
+cond534=>operation: errors.append(f'Memory {total_memory / 1024 ** 3:.0f}Gi exceeds max {MAX_MEMORY / 1024 ** 3:.0f}Gi') if  total_memory > MAX_MEMORY
+cond545=>condition: if errors
+op549=>operation: hint = 'To raise limits, update queue_processor in cdk.json and redeploy (see examples/README.md#troubleshooting)'
+io554=>inputoutput: output: (False, '; '.join(errors) + f'. {hint}')
+e552=>end: end function return
+io566=>inputoutput: output: (True, '')
+e564=>end: end function return
+cond179=>condition: if routing == 'selector'
+cond184=>condition: if not _toleration_matches(tolerations, HYPERPOD_TAINT_KEY)
+io191=>inputoutput: output: (False, f"Job selects SageMaker HyperPod nodes ({CAPACITY_PROVIDER_LABEL}={CAPACITY_PROVIDER_HYPERPOD}) but no matching toleration for taint {HYPERPOD_TAINT_KEY}=true:NoSchedule was found. add a matching toleration (e.g. key '{HYPERPOD_TAINT_KEY}', operator 'Equal', value 'true', effect 'NoSchedule'), or label the Job {KUEUE_QUEUE_NAME_LABEL}: {HYPERPOD_LOCAL_QUEUE} and let Kueue inject it; see docs/HYPERPOD.md")
+e189=>end: end function return
+op197=>operation: requested_taints = set()
+op110=>operation: pod_spec = _extract_pod_spec(m)
+op112=>operation: workload_kinds = {'Job', 'CronJob', 'Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet', 'Pod'}
+cond115=>condition: if kind in workload_kinds and pod_spec is None
+io122=>inputoutput: output: (False, f'{kind} manifest must contain a valid pod spec')
+e120=>end: end function return
+cond129=>operation: weighted_pod_specs.append((pod_spec, 1)) if  pod_spec is not None
+op139=>operation: toleration_hint_example = 'examples/gpu-job.yaml'
 
-op4297->op4299
-op4299->cond4302
-cond4302(yes)->io4309
-io4309->e4307
-cond4302(no)->op4315
-op4315->cond4318
-cond4318(yes)->io4325
-io4325->e4323
-cond4318(no)->op4331
-op4331->cond4334
-cond4334(yes)->io4341
-io4341->e4339
-cond4334(no)->op4347
-op4347->cond4350
-cond4350(yes)->io4357
-io4357->e4355
-cond4350(no)->op4363
-op4363->cond4366
-cond4366(yes)->io4373
-io4373->e4371
-cond4366(no)->op4379
-op4379->cond4382
-cond4382(yes)->op4386
-op4386->cond4389
-cond4389->sub4399
-sub4399->op4401
-op4401->cond4438
-cond4438(yes)->cond4443
-cond4443(yes)->op4447
-op4447->op4449
-op4449->cond4452
-cond4452(yes)->sub4456
-sub4456->sub4458
-sub4458(left)->cond4452
-cond4452(no)->cond4463
-cond4463(yes)->cond4468
-cond4468(yes)->op4472
-op4472->io4477
-io4477->e4475
-cond4468(no)->cond4463
-cond4463(no)->cond4489
-cond4489(yes)->cond4494
-cond4494(yes)->io4501
-io4501->e4499
-cond4494(no)->cond4508
-cond4508(yes)->io4515
-io4515->e4513
-cond4508(no)->cond4522
-cond4522(yes)->io4529
-io4529->e4527
-cond4522(no)->cond4536
-cond4536(yes)->cond4541
-cond4541(yes)->cond4546
-cond4546(yes)->io4553
-io4553->e4551
-cond4546(no)->cond4541
-cond4541(no)->op4564
-op4564->cond4567
-cond4567(yes)->io4574
-io4574->e4572
-cond4567(no)->cond4581
-cond4581(yes)->op4585
-op4585->cond4588
-cond4588(yes)->io4595
-io4595->e4593
-cond4588(no)->cond4605
-cond4605(yes)->op4609
-op4609->op4611
-op4611->cond4614
-cond4614(yes)->io4621
-io4621->e4619
-cond4614(no)->cond4628
-cond4628(yes)->io4635
-io4635->e4633
-cond4628(no)->cond4642
-cond4642(yes)->op4646
-op4646->cond4649
-cond4649(yes)->io4656
-io4656->e4654
-cond4649(no)->cond4666
-cond4666(yes)->op4670
-op4670->cond4673
-cond4673(yes)->io4680
-io4680->e4678
-cond4673(no)->cond4605
-cond4666(no)->cond4605
-cond4642(no)->cond4666
-cond4605(no)->cond4692
-cond4692(yes)->op4696
-op4696->cond4699
-cond4699(yes)->op4703
-op4703->io4708
-io4708->e4706
-cond4699(no)->cond4692
-cond4692(no)->cond4489
-cond4581(no)->cond4605
-cond4536(no)->op4564
-cond4489(no)->op4718
-op4718->op4720
-op4720->op4722
-op4722->cond4725
-cond4725(yes)->cond4730
-cond4730(yes)->op4734
-op4734->op4736
-op4736->op4738
-op4738->op4740
-op4740->op4742
-op4742->op4744
-op4744->cond4747
-cond4747(yes)->op4751
-op4751->op4758
-op4758->op4760
-op4760->op4762
-op4762(left)->cond4730
-cond4747(no)->op4755
-op4755->op4758
-cond4730(no)->cond4725
-cond4725(no)->op4768
-op4768->cond4771
-cond4771->cond4782
-cond4782->cond4793
-cond4793->cond4804
-cond4804(yes)->op4808
-op4808->io4813
-io4813->e4811
-cond4804(no)->io4825
-io4825->e4823
-cond4443(no)->cond4489
-cond4438(no)->io4825
-cond4382(no)->op4405
-op4405->op4407
-op4407->cond4410
-cond4410(yes)->io4417
-io4417->e4415
-cond4410(no)->cond4424
-cond4424->op4434
-op4434->cond4438
+op2->op4
+op4->cond7
+cond7(yes)->io14
+io14->e12
+cond7(no)->op20
+op20->cond23
+cond23(yes)->io30
+io30->e28
+cond23(no)->op36
+op36->cond39
+cond39(yes)->io46
+io46->e44
+cond39(no)->op52
+op52->cond55
+cond55(yes)->io62
+io62->e60
+cond55(no)->op68
+op68->cond71
+cond71(yes)->io78
+io78->e76
+cond71(no)->op84
+op84->cond87
+cond87(yes)->op91
+op91->cond94
+cond94->sub104
+sub104->op106
+op106->cond143
+cond143(yes)->cond148
+cond148(yes)->op152
+op152->op154
+op154->cond157
+cond157(yes)->sub161
+sub161->sub163
+sub163(left)->cond157
+cond157(no)->op167
+op167->cond170
+cond170(yes)->op174
+op174->cond204
+cond204(yes)->cond209
+cond209(yes)->op213
+op213->io218
+io218->e216
+cond209(no)->cond204
+cond204(no)->cond230
+cond230(yes)->cond235
+cond235(yes)->io242
+io242->e240
+cond235(no)->cond249
+cond249(yes)->io256
+io256->e254
+cond249(no)->cond263
+cond263(yes)->io270
+io270->e268
+cond263(no)->cond277
+cond277(yes)->cond282
+cond282(yes)->cond287
+cond287(yes)->io294
+io294->e292
+cond287(no)->cond282
+cond282(no)->op305
+op305->cond308
+cond308(yes)->io315
+io315->e313
+cond308(no)->cond322
+cond322(yes)->op326
+op326->cond329
+cond329(yes)->io336
+io336->e334
+cond329(no)->cond346
+cond346(yes)->op350
+op350->op352
+op352->cond355
+cond355(yes)->io362
+io362->e360
+cond355(no)->cond369
+cond369(yes)->io376
+io376->e374
+cond369(no)->cond383
+cond383(yes)->op387
+op387->cond390
+cond390(yes)->io397
+io397->e395
+cond390(no)->cond407
+cond407(yes)->op411
+op411->cond414
+cond414(yes)->io421
+io421->e419
+cond414(no)->cond346
+cond407(no)->cond346
+cond383(no)->cond407
+cond346(no)->cond433
+cond433(yes)->op437
+op437->cond440
+cond440(yes)->op444
+op444->io449
+io449->e447
+cond440(no)->cond433
+cond433(no)->cond230
+cond322(no)->cond346
+cond277(no)->op305
+cond230(no)->op459
+op459->op461
+op461->op463
+op463->cond466
+cond466(yes)->cond471
+cond471(yes)->op475
+op475->op477
+op477->op479
+op479->op481
+op481->op483
+op483->op485
+op485->cond488
+cond488(yes)->op492
+op492->op499
+op499->op501
+op501->op503
+op503(left)->cond471
+cond488(no)->op496
+op496->op499
+cond471(no)->cond466
+cond466(no)->op509
+op509->cond512
+cond512->cond523
+cond523->cond534
+cond534->cond545
+cond545(yes)->op549
+op549->io554
+io554->e552
+cond545(no)->io566
+io566->e564
+cond170(no)->cond179
+cond179(yes)->cond184
+cond184(yes)->io191
+io191->e189
+cond184(no)->op197
+op197->cond204
+cond179(no)->cond204
+cond148(no)->cond230
+cond143(no)->io566
+cond87(no)->op110
+op110->op112
+op112->cond115
+cond115(yes)->io122
+io122->e120
+cond115(no)->cond129
+cond129->op139
+op139->cond143
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -477,17 +495,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-11-01T00:48:22Z -->
+        <!-- Generated from Git commit: f6b3e38195627b51e21c8bc4a141943bc9c9ca62 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-11-01T00:48:22Z">2026-11-01T00:48:22Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>f6b3e38195627b51e21c8bc4a141943bc9c9ca62</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>30993bb58713ee8b</code>
+            Flow content SHA-256: <code>c7d5e4799914dd6d</code>
           </p>
           <div id="canvas"></div>
         </div>

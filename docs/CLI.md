@@ -537,6 +537,8 @@ Check and manage cluster capacity.
 | [`gco capacity reservation-check`](#gco-capacity-reservation-check) | Check reservation availability and Capacity Block offerings for ML workloads. |
 | [`gco capacity find-blocks`](#gco-capacity-find-blocks) | Find Capacity Blocks across regions, durations, and a start-date window in one consolidated, ranked report. |
 | [`gco capacity reserve`](#gco-capacity-reserve) | Purchase a Capacity Block offering by ID. |
+| [`gco capacity find-training-plans`](#gco-capacity-find-training-plans) | Find SageMaker Training Plan offerings (reserved HyperPod capacity) across Regions in one ranked report. |
+| [`gco capacity training-plans`](#gco-capacity-training-plans) | List the SageMaker Training Plans the account holds, with their reserved capacity. |
 | [`gco capacity find-reservations`](#gco-capacity-find-reservations) | Find existing On-Demand Capacity Reservations (ODCRs) across regions in one ranked report. |
 | [`gco capacity create-reservation`](#gco-capacity-create-reservation) | Create an On-Demand Capacity Reservation in a specific Availability Zone (charges accrue until cancelled). |
 | [`gco capacity cancel-reservation`](#gco-capacity-cancel-reservation) | Cancel an On-Demand Capacity Reservation and stop its charges. |
@@ -652,8 +654,8 @@ This command gathers comprehensive capacity data including:
 
 - Spot placement scores, pricing, and 7-day per-AZ price trends across regions
 - On-demand availability and pricing
-- Capacity Reservations (ODCRs), Capacity Block offerings, and 26-week
-  block-availability trends
+- Capacity Reservations (ODCRs), Capacity Block offerings, and the near-term
+  block-availability trend over the window EC2 answers (about nine days)
 - Current cluster utilization (queue depth, GPU/CPU usage)
 - Running and pending job counts
 - The algorithmic multi-signal region ranking as advisory context
@@ -840,6 +842,54 @@ gco capacity reserve [OPTIONS]
 gco capacity reservation-check -i p4d.24xlarge -r us-east-1
 gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --dry-run
 gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1
+```
+
+#### `gco capacity find-training-plans`
+
+Find [SageMaker Training Plan](https://docs.aws.amazon.com/sagemaker/latest/dg/reserve-capacity-with-training-plans.html) offerings: reserved accelerated capacity for a fixed window, the SageMaker counterpart of an EC2 Capacity Block, and what a [HyperPod](HYPERPOD.md) instance group launches into through `hyperpod.instance_groups[].training_plan_arn`. Every requested Region is searched in parallel (`SearchTrainingPlanOfferings`) and the offerings come back in one report ranked cheapest per instance-hour first, then earliest start. Nothing is purchased: buying a plan is an account commitment made in the console or with `aws sagemaker create-training-plan --training-plan-offering-id <id>`.
+
+```bash
+gco capacity find-training-plans [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-i, --instance-type` | HyperPod instance type or alias, e.g. `ml.p5.48xlarge` or `p5` (the `ml.` prefix is added when missing; required) |
+| `-r, --region` | Region(s) to search; repeatable (default: all deployed regions) |
+| `-c, --count` | Instances the plan must reserve (default: 1) |
+| `--duration-hours` / `--duration-days` | The plan duration (one of the two) |
+| `--start-after` | Earliest start (`YYYY-MM-DD` or ISO datetime) |
+| `--end-before` | Latest end (`YYYY-MM-DD` or ISO datetime); a date means the whole of that day |
+| `--target` | What the capacity is for: `hyperpod-cluster` (default) or `training-job` |
+
+A Region that refuses the search (a denied call, a count SageMaker does not sell) is listed with its reason while the other Regions still answer; only when every Region refuses does the command exit non-zero. The JSON report carries the offerings under `offerings` (ranked) with `best`, the Regions checked and any `errors`.
+
+```bash
+# 4x ml.p5.48xlarge for a week, starting on or after a date, usable by a HyperPod cluster
+gco capacity find-training-plans -i ml.p5.48xlarge -c 4 -r us-east-1 --duration-hours 168 --start-after 2026-11-10
+
+# Several Regions, JSON for scripting
+gco --output json capacity find-training-plans -i p5 -r us-east-1 -r us-west-2 --duration-days 14
+```
+
+#### `gco capacity training-plans`
+
+List the Training Plans the account holds (`ListTrainingPlans`): each plan's state, reserved instance types and zones, total and available instances, window and ARN, soonest start first. The ARN is what `hyperpod.instance_groups[].training_plan_arn` takes; `gco stacks hyperpod preflight` then checks that the plan fits the instance group.
+
+```bash
+gco capacity training-plans [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-i, --instance-type` | Keep the plans whose reserved capacity includes this type (alias or `ml.` type) |
+| `-r, --region` | Region(s) to list; repeatable (default: all deployed regions) |
+| `--status` | Keep the plans in this state: `Pending`, `Active`, `Scheduled`, `Expired` or `Failed` |
+
+```bash
+gco capacity training-plans
+gco capacity training-plans -r us-east-1 --status Active
+gco --output json capacity training-plans -i ml.p5.48xlarge
 ```
 
 #### `gco capacity find-reservations`
@@ -2739,7 +2789,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--min-replicas` | | Autoscaling: minimum replicas |
 | `--max-replicas` | | Autoscaling: maximum replicas |
 | `--autoscale-metric` | | Autoscaling metric (e.g. `cpu:70`, `memory:80`, `gpu:60`), repeatable. CPU/memory use the native HPA; gpu/gpu_memory scale via [KEDA](https://keda.sh/) + CloudWatch. |
-| `--capacity-type` | | Pin the pods to one node capacity type: `spot` or `on-demand` (both hard pins, no fallback). Unset by default: no selector is added, so a node Karpenter launches for the pod is Spot when Spot is available and On-Demand otherwise ([Karpenter NodePool capacity type](https://karpenter.sh/docs/concepts/nodepools/)), and the pod can land on any existing node with room. See [INFERENCE.md](INFERENCE.md#spot-instances-for-inference) |
+| `--capacity-type` | | Pin the pods to one node capacity type: `spot`, `on-demand` or `hyperpod` (all hard pins, no fallback; `hyperpod` selects the Region's [SageMaker HyperPod](HYPERPOD.md) nodes). Unset by default: no selector is added, so a node Karpenter launches for the pod is Spot when Spot is available and On-Demand otherwise ([Karpenter NodePool capacity type](https://karpenter.sh/docs/concepts/nodepools/)), and the pod can land on any existing node with room. See [INFERENCE.md](INFERENCE.md#spot-instances-for-inference) |
 | `--accelerator` | | Accelerator type: `nvidia` for GPU instances (default), `neuron` for [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/)/Inferentia |
 | `--node-selector` | | Node selector (key=value), repeatable. E.g. `eks.amazonaws.com/instance-family=inf2` |
 | `--extra-args` | | One container argument per value, repeatable (e.g. `--extra-args=--max-model-len --extra-args 4096`). For vLLM the renderer adds `--model $(MODEL)` when `-e MODEL=...` is set, unless these arguments already name the model (`--model`, a positional model tag, or `--config`) |
@@ -4693,6 +4743,7 @@ gco release validate --expected-account 123456789012 \
 | `--inference-gpu-count` | GPUs per endpoint replica (default `0`); part of checkpoint identity. |
 | `--optional-schedulers` | Force-enable the off-by-default schedulers (`yunikorn`, `slurm`, or `all`) for this run's deploy so the `schedulers` action proves them too. |
 | `--eks-capabilities` | Enable the off-by-default [EKS Capabilities](EKS_CAPABILITIES.md) (`ack`, `kro`, or `all`) for this run's deploy so the `eks-capabilities` action proves each one attaches `ACTIVE` with no drift. Part of the checkpoint identity. |
+| `--kubernetes-version` | Deploy this run's regional EKS clusters at this Kubernetes minor (`1.36`) instead of cdk.json's `kubernetes_version`: the same CDK context a deployment sets in cdk.json. For a feature the run turns on that trails EKS — [SageMaker HyperPod](HYPERPOD.md) publishes its node AMI per minor, after the minor ships, and every release run deploys HyperPod. The `preflight` action checks that minor, the `topology` action verifies the clusters run it, and it is part of the checkpoint identity. |
 | `--profile` | Topology profile to validate against cdk.json: `configured` (default), `single-region`, or `multi-region`. |
 | `--run-id` | Stable run id (default: UTC timestamp + commit SHA prefix). |
 | `--report-dir` | Report directory (default: `~/gco-live-release-validation-reports/<run-id>`, outside the checkout so the clean-worktree preflight holds). |
@@ -4937,6 +4988,7 @@ Manage CDK infrastructure stacks.
 | [`gco stacks valkey`](#gco-stacks-valkey) | Manage [Valkey](https://valkey.io/) Serverless cache. |
 | [`gco stacks aurora`](#gco-stacks-aurora) | Manage Aurora PostgreSQL ([pgvector](https://github.com/pgvector/pgvector)) database. |
 | [`gco stacks pcs`](#gco-stacks-pcs) | Manage [AWS Parallel Computing Service](https://docs.aws.amazon.com/pcs/latest/userguide/what-is-service.html) as a Slurm backend: the `cdk.json` block, configured vs. deployed state, and the account preflight. |
+| [`gco stacks hyperpod`](#gco-stacks-hyperpod) | Manage [Amazon SageMaker HyperPod](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-hyperpod.html) instance groups as nodes of the regional EKS cluster: the `cdk.json` block, configured vs. deployed state, and the account preflight. |
 | [`gco stacks addons`](#gco-stacks-addons) | Inspect and re-converge cluster add-ons (Helm charts) without touching CloudFormation. |
 | [`gco stacks synth`](#gco-stacks-synth) | Synthesize CloudFormation templates without deploying. |
 | [`gco stacks diff`](#gco-stacks-diff) | Show differences between deployed and local stacks. |
@@ -4995,10 +5047,12 @@ gco stacks deploy STACK_NAME [OPTIONS]
 | `--tag` | `-t` | Add a stack tag (`KEY=VALUE`), repeatable |
 | `--enable` | | Force-enable an off-by-default feature or Helm chart for this run only (`NAME[,NAME...]`, repeatable) |
 | `--skip-pcs-preflight` | | Deploy a regional stack with AWS PCS on without the [`gco stacks pcs preflight`](#gco-stacks-pcs) checks that otherwise run first |
+| `--skip-hyperpod-preflight` | | Deploy a regional stack with SageMaker HyperPod on without the [`gco stacks hyperpod preflight`](#gco-stacks-hyperpod) checks that otherwise run first |
 
-A base regional stack whose Region has AWS PCS on (in `cdk.json`, or through
-`--enable pcs`) is preflighted before CloudFormation starts; a failed check
-stops the deploy with the findings and the flag to override.
+A base regional stack whose Region has AWS PCS or SageMaker HyperPod on (in
+`cdk.json`, or through `--enable pcs` / `--enable hyperpod`) is preflighted
+before CloudFormation starts; a failed check stops the deploy with the
+findings and the flag to override.
 
 **Example:**
 
@@ -5025,13 +5079,14 @@ gco stacks deploy-all [OPTIONS]
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
 | `--enable` | | Force-enable an off-by-default feature or Helm chart for this run only (`NAME[,NAME...]`, repeatable) |
 | `--skip-pcs-preflight` | | Deploy without the [`gco stacks pcs preflight`](#gco-stacks-pcs) checks that otherwise run for every Region with AWS PCS on |
+| `--skip-hyperpod-preflight` | | Deploy without the [`gco stacks hyperpod preflight`](#gco-stacks-hyperpod) checks that otherwise run for every Region with SageMaker HyperPod on |
 
 **Example:**
 
 ```bash
 gco stacks deploy-all -y
 gco stacks deploy-all -y --parallel --max-workers 8
-gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs
+gco stacks deploy-all -y --enable fsx_lustre,valkey,aurora_pgvector,vector_store,slurm,yunikorn,pcs,hyperpod
 ```
 
 See [Run-scoped enablement overrides](CUSTOMIZATION.md#run-scoped-enablement-overrides)
@@ -5425,6 +5480,47 @@ gco stacks pcs enable -y
 gco stacks pcs enable --region us-east-1 --mode existing --cluster-id pcs_0123456789abcdef -y
 gco stacks pcs preflight -r us-east-1
 gco stacks pcs disable -y
+```
+
+#### `gco stacks hyperpod`
+
+Manage [Amazon SageMaker HyperPod](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-hyperpod.html) as GPU capacity of the regional stacks. With the `cdk.json` `hyperpod` block on, the regional stack creates an EKS-orchestrated HyperPod cluster whose instance groups join the regional EKS cluster as nodes (labelled `gco.aws/capacity-provider=hyperpod`, tainted `gco.aws/hyperpod=true:NoSchedule`), fronted by the `gco-hyperpod` Kueue queue. See [HYPERPOD.md](HYPERPOD.md).
+
+```bash
+gco stacks hyperpod COMMAND [OPTIONS]
+```
+
+**Subcommands:**
+
+- `status` - Configured state per Region (cluster name, node recovery, zone, instance groups, Kueue quotas, removal policy) and, once the regional stack is deployed with HyperPod on, the cluster SageMaker describes under the published name: its status and every instance group's current and target counts
+- `enable` - Turn HyperPod on in `cdk.json` (globally, or for one Region as a `hyperpod_regions` overlay); the instance-group options rewrite the block's first instance group, and the merged block is validated before it is written
+- `disable` - Turn HyperPod off in `cdk.json`; the next deploy deletes the cluster and its instances
+- `preflight` - Check the account before a deploy with HyperPod on; exits 1 when a Region has a failure
+
+**Options:**
+
+| Option | Short | Subcommands | Description |
+|--------|-------|-------------|-------------|
+| `--region` | `-r` | all | One Region (default: the first deployment Region; for `enable` / `disable`, a `hyperpod_regions` overlay instead of the global block) |
+| `--all-regions` | `-A` | `status`, `preflight` | Every deployment Region |
+| `--instance-type` | | `enable` | The instance group's HyperPod instance type (`ml.*`; default `ml.g5.8xlarge`, or as configured) |
+| `--instance-count` | | `enable` | Instances in the instance group (default 1, or as configured; 0 keeps the group defined but empty) |
+| `--training-plan-arn` | | `enable` | A SageMaker Training Plan the instance group launches into (see [`gco capacity training-plans`](#gco-capacity-training-plans)) |
+| `--availability-zone` | | `enable` | The zone the instance groups launch into (default: the first EKS-supported private subnet) |
+| `--cluster-name` | | `enable` | The HyperPod cluster name (default `<project>-hyperpod`) |
+| `--yes` | `-y` | `enable`, `disable` | Skip confirmation |
+
+`preflight` runs against the live account with the AWS APIs alone (no kubectl, no CDK). Per Region: SageMaker HyperPod publishes a health-monitoring agent image there (the regional stack refuses to synthesize otherwise), HyperPod publishes a node AMI for the EKS minor the cluster runs (cdk.json `kubernetes_version`; read from the public SSM tree `/aws/service/sagemaker-hyperpod/ami/x86_64` — HyperPod picks the AMI from the cluster's version at `CreateCluster`, and the newest EKS minor has none until HyperPod catches up, see [HYPERPOD.md](HYPERPOD.md#enabling-it)), the account's `<instance type> for cluster usage` Service Quotas cover every instance group's count (a type with no such quota is not a HyperPod type in the Region), every `training_plan_arn` names a plan that exists, is `Active` or `Scheduled`, targets HyperPod clusters, reserves the group's instance type and sits in the configured zone, the configured Availability Zone exists, the regional EKS cluster (once deployed) is `ACTIVE` and authenticates with access entries, and no HyperPod cluster of the same name that this project does not own exists in the Region. An AWS error while checking (a denied call, throttling) is a warning, never a failure: only a fact that would break the deploy or keep the nodes from joining fails the preflight. `gco stacks deploy` and `deploy-all` run the same checks for every regional stack with HyperPod on; `--skip-hyperpod-preflight` bypasses them.
+
+**Example:**
+
+```bash
+gco stacks hyperpod status
+gco stacks hyperpod status --all-regions --output json
+gco stacks hyperpod enable -y
+gco stacks hyperpod enable --region us-east-1 --instance-type ml.p5.48xlarge --instance-count 4 --availability-zone us-east-1b -y
+gco stacks hyperpod preflight -r us-east-1
+gco stacks hyperpod disable -y
 ```
 
 #### `gco stacks addons`

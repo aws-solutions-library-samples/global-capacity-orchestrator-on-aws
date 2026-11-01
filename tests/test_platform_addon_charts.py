@@ -247,6 +247,11 @@ def _selection_stub(
     stub = SimpleNamespace(config=config, node=node)
     stub._cost_monitoring_active = lambda: RS._cost_monitoring_active(stub)
     stub._mlflow_active = lambda: RS._mlflow_active(stub)
+    # HyperPod decides whether the nvidia-device-plugin chart is on; the
+    # helper reads the block for the stub's Region.
+    stub.deployment_region = getattr(stub, "deployment_region", _REGION)
+    stub._hyperpod_config = lambda: RS._hyperpod_config(stub)
+    stub._hyperpod_active = lambda: RS._hyperpod_active(stub)
     return stub
 
 

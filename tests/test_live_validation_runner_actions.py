@@ -1757,6 +1757,44 @@ class TestRunContextJobRecords:
         assert record["submission_blocked_reason"] == "ambiguous boundary"
         assert record["submission_blocked_at"] > 0
 
+    def test_rejected_submission_transition(self, tmp_path: Path) -> None:
+        """An API rejection with proof of non-creation is authoritative absence.
+
+        Only an in-flight submission can be recorded that way; the record lands
+        in ``not_submitted`` (the central-queue proofs' state) with the API's
+        answer kept as evidence.
+        """
+        ctx = self._ctx(tmp_path)
+        record = self._register(ctx)
+        with pytest.raises(RuntimeError, match="Cannot record a rejected Job submission"):
+            ctx.reject_job_submission(record, status_code=400, message="no", resources=[])
+        record["submission_state"] = "submitting"
+        with patch.object(models.time, "time", return_value=3000.0):
+            ctx.reject_job_submission(
+                record,
+                status_code=400,
+                message="Manifest 1 validation failed",
+                resources=[{"name": "j", "status": "failed"}],
+            )
+        assert record["submission_state"] == "not_submitted"
+        assert record["not_submitted_at"] == 3000.0
+        assert record["submission_rejected_at"] == 3000.0
+        assert record["submission_rejection"] == {
+            "status_code": 400,
+            "message": "Manifest 1 validation failed",
+            "resources": [{"name": "j", "status": "failed"}],
+        }
+        # A resumed lifecycle re-prepares the same envelope before it reads the
+        # state; the record keeps its state and its evidence and cannot begin
+        # another submission.
+        ctx.prepare_job_submission(record, envelope={"transport": "api"}, resumable=False)
+        assert record["submission_state"] == "not_submitted"
+        assert record["submission_rejection"]["status_code"] == 400
+        with pytest.raises(
+            RuntimeError, match="Cannot begin Job submission from state 'not_submitted'"
+        ):
+            ctx.begin_job_submission(record, reconciliation_timeout_seconds=1)
+
     def test_central_cancellation_proof_rules(self, tmp_path: Path) -> None:
         ctx = self._ctx(tmp_path)
         record = self._register(ctx, path="dynamodb", transport_region=None)
@@ -2443,6 +2481,33 @@ class TestMainSettings:
             _cli_argv("--repo-root", str(root), "--min-free-disk-gib", "0", actions="preflight"),
         )
         assert settings.min_free_disk_gib == 0
+
+    def test_kubernetes_version_override_is_cdk_context_and_identity(self, tmp_path: Path) -> None:
+        """``--kubernetes-version`` rides every CDK invocation and pins the resume identity."""
+        root = _fake_repo(tmp_path)
+        default = self._settings(tmp_path, _cli_argv("--repo-root", str(root), actions="preflight"))
+        assert default.kubernetes_version_override == ""
+        assert "kubernetes_version" not in default.extra_cdk_context()
+
+        settings = self._settings(
+            tmp_path,
+            _cli_argv(
+                "--repo-root", str(root), "--kubernetes-version", " 1.36 ", actions="preflight"
+            ),
+        )
+        assert settings.kubernetes_version_override == "1.36"
+        assert settings.extra_cdk_context()["kubernetes_version"] == "1.36"
+        assert settings.identity()["extra_cdk_context"]["kubernetes_version"] == "1.36"
+
+    @pytest.mark.parametrize("value", ["1", "v1.36", "1.36.0", "latest", ""])
+    def test_kubernetes_version_must_be_a_minor(
+        self, tmp_path: Path, value: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        parser = live_main._build_parser()
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(_cli_argv("--kubernetes-version", value, actions="preflight"))
+        assert excinfo.value.code == 2
+        assert f"expected a Kubernetes minor such as 1.36, got {value!r}" in capsys.readouterr().err
 
     def test_explicit_paths_resume_and_all_schedulers(self, tmp_path: Path) -> None:
         root = _fake_repo(tmp_path)
@@ -3443,6 +3508,10 @@ class TestActionFinalInventory:
             patch_live_validation_helper(
                 "_strip_deleted_volumes", return_value=(inventory, [{"arn": "vol"}])
             ),
+            patch_live_validation_helper(
+                "_strip_deleted_hyperpod_clusters",
+                return_value=(inventory, [{"arn": "hyperpod"}]),
+            ),
             patch_live_validation_helper("summarize_project_resources", return_value={"total": 0}),
             patch_live_validation_helper("project_resources_are_absent", return_value=absent),
         ):
@@ -3475,6 +3544,7 @@ class TestActionFinalInventory:
         assert result["accepted_expired_dynamodb_streams"] == [{"arn": "stream"}]
         assert result["accepted_deleted_vpc_endpoints"] == [{"arn": "vpce"}]
         assert result["accepted_deleted_volumes"] == [{"arn": "vol"}]
+        assert result["accepted_deleted_hyperpod_clusters"] == [{"arn": "hyperpod"}]
         assert result["residual_project_resources"] == self._PROJECT_INVENTORY
         assert result["transaction_search"] == self._TRANSACTION_SEARCH
         assert ctx.report.final_inventory is result
@@ -4632,6 +4702,30 @@ class TestActionTopology:
             result = actions_topology.action_topology(ctx)
 
         assert result["clusters"]["us-east-1"]["version"] == "1.33"
+
+    def test_the_runs_kubernetes_version_override_is_the_expected_minor(self) -> None:
+        """``--kubernetes-version`` is what the deploy carried, so it is what the cluster must run."""
+        ctx = self._ctx()
+        ctx.cdk_context["kubernetes_version"] = "1.34"  # cdk.json says one thing...
+        ctx.settings.kubernetes_version_override = " 1.33 "  # ...the run deployed another
+
+        with self._checks():
+            result = actions_topology.action_topology(ctx)
+        assert result["clusters"]["us-east-1"]["version"] == "1.33"
+
+        ctx = self._ctx()
+        ctx.settings.kubernetes_version_override = "1.32"
+        with (
+            self._checks(),
+            pytest.raises(
+                RuntimeError,
+                match=re.escape(
+                    "gco-live-us-east-1 runs Kubernetes '1.33'; "
+                    "the run's --kubernetes-version is '1.32'"
+                ),
+            ),
+        ):
+            actions_topology.action_topology(ctx)
 
     @pytest.mark.parametrize("value", [None, "", "   ", 1.33, ["1.33"]], ids=repr)
     def test_a_missing_or_non_string_kubernetes_version_fails_before_the_describe(

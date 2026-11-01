@@ -47,7 +47,7 @@ The globs are complements, so their union is always the whole layer.
 
 ```bash
 docker run --rm -p 4566:4566 -e FLOCI_STORAGE_MODE=memory \
-  -e FLOCI_SERVICES_EKS_MOCK=true \
+  -e FLOCI_SERVICES_EKS_MOCK=true -e FLOCI_SERVICES_EC2_MOCK=true \
   floci/floci:2.2.0    # finch/podman work identically
 GCO_FLOCI_ENDPOINT=http://127.0.0.1:4566 pytest tests/test_floci_*.py -v
 ```
@@ -56,6 +56,13 @@ GCO_FLOCI_ENDPOINT=http://127.0.0.1:4566 pytest tests/test_floci_*.py -v
 Floci's default real mode a `CreateCluster` starts a k3s container and
 answers only once it is ready (about 90 seconds), past botocore's 60-second
 read timeout, so the client's retry collides with the first create.
+`FLOCI_SERVICES_EC2_MOCK=true` matches CI as well: EC2 instances are
+metadata-only and jump to their final state. In real mode, with a Docker
+socket available, every `RunInstances` starts a container and
+`StopInstances` runs `docker stop`, which the PCS login-node tests saw take
+longer than two minutes to reach `stopped`; without a socket (a Finch host)
+Floci retries the daemon for about fifteen seconds per instance operation
+before falling back, so mock mode is also what makes a local run quick.
 
 The E2E module additionally needs the Node CDK toolchain on `PATH`
 (`npm ci`, then `export PATH="$PWD/node_modules/.bin:$PATH"`) and a clean
@@ -86,7 +93,7 @@ isolation against a shared, long-lived local emulator.
 
 ## AWS services exercised
 
-Verified empirically against Floci 1.6.0 (every row is exercised by the
+Verified empirically against Floci 2.2.0 (every row is exercised by the
 committed tests, not inferred from Floci's docs):
 
 | Service | GCO path under test | Depth |
@@ -94,15 +101,18 @@ committed tests, not inferred from Floci's docs):
 | DynamoDB | `TemplateStore`/`WebhookStore`/`JobStore`/`InferenceEndpointStore`; `central_queue_worker` dispatch passes (worker-index discovery, fenced claims, transitions, gated deferrals, failure persistence); `capacity-poller` snapshot writes; the vector store (the stack's exact vector-index `UpdateTable`, `vector-ingest` writes, `SearchVectors` ranking, `INCLUDE` projection and inline `source` filter through `VectorStoreClient`, and the backfilling-index `ValidationException` the client maps to "still building") | Meaningful behavior: conditional writes, GSIs, vector indexes, pagination, waiters |
 | SQS | `JobManager.submit_job_sqs` producer path (CloudFormation-discovered queue, envelope schema) and the `queue_processor` consume path, queue+DLQ redrive pair — including the produce→consume contract over one real queue | Meaningful behavior incl. server-side redrive to the DLQ |
 | S3 | `CostMonitor` Parquet reports; presigned URLs | Meaningful behavior incl. `head_object` idempotency |
-| Secrets Manager | `auth_middleware` token load + rotation stages; `secret-rotation` Lambda four-step protocol | Meaningful behavior (staging labels, promotion, per-token idempotency) |
+| Secrets Manager | `auth_middleware` token load + rotation stages; `secret-rotation` Lambda four-step protocol; the PCS Slurm backend's version-pinned JWT signing-key read (`PcsBackend`: base64 and binary keys, a rotation moving the pin, a version the secret no longer has) | Meaningful behavior (staging labels, promotion, per-token idempotency) |
 | CloudFormation | `GCOAWSClient` discovery; harness fingerprints; `cross-region-aggregator` bridge discovery; E2E CDKToolkit/`cdk list` | Stack materialization, outputs, waiters, tags, fail-closed + bounded-stale discovery (see gaps) |
 | STS | preflight/emulator identity verification | Control plane (identity echo) |
 | EC2 | enabled-region discovery; VPC/subnet scaffolding for ALB fixtures; `capacity-poller` partial-signal path (only `DescribeSpotPriceHistory` answers) | Control plane (see AZ-id and capacity-API gaps) |
-| SSM | `aws_ssm` helpers; CFN-provisioned parameters | Meaningful behavior |
+| SSM | `aws_ssm` helpers; CFN-provisioned parameters; `cli.pcs_login.read_file`'s `SendCommand` + `GetCommandInvocation` poll against a command the emulator registers but never runs | Meaningful behavior; a registered command stays `Pending`, which is the read's deadline path (gap 8 for the public parameters) |
 | Step Functions | `helm-orchestrator` provider (start/adopt/fence), `helm-installer` teardown provider (ordered delete, drain, `is_complete`) | Meaningful behavior: named executions, `ExecutionAlreadyExists` adoption, stop confirmation, Fail-state error/cause |
 | ELBv2 | `regional-api-proxy` ownership validation; `ga-registration` tag/hostname ALB discovery | Meaningful behavior: real internal ALBs, tags, fail-closed rejections |
 | ECR | `image-lookup` adopt-or-create custom resource | Meaningful behavior in CI (create/adopt/delete); local Finch hosts skip (gap 4) |
-| EKS / Lambda / Logs / IAM / KMS / API Gateway / Tagging API | Harness inventory scanners; the baseline's Transaction Search record (Logs resource policies and the span log groups; its X-Ray read is shimmed, gap 2) | Control-plane list/describe only |
+| EKS / Lambda / Logs / IAM / KMS / API Gateway / Tagging API | Harness inventory scanners; the baseline's Transaction Search record (Logs resource policies and the span log groups; its X-Ray read is shimmed, gap 2); the HyperPod preflight's EKS access-mode check against mock-mode clusters created in `API` and `CONFIG_MAP` mode | Control-plane list/describe only |
+| AWS PCS | `cli.pcs_login` (`stack_outputs`, `find_login_node`: the regional stack's `Pcs*` outputs, the running instance tagged `aws:pcs:compute-node-group-id`, every undeployed shape's remedy); the harness inventory's `pcs` scanner placed by the public Region parameters | The PCS API is absent (gap 9): the login-node path never calls it, the scanner's `ListClusters` is shimmed to the empty page, and `cli.pcs_preflight` / the backend's `GetCluster` stay in the unit suite |
+| SageMaker | `cli.hyperpod_preflight.run_preflight` (agent-image table, the node-AMI tree for the EKS minor, Service Quotas, zone, EKS access mode, the shimmed cluster-name check) and `cli.hyperpod_status` (`Hyperpod*` outputs, a published cluster SageMaker refuses to describe) | HyperPod and training-plan operations are not modeled (gap 7): every refusal lands on the documented path — a `could not check` warning in the preflight, a `HyperpodStatusError` naming stack, cluster and SageMaker's answer in the status. The emulator's SSM carries none of AWS's public parameters, so the `kubernetes-version` check reads an empty AMI tree and warns rather than passing |
+| Service Quotas | The HyperPod preflight's `<type> for cluster usage` quota listing | A real `sagemaker` quota page without those quotas, which the preflight must read as "not a HyperPod instance type here", not as a pass |
 | CloudWatch | `metrics_publisher`; `traffic-dial-controller` decision metrics and its no-datapoints `GetMetricData` hold | Accepts writes (no query assertions); an empty query answer drives the controller's fail-safe hold for real |
 
 Still mocked (unit layer only): Kubernetes API interactions (kind E2E owns
@@ -112,7 +122,10 @@ analytics users, SageMaker/EFS/FSx cleanup paths (`analytics-cleanup`,
 (`drift-detection`; `DetectStackDrift` is absent from the emulator), the
 Global Accelerator and EKS halves of `ga-registration`, the Global
 Accelerator half of `traffic-dial-controller` (its SSM and CloudWatch halves
-run here; see `test_floci_traffic_dial.py`), and every
+run here; see `test_floci_traffic_dial.py`), the PCS API (`cli.pcs_preflight`,
+`PcsBackend`'s `GetCluster`, the `pcs-lookup` custom resource; gap 9), the
+HyperPod and training-plan halves of SageMaker (`cli.capacity.training_plans`,
+the `hyperpod` live-validation check; gap 7), and every
 kubeconfig-dependent Lambda path (`kubectl-applier-simple`,
 `helm-installer` worker, `tls-certificate-manager`): the layer runs EKS in
 Floci's metadata-only mock mode, which has no Kubernetes API server, so
@@ -121,7 +134,7 @@ in-cluster behavior cannot be exercised honestly.
 ## Known emulator gaps
 
 Each gap below was probed empirically (re-probed against Floci 2.2.0); the
-first three have narrow,
+first three and the last three have narrow,
 documented answers in `tests/_floci_gap_shims.py` (a botocore `before-send`
 handler per read-only operation — production code is untouched; harness
 subprocesses receive them via `tests/_floci_sitecustomize/`):
@@ -167,6 +180,41 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    eventually-reports-zero contract therefore stays in the unit suite; the
    wire-level tests cover start/stop/adopt/describe semantics, which the
    emulator models faithfully.
+7. **SageMaker HyperPod and training plans** are not among the SageMaker
+   actions Floci 2.2.0 models: `ListClusters`, `DescribeCluster`,
+   `ListClusterNodes`, `CreateCluster`, `ListTrainingPlans`,
+   `DescribeTrainingPlan` and `SearchTrainingPlanOfferings` all answer
+   `ValidationException: Action <name> is not supported` (probed
+   2026-10-31). The harness inventory lists every Region's HyperPod clusters
+   to prove the project's absent, so the shim answers `ListClusters` with the
+   empty page real AWS returns for an account with no HyperPod clusters —
+   which an emulator account is, since `CreateCluster` is not modeled either.
+   Nothing else is shimmed: `test_floci_hyperpod_preflight.py` proves each
+   refusal lands on the documented path (a warning in the preflight, a named
+   `HyperpodStatusError` in the status), and the scanner's ownership matching,
+   the `hyperpod` live-validation check and the training-plan commands keep
+   their coverage in patched-client unit tests.
+8. **The public global-infrastructure parameters** are not served:
+   `GetParametersByPath` under `/aws/service/global-infrastructure/` answers
+   an empty page. botocore names no Region for AWS PCS (the service ships
+   only an endpoint ruleset), so the harness inventory reads PCS's Regions
+   from `…/services/pcs/regions` and fails the collection closed when nothing
+   names one — the fix for live runs that had scanned PCS in zero Regions
+   while reporting the scanner complete. The shim answers that one path with
+   a fixture list — the Regions the emulator enables, deliberately not a
+   copy of AWS's (production reads the live parameters, so there is no list
+   to keep in sync) — and lets every other parameter read reach the
+   emulator.
+9. **AWS PCS** is absent from the catalog entirely: `ListClusters`,
+   `GetCluster` and `CreateCluster` answer `UnknownOperationException`
+   (probed 2026-10-31). The shim answers `ListClusters` with the empty page
+   so the inventory's `pcs` scanner runs in the Regions gap 8 names;
+   `cli.pcs_preflight`, `PcsBackend`'s `GetCluster` and the `pcs-lookup`
+   custom resource keep their coverage in patched-client unit tests, while
+   the parts of the PCS feature that never call the PCS API — the login-node
+   finder over CloudFormation, EC2 and SSM, and the backend's Secrets Manager
+   key read — run here for real (`test_floci_pcs_login.py`,
+   `test_floci_pcs_backend.py`).
 
 ## Where the E2E stops, and why
 

@@ -63,10 +63,12 @@ class TestParseFeatureEnabledOverrides:
         with pytest.raises(ConfigValidationError, match="comma-separated string"):
             parse_feature_enabled_overrides(42)
 
-    def test_override_keys_are_the_documented_five(self) -> None:
+    def test_override_keys_are_the_documented_six(self) -> None:
         """Lockstep with the "Infrastructure features" row in docs/CUSTOMIZATION.md."""
         assert (
-            frozenset({"aurora_pgvector", "valkey", "fsx_lustre", "vector_store", "pcs"})
+            frozenset(
+                {"aurora_pgvector", "valkey", "fsx_lustre", "vector_store", "pcs", "hyperpod"}
+            )
             == FEATURE_OVERRIDE_KEYS
         )
 

@@ -91,6 +91,14 @@ jobs:
           # the first create ("Cluster already exists"). This layer needs only
           # the EKS API shape; the kind E2E owns live-cluster behavior.
           FLOCI_SERVICES_EKS_MOCK: "true"
+          # Metadata-only EC2 instances too. With the Docker socket mounted
+          # (below) a real-mode RunInstances starts a container per instance
+          # and StopInstances runs `docker stop`, so the PCS login-node tests
+          # saw a stop that never reached `stopped` within two minutes; in
+          # mock mode an instance jumps to its final state, as it does on a
+          # Finch host without a socket. The tests need the EC2 API shape
+          # (tags, states, LaunchTime), not a running container.
+          FLOCI_SERVICES_EC2_MOCK: "true"
         volumes:
           # Floci's ECR CreateRepository is Docker-backed and needs the host
           # socket; without it the emulator answers InternalFailure and the
@@ -180,8 +188,9 @@ jobs:
           - 4566:4566
         env:
           FLOCI_STORAGE_MODE: memory
-          # Metadata-only EKS, as in floci:integration above.
+          # Metadata-only EKS and EC2, as in floci:integration above.
           FLOCI_SERVICES_EKS_MOCK: "true"
+          FLOCI_SERVICES_EC2_MOCK: "true"
     env:
       # aws-cdk-lib wraps fs/child_process in performance.measure() telemetry;
       # the full app synth inside `cdk list` crosses Node's 1M-entry buffer,

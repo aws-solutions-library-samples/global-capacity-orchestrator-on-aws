@@ -72,7 +72,7 @@ def deploy_inference(
     env_vars: list[str] | None = None,
     framework: str | None = None,
     extra_args: list[str] | None = None,
-    capacity_type: Literal["on-demand", "spot"] | None = None,
+    capacity_type: Literal["on-demand", "spot", "hyperpod"] | None = None,
 ) -> str:
     """Deploy an inference endpoint across regions.
 
@@ -98,7 +98,9 @@ def deploy_inference(
             land on any existing node with room. ``spot`` pins to Spot with no
             fallback (pods stay Pending while Spot is unavailable);
             ``on-demand`` pins to On-Demand, the choice for production and
-            single-replica endpoints.
+            single-replica endpoints; ``hyperpod`` pins to the Region's
+            SageMaker HyperPod nodes (cdk.json ``hyperpod``; pods stay Pending
+            without them).
     """
     args = [
         "inference",
