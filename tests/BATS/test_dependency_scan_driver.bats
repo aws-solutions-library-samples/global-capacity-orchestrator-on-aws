@@ -305,11 +305,26 @@ case "${1:-} ${2:-}" in
         ;;
     "eks describe-addon-versions")
         [ "${FAKE_AWS_ADDON:-ok}" = "invalid" ] && { echo "None"; exit 0; }
-        name="" minor=""
+        name="" minor="" query=""
         while [ "$#" -gt 0 ]; do
-            case "$1" in --addon-name) name="$2" ;; --kubernetes-version) minor="$2" ;; esac
+            case "$1" in --addon-name) name="$2" ;; --kubernetes-version) minor="$2" ;; --query) query="$2" ;; esac
             shift
         done
+        if [[ "$query" == *"addonVersions[]"* ]]; then
+            # The list form, which the EKS version section asks of vpc-cni and
+            # coredns at the minor a HyperPod Region runs: every build EKS
+            # publishes for that minor, newest first, tab-separated as
+            # ``--output text`` prints a list. The pin is published unless
+            # FAKE_ADDON_MINOR=unpublished; =fail refuses the read.
+            [ "${FAKE_ADDON_MINOR:-ok}" = "fail" ] && { echo "An error occurred (AccessDeniedException) when calling the DescribeAddonVersions operation" >&2; exit 254; }
+            pin="$(catalog_get eks-addon "$name")"
+            if [ "${FAKE_ADDON_MINOR:-ok}" = "unpublished" ]; then
+                printf '%s\n' "$(bump "$pin")"
+            else
+                printf '%s\t%s\n' "$(bump "$pin")" "$pin"
+            fi
+            exit 0
+        fi
         if [ "$name" = "kube-proxy" ]; then
             # EKS publishes kube-proxy per minor: the tree's pin for the minor
             # asked about (a minor it never pinned gets a build of its own).
@@ -2023,7 +2038,7 @@ PY
     [[ "$output" == *"HyperPod health agent:    (skipped)"* ]]
 }
 
-@test "the HyperPod EKS minor check names the minor a HyperPod Region runs, the kube-proxy pin it lacks or should retire, and degrades by name" {
+@test "the HyperPod EKS minor check names the minor a HyperPod Region runs, the kube-proxy pin it lacks or should retire, the vpc-cni and coredns pins it does not publish, and degrades by name" {
     local root="$BATS_TEST_TMPDIR/checkout"
     make_consistent_checkout "$root"
     build_catalog "$root"
@@ -2044,6 +2059,48 @@ PY
     findings="$(findings_path)"
     [ "$(jq -r '.surfaces[] | select(.surface == "Version Consistency") | .count' "$findings")" = "1" ]
     [ "$(jq -r '.surfaces[] | select(.surface == "Version Consistency") | .findings[0].what' "$findings")" = "SageMaker HyperPod EKS minor (cdk.json / HyperPod node AMIs)" ]
+    # The single vpc-cni and coredns pins were checked against the minor a
+    # HyperPod Region runs (the list of builds EKS publishes for it), and
+    # only those two: the five platform add-ons and kube-proxy are not
+    # asked about in that form.
+    grep -q -- '^aws eks describe-addon-versions --addon-name vpc-cni --kubernetes-version 1.36 --query addons\[0\].addonVersions\[\].addonVersion' "$CALLS"
+    grep -q -- '^aws eks describe-addon-versions --addon-name coredns --kubernetes-version 1.36 --query addons\[0\].addonVersions\[\].addonVersion' "$CALLS"
+    [ "$(grep -c -- 'addonVersions\[\].addonVersion' "$CALLS")" -eq 2 ]
+    [[ "$output" != *"is not published for EKS"* ]]
+
+    # A pin cdk.json's minor publishes and HyperPod's does not would fail
+    # CreateAddon on a HyperPod Region: both pins are rows naming the minor,
+    # its newest build and its support end; the kube-proxy pin, published
+    # per minor and checked above, is untouched.
+    run_scan "$root" FAKE_HYPERPOD_AMI=trailing FAKE_ADDON_MINOR=unpublished
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - vpc-cni@1.36: v1.23.0-eksbuild.1 is not published for EKS 1.36, the newest minor HyperPod supports; that minor's newest is v2.23.0-eksbuild.1"* ]]
+    [[ "$output" == *"  - coredns@1.36: v1.14.0-eksbuild.1 is not published for EKS 1.36, the newest minor HyperPod supports; that minor's newest is v2.14.0-eksbuild.1"* ]]
+    [[ "$output" == *"EKS Kubernetes version:   2"* ]]
+    [[ "$output" != *"kube-proxy@"* ]]
+    [[ "$output" != *"INCOMPLETE:"* ]]
+    grep -qF -- "| \`vpc-cni@1.36\` | v1.23.0-eksbuild.1 | not published for EKS 1.36 (the newest minor HyperPod supports); that minor's newest is v2.23.0-eksbuild.1 | 2026-09-15 |" "$(report_path)"
+    grep -qF -- "| \`coredns@1.36\` | v1.14.0-eksbuild.1 | not published for EKS 1.36 (the newest minor HyperPod supports); that minor's newest is v2.14.0-eksbuild.1 | 2026-09-15 |" "$(report_path)"
+    grep -qF -- "A \`vpc-cni@<minor>\` or \`coredns@<minor>\` row is a single pin" "$(report_path)"
+    local minor_findings
+    minor_findings="$(findings_path)"
+    [ "$(jq -r '.surfaces[] | select(.surface == "EKS Kubernetes Version") | .findings[0] | "\(.pin) \(.current) \(.standard_support_ends)"' "$minor_findings")" = "vpc-cni@1.36 v1.23.0-eksbuild.1 2026-09-15" ]
+    [ "$(jq -r '.surfaces[] | select(.surface == "EKS Kubernetes Version") | .findings[1].pin' "$minor_findings")" = "coredns@1.36" ]
+
+    # A refused read of that minor's builds is an incomplete lookup per
+    # add-on, never a verdict on the pin.
+    run_scan "$root" FAKE_HYPERPOD_AMI=trailing FAKE_ADDON_MINOR=fail
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCOMPLETE: vpc-cni add-on lookup for EKS 1.36 (the newest minor HyperPod supports) failed or returned no versions."* ]]
+    [[ "$output" == *"INCOMPLETE: coredns add-on lookup for EKS 1.36 (the newest minor HyperPod supports) failed or returned no versions."* ]]
+    [[ "$output" != *"is not published for EKS"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+
+    # HyperPod at (or ahead of) cdk.json's minor: the cluster runs cdk.json's
+    # minor, whose pins the add-on check covers, so nothing is asked twice.
+    run_scan "$root"
+    [ "$status" -eq 0 ]
+    ! grep -q -- 'addonVersions\[\].addonVersion' "$CALLS"
 
     # Two minors short, at a minor the tree pins no kube-proxy build for: the
     # EKS version section names the build to add and that minor's support

@@ -223,8 +223,13 @@ shipping a skew.
    up. Do not pin a pre-release to close the gap.
 3. `gco/stacks/constants.py` — update the `EKS_ADDON_*` constants to builds
    published for the new minor (see [validating add-ons](#validating-add-on-versions)):
-   the five platform add-ons, and the two version-independent mixed-compute
-   add-ons SageMaker HyperPod needs (`EKS_ADDON_VPC_CNI`, `EKS_ADDON_COREDNS`).
+   the five platform add-ons, and the two single-pin mixed-compute add-ons
+   SageMaker HyperPod needs (`EKS_ADDON_VPC_CNI`, `EKS_ADDON_COREDNS`). EKS
+   publishes add-on builds per minor and not every build for every minor, so
+   while HyperPod's newest minor trails `cdk.json`'s, pick `vpc-cni` and
+   `coredns` builds both minors publish (run the recipe below for each minor;
+   the scan's **EKS Kubernetes Version** row reports a pin the HyperPod minor
+   does not publish, naming that minor's newest build).
    kube-proxy is published per Kubernetes minor, so add the new minor's build
    to `EKS_ADDON_KUBE_PROXY_BY_MINOR` (keep the previous minors a deployment
    may still run — a HyperPod Region stays on the newest minor HyperPod

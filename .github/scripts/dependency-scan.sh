@@ -723,7 +723,8 @@ ADDON_COUNT="$(wc -l < "$ADDON_RESULTS" 2>/dev/null | tr -d ' ')"
 # (``EKS_ADDON_KUBE_PROXY_BY_MINOR`` in gco/stacks/constants.py) and the
 # newest minor SageMaker HyperPod publishes a node AMI for, so the minor a
 # HyperPod Region actually runs is maintained by the scan rather than by
-# memory.
+# memory — and, while that minor trails cdk.json's, that the single vpc-cni
+# and coredns pins are published for it as well.
 #
 # IAM actions: ``eks:DescribeClusterVersions``, ``eks:DescribeAddonVersions``,
 # ``ssm:GetParametersByPath``. Same credential preflight as the EKS add-on /
@@ -866,6 +867,40 @@ for row in data.get('clusterVersions', []):
         [[ "$kp_latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-eksbuild\.[0-9]+$ ]] || kp_latest="unknown"
         echo "  - kube-proxy@${HYPERPOD_NEWEST_K8S}: no pin for the newest minor HyperPod supports; add ${kp_latest} to EKS_ADDON_KUBE_PROXY_BY_MINOR"
         echo "kube-proxy@${HYPERPOD_NEWEST_K8S}|missing (the newest minor HyperPod supports)|${kp_latest}|$(eks_minor_support_end "$CLUSTER_VERSIONS_JSON" "$HYPERPOD_NEWEST_K8S")" >> "$EKS_K8S_RESULTS"
+      fi
+
+      # The other two mixed-compute add-ons, vpc-cni and coredns, are single
+      # pins (EKS_ADDON_VPC_CNI, EKS_ADDON_COREDNS) that the add-on check
+      # above compares against cdk.json's minor only. EKS publishes add-on
+      # builds per minor and does not publish every build for every minor,
+      # so while HyperPod trails, a Region with HyperPod on creates those
+      # add-ons at a minor nobody checked the pins against; a build cdk.json's
+      # minor offers and HyperPod's does not fails CreateAddon mid-deploy.
+      # Availability only: the pins' drift is the add-on check's (they track
+      # cdk.json's minor), so this reports a pin the HyperPod minor does not
+      # publish and names the newest build that minor has.
+      if [ -n "$HYPERPOD_NEWEST_K8S" ] \
+         && [ "$(compare_semver "$CURRENT_K8S" "$HYPERPOD_NEWEST_K8S")" = "older" ]; then
+        while IFS='|' read -r mc_addon mc_pin; do
+          case "$mc_addon" in
+            vpc-cni|coredns) ;;
+            *) continue ;;
+          esac
+          mc_published="$(aws eks describe-addon-versions \
+            --addon-name "$mc_addon" \
+            --kubernetes-version "$HYPERPOD_NEWEST_K8S" \
+            --query 'addons[0].addonVersions[].addonVersion' \
+            --output text 2>/dev/null | tr '\t' '\n')" || mc_published=""
+          if ! grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-eksbuild\.[0-9]+$' <<< "$mc_published"; then
+            mark_scan_incomplete "${mc_addon} add-on lookup for EKS ${HYPERPOD_NEWEST_K8S} (the newest minor HyperPod supports) failed or returned no versions."
+            continue
+          fi
+          if ! grep -qxF -- "$mc_pin" <<< "$mc_published"; then
+            mc_newest="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-eksbuild\.[0-9]+$' <<< "$mc_published" | head -1)"
+            echo "  - ${mc_addon}@${HYPERPOD_NEWEST_K8S}: ${mc_pin} is not published for EKS ${HYPERPOD_NEWEST_K8S}, the newest minor HyperPod supports; that minor's newest is ${mc_newest}"
+            echo "${mc_addon}@${HYPERPOD_NEWEST_K8S}|${mc_pin}|not published for EKS ${HYPERPOD_NEWEST_K8S} (the newest minor HyperPod supports); that minor's newest is ${mc_newest}|$(eks_minor_support_end "$CLUSTER_VERSIONS_JSON" "$HYPERPOD_NEWEST_K8S")" >> "$EKS_K8S_RESULTS"
+          fi
+        done <<< "$(extract_eks_addons gco/stacks/regional_stack.py)"
       fi
     fi
   fi
@@ -3128,7 +3163,10 @@ rm -f "$FINDINGS_SURFACES"
     echo "(\`gco/stacks/constants.py\`, the SageMaker HyperPod mixed-compute add-ons)"
     echo "whose build is stale for its minor, whose minor left standard support"
     echo "(retire it), or that is missing for the newest minor HyperPod supports"
-    echo "(add it). See \`docs/MAINTENANCE.md\`."
+    echo "(add it). A \`vpc-cni@<minor>\` or \`coredns@<minor>\` row is a single pin"
+    echo "(\`EKS_ADDON_VPC_CNI\`, \`EKS_ADDON_COREDNS\`) that EKS does not publish for"
+    echo "the minor a Region with HyperPod on runs; pick a build both minors"
+    echo "publish. See \`docs/MAINTENANCE.md\`."
     echo ""
     eks_disp="$(mktemp)"
     while IFS='|' read -r pin cur lat eos; do
