@@ -98,7 +98,7 @@ This path commonly fails with the pinned-version `ResolutionImpossible` / depend
 # Python 3.14+ (3.14 used in CI)
 python3 --version
 
-# Node.js 24 and npm 12.2.0 (see .nvmrc and package.json)
+# Node.js 24 and npm 12.2.1 (see .nvmrc and package.json)
 node --version
 npm --version
 

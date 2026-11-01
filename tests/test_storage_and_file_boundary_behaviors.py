@@ -24,6 +24,7 @@ from cli.storage import (
     _SyncObject,
     _UploadObject,
 )
+from tests._descriptor_stubs import fstat_answering
 
 
 def _contract(root: Path) -> _ConfinementContract:
@@ -396,7 +397,11 @@ def test_open_upload_source_rejects_nonregular_descriptor(
         current=False,
     )
     monkeypatch.setattr(storage.os, "open", lambda *_args, **_kwargs: 9)
-    monkeypatch.setattr(storage.os, "fstat", lambda _fd: SimpleNamespace(st_mode=stat.S_IFIFO))
+    monkeypatch.setattr(
+        storage.os,
+        "fstat",
+        fstat_answering({9}, lambda _fd: SimpleNamespace(st_mode=stat.S_IFIFO)),
+    )
     close = Mock()
     monkeypatch.setattr(storage.os, "close", close)
 
@@ -419,7 +424,7 @@ def test_verify_upload_source_signature_rejects_replaced_path(
     )
     monkeypatch.setattr(StorageManager, "_open_upload_source", lambda *_args: 9)
     monkeypatch.setattr(StorageManager, "_stat_signature", lambda _stat: (9, 9, 9, 9))
-    monkeypatch.setattr(storage.os, "fstat", lambda _fd: object())
+    monkeypatch.setattr(storage.os, "fstat", fstat_answering({9}, lambda _fd: object()))
     monkeypatch.setattr(storage.os, "close", Mock())
 
     with pytest.raises(RuntimeError, match="changed after planning"):

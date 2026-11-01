@@ -371,10 +371,14 @@ constant still says `v1beta1`, as the reminder.
   which the API server accepts — is rejected client-side by the central
   queue's `apply_queued_job` (`create_namespaced_job(body=manifest)`). The
   release also ships `py.typed` (about 320 new mypy findings) and returns
-  plain dicts from single-resource deletes. GCO stays on 36.x until that path
-  normalizes or bypasses client-side validation and the move is proven
-  against a real API server; the scan's Version Consistency row keeps the lag
-  visible meanwhile.
+  plain dicts from single-resource deletes. 37.0.1 (2026-10-09) changes none
+  of that — its fixes cover type-checker exports and the deprecated
+  `kubernetes.client.apis` import path, and the same unquoted-quantity Job
+  body still raises `pydantic.ValidationError` before any request is sent
+  (re-checked 2026-11-01 against the real library). GCO stays on 36.x until
+  that path normalizes or bypasses client-side validation and the move is
+  proven against a real API server; the scan's Version Consistency row keeps
+  the lag visible meanwhile.
 
 ### Deploy and verify
 

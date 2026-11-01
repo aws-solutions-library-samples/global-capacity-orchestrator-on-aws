@@ -136,21 +136,21 @@ def test_lambda_verifier_main_accepts_an_explicit_root(
 
 def _dev_outputs() -> dict[tuple[str, ...], str]:
     return {
-        ("node", "--version"): "v24.21.0",
-        ("npm", "--version"): "12.2.0",
-        ("cdk", "--version"): "2.1145.0 (build abc123)",
-        ("aws", "--version"): "aws-cli/2.37.10 Python/3.13.11 Linux/6.11",
-        ("docker", "--version"): "Docker version 29.9.1, build deadbeef",
-        ("docker", "buildx", "version"): "github.com/docker/buildx v0.38.0 abc123",
-        ("uv", "--version"): "uv 0.12.23 (abc123 2026-08-01)",
-        ("uvx", "--version"): "uvx 0.12.23 (abc123 2026-08-01)",
+        ("node", "--version"): "v24.22.2",
+        ("npm", "--version"): "12.2.1",
+        ("cdk", "--version"): "2.1147.0 (build abc123)",
+        ("aws", "--version"): "aws-cli/2.39.3 Python/3.13.11 Linux/6.11",
+        ("docker", "--version"): "Docker version 29.9.2, build deadbeef",
+        ("docker", "buildx", "version"): "github.com/docker/buildx v0.38.1 abc123",
+        ("uv", "--version"): "uv 0.13.6 (abc123 2026-10-27)",
+        ("uvx", "--version"): "uvx 0.13.6 (abc123 2026-10-27)",
         ("session-manager-plugin", "--version"): "1.2.896.0",
         (
             "kubectl",
             "version",
             "--client=true",
             "--output=json",
-        ): json.dumps({"clientVersion": {"gitVersion": "v1.37.1"}}),
+        ): json.dumps({"clientVersion": {"gitVersion": "v1.37.2"}}),
     }
 
 
@@ -170,16 +170,16 @@ def test_dev_verifier_accepts_only_matching_runtime_versions(container_verifier:
     )
 
     assert actual == {
-        "Node.js": "v24.21.0",
-        "npm": "12.2.0",
-        "CDK": "2.1145.0",
-        "AWS CLI": "2.37.10",
-        "Docker CLI": "29.9.1",
-        "Buildx": "v0.38.0",
-        "uv": "0.12.23",
-        "uvx": "0.12.23",
+        "Node.js": "v24.22.2",
+        "npm": "12.2.1",
+        "CDK": "2.1147.0",
+        "AWS CLI": "2.39.3",
+        "Docker CLI": "29.9.2",
+        "Buildx": "v0.38.1",
+        "uv": "0.13.6",
+        "uvx": "0.13.6",
         "Session Manager plugin": "1.2.896.0",
-        "kubectl": "v1.37.1",
+        "kubectl": "v1.37.2",
     }
 
 
@@ -197,7 +197,7 @@ def test_dev_verifier_rejects_a_valid_but_wrong_runtime_version(
         )
 
 
-def _helm_runner(*, kubectl_version: str = "v1.37.1"):
+def _helm_runner(*, kubectl_version: str = "v1.37.2"):
     outputs = {
         (
             "docker",
@@ -237,7 +237,7 @@ def test_helm_installer_verifier_accepts_matching_runtime_versions(
         runner=_helm_runner(),
     )
 
-    assert actual == {"Helm": "v4.3.1", "kubectl": "v1.37.1"}
+    assert actual == {"Helm": "v4.3.1", "kubectl": "v1.37.2"}
 
 
 def test_helm_installer_verifier_rejects_a_mismatched_runtime_version(

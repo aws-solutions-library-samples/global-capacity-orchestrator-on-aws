@@ -99,8 +99,8 @@ def test_lockfile_check_uses_its_pinned_resolver_toolchain() -> None:
         ),
         (
             ".github/workflows/integration-tests.yml",
-            "v0.9.0",
-            "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b",
+            "v0.9.1",
+            "3c7f57cdbee0f57fb0259a150e8f6d6cb4f29d72d1aa5dce8803151dd6d4c2a1",
         ),
         (
             "lambda/helm-installer/Dockerfile",
@@ -109,8 +109,8 @@ def test_lockfile_check_uses_its_pinned_resolver_toolchain() -> None:
         ),
         (
             "lambda/helm-installer/Dockerfile",
-            "v1.37.1",
-            "65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8",
+            "v1.37.2",
+            "c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4",
         ),
     ],
 )
@@ -174,8 +174,8 @@ def test_downloaded_release_assets_have_committed_checksums(
         (
             ".github/workflows/integration-tests.yml",
             "Install Metrics Server for HPA reconciliation",
-            'METRICS_SERVER_VERSION: "v0.9.0"',
-            'METRICS_SERVER_SHA256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"',
+            'METRICS_SERVER_VERSION: "v0.9.1"',
+            'METRICS_SERVER_SHA256: "3c7f57cdbee0f57fb0259a150e8f6d6cb4f29d72d1aa5dce8803151dd6d4c2a1"',
             "metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml",
             'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -',
         ),
@@ -1872,13 +1872,13 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
     ]
 
     assert "ARG BUILDX_SHA256" not in dev_dockerfile
-    assert "ARG BUILDX_VERSION=v0.38.0" in buildx_section
+    assert "ARG BUILDX_VERSION=v0.38.1" in buildx_section
     assert "buildx-${BUILDX_VERSION}.linux-${TARGETARCH}" in buildx_section
     assert (
-        'amd64) BUILDX_SHA256="4fe4cc38adf48169132749b6ca22a990928db0118e3407584ee553723115d287"'
+        'amd64) BUILDX_SHA256="e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4"'
     ) in buildx_section
     assert (
-        'arm64) BUILDX_SHA256="38e890e1a162bfdbf32fbe91404991dc4fc28e55b0de901b34374a061bab4d2c"'
+        'arm64) BUILDX_SHA256="3b83b3731916ba433feccaaa689fe5bcdc81c641d92c8e6c2ea865dfa141c97a"'
     ) in buildx_section
     assert (
         'echo "${BUILDX_SHA256}  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c -'
@@ -1890,9 +1890,9 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
     assert (
         "0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b  /tmp/helm.tar.gz"
     ) in helm_section
-    assert "release/v1.37.1/bin/linux/amd64/kubectl" in kubectl_section
+    assert "release/v1.37.2/bin/linux/amd64/kubectl" in kubectl_section
     assert (
-        "65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8  /tmp/kubectl"
+        "c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4  /tmp/kubectl"
     ) in kubectl_section
 
 
@@ -1987,14 +1987,13 @@ def test_npm_audit_retries_a_registry_operational_error() -> None:
 
 #: Root ``overrides`` and the reason each exists: the direct dependency that
 #: pins the vulnerable version exactly, and the fixed line the override lifts
-#: it to. Both are under markdownlint-cli2 0.23.3, which pins every dependency
-#: exactly: smol-toml 1.8.0 (GHSA-r4xh-jqrq-34v2, fixed in 1.9.0) and
-#: markdown-it 15.0.1 (GHSA-r7fv-28h4-cvq7, quadratic smartquotes, fixed in
-#: 15.0.2; GHSA-gfr2-rv44-r23c and GHSA-vfgh-jcmw-g37q, quadratic link
-#: reference and inline HTML parsing, fixed in 15.0.3).
+#: it to. markdownlint 0.42.0 (under markdownlint-cli2 0.24.0, which pins
+#: every dependency exactly) pins re2js 2.8.6 (GHSA-gg6h-894w-4m9c,
+#: quadratic-time lookbehind matching, fixed in 2.8.7). The earlier smol-toml
+#: and markdown-it overrides retired with markdownlint-cli2 0.24.0, which
+#: requests the fixed lines itself.
 _ROOT_NPM_OVERRIDES: dict[str, tuple[str, tuple[int, int, int]]] = {
-    "smol-toml": ("markdownlint-cli2", (1, 9, 0)),
-    "markdown-it": ("markdownlint-cli2", (15, 0, 3)),
+    "re2js": ("markdownlint", (2, 8, 7)),
 }
 
 

@@ -24,6 +24,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._descriptor_stubs import fstat_altering, fstat_answering
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gco_mcp"))
 
 from tools import _task_status as task_status_module
@@ -37,6 +39,16 @@ from tools._task_status import (  # sys.path insert above
     tail_log,
     task_ids_for,
 )
+
+
+def _moved_inode(metadata: os.stat_result) -> SimpleNamespace:
+    """The metadata of a file swapped between ``lstat`` and ``fstat``: same mode, new inode."""
+    return SimpleNamespace(
+        st_mode=metadata.st_mode,
+        st_nlink=metadata.st_nlink,
+        st_dev=metadata.st_dev,
+        st_ino=metadata.st_ino + 1,
+    )
 
 
 @pytest.fixture
@@ -254,10 +266,13 @@ class TestDescriptorSecurityBranches:
         monkeypatch.setattr(
             task_status_module.os,
             "fstat",
-            lambda _fd: SimpleNamespace(
-                st_mode=stat.S_IFDIR | 0o700,
-                st_dev=metadata.st_dev,
-                st_ino=metadata.st_ino + 1,
+            fstat_answering(
+                {701},
+                lambda _fd: SimpleNamespace(
+                    st_mode=stat.S_IFDIR | 0o700,
+                    st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino + 1,
+                ),
             ),
         )
         monkeypatch.setattr(task_status_module.os, "close", closed.append)
@@ -291,26 +306,18 @@ class TestDescriptorSecurityBranches:
         artifact = status_root / "raced.json"
         artifact.write_text("{}", encoding="utf-8")
         root_fd = os.open(status_root, os.O_RDONLY)
-        real_fstat = os.fstat
         real_close = os.close
         closed: list[int] = []
 
         monkeypatch.setattr(task_status_module, "_open_status_directory", lambda _path: root_fd)
 
-        def changed_fstat(fd: int) -> SimpleNamespace:
-            metadata = real_fstat(fd)
-            return SimpleNamespace(
-                st_mode=metadata.st_mode,
-                st_nlink=metadata.st_nlink,
-                st_dev=metadata.st_dev,
-                st_ino=metadata.st_ino + 1,
-            )
-
         def tracked_close(fd: int) -> None:
             closed.append(fd)
             real_close(fd)
 
-        monkeypatch.setattr(task_status_module.os, "fstat", changed_fstat)
+        monkeypatch.setattr(
+            task_status_module.os, "fstat", fstat_altering((status_root, artifact), _moved_inode)
+        )
         monkeypatch.setattr(task_status_module.os, "close", tracked_close)
 
         try:
@@ -326,24 +333,14 @@ class TestDescriptorSecurityBranches:
     ) -> None:
         path = tmp_path / "raced.log"
         path.write_text("preserve", encoding="utf-8")
-        real_fstat = os.fstat
         real_close = os.close
         closed: list[int] = []
-
-        def changed_fstat(fd: int) -> SimpleNamespace:
-            metadata = real_fstat(fd)
-            return SimpleNamespace(
-                st_mode=metadata.st_mode,
-                st_nlink=metadata.st_nlink,
-                st_dev=metadata.st_dev,
-                st_ino=metadata.st_ino + 1,
-            )
 
         def tracked_close(fd: int) -> None:
             closed.append(fd)
             real_close(fd)
 
-        monkeypatch.setattr(task_status_module.os, "fstat", changed_fstat)
+        monkeypatch.setattr(task_status_module.os, "fstat", fstat_altering((path,), _moved_inode))
         monkeypatch.setattr(task_status_module.os, "close", tracked_close)
 
         with pytest.raises(OSError, match="changed while opening"):
@@ -372,18 +369,8 @@ class TestDescriptorSecurityBranches:
     ) -> None:
         path = tmp_path / "raced.log"
         path.write_text("must survive", encoding="utf-8")
-        real_fstat = os.fstat
 
-        def changed_fstat(fd: int) -> SimpleNamespace:
-            metadata = real_fstat(fd)
-            return SimpleNamespace(
-                st_mode=metadata.st_mode,
-                st_nlink=metadata.st_nlink,
-                st_dev=metadata.st_dev,
-                st_ino=metadata.st_ino + 1,
-            )
-
-        monkeypatch.setattr(task_status_module.os, "fstat", changed_fstat)
+        monkeypatch.setattr(task_status_module.os, "fstat", fstat_altering((path,), _moved_inode))
 
         with pytest.raises(OSError, match="changed while opening"):
             task_status_module._open_private_log(path)
@@ -771,7 +758,7 @@ class TestTailAndDecodeBranches:
         def fail_fstat(_fd: int):
             raise OSError("metadata unavailable")
 
-        monkeypatch.setattr(task_status_module.os, "fstat", fail_fstat)
+        monkeypatch.setattr(task_status_module.os, "fstat", fstat_answering({703}, fail_fstat))
         monkeypatch.setattr(task_status_module.os, "close", closed.append)
 
         assert task_status_module.tail_log("anything", directory=status_root) == []
@@ -817,7 +804,9 @@ class TestResidualTaskArtifactBranches:
         monkeypatch.setattr(
             task_status_module.os,
             "fstat",
-            lambda _fd: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_nlink=1),
+            fstat_altering(
+                (path,), lambda _metadata: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_nlink=1)
+            ),
         )
         monkeypatch.setattr(task_status_module.os, "close", tracked_close)
 

@@ -43,8 +43,8 @@ import urllib3
 import yaml
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-08-30T12:00:00Z
-# Generated from Git commit: 8cb8e766461f5b7f35205e12db980988598cf6d5
+# Generated at (UTC): 2026-11-01T14:18:07Z
+# Generated from Git commit: e9975a6893f9a2542214f6eb200b4fb05c3230eb
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/helm-installer/handler.lambda_handler.png``)
@@ -176,7 +176,7 @@ class _PinnedManifestBundle:
 
 
 PINNED_GATEWAY_CRD_BUNDLES = (
-    # Controller v3.6.0 is built against Gateway API v1.6.0 and requires the
+    # Controller v3.6.2 is built against Gateway API v1.6.0 and requires the
     # CRDs to be updated BEFORE the controller (release notes: upgrading the
     # controller first silently disables gateway reconciliation until the
     # CRDs catch up — exactly the stale-Accepted failure the 2026-08 live
@@ -195,10 +195,10 @@ PINNED_GATEWAY_CRD_BUNDLES = (
         crd_count=10,
     ),
     _PinnedManifestBundle(
-        name="aws-lbc-gateway-v3.6.0",
+        name="aws-lbc-gateway-v3.6.2",
         url=(
             "https://raw.githubusercontent.com/kubernetes-sigs/"
-            "aws-load-balancer-controller/v3.6.0/config/crd/gateway/gateway-crds.yaml"
+            "aws-load-balancer-controller/v3.6.2/config/crd/gateway/gateway-crds.yaml"
         ),
         size=129_552,
         sha256="3a4264e2a7cf132944fd095b04ce86299385f26ea31b1e89d0ac21761e1865a0",

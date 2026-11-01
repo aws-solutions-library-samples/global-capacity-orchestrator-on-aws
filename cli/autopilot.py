@@ -50,14 +50,14 @@ from . import __version__
 #: Exact Claude Code release installed by ``gco autopilot`` when the
 #: ``claude`` binary is absent. Pinned (never ``latest``) so installs are
 #: reproducible; the monthly deps-scan reports drift against npm.
-CLAUDE_CODE_VERSION = "2.1.293"
+CLAUDE_CODE_VERSION = "2.1.316"
 
 #: npm package that ships the ``claude`` binary.
 CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code"
 
 #: Exact Codex CLI release installed by the Codex engine.
 #: Keep this literal assignment scanner-friendly like CLAUDE_CODE_VERSION.
-CODEX_VERSION = "0.161.0"
+CODEX_VERSION = "0.166.0"
 
 #: npm package that ships the ``codex`` binary.
 CODEX_PACKAGE = "@openai/codex"
@@ -72,7 +72,7 @@ CODEX_MCP_STARTUP_TIMEOUT_SECONDS = 60.0
 
 #: Exact OpenCode CLI release installed by the OpenCode engine.
 #: Keep this literal assignment scanner-friendly like CLAUDE_CODE_VERSION.
-OPENCODE_VERSION = "1.18.35"
+OPENCODE_VERSION = "1.19.5"
 
 #: npm package that ships the ``opencode`` binary.
 OPENCODE_PACKAGE = "opencode-ai"

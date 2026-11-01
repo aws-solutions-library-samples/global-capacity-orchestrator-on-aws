@@ -14,6 +14,8 @@ import gzip
 import json
 import logging
 import os
+import platform
+import ssl
 import subprocess
 import sys
 import textwrap
@@ -1359,6 +1361,25 @@ def test_exporter_lifecycle(xray: _XRay) -> None:
     assert xray.requests == []
 
 
+def _assert_os_trust_store(context: object, system: str) -> None:
+    """httpx2's default ``verify`` is the OS trust store on every platform.
+
+    httpcore2 2.16 hands macOS and Windows a ``truststore.SSLContext`` (the
+    platform verifier) and builds Linux a plain context over OpenSSL's
+    compiled-in verify paths, because truststore re-adds those paths on every
+    handshake and OpenSSL < 3.4 accumulates them (sethmlarson/truststore#212).
+    Either way the client verifies against the system CAs, which is the
+    property the exporter relies on.
+    """
+    if system in ("Darwin", "Windows"):
+        assert isinstance(context, truststore.SSLContext)
+        return
+    assert type(context) is ssl.SSLContext
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert context.cert_store_stats()["x509_ca"] > 0, "no system CA loaded"
+
+
 def test_the_default_export_client_trusts_public_cas_and_is_never_instrumented() -> None:
     client = _REAL_EXPORT_CLIENT()
     try:
@@ -1366,6 +1387,20 @@ def test_the_default_export_client_trusts_public_cas_and_is_never_instrumented()
         assert client.follow_redirects is False
         assert client.timeout == httpx2.Timeout(tracing._EXPORT_TIMEOUT_SECONDS)
         assert type(client._transport) is httpx2.HTTPTransport
-        assert isinstance(client._transport._pool._ssl_context, truststore.SSLContext)
+        _assert_os_trust_store(client._transport._pool._ssl_context, platform.system())
+    finally:
+        client.close()
+
+
+def test_the_default_export_client_trusts_the_linux_system_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Linux branch of httpcore2's default context, on whatever host runs the suite."""
+    import httpcore2._ssl
+
+    monkeypatch.setattr(httpcore2._ssl.platform, "system", lambda: "Linux")
+    client = _REAL_EXPORT_CLIENT()
+    try:
+        _assert_os_trust_store(client._transport._pool._ssl_context, "Linux")
     finally:
         client.close()

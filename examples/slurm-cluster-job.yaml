@@ -57,7 +57,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: slurm-test
-        image: python:3.14.8-slim
+        image: python:3.14.9-slim
         command: ["python3", "-c"]
         args:
         - |

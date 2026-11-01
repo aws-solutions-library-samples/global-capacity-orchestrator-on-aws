@@ -78,7 +78,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       floci:
-        image: floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520
+        image: floci/floci:2.4.0@sha256:5ee85db604c4aa74ac76e07ea5cc83086f37bb472bf3dbb97e34019e48efae9c
         ports:
           - 4566:4566
         env:
@@ -100,9 +100,10 @@ jobs:
           # (tags, states, LaunchTime), not a running container.
           FLOCI_SERVICES_EC2_MOCK: "true"
         volumes:
-          # Floci's ECR CreateRepository is Docker-backed and needs the host
-          # socket; without it the emulator answers InternalFailure and the
-          # image-lookup Floci tests skip themselves (see
+          # Floci's ECR proxies a registry:2 container it starts through the
+          # host socket; without one the emulator records repositories but
+          # answers ServerException on DeleteRepository and DescribeImages,
+          # and the image-lookup Floci tests skip themselves (see
           # docs/FLOCI_TESTING.md gap 4). Runner-local socket, pinned image.
           - /var/run/docker.sock:/var/run/docker.sock
     steps:
@@ -183,7 +184,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     services:
       floci:
-        image: floci/floci:2.2.0@sha256:e97cd0c1dc2aa14e7697fb5ef5018404c4d6345169dbd276315f0bed2c7b0520
+        image: floci/floci:2.4.0@sha256:5ee85db604c4aa74ac76e07ea5cc83086f37bb472bf3dbb97e34019e48efae9c
         ports:
           - 4566:4566
         env:

@@ -8,7 +8,7 @@
 # to enable Slurm, set "helm": { "slurm": { "enabled": true } } in cdk.json.
 # The cdk.json setting always takes precedence over the value here.
 #
-# Last updated: 2026-07-26
+# Last updated: 2026-11-01
 # Version check sources:
 #   - KEDA: https://artifacthub.io/packages/helm/kedacore/keda
 #   - OpenCost: https://github.com/opencost/opencost-helm-chart/releases
@@ -43,7 +43,7 @@ charts:
     # that under the older v1.5.0 CRD bundle). Bump this version only in
     # lockstep with PINNED_GATEWAY_CRD_BUNDLES in
     # lambda/helm-installer/handler.py.
-    version: "3.6.0"
+    version: "3.6.2"
     namespace: kube-system
     create_namespace: false
     wait: true
@@ -154,7 +154,7 @@ charts:
     repo_name: eks
     repo_url: https://aws.github.io/eks-charts
     chart: aws-efa-k8s-device-plugin
-    version: "v0.5.33"
+    version: "v0.5.35"
     namespace: kube-system
     create_namespace: false
     values:
@@ -177,7 +177,7 @@ charts:
     repo_name: neuron-oci
     repo_url: oci://public.ecr.aws/neuron
     chart: neuron-helm-chart
-    version: "1.10.0"
+    version: "1.11.2"
     namespace: kube-system
     create_namespace: false
     use_oci: true
@@ -203,7 +203,7 @@ charts:
     repo_name: volcano-sh
     repo_url: https://volcano-sh.github.io/helm-charts
     chart: volcano
-    version: "1.15.3"
+    version: "1.16.0"
     namespace: volcano-system
     create_namespace: true
     # Per-chart readiness gate (honored by handler.install_chart):
@@ -293,7 +293,7 @@ charts:
     repo_name: jetstack
     repo_url: https://charts.jetstack.io
     chart: cert-manager
-    version: "v1.21.2"
+    version: "v1.21.3"
     namespace: cert-manager
     create_namespace: true
     values:
@@ -365,7 +365,7 @@ charts:
     repo_name: jetstack
     repo_url: https://charts.jetstack.io
     chart: trust-manager
-    version: "v0.25.0"
+    version: "v0.26.0"
     namespace: trust-manager
     create_namespace: true
     values:
@@ -401,7 +401,7 @@ charts:
     repo_name: slinky-oci
     repo_url: oci://ghcr.io/slinkyproject/charts
     chart: slurm-operator
-    version: "1.2.3"
+    version: "1.2.4"
     namespace: slurm-operator
     create_namespace: true
     use_oci: true
@@ -415,7 +415,7 @@ charts:
         replicas: 1
         image:
           repository: ghcr.io/slinkyproject/slurm-operator
-          tag: "1.2.3"
+          tag: "1.2.4"
         resources:
           requests:
             cpu: 100m
@@ -432,7 +432,7 @@ charts:
         enabled: true
         image:
           repository: ghcr.io/slinkyproject/slurm-operator-webhook
-          tag: "1.2.3"
+          tag: "1.2.4"
         resources:
           requests:
             cpu: 50m
@@ -464,7 +464,7 @@ charts:
     repo_name: slinky-oci
     repo_url: oci://ghcr.io/slinkyproject/charts
     chart: slurm
-    version: "1.2.3"
+    version: "1.2.4"
     namespace: gco-jobs
     create_namespace: false
     use_oci: true
@@ -723,7 +723,7 @@ charts:
     repo_name: prometheus-community
     repo_url: https://prometheus-community.github.io/helm-charts
     chart: kube-prometheus-stack
-    version: "92.1.1"
+    version: "92.17.0"
     namespace: monitoring
     create_namespace: true
     wait: false
@@ -913,7 +913,7 @@ charts:
     repo_name: opencost
     repo_url: https://opencost.github.io/opencost-helm-chart
     chart: opencost
-    version: "2.5.32"
+    version: "2.5.33"
     namespace: monitoring
     create_namespace: false
     wait: false
@@ -1021,7 +1021,7 @@ charts:
     repo_name: mlflow-oci
     repo_url: oci://ghcr.io/mlflow/charts
     chart: mlflow
-    version: "3.17.0"
+    version: "3.17.2"
     namespace: monitoring
     create_namespace: false
     use_oci: true
@@ -1039,7 +1039,7 @@ charts:
         # to v<appVersion>-full) so the monthly deps-drift report covers
         # it. -full carries the server extras (SQLAlchemy backend, boto3
         # for the S3 artifact proxy) the tracking server needs.
-        tag: "v3.17.0-full"
+        tag: "v3.17.2-full"
       # SQLite run-metadata store on the chart's own gp3 PVC (first-class
       # storage support; mounted at /mlflow). The claim size is a
       # deployment token (cluster_observability.mlflow.persistence_size).
@@ -1285,7 +1285,7 @@ charts:
     repo_name: argo
     repo_url: https://argoproj.github.io/argo-helm
     chart: argo-cd
-    version: "10.10.1"
+    version: "10.11.6"
     namespace: argocd
     create_namespace: true
     wait: true
@@ -1388,7 +1388,7 @@ charts:
     repo_name: crossplane-stable
     repo_url: https://charts.crossplane.io/stable
     chart: crossplane
-    version: "2.4.2"
+    version: "2.4.3"
     namespace: crossplane-system
     create_namespace: true
     wait: true
@@ -1427,7 +1427,7 @@ charts:
     repo_name: crossview
     repo_url: https://crossplane-contrib.github.io/crossview
     chart: crossview
-    version: "4.6.0"
+    version: "4.7.0"
     namespace: crossplane-system
     create_namespace: false
     wait: true
@@ -1435,7 +1435,7 @@ charts:
     values:
       image:
         repository: ghcr.io/crossplane-contrib/crossview
-        tag: "v4.6.0"
+        tag: "v4.7.0"
         pullPolicy: IfNotPresent
       app:
         replicas: 1
@@ -1528,7 +1528,7 @@ charts:
     repo_name: kueue-oci
     repo_url: oci://registry.k8s.io/kueue/charts
     chart: kueue
-    version: "0.20.1"
+    version: "0.20.4"
     namespace: kueue-system
     create_namespace: true
     use_oci: true

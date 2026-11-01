@@ -72,9 +72,9 @@
       "source_commit": "c8a2c18a0d540e23acd5eda86d3aab9db69e5c41"
     },
     "gco/services/inference_monitor.py": {
-      "digest": "84e400ed68e9978e312e217f47de078096726bcc66937e598a104f39ce4e70d3",
-      "generated_at": "2026-10-31T03:37:14Z",
-      "source_commit": "69410dc0745abef57030947bdac84489fb805d23"
+      "digest": "d7cf4603ecc7b8bb2bbe6dd56a5d9b40093312f8312232d65ca86493348973fb",
+      "generated_at": "2026-11-01T14:18:07Z",
+      "source_commit": "e9975a6893f9a2542214f6eb200b4fb05c3230eb"
     },
     "gco/services/manifest_api.py": {
       "digest": "9bb96d43bfe44356bb007d300327ae83824bf37459eadf09aae88019f4c51b92",
@@ -232,9 +232,9 @@
       "source_commit": "503e80ca9adfd5d217fe28b2f27f74fdcdb775a0"
     },
     "lambda/helm-installer/handler.py": {
-      "digest": "f63327349a4497d32deeac7fbf8c0dc22cf23e6d3e519e5c5edb5fa10019255e",
-      "generated_at": "2026-08-30T12:00:00Z",
-      "source_commit": "8cb8e766461f5b7f35205e12db980988598cf6d5"
+      "digest": "12e773f58f69bf2adbc76edd3089d5faaddd377c8a6f975a259d7945056f633f",
+      "generated_at": "2026-11-01T14:18:07Z",
+      "source_commit": "e9975a6893f9a2542214f6eb200b4fb05c3230eb"
     },
     "lambda/helm-installer/teardown_provider.py": {
       "digest": "846fa5eb74ffc9ff796a97d04542084e1782a62826ceceb1a7efc9013158fb9c",

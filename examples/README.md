@@ -408,7 +408,7 @@ maintained, with no planned updates, bug fixes, or security patches.
 ```bash
 gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 \
   -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
-gco inference deploy my-sglang -i lmsysorg/sglang:v0.5.21 --framework sglang \
+gco inference deploy my-sglang -i lmsysorg/sglang:v0.5.23 --framework sglang \
   --port 30000 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```
 

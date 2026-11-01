@@ -2825,7 +2825,7 @@ gco inference deploy my-llm \
 # Deploy with SGLang: the renderer supplies the official launcher and the
 # model comes from -e MODEL=...
 gco inference deploy my-sglang \
-  -i lmsysorg/sglang:v0.5.21 \
+  -i lmsysorg/sglang:v0.5.23 \
   --framework sglang --port 30000 --gpu-count 1 \
   -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 ```

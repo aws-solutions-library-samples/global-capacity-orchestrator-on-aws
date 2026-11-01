@@ -27,6 +27,7 @@ partition change would.
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from unittest.mock import patch
 
@@ -76,7 +77,7 @@ class TestCapacityPoller:
     def test_poll_records_only_the_signals_the_capacity_apis_answer(
         self, history_table, monkeypatch
     ):
-        # Floci 2.2.0's EC2 still rejects get_spot_placement_scores and
+        # Floci 2.4.0's EC2 still rejects get_spot_placement_scores and
         # describe_capacity_block_offerings (UnsupportedOperation) but answers
         # describe_spot_price_history with an empty history -- an
         # authoritative "no spot offering observed" answer. The snapshot must
@@ -141,24 +142,39 @@ class TestCapacityPoller:
 class TestImageLookup:
     @pytest.fixture
     def ecr(self, verified_floci_endpoint: str):
-        """ECR client, skipping when the emulator host cannot create repos.
+        """ECR client, skipping when the emulator has no backing registry.
 
-        ``CreateRepository`` needs the emulator's docker socket; under a local
-        finch-hosted container it fails with ``InternalFailure`` (documented in
-        docs/FLOCI_TESTING.md) while the GitHub-hosted CI emulator supports it.
+        Floci's ECR proxies a ``registry:2`` container it starts through the
+        emulator's docker socket (docs/FLOCI_TESTING.md, gap 4). Without one
+        — a local finch-hosted container — ``CreateRepository`` records the
+        repository but ``DeleteRepository`` answers ``ServerException``
+        ("Backing registry unreachable"; before 2.4.0 the create itself
+        failed with ``InternalFailure``). The GitHub-hosted CI emulator mounts
+        the runner's socket, so the suite runs for real there.
+
+        The canary runs in a throwaway emulator account (Floci routes by the
+        12-digit key id): a repository whose delete failed cannot be removed
+        without the registry, and left in the session's account it would
+        break every later ``DescribeImages`` sweep there — the harness
+        inventory tests describe each repository's images.
         """
-        client = boto3.client("ecr")
-        canary = unique_name("gco/floci-canary")
+        canary_account = "9" + "".join(secrets.choice("0123456789") for _ in range(11))
+        canary_client = boto3.client(
+            "ecr",
+            aws_access_key_id=canary_account,
+            aws_secret_access_key="floci-test-secret",
+        )
+        canary = unique_name("floci-canary")
         try:
-            client.create_repository(repositoryName=canary)
+            canary_client.create_repository(repositoryName=canary)
+            canary_client.delete_repository(repositoryName=canary, force=True)
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             pytest.skip(
-                f"emulator host cannot create ECR repositories ({code}); "
+                f"emulator host has no backing ECR registry ({code}); "
                 "this suite runs fully on the CI emulator"
             )
-        client.delete_repository(repositoryName=canary, force=True)
-        return client
+        return boto3.client("ecr")
 
     def test_create_adopts_an_existing_repository(self, ecr):
         handler = load_lambda_module("image-lookup")

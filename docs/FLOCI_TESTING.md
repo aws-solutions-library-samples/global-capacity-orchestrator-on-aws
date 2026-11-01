@@ -48,7 +48,7 @@ The globs are complements, so their union is always the whole layer.
 ```bash
 docker run --rm -p 4566:4566 -e FLOCI_STORAGE_MODE=memory \
   -e FLOCI_SERVICES_EKS_MOCK=true -e FLOCI_SERVICES_EC2_MOCK=true \
-  floci/floci:2.2.0    # finch/podman work identically
+  floci/floci:2.4.0    # finch/podman work identically
 GCO_FLOCI_ENDPOINT=http://127.0.0.1:4566 pytest tests/test_floci_*.py -v
 ```
 
@@ -93,7 +93,7 @@ isolation against a shared, long-lived local emulator.
 
 ## AWS services exercised
 
-Verified empirically against Floci 2.2.0 (every row is exercised by the
+Verified empirically against Floci 2.4.0 (every row is exercised by the
 committed tests, not inferred from Floci's docs):
 
 | Service | GCO path under test | Depth |
@@ -133,17 +133,21 @@ in-cluster behavior cannot be exercised honestly.
 
 ## Known emulator gaps
 
-Each gap below was probed empirically (re-probed against Floci 2.2.0); the
-first three and the last three have narrow,
+Each gap below was probed empirically (re-probed against Floci 2.4.0); gaps
+1, 2, 6, 7 and 8 have narrow,
 documented answers in `tests/_floci_gap_shims.py` (a botocore `before-send`
 handler per read-only operation — production code is untouched; harness
-subprocesses receive them via `tests/_floci_sitecustomize/`):
+subprocesses receive them via `tests/_floci_sitecustomize/`). Floci 2.4.0
+closed the Availability Zone id gap this list used to carry: `DescribeAvailabilityZones`
+now reports the canonical ids (`use1-az3`, not `us-east-1-az3`) and honors
+the `zone-id` filter, so the regional stack's fail-closed resolution runs
+against the emulator unshimmed.
 
 1. **CloudFormation `GetStackPolicy`** responses omit the result wrapper and
    are unparseable by botocore. The shim answers with real AWS's no-policy
    shape — which is what every GCO stack has.
 2. **X-Ray** is absent from Floci's catalog (re-probed against Floci
-   2.2.0: every operation tried, reads and writes, answers
+   2.4.0: every operation tried, reads and writes, answers
    `UnknownOperationException`). The harness's baseline records each
    Region's X-Ray trace segment destination before anything deploys, so the
    Transaction Search state a run changes can be restored. The shim answers
@@ -155,33 +159,31 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    needs no shim. Global Accelerator, absent through Floci 2.0.1, is modeled
    since 2.2.0, so the harness's GA scanner now runs against the emulator
    unshimmed.
-3. **Availability Zone ids** are not the canonical ones: Floci 2.2.0 reports
-   `<region>-azN` (for example `us-east-1-az3`, not `use1-az3`) and ignores a
-   `zone-id` filter, answering every zone. A credentialed
-   synth runs the regional stack's fail-closed EKS-unsupported-AZ
-   resolution (`DescribeAvailabilityZones` filtered by `zone-id`); the shim
-   answers only that filtered query with the canonical id→name mapping so
-   the fail-closed logic stays exercised instead of bypassed.
-4. **ECR repository creation** is Docker-backed inside Floci and requires a
-   Docker socket in the emulator container. The `floci:integration` job
-   mounts the runner's socket so the `image-lookup` paths run for real in
-   CI; under Finch/containerd-only local setups (no socket to mount)
-   `CreateRepository` fails with `InternalFailure` and those tests skip
-   themselves with that reason.
-5. **EC2 capacity APIs**: `GetSpotPlacementScores` and
+3. **ECR image operations** are proxied to a `registry:2` container Floci
+   starts through a Docker socket in the emulator container. The
+   `floci:integration` job mounts the runner's socket so the `image-lookup`
+   paths run for real in CI; under Finch/containerd-only local setups (no
+   socket to mount) Floci 2.4.0 still records `CreateRepository` but answers
+   `ServerException` ("Backing registry unreachable") on `DeleteRepository`
+   and `DescribeImages` (before 2.4.0 the create itself failed with
+   `InternalFailure`). Those tests skip themselves with that reason, probing
+   from a throwaway emulator account so the undeletable canary repository
+   never lands in the session's account, where the harness inventory tests
+   describe every repository's images.
+4. **EC2 capacity APIs**: `GetSpotPlacementScores` and
    `DescribeCapacityBlockOfferings` reject with `UnsupportedOperation`, while
-   `DescribeSpotPriceHistory` answers an empty history (Floci 2.2.0; earlier
-   releases rejected all three). No shim: the capacity poller recording that
-   one authoritative signal, and nothing for the probes that failed, is the
-   production behavior under test; the all-probes-fail path stays in the
+   `DescribeSpotPriceHistory` answers an empty history (Floci 2.4.0; releases
+   before 2.2.0 rejected all three). No shim: the capacity poller recording
+   that one authoritative signal, and nothing for the probes that failed, is
+   the production behavior under test; the all-probes-fail path stays in the
    unit suite.
-6. **Step Functions `ListExecutions`** keeps returning stopped executions
+5. **Step Functions `ListExecutions`** keeps returning stopped executions
    under `statusFilter=RUNNING`. The teardown drain-loop's
    eventually-reports-zero contract therefore stays in the unit suite; the
    wire-level tests cover start/stop/adopt/describe semantics, which the
    emulator models faithfully.
-7. **SageMaker HyperPod and training plans** are not among the SageMaker
-   actions Floci 2.2.0 models: `ListClusters`, `DescribeCluster`,
+6. **SageMaker HyperPod and training plans** are not among the SageMaker
+   actions Floci 2.4.0 models: `ListClusters`, `DescribeCluster`,
    `ListClusterNodes`, `CreateCluster`, `ListTrainingPlans`,
    `DescribeTrainingPlan` and `SearchTrainingPlanOfferings` all answer
    `ValidationException: Action <name> is not supported` (probed
@@ -194,7 +196,7 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    `HyperpodStatusError` in the status), and the scanner's ownership matching,
    the `hyperpod` live-validation check and the training-plan commands keep
    their coverage in patched-client unit tests.
-8. **The public global-infrastructure parameters** are not served:
+7. **The public global-infrastructure parameters** are not served:
    `GetParametersByPath` under `/aws/service/global-infrastructure/` answers
    an empty page. botocore names no Region for AWS PCS (the service ships
    only an endpoint ruleset), so the harness inventory reads PCS's Regions
@@ -205,16 +207,27 @@ subprocesses receive them via `tests/_floci_sitecustomize/`):
    copy of AWS's (production reads the live parameters, so there is no list
    to keep in sync) — and lets every other parameter read reach the
    emulator.
-9. **AWS PCS** is absent from the catalog entirely: `ListClusters`,
+8. **AWS PCS** is absent from the catalog entirely: `ListClusters`,
    `GetCluster` and `CreateCluster` answer `UnknownOperationException`
-   (probed 2026-10-31). The shim answers `ListClusters` with the empty page
-   so the inventory's `pcs` scanner runs in the Regions gap 8 names;
+   (re-probed 2026-11-01 against 2.4.0). The shim answers `ListClusters` with
+   the empty page so the inventory's `pcs` scanner runs in the Regions gap 7
+   names;
    `cli.pcs_preflight`, `PcsBackend`'s `GetCluster` and the `pcs-lookup`
    custom resource keep their coverage in patched-client unit tests, while
    the parts of the PCS feature that never call the PCS API — the login-node
    finder over CloudFormation, EC2 and SSM, and the backend's Secrets Manager
    key read — run here for real (`test_floci_pcs_login.py`,
    `test_floci_pcs_backend.py`).
+9. **PCS's system tag cannot be fabricated.** PCS stamps
+   `aws:pcs:compute-node-group-id` on every compute node group instance, and
+   the login-node finder filters on it. Floci models no PCS to do the
+   stamping, and since 2.3 it refuses caller-set `aws:` keys the way EC2 does
+   (`InvalidParameterValue: Tag keys starting with 'aws:' are reserved for
+   internal use`, on `RunInstances` and `CreateTags` alike). No shim:
+   `test_floci_pcs_login.py` launches its instances under a stand-in key and
+   points the finder's filter at it, so the filter, state and newest-first
+   logic run for real while the production key's spelling stays pinned in the
+   unit suite (`test_pcs_login.py`).
 
 ## Where the E2E stops, and why
 

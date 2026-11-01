@@ -668,7 +668,7 @@ def _failed_job_object() -> dict[str, Any]:
                     "containers": [
                         {
                             "name": "trainer",
-                            "image": "python:3.14.8-slim",
+                            "image": "python:3.14.9-slim",
                             "command": ["python", "-c", "raise SystemExit(1)"],
                             "resources": {
                                 "limits": {"cpu": "1", "memory": "1Gi"},
