@@ -31,7 +31,7 @@ When `hyperpod.enabled` is true for a Region, the regional stack
 
 | Resource | Purpose |
 |----------|---------|
-| `AWS::SageMaker::Cluster` `<project>-hyperpod` | The HyperPod cluster, with `Orchestrator.Eks` pointing at the regional EKS cluster and `NodeRecovery` from the block (`Automatic` by default). One instance group per `hyperpod.instance_groups` entry. |
+| `AWS::SageMaker::Cluster` `<project>-hyperpod` | The HyperPod cluster, with `Orchestrator.Eks` pointing at the regional EKS cluster and `NodeRecovery` from the block (`Automatic` by default). One instance group per `hyperpod.instance_groups` entry. HyperPod also creates the CloudWatch log group `/aws/sagemaker/Clusters/<cluster name>/<cluster id>` for the nodes' logs and never deletes it; `gco stacks destroy` removes it with the stack's other service-created log groups, and the live-validation harness owns it like the EKS control-plane group. |
 | Execution role | Trusted by `sagemaker.amazonaws.com`; carries the AWS-managed `AmazonSageMakerClusterInstanceRolePolicy` plus the ENI, ECR and Pod Identity actions HyperPod documents for EKS orchestration, and read access to the lifecycle script. |
 | `AWS::EKS::AccessEntry` of type `HYPERPOD_LINUX` | How the nodes authenticate to the cluster. The EKS cluster is access-entries only; this entry takes no access policies. |
 | Security group `<project>-hyperpod-sg-<region>` | All traffic within the group (training traffic, EFA) and all traffic to and from the EKS cluster security group (kubelet and control plane, both ways). |

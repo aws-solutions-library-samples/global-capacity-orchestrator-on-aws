@@ -143,7 +143,14 @@ _LOG_GROUP_SOURCE_TYPES = {
     "AWS::EKS::Cluster",
     "AWS::Lambda::Function",
     "AWS::Logs::LogGroup",
+    "AWS::SageMaker::Cluster",
 }
+
+#: Where SageMaker HyperPod writes a cluster's node logs: the service creates
+#: ``/aws/sagemaker/Clusters/<cluster name>/<cluster id>`` with the cluster
+#: and never deletes it, so it is derived from the stack's cluster resource
+#: and owned like the EKS control-plane group.
+_HYPERPOD_LOG_GROUP_PREFIX = "/aws/sagemaker/Clusters"
 
 
 _EKS_LOG_GROUP_SUFFIXES = ("application", "dataplane", "host", "performance")

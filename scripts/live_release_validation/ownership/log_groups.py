@@ -14,6 +14,7 @@ from botocore.exceptions import ClientError
 
 from ..constants import (
     _EKS_LOG_GROUP_SUFFIXES,
+    _HYPERPOD_LOG_GROUP_PREFIX,
     _LOG_CLEANUP_TOKEN_TAG,
     _LOG_GROUP_CHECKPOINT_STABLE_OBSERVATIONS,
     _LOG_GROUP_CLEANUP_STABLE_OBSERVATIONS,
@@ -109,7 +110,19 @@ def _settle_rolling_back_stack(
     )
 
 
-def _derived_log_group_names(resource_type: str, physical_id: str) -> tuple[str, ...]:
+#: The physical id of an ``AWS::SageMaker::Cluster`` resource is the cluster
+#: ARN; its last segment is the cluster id HyperPod puts in the log-group name.
+_SAGEMAKER_CLUSTER_ARN = re.compile(
+    r"^arn:[^:]+:sagemaker:(?P<region>[a-z0-9-]+):(?P<account>\d{12})"
+    r":cluster/(?P<cluster_id>[a-z0-9]+)$"
+)
+
+
+def _derived_log_group_names(
+    resource_type: str,
+    physical_id: str,
+    service_identity: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
     if resource_type == "AWS::Logs::LogGroup":
         return (physical_id,)
     if resource_type == "AWS::Lambda::Function":
@@ -122,7 +135,92 @@ def _derived_log_group_names(resource_type: str, physical_id: str) -> tuple[str,
                 for suffix in _EKS_LOG_GROUP_SUFFIXES
             ),
         )
+    if resource_type == "AWS::SageMaker::Cluster":
+        # HyperPod writes the cluster's node logs to
+        # /aws/sagemaker/Clusters/<cluster name>/<cluster id>, a group the
+        # service creates and never deletes. The ARN the stack resource
+        # carries has the id but not the name, so the name comes from the
+        # service identity (describe_cluster, or the group itself once a
+        # rolled-back cluster is gone).
+        match = _SAGEMAKER_CLUSTER_ARN.match(physical_id)
+        name = str((service_identity or {}).get("name") or "")
+        if match is None or not name or "/" in name:
+            return ()
+        return (f"{_HYPERPOD_LOG_GROUP_PREFIX}/{name}/{match.group('cluster_id')}",)
     return ()
+
+
+def _hyperpod_cluster_log_authority_identity(
+    ctx: RunContext,
+    region: str,
+    cluster_arn: str,
+    *,
+    allow_deleted: bool,
+) -> dict[str, str]:
+    """Resolve the exact HyperPod cluster behind a stack resource's ARN.
+
+    ``describe_cluster`` accepts the ARN and answers the name the log group
+    carries. A rolled-back create may have deleted the cluster already while
+    its log group survives; then the only place the name still exists is the
+    group itself, found by the cluster id (the ARN's last segment) under the
+    service prefix, and the identity is a DELETED tombstone. No group means
+    nothing to own.
+    """
+    match = _SAGEMAKER_CLUSTER_ARN.match(cluster_arn)
+    if (
+        match is None
+        or match.group("region") != region
+        or match.group("account") != ctx.settings.expected_account
+    ):
+        raise RuntimeError(f"HyperPod cluster ARN is not this account's in {region}: {cluster_arn}")
+    cluster_id = match.group("cluster_id")
+    sagemaker = ctx.session.client("sagemaker", region_name=region)
+    try:
+        cluster = sagemaker.describe_cluster(ClusterName=cluster_arn)
+    except ClientError as exc:
+        if not (
+            allow_deleted and exc.response.get("Error", {}).get("Code", "") == "ResourceNotFound"
+        ):
+            raise
+    else:
+        identity = {
+            "name": str(cluster.get("ClusterName") or ""),
+            "arn": str(cluster.get("ClusterArn") or ""),
+            "status": str(cluster.get("ClusterStatus") or ""),
+        }
+        # Pre-destroy authority wants the cluster the stack finished creating;
+        # a rollback may leave it Failed or Deleting, which still names the
+        # group the service created for it.
+        if (
+            identity["arn"] != cluster_arn
+            or not identity["name"]
+            or not identity["status"]
+            or (identity["status"] != "InService" and not allow_deleted)
+        ):
+            raise RuntimeError(
+                f"HyperPod cluster identity is not exact and InService for {region}:{cluster_arn}"
+            )
+        return identity
+    logs = ctx.session.client("logs", region_name=region)
+    names = [
+        str(group.get("logGroupName") or "")
+        for page in logs.get_paginator("describe_log_groups").paginate(
+            logGroupNamePrefix=f"{_HYPERPOD_LOG_GROUP_PREFIX}/"
+        )
+        for group in page.get("logGroups", [])
+    ]
+    suffix = f"/{cluster_id}"
+    survivors = sorted(
+        name
+        for name in names
+        if name.endswith(suffix) and name.count("/") == _HYPERPOD_LOG_GROUP_PREFIX.count("/") + 2
+    )
+    if len(survivors) > 1:
+        raise RuntimeError(
+            f"HyperPod cluster {cluster_id} in {region} has more than one surviving log group"
+        )
+    name = survivors[0].rsplit("/", 2)[1] if survivors else ""
+    return {"name": name, "arn": cluster_arn, "status": "DELETED"}
 
 
 def _live_eks_cluster_identity(
@@ -208,15 +306,36 @@ def _validated_owned_log_group_identity(
     # The source stack may be the current generation or, after an adopted
     # in-place upgrade, one it replaced (its retained log groups outlive it).
     owned_stack_ids = _owned_stack_ids(ctx, region, stack_name)
+    source_service_identity = record.get("source_service_identity")
     if (
         not name
         or not logical_id
         or resource_type not in _LOG_GROUP_SOURCE_TYPES
-        or name not in _derived_log_group_names(resource_type, physical_id)
+        or name
+        not in _derived_log_group_names(
+            resource_type,
+            physical_id,
+            source_service_identity if isinstance(source_service_identity, Mapping) else None,
+        )
     ):
         raise RuntimeError(f"Log-group checkpoint source is invalid for {region}:{name}")
-    source_service_identity = record.get("source_service_identity")
-    if resource_type == "AWS::EKS::Cluster":
+    if resource_type == "AWS::SageMaker::Cluster":
+        # The ARN is this account's and this Region's, and the identity is the
+        # service's own answer for it (or the DELETED tombstone a rolled-back
+        # create leaves, named from the surviving group).
+        match = _SAGEMAKER_CLUSTER_ARN.match(physical_id)
+        if (
+            match is None
+            or match.group("region") != region
+            or match.group("account") != ctx.settings.expected_account
+            or not isinstance(source_service_identity, Mapping)
+            or source_service_identity.get("arn") != physical_id
+            or not source_service_identity.get("status")
+        ):
+            raise RuntimeError(
+                f"Log-group checkpoint lacks exact HyperPod cluster identity for {region}:{name}"
+            )
+    elif resource_type == "AWS::EKS::Cluster":
         expected_arn = (
             f"arn:{partition}:eks:{region}:{ctx.settings.expected_account}:cluster/{physical_id}"
         )
@@ -752,7 +871,16 @@ def _checkpoint_owned_log_groups(ctx: RunContext) -> list[dict[str, Any]]:
                         physical_id,
                         allow_deleted=rolled_back,
                     )
-                names = _derived_log_group_names(resource_type, physical_id)
+                elif resource_type == "AWS::SageMaker::Cluster":
+                    source_service_identity = _hyperpod_cluster_log_authority_identity(
+                        ctx,
+                        region,
+                        physical_id,
+                        allow_deleted=rolled_back,
+                    )
+                names = _derived_log_group_names(
+                    resource_type, physical_id, source_service_identity
+                )
                 if resource_type == "AWS::Lambda::Function":
                     default_name = f"/aws/lambda/{physical_id}"
                     try:

@@ -29,6 +29,7 @@ from ..ownership.ecr import (
 from ..ownership.efs_automatic_backups import (
     _strip_accepted_efs_automatic_backup_recovery_points,
 )
+from ..ownership.hyperpod_clusters import _strip_deleted_hyperpod_clusters
 from ..ownership.kms import (
     _strip_expected_pending_kms,
 )
@@ -105,6 +106,10 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         ctx,
         residual_inventory,
     )
+    residual_inventory, accepted_deleted_hyperpod_clusters = _strip_deleted_hyperpod_clusters(
+        ctx,
+        residual_inventory,
+    )
     transaction_search = _verify_transaction_search_restored(ctx)
     summary = summarize_project_resources(residual_inventory)
     result = {
@@ -120,6 +125,7 @@ def action_final_inventory(ctx: RunContext) -> dict[str, Any]:
         "accepted_expired_dynamodb_streams": accepted_expired_streams,
         "accepted_deleted_vpc_endpoints": accepted_deleted_vpc_endpoints,
         "accepted_deleted_volumes": accepted_deleted_volumes,
+        "accepted_deleted_hyperpod_clusters": accepted_deleted_hyperpod_clusters,
         "residual_project_resources": residual_inventory,
         "transaction_search": transaction_search,
     }

@@ -2496,6 +2496,21 @@ def _eks_identity(status: str = "ACTIVE") -> dict[str, str]:
     return {"name": _CLUSTER, "arn": _CLUSTER_ARN, "status": status}
 
 
+_HYPERPOD_NAME = f"{_PROJECT}-hyperpod"
+_HYPERPOD_ID = "2b6s56ajc992"
+_HYPERPOD_ARN = f"arn:aws:sagemaker:{_REGION}:{_ACCOUNT}:cluster/{_HYPERPOD_ID}"
+_HYPERPOD_LOG_GROUP = f"/aws/sagemaker/Clusters/{_HYPERPOD_NAME}/{_HYPERPOD_ID}"
+
+
+def _hyperpod_identity(status: str = "InService") -> dict[str, str]:
+    return {"name": _HYPERPOD_NAME, "arn": _HYPERPOD_ARN, "status": status}
+
+
+def _hyperpod_cluster(status: str = "InService") -> dict[str, str]:
+    """A ``describe_cluster`` answer for the fixture cluster."""
+    return {"ClusterName": _HYPERPOD_NAME, "ClusterArn": _HYPERPOD_ARN, "ClusterStatus": status}
+
+
 class TestDerivedLogGroupNames:
     def test_each_source_type_derives_its_exact_group_names(self) -> None:
         derive = ownership_log_groups._derived_log_group_names
@@ -2509,6 +2524,138 @@ class TestDerivedLogGroupNames:
             f"/aws/containerinsights/{_CLUSTER}/performance",
         )
         assert derive("AWS::S3::Bucket", "bucket") == ()
+
+    def test_hyperpod_cluster_group_needs_the_arn_and_the_cluster_name(self) -> None:
+        """HyperPod's group carries the cluster *name*, which the ARN lacks."""
+        derive = ownership_log_groups._derived_log_group_names
+        assert derive("AWS::SageMaker::Cluster", _HYPERPOD_ARN, _hyperpod_identity()) == (
+            _HYPERPOD_LOG_GROUP,
+        )
+        assert derive("AWS::SageMaker::Cluster", _HYPERPOD_ARN) == ()
+        assert derive("AWS::SageMaker::Cluster", _HYPERPOD_ARN, {"name": ""}) == ()
+        assert derive("AWS::SageMaker::Cluster", _HYPERPOD_ARN, {"name": "a/b"}) == ()
+        assert derive("AWS::SageMaker::Cluster", "gco-hyperpod", _hyperpod_identity()) == ()
+
+
+class TestHyperpodClusterLogAuthorityIdentity:
+    def _ctx(
+        self,
+        cluster: dict[str, Any] | None,
+        *,
+        error: ClientError | None = None,
+        surviving_groups: list[str] | None = None,
+    ) -> tuple[Any, MagicMock, MagicMock]:
+        ctx = _ctx()
+        sagemaker = MagicMock(name="sagemaker")
+        if error is not None:
+            sagemaker.describe_cluster.side_effect = error
+        else:
+            sagemaker.describe_cluster.return_value = cluster or {}
+        logs = MagicMock(name="logs")
+        logs.get_paginator.return_value.paginate.return_value = [
+            {"logGroups": [{"logGroupName": name} for name in (surviving_groups or [])]}
+        ]
+        _route(ctx, {"sagemaker": sagemaker, "logs": logs})
+        return ctx, sagemaker, logs
+
+    def test_live_identity_is_the_services_answer_for_the_exact_arn(self) -> None:
+        ctx, sagemaker, logs = self._ctx(_hyperpod_cluster())
+        assert (
+            ownership_log_groups._hyperpod_cluster_log_authority_identity(
+                ctx, _REGION, _HYPERPOD_ARN, allow_deleted=False
+            )
+            == _hyperpod_identity()
+        )
+        sagemaker.describe_cluster.assert_called_once_with(ClusterName=_HYPERPOD_ARN)
+        logs.get_paginator.assert_not_called()
+
+        # Pre-destroy authority wants InService; a rollback may read Failed.
+        ctx, _sagemaker, _logs = self._ctx(_hyperpod_cluster(status="Failed"))
+        with pytest.raises(RuntimeError, match="not exact and InService"):
+            ownership_log_groups._hyperpod_cluster_log_authority_identity(
+                ctx, _REGION, _HYPERPOD_ARN, allow_deleted=False
+            )
+        assert ownership_log_groups._hyperpod_cluster_log_authority_identity(
+            ctx, _REGION, _HYPERPOD_ARN, allow_deleted=True
+        ) == _hyperpod_identity("Failed")
+
+        for answer in (
+            {**_hyperpod_cluster(), "ClusterArn": f"{_HYPERPOD_ARN}0"},
+            {**_hyperpod_cluster(), "ClusterName": ""},
+            {**_hyperpod_cluster(), "ClusterStatus": ""},
+        ):
+            ctx, _sagemaker, _logs = self._ctx(answer)
+            with pytest.raises(RuntimeError, match="not exact and InService"):
+                ownership_log_groups._hyperpod_cluster_log_authority_identity(
+                    ctx, _REGION, _HYPERPOD_ARN, allow_deleted=True
+                )
+
+    def test_a_foreign_arn_is_refused_before_any_call(self) -> None:
+        ctx, sagemaker, _logs = self._ctx(_hyperpod_cluster())
+        for arn in (
+            _HYPERPOD_ARN.replace(_REGION, _OTHER_REGION),
+            _HYPERPOD_ARN.replace(_ACCOUNT, "210987654321"),
+            "gco-hyperpod",
+        ):
+            with pytest.raises(RuntimeError, match="not this account's"):
+                ownership_log_groups._hyperpod_cluster_log_authority_identity(
+                    ctx, _REGION, arn, allow_deleted=True
+                )
+        sagemaker.describe_cluster.assert_not_called()
+
+    def test_deleted_tombstone_is_named_from_the_surviving_group(self) -> None:
+        not_found = _client_error("ResourceNotFound", "DescribeCluster")
+        ctx, _sagemaker, _logs = self._ctx(None, error=not_found)
+        with pytest.raises(ClientError):
+            ownership_log_groups._hyperpod_cluster_log_authority_identity(
+                ctx, _REGION, _HYPERPOD_ARN, allow_deleted=False
+            )
+
+        ctx, _sagemaker, logs = self._ctx(
+            None,
+            error=not_found,
+            surviving_groups=[
+                f"/aws/sagemaker/Clusters/other/{_HYPERPOD_ID}x",
+                "/aws/sagemaker/Clusters/nested/extra/" + _HYPERPOD_ID,
+                _HYPERPOD_LOG_GROUP,
+            ],
+        )
+        assert ownership_log_groups._hyperpod_cluster_log_authority_identity(
+            ctx, _REGION, _HYPERPOD_ARN, allow_deleted=True
+        ) == _hyperpod_identity("DELETED")
+        logs.get_paginator.return_value.paginate.assert_called_once_with(
+            logGroupNamePrefix="/aws/sagemaker/Clusters/"
+        )
+
+        # No surviving group: nothing to own, so the tombstone carries no name
+        # and derives no group.
+        ctx, _sagemaker, _logs = self._ctx(None, error=not_found, surviving_groups=[])
+        tombstone = ownership_log_groups._hyperpod_cluster_log_authority_identity(
+            ctx, _REGION, _HYPERPOD_ARN, allow_deleted=True
+        )
+        assert tombstone == {"name": "", "arn": _HYPERPOD_ARN, "status": "DELETED"}
+        assert (
+            ownership_log_groups._derived_log_group_names(
+                "AWS::SageMaker::Cluster", _HYPERPOD_ARN, tombstone
+            )
+            == ()
+        )
+
+        ctx, _sagemaker, _logs = self._ctx(
+            None,
+            error=not_found,
+            surviving_groups=[_HYPERPOD_LOG_GROUP, f"/aws/sagemaker/Clusters/twin/{_HYPERPOD_ID}"],
+        )
+        with pytest.raises(RuntimeError, match="more than one surviving log group"):
+            ownership_log_groups._hyperpod_cluster_log_authority_identity(
+                ctx, _REGION, _HYPERPOD_ARN, allow_deleted=True
+            )
+
+        ctx, _sagemaker, _logs = self._ctx(None, error=_client_error("AccessDeniedException"))
+        with pytest.raises(ClientError):
+            ownership_log_groups._hyperpod_cluster_log_authority_identity(
+                ctx, _REGION, _HYPERPOD_ARN, allow_deleted=True
+            )
 
 
 class TestEksClusterLogAuthorityIdentity:
@@ -2602,6 +2749,16 @@ class TestValidatedOwnedLogGroupIdentity:
                     source_service_identity=_eks_identity(status),
                 ),
             ) == (_REGION, f"/aws/containerinsights/{_CLUSTER}/host")
+        for status in ("InService", "Failed", "DELETED"):
+            assert validate(
+                _ctx(),
+                _log_group_record(
+                    name=_HYPERPOD_LOG_GROUP,
+                    source_resource_type="AWS::SageMaker::Cluster",
+                    source_physical_id=_HYPERPOD_ARN,
+                    source_service_identity=_hyperpod_identity(status),
+                ),
+            ) == (_REGION, _HYPERPOD_LOG_GROUP)
 
     @pytest.mark.parametrize(
         ("state_override", "record_override", "match"),
@@ -2632,6 +2789,64 @@ class TestValidatedOwnedLogGroupIdentity:
                 "lacks exact live EKS identity",
             ),
             ({}, {"source_service_identity": _eks_identity()}, "Unexpected service identity"),
+            # A HyperPod record whose name no longer derives from its identity,
+            # or whose identity is not the service's exact answer for the ARN.
+            (
+                {},
+                {
+                    "name": _HYPERPOD_LOG_GROUP,
+                    "source_resource_type": "AWS::SageMaker::Cluster",
+                    "source_physical_id": _HYPERPOD_ARN,
+                    "source_service_identity": {**_hyperpod_identity(), "name": "renamed"},
+                },
+                "source is invalid",
+            ),
+            (
+                {},
+                {
+                    "name": _HYPERPOD_LOG_GROUP,
+                    "source_resource_type": "AWS::SageMaker::Cluster",
+                    "source_physical_id": _HYPERPOD_ARN,
+                },
+                "source is invalid",
+            ),
+            (
+                {},
+                {
+                    "name": _HYPERPOD_LOG_GROUP,
+                    "source_resource_type": "AWS::SageMaker::Cluster",
+                    "source_physical_id": _HYPERPOD_ARN,
+                    "source_service_identity": {**_hyperpod_identity(), "arn": f"{_HYPERPOD_ARN}0"},
+                },
+                "lacks exact HyperPod cluster identity",
+            ),
+            (
+                {},
+                {
+                    "name": _HYPERPOD_LOG_GROUP,
+                    "source_resource_type": "AWS::SageMaker::Cluster",
+                    "source_physical_id": _HYPERPOD_ARN,
+                    "source_service_identity": {**_hyperpod_identity(), "status": ""},
+                },
+                "lacks exact HyperPod cluster identity",
+            ),
+            (
+                {},
+                {
+                    "name": _HYPERPOD_LOG_GROUP.replace(_HYPERPOD_ID, "a1b2c3d4e5f6"),
+                    "source_resource_type": "AWS::SageMaker::Cluster",
+                    "source_physical_id": _HYPERPOD_ARN.replace(
+                        _HYPERPOD_ID, "a1b2c3d4e5f6"
+                    ).replace(_REGION, _OTHER_REGION),
+                    "source_service_identity": {
+                        **_hyperpod_identity(),
+                        "arn": _HYPERPOD_ARN.replace(_HYPERPOD_ID, "a1b2c3d4e5f6").replace(
+                            _REGION, _OTHER_REGION
+                        ),
+                    },
+                },
+                "lacks exact HyperPod cluster identity",
+            ),
             ({"owned_stacks": {}}, {}, "authority is invalid"),
             ({}, {"stack_id": f"{_STACK_ID}-2"}, "authority is invalid"),
             (
@@ -2990,6 +3205,8 @@ class _CheckpointHarness:
         self.lambda_client.get_function_configuration.return_value = {"LoggingConfig": {}}
         self.eks = MagicMock(name="eks")
         self.eks.describe_cluster.return_value = {"cluster": _eks_identity()}
+        self.sagemaker = MagicMock(name="sagemaker")
+        self.sagemaker.describe_cluster.return_value = _hyperpod_cluster()
         _route(
             self.ctx,
             {
@@ -2997,6 +3214,7 @@ class _CheckpointHarness:
                 "logs": self.logs,
                 "lambda": self.lambda_client,
                 "eks": self.eks,
+                "sagemaker": self.sagemaker,
             },
         )
         self.live_stack = (
@@ -3329,6 +3547,57 @@ class TestCheckpointOwnedLogGroups:
         assert all(
             record["source_service_identity"] == _eks_identity("DELETED") for record in records
         )
+
+    def test_hyperpod_cluster_group_carries_the_live_cluster_identity(self) -> None:
+        """The service-created ``/aws/sagemaker/Clusters/<name>/<id>`` group is owned.
+
+        The fourth #502 release attempt's final inventory found it after the
+        stack was gone: HyperPod creates it with the cluster and never deletes
+        it, and nothing had derived it from the stack's cluster resource.
+        """
+        harness = _CheckpointHarness(
+            [_resource("AWS::SageMaker::Cluster", "HyperpodCluster", _HYPERPOD_ARN)]
+        )
+
+        def observe(client: Any, region: str, name: str, **kwargs: Any) -> dict[str, Any]:
+            return _present(_identity(arn=f"arn:aws:logs:{_REGION}:{_ACCOUNT}:log-group:{name}"))
+
+        records = harness.run(observe)
+        assert [record["name"] for record in records] == [_HYPERPOD_LOG_GROUP]
+        assert records[0]["source_physical_id"] == _HYPERPOD_ARN
+        assert records[0]["source_service_identity"] == _hyperpod_identity()
+        harness.sagemaker.describe_cluster.assert_called_once_with(ClusterName=_HYPERPOD_ARN)
+
+        # A rolled-back create whose cluster is already gone: the group is
+        # found by the cluster id and owned under the DELETED tombstone; with
+        # no surviving group there is nothing to own.
+        harness = _CheckpointHarness(
+            [
+                _resource(
+                    "AWS::SageMaker::Cluster", "HyperpodCluster", _HYPERPOD_ARN, "DELETE_COMPLETE"
+                )
+            ],
+            stack_status="ROLLBACK_COMPLETE",
+        )
+        harness.sagemaker.describe_cluster.side_effect = _client_error("ResourceNotFound")
+        harness.logs.get_paginator.return_value.paginate.return_value = [
+            {"logGroups": [{"logGroupName": _HYPERPOD_LOG_GROUP}]}
+        ]
+        records = harness.run(observe)
+        assert [record["name"] for record in records] == [_HYPERPOD_LOG_GROUP]
+        assert records[0]["source_service_identity"] == _hyperpod_identity("DELETED")
+
+        harness = _CheckpointHarness(
+            [
+                _resource(
+                    "AWS::SageMaker::Cluster", "HyperpodCluster", _HYPERPOD_ARN, "DELETE_COMPLETE"
+                )
+            ],
+            stack_status="ROLLBACK_COMPLETE",
+        )
+        harness.sagemaker.describe_cluster.side_effect = _client_error("ResourceNotFound")
+        harness.logs.get_paginator.return_value.paginate.return_value = [{"logGroups": []}]
+        assert harness.run(observe) == []
 
     def test_previous_record_is_revalidated_against_its_own_generation(self) -> None:
         previous = _log_group_record(observed_identity=_identity())

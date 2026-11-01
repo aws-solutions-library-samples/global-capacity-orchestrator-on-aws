@@ -55,6 +55,9 @@ from scripts.live_release_validation.ownership import dynamodb_streams as owners
 from scripts.live_release_validation.ownership import ebs_volumes as ownership_ebs_volumes
 from scripts.live_release_validation.ownership import ecr as ownership_ecr
 from scripts.live_release_validation.ownership import efs_automatic_backups as ownership_efs_backups
+from scripts.live_release_validation.ownership import (
+    hyperpod_clusters as ownership_hyperpod_clusters,
+)
 from scripts.live_release_validation.ownership import log_groups as ownership_log_groups
 from scripts.live_release_validation.ownership import stacks as ownership_stacks
 from scripts.live_release_validation.ownership import vpc_endpoints as ownership_vpc_endpoints
@@ -6394,6 +6397,158 @@ class TestStripDeletedVpcEndpoints:
         assert inventory == snapshot
 
 
+class TestStripDeletedHyperpodClusters:
+    """``_strip_deleted_hyperpod_clusters`` — Tagging API lag on a deleted HyperPod cluster.
+
+    Pins the fourth #502 release attempt's teardown: the regional stack's
+    SageMaker HyperPod cluster was deleted with the stack, yet
+    ``final-inventory`` still saw its ``sagemaker:…:cluster/<id>`` ARN (stack
+    tags intact) in the Tagging API index while ``DescribeCluster`` already
+    answered ``ResourceNotFound`` and the ``hyperpod`` scanner listed nothing.
+    Acceptance needs the service to prove the cluster gone; a cluster still
+    ``Deleting`` (or in any other live status) keeps its entry as residue.
+    """
+
+    _ACCOUNT = "123456789012"
+    _REGION = "us-east-1"
+    _CLUSTER_ID = "2b6s56ajc992"
+    _ARN = f"arn:aws:sagemaker:{_REGION}:{_ACCOUNT}:cluster/{_CLUSTER_ID}"
+    _TAGS = {
+        "aws:cloudformation:stack-name": "gco-us-east-1",
+        "aws:cloudformation:logical-id": "HyperpodClusterA7B723C0",
+        "gco:hyperpod-cluster": "gco-hyperpod",
+    }
+
+    def _inventory(self, *entries: dict[str, object]) -> dict[str, object]:
+        return {
+            "regional": {
+                self._REGION: {"tagged_resources": list(entries), "hyperpod_clusters": []},
+            }
+        }
+
+    def _ctx(self, *, status: str | None) -> tuple[SimpleNamespace, MagicMock]:
+        """``status=None`` makes SageMaker answer ResourceNotFound; otherwise the given status."""
+        sagemaker = MagicMock()
+        if status is None:
+            sagemaker.describe_cluster.side_effect = ClientError(
+                {"Error": {"Code": "ResourceNotFound", "Message": "gone"}},
+                "DescribeCluster",
+            )
+        else:
+            sagemaker.describe_cluster.return_value = {
+                "ClusterArn": self._ARN,
+                "ClusterName": "gco-hyperpod",
+                "ClusterStatus": status,
+            }
+        ctx = _context()
+        ctx.session = MagicMock()
+        ctx.session.client.return_value = sagemaker
+        return ctx, sagemaker
+
+    def test_not_found_cluster_is_stripped_with_evidence(self):
+        ctx, sagemaker = self._ctx(status=None)
+        inventory = self._inventory({"arn": self._ARN, "tags": dict(self._TAGS)})
+        residual, accepted = ownership_hyperpod_clusters._strip_deleted_hyperpod_clusters(
+            ctx, inventory
+        )
+        assert self._REGION not in residual["regional"]
+        assert accepted == [
+            {
+                "region": self._REGION,
+                "arn": self._ARN,
+                "cluster_id": self._CLUSTER_ID,
+                "cluster_status": "ABSENT",
+                "authority": "sagemaker:DescribeCluster",
+                "tags": self._TAGS,
+                "note": (
+                    "the Resource Groups Tagging API index lags cluster deletion; "
+                    "SageMaker is the authority for existence"
+                ),
+            }
+        ]
+        sagemaker.describe_cluster.assert_called_once_with(ClusterName=self._ARN)
+        assert ctx.session.client.call_args.kwargs["region_name"] == self._REGION
+
+    @pytest.mark.parametrize("status", ["Deleting", "InService", "Failed", "Creating"])
+    def test_a_cluster_the_service_still_knows_keeps_its_entry(self, status):
+        ctx, _sagemaker = self._ctx(status=status)
+        entry = {"arn": self._ARN, "tags": {}}
+        residual, accepted = ownership_hyperpod_clusters._strip_deleted_hyperpod_clusters(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+
+    def test_a_cluster_without_a_status_is_kept_as_unknown(self):
+        ctx, sagemaker = self._ctx(status="InService")
+        sagemaker.describe_cluster.return_value = {"ClusterArn": self._ARN}
+        entry = {"arn": self._ARN, "tags": {}}
+        residual, accepted = ownership_hyperpod_clusters._strip_deleted_hyperpod_clusters(
+            ctx, self._inventory(entry)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [entry]
+        assert accepted == []
+
+    def test_non_cluster_and_foreign_entries_are_untouched(self):
+        ctx, sagemaker = self._ctx(status=None)
+        plan = {
+            "arn": f"arn:aws:sagemaker:{self._REGION}:{self._ACCOUNT}:training-plan/abc123def456"
+        }
+        wrong_account = {"arn": f"arn:aws:sagemaker:{self._REGION}:999999999999:cluster/abc123"}
+        wrong_region = {"arn": f"arn:aws:sagemaker:eu-west-1:{self._ACCOUNT}:cluster/abc123"}
+        endpoint = {"arn": f"arn:aws:sagemaker:{self._REGION}:{self._ACCOUNT}:endpoint/gco"}
+        residual, accepted = ownership_hyperpod_clusters._strip_deleted_hyperpod_clusters(
+            ctx, self._inventory(plan, wrong_account, wrong_region, endpoint)
+        )
+        assert residual["regional"][self._REGION]["tagged_resources"] == [
+            plan,
+            wrong_account,
+            wrong_region,
+            endpoint,
+        ]
+        assert accepted == []
+        sagemaker.describe_cluster.assert_not_called()
+
+    def test_region_with_other_resources_keeps_its_bucket(self):
+        ctx, _sagemaker = self._ctx(status=None)
+        inventory = {
+            "regional": {
+                self._REGION: {
+                    "tagged_resources": [{"arn": self._ARN, "tags": {}}],
+                    "cloudwatch_log_groups": [
+                        f"/aws/sagemaker/Clusters/gco-hyperpod/{self._CLUSTER_ID}"
+                    ],
+                }
+            }
+        }
+        residual, accepted = ownership_hyperpod_clusters._strip_deleted_hyperpod_clusters(
+            ctx, inventory
+        )
+        assert residual["regional"][self._REGION] == {
+            "tagged_resources": [],
+            "cloudwatch_log_groups": [f"/aws/sagemaker/Clusters/gco-hyperpod/{self._CLUSTER_ID}"],
+        }
+        assert len(accepted) == 1
+
+    def test_unexpected_describe_error_propagates(self):
+        ctx, sagemaker = self._ctx(status=None)
+        sagemaker.describe_cluster.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "denied"}},
+            "DescribeCluster",
+        )
+        with pytest.raises(ClientError):
+            ownership_hyperpod_clusters._strip_deleted_hyperpod_clusters(
+                ctx, self._inventory({"arn": self._ARN})
+            )
+
+    def test_input_inventory_is_not_mutated(self):
+        ctx, _sagemaker = self._ctx(status=None)
+        inventory = self._inventory({"arn": self._ARN, "tags": {}})
+        snapshot = json.loads(json.dumps(inventory))
+        ownership_hyperpod_clusters._strip_deleted_hyperpod_clusters(ctx, inventory)
+        assert inventory == snapshot
+
+
 class TestProjectTargetGroupScanner:
     def test_controller_cluster_tag_owns_orphan_target_group(self):
         client = MagicMock()
@@ -6943,6 +7098,8 @@ class TestActionBaselineCheckpointPurity:
         assert "accepted_deleted_vpc_endpoints" not in ctx.checkpoint.baseline
         assert result["accepted_deleted_volumes"] == []
         assert "accepted_deleted_volumes" not in ctx.checkpoint.baseline
+        assert result["accepted_deleted_hyperpod_clusters"] == []
+        assert "accepted_deleted_hyperpod_clusters" not in ctx.checkpoint.baseline
         # The persisted checkpoint is the pure capture — byte-for-byte what
         # compare_baseline will re-capture against after teardown.
         assert ctx.checkpoint.baseline == self._BASELINE
