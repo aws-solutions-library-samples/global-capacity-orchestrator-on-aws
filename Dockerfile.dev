@@ -72,7 +72,7 @@
 # checkov:skip=CKV_DOCKER_3:Contributors bind-mount their own checkout and AWS
 # credentials and run host-side gco/cdk/kubectl commands inside this image, so it
 # has to run as the invoking host user. It is never deployed.
-FROM python:3.14.8-slim
+FROM python:3.14.9-slim
 
 # Multi-arch build args. BuildKit auto-populates TARGETARCH with the build
 # platform's Go-style arch name (`amd64` / `arm64`). We additionally derive
