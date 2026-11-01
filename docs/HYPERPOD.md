@@ -49,7 +49,10 @@ lands on HyperPod.
 
 The cluster is created after the regional add-on convergence starts, so the
 namespace, agent and RBAC are applying before the first node boots, and it is
-deleted before the add-on layer unwinds on stack deletion.
+deleted before the add-on layer unwinds on stack deletion. It also depends on
+the execution role's policy, not just the role: HyperPod deletes the nodes'
+network interfaces as that role while the cluster is being deleted, so the
+role's statements have to outlive the cluster.
 
 ## How work reaches HyperPod nodes
 

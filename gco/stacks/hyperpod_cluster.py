@@ -592,6 +592,19 @@ class HyperpodCluster(Construct):
         cluster.node.add_dependency(self.access_entry)
         cluster.node.add_dependency(self.lifecycle_script)
         cluster.node.add_dependency(self.security_group)
+        # The instance groups reference the execution role's ARN, so the
+        # cluster already depends on the role — but not on the role's default
+        # policy, the separate AWS::IAM::Policy that carries every statement
+        # the role has (ENI management, image pulls, the lifecycle script).
+        # Left to CloudFormation's ordering the policy was deleted while the
+        # cluster was still shutting its node down, and HyperPod's ENI cleanup
+        # ran as a role with no permissions: the fourth #502 release attempt's
+        # teardown sat on "Failed to delete Network Interfaces because the
+        # execution role ARN ... does not have permission to perform
+        # ec2:DeleteNetworkInterface and ec2:DeleteNetworkInterfacePermission"
+        # until the statement was restored by hand. Depending on the role
+        # construct keeps the role and its policy until the cluster is gone.
+        cluster.node.add_dependency(self.execution_role)
         # The CNI and kube-proxy DaemonSets exist before the first node joins,
         # so it turns Ready as soon as the kubelet registers (and, on stack
         # deletion, the nodes are gone before their networking is removed).

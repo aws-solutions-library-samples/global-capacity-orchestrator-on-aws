@@ -242,6 +242,22 @@ class TestHyperpodOn:
         assert "HelmInstallCharts" in depends
         assert any(dep.startswith("HyperpodNodeAccessEntry") for dep in depends)
         assert any(dep.startswith("HyperpodLifecycleScript") for dep in depends)
+        # ... and after the execution role's default policy, so CloudFormation
+        # deletes the cluster before the policy: HyperPod deletes the nodes'
+        # ENIs as that role, and the fourth #502 release attempt's teardown
+        # lost the statement mid-way (the ARN reference alone orders only the
+        # AWS::IAM::Role).
+        [policy_id] = [
+            k
+            for k, v in resources.items()
+            if v["Type"] == "AWS::IAM::Policy"
+            and k.startswith("HyperpodExecutionRoleDefaultPolicy")
+        ]
+        assert policy_id in depends
+        assert any(
+            dep.startswith("HyperpodExecutionRole") and not dep.startswith(policy_id)
+            for dep in depends
+        )
 
     def test_zone_pin_selects_that_subnet(self, synthesized) -> None:
         stack, _resources = synthesized
