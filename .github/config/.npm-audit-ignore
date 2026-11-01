@@ -24,59 +24,33 @@
 #   package-dir|package|advisory|node-path|exp:YYYY-MM-DD
 # =============================================================================
 
-# GHSA-6j4f-fj2g-mc7p (CVE-2026-102276, high), GHSA-qhr7-859c-m2p7
-# (CVE-2026-102278, high) and GHSA-q2hr-2g5m-vwhr (CVE-2026-102277, moderate):
-# three brace-expansion denial-of-service advisories published 2026-09-29.
-# Two exhaust the stack through recursion (in parseCommaParts() and on nested
-# brace groups); the third makes `{a},b}`-shaped input expand in quadratic
-# time. On the 5.x line they are fixed in 5.0.10, 5.0.11 and 5.0.12.
+# GHSA-g3hv-75wg-m249 (CVE-2026-118764, moderate): minimatch denial of
+# service through globparts amplification, published 2026-10-30 23:09 UTC and
+# fixed in 11.0.1 (no fix on the 10.x line).
 #
-# The one reported copy is brace-expansion 5.0.9, which aws-cdk-lib bundles
-# (minimatch 10.2.5 -> brace-expansion) inside its published tarball. The root
-# graph reaches aws-cdk-lib only through cdk-dia, the infrastructure diagram
-# generator. A bundled copy is out of reach of `npm audit fix` and `overrides`,
-# and Dependabot's security update fails on it for the same reason.
+# The one reported copy is minimatch 10.2.6, which aws-cdk-lib 2.275.0 bundles
+# inside its published tarball. The root graph reaches aws-cdk-lib only
+# through cdk-dia, the infrastructure diagram generator. A bundled copy is out
+# of reach of `npm audit fix` and `overrides`, Dependabot's security update
+# fails on it for the same reason, and the only "fix" npm offers is a
+# downgrade of cdk-dia to 0.11.0, which predates the aws-cdk-lib dependency
+# and does not render this repository's stacks.
 #
-# Not clearable by a pin bump: re-checked 2026-10-08, aws-cdk-lib 2.272.0 (the
-# latest release, 2026-09-30, and the one this repository's lock now resolves)
-# still bundles brace-expansion 5.0.9. The upstream fix,
-# https://github.com/aws/aws-cdk/pull/38929 (bundled copy to 5.0.12), merged
-# on 2026-10-06 — after that release — so the next aws-cdk-lib release should
-# clear all three.
+# Not clearable by a pin bump: re-checked 2026-11-01 by reading the
+# package.json files inside the published aws-cdk-lib 2.275.0 tarball (the
+# newest release, 2026-10-26, and the one this repository's lock now
+# resolves). It moved its bundled minimatch from 10.2.5 to 10.2.6, still on
+# the unfixed 10.x line, and its bundled brace-expansion from 5.0.9 to 5.0.12,
+# which retired the GHSA-6j4f-fj2g-mc7p, GHSA-q2hr-2g5m-vwhr and
+# GHSA-qhr7-859c-m2p7 entries this file used to carry.
 #
 # Low risk: cdk-dia's runtime code never loads aws-cdk-lib. It matches the
 # construct names in the synthesized cdk.out/tree.json as strings, and its only
 # import of the library is a TypeScript type declaration. Diagram generation is
 # contributor/CI tooling that never runs in a deployed service, and the impact
-# of all three advisories is availability only.
-#
-# Remove these entries and refresh package-lock.json as soon as an aws-cdk-lib
-# release bundles brace-expansion >= 5.0.12.
-# Advisories: https://github.com/advisories/GHSA-6j4f-fj2g-mc7p
-#             https://github.com/advisories/GHSA-qhr7-859c-m2p7
-#             https://github.com/advisories/GHSA-q2hr-2g5m-vwhr
-.|brace-expansion|GHSA-6j4f-fj2g-mc7p|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-11-29
-.|brace-expansion|GHSA-q2hr-2g5m-vwhr|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-11-29
-.|brace-expansion|GHSA-qhr7-859c-m2p7|node_modules/aws-cdk-lib/node_modules/brace-expansion|exp:2026-11-29
-# GHSA-g3hv-75wg-m249 (CVE-2026-118764, moderate): minimatch denial of
-# service through globparts amplification, published 2026-10-30 23:09 UTC and
-# fixed in 11.0.1 (no fix on the 10.x line).
-#
-# The one reported copy is minimatch 10.2.5, which aws-cdk-lib 2.272.0 bundles
-# inside its published tarball (the same bundled copy that pulls in the
-# brace-expansion 5.0.9 above). As with those three entries, the root graph
-# reaches aws-cdk-lib only through cdk-dia; a bundled copy is out of reach of
-# `npm audit fix` and `overrides`, and the only "fix" npm offers is a downgrade
-# of cdk-dia to 0.11.0, which predates the aws-cdk-lib dependency and does not
-# render this repository's stacks.
-#
-# Low risk, for the same reason as the brace-expansion entries: cdk-dia never
-# loads aws-cdk-lib at runtime (it imports a type declaration only), diagram
-# generation is contributor/CI tooling that never runs in a deployed service,
-# and the impact is availability only.
+# is availability only.
 #
 # Remove this entry and refresh package-lock.json as soon as an aws-cdk-lib
-# release bundles minimatch >= 11.0.1; the four aws-cdk-lib entries in this
-# file clear together.
+# release bundles minimatch >= 11.0.1.
 # Advisory: https://github.com/advisories/GHSA-g3hv-75wg-m249
-.|minimatch|GHSA-g3hv-75wg-m249|node_modules/aws-cdk-lib/node_modules/minimatch|exp:2026-11-29
+.|minimatch|GHSA-g3hv-75wg-m249|node_modules/aws-cdk-lib/node_modules/minimatch|exp:2026-12-29

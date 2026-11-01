@@ -9,8 +9,12 @@ whose outputs carry the published ids, instances tagged the way PCS tags them
 in every state the finder has to tell apart, and an SSM command the emulator
 registers but never executes, which is exactly the shape the read's deadline
 exists for. The PCS API itself is absent from Floci (docs/FLOCI_TESTING.md,
-gap 9); the ``aws ssm start-session`` argv builders are pure and stay in the
-unit suite.
+gap 8), and so is the tag it stamps: PCS writes
+``aws:pcs:compute-node-group-id`` as a system tag, which no caller can set
+(EC2 and Floci alike answer ``InvalidParameterValue: Tag keys starting with
+'aws:' are reserved for internal use``), so this module launches its instances
+under a stand-in key and points the finder's filter at it (gap 9). The
+``aws ssm start-session`` argv builders are pure and stay in the unit suite.
 """
 
 from __future__ import annotations
@@ -22,7 +26,6 @@ import boto3
 import pytest
 
 from gco.pcs_config import (
-    PCS_NODE_GROUP_INSTANCE_TAG,
     PCS_OUTPUT_CLUSTER_ID,
     PCS_OUTPUT_LOGIN_NODE_GROUP_ID,
     PCS_OUTPUT_MODE,
@@ -32,6 +35,20 @@ from tests._floci import floci_test_markers, unique_name
 pytestmark = floci_test_markers()
 
 REGION = "us-east-1"
+
+#: Stands in for ``gco.pcs_config.PCS_NODE_GROUP_INSTANCE_TAG`` on the
+#: emulator. Floci models no PCS, so nothing there stamps the real key on an
+#: instance, and since 2.3 it refuses caller-set ``aws:`` keys the way EC2
+#: does. The production spelling stays pinned by tests/test_pcs_login.py; what
+#: runs for real here is the finder's filter, state and ordering logic.
+_STAND_IN_NODE_GROUP_TAG = "gco-floci:pcs:compute-node-group-id"
+
+
+@pytest.fixture(autouse=True)
+def _finder_filters_on_the_stand_in_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("cli.pcs_login.PCS_NODE_GROUP_INSTANCE_TAG", _STAND_IN_NODE_GROUP_TAG)
+
+
 #: The emulator finishes a stack or an instance transition at once (EC2 runs
 #: in its metadata-only mock mode, see docs/FLOCI_TESTING.md); botocore's
 #: default waiter delays (30 s and 15 s between polls) would only add minutes.
@@ -92,7 +109,7 @@ def _terminate(instance_ids: list[str]) -> None:
 
 
 def _launch_login_instance(subnet_id: str, node_group_id: str) -> str:
-    """An instance carrying the tag PCS puts on every compute node group member."""
+    """An instance carrying the (stand-in) tag PCS puts on every node group member."""
     ec2 = boto3.client("ec2", region_name=REGION)
     return ec2.run_instances(
         ImageId="ami-0123456789abcdef0",
@@ -103,7 +120,7 @@ def _launch_login_instance(subnet_id: str, node_group_id: str) -> str:
         TagSpecifications=[
             {
                 "ResourceType": "instance",
-                "Tags": [{"Key": PCS_NODE_GROUP_INSTANCE_TAG, "Value": node_group_id}],
+                "Tags": [{"Key": _STAND_IN_NODE_GROUP_TAG, "Value": node_group_id}],
             }
         ],
     )["Instances"][0]["InstanceId"]

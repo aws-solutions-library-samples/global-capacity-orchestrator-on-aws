@@ -1,23 +1,20 @@
 """Documented Floci-gap shims, importable without pytest.
 
-Six emulator gaps affect GCO's AWS surface (each probed empirically; see
-docs/FLOCI_TESTING.md):
+Five emulator gaps affect GCO's AWS surface (each probed empirically, last
+against Floci 2.4.0; see docs/FLOCI_TESTING.md):
 
 * CloudFormation ``GetStackPolicy`` responses omit the
   ``GetStackPolicyResult`` wrapper element, so botocore's parser raises
   ``KeyError`` whether or not the stack has a policy. Real AWS returns a
   parseable empty result for a policy-less stack — which is what every GCO
   stack is — and the harness already tolerates exactly that shape.
-* EC2 does not answer the canonical Availability Zone IDs: Floci 2.2.0
-  reports ``<region>-azN`` and ignores the ``zone-id`` filter (see
-  :func:`shim_floci_zone_id_lookup`).
 * X-Ray is absent from the emulator's service catalog
   (``UnknownOperationException`` on every operation tried, re-probed against
-  Floci 2.2.0), while the harness's
+  Floci 2.4.0), while the harness's
   baseline records each Region's trace segment destination before anything
   deploys, so the Transaction Search state the run changes can be restored.
 * SageMaker ``ListClusters`` (the HyperPod cluster listing) is not among the
-  SageMaker actions Floci 2.2.0 models (``ValidationException: Action
+  SageMaker actions Floci 2.4.0 models (``ValidationException: Action
   ListClusters is not supported``), while the harness's inventory lists the
   project's HyperPod clusters in every Region to prove them absent.
 * The public global-infrastructure parameters
@@ -28,9 +25,14 @@ docs/FLOCI_TESTING.md):
   on ``ListClusters``, ``GetCluster`` and ``CreateCluster``), while the
   inventory lists the project's PCS clusters in every PCS Region.
 
+The Availability Zone id shim this module used to carry is gone: Floci 2.4.0
+reports the canonical zone ids and honors the ``zone-id`` filter (an unknown
+id answers an empty list), so the regional stack's fail-closed resolution now
+runs against the emulator unshimmed.
+
 Each shim registers a botocore ``before-send`` handler that answers exactly
 one read-only operation with the response real AWS would give for the
-resources GCO actually creates (no stack policy; the canonical zone ids; the
+resources GCO actually creates (no stack policy; the
 X-Ray destination of an account that never turned Transaction Search on,
 which a fabricated emulator account cannot have done).
 They live strictly in the test layer: in-process Floci tests apply them to
@@ -114,64 +116,6 @@ def shim_floci_get_stack_policy(events) -> None:
     events.register("before-send.cloudformation.GetStackPolicy", _synthesize)
 
 
-def shim_floci_zone_id_lookup(events) -> None:
-    """Answer zone-id-filtered ``DescribeAvailabilityZones`` with real mappings.
-
-    Second documented gap: Floci's EC2 does not answer canonical Availability
-    Zone IDs (2.2.0 reports ``<region>-azN`` and ignores the ``zone-id`` filter),
-    but a credentialed CDK synth runs the regional stack's fail-closed
-    EKS-unsupported-AZ resolution, which filters
-    ``DescribeAvailabilityZones`` by ``zone-id`` and refuses to proceed when
-    any requested ID is missing (gco/stacks/regional_stack.py — correct
-    behavior against real AWS, where every ID resolves).
-
-    The shim intercepts ONLY requests carrying a ``zone-id`` filter (the
-    exact query that code path issues; unfiltered calls still reach the
-    emulator) and answers with the canonical id→name mapping for the IDs in
-    ``gco/stacks/constants.EKS_UNSUPPORTED_AZ_IDS``, using the reference
-    account layout. That keeps the fail-closed production logic exercised
-    end to end instead of bypassed.
-    """
-    from urllib.parse import parse_qs
-
-    # Canonical name for each unsupported zone id in the reference layout.
-    zone_names = {
-        "use1-az3": ("us-east-1c", "us-east-1"),
-        "usw1-az2": ("us-west-1b", "us-west-1"),
-        "cac1-az3": ("ca-central-1c", "ca-central-1"),
-    }
-
-    def _synthesize(request, **_kwargs):
-        body = request.body
-        if isinstance(body, bytes):
-            body = body.decode("utf-8", errors="replace")
-        params = parse_qs(body or "")
-        if params.get("Filter.1.Name") != ["zone-id"]:
-            return None  # not the fail-closed lookup; let the emulator answer
-        requested = [
-            value[0] for key, value in sorted(params.items()) if key.startswith("Filter.1.Value.")
-        ]
-        items = []
-        for zone_id in requested:
-            if zone_id not in zone_names:
-                continue
-            name, region = zone_names[zone_id]
-            items.append(
-                f"<item><zoneId>{zone_id}</zoneId><zoneName>{name}</zoneName>"  # nosemgrep: python.django.security.injection.raw-html-format.raw-html-format - EC2 XML wire payload served to botocore in-process, not HTML; values come from the hardcoded zone_names dict above
-                f"<regionName>{region}</regionName><state>available</state></item>"  # nosemgrep: python.django.security.injection.raw-html-format.raw-html-format - continuation of the same hardcoded XML payload
-            )
-        xml = (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<DescribeAvailabilityZonesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">'
-            "<requestId>floci-gap-shim</requestId>"
-            f"<availabilityZoneInfo>{''.join(items)}</availabilityZoneInfo>"
-            "</DescribeAvailabilityZonesResponse>"
-        )
-        return _local_response(request, xml.encode(), "text/xml")
-
-    events.register("before-send.ec2.DescribeAvailabilityZones", _synthesize)
-
-
 def shim_floci_missing_xray(events) -> None:
     """Answer X-Ray ``GetTraceSegmentDestination`` with the account default.
 
@@ -196,7 +140,7 @@ def shim_floci_sagemaker_list_clusters(events) -> None:
     The only SageMaker call the Floci layers reach is the harness inventory's
     HyperPod scanner (``scripts/live_release_validation/inventory/scanners.py``),
     which lists every Region's clusters to prove the project's absent. Floci
-    2.2.0 answers ``ValidationException: Action ListClusters is not supported``
+    2.4.0 answers ``ValidationException: Action ListClusters is not supported``
     (SageMaker is in its catalog; this action is not). Real AWS returns an
     empty page for an account with no HyperPod clusters, and an emulator
     account can have none: ``CreateCluster`` is not modeled either. Every
@@ -213,7 +157,7 @@ def shim_floci_sagemaker_list_clusters(events) -> None:
 def shim_floci_pcs_service_regions(events) -> None:
     """Answer the public ``…/services/pcs/regions`` parameters with a fixture list.
 
-    Floci 2.2.0 serves none of the public global-infrastructure parameters
+    Floci 2.4.0 serves none of the public global-infrastructure parameters
     (``GetParametersByPath`` under that tree answers an empty page). The
     harness inventory reads AWS PCS's Regions from exactly that path, because
     botocore's endpoint data names no Region for PCS, and fails the
@@ -255,7 +199,7 @@ def shim_floci_pcs_service_regions(events) -> None:
 def shim_floci_pcs_list_clusters(events) -> None:
     """Answer AWS PCS ``ListClusters`` with the no-clusters shape.
 
-    PCS is absent from Floci 2.2.0's catalog: ``ListClusters``, ``GetCluster``
+    PCS is absent from Floci 2.4.0's catalog: ``ListClusters``, ``GetCluster``
     and ``CreateCluster`` all answer ``UnknownOperationException``. The
     harness inventory lists every PCS Region's clusters to prove the
     project's absent; real AWS returns an empty page for an account with no
@@ -273,7 +217,6 @@ def shim_floci_pcs_list_clusters(events) -> None:
 def apply_known_floci_gap_shims(events) -> None:
     """Install every documented Floci-gap shim on a botocore event system."""
     shim_floci_get_stack_policy(events)
-    shim_floci_zone_id_lookup(events)
     shim_floci_missing_xray(events)
     shim_floci_sagemaker_list_clusters(events)
     shim_floci_pcs_service_regions(events)

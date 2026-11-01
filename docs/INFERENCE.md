@@ -130,7 +130,7 @@ internal CA (the chain is described in
   but model pods also land on arm64 (Graviton GPU) nodes, so the sidecar does
   not reuse a service image. It runs the stdlib-only `gco/services/tls_proxy.py`
   source, which the monitor publishes in a per-endpoint `<name>-tls-proxy`
-  ConfigMap, on the official `public.ecr.aws/docker/library/python:3.14.8-slim`
+  ConfigMap, on the official `public.ecr.aws/docker/library/python:3.14.9-slim`
   image pinned by tag and OCI index digest (override with
   `ENDPOINT_TLS_PROXY_IMAGE` on the inference monitor). It runs as UID 65532
   with a read-only root filesystem, no capabilities, no AWS credentials, and
@@ -387,7 +387,7 @@ GCO works with any containerized inference server. These frameworks have example
 | Framework | Image Example | Default Port | Health Path | Use Case |
 |-----------|--------------|-------------|-------------|----------|
 | [vLLM](https://docs.vllm.ai/en/latest/) ([example](../examples/inference-vllm.yaml)) | `vllm/vllm-openai:v0.32.0` | 8000 | `/health` | OpenAI-compatible LLM serving |
-| [SGLang](https://docs.sglang.ai/) ([example](../examples/inference-sglang.yaml)) | `lmsysorg/sglang:v0.5.21` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
+| [SGLang](https://docs.sglang.ai/) ([example](../examples/inference-sglang.yaml)) | `lmsysorg/sglang:v0.5.23` | 30000 | `/health` | High-throughput LLM serving with RadixAttention |
 | [Triton](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html) ([example](../examples/inference-triton.yaml)) | `nvcr.io/nvidia/tritonserver:26.09-py3` | 8000 | `/v2/health/ready` | Multi-framework model serving |
 
 `gco inference deploy --framework` accepts `vllm` and `sglang`. These two are
@@ -513,7 +513,7 @@ body unchanged, like any other non-completion request.
 
 ```bash
 gco inference deploy sglang-qwen \
-  -i lmsysorg/sglang:v0.5.21 \
+  -i lmsysorg/sglang:v0.5.23 \
   --framework sglang \
   --port 30000 \
   --gpu-count 1 \

@@ -340,10 +340,10 @@ def backend_tls_certificate_arn_parameter_name(project_name: str, region: str) -
 # The dependency scanner checks ``aws eks describe-addon-versions`` monthly
 # and opens an issue when newer builds are available.
 
-EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.0-eksbuild.3"
+EKS_ADDON_POD_IDENTITY_AGENT = "v1.4.1-eksbuild.3"
 """EKS Pod Identity Agent — enables IRSA and Pod Identity for service accounts."""
 
-EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.11"
+EKS_ADDON_METRICS_SERVER = "v0.9.0-eksbuild.14"
 """Kubernetes Metrics Server — provides CPU/memory metrics for HPA and ``kubectl top``.
 
 The ``v0.9.x`` line registers only ``metrics.k8s.io/v1beta1``; the ``v1`` API
@@ -355,13 +355,13 @@ registers ``v1`` (upstream ``master`` does; expected from ``v0.10.x``), flip
 that constant.
 """
 
-EKS_ADDON_EFS_CSI_DRIVER = "v3.4.2-eksbuild.1"
+EKS_ADDON_EFS_CSI_DRIVER = "v3.5.3-eksbuild.1"
 """Amazon EFS CSI Driver — mounts EFS file systems as Kubernetes persistent volumes."""
 
-EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v6.7.0-eksbuild.1"
+EKS_ADDON_CLOUDWATCH_OBSERVABILITY = "v7.0.0-eksbuild.1"
 """Amazon CloudWatch Observability — Container Insights, Prometheus metrics, FluentBit logs."""
 
-EKS_ADDON_FSX_CSI_DRIVER = "v1.10.0-eksbuild.2"
+EKS_ADDON_FSX_CSI_DRIVER = "v1.11.0-eksbuild.1"
 """Amazon FSx CSI Driver — mounts FSx for Lustre file systems as Kubernetes persistent volumes."""
 
 # ---------------------------------------------------------------------------

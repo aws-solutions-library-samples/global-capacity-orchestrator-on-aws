@@ -127,9 +127,9 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 #      https://nodejs.org/dist/<NODE_VERSION>/SHASUMS256.txt
 #      for node-<NODE_VERSION>-linux-{x64,arm64}.tar.gz.
 # Node's tarballs use x64/arm64 arch tags; amd64 maps to x64 below.
-ARG NODE_VERSION=v24.21.0
-ARG NODE_SHA256_AMD64=6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff
-ARG NODE_SHA256_ARM64=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5
+ARG NODE_VERSION=v24.22.2
+ARG NODE_SHA256_AMD64=361718c444e49af2ca5a110c83ba6a8901143f23ab285ebbef0341f391f482a9
+ARG NODE_SHA256_ARM64=95c264150aceb7f3437a29fd6984924f5f8d1511ea3cbd6c508b83f6c555dae2
 RUN case "${TARGETARCH}" in \
         amd64)  NODE_ARCH="x64";   NODE_SHA256="${NODE_SHA256_AMD64}" ;; \
         arm64)  NODE_ARCH="arm64"; NODE_SHA256="${NODE_SHA256_ARM64}" ;; \
@@ -153,7 +153,7 @@ RUN case "${TARGETARCH}" in \
 #
 # Bump in lockstep with the deps-scan report; the value flows through
 # as ``NPM_VERSION`` in the Dockerfile.dev pins section.
-ARG NPM_VERSION=12.2.0
+ARG NPM_VERSION=12.2.1
 RUN npm install -g "npm@${NPM_VERSION}" \
     && npm --version
 
@@ -162,7 +162,7 @@ RUN npm install -g "npm@${NPM_VERSION}" \
 # (``aws-cdk``) and the CDK library (``aws-cdk-lib``) are versioned
 # independently — do not assume the two version strings match. Bump the
 # CLI in lockstep with `npm view aws-cdk version` when rebuilding.
-ARG CDK_VERSION=2.1145.0
+ARG CDK_VERSION=2.1147.0
 RUN npm install -g "aws-cdk@${CDK_VERSION}" \
     && cdk --version
 
@@ -171,7 +171,7 @@ RUN npm install -g "aws-cdk@${CDK_VERSION}" \
 # allows ±1 minor, so this pin can lag or lead the cluster by one.
 # kubectl publishes both linux/amd64 and linux/arm64 binaries, so we
 # pass ${TARGETARCH} straight through.
-ARG KUBECTL_VERSION=v1.37.1
+ARG KUBECTL_VERSION=v1.37.2
 ARG TARGETARCH
 RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
     && chmod +x kubectl \
@@ -182,7 +182,7 @@ RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARC
 # preserved across rebuilds. Bump when a new feature or bugfix is needed
 # (see https://github.com/aws/aws-cli/blob/v2/CHANGELOG.rst).
 # AWS CLI v2 uses GNU arch tags (x86_64 / aarch64) in the install URL.
-ARG AWSCLI_VERSION=2.37.10
+ARG AWSCLI_VERSION=2.39.3
 RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && curl "https://awscli.amazonaws.com/awscli-exe-linux-${GNU_ARCH}-${AWSCLI_VERSION}.zip" -o "awscliv2.zip" \
     && unzip awscliv2.zip \
@@ -223,7 +223,7 @@ RUN case "${TARGETARCH}" in \
 # Latest stable at pin time:
 #   https://download.docker.com/linux/static/stable/x86_64/
 #   https://download.docker.com/linux/static/stable/aarch64/
-ARG DOCKER_VERSION=29.9.1
+ARG DOCKER_VERSION=29.9.2
 RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${GNU_ARCH}/docker-${DOCKER_VERSION}.tgz" \
       -o /tmp/docker.tgz \
@@ -254,11 +254,11 @@ RUN GNU_ARCH=$(cat /tmp/gnu_arch) \
 # Keep the per-architecture checksums as literal, non-overridable trust
 # anchors from the release's checksums.txt. Overriding BUILDX_VERSION alone
 # must fail closed until these reviewed hashes are updated too.
-# https://github.com/docker/buildx/releases/tag/v0.38.0
-ARG BUILDX_VERSION=v0.38.0
+# https://github.com/docker/buildx/releases/tag/v0.38.1
+ARG BUILDX_VERSION=v0.38.1
 RUN case "${TARGETARCH}" in \
-        amd64) BUILDX_SHA256="4fe4cc38adf48169132749b6ca22a990928db0118e3407584ee553723115d287" ;; \
-        arm64) BUILDX_SHA256="38e890e1a162bfdbf32fbe91404991dc4fc28e55b0de901b34374a061bab4d2c" ;; \
+        amd64) BUILDX_SHA256="e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4" ;; \
+        arm64) BUILDX_SHA256="3b83b3731916ba433feccaaa689fe5bcdc81c641d92c8e6c2ea865dfa141c97a" ;; \
         *)     echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac \
     && mkdir -p /usr/local/lib/docker/cli-plugins \
@@ -278,9 +278,9 @@ RUN case "${TARGETARCH}" in \
 # other tool above: pinned direct vendor download + checksum. Bump procedure
 # (keep the three ARGs in lockstep, hashes from the per-artifact *.sha256
 # files on https://github.com/astral-sh/uv/releases):
-ARG UV_VERSION=0.12.23
-ARG UV_SHA256_AMD64=9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6
-ARG UV_SHA256_ARM64=6524bd338177ed50d035d39354e12545e993bbeba2ecbddf0480c5b3a81d313f
+ARG UV_VERSION=0.13.6
+ARG UV_SHA256_AMD64=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
+ARG UV_SHA256_ARM64=229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d
 RUN case "${TARGETARCH}" in \
         amd64)  UV_TARGET="x86_64-unknown-linux-gnu";  UV_SHA256="${UV_SHA256_AMD64}" ;; \
         arm64)  UV_TARGET="aarch64-unknown-linux-gnu"; UV_SHA256="${UV_SHA256_ARM64}" ;; \

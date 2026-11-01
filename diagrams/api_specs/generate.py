@@ -1287,7 +1287,10 @@ def _label_lines(labels: list[str]) -> list[str]:
     if len(labels) > 1 and all(label.startswith("/") for label in labels):
         import os.path
 
-        common = os.path.commonprefix(labels)
+        # Character-wise on purpose: the labels are route templates, not
+        # filesystem paths, and the slice below already cuts the result back
+        # to a ``/`` boundary.
+        common = os.path.commonprefix(labels)  # noqa: RUF071 - see above
         prefix = common[: common.rfind("/") + 1]
         if prefix.count("/") >= 3:
             return [f"{prefix}*"]

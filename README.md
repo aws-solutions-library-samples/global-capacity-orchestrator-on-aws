@@ -179,7 +179,7 @@ pipx install -e .
 A host install additionally needs:
 
 - Python 3.14+ and Node.js 24 (use `.nvmrc`)
-- npm 12.2.0 and the repository's locked tooling graph: run `npm ci --ignore-scripts --no-audit --no-fund` at the repository root; `gco` prefers its local `node_modules/.bin/cdk` over a global CLI
+- npm 12.2.1 and the repository's locked tooling graph: run `npm ci --ignore-scripts --no-audit --no-fund` at the repository root; `gco` prefers its local `node_modules/.bin/cdk` over a global CLI
 - A **clean** Python virtual environment or pipx — GCO pins exact versions of many packages, so installing into an existing environment commonly fails with dependency-resolver errors. If you hit `ResolutionImpossible`, switch to the dev container instead of debugging your local environment.
 
 </details>
@@ -231,7 +231,7 @@ See [Templates](docs/CLI.md#templates-commands), [DAG](docs/CLI.md#dag-commands)
 
 ```bash
 gco inference deploy vllm-qwen -i vllm/vllm-openai:v0.32.0 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
-gco inference deploy sglang-qwen -i lmsysorg/sglang:v0.5.21 --framework sglang --port 30000 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
+gco inference deploy sglang-qwen -i lmsysorg/sglang:v0.5.23 --framework sglang --port 30000 --gpu-count 1 -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 gco models upload ./triton-repo --name triton-repo
 gco inference deploy triton-models -i nvcr.io/nvidia/tritonserver:26.09-py3 --health-path /v2/health/ready --gpu-count 1 \
   --model-source $(gco models uri triton-repo) --extra-args tritonserver --extra-args=--model-repository=/models/triton-models

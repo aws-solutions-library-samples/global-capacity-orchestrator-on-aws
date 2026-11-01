@@ -113,4 +113,4 @@ Helm's server-side apply never conflicts with the autoscaler's field ownership
 ## Dependencies
 
 - `boto3`, `pyyaml`, `urllib3` (see `requirements.txt`)
-- Helm v4.3.1, kubectl v1.37.1 (installed in Docker image)
+- Helm v4.3.1, kubectl v1.37.2 (installed in Docker image)

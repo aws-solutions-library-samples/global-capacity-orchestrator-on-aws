@@ -1,2 +1,2 @@
-boto3==1.43.109
+boto3==1.43.123
 cryptography==50.0.0

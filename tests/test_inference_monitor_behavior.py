@@ -1843,7 +1843,7 @@ def test_sglang_renderer_never_duplicates_operator_supplied_launcher_flags() -> 
     deployment = _build_deployment(
         monitor,
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "framework": "sglang",
             "port": 30000,
             "health_check_path": "/health",
@@ -1888,7 +1888,7 @@ def test_sglang_renderer_accepts_the_short_model_alias_and_skips_env_injection()
     deployment = _build_deployment(
         monitor,
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "framework": "sglang",
             "port": 30000,
             "env": {"MODEL": "test/model"},
@@ -1905,7 +1905,7 @@ def test_sglang_renderer_without_model_env_leaves_the_model_to_the_operator() ->
     deployment = _build_deployment(
         monitor,
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "framework": "sglang",
             "port": 30000,
             "env": {"HF_TOKEN": "x"},
@@ -1922,7 +1922,7 @@ def test_sglang_renderer_respects_an_operator_supplied_command() -> None:
     deployment = _build_deployment(
         monitor,
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "framework": "sglang",
             "port": 30000,
             "env": {"MODEL": "test/model"},
@@ -1949,7 +1949,7 @@ def test_sglang_renderer_keeps_pods_off_pre_ampere_gpus() -> None:
     deployment = _build_deployment(
         _make_monitor(),
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "framework": "sglang",
             "port": 30000,
             "health_check_path": "/health",
@@ -1986,7 +1986,7 @@ def test_sglang_renderer_keeps_pods_off_pre_ampere_gpus() -> None:
         },
         # The GPU-name label is meaningless for Neuron devices.
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "framework": "sglang",
             "accelerator": "neuron",
             "port": 30000,
@@ -1995,7 +1995,7 @@ def test_sglang_renderer_keeps_pods_off_pre_ampere_gpus() -> None:
         },
         # No accelerator requested at all: nothing to steer.
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "framework": "sglang",
             "gpu_count": 0,
             "port": 30000,
@@ -2023,7 +2023,7 @@ def test_sglang_probes_outlast_the_health_endpoints_one_second_generation_floor(
     deployment = _build_deployment(
         _make_monitor(),
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "framework": "sglang",
             "port": 30000,
             "health_check_path": "/health",
@@ -2071,7 +2071,7 @@ def test_legacy_official_sglang_image_infers_the_sglang_contract() -> None:
     deployment = _build_deployment(
         monitor,
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "port": 30000,
             "health_check_path": "/health",
             "env": {"MODEL": "test/model"},
@@ -2201,7 +2201,7 @@ def test_gpu_type_hint_composes_with_the_sglang_pre_ampere_affinity() -> None:
     deployment = _build_deployment(
         _make_monitor(),
         {
-            "image": "lmsysorg/sglang:v0.5.21",
+            "image": "lmsysorg/sglang:v0.5.23",
             "framework": "sglang",
             "port": 30000,
             "env": {"MODEL": "test/model"},

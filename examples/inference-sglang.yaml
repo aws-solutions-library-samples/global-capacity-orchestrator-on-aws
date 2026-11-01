@@ -21,14 +21,14 @@
 # renderer supply the official launcher (python3 -m sglang.launch_server)
 # bound to 0.0.0.0:--port with --model-path taken from -e MODEL=...:
 #   gco inference deploy sglang-qwen \
-#     -i lmsysorg/sglang:v0.5.21 \
+#     -i lmsysorg/sglang:v0.5.23 \
 #     --framework sglang --port 30000 \
 #     --gpu-count 1 --replicas 1 \
 #     -e MODEL=Qwen/Qwen2.5-1.5B-Instruct
 #
 # Usage with autoscaling:
 #   gco inference deploy sglang-qwen \
-#     -i lmsysorg/sglang:v0.5.21 \
+#     -i lmsysorg/sglang:v0.5.23 \
 #     --framework sglang --port 30000 \
 #     --gpu-count 1 --replicas 2 \
 #     --min-replicas 1 --max-replicas 8 \
@@ -85,7 +85,7 @@ spec:
     spec:
       containers:
       - name: sglang
-        image: lmsysorg/sglang:v0.5.21
+        image: lmsysorg/sglang:v0.5.23
         securityContext:
           allowPrivilegeEscalation: false
         ports:

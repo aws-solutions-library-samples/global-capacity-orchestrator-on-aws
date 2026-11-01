@@ -135,7 +135,7 @@ spec:
                   readOnly: true
           containers:
             - name: upload
-              image: public.ecr.aws/aws-cli/aws-cli:2.39.0
+              image: public.ecr.aws/aws-cli/aws-cli:2.39.3
               imagePullPolicy: IfNotPresent
               command: ["/bin/bash", "-c"]
               args:

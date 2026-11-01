@@ -44,13 +44,14 @@ _TRACED_ROLES = ("HealthMonitorRole", "ManifestProcessorRole", "InferenceProxyRo
 _XRAY_ACTIONS = {"xray:PutTraceSegments", "xray:PutSpans"}
 
 #: Excerpt of the ``describe-addon-configuration`` schema of
-#: amazon-cloudwatch-observability v6.7.0-eksbuild.1 (the pinned
+#: amazon-cloudwatch-observability v7.0.0-eksbuild.1 (the pinned
 #: ``EKS_ADDON_CLOUDWATCH_OBSERVABILITY``): every level GCO writes keeps the
 #: add-on's ``additionalProperties: false``, so a misspelled key fails here
 #: instead of at the EKS UpdateAddon call. Sibling keys GCO never sets are
-#: accepted as-is. (v6.7.0 only added optional siblings over v6.6.0:
-#: ``podAnnotations``, ``podLabels``, ``podDisruptionBudget``,
-#: ``priorityClassName`` and ``topologySpreadConstraints``.)
+#: accepted as-is. (v7.0.0 changed nothing GCO writes: over v6.7.0 it only
+#: added the ``knative``, ``kserve`` and ``vllm`` scrape blocks under
+#: ``otelContainerInsights.solutions``, a tree GCO leaves at its disabled
+#: default; v6.7.0 had only added optional siblings over v6.6.0.)
 _ADDON_SCHEMA_EXCERPT: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2019-09/schema",
     "type": "object",

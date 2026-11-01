@@ -90,7 +90,7 @@ class TestInferenceDeploy:
                     "deploy",
                     "sglang-qwen",
                     "-i",
-                    "lmsysorg/sglang:v0.5.21",
+                    "lmsysorg/sglang:v0.5.23",
                     "--framework",
                     "sglang",
                     "--port",
@@ -996,7 +996,7 @@ class TestInferenceInvoke:
     def test_invoke_sglang_is_inferred_from_the_official_image(self, runner):
         """Records written before ``framework`` existed still route by image name."""
         mock_mgr = MagicMock()
-        mock_mgr.get_endpoint.return_value = self._mock_endpoint(image="lmsysorg/sglang:v0.5.21")
+        mock_mgr.get_endpoint.return_value = self._mock_endpoint(image="lmsysorg/sglang:v0.5.23")
         mock_client = MagicMock()
         mock_resp = MagicMock()
         mock_resp.ok = True
@@ -1019,7 +1019,7 @@ class TestInferenceInvoke:
         """A caller-selected OpenAI path on an SGLang endpoint speaks OpenAI, not /generate."""
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = self._mock_endpoint(
-            image="lmsysorg/sglang:v0.5.21",
+            image="lmsysorg/sglang:v0.5.23",
             env={"MODEL": "Qwen/Qwen2.5-1.5B-Instruct"},
             framework="sglang",
         )
@@ -1661,7 +1661,7 @@ class TestInferenceModels:
 
     def test_sglang_models_infers_the_official_image(self, runner):
         endpoint = self._mock_endpoint()
-        endpoint["spec"]["image"] = "lmsysorg/sglang:v0.5.21"
+        endpoint["spec"]["image"] = "lmsysorg/sglang:v0.5.23"
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = endpoint
         mock_client = MagicMock()
@@ -1725,10 +1725,10 @@ class TestInferenceModels:
     @pytest.mark.parametrize(
         ("persisted", "image", "expected"),
         [
-            ("vllm", "lmsysorg/sglang:v0.5.21", "vllm"),
+            ("vllm", "lmsysorg/sglang:v0.5.23", "vllm"),
             ("sglang", "vllm/vllm-openai:v0.32.0", "sglang"),
             (None, "vllm/vllm-openai:v0.32.0", "vllm"),
-            (None, "lmsysorg/sglang:v0.5.21", "sglang"),
+            (None, "lmsysorg/sglang:v0.5.23", "sglang"),
             (None, "nvcr.io/nvidia/tritonserver:26.09-py3", "triton"),
             (None, "registry.example/team/private-server@sha256:" + "a" * 64, "openai"),
             # The retired TGI contract is no longer recognised from a record
@@ -1736,7 +1736,7 @@ class TestInferenceModels:
             # servers to the CLI until they are redeployed.
             ("tgi", "registry.example/team/private-server:1", "openai"),
             (None, "ghcr.io/huggingface/text-generation-inference:3.3.7", "openai"),
-            ("custom", "lmsysorg/sglang:v0.5.21", "sglang"),
+            ("custom", "lmsysorg/sglang:v0.5.23", "sglang"),
         ],
     )
     def test_resolve_invoke_framework_prefers_the_persisted_contract(
@@ -2127,7 +2127,7 @@ class TestInferenceInvokeRemaining:
     )
     def test_invoke_buffered_sglang_text_shapes(self, runner, payload, expected_output):
         mock_mgr = MagicMock()
-        mock_mgr.get_endpoint.return_value = self._endpoint(image="lmsysorg/sglang:v0.5.21")
+        mock_mgr.get_endpoint.return_value = self._endpoint(image="lmsysorg/sglang:v0.5.23")
         mock_client = MagicMock()
         mock_client.make_authenticated_request.return_value = self._buffered_response(payload)
         with (
@@ -2821,7 +2821,7 @@ class TestInvokeServedModelHint:
 
     def test_sglang_requests_carry_no_model_to_check(self, runner):
         client = self._client()
-        endpoint = self._endpoint(image="lmsysorg/sglang:v0.5.21", framework="sglang")
+        endpoint = self._endpoint(image="lmsysorg/sglang:v0.5.23", framework="sglang")
         result = self._invoke(runner, endpoint, client, "-p", "hi")
 
         assert result.exit_code == 1

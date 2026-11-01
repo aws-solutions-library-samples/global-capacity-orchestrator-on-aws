@@ -5,9 +5,9 @@ validation harness as a subprocess via ``gco release validate``. That child
 interpreter builds its own boto3 sessions, out of reach of in-process test
 fixtures — so the documented Floci gap shims from tests/_floci_gap_shims.py
 (its docstring lists each gap: unparseable CloudFormation ``GetStackPolicy``
-responses, X-Ray absent, EC2 without canonical Availability Zone
-IDs, SageMaker without ``ListClusters``, the public global-infrastructure
-parameters unserved, AWS PCS absent) are injected here instead: the E2E prepends this directory to
+responses, X-Ray absent, SageMaker without ``ListClusters``, the public
+global-infrastructure parameters unserved, AWS PCS absent) are injected here
+instead: the E2E prepends this directory to
 ``PYTHONPATH``, Python imports ``sitecustomize`` at startup, and every
 botocore session created in the child auto-registers the same ``before-send``
 answers.

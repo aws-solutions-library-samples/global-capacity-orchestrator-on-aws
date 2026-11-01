@@ -123,8 +123,8 @@ class AdminApiKeySecretError(Exception):
 # and immutable manifest-list digest together: both amd64 and arm64 inference
 # nodes resolve through this single verified index.
 AWS_CLI_IMAGE = (
-    "public.ecr.aws/aws-cli/aws-cli:2.37.10@"
-    "sha256:3dacc5db57c923c4223e949795f538ecf1f2212b2b7d5a028b47b97f91564c0d"
+    "public.ecr.aws/aws-cli/aws-cli:2.39.3@"
+    "sha256:d557b3524475d70dd3104cf44d96568ee3188897b73a6ece2b37aa50e1af362f"
 )
 
 # Valid TCP port boundaries for KV-transfer bootstrap ports.
@@ -428,8 +428,8 @@ ENDPOINT_TLS_PROXY_SCRIPT_PATH = (
 # both amd64 and arm64 model nodes resolve through this single verified index.
 # The minor version must satisfy tls_proxy.py (it uses Python 3.14 syntax).
 ENDPOINT_TLS_PROXY_IMAGE = (
-    "public.ecr.aws/docker/library/python:3.14.8-slim@"
-    "sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2"
+    "public.ecr.aws/docker/library/python:3.14.9-slim@"
+    "sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8"
 )
 ENDPOINT_TLS_PROXY_IMAGE_ENV = "ENDPOINT_TLS_PROXY_IMAGE"
 
