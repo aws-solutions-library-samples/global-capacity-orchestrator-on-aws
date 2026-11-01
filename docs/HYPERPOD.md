@@ -84,6 +84,14 @@ spec:
 The `ClusterQueue`'s nominal quotas come from `hyperpod.queue`; they are
 admission caps, the instance groups are the real limit.
 
+The job API's toleration rule (`require_accelerator_toleration`, which
+otherwise rejects a GPU request that does not tolerate `nvidia.com/gpu`) knows
+this routing: HyperPod nodes carry no accelerator taint, only
+`gco.aws/hyperpod=true:NoSchedule`, so a Job labelled for `gco-hyperpod` is
+accepted without any toleration, and a Job that selects the nodes itself (the
+next section) is accepted when it tolerates `gco.aws/hyperpod` and rejected,
+with that taint named, when it does not.
+
 **Any other scheduler.** Set the node selector and toleration yourself:
 
 ```yaml
@@ -234,8 +242,13 @@ nodes that ran a job (see [How work reaches HyperPod nodes](#how-work-reaches-hy
   documented EKS-node actions (the VPC CNI's `AmazonEKS_CNI_Policy` actions,
   because `aws-node` on a HyperPod node runs with the node's credentials, plus
   image pulls and Pod Identity; `ec2:CreateTags` is scoped to network
-  interfaces), and read access to the lifecycle prefix; the nodes get no
-  credentials for the regional bucket beyond that prefix.
+  interfaces), `s3:GetObject` under the lifecycle prefix and `s3:ListBucket` on
+  the regional shared bucket (HyperPod validates the role's access to
+  `SourceS3Uri` from its control plane before a node launches, and that check
+  lists the bucket in a form a prefix condition denies — the node then sits in
+  `Pending` with "Execution role provided does not have permissions to access
+  the bucket"); the nodes can read object keys of the bucket but no object
+  outside the lifecycle prefix.
 - The security group admits security-group sources only (itself and the EKS
   cluster group), never a CIDR.
 - The health-monitoring agent runs non-root with every capability dropped,

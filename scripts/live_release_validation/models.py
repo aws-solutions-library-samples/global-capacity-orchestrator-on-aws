@@ -15,12 +15,13 @@ from threading import RLock
 from typing import Any, ClassVar, Literal, cast
 
 from .artifact_io import (
-    REPORT_FILENAMES as _REPORT_FILENAMES,
-)
-from .artifact_io import (
+    MODEL_REPOSITORIES_DIRNAME,
     atomic_write_text,
     ensure_private_directory,
     ensure_private_run_directory,
+)
+from .artifact_io import (
+    REPORT_FILENAMES as _REPORT_FILENAMES,
 )
 from .artifact_io import (
     read_private_text as _read_private_text,
@@ -52,6 +53,7 @@ from .json_utils import loads_without_duplicate_keys
 
 __all__ = [
     "INFERENCE_OWNER_LABEL",
+    "MODEL_REPOSITORIES_DIRNAME",
     "MOONCAKE_CONFIG_DIGEST_ANNOTATION",
     "MOONCAKE_STORE_RECONFIGURED_LOCAL_BUFFER_BYTES",
     "STRUCTURED_DECISION_PATH",
@@ -710,6 +712,41 @@ class RunContext:
             record["submission_state"] = "blocked"
             record["submission_blocked_reason"] = reason
             record["submission_blocked_at"] = time.time()
+            self.persist_callback(self.checkpoint)
+
+    def reject_job_submission(
+        self,
+        record: dict[str, Any],
+        *,
+        status_code: int,
+        message: str,
+        resources: list[dict[str, Any]],
+    ) -> None:
+        """Record that the API refused the submission and created nothing.
+
+        The manifest-API counterpart of the central-queue proofs below: the
+        API answered the POST, and its answer (a 4xx whose every reported
+        resource is ``failed``, or that reports none) is proof no apply ran, so
+        the record is ``not_submitted`` — authoritative absence — with the
+        answer kept as evidence. Without it the record sat in ``submitting``
+        and teardown waited out the reconciliation window, then blocked on
+        "may have escaped" (the fourth #502 release attempt, whose probe Job
+        was rejected at admission). A lifecycle never replays a rejected
+        envelope: it is immutable and would meet the same answer.
+        """
+        with self.state_lock:
+            state = str(record.get("submission_state") or "")
+            if state != "submitting":
+                raise RuntimeError(f"Cannot record a rejected Job submission from state {state!r}")
+            now = time.time()
+            record["submission_state"] = "not_submitted"
+            record["not_submitted_at"] = now
+            record["submission_rejected_at"] = now
+            record["submission_rejection"] = {
+                "status_code": int(status_code),
+                "message": str(message),
+                "resources": to_jsonable(resources),
+            }
             self.persist_callback(self.checkpoint)
 
     def mark_job_not_submitted(self, record: dict[str, Any]) -> None:

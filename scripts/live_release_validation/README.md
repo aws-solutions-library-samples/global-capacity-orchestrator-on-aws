@@ -26,7 +26,7 @@ guide: how the code is organized and where a new check belongs.
 | `registry.py` | The ordered action registry: names, descriptions, dependencies, handlers. Single source of truth for `--actions`. |
 | `runner.py` | Executes selected actions, checkpoints after each, and guarantees cleanup + reporting once runtime construction succeeds; bootstrap failures report cleanup blocked with an exact recovery command. |
 | `models.py` | Main `RunSettings`, `RunCheckpoint`, `RunContext`, `ActionResult`, and `ValidationReport` types. |
-| `artifact_io.py` | Owner-only report/checkpoint directory validation and atomic text writes. |
+| `artifact_io.py` | Owner-only report/checkpoint directory validation (the reports, the checkpoint, the isolated `kubeconfig`, and the run's own `model-repositories/` directory are the only entries a resume accepts) and atomic text writes. |
 | `inference_contract.py` | Strict vLLM/SGLang/Triton request, structured-decision (`/v1/systemone`), probe, endpoint, and resume-identity helpers used by main `RunSettings`. |
 | `actions/` | One module per action. This is the "test case" layer. |
 | `checks/` | Reusable validation helpers (polling, waiting, payload validation) shared by actions. |
@@ -58,6 +58,15 @@ skipped with their configuration source unless the run passes
 `--optional-schedulers` — which the runner threads to every CDK invocation as
 the `helm_enabled_overrides` context so the deployed chart set, the applier's
 gated manifests, and the probes all resolve enablement identically.
+
+The lifecycle's checkpointed record moves `registered → prepared → submitting
+→ submitted → appeared → deleted`. A submission the manifest API refuses with
+proof it created nothing (`ManifestSubmissionError.nothing_created()`: a 4xx
+whose every reported resource failed, or that reports none) goes to
+`not_submitted` with the answer kept as `submission_rejection`, so teardown
+confirms the absence with one lookup and a resume refuses to replay the
+immutable envelope; any other failed POST stays `submitting` for the
+fail-closed reconciliation that ends in `blocked`.
 
 The same action proves the AWS PCS Slurm backend (`checks/pcs.py`), which
 every release run deploys in managed mode with its metrics scrape on through

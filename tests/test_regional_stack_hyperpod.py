@@ -309,7 +309,12 @@ class TestHyperpodOn:
         assert "hyperpod/lifecycle/*" in json.dumps(read["Resource"])
         listing = _by_sid(statements, "HyperpodLifecycleScriptList")
         assert listing["Action"] == "s3:ListBucket"
-        assert listing["Condition"] == {"StringLike": {"s3:prefix": ["hyperpod/lifecycle/*"]}}
+        # No s3:prefix condition: HyperPod's control plane validates the role's
+        # access to SourceS3Uri by listing the bucket in a form a prefix
+        # condition denies, and a node then never launches (the fourth #502
+        # release attempt). The bucket ARN, not its objects.
+        assert "Condition" not in listing
+        assert json.dumps(listing["Resource"]).endswith('"Arn"]}')
         assert _by_sid(statements, "HyperpodLifecycleScriptDecrypt")["Action"] == "kms:Decrypt"
         assert role["DeletionPolicy"] == "Retain"
 

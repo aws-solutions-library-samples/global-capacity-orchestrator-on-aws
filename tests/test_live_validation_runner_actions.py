@@ -1757,6 +1757,44 @@ class TestRunContextJobRecords:
         assert record["submission_blocked_reason"] == "ambiguous boundary"
         assert record["submission_blocked_at"] > 0
 
+    def test_rejected_submission_transition(self, tmp_path: Path) -> None:
+        """An API rejection with proof of non-creation is authoritative absence.
+
+        Only an in-flight submission can be recorded that way; the record lands
+        in ``not_submitted`` (the central-queue proofs' state) with the API's
+        answer kept as evidence.
+        """
+        ctx = self._ctx(tmp_path)
+        record = self._register(ctx)
+        with pytest.raises(RuntimeError, match="Cannot record a rejected Job submission"):
+            ctx.reject_job_submission(record, status_code=400, message="no", resources=[])
+        record["submission_state"] = "submitting"
+        with patch.object(models.time, "time", return_value=3000.0):
+            ctx.reject_job_submission(
+                record,
+                status_code=400,
+                message="Manifest 1 validation failed",
+                resources=[{"name": "j", "status": "failed"}],
+            )
+        assert record["submission_state"] == "not_submitted"
+        assert record["not_submitted_at"] == 3000.0
+        assert record["submission_rejected_at"] == 3000.0
+        assert record["submission_rejection"] == {
+            "status_code": 400,
+            "message": "Manifest 1 validation failed",
+            "resources": [{"name": "j", "status": "failed"}],
+        }
+        # A resumed lifecycle re-prepares the same envelope before it reads the
+        # state; the record keeps its state and its evidence and cannot begin
+        # another submission.
+        ctx.prepare_job_submission(record, envelope={"transport": "api"}, resumable=False)
+        assert record["submission_state"] == "not_submitted"
+        assert record["submission_rejection"]["status_code"] == 400
+        with pytest.raises(
+            RuntimeError, match="Cannot begin Job submission from state 'not_submitted'"
+        ):
+            ctx.begin_job_submission(record, reconciliation_timeout_seconds=1)
+
     def test_central_cancellation_proof_rules(self, tmp_path: Path) -> None:
         ctx = self._ctx(tmp_path)
         record = self._register(ctx, path="dynamodb", transport_region=None)

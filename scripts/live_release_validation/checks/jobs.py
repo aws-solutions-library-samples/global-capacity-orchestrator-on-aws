@@ -9,6 +9,7 @@ import time
 from typing import Any, cast
 from urllib.parse import quote
 
+from cli.aws_client import ManifestSubmissionError
 from cli.jobs import resolve_submission_identity
 
 from ..constants import (
@@ -182,6 +183,25 @@ def _get_owned_job(ctx: RunContext, record: dict[str, Any]) -> dict[str, Any] | 
     return data
 
 
+def _rejected_submission_reason(
+    path: str, record: dict[str, Any], existing: dict[str, Any] | None
+) -> str:
+    """Why a lifecycle cannot continue past a submission the API rejected."""
+    rejection = record.get("submission_rejection")
+    rejection = rejection if isinstance(rejection, dict) else {}
+    reason = (
+        f"{path} submission was rejected by the API on a previous attempt "
+        f"(HTTP {rejection.get('status_code')}): {rejection.get('message')}; "
+        "the checkpointed envelope is immutable, so it is not replayed"
+    )
+    if existing is not None:
+        reason += (
+            "; a Job with the run's identity exists despite the recorded proof of "
+            f"non-creation and is bound to UID {record.get('uid')!r} for cleanup"
+        )
+    return reason
+
+
 def _reactivate_deleted_job_record(ctx: RunContext, record: dict[str, Any]) -> None:
     """Permit a crash-window replay only after authoritative prior absence."""
     if not record.get("deleted"):
@@ -205,6 +225,8 @@ def _reactivate_deleted_job_record(ctx: RunContext, record: dict[str, Any]) -> N
             "submission_resumable",
             "submission_blocked_reason",
             "submission_blocked_at",
+            "submission_rejected_at",
+            "submission_rejection",
             "not_submitted_at",
             "validation_evidence",
             "deleted_at",
@@ -358,7 +380,15 @@ def _delete_owned_job(ctx: RunContext, record: dict[str, Any]) -> dict[str, Any]
         if state in {"registered", "prepared", "not_submitted"}:
             ctx.mark_job_not_submitted(record)
             ctx.mark_job_deleted(record)
-            return {"not_submitted": True, "already_absent": True}
+            absent: dict[str, Any] = {"not_submitted": True, "already_absent": True}
+            if record.get("submission_rejection") is not None:
+                # The API refused the POST with proof it created nothing
+                # (RunContext.reject_job_submission); the lookup just confirmed
+                # the absence, with no reconciliation wait. A Job that exists
+                # anyway carries the run's labels, so the lookup above has bound
+                # its UID and the deletion below runs under that authority.
+                absent["submission_rejection"] = copy.deepcopy(record["submission_rejection"])
+            return absent
         raise RuntimeError(
             "Job submission may have escaped but no immutable Kubernetes UID was observed; "
             "cleanup remains unresolved"
@@ -516,6 +546,13 @@ def _run_api_transport_lifecycle(
         raise RuntimeError(
             str(record.get("submission_blocked_reason") or f"{path} submission blocked")
         )
+    if record.get("submission_rejection") is not None:
+        # The envelope is immutable and the deployed API has not changed, so a
+        # replay would meet the same rejection; the record stays terminal and
+        # teardown settles it (_delete_owned_job). A Job that exists anyway
+        # contradicts the recorded proof of non-creation: the lookup has bound
+        # its UID for cleanup, and the contradiction is named here.
+        raise RuntimeError(_rejected_submission_reason(path, record, existing))
 
     if existing is None:
         if state != "prepared":
@@ -524,12 +561,28 @@ def _run_api_transport_lifecycle(
             record,
             reconciliation_timeout_seconds=_job_appearance_timeout(ctx),
         )
-        submission = ctx.job_manager.submit_job(
-            manifests,
-            namespace=namespace,
-            target_region=record.get("transport_region"),
-            labels={_RUN_JOB_LABEL: token},
-        )
+        try:
+            submission = ctx.job_manager.submit_job(
+                manifests,
+                namespace=namespace,
+                target_region=record.get("transport_region"),
+                labels={_RUN_JOB_LABEL: token},
+            )
+        except ManifestSubmissionError as exc:
+            # A rejection the API answered with proof that nothing was created
+            # (every reported resource failed, or a 4xx before processing) is
+            # authoritative absence, not a request that may have landed: record
+            # it so teardown does not wait out the reconciliation window and
+            # then block on it. Anything else stays in ``submitting`` for the
+            # fail-closed reconciliation.
+            if exc.nothing_created():
+                ctx.reject_job_submission(
+                    record,
+                    status_code=exc.status_code,
+                    message=str(exc),
+                    resources=exc.resources,
+                )
+            raise
         submitted_name, submitted_namespace = resolve_submission_identity(
             submission,
             fallback_name=name,

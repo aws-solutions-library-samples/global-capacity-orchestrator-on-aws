@@ -298,9 +298,20 @@ class HyperpodCluster(Construct):
                 ],
             )
         )
-        # Exact statements rather than grant_read(): the recursive copy of the
-        # lifecycle prefix needs ListBucket on the bucket and GetObject under
-        # the prefix, and nothing wider.
+        # Exact statements rather than grant_read(): GetObject under the
+        # lifecycle prefix and ListBucket on the bucket, the minimum HyperPod
+        # documents for the execution role. ListBucket carries no s3:prefix
+        # condition on purpose. HyperPod validates the role's access to
+        # SourceS3Uri from its control plane before it launches a node, and
+        # that check lists the bucket in a form a prefix condition denies: with
+        # the condition `s3:prefix: hyperpod/lifecycle/*` the fourth #502
+        # release attempt's node sat in Pending with "Execution role provided
+        # does not have permissions to access the bucket s3://…/hyperpod/
+        # lifecycle/ … (s3:ListBucket, s3:GetObject)", and granting the
+        # unconditioned ListBucket to the live role had HyperPod replace the
+        # node and bring it to Running. Listing exposes object keys of the
+        # regional shared bucket to the nodes, not their contents; GetObject
+        # stays scoped to the prefix.
         role.add_to_policy(
             iam.PolicyStatement(
                 sid="HyperpodLifecycleScriptRead",
@@ -313,7 +324,6 @@ class HyperpodCluster(Construct):
                 sid="HyperpodLifecycleScriptList",
                 actions=["s3:ListBucket"],
                 resources=[bucket.bucket_arn],
-                conditions={"StringLike": {"s3:prefix": [f"{LIFECYCLE_PREFIX}/*"]}},
             )
         )
         role.add_to_policy(

@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ from cli.inference import InferenceManager
 from cli.main import cli
 from gco.services.inference_store import InferenceEndpointStore
 from scripts.example_job_validation import kube
+from scripts.live_release_validation.artifact_io import MODEL_REPOSITORIES_DIRNAME
 from scripts.live_release_validation.checks import inference as lifecycle_module
 from scripts.live_release_validation.checks import inference_inventory as inventory_module
 from scripts.live_release_validation.checks import inference_runtime as runtime_module
@@ -1784,6 +1786,36 @@ class TestIsolatedKubeconfig:
             path.chmod(0o600)
         ensure_private_run_directory(report_dir, report_dir / "checkpoint.json")
 
+    def test_the_runs_model_repositories_directory_is_allowed_when_owner_only(
+        self, tmp_path: Path
+    ) -> None:
+        """The inference action's Triton repositories live in the report directory.
+
+        The fourth #502 release attempt could not resume past its passed
+        inference action: the directory was rejected as an unrelated entry and
+        teardown never started. It is the run's own, accepted as a real
+        owner-only directory and refused with any other mode or as a symlink.
+        """
+        report_dir = tmp_path / "report"
+        report_dir.mkdir(mode=0o700)
+        checkpoint = report_dir / "checkpoint.json"
+        checkpoint.write_text("{}", encoding="utf-8")
+        checkpoint.chmod(0o600)
+        repositories = report_dir / MODEL_REPOSITORIES_DIRNAME
+        repositories.mkdir(mode=0o755)
+        with pytest.raises(PermissionError, match="must already have mode 0700"):
+            ensure_private_run_directory(report_dir, checkpoint)
+        repositories.chmod(0o700)
+        (repositories / "plan").mkdir()
+        ensure_private_run_directory(report_dir, checkpoint)
+
+        shutil.rmtree(repositories)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        repositories.symlink_to(elsewhere, target_is_directory=True)
+        with pytest.raises(ValueError, match="output directory must be real"):
+            ensure_private_run_directory(report_dir, checkpoint)
+
 
 def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
@@ -2560,7 +2592,11 @@ class TestTritonAndStoreScenarios:
 
         assert stages == ["model-upload", "model-uri", "deploy"]
         upload_root = Path(commands[0][commands[0].index("upload") + 1])
-        assert upload_root == settings.report_dir / "model-repositories" / plan.name
+        assert upload_root == settings.report_dir / MODEL_REPOSITORIES_DIRNAME / plan.name
+        # Owner-only, so a resume's run-directory check accepts it (#502 attempt 4).
+        assert stat_mode(upload_root.parent) == 0o700
+        settings.report_dir.chmod(0o700)
+        ensure_private_run_directory(settings.report_dir, settings.report_dir / "checkpoint.json")
         assert (upload_root / TRITON_MODEL_NAME / "config.pbtxt").is_file()
         assert (upload_root / TRITON_MODEL_NAME / TRITON_MODEL_VERSION / "model.py").is_file()
         assert commands[0][-2:] == ["--name", plan.registry_model_name]

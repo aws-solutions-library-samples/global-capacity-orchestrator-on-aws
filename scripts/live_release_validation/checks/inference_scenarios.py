@@ -23,9 +23,11 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from ..models import (
+    MODEL_REPOSITORIES_DIRNAME,
     MOONCAKE_CONFIG_DIGEST_ANNOTATION,
     TRITON_MODEL_NAME,
     TRITON_MODEL_VERSION,
+    ensure_private_directory,
     write_triton_model_repository,
 )
 from .inference_commands import (
@@ -97,18 +99,20 @@ class InferenceScenarioMixin:
         """Upload the plan's generated model repository and return its registry URI.
 
         Only runtimes served from the registry (Triton) have one. The repository
-        is written into the private report directory, published with
-        ``gco models upload`` under a run-owned name, and its URI read back with
-        ``gco models uri`` so the deploy's ``--model-source`` is exactly what the
-        registry resolves. Re-running after a crash re-uploads the same files,
-        which is idempotent; the recorded URI is the one the stored spec is
-        later checked against.
+        is written into the private report directory (its owner-only
+        ``model-repositories`` subdirectory, the one entry a resume accepts
+        there besides the reports), published with ``gco models upload`` under
+        a run-owned name, and its URI read back with ``gco models uri`` so the
+        deploy's ``--model-source`` is exactly what the registry resolves.
+        Re-running after a crash re-uploads the same files, which is
+        idempotent; the recorded URI is the one the stored spec is later
+        checked against.
         """
         if not plan.runtime.uses_model_registry:
             return None
-        repository_root = write_triton_model_repository(
-            self.settings.report_dir / "model-repositories" / plan.name
-        )
+        repositories = self.settings.report_dir / MODEL_REPOSITORIES_DIRNAME
+        ensure_private_directory(repositories)
+        repository_root = write_triton_model_repository(repositories / plan.name)
         record["model_repository"] = {
             "registry_model_name": plan.registry_model_name,
             "phase": "uploading",

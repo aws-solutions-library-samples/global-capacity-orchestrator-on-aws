@@ -42,6 +42,40 @@ class APIRequestError(RuntimeError):
         self.status_code = status_code
 
 
+class ManifestSubmissionError(RuntimeError):
+    """The manifest API answered a submission with a non-2xx response.
+
+    The message is the API's own account of what failed, unchanged. The status
+    and the per-resource outcomes the API reported travel with it so a caller
+    that must know whether anything was created — the live-validation harness's
+    crash-safe submission, which otherwise has to treat a failed POST as a
+    request that may have landed — can read the evidence instead of guessing.
+    """
+
+    def __init__(
+        self, status_code: int, message: str, resources: list[dict[str, Any]] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.resources: list[dict[str, Any]] = [
+            dict(item) for item in (resources or []) if isinstance(item, dict)
+        ]
+
+    def nothing_created(self) -> bool:
+        """True when the response proves the API created nothing.
+
+        The manifest API validates and applies each manifest in turn and
+        reports every outcome in ``resources``, so a 4xx whose every reported
+        resource is ``failed`` means no apply ran; a 4xx carrying no resources
+        was refused before processing (the request validation, the gateway).
+        A 5xx is never proof: the API may have applied a manifest and then
+        failed to answer.
+        """
+        if not 400 <= self.status_code < 500:
+            return False
+        return all(item.get("status") == "failed" for item in self.resources)
+
+
 class RegionalApiDiscoveryError(RuntimeError):
     """Regional endpoint discovery failed without confirming stack absence."""
 
@@ -729,7 +763,8 @@ class GCOAWSClient:
             API response dictionary
 
         Raises:
-            RuntimeError: If submission fails with descriptive error message
+            ManifestSubmissionError: If submission fails; the API's message,
+                with its status and per-resource outcomes attached.
         """
         body = {"manifests": manifests, "dry_run": dry_run}
 
@@ -743,11 +778,14 @@ class GCOAWSClient:
         # Parse response and provide descriptive error messages
         if not response.ok:
             error_msg = f"{response.status_code} {response.reason}"
+            resources: list[dict[str, Any]] = []
             try:
                 error_data = response.json()
                 # Extract meaningful error details from the response
                 if "resources" in error_data:
-                    failed = [r for r in error_data["resources"] if r.get("status") == "failed"]
+                    reported = error_data["resources"]
+                    resources = [r for r in reported if isinstance(r, dict)]
+                    failed = [r for r in resources if r.get("status") == "failed"]
                     if failed:
                         messages = [
                             f"{r.get('name')}: {r.get('message', 'Unknown error')}" for r in failed
@@ -757,9 +795,9 @@ class GCOAWSClient:
                     error_msg = error_data["error"]
                 elif "message" in error_data:
                     error_msg = error_data["message"]
-            except json.JSONDecodeError, KeyError:
+            except json.JSONDecodeError, KeyError, TypeError:
                 error_msg = response.text or error_msg
-            raise RuntimeError(error_msg)
+            raise ManifestSubmissionError(response.status_code, str(error_msg), resources)
 
         result: dict[str, Any] = response.json()
         return result
