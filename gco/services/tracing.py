@@ -144,8 +144,9 @@ def _is_retryable_status(status_code: int) -> bool:
 def _new_export_client() -> httpx2.Client:
     """Build the exporter's own client.
 
-    It trusts the public CA store (httpx2's default ``verify``, backed by
-    truststore), ignores proxy and CA variables from the environment, and is
+    It trusts the OS CA store (httpx2's default ``verify``: truststore's
+    platform verifier on macOS and Windows, OpenSSL's compiled-in verify paths
+    on Linux), ignores proxy and CA variables from the environment, and is
     never wrapped by the tracing transport.
     """
     import httpx2

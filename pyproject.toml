@@ -62,7 +62,8 @@ dependencies = [
     "pydantic==2.14.2",
     "prometheus-client==0.26.0",
     # httpx2 is Pydantic's maintained continuation of httpx (same API). Its
-    # default TLS trust is the OS store, through truststore.
+    # default TLS trust is the OS store (truststore on macOS and Windows,
+    # OpenSSL's compiled-in verify paths on Linux since httpcore2 2.16).
     "httpx2==2.16.0",
     # OpenTelemetry for the X-Ray tracing of the four FastAPI services
     # (gco/services/tracing.py imports it lazily, only when
