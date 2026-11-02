@@ -97,10 +97,12 @@ GPU capacity checking, region recommendation, and AI-powered advisory.
 |------|-------------|
 | `checker.py` | Spot placement scores, pricing, and availability checks |
 | `advisor.py` | AI-powered capacity recommendations via Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) |
+| `backends.py` | Per-Region SageMaker HyperPod and AWS PCS capacity (cluster health, HyperPod GPU pool, PCS node-group headroom and Slurm queue) behind `recommend-region --backend` |
 | `blocks.py` | Capacity Block search primitives: duration math, instance-type normalization, offering pricing, de-dup and sort helpers |
 | `history.py` | DynamoDB-backed time-series store behind `gco capacity history` |
 | `models.py` | Data models for capacity responses |
-| `multi_region.py` | Cross-region capacity aggregation and comparison |
+| `multi_region.py` | Cross-region capacity aggregation and comparison, including the HyperPod- and PCS-only rankings |
+| `placement.py` | What a manifest asks of a Region (HyperPod routing, GPUs requested), read by `gco jobs submit-sqs --auto-region` |
 | `traffic_dial.py` | Manual Global Accelerator traffic-dial controls (`gco capacity traffic-dial show`, `set`, `clear`) |
 | `training_plans.py` | SageMaker Training Plan offering search and account listing (`gco capacity find-training-plans`, `training-plans`): the reserved capacity HyperPod instance groups launch into |
 

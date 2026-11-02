@@ -300,9 +300,86 @@ class TestSubmissionContracts:
             )
 
         assert result.exit_code == 0, result.output
-        checker.recommend_region_for_job.assert_called_once_with()
+        # The manifest (a plain Job) is read before the ranking: it is not routed
+        # to HyperPod and requests no GPUs, so the default EKS ranking runs.
+        manager.load_manifests.assert_called_once_with(manifest_path)
+        checker.recommend_region_for_job.assert_called_once_with(
+            gpu_required=False, gpu_count=0, backend="eks"
+        )
         assert manager.submit_job_sqs.call_args.kwargs["region"] == "eu-west-1"
         formatter.print_info.assert_any_call("Selected region: eu-west-1 (lowest queue)")
+
+    def test_submit_sqs_auto_region_follows_hyperpod_routing(self, manifest_path: str) -> None:
+        """A manifest routed to HyperPod is ranked among HyperPod Regions, GPUs counted."""
+        manager = MagicMock()
+        manager.submit_job_sqs.return_value = {"message_id": "m-1"}
+        manager.load_manifests.return_value = [
+            {
+                "apiVersion": "batch/v1",
+                "kind": "Job",
+                "metadata": {
+                    "name": "trainer",
+                    "labels": {"kueue.x-k8s.io/queue-name": "gco-hyperpod"},
+                },
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {"name": "t", "resources": {"limits": {"nvidia.com/gpu": "4"}}}
+                            ]
+                        }
+                    }
+                },
+            }
+        ]
+        checker = MagicMock()
+        checker.recommend_region_for_job.return_value = {
+            "region": "us-west-2",
+            "reason": "HyperPod cluster InService (2 of 2 nodes, 8 GPUs), fits the 4 GPUs requested",
+        }
+        with patch("cli.capacity.get_capacity_checker", return_value=checker):
+            result, _, formatter = _invoke(
+                ["jobs", "submit-sqs", manifest_path, "--auto-region"], manager
+            )
+
+        assert result.exit_code == 0, result.output
+        checker.recommend_region_for_job.assert_called_once_with(
+            gpu_required=True, gpu_count=4, backend="hyperpod"
+        )
+        assert manager.submit_job_sqs.call_args.kwargs["region"] == "us-west-2"
+        formatter.print_info.assert_any_call(
+            "Manifest is routed to SageMaker HyperPod (by queue); "
+            "ranking the Regions where HyperPod is deployed..."
+        )
+
+    def test_submit_sqs_auto_region_fails_when_no_region_runs_hyperpod(
+        self, manifest_path: str
+    ) -> None:
+        """No eligible Region is an error, not a submission to the default Region."""
+        from cli.capacity import NoEligibleRegionError
+
+        manager = MagicMock()
+        manager.load_manifests.return_value = [
+            {
+                "kind": "Job",
+                "metadata": {"labels": {"kueue.x-k8s.io/queue-name": "gco-hyperpod"}},
+            }
+        ]
+        checker = MagicMock()
+        checker.recommend_region_for_job.side_effect = NoEligibleRegionError(
+            "No deployed Region runs SageMaker HyperPod (us-east-1: not deployed)", []
+        )
+        with patch("cli.capacity.get_capacity_checker", return_value=checker):
+            result, _, formatter = _invoke(
+                ["jobs", "submit-sqs", manifest_path, "--auto-region"], manager
+            )
+
+        assert result.exit_code == 1
+        manager.submit_job_sqs.assert_not_called()
+        assert (
+            "No deployed Region runs SageMaker HyperPod"
+            in (formatter.print_error.call_args.args[0])
+        )
 
     def test_submit_sqs_explicit_region_skips_auto_selection(self, manifest_path: str) -> None:
         manager = MagicMock()

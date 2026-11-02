@@ -680,7 +680,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `instance_info` | Get hardware and pricing metadata for an [EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html) instance type | safe | — |
 | `recommend_capacity` | Recommend spot or on-demand capacity from interruption tolerance | safe | — |
 | `capacity_status` | View capacity across all deployed regions | safe | — |
-| `recommend_region` | Get optimal region recommendation (supports instance-type-aware weighted scoring) | safe | — |
+| `recommend_region` | Get optimal region recommendation (supports instance-type-aware weighted scoring; `backend="hyperpod"` or `"pcs"` ranks only the Regions running that backend on its own capacity) | safe | — |
 | `spot_prices` | Get current spot prices for an instance type | safe | — |
 | `ai_recommend` | Get AI-powered capacity recommendation using Amazon [Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html) | safe | — |
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions | safe | — |
@@ -1257,7 +1257,7 @@ Try asking:
 
 1. **"Check GPU capacity for g5.xlarge across all regions"** — this calls `check_capacity` and shows you how GCO queries EC2 spot placement scores, spot price history, and on-demand availability.
 
-2. **"Which region should I use for a GPU job?"** — this triggers `recommend_region`, which aggregates queue depth, GPU utilization, and running job counts across all deployed regions, then ranks them. Pass an instance type (e.g. `g5.xlarge`) for weighted multi-signal scoring that also factors in spot placement scores, pricing trends, and capacity block availability.
+2. **"Which region should I use for a GPU job?"** — this triggers `recommend_region`, which aggregates queue depth, GPU utilization, and running job counts across all deployed regions, then ranks them. Pass an instance type (e.g. `g5.xlarge`) for weighted multi-signal scoring that also factors in spot placement scores, pricing trends, and capacity block availability. For a job that must run on SageMaker HyperPod or a Slurm job for AWS PCS, pass `backend="hyperpod"` or `backend="pcs"`: only the Regions running that backend are ranked, on the HyperPod cluster's health and GPU pool or on the PCS node groups' headroom and Slurm queue, and the tool fails when no Region runs it.
 
 3. **"Explain how the capacity recommendation works under the hood"** — the agent will read `cli/capacity/` via the source resources and walk you through the three-layer architecture:
    - `CapacityChecker` — core AWS queries (spot scores, pricing, instance offerings)

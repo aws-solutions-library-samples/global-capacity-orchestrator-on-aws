@@ -2335,7 +2335,7 @@ class TestRecommendRegionCommand:
             result = runner.invoke(cli, ["capacity", "recommend-region", "--gpu"])
             assert result.exit_code == 0
             mock_cc.recommend_region_for_job.assert_called_with(
-                gpu_required=True, min_gpus=0, instance_type=None, gpu_count=0
+                gpu_required=True, min_gpus=0, instance_type=None, gpu_count=0, backend="eks"
             )
 
     def test_recommend_region_verbose(self):
