@@ -241,6 +241,28 @@ PYEOF
     [ "$status" -ne 0 ]
 }
 
+@test "SKIP_SANITIZE=1 bypasses verification the same way it bypasses redaction" {
+    # The debugging escape hatch covers both halves: a cast that sanitize_cast
+    # left alone would otherwise fail the verifier every time.
+    local cast="$TEST_TMPDIR/skip-verify.cast"
+    printf '[0.1,"o","account 123456789012"]\n' > "$cast"
+    SKIP_SANITIZE=1 run verify_cast_sanitized "$cast"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run verify_cast_sanitized "$cast"
+    [ "$status" -ne 0 ]
+}
+
+@test "verify_cast_sanitized fails closed on a missing cast file" {
+    # sanitize_cast silently skips a file that is not there (a recording may
+    # have failed before writing one); the verifier must not read that as
+    # "nothing left to redact".
+    local cast="$TEST_TMPDIR/never-recorded.cast"
+    run verify_cast_sanitized "$cast"
+    [ "$status" -eq 1 ]
+    [[ "$output" == "Cannot verify missing cast file: $cast" ]]
+}
+
 @test "verify_cast_sanitized rejects complete identifiers hidden by adjacent output" {
     local cast="$TEST_TMPDIR/adjacent-unsanitized.cast"
     local fake_access_key_id
