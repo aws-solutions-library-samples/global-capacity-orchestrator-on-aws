@@ -216,6 +216,29 @@ teardown() {
     [[ "$output" == *"podman run"* ]]
 }
 
+@test "--runtime=, --image= and --rc= take their value after the equals sign" {
+    bash "$SCRIPT" --no-build --runtime=docker --image=eq/img:dev "--rc=$RCFILE" >/dev/null
+    grep -q 'docker run' "$RCFILE"
+    grep -q 'eq/img:dev gco' "$RCFILE"
+    [ "$(grep -c '# >>> gco >>>' "$RCFILE")" -eq 1 ]
+}
+
+@test "the equals and the two-argument spellings of an option produce the same block" {
+    run bash "$SCRIPT" --print --runtime=podman --image=my/gco:dev
+    [ "$status" -eq 0 ]
+    local spelled_out="$output"
+    run bash "$SCRIPT" --print --runtime podman --image my/gco:dev
+    [ "$status" -eq 0 ]
+    [ "$output" = "$spelled_out" ]
+}
+
+@test "an unknown option fails with the option named and a pointer to --help" {
+    run bash "$SCRIPT" --print --runtime docker --bogus
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"error: unknown option: --bogus (try --help)"* ]]
+    [ ! -e "$RCFILE" ]
+}
+
 @test "--runtime beats GCO_CONTAINER_RUNTIME" {
     make_shim "$SHIMDIR" docker 0
     make_shim "$SHIMDIR" finch 0
@@ -594,6 +617,60 @@ SHIM
     [ "$status" -eq 0 ]
     ! command -v docker >/dev/null 2>&1 || true
     ! grep -qF '# >>> gco >>>' "$RCFILE"
+}
+
+# -- Shell profile selection ---------------------------------------------------
+# Without --rc the script writes into the login shell's own rc file, chosen by
+# the basename of $SHELL. HOME is pointed at a scratch directory so the test
+# never touches the real profile.
+
+@test "zsh users get ~/.zshrc without --rc" {
+    run env HOME="$SHIMDIR" SHELL=/bin/zsh bash "$SCRIPT" --runtime docker --no-build
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Shell profile     : $SHIMDIR/.zshrc"* ]]
+    grep -qF '# >>> gco >>>' "$SHIMDIR/.zshrc"
+    [ ! -e "$SHIMDIR/.bashrc" ]
+    [ ! -e "$SHIMDIR/.profile" ]
+}
+
+@test "bash users get ~/.bashrc without --rc" {
+    run env HOME="$SHIMDIR" SHELL=/usr/local/bin/bash bash "$SCRIPT" --runtime docker --no-build
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Shell profile     : $SHIMDIR/.bashrc"* ]]
+    grep -qF '# >>> gco >>>' "$SHIMDIR/.bashrc"
+    [ ! -e "$SHIMDIR/.zshrc" ]
+}
+
+@test "any other POSIX shell falls back to ~/.profile without --rc" {
+    run env HOME="$SHIMDIR" SHELL=/bin/ksh bash "$SCRIPT" --runtime docker --no-build
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Shell profile     : $SHIMDIR/.profile"* ]]
+    grep -qF '# >>> gco >>>' "$SHIMDIR/.profile"
+}
+
+@test "an empty SHELL falls back to ~/.profile too" {
+    # Bash fills an unset SHELL from the login shell before the script runs,
+    # so an empty value is the only way the ${SHELL:-sh} default is reached.
+    run env SHELL= HOME="$SHIMDIR" bash "$SCRIPT" --runtime docker --no-build
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Shell profile     : $SHIMDIR/.profile"* ]]
+    grep -qF '# >>> gco >>>' "$SHIMDIR/.profile"
+}
+
+@test "--uninstall without --rc removes the block from the shell's own rc file" {
+    env HOME="$SHIMDIR" SHELL=/bin/zsh bash "$SCRIPT" --runtime docker --no-build >/dev/null
+    grep -qF '# >>> gco >>>' "$SHIMDIR/.zshrc"
+    run env HOME="$SHIMDIR" SHELL=/bin/zsh bash "$SCRIPT" --uninstall
+    [ "$status" -eq 0 ]
+    ! grep -qF '# >>> gco >>>' "$SHIMDIR/.zshrc"
+}
+
+@test "install summary describes the podman socket mount" {
+    make_shim "$SHIMDIR" podman 0
+    PATH="$SHIMDIR:$PATH" XDG_RUNTIME_DIR=/run/user/4242 \
+        run bash "$SCRIPT" --runtime podman --no-build --rc "$RCFILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Socket mount      : Podman socket (/run/user/4242/podman/podman.sock) -> /var/run/docker.sock"* ]]
 }
 
 # -- fish shell ----------------------------------------------------------------
