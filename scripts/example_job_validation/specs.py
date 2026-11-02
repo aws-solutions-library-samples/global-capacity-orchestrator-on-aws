@@ -237,6 +237,18 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             notes="default model (Qwen/Qwen2.5-1.5B-Instruct) is ungated; runs verbatim",
         ),
         ExampleSpec(
+            "inference-vllm-gemma4",
+            SUBMIT_DIRECT,
+            DEPLOYMENT_AVAILABLE,
+            accelerator="nvidia",
+            capacity_quota_code="L-3819A6DF",
+            timeout_seconds=4500,
+            notes=(
+                "ungated Gemma 4 31B BF16; requires G7e Spot and the inference EFS claim; "
+                "hard family/capacity selectors remain unchanged during validation"
+            ),
+        ),
+        ExampleSpec(
             "inference-sglang",
             SUBMIT_DIRECT,
             DEPLOYMENT_AVAILABLE,
