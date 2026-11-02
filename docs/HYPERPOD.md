@@ -117,21 +117,35 @@ the node's HyperPod labels (`sagemaker.amazonaws.com/node-health-status`,
 `sagemaker.amazonaws.com/deep-health-check-status`, the instance group) are
 included in `node_labels`.
 
-**Across Regions.** HyperPod changes nothing about how GCO chooses a Region,
-and nothing in that choice knows a Region has HyperPod. The global workload
-API routes through Global Accelerator by endpoint health and network proximity,
-never by GPU inventory ([Global Routing](CONCEPTS.md#global-routing)).
-`gco jobs submit-sqs --auto-region` and `gco capacity recommend-region` score
-each Region on its job queue depth, its cluster's Container Insights GPU
+**Across Regions.** The global workload API routes through Global Accelerator
+by endpoint health and network proximity, never by GPU inventory
+([Global Routing](CONCEPTS.md#global-routing)); HyperPod changes nothing
+there. The CLI's Region picker does know HyperPod. `gco jobs submit-sqs
+--auto-region` reads the manifest first: one routed to HyperPod (either form
+above) is placed only in a Region whose regional stack runs a HyperPod
+cluster, and the command fails when no Region does rather than queueing the
+Job where it could never start. `gco capacity recommend-region --backend
+hyperpod` (the MCP `recommend_region` tool's `backend`) is the same ranking
+on its own. Those Regions are ranked on what SageMaker reports for the
+cluster the stack's `HyperpodClusterName` output names: a cluster that is
+`InService` with every instance group at its target count ranks ahead of one
+that is not; a GPU pool known to be smaller than the GPUs the manifest
+requests (or `--gpu-count`) ranks behind every pool that fits;
+`--instance-type` keeps only Regions with an instance group of that type.
+The pool is each group's node count times the GPU count of its `ml.*` type,
+read from EC2's description of the type's EC2 twin (`ml.g5.8xlarge` →
+`g5.8xlarge`); the read uses your credentials (`sagemaker:DescribeCluster`,
+`ec2:DescribeInstanceTypes`), as `gco stacks hyperpod status` does. Among
+equals, the Region's job queue decides (HyperPod work waits in the same queue
+as everything else), then the larger pool. What the
+picker cannot see is how many of those GPUs are busy: the CloudWatch agent
+does not run on HyperPod nodes (it tolerates only the accelerator taints, not
+`gco.aws/hyperpod`), so Container Insights GPU utilization excludes them, and
+Kueue's `gco-hyperpod-queue` usage has no API route. A manifest not routed to
+HyperPod is placed as before, on queue depth, Container Insights GPU
 utilization and, for a named instance type, EC2 spot placement and pricing.
-HyperPod nodes are nodes of the cluster, so they count in that utilization, but
-the score does not see them as HyperPod: it weighs neither the `gco-hyperpod`
-`ClusterQueue`'s free quota nor an instance group's spare instances, and an
-`ml.*` instance type has no EC2 spot signal, so that component stays neutral.
-Choose the Region as before, then ask for HyperPod within it with the queue
-label or `--capacity-type hyperpod`. Training Plan discovery
-(`gco capacity find-training-plans`) is a read-only search and feeds neither
-path.
+Training Plan discovery (`gco capacity find-training-plans`) is a read-only
+search and feeds neither path.
 
 ## Enabling it
 
@@ -328,7 +342,10 @@ stay in the unit suite.
   operator for yourself.
 - HyperPod task governance (HyperPod's own Kueue install) is not installed;
   GCO's Kueue is the single queueing layer.
-- Region selection is not HyperPod-aware. The global API's health-based
-  routing and the `--auto-region` / `recommend-region` scoring treat a
-  Region's HyperPod nodes as part of its cluster, not as a pool of their own
-  (see [How work reaches HyperPod nodes](#how-work-reaches-hyperpod-nodes)).
+- Region selection sees HyperPod's size, not its load. `--auto-region` and
+  `recommend-region --backend hyperpod` know which Regions run HyperPod, the
+  cluster's health and its GPU pool, but not how many of those GPUs are busy:
+  the CloudWatch agent does not run on HyperPod nodes and Kueue's queue usage
+  is not exposed by the API, so the Region's shared job queue stands in for
+  load. The global API's health-based routing stays unaware of HyperPod (see
+  [How work reaches HyperPod nodes](#how-work-reaches-hyperpod-nodes)).

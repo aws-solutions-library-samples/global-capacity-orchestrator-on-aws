@@ -86,7 +86,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `list_reservations` | List On-Demand Capacity Reservations (ODCRs) across regions. |
 | `list_training_plans` | `gco capacity training-plans` — the SageMaker Training Plans the account holds, with their reserved capacity, windows and ARNs. |
 | `recommend_capacity` | Recommend spot or on-demand capacity for a workload. |
-| `recommend_region` | Get optimal region recommendation based on capacity. |
+| `recommend_region` | Get optimal region recommendation based on capacity; `backend` (`eks`, `hyperpod`, `pcs`) ranks only the Regions running that backend on its own capacity. |
 | `reservation_check` | Check ODCR and Capacity Block availability (multi-region, date-window, duration in hours or days). |
 | `reserve_capacity` | Purchase a Capacity Block offering by its ID. |
 | `spot_prices` | Get current spot prices for an instance type. |

@@ -8,6 +8,8 @@ Submodules:
     models        — Data classes and GPU instance specs
     checker       — Single-region CapacityChecker
     multi_region  — Multi-region checking and weighted scoring
+    backends      — Per-Region SageMaker HyperPod and AWS PCS capacity
+    placement     — What a manifest asks of a Region (HyperPod routing, GPUs)
     advisor       — Bedrock-powered AI capacity recommendations
 """
 
@@ -20,6 +22,15 @@ from .advisor import (
     BedrockCapacityRecommendation,
     CapacityPredictionResult,
     get_bedrock_capacity_advisor,
+)
+from .backends import (
+    BACKEND_EKS,
+    BACKEND_HYPERPOD,
+    BACKEND_PCS,
+    BACKENDS,
+    HyperpodCapacity,
+    NoEligibleRegionError,
+    PcsCapacity,
 )
 from .checker import (
     CapacityBlockRequestError,
@@ -46,6 +57,7 @@ from .multi_region import (
     compute_weighted_score,
     get_multi_region_capacity_checker,
 )
+from .placement import PlacementHints, manifest_placement
 from .traffic_dial import (
     RegionDialStatus,
     TrafficDialError,
@@ -54,6 +66,10 @@ from .traffic_dial import (
 )
 
 __all__ = [
+    "BACKENDS",
+    "BACKEND_EKS",
+    "BACKEND_HYPERPOD",
+    "BACKEND_PCS",
     "BedrockCapacityAdvisor",
     "BedrockCapacityRecommendation",
     "CapacityBlockRequestError",
@@ -62,8 +78,12 @@ __all__ = [
     "CapacityEstimate",
     "CapacityHistoryStore",
     "CapacityPredictionResult",
+    "HyperpodCapacity",
     "InstanceTypeInfo",
     "MultiRegionCapacityChecker",
+    "NoEligibleRegionError",
+    "PcsCapacity",
+    "PlacementHints",
     "RegionCapacity",
     "RegionDialStatus",
     "SpotPlacementConfigLimitError",
@@ -79,4 +99,5 @@ __all__ = [
     "get_multi_region_capacity_checker",
     "get_traffic_dial_manager",
     "instance_type_info_from_ec2",
+    "manifest_placement",
 ]

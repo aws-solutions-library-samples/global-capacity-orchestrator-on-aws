@@ -1198,6 +1198,7 @@ def test_capacity_recommend_region_verbose_prints_ranked_signals(
         min_gpus=4,
         instance_type="p5.48xlarge",
         gpu_count=8,
+        backend="eks",
     )
 
 

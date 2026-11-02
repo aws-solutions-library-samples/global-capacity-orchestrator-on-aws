@@ -624,13 +624,24 @@ gco capacity recommend-region [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--gpu` | | Recommend for GPU workloads |
-| `--instance-type` | `-i` | Specific instance type (enables weighted scoring) |
+| `--instance-type` | `-i` | Specific instance type (enables weighted scoring; with `--backend hyperpod`, the instance group type a Region must have) |
 | `--gpu-count` | | Number of GPUs required |
 | `--min-gpus` | | Minimum GPUs required |
+| `--backend` | | Capacity pool to place on: `eks` (default), `hyperpod` or `pcs` |
 
 When `--instance-type` is provided, the recommendation uses weighted multi-signal
 scoring that combines spot placement scores, spot-vs-on-demand pricing, queue depth,
 GPU utilization, and running job counts. Without it, a simpler composite score is used.
+
+`--backend hyperpod` considers only Regions whose regional stack runs a
+[SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) cluster and ranks
+them on the cluster's health (`InService`, every instance group at its target count),
+whether its GPU pool fits `--gpu-count` (and has an instance group of `--instance-type`,
+if given), and the Region's job queue. `--backend pcs` considers only Regions running
+[AWS PCS](PCS.md#using-the-cluster) and ranks them on the cluster's health, how many more
+compute nodes its node groups can launch, and Slurm's pending jobs. Both fail when no
+Region runs the backend instead of falling back to the default Region; `--verbose` lists
+the ranked Regions with the signals they were scored on and the Regions left out.
 
 **Example:**
 
@@ -638,6 +649,8 @@ GPU utilization, and running job counts. Without it, a simpler composite score i
 gco capacity recommend-region --gpu
 gco capacity recommend-region -i g5.xlarge
 gco capacity recommend-region -i p4d.24xlarge --gpu-count 8
+gco capacity recommend-region --backend hyperpod --gpu-count 8
+gco capacity recommend-region --backend pcs
 ```
 
 #### `gco capacity ai-recommend`
@@ -3320,10 +3333,19 @@ gco jobs submit-sqs MANIFEST_PATH [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Target region for SQS queue |
-| `--auto-region` | | Auto-select optimal region based on capacity |
+| `--auto-region` | | Auto-select optimal region based on capacity (ignored with `--region`) |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
+
+`--auto-region` reads the manifest before ranking. A manifest routed to
+[SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) (the
+`kueue.x-k8s.io/queue-name: gco-hyperpod` label, or a node selector for
+`gco.aws/capacity-provider: hyperpod` on every pod spec) is placed only in a Region
+running HyperPod, ranked as `gco capacity recommend-region --backend hyperpod` ranks
+them with `--gpu-count` set to the `nvidia.com/gpu` the manifest requests; the command
+fails when no Region runs HyperPod rather than queueing the Job where it could never
+start. Any other manifest is placed on the default ranking.
 
 **Example:**
 
@@ -4867,6 +4889,7 @@ The `sbatch` equivalent: reads a local batch script (an interpreter line first, 
 
 ```bash
 gco slurm submit SCRIPT -r REGION [--backend slinky|pcs] [OPTIONS]
+gco slurm submit SCRIPT --auto-region [OPTIONS]
 ```
 
 **Options:**
@@ -4874,6 +4897,7 @@ gco slurm submit SCRIPT -r REGION [--backend slinky|pcs] [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--backend`, `-b` | `slinky` or `pcs`; required when the region runs both (every API command takes it). |
+| `--auto-region` | Pick the Region among those running [AWS PCS](PCS.md#using-the-cluster), ranked as `gco capacity recommend-region --backend pcs` ranks them (cluster health, the compute nodes the node groups can still launch, pending Slurm jobs); implies `--backend pcs` and fails when no Region runs PCS. Ignored with `--region`; refused with `--backend slinky`, which has no cross-Region recommendation. |
 | `--name`, `-J` | Job name (default: the script's `#SBATCH --job-name`, else `gco-job`). |
 | `--partition`, `-p` | Partition (default: the cluster's default partition, `cpu` on Slinky and the `default: true` queue, `gco`, on PCS as shipped). |
 | `--nodes`, `-N` | Node count. |
@@ -4952,6 +4976,7 @@ gco slurm status -r us-east-1
 gco slurm status -r us-east-1 --backend pcs
 gco slurm submit hello.sbatch -r us-east-1
 gco slurm submit hello.sbatch -r us-east-1 --backend pcs
+gco slurm submit hello.sbatch --auto-region
 gco slurm submit train.sbatch -r us-east-1 -p gpu -N 2 --gpus-per-node 8 -t 04:00:00
 gco slurm queue -r us-east-1 --state PENDING
 gco slurm output 42 -r us-east-1 --via-ssm auto -y
