@@ -3,12 +3,14 @@
 # Adapted from inference-vllm.yaml. Serves the original BF16 checkpoint on one
 # 96 GB NVIDIA RTX PRO 6000 Blackwell GPU. The 80 GiB host-memory request makes
 # g7e.4xlarge (128 GiB RAM) the smallest eligible instance; g7e.2xlarge has
-# only 64 GiB RAM. g7e.8xlarge is also eligible when Spot supply changes.
-# Affinity keeps this one-GPU server on the single-GPU G7e sizes.
+# only 64 GiB RAM. g7e.8xlarge, g7e.12xlarge and g7e.24xlarge are also
+# eligible when Spot supply changes. The server requests one GPU on every
+# eligible size, including the larger multi-GPU hosts.
 #
 # Prerequisites:
 #   - Existing GCO cluster with gpu-inference-pool and gco-inference/efs-claim.
 #   - G7e support in EKS Auto Mode, regional G7e Spot supply and G/VT Spot quota.
+#     The quota must cover the chosen instance: g7e.24xlarge needs 96 vCPUs.
 #   - Outbound HTTPS access to Hugging Face and the vLLM image registry.
 # The model is ungated: no Hugging Face token is required.
 #
@@ -195,6 +197,8 @@ spec:
                 values:
                 - g7e.4xlarge
                 - g7e.8xlarge
+                - g7e.12xlarge
+                - g7e.24xlarge
       volumes:
       - name: model-cache
         persistentVolumeClaim:

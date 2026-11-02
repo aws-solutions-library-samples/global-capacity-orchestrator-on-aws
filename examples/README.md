@@ -436,9 +436,11 @@ This variant adapts `inference-vllm.yaml` for `google/gemma-4-31B-it`, with one
 96 GB Blackwell GPU, BF16 weights, an 8,192-token context and four concurrent
 sequences. It requires the existing `gpu-inference-pool` and
 `gco-inference/efs-claim`. Its 80 GiB host-memory request makes `g7e.4xlarge`
-the smallest eligible instance, with `g7e.8xlarge` also eligible for Spot
-availability. Affinity keeps this server on single-GPU instances. The model
-is ungated and needs no Hugging Face token. The EFS
+the smallest eligible instance, with `g7e.8xlarge`, `g7e.12xlarge` and
+`g7e.24xlarge` also eligible for Spot availability. The server requests one
+GPU on every eligible size, including the larger multi-GPU hosts. The G/VT
+Spot quota must cover the chosen instance; `g7e.24xlarge` needs 96 vCPUs.
+The model is ungated and needs no Hugging Face token. The EFS
 cache preserves downloads across Spot replacements; the one-hour startup
 probe allows for the first download and load. Both G7e and Spot are required
 by node selectors, so the pod stays Pending if that capacity is unavailable.

@@ -250,7 +250,7 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
             "efs",
             "chat completions",
         ],
-        "instance_types": ["g7e.4xlarge", "g7e.8xlarge"],
+        "instance_types": ["g7e.4xlarge", "g7e.8xlarge", "g7e.12xlarge", "g7e.24xlarge"],
         "use_cases": [
             "serve Gemma 4 31B on G7e Spot",
             "reuse model weights after a Spot replacement",
