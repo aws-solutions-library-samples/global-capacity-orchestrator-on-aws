@@ -170,7 +170,7 @@ jobs:
           # restore, and a restore GitHub's storage refuses stalls the job (see
           # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
           package-manager-cache: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -319,7 +319,7 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -429,7 +429,7 @@ jobs:
       # project pins, so the version comes from .ruby-version — the same
       # single-source-of-truth treatment .python-version gets.
       - name: Set up Ruby
-        uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8  # v1.331.0
+        uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f  # v1.335.0
         with:
           ruby-version: ".ruby-version"
       - name: Install the committed gem lock
@@ -629,7 +629,7 @@ jobs:
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -656,7 +656,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -707,7 +707,7 @@ jobs:
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -910,7 +910,7 @@ jobs:
           cache-dependency-path: "package-lock.json"
       - name: Install and verify the declared npm version
         run: bash .github/scripts/use-pinned-npm.sh package.json
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -977,7 +977,7 @@ jobs:
           # restore, and a restore GitHub's storage refuses stalls the job (see
           # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
           package-manager-cache: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -1043,7 +1043,7 @@ jobs:
           # restore, and a restore GitHub's storage refuses stalls the job (see
           # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
           package-manager-cache: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -1139,7 +1139,7 @@ jobs:
           # restore, and a restore GitHub's storage refuses stalls the job (see
           # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
           package-manager-cache: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -1197,7 +1197,7 @@ jobs:
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -1282,7 +1282,7 @@ jobs:
           # GitHub's storage refuses stalls the job (see
           # SEGMENT_DOWNLOAD_TIMEOUT_MINS above).
           package-manager-cache: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           # Intentionally no pip cache — this job verifies a cold install.
@@ -1306,7 +1306,7 @@ jobs:
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
           cache: "pip"
@@ -1371,7 +1371,7 @@ jobs:
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
       - name: Install uv

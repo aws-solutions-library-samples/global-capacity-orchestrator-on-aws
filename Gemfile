@@ -32,7 +32,7 @@ source "https://rubygems.org"
 
 # Bash line coverage for the BATS suite. Pinned exactly; Dependabot proposes
 # bumps. Its own dependency (simplecov) is resolved in Gemfile.lock.
-gem "bashcov", "4.0.0"
+gem "bashcov", "4.0.1"
 
 # Audits Gemfile.lock against the Ruby advisory database. Pinned exactly for
 # the same reason pip-audit and npm's audit tooling are.
