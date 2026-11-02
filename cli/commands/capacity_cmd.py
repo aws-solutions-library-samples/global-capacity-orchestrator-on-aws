@@ -318,6 +318,29 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
         sys.exit(1)
 
 
+def _ranked_region_line(backend: str, entry: dict[str, Any]) -> str:
+    """One ``--verbose`` ranking line, showing the signals the backend was scored on."""
+    line = f"  {entry['region']}: score={entry['score']:.4f}"
+    if backend == "hyperpod":
+        cluster = entry.get("hyperpod") or {}
+        gpus = entry.get("gpus_available")
+        return (
+            f"{line}, hyperpod={cluster.get('status') or 'unknown'}, "
+            f"nodes={cluster.get('nodes_current', 0)}/{cluster.get('nodes_target', 0)}, "
+            f"gpus={'?' if gpus is None else gpus}, queue={entry['queue_depth']}"
+        )
+    if backend == "pcs":
+        cluster = entry.get("pcs") or {}
+        pending = cluster.get("slurm_pending_jobs")
+        headroom = entry.get("headroom")
+        return (
+            f"{line}, pcs={cluster.get('status') or 'unknown'}, "
+            f"pending={'?' if pending is None else pending}, "
+            f"headroom={'?' if headroom is None else headroom}"
+        )
+    return f"{line}, queue={entry['queue_depth']}, gpu={entry['gpu_utilization']:.0f}%"
+
+
 @capacity.command("recommend-region")
 @click.option("--gpu", is_flag=True, help="Job requires GPUs")
 @click.option("--min-gpus", default=0, help="Minimum GPUs required")
@@ -325,9 +348,20 @@ def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
     "--instance-type", "-i", default=None, help="Specific instance type for workload-aware scoring"
 )
 @click.option("--gpu-count", default=0, help="Number of GPUs required")
+@click.option(
+    "--backend",
+    type=click.Choice(["eks", "hyperpod", "pcs"]),
+    default="eks",
+    show_default=True,
+    help=(
+        "Capacity pool to place on: eks (the Region's EKS cluster), hyperpod (only Regions "
+        "running SageMaker HyperPod, ranked on the cluster's health and GPU pool), pcs (only "
+        "Regions running AWS PCS, ranked on node-group headroom and the Slurm queue)"
+    ),
+)
 @pass_config
 def recommend_region(
-    config: Any, gpu: Any, min_gpus: Any, instance_type: Any, gpu_count: Any
+    config: Any, gpu: Any, min_gpus: Any, instance_type: Any, gpu_count: Any, backend: Any
 ) -> None:
     """Recommend optimal region for job placement.
 
@@ -339,11 +373,21 @@ def recommend_region(
     Without --instance-type, uses a simpler composite score based on
     queue depth, GPU utilization, and running jobs.
 
+    --backend hyperpod considers only Regions whose stack runs a SageMaker
+    HyperPod cluster and ranks them on the cluster's health, whether its GPU
+    pool fits --gpu-count (and has --instance-type, if given), and the
+    Region's job queue. --backend pcs considers only Regions running AWS PCS
+    and ranks them on the cluster's health, how many more compute nodes its
+    node groups can launch, and Slurm's pending jobs. Either fails when no
+    Region runs the backend instead of falling back to the default Region.
+
     Examples:
         gco capacity recommend-region
         gco capacity recommend-region --gpu
         gco capacity recommend-region -i g5.xlarge
         gco capacity recommend-region -i p4d.24xlarge --gpu-count 8
+        gco capacity recommend-region --backend hyperpod --gpu-count 8
+        gco capacity recommend-region --backend pcs
     """
     from ..capacity import get_multi_region_capacity_checker
 
@@ -356,6 +400,7 @@ def recommend_region(
             min_gpus=min_gpus,
             instance_type=instance_type,
             gpu_count=gpu_count,
+            backend=backend,
         )
 
         if config.output_format == "table":
@@ -365,10 +410,9 @@ def recommend_region(
             if config.verbose:
                 print("\nAll regions ranked:")
                 for r in recommendation.get("all_regions", []):
-                    print(
-                        f"  {r['region']}: score={r['score']:.4f}, "
-                        f"queue={r['queue_depth']}, gpu={r['gpu_utilization']:.0f}%"
-                    )
+                    print(_ranked_region_line(backend, r))
+                for r in recommendation.get("ineligible_regions", []):
+                    print(f"  {r['region']}: not eligible ({r['reason']})")
         else:
             formatter.print(recommendation)
 

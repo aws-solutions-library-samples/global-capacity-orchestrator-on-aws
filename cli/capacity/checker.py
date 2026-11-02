@@ -2528,6 +2528,8 @@ class CapacityChecker:
         min_gpus: int = 0,
         instance_type: str | None = None,
         gpu_count: int = 0,
+        *,
+        backend: str = "eks",
     ) -> dict[str, Any]:
         """
         Recommend the optimal region for job placement.
@@ -2539,6 +2541,8 @@ class CapacityChecker:
             min_gpus: Minimum number of GPUs required
             instance_type: Specific instance type for workload-aware scoring
             gpu_count: Number of GPUs required
+            backend: ``eks`` (default), or ``hyperpod`` / ``pcs`` to rank only
+                the Regions running that backend on its own capacity
 
         Returns:
             Dictionary with recommended region and justification
@@ -2547,7 +2551,11 @@ class CapacityChecker:
 
         checker = MultiRegionCapacityChecker(self.config)
         return checker.recommend_region_for_job(
-            gpu_required, min_gpus, instance_type=instance_type, gpu_count=gpu_count
+            gpu_required,
+            min_gpus,
+            instance_type=instance_type,
+            gpu_count=gpu_count,
+            backend=backend,
         )
 
 

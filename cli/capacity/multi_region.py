@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import statistics
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -13,17 +14,38 @@ from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, get_config
 
+from .backends import (
+    BACKEND_EKS,
+    BACKEND_HYPERPOD,
+    BACKEND_PCS,
+    BACKENDS,
+    HyperpodCapacity,
+    NoEligibleRegionError,
+    PcsCapacity,
+    ec2_equivalent,
+    hyperpod_capacity,
+    ml_instance_type,
+    pcs_capacity,
+    sum_gpus,
+)
 from .checker import CapacityChecker
 
 logger = logging.getLogger(__name__)
 
 _TELEMETRY_MISSING_SIGNAL_PENALTY = 1000.0
 _SCORED_TELEMETRY_SIGNALS = frozenset({"queue", "gpu"})
+#: The regional API route the PCS ranking reads Slurm's queue from.
+_SLURM_STATUS_PATH = "/api/v1/slurm/status"
 
 
 def _missing_scored_signal_count(capacity: RegionCapacity) -> int:
     """Return the number of unavailable signals used for placement scoring."""
     return len(_SCORED_TELEMETRY_SIGNALS.intersection(capacity.unavailable_signals))
+
+
+def _check_backend(backend: str) -> None:
+    if backend not in BACKENDS:
+        raise ValueError(f"backend must be one of {', '.join(BACKENDS)}, not {backend!r}")
 
 
 @dataclass
@@ -43,6 +65,11 @@ class RegionCapacity:
     telemetry_status: str = "unknown"
     unavailable_signals: list[str] = field(default_factory=list)
     telemetry_errors: list[str] = field(default_factory=list)
+    #: The Region's SageMaker HyperPod cluster, read only when the ``hyperpod``
+    #: backend is asked for; ``None`` otherwise.
+    hyperpod: HyperpodCapacity | None = None
+    #: The Region's AWS PCS cluster, read only when the ``pcs`` backend is asked for.
+    pcs: PcsCapacity | None = None
 
 
 class MultiRegionCapacityChecker:
@@ -63,8 +90,14 @@ class MultiRegionCapacityChecker:
         # empty result can be distinguished as "checks failed" vs "no regions".
         self._last_region_errors: list[str] = []
 
-    def get_region_capacity(self, region: str) -> RegionCapacity:
-        """Get capacity information while retaining telemetry uncertainty."""
+    def get_region_capacity(self, region: str, *, backend: str = BACKEND_EKS) -> RegionCapacity:
+        """Get capacity information while retaining telemetry uncertainty.
+
+        ``backend`` ``hyperpod`` or ``pcs`` additionally reads that backend's
+        capacity in the Region (:mod:`cli.capacity.backends`) onto the
+        ``hyperpod`` / ``pcs`` field; the default ``eks`` reads nothing extra.
+        """
+        _check_backend(backend)
         from cli.aws_client import get_aws_client
 
         aws_client = get_aws_client(self.config)
@@ -81,6 +114,9 @@ class MultiRegionCapacityChecker:
             return capacity
 
         available = {"queue": False, "gpu": False, "cpu": False}
+        # The stack's outputs, kept for the backend reads below; ``None`` when
+        # CloudFormation could not be asked.
+        outputs: dict[str, str] | None = None
 
         # Get queue depth from SQS.
         try:
@@ -172,10 +208,46 @@ class MultiRegionCapacityChecker:
         capacity.recommendation_score = base_score + (
             len(missing_scored_signals) * _TELEMETRY_MISSING_SIGNAL_PENALTY
         )
+
+        if backend == BACKEND_HYPERPOD:
+            capacity.hyperpod = hyperpod_capacity(
+                region,
+                outputs,
+                client_factory=self._session.client,
+                gpus_per_instance=self._ml_gpu_lookup(region),
+            )
+        elif backend == BACKEND_PCS:
+            capacity.pcs = pcs_capacity(
+                region,
+                outputs,
+                client_factory=self._session.client,
+                slurm_status=lambda: aws_client.call_api(
+                    "GET", _SLURM_STATUS_PATH, region=region, params={"backend": BACKEND_PCS}
+                ),
+            )
         return capacity
 
-    def get_all_regions_capacity(self) -> list[RegionCapacity]:
+    def _ml_gpu_lookup(self, region: str) -> Callable[[str], int | None]:
+        """GPUs per node of an ``ml.*`` type, from EC2's description of its EC2 twin.
+
+        One EC2 call per distinct type and Region; ``None`` when EC2 does not
+        describe the type there (the HyperPod ranking then treats the group's
+        GPU count as unknown rather than as zero).
+        """
+        checker = CapacityChecker(self.config)
+        cache: dict[str, int | None] = {}
+
+        def lookup(instance_type: str) -> int | None:
+            if instance_type not in cache:
+                info = checker.get_instance_info(ec2_equivalent(instance_type), region=region)
+                cache[instance_type] = info.gpu_count if info else None
+            return cache[instance_type]
+
+        return lookup
+
+    def get_all_regions_capacity(self, *, backend: str = BACKEND_EKS) -> list[RegionCapacity]:
         """Get capacity information for all deployed regions."""
+        _check_backend(backend)
         from cli.aws_client import get_aws_client
 
         self._last_region_errors = []
@@ -190,7 +262,7 @@ class MultiRegionCapacityChecker:
         capacities = []
         for region in stacks:
             try:
-                capacity = self.get_region_capacity(region)
+                capacity = self.get_region_capacity(region, backend=backend)
                 capacities.append(capacity)
             except Exception as e:
                 logger.warning("Failed to get capacity for region %s: %s", region, e)
@@ -205,6 +277,8 @@ class MultiRegionCapacityChecker:
         min_gpus: int = 0,
         instance_type: str | None = None,
         gpu_count: int = 0,
+        *,
+        backend: str = BACKEND_EKS,
     ) -> dict[str, Any]:
         """
         Recommend the optimal region for job placement.
@@ -214,15 +288,32 @@ class MultiRegionCapacityChecker:
         and running job counts. Falls back to simple scoring when instance_type
         is not specified.
 
+        ``backend`` ``hyperpod`` or ``pcs`` ranks only the Regions where that
+        backend is deployed, on the backend's own capacity (see
+        :meth:`_hyperpod_recommend` and :meth:`_pcs_recommend`), and raises
+        :class:`NoEligibleRegionError` when no Region qualifies instead of
+        falling back to the default Region, where the work could not run.
+
         Args:
             gpu_required: Whether the job requires GPUs
             min_gpus: Minimum number of GPUs required
             instance_type: Specific instance type for workload-aware scoring
             gpu_count: Number of GPUs required
+            backend: ``eks`` (default), ``hyperpod`` or ``pcs``
 
         Returns:
             Dictionary with recommended region and justification
         """
+        _check_backend(backend)
+        if backend == BACKEND_HYPERPOD:
+            return self._hyperpod_recommend(
+                self.get_all_regions_capacity(backend=backend),
+                gpus_required=gpu_count or min_gpus,
+                instance_type=instance_type,
+            )
+        if backend == BACKEND_PCS:
+            return self._pcs_recommend(self.get_all_regions_capacity(backend=backend))
+
         capacities = self.get_all_regions_capacity()
 
         if not capacities:
@@ -476,6 +567,269 @@ class MultiRegionCapacityChecker:
             "telemetry_status": best["telemetry_status"],
             "telemetry_errors": best["telemetry_errors"],
             "all_regions": scored_regions,
+        }
+
+    def _no_eligible_region(
+        self, backend_label: str, ineligible: list[dict[str, str]], cdk_key: str
+    ) -> NoEligibleRegionError:
+        """The error for a backend ranking that found no Region to place on."""
+        details = [f"{entry['region']}: {entry['reason']}" for entry in ineligible]
+        details.extend(self._last_region_errors)
+        if not details:
+            details.append("no regional stack was found")
+        return NoEligibleRegionError(
+            f"No deployed Region runs {backend_label} ({'; '.join(details)}). Turn on "
+            f"{cdk_key} in cdk.json for a Region and deploy it, or choose a Region with --region",
+            ineligible,
+        )
+
+    def _queue_reasons(self, cap: RegionCapacity) -> list[str]:
+        """The shared job-queue notes the backend rankings reuse."""
+        if "queue" in cap.unavailable_signals:
+            return ["job queue telemetry unavailable"]
+        reasons = []
+        if cap.queue_depth == 0:
+            reasons.append("empty queue")
+        elif cap.queue_depth < 5:
+            reasons.append(f"low queue depth ({cap.queue_depth})")
+        if cap.running_jobs == 0:
+            reasons.append("no running jobs")
+        elif cap.running_jobs < 5:
+            reasons.append(f"few running jobs ({cap.running_jobs})")
+        return reasons
+
+    def _hyperpod_recommend(
+        self,
+        capacities: list[RegionCapacity],
+        *,
+        gpus_required: int = 0,
+        instance_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Rank the Regions whose regional stack publishes a SageMaker HyperPod cluster.
+
+        Lower scores win. A Region scores 1000 for each of: a cluster that is
+        not ``InService`` with every instance group at its target count, a
+        GPU pool known to be smaller than ``gpus_required``, an undescribable
+        cluster, and a missing job-queue signal; then ``queue_depth x 10 +
+        running_jobs x 5`` for the Region's shared job queue, which HyperPod
+        work waits in like any other. Ties go to the larger HyperPod GPU pool,
+        then the more nodes, then the Region name. With ``instance_type``,
+        only Regions whose cluster has an instance group of that type (either
+        spelling, ``ml.g5.8xlarge`` or ``g5.8xlarge``) qualify, and the pool
+        is that group's GPUs.
+
+        Busy GPUs on HyperPod nodes are not visible from outside the cluster,
+        so a healthy cluster with a large pool and an empty Region queue is
+        the best this ranking can tell apart.
+        """
+        wanted = ml_instance_type(instance_type) if instance_type else None
+        eligible: list[tuple[tuple[float, int, int, str], dict[str, Any]]] = []
+        ineligible: list[dict[str, str]] = []
+        for cap in capacities:
+            hp = cap.hyperpod
+            if hp is None or not hp.deployed:
+                reason = hp.errors[0] if hp and hp.errors else "SageMaker HyperPod is not deployed"
+                ineligible.append({"region": cap.region, "reason": reason})
+                continue
+            gpus: int | None = None
+            if "cluster" not in hp.unavailable_signals:
+                groups = hp.instance_groups
+                if wanted:
+                    groups = [group for group in groups if group.instance_type == wanted]
+                    if not groups:
+                        ineligible.append(
+                            {
+                                "region": cap.region,
+                                "reason": f"no HyperPod instance group of {wanted}",
+                            }
+                        )
+                        continue
+                gpus = sum_gpus(groups)
+            fits = None if gpus is None or gpus_required <= 0 else gpus >= gpus_required
+            penalty = 0.0
+            if not hp.healthy:
+                penalty += _TELEMETRY_MISSING_SIGNAL_PENALTY
+            if fits is False:
+                penalty += _TELEMETRY_MISSING_SIGNAL_PENALTY
+            missing = set(hp.unavailable_signals)
+            if "queue" in cap.unavailable_signals:
+                missing.add("queue")
+            score = (
+                penalty
+                + len(missing) * _TELEMETRY_MISSING_SIGNAL_PENALTY
+                + cap.queue_depth * 10
+                + cap.running_jobs * 5
+            )
+            entry = {
+                "region": cap.region,
+                "score": score,
+                "queue_depth": cap.queue_depth,
+                "running_jobs": cap.running_jobs,
+                "gpu_utilization": cap.gpu_utilization,
+                "telemetry_status": cap.telemetry_status,
+                "telemetry_errors": (cap.telemetry_errors + hp.errors) or None,
+                "unavailable_scored_signals": len(missing),
+                "healthy": hp.healthy,
+                "gpus_available": gpus,
+                "fits": fits,
+                "hyperpod": asdict(hp),
+            }
+            eligible.append(((score, -(gpus or 0), -hp.nodes_current, cap.region), entry))
+
+        if not eligible:
+            raise self._no_eligible_region("SageMaker HyperPod", ineligible, "hyperpod")
+
+        eligible.sort(key=lambda item: item[0])
+        ranked = [entry for _key, entry in eligible]
+        best = ranked[0]
+        best_cap = next(cap for cap in capacities if cap.region == best["region"])
+        hp = best_cap.hyperpod
+        assert hp is not None  # nosec B101  # eligible entries all carry a cluster
+
+        reasons = []
+        if "cluster" in hp.unavailable_signals:
+            reasons.append("HyperPod cluster could not be described")
+        elif hp.healthy:
+            reasons.append(
+                f"HyperPod cluster InService ({hp.nodes_current} of {hp.nodes_target} nodes"
+                + (
+                    f", {best['gpus_available']} GPUs)"
+                    if best["gpus_available"] is not None
+                    else ")"
+                )
+            )
+        else:
+            reasons.append(
+                f"HyperPod cluster {hp.status or 'in an unknown state'} "
+                f"({hp.nodes_current} of {hp.nodes_target} nodes)"
+            )
+        if best["fits"] is True:
+            reasons.append(f"fits the {gpus_required} GPUs requested")
+        elif best["fits"] is False:
+            reasons.append(
+                f"cannot fit the {gpus_required} GPUs requested "
+                f"({best['gpus_available']} on HyperPod nodes)"
+            )
+        elif gpus_required > 0:
+            reasons.append("GPU count of its HyperPod nodes is unknown")
+        reasons.extend(self._queue_reasons(best_cap))
+
+        return {
+            "region": best["region"],
+            "reason": ", ".join(reasons),
+            "score": best["score"],
+            "backend": BACKEND_HYPERPOD,
+            "scoring_method": "hyperpod",
+            "gpus_required": gpus_required,
+            "instance_type": wanted,
+            "queue_depth": best["queue_depth"],
+            "running_jobs": best["running_jobs"],
+            "gpu_utilization": best["gpu_utilization"],
+            "telemetry_status": best["telemetry_status"],
+            "telemetry_errors": best["telemetry_errors"],
+            "hyperpod": best["hyperpod"],
+            "all_regions": ranked,
+            "ineligible_regions": ineligible,
+        }
+
+    def _pcs_recommend(self, capacities: list[RegionCapacity]) -> dict[str, Any]:
+        """Rank the Regions whose regional stack publishes an AWS PCS cluster.
+
+        Lower scores win. A Region scores 1000 for each of: a cluster that is
+        not ``ACTIVE``, and each source that could not be read (the cluster,
+        its node groups and their instances, Slurm through the regional API);
+        500 when its compute node groups are at their maximum with no idle
+        Slurm node, so new work would wait; then ``pending Slurm jobs x 10 +
+        running Slurm jobs x 5``. Ties go to the larger headroom (instances the
+        node groups may still launch), then more idle nodes, then the Region
+        name. The Region's EKS job queue plays no part: Slurm work never goes
+        through it.
+        """
+        eligible: list[tuple[tuple[float, int, int, str], dict[str, Any]]] = []
+        ineligible: list[dict[str, str]] = []
+        for cap in capacities:
+            pcs = cap.pcs
+            if pcs is None or not pcs.deployed:
+                reason = pcs.errors[0] if pcs and pcs.errors else "AWS PCS is not deployed"
+                ineligible.append({"region": cap.region, "reason": reason})
+                continue
+            headroom = pcs.headroom
+            idle = pcs.slurm_idle_nodes
+            exhausted = headroom == 0 and not idle
+            penalty = 0.0
+            if not pcs.healthy:
+                penalty += _TELEMETRY_MISSING_SIGNAL_PENALTY
+            if exhausted:
+                penalty += _TELEMETRY_MISSING_SIGNAL_PENALTY / 2
+            score = (
+                penalty
+                + len(pcs.unavailable_signals) * _TELEMETRY_MISSING_SIGNAL_PENALTY
+                + (pcs.slurm_pending_jobs or 0) * 10
+                + (pcs.slurm_running_jobs or 0) * 5
+            )
+            entry = {
+                "region": cap.region,
+                "score": score,
+                "queue_depth": cap.queue_depth,
+                "gpu_utilization": cap.gpu_utilization,
+                "telemetry_status": cap.telemetry_status,
+                "telemetry_errors": (cap.telemetry_errors + pcs.errors) or None,
+                "unavailable_scored_signals": len(pcs.unavailable_signals),
+                "healthy": pcs.healthy,
+                "headroom": headroom,
+                "exhausted": exhausted,
+                "pcs": asdict(pcs),
+            }
+            eligible.append(((score, -(headroom or 0), -(idle or 0), cap.region), entry))
+
+        if not eligible:
+            raise self._no_eligible_region("AWS PCS", ineligible, "pcs")
+
+        eligible.sort(key=lambda item: item[0])
+        ranked = [entry for _key, entry in eligible]
+        best = ranked[0]
+        pcs = next(cap for cap in capacities if cap.region == best["region"]).pcs
+        assert pcs is not None  # nosec B101  # eligible entries all carry a cluster
+
+        reasons = []
+        if "cluster" in pcs.unavailable_signals:
+            reasons.append("PCS cluster could not be read")
+        elif pcs.healthy:
+            reasons.append("PCS cluster ACTIVE")
+        else:
+            reasons.append(f"PCS cluster {pcs.status or 'in an unknown state'}")
+        if "nodes" in pcs.unavailable_signals:
+            reasons.append("node groups unreadable")
+        else:
+            reasons.append(
+                f"{pcs.running_nodes} of {pcs.max_nodes} compute nodes launched, "
+                f"{pcs.headroom} more can launch"
+            )
+        if "slurm" in pcs.unavailable_signals:
+            reasons.append("Slurm status unavailable")
+        else:
+            pending = pcs.slurm_pending_jobs or 0
+            reasons.append(
+                "no pending Slurm jobs" if pending == 0 else f"{pending} pending Slurm jobs"
+            )
+            if pcs.slurm_idle_nodes:
+                reasons.append(f"{pcs.slurm_idle_nodes} idle Slurm nodes")
+        if best["exhausted"]:
+            reasons.append("at capacity: new work would wait")
+
+        return {
+            "region": best["region"],
+            "reason": ", ".join(reasons),
+            "score": best["score"],
+            "backend": BACKEND_PCS,
+            "scoring_method": "pcs",
+            "queue_depth": best["queue_depth"],
+            "gpu_utilization": best["gpu_utilization"],
+            "telemetry_status": best["telemetry_status"],
+            "telemetry_errors": best["telemetry_errors"],
+            "pcs": best["pcs"],
+            "all_regions": ranked,
+            "ineligible_regions": ineligible,
         }
 
 
