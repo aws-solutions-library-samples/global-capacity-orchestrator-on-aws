@@ -264,7 +264,14 @@ def submit_job_direct(
 )
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @click.option("--priority", "-p", default=0, help="Job priority (higher = more important)")
-@click.option("--auto-region", is_flag=True, help="Auto-select optimal region based on capacity")
+@click.option(
+    "--auto-region",
+    is_flag=True,
+    help=(
+        "Auto-select optimal region based on capacity (a manifest routed to SageMaker "
+        "HyperPod is placed only where HyperPod is deployed)"
+    ),
+)
 @pass_config
 def submit_job_sqs(
     config: Any,
@@ -283,7 +290,12 @@ def submit_job_sqs(
     - Provides better fault tolerance
 
     If --auto-region is specified, the CLI will analyze capacity across all
-    regions and submit to the optimal one.
+    regions and submit to the optimal one. A manifest routed to SageMaker
+    HyperPod (the gco-hyperpod Kueue queue label, or a node selector for
+    gco.aws/capacity-provider=hyperpod) is placed only in a Region where
+    HyperPod is deployed, ranked on that cluster's health and whether its GPU
+    pool fits the GPUs the manifest requests; the command fails when no such
+    Region exists rather than queueing the job where it could never start.
 
     Examples:
         gco jobs submit-sqs job.yaml --region us-east-1
@@ -309,11 +321,26 @@ def submit_job_sqs(
     try:
         # Auto-select region if requested
         if auto_region and not region:
-            formatter.print_info("Analyzing capacity across regions...")
-            from ..capacity import get_capacity_checker
+            from ..capacity import BACKEND_HYPERPOD, get_capacity_checker, manifest_placement
+
+            # Read the manifest first: a Job routed to SageMaker HyperPod can
+            # only run where HyperPod is deployed, so the ranking is limited
+            # to those Regions and sized against the GPUs the Job requests.
+            hints = manifest_placement(job_manager.load_manifests(manifest_path))
+            if hints.backend == BACKEND_HYPERPOD:
+                formatter.print_info(
+                    f"Manifest is routed to SageMaker HyperPod (by {hints.routing}); "
+                    "ranking the Regions where HyperPod is deployed..."
+                )
+            else:
+                formatter.print_info("Analyzing capacity across regions...")
 
             checker = get_capacity_checker(config)
-            recommendation = checker.recommend_region_for_job()
+            recommendation = checker.recommend_region_for_job(
+                gpu_required=hints.gpu_count > 0,
+                gpu_count=hints.gpu_count,
+                backend=hints.backend,
+            )
             region = recommendation["region"]
             formatter.print_info(f"Selected region: {region} ({recommendation['reason']})")
         elif not region:

@@ -145,7 +145,7 @@ spec:
 3. Global Accelerator evaluates registered internal ALBs using health, endpoint weights, and network proximity
 4. If an endpoint is unhealthy, it routes new requests to another healthy registered region
 
-This routing is transparent to the client, but it is not a GPU-capacity scheduler. Use `gco capacity` and auto-region queue/CLI workflows when placement must consider available accelerator capacity. Outside `aws`, these accelerator resources and workload routes are omitted; clients call an authorized regional bridge and choose failover explicitly.
+This routing is transparent to the client, but it is not a GPU-capacity scheduler. Use `gco capacity` and auto-region queue/CLI workflows when placement must consider available accelerator capacity: `gco jobs submit-sqs --auto-region` places a manifest routed to [SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) only in a Region running HyperPod, ranked on that cluster's health and GPU pool, and `gco slurm submit --auto-region` picks among the Regions running [AWS PCS](PCS.md#using-the-cluster) on node-group headroom and the Slurm queue (`gco capacity recommend-region --backend hyperpod|pcs` shows either ranking). The Global Accelerator path itself knows nothing of either backend. Outside `aws`, these accelerator resources and workload routes are omitted; clients call an authorized regional bridge and choose failover explicitly.
 
 ## Inference Serving
 

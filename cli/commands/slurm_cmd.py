@@ -363,6 +363,16 @@ def slurm_job(config: Any, job_id: int, region: str | None, backend: str | None)
 )
 @click.option("--comment", help="Free-text comment stored with the job")
 @click.option("--exclusive", is_flag=True, default=False, help="Whole-node allocation")
+@click.option(
+    "--auto-region",
+    is_flag=True,
+    default=False,
+    help=(
+        "Pick the Region among those running AWS PCS, on each cluster's health, the compute "
+        "nodes its node groups can still launch and its pending Slurm jobs (implies "
+        "--backend pcs; Slinky has no cross-Region recommendation). Ignored with --region."
+    ),
+)
 @pass_config
 def slurm_submit(
     config: Any,
@@ -381,6 +391,7 @@ def slurm_submit(
     environment: tuple[str, ...],
     comment: str | None,
     exclusive: bool,
+    auto_region: bool,
 ) -> None:
     """Submit a batch script (sbatch) through the GCO API.
 
@@ -390,14 +401,37 @@ def slurm_submit(
     runs as the backend's Slurm identity with your caller identity in its
     comment.
 
+    --auto-region ranks the Regions running AWS PCS (gco capacity
+    recommend-region --backend pcs) and submits to the best one; it fails
+    when no Region runs PCS.
+
     Examples:
         gco slurm submit hello.sbatch -r us-east-1
         gco slurm submit hello.sbatch -r us-east-1 --backend pcs
+        gco slurm submit hello.sbatch --auto-region
         gco slurm submit train.sbatch -r us-east-1 -p gpu -N 2 --gpus-per-node 8 -t 04:00:00
     """
     from ..slurm import SlurmCliError, memory_mb, read_batch_script, submission_body
 
     formatter = get_output_formatter(config)
+    if auto_region and not region:
+        if backend == SLINKY_BACKEND:
+            raise click.UsageError(
+                "--auto-region ranks the Regions running AWS PCS and cannot be combined with "
+                "--backend slinky; pass --region for a Slinky cluster"
+            )
+        backend = PCS_BACKEND
+        from ..capacity import get_multi_region_capacity_checker
+
+        formatter.print_info("Ranking the Regions where AWS PCS is deployed...")
+        try:
+            recommendation = get_multi_region_capacity_checker(config).recommend_region_for_job(
+                backend=PCS_BACKEND
+            )
+        except Exception as exc:
+            _fail(formatter, "recommend a Region", exc)
+        region = str(recommendation["region"])
+        formatter.print_info(f"Selected region: {region} ({recommendation['reason']})")
     target = _slurm_region(config, region)
     try:
         body = submission_body(

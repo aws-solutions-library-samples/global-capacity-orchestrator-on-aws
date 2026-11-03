@@ -91,7 +91,10 @@ def capacity_status(region: str | None = None) -> str:
 @mcp.tool(tags={"safe", "capacity"})
 @audit_logged
 def recommend_region(
-    gpu: bool = False, instance_type: str | None = None, gpu_count: int = 0
+    gpu: bool = False,
+    instance_type: str | None = None,
+    gpu_count: int = 0,
+    backend: str | None = None,
 ) -> str:
     """Get optimal region recommendation based on capacity.
 
@@ -99,7 +102,16 @@ def recommend_region(
         gpu: Whether the workload requires GPUs.
         instance_type: Specific instance type to check. When provided, uses weighted
             multi-signal scoring (spot placement scores, pricing, queue depth, etc.).
+            With ``backend="hyperpod"`` it names the HyperPod instance group type
+            the Region must have (``ml.g5.8xlarge`` or ``g5.8xlarge``).
         gpu_count: Number of GPUs required for the workload.
+        backend: Capacity pool to place on. ``eks`` (default) is the Region's EKS
+            cluster. ``hyperpod`` considers only Regions running SageMaker
+            HyperPod, ranked on the cluster's health, whether its GPU pool fits
+            ``gpu_count`` and the Region's job queue; ``pcs`` considers only
+            Regions running AWS PCS, ranked on the cluster's health, the compute
+            nodes its node groups can still launch and Slurm's pending jobs.
+            Both fail when no Region runs the backend.
     """
     args = ["capacity", "recommend-region"]
     if gpu:
@@ -108,6 +120,8 @@ def recommend_region(
         args += ["-i", instance_type]
     if gpu_count:
         args += ["--gpu-count", str(gpu_count)]
+    if backend:
+        args += ["--backend", backend]
     return cli_runner._run_cli(*args)
 
 
