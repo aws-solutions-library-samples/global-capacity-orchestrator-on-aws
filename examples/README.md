@@ -70,6 +70,7 @@ This directory contains example Kubernetes manifests you can use with Global Cap
 | [SGLang](#inference-frameworks) | `inference-sglang.yaml` | Inference | ✅ | — |
 | [Triton](#inference-frameworks) | `inference-triton.yaml` | Inference | ✅ | — |
 | [vLLM](#inference-frameworks) | `inference-vllm.yaml` | Inference | ✅ | — |
+| [Gemma 4 on G7e Spot](#inference-frameworks) | `inference-vllm-gemma4.yaml` | Inference | ✅ | G7e Spot supply |
 | [KEDA Scaled](#keda-autoscaled-job) | `keda-scaled-job.yaml` | Scheduler | — | — |
 | [kro BatchJob](#kro-batchjob) | `kro-batch-job.yaml` | Platform add-ons | — | [kro EKS Capability](../docs/EKS_CAPABILITIES.md) |
 | [kro BatchJob API](#kro-batchjob) | `kro-batch-api.yaml` | Platform add-ons | — | [kro EKS Capability](../docs/EKS_CAPABILITIES.md) |
@@ -394,6 +395,7 @@ GCO includes example manifests for multiple inference frameworks. Each creates a
 | `inference-sglang.yaml` | SGLang | High-throughput serving with RadixAttention | [Inference Guide](../docs/INFERENCE.md) |
 | `inference-triton.yaml` | Triton | NVIDIA multi-framework serving (PyTorch, TensorFlow, ONNX) | [Inference Guide](../docs/INFERENCE.md) |
 | `inference-vllm.yaml` | vLLM | OpenAI-compatible LLM serving with PagedAttention | [Inference Guide](../docs/INFERENCE.md) |
+| `inference-vllm-gemma4.yaml` | vLLM | Gemma 4 31B BF16 on G7e Spot, with an EFS model cache | [Inference Guide](../docs/INFERENCE.md) |
 
 Hugging Face's Text Generation Inference (TGI) is no longer offered as a
 `gco inference deploy --framework` choice: the project entered maintenance
@@ -419,6 +421,31 @@ gco jobs submit-direct examples/inference-vllm.yaml -r us-east-1
 ```
 
 A directly applied manifest isn't registered with the inference monitor, so `gco inference` doesn't manage it and the authenticated `/inference/` route doesn't reach it; each header shows how to test it with `kubectl port-forward` through the cluster tunnel.
+
+**Gemma 4 31B on G7e Spot:**
+
+```bash
+gco cluster tunnel --region us-west-2 --via-ssm auto
+# In another shell, add the kubectl connection flags printed by the tunnel:
+kubectl apply -f examples/inference-vllm-gemma4.yaml
+kubectl rollout status -n gco-inference deployment/vllm-gemma4 --timeout=60m
+kubectl port-forward --address 127.0.0.1 -n gco-inference svc/vllm-gemma4 8000:80
+```
+
+This variant adapts `inference-vllm.yaml` for `google/gemma-4-31B-it`, with one
+96 GB Blackwell GPU, BF16 weights, an 8,192-token context and four concurrent
+sequences. It requires the existing `gpu-inference-pool` and
+`gco-inference/efs-claim`. Its 80 GiB host-memory request makes `g7e.4xlarge`
+the smallest eligible instance, with `g7e.8xlarge`, `g7e.12xlarge` and
+`g7e.24xlarge` also eligible for Spot availability. The server requests one
+GPU on every eligible size, including the larger multi-GPU hosts. The G/VT
+Spot quota must cover the chosen instance; `g7e.24xlarge` needs 96 vCPUs.
+The model is ungated and needs no Hugging Face token. The EFS
+cache preserves downloads across Spot replacements; the one-hour startup
+probe allows for the first download and load. Both G7e and Spot are required
+by node selectors, so the pod stays Pending if that capacity is unavailable.
+The single replica is unavailable while an interrupted node is replaced.
+The manifest header includes a chat completion smoke test and cleanup.
 
 See the [Inference Guide](../docs/INFERENCE.md) for canary deployments, scaling, health checks, and multi-region routing.
 

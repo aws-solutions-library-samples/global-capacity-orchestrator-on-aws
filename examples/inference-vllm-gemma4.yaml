@@ -1,0 +1,231 @@
+# Gemma 4 31B IT on G7e Spot
+#
+# Adapted from inference-vllm.yaml. Serves the original BF16 checkpoint on one
+# 96 GB NVIDIA RTX PRO 6000 Blackwell GPU. The 80 GiB host-memory request makes
+# g7e.4xlarge (128 GiB RAM) the smallest eligible instance; g7e.2xlarge has
+# only 64 GiB RAM. g7e.8xlarge, g7e.12xlarge and g7e.24xlarge are also
+# eligible when Spot supply changes. The server requests one GPU on every
+# eligible size, including the larger multi-GPU hosts.
+#
+# Prerequisites:
+#   - Existing GCO cluster with gpu-inference-pool and gco-inference/efs-claim.
+#   - G7e support in EKS Auto Mode, regional G7e Spot supply and G/VT Spot quota.
+#     The quota must cover the chosen instance: g7e.24xlarge needs 96 vCPUs.
+#   - Outbound HTTPS access to Hugging Face and the vLLM image registry.
+# The model is ungated: no Hugging Face token is required.
+#
+# Deploy to the existing us-west-2 cluster from a network with EKS API access:
+#   gco jobs submit-direct examples/inference-vllm-gemma4.yaml -r us-west-2
+#
+# This is a standalone Deployment + ClusterIP Service. It is not registered
+# with the inference monitor or the managed /inference/ API. Use the cluster
+# tunnel (`gco cluster tunnel --region us-west-2 --via-ssm auto`) and the kubectl
+# connection flags it prints. You can also deploy through that tunnel:
+#   kubectl apply -f examples/inference-vllm-gemma4.yaml
+#   kubectl rollout status -n gco-inference deployment/vllm-gemma4 --timeout=60m
+#   kubectl port-forward --address 127.0.0.1 -n gco-inference \
+#     svc/vllm-gemma4 8000:80
+#   curl http://127.0.0.1:8000/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"google/gemma-4-31B-it","messages":[{"role":"user","content":"Hello"}],"max_tokens":128}'
+#
+# The selectors require G7e Spot: no On-Demand or other-family fallback.
+# A single replica is unavailable during Spot replacement and model loading.
+# EFS preserves the ~62.5 GB weight download across node replacements.
+# Initial settings: BF16, TP=1, 8192 tokens, 4 concurrent sequences, up to
+# 2 images per prompt. Tune context/concurrency after measuring GPU memory.
+#
+# Cleanup (keeps the shared EFS claim and cached weights):
+#   kubectl delete -f examples/inference-vllm-gemma4.yaml
+#
+# References:
+#   https://huggingface.co/google/gemma-4-31B-it
+#   https://recipes.vllm.ai/Google/Gemma4
+#   https://aws.amazon.com/ec2/instance-types/g7e/
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-gemma4
+  namespace: gco-inference
+  labels:
+    # As in inference-vllm.yaml, only the pod template carries gco.io/type.
+    # Top-level inference labels are reserved for the inference monitor.
+    app: vllm-gemma4
+    project: gco
+    framework: vllm
+spec:
+  replicas: 1
+  # Updating this single-GPU server does not need a second GPU for a surge.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-gemma4
+  template:
+    metadata:
+      labels:
+        app: vllm-gemma4
+        project: gco
+        gco.io/type: inference
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: vllm
+        # Same pinned release as inference-vllm.yaml; includes Gemma 4 support
+        # and CUDA 13 for Blackwell.
+        image: vllm/vllm-openai:v0.32.0
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 8000
+        env:
+        - name: MODEL
+          value: "google/gemma-4-31B-it"
+        - name: MODEL_REVISION
+          value: "842da3794eaa0b77d5f08bae87a17459d91ff475"
+        - name: MAX_MODEL_LEN
+          value: "8192"
+        - name: DTYPE
+          value: "bfloat16"
+        # Keep downloads on the existing inference EFS access point so a
+        # replacement Spot node can reuse them. Compile caches stay local.
+        - name: HF_HOME
+          value: "/models/huggingface/gemma4"
+        - name: VLLM_CACHE_ROOT
+          value: "/tmp/vllm"
+        - name: XDG_CACHE_HOME
+          value: "/tmp/cache"
+        # UID 1000 may lack a passwd entry; torch uses getpass.getuser().
+        - name: LOGNAME
+          value: "vllm"
+        - name: USER
+          value: "vllm"
+        - name: HOME
+          value: "/tmp"
+        args:
+        - "--model"
+        - "$(MODEL)"
+        - "--revision"
+        - "$(MODEL_REVISION)"
+        - "--max-model-len"
+        - "$(MAX_MODEL_LEN)"
+        - "--dtype"
+        - "$(DTYPE)"
+        - "--tensor-parallel-size"
+        - "1"
+        - "--gpu-memory-utilization"
+        - "0.90"
+        - "--max-num-seqs"
+        - "4"
+        - "--limit-mm-per-prompt"
+        - '{"image":2,"video":0}'
+        - "--reasoning-parser"
+        - "gemma4"
+        - "--port"
+        - "8000"
+        resources:
+          requests:
+            cpu: "8"
+            memory: "80Gi"
+            ephemeral-storage: "4Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "12"
+            memory: "96Gi"
+            ephemeral-storage: "12Gi"
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /models
+        - name: runtime-cache
+          mountPath: /tmp
+        - name: shared-memory
+          mountPath: /dev/shm
+        # Allow an hour for the first download, model load and compilation.
+        # Liveness stays disabled until startup succeeds.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 15
+          failureThreshold: 240
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 15
+          failureThreshold: 5
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      nodeSelector:
+        karpenter.sh/nodepool: gpu-inference-pool
+        karpenter.sh/capacity-type: spot
+        eks.amazonaws.com/instance-family: g7e
+        eks.amazonaws.com/instance-gpu-manufacturer: nvidia
+        kubernetes.io/arch: amd64
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                - g7e.4xlarge
+                - g7e.8xlarge
+                - g7e.12xlarge
+                - g7e.24xlarge
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: efs-claim
+      - name: runtime-cache
+        emptyDir:
+          sizeLimit: 10Gi
+      - name: shared-memory
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-gemma4
+  namespace: gco-inference
+  labels:
+    app: vllm-gemma4
+    project: gco
+spec:
+  selector:
+    app: vllm-gemma4
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  type: ClusterIP
