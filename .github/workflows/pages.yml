@@ -109,7 +109,10 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
+    # Backstop only: the deploy step's own 10-minute timeout (see its
+    # comment) must fire first, so this covers the sibling-run wait (10
+    # minutes), the builds and downloads, and that timeout with room over.
+    timeout-minutes: 30
     # Job-level permissions replace the top-level block for this job:
     #   contents: read — checkout of the triggering commit, so the wiki is
     #                    built from the exact code the published coverage
@@ -283,11 +286,29 @@ jobs:
           # /coverage/ redirect, and the three badge JSONs at the root — the
           # single deployment GitHub Pages serves.
           path: site
+          # One artifact name per attempt. Artifacts outlive a re-run of this
+          # job, and deploy-pages looks its artifact up by name across the
+          # whole run, so a re-run after a failed deploy used to find two
+          # "github-pages" artifacts and refuse ("Multiple artifacts named
+          # ... were unexpectedly found"). With the attempt number in the
+          # name, re-running the job is a working recovery path.
+          name: github-pages-${{ github.run_attempt }}
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
         with:
-          # Give up after 3 minutes rather than the action's 10-minute
-          # default, so a stuck Pages deployment ends the step cleanly inside
-          # this job's timeout-minutes backstop.
-          timeout: 180000
+          artifact_name: github-pages-${{ github.run_attempt }}
+          # Wait up to 10 minutes (the action's default) for the Pages
+          # backend to finish the deployment. A healthy deployment takes
+          # seconds (median 8s, p90 28s over the 22 successful deploys up to
+          # 2026-11-09), but the backend stalls in deployment_queued /
+          # syncing_files now and then, and the 3-minute budget this used to
+          # set failed three of the last four main deploys that way
+          # (2026-11-06 twice, 2026-11-09) while a 1m44s one got through.
+          # When this fires the action cancels the Pages deployment and fails
+          # the step with "Timeout reached", so keep it inside
+          # timeout-minutes and a stall ends as that step failure rather than
+          # a cancelled job: at worst ~10 minutes waiting for the sibling run
+          # above, a few minutes of builds and downloads, then these 10
+          # minutes, all inside the job's 30.
+          timeout: 600000
