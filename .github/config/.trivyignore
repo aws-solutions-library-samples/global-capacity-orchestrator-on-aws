@@ -284,6 +284,62 @@ CVE-2026-97689 exp:2026-12-14
 CVE-2026-78669 exp:2026-12-14
 
 # -----------------------------------------------------------------------------
+# CVE-2026-78661 (GO-2026-6860, GHSA-75pg-wvh3-34jr): the golang.org/x/net/html
+# *parser* coalesces adjacent text nodes by string concatenation, so an input
+# made of many short text runs separated by ignored end tags ("a</x>") costs
+# O(n^2) allocations and copies. Fixed in golang.org/x/net 0.62.0. The
+# vulnerable symbols are Parse, ParseFragment, ParseWithOptions,
+# ParseFragmentWithOptions and the parser's addText, fosterParent and parse
+# methods. Trivy reports the x/net module under each Go binary's gobinary
+# target in security:trivy:container-scan:
+#   * Dockerfile.dev: kubectl v1.37.2 (x/net v0.57.0) and the docker-buildx
+#     plugin v0.38.1 (x/net v0.59.0)
+#   * lambda/helm-installer: kubectl v1.37.2 (as above) and helm v4.3.1
+#     (x/net v0.60.0, so this id reaches helm where CVE-2026-78669 did not)
+#
+# Not introduced by any change of ours: the Go advisory was published
+# 2026-10-27T21:16Z, and the Security run on main at 74c11784 (completed
+# 2026-11-06T17:28Z) still scanned the dev and helm-installer images clean
+# with these exact pins. The first run to report it was PR #519's at
+# 2026-11-09T11:18Z, whose diff moves only the ruby/setup-ruby action SHA.
+#
+# Not clearable by a pin bump, re-checked 2026-11-09: v1.37.2 is still the
+# newest Kubernetes 1.37 patch (dl.k8s.io/release/stable-1.37.txt) and links
+# x/net v0.57.0; Buildx v0.38.2 (2026-11-03) is the newest stable release and,
+# per `go version -m` on its published linux-amd64 binary, still links x/net
+# v0.59.0, so the v0.38.1 -> v0.38.2 bump would not clear it; helm v4.3.1
+# (2026-10-15) is still the newest Helm 4 release and links v0.60.0.
+#
+# Not reachable: the vulnerable parser is not compiled into any of the three.
+# The release binaries are stripped, but Go keeps every linked function's
+# name for stack traces, and those names (checked on the checksum-matched
+# linux-amd64 artifacts) show
+#   * kubectl: only the html Tokenizer API (NewTokenizer, Tokenizer.Next,
+#     Token, Err, ...) plus EscapeString and unescape, linked through
+#     k8s.io/apimachinery/pkg/util/proxy's rewriteHTML, which `kubectl proxy`
+#     uses to rewrite URL attributes in HTML the proxied API server returns.
+#     No html.Parse* function and no (*parser) method is present. The
+#     Tokenizer carries none of the quadratic text coalescing, and the
+#     response being tokenized comes from the user's own Kubernetes API.
+#   * docker-buildx and helm: no golang.org/x/net/html symbol at all. Both
+#     link x/net only for http2, idna and friends; Trivy flags the module
+#     version, not a use of the package.
+# govulncheck cannot confirm this on stripped binaries: it falls back to
+# module-level matching and reports every symbol.
+#
+# Clears when kubectl, buildx and helm all link golang.org/x/net >= 0.62.0:
+# bump KUBECTL_VERSION in Dockerfile.dev plus the kubectl URL and sha256 in
+# lambda/helm-installer/Dockerfile, BUILDX_VERSION with both sha256 anchors,
+# and the helm URL and sha256 in lambda/helm-installer/Dockerfile. Confirm
+# each with `go version -m` on the binary (or `trivy image`), then drop the
+# id. Expires with the CVE-2026-78669 entry above and the CVE-2026-56851 entry
+# below so the kubectl and buildx pins are re-evaluated in one pass.
+# Advisories: https://pkg.go.dev/vuln/GO-2026-6860
+#             https://github.com/advisories/GHSA-75pg-wvh3-34jr
+#             https://avd.aquasec.com/nvd/cve-2026-78661
+CVE-2026-78661 exp:2026-12-14
+
+# -----------------------------------------------------------------------------
 # CVE-2026-56851 (GO-2026-6629): the Nickname profile in
 # golang.org/x/text/secure/precis can panic with an out-of-bounds slice error
 # when it transforms crafted input into a short destination buffer. Fixed in
