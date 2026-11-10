@@ -42,3 +42,4 @@ CDK context.
 | `__init__.py` | Exports the package's public configuration API. |
 | `accelerator_catalog.json` | Reviewed NVIDIA GPU and AWS Neuron instance catalog consumed by configuration and capacity validation. |
 | `config_loader.py` | Deployment defaults, typed accessors, cross-field validation, and schema rules. The opt-in `eks_capabilities` block (AWS-managed ACK and kro) is validated through the CDK-free `gco/eks_capabilities_config.py`, and the self-managed Argo CD block (`helm.argocd`) through `gco/argocd_config.py`; the CLI and live validation share both. The `tracing` block and its run-scoped `tracing_overrides` context resolve through `resolve_tracing_config`, which the regional stack also calls. |
+| `runai_api_contract.json` | The NVIDIA Run:ai API routes, parameters and fields `gco capacity runai` reads; `.github/scripts/check_runai_api_contract.py` checks it monthly against every published API reference version from its `min_version`. |

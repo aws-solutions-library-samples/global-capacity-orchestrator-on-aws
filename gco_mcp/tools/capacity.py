@@ -2,7 +2,12 @@
 
 import cli_runner
 from audit import audit_logged
-from feature_flags import FLAG_CAPACITY_PURCHASE, FLAG_DESTRUCTIVE_OPERATIONS, is_enabled
+from feature_flags import (
+    FLAG_CAPACITY_PURCHASE,
+    FLAG_DESTRUCTIVE_OPERATIONS,
+    FLAG_RUNAI_CAPACITY,
+    is_enabled,
+)
 from server import mcp
 
 
@@ -668,4 +673,50 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
         args = ["capacity", "cancel-reservation", "-o", reservation_id, "-r", region, "-y"]
         if dry_run:
             args.append("--dry-run")
+        return cli_runner._run_cli(*args)
+
+
+# NVIDIA Run:ai capacity — read-only, disabled by default because it calls a
+# non-AWS control plane with credentials from the MCP host's environment.
+# Set GCO_ENABLE_RUNAI_CAPACITY=true to enable.
+if is_enabled(FLAG_RUNAI_CAPACITY):
+
+    @mcp.tool(tags={"safe", "capacity"})
+    @audit_logged
+    def runai_capacity(
+        cluster: str | None = None,
+        node_pool: str | None = None,
+        gpu_count: int | None = None,
+        project: str | None = None,
+    ) -> str:
+        """Read GPU capacity from the NVIDIA Run:ai control plane configured on the MCP host.
+
+        Returns one row per Run:ai cluster and node pool: total, allocated and
+        free GPUs, whole_gpus_upper_bound (the whole GPUs a new workload could be
+        given), the GPU models with the EC2 families that carry them, and each
+        project's quota headroom. Rows carry observed_at/valid_until (telemetry
+        is a short-lived snapshot), a value Run:ai did not report is null (never
+        0), and every row says submit_compatible=false: GCO does not submit work
+        to Run:ai, and these rows are not part of recommend_region's AWS ranking.
+
+        The control plane and its credentials come only from the MCP host's
+        environment (GCO_RUNAI_URL, GCO_RUNAI_CLIENT_ID, GCO_RUNAI_CLIENT_SECRET,
+        optional GCO_RUNAI_CA_FILE); this tool takes no URL or credential
+        argument, so a prompt cannot redirect the secret to another host.
+
+        Args:
+            cluster: Only this Run:ai cluster (name or ID).
+            node_pool: Only this node pool.
+            gpu_count: Mark which node pools have this many whole GPUs free.
+            project: Report this Run:ai project's quota headroom on each pool.
+        """
+        args = ["capacity", "runai"]
+        if cluster:
+            args.extend(["--cluster", cluster])
+        if node_pool:
+            args.extend(["--node-pool", node_pool])
+        if gpu_count is not None:
+            args.extend(["--gpu-count", str(gpu_count)])
+        if project:
+            args.extend(["--project", project])
         return cli_runner._run_cli(*args)

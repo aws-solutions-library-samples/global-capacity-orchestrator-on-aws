@@ -524,7 +524,7 @@ If the selected `claude`, `codex`, or `opencode` binary is missing, Autopilot of
 Check and manage cluster capacity.
 
 <details>
-<summary>All <code>gco capacity</code> commands (23) — click to expand</summary>
+<summary>All <code>gco capacity</code> commands (24) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -539,6 +539,7 @@ Check and manage cluster capacity.
 | [`gco capacity reserve`](#gco-capacity-reserve) | Purchase a Capacity Block offering by ID. |
 | [`gco capacity find-training-plans`](#gco-capacity-find-training-plans) | Find SageMaker Training Plan offerings (reserved HyperPod capacity) across Regions in one ranked report. |
 | [`gco capacity training-plans`](#gco-capacity-training-plans) | List the SageMaker Training Plans the account holds, with their reserved capacity. |
+| [`gco capacity runai`](#gco-capacity-runai) | Read GPU capacity from an NVIDIA Run:ai control plane (read-only, outside the AWS Region ranking). |
 | [`gco capacity find-reservations`](#gco-capacity-find-reservations) | Find existing On-Demand Capacity Reservations (ODCRs) across regions in one ranked report. |
 | [`gco capacity create-reservation`](#gco-capacity-create-reservation) | Create an On-Demand Capacity Reservation in a specific Availability Zone (charges accrue until cancelled). |
 | [`gco capacity cancel-reservation`](#gco-capacity-cancel-reservation) | Cancel an On-Demand Capacity Reservation and stop its charges. |
@@ -903,6 +904,28 @@ gco capacity training-plans [OPTIONS]
 gco capacity training-plans
 gco capacity training-plans -r us-east-1 --status Active
 gco --output json capacity training-plans -i ml.p5.48xlarge
+```
+
+#### `gco capacity runai`
+
+Read GPU capacity from an [NVIDIA Run:ai](https://run-ai-docs.nvidia.com/) control plane, read-only: one token request and GET requests, nothing submitted. Each row is one Run:ai cluster and node pool with total, allocated and free GPUs, `whole_gpus_upper_bound` (the whole GPUs a new workload could be given, which accounts for fractional allocations), the nodes' GPU models with the EC2 families that carry the same model (through the accelerator catalog's `gpu_model`), and each project's quota headroom. Every row carries `observed_at` and `valid_until` because telemetry is a short-lived snapshot; a value Run:ai did not report is `null` (shown as `?`), never 0, and a 403 is an error, never "0 free". Rows say `source: runai` and `submit_compatible: false` and are not part of [`recommend-region`](#gco-capacity-recommend-region), which they have no Region or price for. Configure with `GCO_RUNAI_URL`, `GCO_RUNAI_CLIENT_ID` and `GCO_RUNAI_CLIENT_SECRET`, plus `GCO_RUNAI_CA_FILE` for a certificate signed by a private CA. Requires NVIDIA Run:ai 2.24 or later. See [RUNAI.md](RUNAI.md).
+
+```bash
+gco capacity runai [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--cluster` | Only this Run:ai cluster (name or ID) |
+| `--node-pool` | Only this node pool |
+| `--gpu-count` | Mark which node pools have this many whole GPUs free (`fits_gpu_count`) |
+| `--project` | Report this Run:ai project's quota headroom on each node pool (`project_headroom_gpus`, plus `within_project_quota` with `--gpu-count`) |
+| `--page-size` | Items per request on the paged list routes, 1–500 (default 500, the API's maximum) |
+
+```bash
+gco capacity runai
+gco capacity runai --gpu-count 4 --project team-a
+gco --output json capacity runai --cluster prod --node-pool h100
 ```
 
 #### `gco capacity find-reservations`

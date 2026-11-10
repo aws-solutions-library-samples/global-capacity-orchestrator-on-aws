@@ -87,3 +87,4 @@ it built this way?" questions can be answered from the decision log:
 | [0003](0003-dedicated-inference-response-streaming-path.md) | Dedicated inference response-streaming path | Accepted |
 | [0004](0004-record-and-sanitize-deployment-lifecycle.md) | Record and sanitize the deployment lifecycle | Accepted |
 | [0005](0005-cloudformation-generated-s3-bucket-names.md) | CloudFormation-generated S3 bucket names | Accepted |
+| [0006](0006-runai-read-only-capacity-source.md) | [NVIDIA Run:ai](https://run-ai-docs.nvidia.com/) as a read-only capacity source | Accepted |

@@ -1213,6 +1213,73 @@ def list_training_plans(config: Any, instance_type: Any, regions: Any, status: A
     _print_training_plans(result)
 
 
+@capacity.command("runai")
+@click.option("--cluster", help="Only this Run:ai cluster (name or ID)")
+@click.option("--node-pool", help="Only this node pool")
+@click.option(
+    "--gpu-count",
+    type=click.IntRange(min=1),
+    help="Mark which node pools have this many whole GPUs free",
+)
+@click.option(
+    "--project",
+    help="Report this Run:ai project's quota headroom on each node pool",
+)
+@click.option(
+    "--page-size",
+    type=click.IntRange(1, 500),
+    default=500,
+    show_default=True,
+    help="Items per request on the paged list routes (the API's maximum is 500)",
+)
+@pass_config
+def runai_capacity(
+    config: Any,
+    cluster: Any,
+    node_pool: Any,
+    gpu_count: Any,
+    project: Any,
+    page_size: Any,
+) -> None:
+    """Read GPU capacity from an NVIDIA Run:ai control plane (read-only).
+
+    Reports every Run:ai cluster and node pool the access key can see: total,
+    allocated and free GPUs, the whole GPUs a new workload could be given, the
+    GPU models with the EC2 families that carry them, and each project's quota
+    headroom. Nothing is submitted to Run:ai, and the rows stay outside the AWS
+    Region ranking ('recommend-region'), which they carry no Region or price for.
+
+    Configure it with GCO_RUNAI_URL, GCO_RUNAI_CLIENT_ID and
+    GCO_RUNAI_CLIENT_SECRET, plus GCO_RUNAI_CA_FILE when the control plane's
+    certificate is signed by a private CA (see docs/RUNAI.md). Requires NVIDIA
+    Run:ai 2.24 or later.
+
+    Examples:
+        gco capacity runai
+        gco capacity runai --gpu-count 4 --project team-a
+        gco capacity runai --cluster prod --node-pool h100 --output json
+    """
+    from ..capacity import runai
+
+    formatter = get_output_formatter(config)
+    try:
+        settings = runai.RunAISettings.from_env()
+        report = runai.read_capacity(
+            settings,
+            runai.Request(
+                cluster=cluster, node_pool=node_pool, gpu_count=gpu_count, project=project
+            ),
+            page_size=page_size,
+        )
+    except runai.RunAIError as exc:
+        formatter.print_error(f"Run:ai capacity: {exc}")
+        sys.exit(1)
+    if config.output_format != "table":
+        formatter.print(report)
+        return
+    print(runai.render_table(report))
+
+
 @capacity.command("reserve")
 @click.option(
     "--offering-id",

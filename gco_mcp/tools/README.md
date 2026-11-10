@@ -14,13 +14,13 @@ MCP tool definitions — one file per domain. Each module registers tools agains
 Counts are tools registered per module; tools gated behind a feature flag only
 appear when that flag (or the umbrella `GCO_ENABLE_ALL_TOOLS`) is set. At
 default registration the server exposes 156 tools; with every flag enabled the
-ceiling is 215. See [Feature Flags](../README.md#feature-flags) for the
+ceiling is 216. See [Feature Flags](../README.md#feature-flags) for the
 flag-to-tool mapping.
 
 | File | Tools | Description |
 |------|-------|-------------|
 | `analytics.py` | 8 | `analytics_doctor`, `analytics_status`, `analytics_login_url`, `analytics_users_list`, `enable_analytics`, `disable_analytics`, `analytics_user_add`, `analytics_user_remove` (gated) |
-| `capacity.py` | 20 | `check_capacity`, `instance_info`, `recommend_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `find_training_plans`, `list_training_plans`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated) |
+| `capacity.py` | 21 | `check_capacity`, `instance_info`, `recommend_capacity`, `capacity_status`, `recommend_region`, `spot_prices`, `ai_recommend`, `list_reservations`, `reservation_check`, `find_capacity_blocks`, `find_capacity_reservations`, `find_training_plans`, `list_training_plans`, `capacity_history_show`, `capacity_history_stats`, `capacity_history_patterns`, `capacity_predict`, `reserve_capacity` (gated), `create_reservation` (gated), `cancel_reservation` (gated), `runai_capacity` (gated) |
 | `cluster.py` | 1 | `cluster_tunnel_command` |
 | `config.py` | 1 | `config_get` |
 | `costs.py` | 14 | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_workloads`, `cost_allocation_status`, `cost_allocation_activate`, `cost_k8s_namespaces`, `cost_k8s_regions`, `cost_k8s_trend`, `cost_k8s_top`, `cost_report_status`, `cost_report_list`, `cost_report_generate` |
@@ -89,6 +89,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `recommend_region` | Get optimal region recommendation based on capacity; `backend` (`eks`, `hyperpod`, `pcs`) ranks only the Regions running that backend on its own capacity. |
 | `reservation_check` | Check ODCR and Capacity Block availability (multi-region, date-window, duration in hours or days). |
 | `reserve_capacity` | Purchase a Capacity Block offering by its ID. |
+| `runai_capacity` | Read GPU capacity from the NVIDIA Run:ai control plane configured on the MCP host (read-only, outside the AWS Region ranking; gated by `GCO_ENABLE_RUNAI_CAPACITY`, no URL or credential argument). |
 | `spot_prices` | Get current spot prices for an instance type. |
 
 ### `cluster.py`

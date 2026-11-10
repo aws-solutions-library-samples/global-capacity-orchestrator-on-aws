@@ -604,6 +604,13 @@ FAKE_PIP
 source "$FAKE_LIB"
 export PYTHONPATH="$FAKE_PYSHADOW${PYTHONPATH:+:$PYTHONPATH}"
 case "${1:-}" in
+    *check_runai_api_contract.py)
+        case "${FAKE_RUNAI_API:-current}" in
+            fail) exit 2 ;;
+            drift) echo "2.27|GET /api/v1/nodes|response field nodes[].gpuInfo.gpuType missing|update cli/capacity/runai.py and gco/config/runai_api_contract.json" ;;
+        esac
+        exit 0
+        ;;
     *check_runner_images.py)
         case "${FAKE_RUNNER_IMAGES:-current}" in
             fail) exit 2 ;;
@@ -1151,7 +1158,7 @@ findings_path() {
     [ "$(jq -r '.schema' "$findings")" = "gco.dependency-scan.findings/1" ]
     [ "$(jq -r '.has_drift' "$findings")" = "false" ]
     [ "$(jq -r '.scan_complete' "$findings")" = "true" ]
-    [ "$(jq -r '.surfaces | length' "$findings")" = "26" ]
+    [ "$(jq -r '.surfaces | length' "$findings")" = "27" ]
     [ "$(jq -r '[.surfaces[].count] | add' "$findings")" = "0" ]
     [ "$(jq -r '[.surfaces[] | select(.skipped != null)] | length' "$findings")" = "0" ]
     # Every surface was consulted through the faked tools.
@@ -1189,6 +1196,8 @@ findings_path() {
     grep -q '^aws ssm get-parameters-by-path --path /aws/service/pcs/ami --recursive --region us-east-1' "$CALLS"
     grep -q '^aws ec2 describe-images --owners amazon --region us-east-1 --filters Name=name,Values=aws-pcs-sample_ami-\*' "$CALLS"
     [[ "$output" == *"PCS Slurm versions:       0"* ]]
+    [[ "$output" == *"Run:ai API contract:      0"* ]]
+    [[ "$output" == *"every published version from the contract's minimum serves what the reader uses."* ]]
     [[ "$output" == *"PCS scripts and AMIs:     0"* ]]
     [[ "$output" == *"HyperPod health agent:    0"* ]]
     grep -q '^curl https://raw.githubusercontent.com/aws/sagemaker-hyperpod-cli/main/helm_chart/HyperPodHelmChart/charts/health-monitoring-agent/templates/health-monitoring-agent.yaml$' "$CALLS"
@@ -1200,7 +1209,7 @@ findings_path() {
     local root="$BATS_TEST_TMPDIR/checkout"
     make_consistent_checkout "$root"
     build_catalog "$root"
-    run_scan "$root" FAKE_DRIFT=1 FAKE_RUNNER_IMAGES=drift FAKE_ACCELERATOR=drift
+    run_scan "$root" FAKE_DRIFT=1 FAKE_RUNNER_IMAGES=drift FAKE_ACCELERATOR=drift FAKE_RUNAI_API=drift
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"Found 3 outdated Python package(s)"* ]]
@@ -1286,7 +1295,8 @@ findings_path() {
             "## Bedrock Default Model" "## PCS Slurm Versions" "## PCS Lifecycle Scripts and AMIs" \
             "## HyperPod Health Monitoring Agent" "## Accelerator Catalog and NodePools" "## Dockerfile.dev Pins" \
             "## GCO Autopilot Pins" "## Pre-commit Hooks" "## CDK Enum Constants" "## Python Release" \
-            "## Runner Images" "## Ruby Release" "## Ubuntu LTS Base" "## CI Tooling" "## Action Required"; do
+            "## Runner Images" "## NVIDIA Run:ai API" "## Ruby Release" "## Ubuntu LTS Base" "## CI Tooling" \
+            "## Action Required"; do
         grep -qF -- "$section" "$report" || { echo "missing section: $section"; false; }
     done
     grep -qF -- "| [Python Packages](#python-packages) | 3 update(s) | routine |" "$report"
@@ -1298,6 +1308,8 @@ findings_path() {
     grep -qF -- "re-run the live release" "$report"
     grep -qF -- "| SLURM_IMAGE_TAG (gco/slurm_config.py) | 26.05.5-ubuntu24.04 | 26.05.5-ubuntu25.04 |" "$report"
     grep -qF -- "| [PCS Slurm Versions](#pcs-slurm-versions) | 1 update(s) | act soon |" "$report"
+    grep -qF -- "| 2.27 | GET /api/v1/nodes | response field nodes[].gpuInfo.gpuType missing | update cli/capacity/runai.py and gco/config/runai_api_contract.json |" "$report"
+    grep -qF -- "| [NVIDIA Run:ai API](#nvidia-runai-api) | 1 update(s) | act soon |" "$report"
     grep -qF -- "| PCS_SUPPORTED_SLURM_VERSIONS (gco/pcs_config.py) | 25.11, 26.05 | 27.05 supported (EOL 2999-12-31) | add it once a cluster on it is confirmed to serve slurmrestd OpenAPI v0.0.44 |" "$report"
     grep -qF -- "| PCS_MOUNT_EFS_SCRIPT (gco/stacks/pcs_cluster.py) | mount-efs-v1.0.0.sh | mount-efs-v1.0.1.sh |" "$report"
     grep -qF -- "| DLAMI_SSM_PARAMETER (lambda/pcs-lookup/handler.py) | dlami-base-ubuntu2404 | dlami-base-ubuntu2405 (newer PCS-ready DLAMI base) |" "$report"
@@ -1359,6 +1371,8 @@ findings_path() {
     [[ "$output" == *"EKS add-ons outdated:     (skipped)"* ]]
     # The Slurm-version half reads a public page, so it still runs.
     [[ "$output" == *"PCS Slurm versions:       0"* ]]
+    [[ "$output" == *"Run:ai API contract:      0"* ]]
+    [[ "$output" == *"every published version from the contract's minimum serves what the reader uses."* ]]
     [[ "$output" == *"PCS scripts and AMIs:     (skipped)"* ]]
     [[ "$output" == *"Accelerator catalog:      0 (online skipped)"* ]]
     [[ "$output" == *"No drift was found in completed checks, but the scan is incomplete."* ]]
@@ -1374,9 +1388,11 @@ findings_path() {
     local root="$BATS_TEST_TMPDIR/checkout"
     make_consistent_checkout "$root"
     build_catalog "$root"
-    run_scan "$root" FAKE_AWS=none FAKE_DRIFT=1 FAKE_RUNNER_IMAGES=fail FAKE_AWS_CDK=absent
+    run_scan "$root" FAKE_AWS=none FAKE_DRIFT=1 FAKE_RUNNER_IMAGES=fail FAKE_AWS_CDK=absent FAKE_RUNAI_API=fail
 
     [ "$status" -eq 0 ]
+    [[ "$output" == *"Could not read the NVIDIA Run:ai API reference"* ]]
+    [[ "$output" == *"Run:ai API contract:      (skipped)"* ]]
     [[ "$output" == *"aws-cdk-lib not importable. Install with 'pip install aws-cdk-lib' to enable."* ]]
     [[ "$output" == *"Could not read the actions/runner-images catalog"* ]]
     [[ "$output" == *"CDK enum constants:       (skipped)"* ]]
@@ -1392,6 +1408,7 @@ findings_path() {
     grep -qF -- "- **EKS Add-ons:** No AWS credentials available" "$report"
     grep -qF -- "- **CDK Enum Constants:** aws-cdk-lib not importable" "$report"
     grep -qF -- "- **Runner Images:** Could not read the actions/runner-images catalog" "$report"
+    grep -qF -- "- **NVIDIA Run:ai API:** Could not read the NVIDIA Run:ai API reference" "$report"
     # A zero-count surface in an incomplete scan is provisional, not "up to date".
     grep -qF -- "| Base-image Security Epochs | no drift found (incomplete scan) | — |" "$report"
 }
@@ -1810,7 +1827,7 @@ YAML
     make_consistent_checkout "$root"
     rm -f "$root/cli/autopilot.py"
     build_catalog "$root"
-    run_scan "$root" FAKE_AWS=none FAKE_AWS_CDK=absent FAKE_RUNNER_IMAGES=fail FAKE_ENDOFLIFE=down FAKE_HMA=fail
+    run_scan "$root" FAKE_AWS=none FAKE_AWS_CDK=absent FAKE_RUNNER_IMAGES=fail FAKE_ENDOFLIFE=down FAKE_HMA=fail FAKE_RUNAI_API=fail
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"cli/autopilot.py not found."* ]]
@@ -1829,6 +1846,7 @@ YAML
     [[ "$notes" == *"Ruby release skipped: endoflife.date query failed"* ]]
     [[ "$notes" == *"Ubuntu LTS base skipped: endoflife.date query failed"* ]]
     [[ "$notes" == *"Runner images skipped: Could not read the actions/runner-images catalog"* ]]
+    [[ "$notes" == *"Run:ai API contract skipped: Could not read the NVIDIA Run:ai API reference"* ]]
     [[ "$notes" == *"HyperPod health agent skipped: HyperPod chart lookup failed"* ]]
     [[ "$notes" != *"Incomplete checks:"* ]]
 }

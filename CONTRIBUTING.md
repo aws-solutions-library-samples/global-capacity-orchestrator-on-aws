@@ -803,6 +803,7 @@ Dependency drift is tracked through three layers:
 - **EKS Add-ons**: extracted from `gco/stacks/constants.py` (requires AWS credentials via OIDC; records an explicit skip otherwise)
 - **Accelerator Catalog and NodePools**: always runs `python scripts/accelerator_catalog.py validate` offline to reject deprecated scheduling, surface newer unreferenced generations, and require exact catalog/`watch_instance_types`/`ConfigLoader` synchronization; with AWS credentials, compares the catalog with NVIDIA GPU and AWS Neuron instance types returned by EC2 across enabled commercial Regions
 - **Pre-commit Hooks**: `rev:` pins in `.pre-commit-config.yaml` are compared against the latest tag published by the upstream GitHub repo
+- **NVIDIA Run:ai API**: the routes and fields `gco capacity runai` reads (`gco/config/runai_api_contract.json`) are checked against every published Run:ai API reference version from the contract's minimum, plus latest (public documentation, no credentials)
 
 #### Running the Dependency Check Manually
 

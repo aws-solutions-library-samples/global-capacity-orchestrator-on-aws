@@ -205,6 +205,7 @@ class TestFeatureFlags:
             },
             "GCO_ENABLE_LOCAL_METRICS": {"metrics_from_local_file"},
             "GCO_ENABLE_LOCAL_STORAGE_SYNC": {"sync_storage_bucket"},
+            "GCO_ENABLE_RUNAI_CAPACITY": {"runai_capacity"},
             "GCO_ENABLE_SEMANTIC_PROGRESS": {"metrics_semantic_progress"},
             "GCO_ENABLE_CONFIG_MANAGEMENT": {
                 "list_deployment_regions",

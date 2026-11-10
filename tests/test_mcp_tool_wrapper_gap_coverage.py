@@ -36,6 +36,7 @@ FLAG_IMAGE_PUBLISH = "GCO_ENABLE_IMAGE_PUBLISH"
 FLAG_INFRASTRUCTURE_DEPLOY = "GCO_ENABLE_INFRASTRUCTURE_DEPLOY"
 FLAG_INFRASTRUCTURE_DESTROY = "GCO_ENABLE_INFRASTRUCTURE_DESTROY"
 FLAG_MODEL_UPLOAD = "GCO_ENABLE_MODEL_UPLOAD"
+FLAG_RUNAI_CAPACITY = "GCO_ENABLE_RUNAI_CAPACITY"
 
 _MODULE_IDS = itertools.count()
 
@@ -105,6 +106,7 @@ def _isolated_tool_module(
         FLAG_INFRASTRUCTURE_DEPLOY=FLAG_INFRASTRUCTURE_DEPLOY,
         FLAG_INFRASTRUCTURE_DESTROY=FLAG_INFRASTRUCTURE_DESTROY,
         FLAG_MODEL_UPLOAD=FLAG_MODEL_UPLOAD,
+        FLAG_RUNAI_CAPACITY=FLAG_RUNAI_CAPACITY,
         is_enabled=lambda flag: flag in enabled,
     )
 
@@ -628,13 +630,50 @@ def test_capacity_gated_definitions_are_isolated_and_flag_specific() -> None:
         assert not hasattr(disabled.module, "reserve_capacity")
         assert not hasattr(disabled.module, "create_reservation")
         assert not hasattr(disabled.module, "cancel_reservation")
+        assert not hasattr(disabled.module, "runai_capacity")
     with _isolated_tool_module("capacity", FLAG_CAPACITY_PURCHASE) as purchase:
         assert hasattr(purchase.module, "reserve_capacity")
         assert hasattr(purchase.module, "create_reservation")
         assert not hasattr(purchase.module, "cancel_reservation")
+        assert not hasattr(purchase.module, "runai_capacity")
     with _isolated_tool_module("capacity", FLAG_DESTRUCTIVE_OPERATIONS) as destructive:
         assert not hasattr(destructive.module, "reserve_capacity")
         assert hasattr(destructive.module, "cancel_reservation")
+        assert not hasattr(destructive.module, "runai_capacity")
+    with _isolated_tool_module("capacity", FLAG_RUNAI_CAPACITY) as runai:
+        assert hasattr(runai.module, "runai_capacity")
+        assert not hasattr(runai.module, "reserve_capacity")
+        assert not hasattr(runai.module, "cancel_reservation")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_argv"),
+    [
+        ({}, ("capacity", "runai")),
+        (
+            {"cluster": "prod", "node_pool": "h100", "gpu_count": 0, "project": "team-a"},
+            (
+                "capacity",
+                "runai",
+                "--cluster",
+                "prod",
+                "--node-pool",
+                "h100",
+                "--gpu-count",
+                "0",
+                "--project",
+                "team-a",
+            ),
+        ),
+    ],
+)
+def test_capacity_runai_wrapper_argv(
+    kwargs: dict[str, Any], expected_argv: tuple[str, ...]
+) -> None:
+    """Only these four filters reach the CLI; the control plane comes from the host."""
+    with _isolated_tool_module("capacity", FLAG_RUNAI_CAPACITY) as loaded:
+        assert loaded.module.runai_capacity(**kwargs) == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(*expected_argv)
 
 
 @pytest.mark.parametrize(

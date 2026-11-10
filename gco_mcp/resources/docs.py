@@ -1421,6 +1421,25 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["KUEUE", "CUSTOMIZATION", "CLI", "PCS"],
     },
+    "RUNAI": {
+        "summary": "Read-only NVIDIA Run:ai capacity — gco capacity runai and the runai_capacity MCP tool (gated by GCO_ENABLE_RUNAI_CAPACITY): per Run:ai cluster and node pool total, allocated and free GPUs, the whole-GPU upper bound under fractional allocations, GPU models matched to EC2 families through the accelerator catalog, project quota headroom, observed_at/valid_until freshness, GCO_RUNAI_* configuration with private-CA trust, the 2.24+ support floor, and the monthly API contract check. Never submitted to and never ranked with AWS Regions.",
+        "topics": ["capacity", "integrations", "security"],
+        "keywords": [
+            "run:ai",
+            "runai",
+            "nvidia run:ai",
+            "gpu capacity",
+            "node pool",
+            "project quota",
+            "free gpus",
+            "fractional gpu",
+            "on premises",
+            "private ca",
+            "api contract",
+            "read-only",
+        ],
+        "related": ["CLI", "MAINTENANCE", "CUSTOMIZATION"],
+    },
     "TROUBLESHOOTING": {
         "summary": "Troubleshooting guide — common installation, deployment, kubectl, and pod issues with their resolutions.",
         "topics": [

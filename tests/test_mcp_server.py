@@ -198,13 +198,13 @@ class TestToolRegistration:
         # 139 before the platform add-on status trio
         # eks_capabilities_status + gitops_status + crossplane_status; 138
         # before deps_scan; 134 before fleet_status; 125 before the cost
-        # allocation/k8s/report family added 9). Optional families add 58
+        # allocation/k8s/report family added 9). Optional families add 60
         # more when every flag is enabled: capacity purchase (2), image
         # publish (3), destructive operations (16), model upload (2),
         # infrastructure deploy (4), infrastructure destroy (2), local metrics
         # (1), semantic progress (1), local storage sync (1), config
-        # management (11), Mission (10), and Swarm (6). The all-flags ceiling
-        # is therefore 215.
+        # management (11), Mission (10), Swarm (6), and NVIDIA Run:ai
+        # capacity (1). The all-flags ceiling is therefore 216.
         base_count = 156
         tool_names = [t.name for t in tools]
         expected = base_count
@@ -242,6 +242,8 @@ class TestToolRegistration:
         if "swarm_start" in tool_names:
             # The six swarm_* tools register together under GCO_ENABLE_SWARM.
             expected += 6
+        if "runai_capacity" in tool_names:
+            expected += 1  # gated by GCO_ENABLE_RUNAI_CAPACITY
         if "mission_start" in tool_names:
             # The ten mission_* tools register together under GCO_ENABLE_MISSION.
             expected += 10

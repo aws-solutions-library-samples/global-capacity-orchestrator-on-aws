@@ -47,6 +47,10 @@
 #     installed aws-cdk-lib (LAMBDA_PYTHON_RUNTIME, LAMBDA_NODEJS_RUNTIME;
 #     the Aurora engine is a plain version string checked against live RDS)
 #   - Latest stable Python release from endoflife.date — public endpoint
+#   - NVIDIA Run:ai API contract: the routes and fields `gco capacity runai`
+#     reads (gco/config/runai_api_contract.json) against every published API
+#     reference version from the contract's minimum, plus latest — public
+#     endpoint, no credentials
 #   - CI tooling the workflows install by hand: Trivy (the install-trivy
 #     composite action's version default),
 #     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
@@ -2088,6 +2092,40 @@ RUNNER_IMAGE_COUNT="$(wc -l < "$RUNNER_IMAGE_RESULTS" 2>/dev/null | tr -d ' ')"
 [ -z "$RUNNER_IMAGE_COUNT" ] && RUNNER_IMAGE_COUNT=0
 
 # ---------------------------------------------------------------------------
+# NVIDIA Run:ai API contract (public endpoint — no credentials)
+#
+# `gco capacity runai` reads six routes of the NVIDIA Run:ai control-plane REST
+# API, declared with every field it reads in gco/config/runai_api_contract.json.
+# NVIDIA publishes the API reference per version with the OpenAPI document
+# embedded in each page, so check_runai_api_contract.py checks every published
+# version from the contract's min_version on, plus the unversioned latest,
+# without a Run:ai installation. A row is a route missing or deprecated, a
+# parameter, value or field missing (the reader breaks on that version), or a
+# newly published version that still satisfies the contract (record it in
+# reviewed_versions). It exits 2 without rows when the reference cannot be
+# read, which is a skip here, never an all-clear.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Checking NVIDIA Run:ai API contract ==="
+RUNAI_API_RESULTS="$(mktemp)"
+RUNAI_API_SKIP_REASON=""
+if python3 .github/scripts/check_runai_api_contract.py --format rows > "$RUNAI_API_RESULTS" 2>/dev/null; then
+  while IFS='|' read -r runai_version runai_route runai_finding _; do
+    [ -z "$runai_version" ] && continue
+    echo "  - Run:ai API ${runai_version}: ${runai_route}: ${runai_finding}"
+  done < "$RUNAI_API_RESULTS"
+  if [ ! -s "$RUNAI_API_RESULTS" ]; then
+    echo "  every published version from the contract's minimum serves what the reader uses."
+  fi
+else
+  RUNAI_API_SKIP_REASON="Could not read the NVIDIA Run:ai API reference (network, or the page layout changed)."
+  echo "  $RUNAI_API_SKIP_REASON"
+  : > "$RUNAI_API_RESULTS"
+fi
+RUNAI_API_COUNT="$(wc -l < "$RUNAI_API_RESULTS" 2>/dev/null | tr -d ' ')"
+[ -z "$RUNAI_API_COUNT" ] && RUNAI_API_COUNT=0
+
+# ---------------------------------------------------------------------------
 # CI tooling pins (public endpoints — no AWS creds)
 #
 # The workflows install their own pinned tooling — Trivy (cve-scan.yml /
@@ -2821,6 +2859,11 @@ if [ -n "$RUNNER_IMAGE_SKIP_REASON" ]; then
 else
   echo "Runner images:            $RUNNER_IMAGE_COUNT"
 fi
+if [ -n "$RUNAI_API_SKIP_REASON" ]; then
+  echo "Run:ai API contract:      (skipped)"
+else
+  echo "Run:ai API contract:      $RUNAI_API_COUNT"
+fi
 if [ -n "$AUTOPILOT_SKIP_REASON" ]; then
   echo "GCO autopilot pins:       (skipped)"
 else
@@ -2849,6 +2892,7 @@ if ! dependency_scan_is_complete \
   "$RUBY_RELEASE_SKIP_REASON" \
   "$UBUNTU_LTS_SKIP_REASON" \
   "$RUNNER_IMAGE_SKIP_REASON" \
+  "$RUNAI_API_SKIP_REASON" \
   "$PCS_SLURM_SKIP_REASON" \
   "$PCS_ASSETS_SKIP_REASON" \
   "$HMA_SKIP_REASON"; then
@@ -2885,6 +2929,7 @@ findings_surface "Python Release"           "informational" "$PYTHON_RELEASE_COU
 findings_surface "Ruby Release"             "informational" "$RUBY_RELEASE_COUNT" "$RUBY_RELEASE_SKIP_REASON" "surface|current|latest" "$RUBY_RELEASE_RESULTS"
 findings_surface "Ubuntu LTS Base"          "informational" "$UBUNTU_LTS_COUNT"   "$UBUNTU_LTS_SKIP_REASON"   "surface|current|latest" "$UBUNTU_LTS_RESULTS"
 findings_surface "Runner Images"            "act soon" "$RUNNER_IMAGE_COUNT"  "$RUNNER_IMAGE_SKIP_REASON"  "label|current|latest" "$RUNNER_IMAGE_RESULTS"
+findings_surface "NVIDIA Run:ai API"        "act soon" "$RUNAI_API_COUNT"     "$RUNAI_API_SKIP_REASON"     "version|route|finding|action" "$RUNAI_API_RESULTS"
 findings_surface "CI Tooling"               "act soon" "$CI_TOOLING_COUNT"    ""                           "tool|current|latest|url" "$CI_TOOLING_RESULTS"
 findings_surface "Version Consistency"      "routine" "$CONSISTENCY_COUNT"    ""                           "what|pinned_values" "$CONSISTENCY_RESULTS"
 findings_surface "Base-image Security Epochs" "act soon" "$EPOCH_COUNT"       ""                           "dockerfile|arg|epoch|age_days" "$EPOCH_RESULTS"
@@ -2903,6 +2948,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
    && [ "$RUBY_RELEASE_COUNT" -eq 0 ] \
    && [ "$UBUNTU_LTS_COUNT" -eq 0 ] \
    && [ "$RUNNER_IMAGE_COUNT" -eq 0 ] \
+   && [ "$RUNAI_API_COUNT" -eq 0 ] \
    && [ "$BEDROCK_MODEL_COUNT" -eq 0 ] \
    && [ "$PCS_SLURM_COUNT" -eq 0 ] \
    && [ "$PCS_ASSETS_COUNT" -eq 0 ] \
@@ -2974,6 +3020,10 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Runner images skipped: $RUNNER_IMAGE_SKIP_REASON"
   fi
+  if [ -n "$RUNAI_API_SKIP_REASON" ]; then
+    [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
+    SKIP_NOTES="${SKIP_NOTES}Run:ai API contract skipped: $RUNAI_API_SKIP_REASON"
+  fi
   if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     [ -n "$SKIP_NOTES" ] && SKIP_NOTES="$SKIP_NOTES; "
     SKIP_NOTES="${SKIP_NOTES}Incomplete checks: $(join_scan_incomplete_reasons)"
@@ -2986,7 +3036,7 @@ if [ "$PYTHON_COUNT" -eq 0 ] && [ "$NPM_COUNT" -eq 0 ] && [ "$DOCKER_COUNT" -eq 
   echo "$STATUS_MESSAGE"
   write_findings_document "$FINDINGS_FILE" "$SCAN_COMPLETE" false "$INCOMPLETE_REASONS_FILE"
   rm -f "$FINDINGS_SURFACES"
-  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+  rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$RUNAI_API_RESULTS" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "# Dependency Update Report"
@@ -3085,6 +3135,7 @@ rm -f "$FINDINGS_SURFACES"
   summary_row "Ruby Release"             "$RUBY_RELEASE_COUNT"   "$RUBY_RELEASE_SKIP_REASON" "informational"
   summary_row "Ubuntu LTS Base"          "$UBUNTU_LTS_COUNT"     "$UBUNTU_LTS_SKIP_REASON"   "informational"
   summary_row "Runner Images"            "$RUNNER_IMAGE_COUNT"   "$RUNNER_IMAGE_SKIP_REASON" "act soon"
+  summary_row "NVIDIA Run:ai API"        "$RUNAI_API_COUNT"      "$RUNAI_API_SKIP_REASON"    "act soon"
   summary_row "CI Tooling"               "$CI_TOOLING_COUNT"     ""                          "act soon"
   summary_row "Version Consistency"      "$CONSISTENCY_COUNT"    ""                          "routine"
   summary_row "Base-image Security Epochs" "$EPOCH_COUNT"        ""                          "act soon"
@@ -3381,6 +3432,20 @@ rm -f "$FINDINGS_SURFACES"
     emit_md_table "Label|Current image|Recommended" "$RUNNER_IMAGE_RESULTS"
     echo ""
   fi
+  if [ "$RUNAI_API_COUNT" -gt 0 ]; then
+    echo "## NVIDIA Run:ai API"
+    echo ""
+    echo "\`gco capacity runai\` reads the routes and fields declared in"
+    echo "\`gco/config/runai_api_contract.json\`. A row below is a published API"
+    echo "reference version that no longer serves one of them (the reader breaks on"
+    echo "control planes at that version), or a new version that still satisfies the"
+    echo "contract and only needs recording in \`reviewed_versions\`. See"
+    echo "[docs/RUNAI.md](../blob/main/docs/RUNAI.md#keeping-it-working) and"
+    echo "<https://run-ai-docs.nvidia.com/api>."
+    echo ""
+    emit_md_table "Version|Route|Finding|Action" "$RUNAI_API_RESULTS"
+    echo ""
+  fi
 
   if [ "$RUBY_RELEASE_COUNT" -gt 0 ]; then
     echo "## Ruby Release"
@@ -3490,7 +3555,7 @@ rm -f "$FINDINGS_SURFACES"
   fi
 
   # ----- Skipped checks (collapsed) -----
-  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${PCS_SLURM_SKIP_REASON}${PCS_ASSETS_SKIP_REASON}${HMA_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${UBUNTU_LTS_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}" ] \
+  if [ -n "${ADDON_SKIP_REASON}${EKS_K8S_SKIP_REASON}${AURORA_SKIP_REASON}${EMR_SKIP_REASON}${BEDROCK_MODEL_SKIP_REASON}${PCS_SLURM_SKIP_REASON}${PCS_ASSETS_SKIP_REASON}${HMA_SKIP_REASON}${ACCELERATOR_SKIP_REASON}${AUTOPILOT_SKIP_REASON}${CDK_ENUM_SKIP_REASON}${PYTHON_RELEASE_SKIP_REASON}${RUBY_RELEASE_SKIP_REASON}${UBUNTU_LTS_SKIP_REASON}${RUNNER_IMAGE_SKIP_REASON}${RUNAI_API_SKIP_REASON}" ] \
      || [ -s "$INCOMPLETE_REASONS_FILE" ]; then
     echo "<details>"
     echo "<summary>Skipped checks</summary>"
@@ -3510,6 +3575,7 @@ rm -f "$FINDINGS_SURFACES"
     [ -n "$RUBY_RELEASE_SKIP_REASON" ] && echo "- **Ruby Release:** $RUBY_RELEASE_SKIP_REASON"
     [ -n "$UBUNTU_LTS_SKIP_REASON" ] && echo "- **Ubuntu LTS Base:** $UBUNTU_LTS_SKIP_REASON"
     [ -n "$RUNNER_IMAGE_SKIP_REASON" ] && echo "- **Runner Images:** $RUNNER_IMAGE_SKIP_REASON"
+    [ -n "$RUNAI_API_SKIP_REASON" ] && echo "- **NVIDIA Run:ai API:** $RUNAI_API_SKIP_REASON"
     if [ -s "$INCOMPLETE_REASONS_FILE" ]; then
       while IFS= read -r incomplete_reason; do
         echo "- **Incomplete lookup or parse:** ${incomplete_reason}"
@@ -3542,7 +3608,7 @@ rm -f "$FINDINGS_SURFACES"
   echo "_Automatically created by the \`deps-scan\` workflow._"
 } > "$REPORT_FILE"
 
-rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
+rm -f "$NPM_RESULTS" "$DOCKER_RESULTS" "$HELM_RESULTS" "$ADDON_RESULTS" "$EKS_K8S_RESULTS" "$AURORA_RESULTS" "$EMR_RESULTS" "$DOCKERFILE_RESULTS" "$AUTOPILOT_RESULTS" "$PRECOMMIT_RESULTS" "$CDK_ENUM_RESULTS" "$PYTHON_RELEASE_RESULTS" "$RUBY_RELEASE_RESULTS" "$UBUNTU_LTS_RESULTS" "$RUNNER_IMAGE_RESULTS" "$RUNNER_IMAGE_NOTES" "$RUNAI_API_RESULTS" "$BEDROCK_MODEL_RESULTS" "$PCS_SLURM_RESULTS" "$PCS_ASSETS_RESULTS" "$CI_TOOLING_RESULTS" "$CONSISTENCY_RESULTS" "$EPOCH_RESULTS" "$SUPPRESSION_RESULTS" "$LOCKFILE_RESULTS" "$HMA_RESULTS" "$ACCELERATOR_OFFLINE_REPORT" "$ACCELERATOR_ONLINE_REPORT" "$ACCELERATOR_ONLINE_SUMMARY" "$ACCELERATOR_OFFLINE_ERROR" "$ACCELERATOR_ONLINE_ERROR" "$INCOMPLETE_REASONS_FILE"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   {

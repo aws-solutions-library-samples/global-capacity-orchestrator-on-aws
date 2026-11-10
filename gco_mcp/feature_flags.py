@@ -38,6 +38,11 @@ FLAG_CONFIG_MANAGEMENT = "GCO_ENABLE_CONFIG_MANAGEMENT"
 # blast radius of whatever tool flags are already enabled (N children acting
 # concurrently) and because loop-spawning-loops deserves an explicit opt-in.
 FLAG_SWARM = "GCO_ENABLE_SWARM"
+# Read-only GPU capacity from an NVIDIA Run:ai control plane. Nothing is
+# written anywhere, but the tool calls a non-AWS service with the client
+# secret held in the MCP host's environment, so reaching it is an explicit
+# opt-in like the other read-only-but-sensitive readers.
+FLAG_RUNAI_CAPACITY = "GCO_ENABLE_RUNAI_CAPACITY"
 
 # Per-tool flags. The umbrella is intentionally not in this tuple — callers
 # iterating ALL_FLAGS for "what gates this tool?" lookups should not see
@@ -55,6 +60,7 @@ ALL_FLAGS = (
     FLAG_SEMANTIC_PROGRESS,
     FLAG_CONFIG_MANAGEMENT,
     FLAG_SWARM,
+    FLAG_RUNAI_CAPACITY,
 )
 
 

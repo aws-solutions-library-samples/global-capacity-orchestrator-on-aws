@@ -72,7 +72,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 156 tools by default (up to 215 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 156 tools by default (up to 216 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -504,6 +504,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 | `GCO_ENABLE_LOCAL_METRICS` | `false` | `metrics_from_local_file` | Reads a metric file from the MCP host beneath `GCO_METRICS_LOCAL_ROOT`; disabled by default to prevent unintended host-file access. |
 | `GCO_ENABLE_LOCAL_STORAGE_SYNC` | `false` | `sync_storage_bucket` | Reads from or writes to the MCP host and can upload objects to S3. A large or unintended sync can consume local disk or [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) storage and network capacity, so the operator must opt in and confine local paths with `GCO_STORAGE_LOCAL_ROOT`. |
 | `GCO_ENABLE_SEMANTIC_PROGRESS` | `false` | `metrics_semantic_progress` | Invokes an LLM-as-judge progress scorer, which can incur model-call cost and sends the supplied scoring inputs to the configured model. |
+| `GCO_ENABLE_RUNAI_CAPACITY` | `false` | `runai_capacity` | Read-only, but calls a non-AWS service (an NVIDIA Run:ai control plane) with the client secret from the MCP host's environment (`GCO_RUNAI_URL`, `GCO_RUNAI_CLIENT_ID`, `GCO_RUNAI_CLIENT_SECRET`, optional `GCO_RUNAI_CA_FILE`). The tool takes no URL or credential argument, so a prompt cannot redirect the secret. See [`docs/RUNAI.md`](../docs/RUNAI.md). |
 | `GCO_ENABLE_CONFIG_MANAGEMENT` | `false` | `list_deployment_regions`, `add_deployment_region`, `remove_deployment_region`, `set_deployment_region`, `set_eks_endpoint_access`, `set_mission_default_model`, `set_capacity_advisor_default_model`, `set_claude_code_default_model`, `set_codex_default_model`, `set_codex_reasoning_effort`, `set_opencode_default_model` | Edits the deployment configuration (`cdk.json`) on the MCP host through the managed-config engine — validated against the same rules CDK synth enforces, atomic, idempotent, and audited. Config-only (deploying is separately gated), but still a local-file mutation an agent could chain into a topology change, so the operator must opt in. Installed (`uvx`/`pip`) servers see a read-only packaged `cdk.json` and refuse with guidance; run from a checkout to use these tools. |
 
 ### Enabling a Flag
@@ -695,6 +696,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `capacity_predict` | Predict a favorable acquisition time from historical capacity signals using Bedrock | safe | — |
 | `reserve_capacity` | Purchase a Capacity Block offering by ID (supports dry-run) | cost-incurring | `GCO_ENABLE_CAPACITY_PURCHASE` |
 | `create_reservation` | Create a new On-Demand Capacity Reservation (supports dry-run) | cost-incurring | `GCO_ENABLE_CAPACITY_PURCHASE` |
+| `runai_capacity` | Read GPU capacity from an NVIDIA Run:ai control plane: per node pool total/allocated/free GPUs, whole-GPU upper bound, GPU models with their EC2 families, project quota headroom; rows are `submit_compatible: false` and outside the Region ranking | safe | `GCO_ENABLE_RUNAI_CAPACITY` |
 | `cancel_reservation` | Cancel an ODCR, releasing its reserved capacity (supports dry-run) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Inference Endpoints
