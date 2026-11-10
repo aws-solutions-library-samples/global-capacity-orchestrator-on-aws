@@ -37,6 +37,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -77,13 +78,25 @@ def _version_key(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
 
 
+#: The documentation site, and the local fixtures the tests and --docs-root use.
+_SCHEMES = ("https", "file")
+
+
 def fetch_url(url: str, *, attempts: int = 3, timeout: float = 30.0) -> str:
-    """GET ``url`` (``https://`` or ``file://``) as text, retrying transient failures."""
+    """GET ``url`` (``https://`` or ``file://``) as text, retrying transient failures.
+
+    Any other scheme is refused before a request is made. The root comes from
+    the checked-in contract or the operator's ``--docs-root``, and every path
+    under it from the site's own sitemap.
+    """
+    if urllib.parse.urlsplit(url).scheme not in _SCHEMES:
+        raise ContractCheckError(f"refusing {url}: only https:// and file:// URLs are read")
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     attempt = 0
     while True:
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310 - fixed docs host or test fixture
+            # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310 - https:// or file:// only, checked above
                 body: bytes = response.read()
                 return body.decode("utf-8")
         except (urllib.error.URLError, TimeoutError, UnicodeDecodeError) as exc:

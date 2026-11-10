@@ -326,6 +326,21 @@ class TestFetch:
         assert calls == [checker.USER_AGENT] * 3
         assert slept == [1, 2]
 
+    @pytest.mark.parametrize(
+        "url", ["http://docs.example/x.md", "ftp://docs.example/x.md", "docs.example/x.md"]
+    )
+    def test_refuses_any_other_scheme_before_a_request(
+        self, url: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def urlopen(request: Any, timeout: float) -> Any:
+            raise AssertionError("no request may be made")
+
+        monkeypatch.setattr(checker.urllib.request, "urlopen", urlopen)
+        with pytest.raises(
+            checker.ContractCheckError, match="only https:// and file:// URLs are read"
+        ):
+            checker.fetch_url(url)
+
     def test_gives_up_after_the_last_attempt(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def urlopen(request: Any, timeout: float) -> Any:
             raise TimeoutError("slow")
