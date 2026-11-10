@@ -1257,7 +1257,7 @@ def runai_capacity(
     Examples:
         gco capacity runai
         gco capacity runai --gpu-count 4 --project team-a
-        gco capacity runai --cluster prod --node-pool h100 --output json
+        gco --output json capacity runai --cluster prod --node-pool h100
     """
     from ..capacity import runai
 

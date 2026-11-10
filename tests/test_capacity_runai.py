@@ -17,6 +17,7 @@ import datetime
 import json
 import logging
 import re
+import shlex
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -705,6 +706,20 @@ class TestCommand:
         assert document["request"]["gpu_count"] == 2
         assert {r["node_pool"] for r in document["rows"]} == {"t4", "default", "h100"}
         assert fake.CLIENT_SECRET not in result.output and fake.TOKEN not in result.output
+
+    def test_every_help_example_parses(self) -> None:
+        """--output is a gco option, so a JSON example has to put it before the command."""
+        from cli.commands.capacity_cmd import runai_capacity
+
+        examples = [
+            line.strip()
+            for line in (runai_capacity.help or "").splitlines()
+            if line.strip().startswith("gco ")
+        ]
+        assert any("--output json" in example for example in examples)
+        for example in examples:
+            result = CliRunner().invoke(cli, [*shlex.split(example)[1:], "--help"])
+            assert result.exit_code == 0, (example, result.output)
 
     def test_table_output(self, plane: fake.FakeControlPlane) -> None:
         result = CliRunner().invoke(
