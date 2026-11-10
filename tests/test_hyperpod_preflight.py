@@ -164,7 +164,11 @@ def _expect_zone(clients: _Clients, state: str | None = "available") -> None:
 
 
 def _expect_eks(
-    clients: _Clients, *, status: str | None = "ACTIVE", mode: str = "API_AND_CONFIG_MAP"
+    clients: _Clients,
+    *,
+    status: str | None = "ACTIVE",
+    mode: str = "API_AND_CONFIG_MAP",
+    version: str | None = _K8S,
 ) -> None:
     if status is None:
         clients["eks"].add_client_error(
@@ -173,17 +177,14 @@ def _expect_eks(
             expected_params={"name": _EKS_NAME},
         )
         return
-    clients["eks"].add_response(
-        "describe_cluster",
-        {
-            "cluster": {
-                "name": _EKS_NAME,
-                "status": status,
-                "accessConfig": {"authenticationMode": mode},
-            }
-        },
-        {"name": _EKS_NAME},
-    )
+    cluster: dict[str, Any] = {
+        "name": _EKS_NAME,
+        "status": status,
+        "accessConfig": {"authenticationMode": mode},
+    }
+    if version is not None:
+        cluster["version"] = version
+    clients["eks"].add_response("describe_cluster", {"cluster": cluster}, {"name": _EKS_NAME})
 
 
 def _expect_clusters(clients: _Clients, summaries: list[dict[str, Any]]) -> None:
@@ -243,13 +244,20 @@ def _expect_default_ami_tree(clients: _Clients) -> None:
     )
 
 
-def _expect_happy_path(clients: _Clients, *, zone: bool = False, plan: bool = False) -> None:
+def _expect_happy_path(
+    clients: _Clients,
+    *,
+    zone: bool = False,
+    plan: bool = False,
+    eks_status: str | None = "ACTIVE",
+    eks_version: str | None = _K8S,
+) -> None:
     _expect_default_quotas(clients)
     if plan:
         _expect_plan(clients, _plan())
     if zone:
         _expect_zone(clients)
-    _expect_eks(clients)
+    _expect_eks(clients, status=eks_status, version=eks_version)
     _expect_clusters(clients, [])
 
 
@@ -380,15 +388,16 @@ def test_happy_path_passes_every_check(clients: _Clients) -> None:
     ]
     assert (
         _by_name(report, "kubernetes-version")[0].detail
-        == "EKS 1.36: HyperPod publishes a node AMI (newest 1.36)"
+        == f"EKS 1.36 ({_EKS_NAME} runs it): HyperPod publishes a node AMI (newest 1.36)"
     )
     assert (
         _by_name(report, "instance-types")[0].detail
         == "ml.g5.8xlarge: 2 of 4 quota for cluster usage"
     )
     assert _by_name(report, "cluster-name")[0].detail == f"{_CLUSTER_NAME} is free"
-    # Clients are created lazily, in the order the checks first need them.
-    assert clients.requested == ["ssm", "service-quotas", "eks", "sagemaker"]
+    # Clients are created lazily: the cluster is described first, because its
+    # version decides kubernetes-version, then in the order the checks need them.
+    assert clients.requested == ["eks", "ssm", "service-quotas", "sagemaker"]
 
 
 def test_report_dict_and_summary(clients: _Clients) -> None:
@@ -463,12 +472,13 @@ def test_region_without_an_agent_image_fails() -> None:
 
 def test_kubernetes_version_without_a_hyperpod_ami_fails(clients: _Clients) -> None:
     """The newest EKS minor has no HyperPod AMI until the service catches up: CreateCluster would fail."""
-    _expect_happy_path(clients)
+    _expect_happy_path(clients, eks_status=None)
     report = _run(clients, _config(), kubernetes_version="1.37")
     [check] = _by_name(report, "kubernetes-version")
     assert check.status == pf.FAIL
     assert check.detail == (
-        f"EKS 1.37: SageMaker HyperPod publishes no node AMI for this minor in {_REGION} "
+        "EKS 1.37 (cdk.json kubernetes_version): SageMaker HyperPod publishes no node AMI for "
+        f"this minor in {_REGION} "
         "(it does for 1.34, 1.35, 1.36), so CreateCluster would fail; deploy the cluster at a "
         "supported minor (cdk.json kubernetes_version, or --kubernetes-version on gco release "
         "validate) — EKS cannot downgrade a running cluster"
@@ -491,7 +501,7 @@ def test_kubernetes_version_tree_is_paginated_deduplicated_and_sorted(clients: _
             {"Type": "String", "Value": "ami-0fedcba9876543210"},  # a leaf without a name
         ],
     )
-    _expect_happy_path(clients)
+    _expect_happy_path(clients, eks_status=None)
     report = _run(clients, _config(), kubernetes_version="1.35", ami_tree=False)
     [check] = _by_name(report, "kubernetes-version")
     assert check.status == pf.FAIL
@@ -524,6 +534,138 @@ def test_kubernetes_version_denied_tree_warns(clients: _Clients) -> None:
         pf.Check("kubernetes-version", pf.WARN, "could not check: AccessDeniedException: no ssm")
     ]
     assert report.ok
+
+
+def test_kubernetes_version_judges_the_minor_the_running_cluster_reports(
+    clients: _Clients,
+) -> None:
+    """A cluster upgraded past the newest HyperPod AMI fails, and says only HyperPod can fix it."""
+    _expect_happy_path(clients, eks_version="1.37")
+    report = _run(clients, _config(), kubernetes_version="1.37")
+    [check] = _by_name(report, "kubernetes-version")
+    assert check.status == pf.FAIL
+    assert check.detail == (
+        f"EKS 1.37 ({_EKS_NAME} runs it): SageMaker HyperPod publishes no node AMI for this "
+        f"minor in {_REGION} (it does for 1.34, 1.35, 1.36), so CreateCluster would fail; EKS "
+        "cannot downgrade a running cluster, so HyperPod can join this one only once HyperPod "
+        "publishes the AMI"
+    )
+
+
+def test_kubernetes_version_below_the_running_minor_fails_before_the_ami_tree(
+    clients: _Clients,
+) -> None:
+    """cdk.json behind a cluster upgraded by hand: the deploy would try to downgrade it."""
+    _expect_happy_path(clients, eks_version="1.37")
+    report = _run(clients, _config(), kubernetes_version="1.36", ami_tree=False)
+    assert _by_name(report, "kubernetes-version") == [
+        pf.Check(
+            "kubernetes-version",
+            pf.FAIL,
+            f"cdk.json kubernetes_version 1.36 is below the 1.37 {_EKS_NAME} already runs, and "
+            "EKS cannot downgrade a cluster, so the deploy would fail; set kubernetes_version "
+            "to 1.37",
+        )
+    ]
+    assert "ssm" not in clients.requested
+
+
+def test_kubernetes_version_one_minor_above_checks_the_upgraded_minor(clients: _Clients) -> None:
+    """The deploy upgrades the cluster in place before HyperPod exists, so cdk.json's minor counts."""
+    _expect_happy_path(clients, eks_version="1.35")
+    report = _run(clients, _config(), kubernetes_version="1.36")
+    [check] = _by_name(report, "kubernetes-version")
+    assert check == pf.Check(
+        "kubernetes-version",
+        pf.PASS,
+        f"EKS 1.36 (the deploy upgrades {_EKS_NAME} from 1.35 before HyperPod): HyperPod "
+        "publishes a node AMI (newest 1.36)",
+    )
+
+
+def test_kubernetes_version_one_minor_above_without_an_ami_says_keep_cdk_json(
+    clients: _Clients,
+) -> None:
+    _expect_happy_path(clients, eks_version="1.36")
+    report = _run(clients, _config(), kubernetes_version="1.37")
+    [check] = _by_name(report, "kubernetes-version")
+    assert check.status == pf.FAIL
+    assert check.detail.startswith(f"EKS 1.37 (the deploy upgrades {_EKS_NAME} from 1.36")
+    assert "deploy the cluster at a supported minor (cdk.json kubernetes_version" in check.detail
+
+
+def test_kubernetes_version_more_than_one_minor_above_fails(clients: _Clients) -> None:
+    _expect_happy_path(clients, eks_version="1.34")
+    report = _run(clients, _config(), kubernetes_version="1.36", ami_tree=False)
+    assert _by_name(report, "kubernetes-version") == [
+        pf.Check(
+            "kubernetes-version",
+            pf.FAIL,
+            f"cdk.json kubernetes_version 1.36 is more than one minor above the 1.34 {_EKS_NAME} "
+            "runs, and EKS upgrades one minor at a time, so the deploy would fail; step "
+            "kubernetes_version up one minor per deploy",
+        )
+    ]
+
+
+@pytest.mark.parametrize("version", [None, "", "  "])
+def test_kubernetes_version_falls_back_to_cdk_json_without_a_reported_version(
+    clients: _Clients, version: str | None
+) -> None:
+    _expect_happy_path(clients, eks_version=version)
+    report = _run(clients, _config())
+    [check] = _by_name(report, "kubernetes-version")
+    assert check.status == pf.PASS
+    assert check.detail.startswith("EKS 1.36 (cdk.json kubernetes_version)")
+
+
+def test_kubernetes_version_unreadable_reported_version_falls_back_to_cdk_json(
+    clients: _Clients,
+) -> None:
+    _expect_happy_path(clients, eks_version="next")
+    report = _run(clients, _config())
+    [check] = _by_name(report, "kubernetes-version")
+    assert check.status == pf.PASS
+    assert check.detail.startswith(
+        f"EKS 1.36 (cdk.json kubernetes_version; {_EKS_NAME} reports 'next')"
+    )
+
+
+def test_kubernetes_version_falls_back_to_cdk_json_when_the_describe_fails(
+    clients: _Clients,
+) -> None:
+    """A denied DescribeCluster warns under eks-cluster; the version check still runs on cdk.json."""
+    _expect_default_quotas(clients)
+    clients["eks"].add_client_error(
+        "describe_cluster",
+        service_error_code="AccessDeniedException",
+        expected_params={"name": _EKS_NAME},
+    )
+    _expect_clusters(clients, [])
+    report = _run(clients, _config())
+    assert _by_name(report, "kubernetes-version")[0].detail.startswith(
+        "EKS 1.36 (cdk.json kubernetes_version)"
+    )
+    assert _by_name(report, "eks-cluster") == [
+        pf.Check("eks-cluster", pf.WARN, "could not check: AccessDeniedException")
+    ]
+
+
+def test_eks_cluster_transport_error_warns(
+    clients: _Clients, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreachable(**_: Any) -> Any:
+        raise EndpointConnectionError(endpoint_url="https://eks.us-east-1.amazonaws.com")
+
+    monkeypatch.setattr(clients.clients["eks"], "describe_cluster", unreachable)
+    _expect_default_quotas(clients)
+    _expect_clusters(clients, [])
+    report = _run(clients, _config())
+    [check] = _by_name(report, "eks-cluster")
+    assert check.status == pf.WARN
+    assert check.detail.startswith("could not check: ")
+    assert "eks.us-east-1.amazonaws.com" in check.detail
+    assert _by_name(report, "kubernetes-version")[0].status == pf.PASS
 
 
 # ---------------------------------------------------------------------------
