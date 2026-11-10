@@ -47,7 +47,7 @@ decisions.
 | When the scan flags a PCS Slurm version nearing EOL, retired, or newly supported | Move the managed default / edit `PCS_SUPPORTED_SLURM_VERSIONS` in `gco/pcs_config.py`, then re-run the live release validation | `deps-scan` **PCS Slurm Versions** row |
 | When the scan flags a newer PCS lifecycle script or AMI family | Bump the pin in `gco/stacks/pcs_cluster.py` / `lambda/pcs-lookup/handler.py`, then re-run the live release validation | `deps-scan` **PCS Lifecycle Scripts and AMIs** row |
 | When the scan flags the HyperPod health-monitoring agent copy behind the upstream chart | Add or remove the named `ml.*` types in `lambda/kubectl-applier-simple/manifests/51-hyperpod-health-monitoring-agent.yaml`, bump `HEALTH_MONITORING_AGENT_TAG` or extend `HEALTH_MONITORING_AGENT_ACCOUNTS` in `gco/hyperpod_config.py`, then re-run the live release validation | `deps-scan` **HyperPod Health Monitoring Agent** row |
-| Weekly | Check the `cve-scan` result and act on new findings | Monday `cve-scan` run |
+| Weekly | Act on the `[Automated] Weekly CVE scan is failing` issue when one is open | Monday `cve-scan` run |
 | Every PR | Hold exact 100% Python line + branch coverage and label the PR so release notes categorize | Opening a pull request |
 | Every release | Bump the version and confirm the generated GitHub Release notes | Cutting a version |
 | On alarm | Follow the matching runbook in `docs/RUNBOOKS.md` | CloudWatch alarm via the SNS alert topic |
@@ -751,7 +751,7 @@ for acting on a monthly drift report.
 | Layer | What runs | Cadence |
 |-------|-----------|---------|
 | `security.yml` | bandit, pip-audit, npm audit (every owned graph), bundler-audit, Trivy (filesystem + per-image), semgrep, checkov, KICS, trufflehog, gitleaks, [CodeQL](https://codeql.github.com/docs/) (Python + JavaScript) | Every push + PR |
-| `cve-scan.yml` | Trivy re-run against fresh CVE databases | Weekly (Mon 09:00 UTC) |
+| `cve-scan.yml` | Trivy re-run against fresh CVE databases (source tree and every image), with a rolling issue while it fails | Weekly (Mon 09:00 UTC) |
 | `deps-scan.yml` | Version drift across every pinned surface | Monthly |
 
 When a scanner flags a CVE with no upstream fix yet, suppress it with an

@@ -455,7 +455,7 @@ Each workflow file has a comment header documenting triggers and per-job purpose
 | `.github/workflows/release.yml` | Manual | Stage 1: open the version-bump PR and dispatch its gating workflows |
 | `.github/workflows/release-publish.yml` | `main` VERSION push + manual | Stage 2: verify the merged release commit, then create the immutable tag and GitHub Release |
 | `.github/workflows/deps-scan.yml` | Monthly + manual | Check pinned versions and live accelerator-catalog drift; maintain one rolling issue |
-| `.github/workflows/cve-scan.yml` | Weekly + manual | Re-run Trivy against current CVE databases |
+| `.github/workflows/cve-scan.yml` | Weekly + manual | Re-run Trivy against current CVE databases (source tree and every image); keeps a rolling issue open while it fails |
 | `.github/workflows/pages.yml` | Successful Unit Tests run on `main` | Publish the strict Zensical site, coverage report, and badge JSON |
 | `.github/workflows/mooncake-image.yml` | `main`, PR, manual | Validate the pinned upstream Mooncake image contract |
 | `.github/workflows/pr-type-label.yml` | PR opened/edited/reopened/ready/synchronize | Sync the declared type-of-change checkbox to its release-note label; label PRs that change a deployed path `live-validation-required` |
@@ -792,7 +792,7 @@ Dependency drift is tracked through three layers:
 
 1. **Dependabot (one weekly PR)** — GitHub Actions, Docker, the locked root npm tooling graph, the deployable inference-streaming Lambda graph, and the CI-only RubyGems graph, batched into a single grouped pull request every Monday. See `.github/dependabot.yml` and [`.github/CI.md`](.github/CI.md#dependabot). Python packages are intentionally excluded because `requirements-lock.txt` is managed through `pip-compile` and bumped intentionally.
 2. **`deps-scan` workflow (monthly issue)** — runs on the 1st of each month at 09:00 UTC. Checks Python packages, Docker images, Helm charts, EKS add-on versions, Aurora PostgreSQL engine versions, pre-commit hook revisions, and accelerator catalog/NodePool/watch-list policy. Deterministic accelerator validation always runs offline; with OIDC credentials the scan also compares the checked-in catalog with the live enabled-Region EC2 union. If anything is out of date or an online check cannot run correctly, it updates one GitHub issue labeled `dependencies, automated`. The scan logic lives in [`.github/scripts/dependency-scan.sh`](.github/scripts/dependency-scan.sh) — see [`.github/CI.md`](.github/CI.md#dependency-scan-script) for the full reference (surfaces checked, inputs, outputs, extension points, failure modes). Pinned versions are centralised in [`gco/stacks/constants.py`](gco/stacks/constants.py).
-3. **`cve-scan` workflow (weekly job)** — runs Mondays at 09:00 UTC. Re-runs Trivy against the latest CVE databases. A red run is the signal; the per-push `security.yml` workflow will catch the same issue on the next PR.
+3. **`cve-scan` workflow (weekly job)** — runs Mondays at 09:00 UTC. Re-runs Trivy against the latest CVE databases over the source tree and every buildable image, with the flags the per-push `security.yml` scan uses, so a finding here is what the next PR would hit. While it fails it keeps one GitHub issue labeled `security, automated` open with the findings table, and a clean, complete run closes it.
 
 #### What Gets Checked by `deps-scan`
 
