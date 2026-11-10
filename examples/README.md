@@ -32,6 +32,7 @@ This directory contains example Kubernetes manifests you can use with Global Cap
   - [MLflow Tracking Job](#mlflow-tracking-job)
   - [Model Download Job](#model-download-job)
   - [Multi-GPU Distributed Training](#multi-gpu-distributed-training)
+  - [Nitro Sandbox Job](#nitro-sandbox-job)
   - [Ray Cluster](#ray-cluster)
   - [Simple Job](#simple-job)
   - [Slurm Cluster Job](#slurm-cluster-job)
@@ -81,6 +82,7 @@ This directory contains example Kubernetes manifests you can use with Global Cap
 | [MLflow Tracking](#mlflow-tracking-job) | `mlflow-tracking-job.yaml` | Jobs | — | — |
 | [Model Download](#model-download-job) | `model-download-job.yaml` | Jobs | — | — |
 | [Multi-GPU Training](#multi-gpu-distributed-training) | `multi-gpu-training.yaml` | Jobs | ✅ | — |
+| [Nitro Sandbox](#nitro-sandbox-job) | `nitro-sandbox-job.yaml` | Jobs | — | EKS 1.36+ |
 | [Pipeline DAG](#dag-pipeline) | `pipeline-dag.yaml` | Pipeline | — | — |
 | [Ray Cluster](#ray-cluster) | `ray-cluster.yaml` | Distributed | — | — |
 | [Regional Shared Bucket Upload](#regional-shared-bucket-upload-job) | `regional-shared-bucket-upload-job.yaml` | Storage | — | — |
@@ -713,6 +715,27 @@ kubectl logs -f job/pytorch-ddp-training -n gco-jobs
 **Requirements:** GPU nodes available, NVIDIA device plugin (installed by default).
 
 **When to use:** Multi-node distributed training, PyTorch DDP workloads, scaling training across GPUs.
+
+---
+
+### Nitro Sandbox Job
+
+**File:** `nitro-sandbox-job.yaml`
+
+A CPU Job whose pod runs inside its own [AWS Nitro Sandbox](../docs/NITRO_SANDBOXES.md), a lightweight VM with its own kernel, isolated from the node and from other pods. The pod prints its machine, kernel and disks, and fails unless its disks are virtio-blk devices, which a pod sees only inside a sandbox. It is queued through the `gco-default` Kueue queue.
+
+**Usage:**
+
+```bash
+gco jobs submit examples/nitro-sandbox-job.yaml --region us-east-1
+gco jobs logs nitro-sandbox-job -r us-east-1
+# Any CPU manifest, unedited:
+gco jobs submit examples/simple-job.yaml --region us-east-1 --sandbox isolated
+```
+
+**Requirements:** EKS 1.36 or later (`cdk.json` `kubernetes_version`) in a Region where EKS offers Nitro Sandboxes. CPU only: GCO rejects a sandboxed pod that requests a GPU, Neuron device or EFA.
+
+**When to use:** Running untrusted code, such as code an AI agent wrote or a tenant's container, where a container escape must not reach the node.
 
 ---
 

@@ -160,6 +160,33 @@ EXAMPLE_METADATA: dict[str, dict[str, str | list[str]]] = {
         ],
         "related": ["inference-vllm", "inference-sglang", "efs-output-job"],
     },
+    "nitro-sandbox-job": {
+        "category": "Jobs & Training",
+        "summary": (
+            "Runs a CPU Job inside an AWS Nitro Sandbox (runtimeClassName: isolated-sandbox), "
+            "a per-pod VM for untrusted code; the pod fails unless it is in a sandbox."
+        ),
+        "gpu": "no",
+        "opt_in": "EKS 1.36+",
+        "submission": "gco jobs submit examples/nitro-sandbox-job.yaml --region us-east-1",
+        "keywords": [
+            "nitro sandbox",
+            "sandbox",
+            "isolation",
+            "untrusted code",
+            "isolated-sandbox",
+            "runtimeclass",
+            "microvm",
+            "agent code",
+        ],
+        "instance_types": [],
+        "use_cases": [
+            "run untrusted or AI-generated code in its own VM",
+            "isolate one tenant's pod from the node and other pods",
+            "check that --sandbox isolated works on a cluster",
+        ],
+        "related": ["simple-job", "kueue-job"],
+    },
     "sqs-job-submission": {
         "category": "Jobs & Training",
         "summary": "Demonstrates SQS-based submission (recommended). Contains CPU and GPU job examples.",
@@ -1439,6 +1466,23 @@ DOC_METADATA: dict[str, dict[str, str | list[str]]] = {
             "read-only",
         ],
         "related": ["CLI", "MAINTENANCE", "CUSTOMIZATION"],
+    },
+    "NITRO_SANDBOXES": {
+        "summary": "AWS Nitro Sandboxes on EKS 1.36+: each pod in its own VM for untrusted code. --sandbox isolated on gco jobs submit, submit-sqs, submit-direct and submit-queue (and the MCP submit tools) sets runtimeClassName: isolated-sandbox on every pod template; the submission paths reject sandboxed pods that request GPUs, Neuron or EFA, set hostNetwork or hostUsers: false, put sandbox annotations on the workload instead of the pod template, or name a RuntimeClass the cluster lacks; gco-cluster-queue covers the eks.amazonaws.com/nitro-sandbox slot; confidential-sandbox manifests pass through with their Cedar policy and an explicit automountServiceAccountToken.",
+        "topics": ["jobs", "security", "eks"],
+        "keywords": [
+            "nitro sandbox",
+            "sandbox",
+            "isolated-sandbox",
+            "confidential-sandbox",
+            "runtimeclass",
+            "untrusted code",
+            "isolation",
+            "microvm",
+            "cedar policy",
+            "kueue",
+        ],
+        "related": ["KUEUE", "CLI", "ARCHITECTURE"],
     },
     "TROUBLESHOOTING": {
         "summary": "Troubleshooting guide — common installation, deployment, kubectl, and pod issues with their resolutions.",

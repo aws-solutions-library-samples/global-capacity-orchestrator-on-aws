@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+from typing import Literal
 
 import cli_runner
 from audit import audit_logged
@@ -53,7 +54,11 @@ def list_jobs(
 @mcp.tool(tags={"low-risk", "jobs"})
 @audit_logged
 def submit_job_sqs(
-    manifest_path: str, region: str, namespace: str | None = None, priority: int | None = None
+    manifest_path: str,
+    region: str,
+    namespace: str | None = None,
+    priority: int | None = None,
+    sandbox: Literal["isolated"] | None = None,
 ) -> str:
     """Submit a job via SQS queue (recommended for production).
 
@@ -62,27 +67,39 @@ def submit_job_sqs(
         region: Target AWS region for the SQS queue.
         namespace: Override the namespace in the manifest.
         priority: Job priority (0-100, higher = more important).
+        sandbox: "isolated" runs every pod in an AWS Nitro Sandbox (EKS 1.36+,
+            CPU only; see docs/NITRO_SANDBOXES.md).
     """
     args = ["jobs", "submit-sqs", manifest_path, "-r", region]
     if namespace:
         args += ["-n", namespace]
     if priority is not None:
         args += ["--priority", str(priority)]
+    if sandbox:
+        args += ["--sandbox", sandbox]
     return cli_runner._run_cli(*args)
 
 
 @mcp.tool(tags={"low-risk", "jobs"})
 @audit_logged
-def submit_job_api(manifest_path: str, namespace: str | None = None) -> str:
+def submit_job_api(
+    manifest_path: str,
+    namespace: str | None = None,
+    sandbox: Literal["isolated"] | None = None,
+) -> str:
     """Submit a job via the authenticated API Gateway (SigV4).
 
     Args:
         manifest_path: Path to the YAML manifest file.
         namespace: Override the namespace in the manifest.
+        sandbox: "isolated" runs every pod in an AWS Nitro Sandbox (EKS 1.36+,
+            CPU only; see docs/NITRO_SANDBOXES.md).
     """
     args = ["jobs", "submit", manifest_path]
     if namespace:
         args += ["-n", namespace]
+    if sandbox:
+        args += ["--sandbox", sandbox]
     return cli_runner._run_cli(*args)
 
 

@@ -5370,7 +5370,16 @@ class TestSmokeManifestSupplyChain:
         probes = sorted(manifest_dir.glob("netpol-*-job.yaml"))
         assert {path.name for path in smoke} == {
             f"{name}-smoke-job.yaml"
-            for name in ("api", "sqs", "kueue", "yunikorn", "volcano", "slurm", "hyperpod")
+            for name in (
+                "api",
+                "sqs",
+                "kueue",
+                "yunikorn",
+                "volcano",
+                "slurm",
+                "hyperpod",
+                "nitro-sandbox",
+            )
         }
         assert {path.name for path in probes} == {
             "netpol-probe-job.yaml",
@@ -5419,6 +5428,72 @@ class TestSmokeManifestSupplyChain:
                     ]
                 }
             }, path.name
+
+
+class TestSandboxesAction:
+    """The sandboxes action runs a queued Nitro Sandbox Job, or skips below EKS 1.36."""
+
+    @staticmethod
+    def _ctx(*, cdk_minor: str, override: str = "") -> SimpleNamespace:
+        return SimpleNamespace(
+            cdk_context={"kubernetes_version": cdk_minor},
+            settings=SimpleNamespace(run_id="run-123", kubernetes_version_override=override),
+            checkpoint=SimpleNamespace(state={}),
+            persist=MagicMock(),
+        )
+
+    def test_a_supported_minor_runs_the_smoke_job_through_the_api(self) -> None:
+        from scripts.live_release_validation.actions import sandboxes
+
+        ctx = self._ctx(cdk_minor="1.37", override="1.36")
+        with patch_live_validation_helper(
+            "_run_api_transport_lifecycle", return_value={"marker_seen": True}
+        ) as lifecycle:
+            evidence = sandboxes.action_sandboxes(ctx)
+
+        lifecycle.assert_called_once_with(
+            ctx,
+            manifest_filename="nitro-sandbox-smoke-job.yaml",
+            path="nitro-sandbox",
+            marker_prefix="NITRO_SANDBOX",
+        )
+        assert evidence == {
+            "kubernetes_version": "1.36",
+            "sandboxes": {"status": "validated", "marker_seen": True},
+        }
+        assert ctx.checkpoint.state["sandbox_validation"] == evidence
+        ctx.persist.assert_called_once_with()
+
+    def test_a_minor_before_nitro_sandboxes_is_skipped_with_the_reason(self) -> None:
+        from scripts.live_release_validation.actions import sandboxes
+
+        ctx = self._ctx(cdk_minor="1.35")
+        with patch_live_validation_helper("_run_api_transport_lifecycle") as lifecycle:
+            evidence = sandboxes.action_sandboxes(ctx)
+
+        lifecycle.assert_not_called()
+        result = evidence["sandboxes"]
+        assert result["status"] == "skipped"
+        assert "EKS 1.35 predates AWS Nitro Sandboxes, which need 1.36" in result["reason"]
+        assert "--kubernetes-version" in result["reason"]
+        assert ctx.checkpoint.state["sandbox_validation"] == evidence
+
+    def test_the_smoke_job_prints_its_marker_only_inside_a_sandbox(self) -> None:
+        import yaml
+
+        root = Path(__file__).resolve().parents[1]
+        job = yaml.safe_load(
+            (
+                root / "scripts/live_release_validation/manifests/nitro-sandbox-smoke-job.yaml"
+            ).read_text(encoding="utf-8")
+        )
+        assert job["metadata"]["labels"]["kueue.x-k8s.io/queue-name"] == "gco-default"
+        pod = job["spec"]["template"]["spec"]
+        assert pod["runtimeClassName"] == "isolated-sandbox"
+        script = pod["containers"][0]["command"][-1]
+        assert script.endswith(
+            "ls /sys/block | grep -q '^vd' && echo GCO_LIVE_NITRO_SANDBOX___RUN_TOKEN__"
+        )
 
 
 class TestSchedulerValidation:

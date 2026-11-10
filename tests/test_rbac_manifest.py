@@ -357,6 +357,31 @@ class TestManifestProcessorRole:
             "surface can report the instance type a pod landed on"
         )
 
+    def test_manifest_processor_cluster_read_gets_only_the_sandbox_runtime_classes(self, rbac_docs):
+        """Both submission paths read the Nitro Sandbox RuntimeClasses, and only those.
+
+        gco.job_admission.check_sandbox_runtime_class refuses a sandboxed
+        manifest on a cluster without its RuntimeClass. Without this rule the
+        read is refused and the check fails open, so a Job would again be
+        accepted with pods that can never be created. RuntimeClasses are
+        cluster-scoped, and ``resourceNames`` keeps the grant to the two
+        classes the check asks about.
+        """
+        from gco.job_admission import SANDBOX_RUNTIME_CLASSES
+
+        role = _find_doc(rbac_docs, "ClusterRole", "gco-manifest-processor-cluster-read")
+        rules = [
+            rule for rule in role.get("rules", []) if "node.k8s.io" in rule.get("apiGroups", [])
+        ]
+        assert rules == [
+            {
+                "apiGroups": ["node.k8s.io"],
+                "resources": ["runtimeclasses"],
+                "resourceNames": sorted(SANDBOX_RUNTIME_CLASSES),
+                "verbs": ["get"],
+            }
+        ]
+
 
 # ─── Submittable kinds ↔ RBAC lockstep ──────────────────────────────
 

@@ -687,6 +687,16 @@ class TestJobTools:
             assert "submit" in cmd
             assert "job.yaml" in cmd
             assert "-n" not in cmd
+            assert "--sandbox" not in cmd
+
+    @pytest.mark.parametrize("tool", ["submit_job_api", "submit_job_sqs"])
+    def test_submit_tools_pass_the_nitro_sandbox_mode(self, tool):
+        args = ("job.yaml",) if tool == "submit_job_api" else ("job.yaml", "us-east-1")
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            getattr(run_mcp, tool)(*args, sandbox="isolated")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("--sandbox") + 1] == "isolated"
 
     def test_get_job(self):
         with patch("cli_runner.subprocess.run") as mock:

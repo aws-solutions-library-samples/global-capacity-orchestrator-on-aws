@@ -3332,6 +3332,7 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--dry-run` | | Validate without applying |
 | `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 | `--wait` | `-w` | Wait for job completion |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
@@ -3341,6 +3342,7 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 gco jobs submit examples/simple-job.yaml -n gco-jobs
 gco jobs submit job.yaml --dry-run
 gco jobs submit job.yaml -l team=ml -l priority=high
+gco jobs submit examples/simple-job.yaml --sandbox isolated
 ```
 
 #### `gco jobs submit-sqs`
@@ -3360,6 +3362,7 @@ gco jobs submit-sqs MANIFEST_PATH [OPTIONS]
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 
 `--auto-region` reads the manifest before ranking. A manifest routed to
 [SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) (the
@@ -3398,8 +3401,13 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
 | `--dry-run` | | Validate without applying |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 | `--wait` | `-w` | Wait for job completion |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
+
+`submit-direct` skips GCO's server-side admission, so `--sandbox` runs the
+[sandbox checks](NITRO_SANDBOXES.md#what-gco-checks-at-submission) itself before
+calling kubectl.
 
 **Example:**
 
@@ -3425,6 +3433,7 @@ Jobs are stored in DynamoDB and picked up by the target region's manifest proces
 | `--namespace` | `-n` | Kubernetes namespace |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 
 **Example:**
 

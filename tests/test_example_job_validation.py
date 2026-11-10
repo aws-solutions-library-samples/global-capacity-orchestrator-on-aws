@@ -206,6 +206,8 @@ class TestActionRegistry:
                 # Describes the deployed HyperPod cluster and runs a Job on
                 # its node; nothing to prove once the stack is gone.
                 "hyperpod",
+                # Runs a Job in an AWS Nitro Sandbox on the deployed cluster.
+                "sandboxes",
                 "opencost",
                 "convergence",
                 "platform-workloads",

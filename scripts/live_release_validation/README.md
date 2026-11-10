@@ -116,6 +116,17 @@ part of the resume identity through `extra_cdk_context()`), the preflight
 checks HyperPod's AMI tree for that minor, and `topology` compares the
 deployed clusters against it (`context.effective_kubernetes_version`).
 
+The `sandboxes` action (`actions/sandboxes.py`) runs
+`manifests/nitro-sandbox-smoke-job.yaml` through the same API-transport
+lifecycle: an `isolated-sandbox` Job queued to `gco-default`, whose pod prints
+the marker only when its disks are virtio-blk devices, so completion proves the
+API's sandbox admission, the ClusterQueue's coverage of the
+`eks.amazonaws.com/nitro-sandbox` slot, Auto Mode's sandbox node and the
+sandbox itself (see [NITRO_SANDBOXES.md](../../docs/NITRO_SANDBOXES.md)). It
+reads the same `effective_kubernetes_version` and skips below 1.36, the first
+minor with Nitro Sandboxes; a 1.36+ run in a Region without them fails with
+the API's missing-RuntimeClass rejection, since that run cannot validate them.
+
 The two cluster-facing actions share their kubectl plumbing in
 `checks/cluster.py` (the same access-entry-plus-SSM-tunnel session and isolated
 kubeconfig the `inference` action uses, and a fail-closed JSON read that

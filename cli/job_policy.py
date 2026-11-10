@@ -35,6 +35,7 @@ from typing import Any
 from gco.job_admission import (
     JobValidationPolicy,
     check_resource_caps,
+    check_sandbox,
     check_security_context,
     check_tolerations,
     validate_image_sources,
@@ -63,6 +64,7 @@ CHECK_IMAGES = "images"
 CHECK_CAPS = "resource_caps"
 CHECK_SECURITY = "security_context"
 CHECK_TOLERATIONS = "tolerations"
+CHECK_SANDBOX = "sandbox"
 
 #: An AWS ECR registry hostname, e.g. 123456789012.dkr.ecr.us-east-2.amazonaws.com
 #: (also matching the .cn and ISO partition suffixes).
@@ -245,6 +247,9 @@ def evaluate_manifest(
         ok, message = check_tolerations(manifest)
         if not ok:
             issues.append(AdmissionIssue(CHECK_TOLERATIONS, message or "missing toleration", label))
+    ok, message = check_sandbox(manifest)
+    if not ok:
+        issues.append(AdmissionIssue(CHECK_SANDBOX, message or "Nitro Sandbox constraint", label))
 
     return issues
 

@@ -92,7 +92,12 @@ from gco.hyperpod_config import (
     HYPERPOD_LOCAL_QUEUE,
     HYPERPOD_TAINT_KEY,
 )
-from gco.job_admission import KUEUE_QUEUE_NAME_LABEL, hyperpod_routing
+from gco.job_admission import (
+    KUEUE_QUEUE_NAME_LABEL,
+    check_sandbox,
+    check_sandbox_runtime_class,
+    hyperpod_routing,
+)
 from gco.job_envelope import DEFAULT_JOB_NAMESPACE
 from gco.manifest_security_policy import parse_boolean_environment
 from gco.models import ResourceStatus
@@ -102,6 +107,7 @@ from gco.services.manifest_processor import (
     DEFAULT_ALLOWED_KINDS,
     DEFAULT_TRUSTED_DOCKERHUB_ORGS,
     DEFAULT_TRUSTED_REGISTRIES,
+    RuntimeClassPresence,
     extract_trainjob_pod_specs,
     validate_resource_kind,
 )
@@ -196,6 +202,12 @@ ALLOWED_KINDS = (
     set(DEFAULT_ALLOWED_KINDS)
     if _allowed_kinds_env is None
     else {kind.strip() for kind in _allowed_kinds_env.split(",") if kind.strip()}
+)
+# Whether a Nitro Sandbox RuntimeClass exists here (validate_manifest). The
+# client is built per lookup because the Kubernetes configuration is loaded
+# after import.
+runtime_class_exists = RuntimeClassPresence(
+    lambda name: client.NodeV1Api().read_runtime_class(name)
 )
 # Defaults come from the shared source of truth
 # (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS - two full
@@ -689,6 +701,14 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
                 "and redeploy (see examples/README.md#troubleshooting)"
             )
             return False, "; ".join(errors) + f". {hint}"
+
+    # AWS Nitro Sandbox constraints, then whether this cluster has the sandbox
+    # RuntimeClass at all: the same functions the REST path calls.
+    sandbox_valid, sandbox_error = check_sandbox(m)
+    if sandbox_valid:
+        sandbox_valid, sandbox_error = check_sandbox_runtime_class(m, runtime_class_exists)
+    if not sandbox_valid:
+        return False, f"Nitro Sandbox validation failed: {sandbox_error}"
 
     return True, ""
 
