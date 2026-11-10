@@ -262,6 +262,9 @@ _QUANTITY_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
         "{{QUOTA_MAX_CPU}}",
         "{{QUOTA_MAX_MEMORY}}",
         "{{QUOTA_MAX_GPU}}",
+        # The default ClusterQueue's eks.amazonaws.com/nitro-sandbox quota,
+        # one slot per pod (the namespace pod quota).
+        "{{QUOTA_MAX_PODS}}",
         # The HyperPod ClusterQueue's nominal quotas
         # (post-helm-kueue-hyperpod-queue.yaml), from cdk.json hyperpod.queue.
         "{{HYPERPOD_QUEUE_MAX_CPU}}",
