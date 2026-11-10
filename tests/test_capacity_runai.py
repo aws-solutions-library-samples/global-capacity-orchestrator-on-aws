@@ -679,6 +679,56 @@ class TestRenderTable:
         table = runai.render_table(report)
         assert "(no node pools match)" in table
         assert "note:" not in table
+        lines = table.splitlines()
+        assert lines[3] == "  " + "-" * (len(lines[4]) - 2)
+
+    def test_long_names_widen_their_column_instead_of_being_cut(self) -> None:
+        pool_name = "a-node-pool-name-longer-than-eighteen"
+        pool = {
+            "id": "np",
+            "name": pool_name,
+            "clusterId": "c",
+            "clusterName": "a-long-cluster-name",
+        }
+        nodes = [
+            {
+                "clusterUuid": "c",
+                "nodePool": pool_name,
+                "status": "Ready",
+                "gpuInfo": {"gpuType": gpu_type, "gpuCount": 8},
+            }
+            for gpu_type in ("NVIDIA-A100-SXM4-40GB", "NVIDIA-H100-80GB-HBM3")
+        ]
+        report = _report(
+            node_pools=[pool],
+            nodes=nodes,
+            gpu_models=runai.load_gpu_models(),
+            request=runai.Request(gpu_count=1),
+        )
+        lines = runai.render_table(report).splitlines()
+        header = next(line for line in lines if line.startswith("  CLUSTER"))
+        row = next(line for line in lines if line.startswith("  a-long-cluster-name"))
+        values = {
+            "NODE POOL": pool_name,
+            "GPU TYPES": "NVIDIA-A100-SXM4-40GB(A100),NVIDIA-H100-80GB-HBM3(H100)",
+        }
+        for title, value in values.items():  # names start under their header
+            assert row.index(value) == header.index(title)
+        for title in ("TOTAL", "WHOLE", "FITS 1"):  # numbers end under theirs
+            end = header.index(title) + len(title)
+            assert row[end - 1] == "?" and row[end : end + 2] in ("  ", "")
+        assert lines[3] == "  " + "-" * (len(header) - 2)
+
+    def test_the_doc_sample_is_what_the_table_prints(self, plane: fake.FakeControlPlane) -> None:
+        """docs/RUNAI.md shows real output, so a change to the table has to update it."""
+        report = runai.read_capacity(_settings(plane), runai.Request(gpu_count=2), now=NOW)
+        report["control_plane"] = "https://runai.example.com"
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "RUNAI.md").read_text(
+            encoding="utf-8"
+        )
+        marker = "from `gco capacity runai --gpu-count 2`:\n\n```text\n"
+        sample = doc.split(marker, 1)[1].split("\n```", 1)[0]
+        assert sample == runai.render_table(report).strip("\n")
 
 
 # ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -667,43 +667,70 @@ def _fmt(value: float | int | None) -> str:
     return f"{value:g}" if isinstance(value, float) else str(value)
 
 
+def _table_cells(row: Mapping[str, Any], request: Mapping[str, Any]) -> list[str]:
+    types = ",".join(
+        f"{t['gpu_type']}" + (f"({t['ec2_gpu_model']})" if t["ec2_gpu_model"] else "")
+        for t in row["gpu_types"]
+    )
+    cells = [
+        str(row["cluster"]),
+        str(row["node_pool"]),
+        types or "-",
+        _fmt(row["total_gpus"]),
+        _fmt(row["allocated_gpus"]),
+        _fmt(row["free_gpus"]),
+        _fmt(row["whole_gpus_upper_bound"]),
+    ]
+    if request["gpu_count"] is not None:
+        fits = row.get("fits_gpu_count")
+        cells.append("?" if fits is None else ("yes" if fits else "no"))
+    if request["project"] is not None:
+        cells.append(_fmt(row.get("project_headroom_gpus")))
+    return cells
+
+
 def render_table(report: Mapping[str, Any]) -> str:
-    """The report as the terminal shows it."""
+    """The report as the terminal shows it.
+
+    Each column is as wide as its longest value, so a long cluster, node pool
+    or GPU type name widens the column instead of being cut off. Names left,
+    numbers right.
+    """
     request = report["request"]
+    columns = [
+        ("CLUSTER", "<"),
+        ("NODE POOL", "<"),
+        ("GPU TYPES", "<"),
+        ("TOTAL", ">"),
+        ("ALLOC", ">"),
+        ("FREE", ">"),
+        ("WHOLE", ">"),
+    ]
+    if request["gpu_count"] is not None:
+        columns.append((f"FITS {request['gpu_count']}", ">"))
+    if request["project"] is not None:
+        columns.append(("HEADROOM", ">"))
+    rows: Iterable[Mapping[str, Any]] = report["rows"]
+    body = [_table_cells(row, request) for row in rows]
+    widths = [
+        max([len(header), *(len(cells[index]) for cells in body)])
+        for index, (header, _) in enumerate(columns)
+    ]
+
+    def line(cells: Sequence[str]) -> str:
+        return "  " + "  ".join(
+            f"{cell:{align}{width}}"
+            for cell, (_, align), width in zip(cells, columns, widths, strict=True)
+        )
+
+    table = [line([header for header, _ in columns]), *(line(cells) for cells in body)]
     lines = [
         f"\n  NVIDIA Run:ai capacity — {report['control_plane']} (read-only; not ranked with AWS Regions)",
         f"  Observed {report['observed_at']}, valid until {report['valid_until']}",
-        "  " + "-" * 100,
+        "  " + "-" * (len(table[0]) - 2),
+        *table,
     ]
-    rows: Iterable[Mapping[str, Any]] = report["rows"]
-    header = f"  {'CLUSTER':<18} {'NODE POOL':<18} {'GPU TYPES':<26} {'TOTAL':>5} {'ALLOC':>6} {'FREE':>5} {'WHOLE':>5}"
-    if request["gpu_count"] is not None:
-        header += f" {'FITS ' + str(request['gpu_count']):>7}"
-    if request["project"] is not None:
-        header += f" {'HEADROOM':>8}"
-    lines.append(header)
-    any_row = False
-    for row in rows:
-        any_row = True
-        types = (
-            ",".join(
-                f"{t['gpu_type']}" + (f"({t['ec2_gpu_model']})" if t["ec2_gpu_model"] else "")
-                for t in row["gpu_types"]
-            )
-            or "-"
-        )
-        line = (
-            f"  {row['cluster'][:18]:<18} {row['node_pool'][:18]:<18} {types[:26]:<26} "
-            f"{_fmt(row['total_gpus']):>5} {_fmt(row['allocated_gpus']):>6} "
-            f"{_fmt(row['free_gpus']):>5} {_fmt(row['whole_gpus_upper_bound']):>5}"
-        )
-        if request["gpu_count"] is not None:
-            fits = row.get("fits_gpu_count")
-            line += f" {'?' if fits is None else ('yes' if fits else 'no'):>7}"
-        if request["project"] is not None:
-            line += f" {_fmt(row.get('project_headroom_gpus')):>8}"
-        lines.append(line)
-    if not any_row:
+    if not body:
         lines.append("  (no node pools match)")
     notes = [
         *report["notes"],

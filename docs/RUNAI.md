@@ -39,15 +39,23 @@ gco capacity runai --gpu-count 4 --project team-a
 gco --output json capacity runai --cluster prod --node-pool h100
 ```
 
-The same numbers in the terminal:
+The same numbers in the terminal, from `gco capacity runai --gpu-count 2`:
 
 ```text
   NVIDIA Run:ai capacity — https://runai.example.com (read-only; not ranked with AWS Regions)
   Observed 2026-11-09T12:00:00Z, valid until 2026-11-09T12:01:30Z
-  ----------------------------------------------------------------------------------------------------
-  CLUSTER            NODE POOL          GPU TYPES                  TOTAL  ALLOC  FREE WHOLE  FITS 2
-  lab                h100               NVIDIA-H100-80GB-HBM3(H100)   16      0     8     8     yes
-  prod               t4              Tesla-T4(T4)                   4    2.5     2     1      no
+  ----------------------------------------------------------------------------------
+  CLUSTER  NODE POOL  GPU TYPES                    TOTAL  ALLOC  FREE  WHOLE  FITS 2
+  lab      h100       NVIDIA-H100-80GB-HBM3(H100)     16      0     8      8     yes
+  prod     default    -                                ?      ?     ?      ?       ?
+  prod     t4         Tesla-T4(T4)                     4    2.5     2      1      no
+
+  note: project team-b: quotaStatus.allocated has no gpu value; read as 0
+  note: prod/default: no TOTAL_GPUS value for this pool; reported as unknown, not 0
+  note: prod/default: no ALLOCATED_GPUS value for this pool; reported as unknown, not 0
+  note: prod/default: no FREE_GPUS value for this pool; reported as unknown, not 0
+
+  WHOLE = whole GPUs a new workload could be given; ? = not reported (never 0).
 ```
 
 ## What it does not do
