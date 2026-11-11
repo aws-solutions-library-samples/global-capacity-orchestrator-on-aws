@@ -516,7 +516,10 @@ def destroy_all_orchestrated(
     Once every regional stack is gone this deletes the EBS volumes their
     clusters' CSI drivers provisioned for in-cluster PVCs, which CloudFormation
     does not own and deleting an EKS cluster does not remove. Pass
-    --retain-volumes to list them instead of deleting them.
+    --retain-volumes to list them instead of deleting them. It also deletes
+    each Region's /{project}/addons/{region} SSM parameters (add-on status
+    records, the convergence replay input, the teardown fence), which the
+    add-on tooling writes outside CloudFormation.
 
     After a fully successful teardown this also purges the runtime
     /{project}/traffic-dial SSM parameters (controller state and manual

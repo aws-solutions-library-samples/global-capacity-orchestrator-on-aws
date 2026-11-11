@@ -5380,20 +5380,26 @@ class StackManager:
 
         # Every regional stack is verifiably absent here, so each EKS cluster and
         # its CSI driver are gone and the volumes it provisioned can never
-        # reattach. Running after the barrier (rather than inside the per-stack
+        # reattach, and nothing can write a cluster's add-on bookkeeping in SSM
+        # again. Running after the barrier (rather than inside the per-stack
         # loop above) means parallel and sequential teardowns publish the same
         # outcomes in the same order, with no concurrent access to the report.
         # Cleanup results deliberately do not feed ``failed``: these stacks are
         # already deleted, and relabeling one as failed would send the CLI's
         # retry loop back to CDK for a stack that no longer exists.
         for stack_name in regional_stacks:
+            stack_region = strict_resources.get(stack_name, {}).get("region")
             record_cleanup(
                 "dynamic-pvs",
                 self._cleanup_cluster_volumes(
                     stack_name,
-                    region=strict_resources.get(stack_name, {}).get("region"),
+                    region=stack_region,
                     retain=retain_volumes,
                 ),
+            )
+            record_cleanup(
+                "addon-parameters",
+                self._cleanup_addon_parameters(stack_name, region=stack_region),
             )
 
         for stack_name in pre_regional_stacks:
@@ -6154,6 +6160,64 @@ class StackManager:
             )
         for failure in outcome["errors"]:
             logger.warning("Traffic-dial parameter cleanup failed: %s", failure)
+        return outcome
+
+    def _cleanup_addon_parameters(
+        self,
+        stack_name: str,
+        *,
+        region: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete the add-on bookkeeping a destroyed regional stack left in SSM.
+
+        The Helm orchestrator, the Helm installer, the kubectl applier and the
+        teardown provider write ``/{project}/addons/{region}/*`` at runtime:
+        the convergence replay input and execution identity, per-chart and
+        per-phase status records, and the teardown fence. CloudFormation never
+        owned them, so every teardown left them behind (28 per Region on a
+        live two-Region run). The caller runs this only once the regional stack
+        is verifiably absent, so nothing writes the tree again. Like the
+        traffic-dial purge it also runs in strict teardowns: the parameters are
+        untagged, so the live-validation inventory cannot see them and nothing
+        else removes them. Best-effort: errors are recorded, never raised.
+        """
+        import boto3
+
+        project_name = self.config.project_name
+        region = region or stack_name.replace(f"{project_name}-", "", 1)
+        path = f"/{project_name}/addons/{region}"
+        outcome: dict[str, Any] = {
+            "stack": stack_name,
+            "region": region,
+            "deleted": [],
+            "errors": [],
+        }
+        try:
+            ssm = boto3.client("ssm", region_name=region)
+            paginator = ssm.get_paginator("get_parameters_by_path")
+            names = [
+                str(parameter["Name"])
+                for page in paginator.paginate(Path=path, Recursive=True)
+                for parameter in page.get("Parameters", [])
+                if parameter.get("Name")
+            ]
+        except Exception as exc:  # best-effort cleanup
+            outcome["errors"].append(f"{path}: {type(exc).__name__}: {exc}")
+            names = []
+        # DeleteParameters accepts at most ten names per call.
+        for start in range(0, len(names), 10):
+            batch = names[start : start + 10]
+            try:
+                response = ssm.delete_parameters(Names=batch)
+            except Exception as exc:  # best-effort cleanup
+                outcome["errors"].append(f"{', '.join(batch)}: {type(exc).__name__}: {exc}")
+                continue
+            outcome["deleted"].extend(str(name) for name in response.get("DeletedParameters", []))
+        outcome["deleted"].sort()
+        if outcome["deleted"]:
+            print(f"  Deleted {len(outcome['deleted'])} add-on SSM parameter(s) under {path}.")
+        for failure in outcome["errors"]:
+            logger.warning("Add-on parameter cleanup failed for %s: %s", stack_name, failure)
         return outcome
 
     def _cleanup_bastion_iam(self) -> dict[str, Any]:

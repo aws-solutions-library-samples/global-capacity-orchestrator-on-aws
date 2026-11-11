@@ -326,11 +326,11 @@ def _no_real_mission_memory():
 # sweep (CloudWatch DeleteLogGroup on every Lambda/EKS/Container Insights
 # group the stacks imply), the sweep of explicit log groups Lambda recreated
 # after CloudFormation deleted them, bastion IAM retirement, the traffic-dial
-# SSM purge, and the post-regional EBS volume sweep. Orchestration tests that
-# mock ``destroy`` / ``list_stacks`` but not these helpers otherwise fire real
-# AWS calls: slow and non-hermetic, and outright destructive when
-# ``config.project_name`` resolves to a live value (see the credential scrub
-# at the top of this module for the day that happened).
+# SSM purge, and the post-regional EBS volume and add-on SSM sweeps.
+# Orchestration tests that mock ``destroy`` / ``list_stacks`` but not these
+# helpers otherwise fire real AWS calls: slow and non-hermetic, and outright
+# destructive when ``config.project_name`` resolves to a live value (see the
+# credential scrub at the top of this module for the day that happened).
 #
 # Every helper is no-oped for every test, except the exact helpers a test
 # class (or module-level test) owns and exercises for real with its own boto3
@@ -352,6 +352,7 @@ _DESTROY_CLEANUP_STUBS: dict[str, object] = {
     "_cleanup_bastion_iam": {"completed_steps": 0, "absent_steps": 0, "errors": []},
     "_detach_stack_roles_from_instance_profiles": {"detached": [], "errors": []},
     "_cleanup_traffic_dial_parameters": {"deleted": [], "errors": []},
+    "_cleanup_addon_parameters": {"deleted": [], "errors": []},
     # The post-regional EBS sweep calls EC2 DeleteVolume. Left real, an
     # orchestration test that names a live regional stack would destroy that
     # cluster's Prometheus/Grafana data — the most destructive helper here.
@@ -384,6 +385,7 @@ _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
     "TestBastionIamCleanup": frozenset({"_cleanup_bastion_iam"}),
     "TestRoleInstanceProfileDetach": frozenset({"_detach_stack_roles_from_instance_profiles"}),
     "TestTrafficDialParameterCleanup": frozenset({"_cleanup_traffic_dial_parameters"}),
+    "TestAddonParameterCleanup": frozenset({"_cleanup_addon_parameters"}),
     "TestClusterVolumeCleanup": frozenset({"_cleanup_cluster_volumes"}),
     # Floci layer: drives the real method against the local emulator, so the
     # no-op stub would defeat the entire point of the module.

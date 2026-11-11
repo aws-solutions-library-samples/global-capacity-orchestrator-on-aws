@@ -1291,6 +1291,101 @@ class TestTrafficDialParameterCleanup:
         assert outcome["errors"] == ["RuntimeError: AccessDenied"]
 
 
+class TestAddonParameterCleanup:
+    """destroy-all deletes a destroyed Region's /{project}/addons/{region} tree.
+
+    The Helm orchestrator, installer, kubectl applier and teardown provider
+    write the replay input, execution identity, status records and teardown
+    fence there at runtime. CloudFormation never owned them, so a live
+    two-Region teardown left 28 behind in each Region.
+    """
+
+    def _manager(self, project_name="gco"):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = project_name
+        config.global_region = "us-east-2"
+        return StackManager(config)
+
+    @staticmethod
+    def _ssm(names):
+        ssm = MagicMock()
+        paginator = ssm.get_paginator.return_value
+        paginator.paginate.return_value = [
+            {"Parameters": [{"Name": name} for name in names[:7]]},
+            {"Parameters": [{"Name": name} for name in names[7:]] + [{"Type": "String"}]},
+        ]
+        ssm.delete_parameters.side_effect = lambda Names: {
+            "DeletedParameters": list(Names),
+            "InvalidParameters": [],
+        }
+        return ssm
+
+    def test_deletes_the_whole_tree_in_batches_of_ten(self, capsys):
+        manager = self._manager()
+        names = [f"/gco/addons/us-west-2/chart-{index:02d}" for index in range(12)]
+        ssm = self._ssm(names)
+        with patch("boto3.client", return_value=ssm) as client:
+            outcome = manager._cleanup_addon_parameters("gco-us-west-2")
+
+        # The Region comes from the stack name when the caller has no record.
+        client.assert_called_once_with("ssm", region_name="us-west-2")
+        ssm.get_paginator.assert_called_once_with("get_parameters_by_path")
+        ssm.get_paginator.return_value.paginate.assert_called_once_with(
+            Path="/gco/addons/us-west-2", Recursive=True
+        )
+        assert [len(call.kwargs["Names"]) for call in ssm.delete_parameters.call_args_list] == [
+            10,
+            2,
+        ]
+        assert outcome == {
+            "stack": "gco-us-west-2",
+            "region": "us-west-2",
+            "deleted": sorted(names),
+            "errors": [],
+        }
+        assert "Deleted 12 add-on SSM parameter(s) under /gco/addons/us-west-2." in (
+            capsys.readouterr().out
+        )
+
+    def test_uses_the_recorded_region_and_project_scope(self):
+        manager = self._manager(project_name="acme")
+        ssm = self._ssm([])
+        with patch("boto3.client", return_value=ssm) as client:
+            outcome = manager._cleanup_addon_parameters("acme-us-east-1", region="eu-west-1")
+
+        client.assert_called_once_with("ssm", region_name="eu-west-1")
+        ssm.get_paginator.return_value.paginate.assert_called_once_with(
+            Path="/acme/addons/eu-west-1", Recursive=True
+        )
+        ssm.delete_parameters.assert_not_called()
+        assert outcome["deleted"] == [] and outcome["errors"] == []
+
+    def test_listing_failure_is_recorded_not_raised(self, capsys):
+        manager = self._manager()
+        ssm = MagicMock()
+        ssm.get_paginator.return_value.paginate.side_effect = RuntimeError("AccessDenied")
+        with patch("boto3.client", return_value=ssm):
+            outcome = manager._cleanup_addon_parameters("gco-us-east-1")
+
+        ssm.delete_parameters.assert_not_called()
+        assert outcome["errors"] == ["/gco/addons/us-east-1: RuntimeError: AccessDenied"]
+        assert capsys.readouterr().out == ""
+
+    def test_one_failed_batch_does_not_stop_the_others(self):
+        manager = self._manager()
+        names = [f"/gco/addons/us-east-1/chart-{index:02d}" for index in range(12)]
+        ssm = self._ssm(names)
+        deleted_second = {"DeletedParameters": names[10:], "InvalidParameters": []}
+        ssm.delete_parameters.side_effect = [RuntimeError("Throttling"), deleted_second]
+        with patch("boto3.client", return_value=ssm):
+            outcome = manager._cleanup_addon_parameters("gco-us-east-1")
+
+        assert outcome["deleted"] == names[10:]
+        assert outcome["errors"] == [", ".join(names[:10]) + ": RuntimeError: Throttling"]
+
+
 class TestDestroyOrchestratedImplicitCleanupWiring:
     """The sweep runs on every non-strict exit path and never in strict mode."""
 
@@ -1590,6 +1685,32 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
         collect.assert_called_once_with(["gco-global", "gco-us-east-1"])
         sweep.assert_called_once_with(identities, ["gco-us-east-1"])
         assert ("regenerated-log-groups", {"deleted": [], "errors": []}) in cleanups
+
+    @pytest.mark.parametrize("strict", [False, True])
+    def test_addon_parameters_go_once_the_regional_stack_is_gone(self, strict):
+        """Strict teardowns purge them too: nothing else owns these untagged params."""
+        from cli.stacks import StackManager
+
+        outcome = {"stack": "gco-us-east-1", "region": "us-east-1", "deleted": [], "errors": []}
+        with patch.object(StackManager, "_cleanup_addon_parameters", return_value=outcome) as sweep:
+            (ok, _successful, _failed), *_sweeps, cleanups = self._run(
+                destroy_results=[True, True],
+                strict=strict,
+            )
+
+        assert ok is True
+        sweep.assert_called_once_with("gco-us-east-1", region=None)
+        assert ("addon-parameters", outcome) in cleanups
+
+    def test_addon_parameters_stay_while_a_regional_stack_survives(self):
+        from cli.stacks import StackManager
+
+        with patch.object(StackManager, "_cleanup_addon_parameters") as sweep:
+            (ok, _successful, failed), *_sweeps, cleanups = self._run(destroy_results=[False])
+
+        assert ok is False and failed == ["gco-us-east-1"]
+        sweep.assert_not_called()
+        assert "addon-parameters" not in {name for name, _ in cleanups}
 
     def test_strict_teardown_never_sweeps_regenerated_log_groups(self):
         from cli.stacks import StackManager
