@@ -513,6 +513,15 @@ _UNINSTALL_TIMEOUT_MINUTES: dict[str, int] = {
     SLURM_CLUSTER_CHART_NAME: 4,
 }
 
+#: How the stack-delete teardown waits for Global Accelerator to deploy this
+#: Region's endpoint removal before it deletes the Gateway's ALB. On live runs
+#: one Region's removal deployed in about 30 seconds, but two Regions removing
+#: theirs at once (``destroy-all --parallel``) took 12 to 13 minutes, which is
+#: too close to the 15-minute Lambda limit to wait inside one invocation. The
+#: state machine therefore polls: every 30 seconds, for up to 20 minutes.
+_GA_REMOVAL_POLL_INTERVAL_SECONDS = 30
+_GA_REMOVAL_POLL_ATTEMPTS = 40
+
 
 #: (container ceiling, namespace ceiling) pairs the resource-quota invariant
 #: compares; every dimension a container can request must fit the namespace.
@@ -4958,9 +4967,9 @@ class GCORegionalStack(Stack):
                         "globalaccelerator:RemoveEndpoints",
                         "globalaccelerator:UpdateEndpointGroup",
                         "globalaccelerator:DescribeEndpointGroup",
-                        # The teardown-time cleanup_gateway_endpoint task runs
-                        # on this Lambda and strictly waits for the accelerator
-                        # to reach DEPLOYED after endpoint removal.
+                        # Registration waits for DEPLOYED, and the teardown's
+                        # check_accelerator_deployed task polls the same status
+                        # after endpoint removal.
                         "globalaccelerator:DescribeAccelerator",
                     ],
                     resources=["*"],
@@ -6472,8 +6481,14 @@ class GCORegionalStack(Stack):
             )
             return task
 
-        def _endpoint_cleanup_task() -> sfn_tasks.LambdaInvoke:
-            """Fence SSM/GA publication after all endpoint writers are quiesced."""
+        def _endpoint_cleanup_branch() -> sfn.IChainable:
+            """Fence SSM/GA publication after all endpoint writers are quiesced.
+
+            The cleanup task deletes the registry parameter and submits the GA
+            endpoint removal. With Global Accelerator the branch then polls
+            until the accelerator has deployed that removal, so the Gateway's
+            ALB is not deleted while GA can still route to it.
+            """
             payload: dict[str, Any] = {
                 "Action": "cleanup_gateway_endpoint",
                 "Region": sfn.JsonPath.string_at("$.Region"),
@@ -6482,15 +6497,40 @@ class GCORegionalStack(Stack):
             }
             if self.global_accelerator_enabled:
                 payload["EndpointGroupArn"] = sfn.JsonPath.string_at("$.EndpointGroupArn")
-            return sfn_tasks.LambdaInvoke(
+            cleanup = sfn_tasks.LambdaInvoke(
                 self,
                 "CleanupGatewayEndpoint",
                 lambda_function=self.ga_registration_lambda,
                 payload=sfn.TaskInput.from_object(payload),
                 payload_response_only=True,
                 result_path="$.endpointCleanup",
-                task_timeout=sfn.Timeout.duration(Duration.minutes(15)),
+                task_timeout=sfn.Timeout.duration(Duration.minutes(2)),
             )
+            if not self.global_accelerator_enabled:
+                return cleanup
+            confirm = sfn_tasks.LambdaInvoke(
+                self,
+                "ConfirmAcceleratorDeployed",
+                lambda_function=self.ga_registration_lambda,
+                payload=sfn.TaskInput.from_object(
+                    {
+                        "Action": "check_accelerator_deployed",
+                        "EndpointGroupArn": sfn.JsonPath.string_at("$.EndpointGroupArn"),
+                    }
+                ),
+                payload_response_only=True,
+                result_path="$.acceleratorDeployed",
+                task_timeout=sfn.Timeout.duration(Duration.minutes(1)),
+            )
+            # Only the handler's not-yet-deployed signal is retried. A describe
+            # failure such as AccessDenied fails the teardown as itself.
+            confirm.add_retry(
+                errors=["AcceleratorNotDeployedError"],
+                interval=Duration.seconds(_GA_REMOVAL_POLL_INTERVAL_SECONDS),
+                max_attempts=_GA_REMOVAL_POLL_ATTEMPTS,
+                backoff_rate=1.0,
+            )
+            return cleanup.next(confirm)
 
         def _gateway_cleanup_task() -> sfn_tasks.LambdaInvoke:
             return sfn_tasks.LambdaInvoke(
@@ -6512,7 +6552,7 @@ class GCORegionalStack(Stack):
         non_lbc_tasks = [
             _uninstall_task(name) for name in reversed(chart_order) if name != lbc_chart
         ]
-        endpoint_cleanup = _endpoint_cleanup_task()
+        endpoint_cleanup = _endpoint_cleanup_branch()
         pre_gateway_cleanup = sfn.Parallel(
             self,
             "CleanupEndpointAndCharts",
@@ -6566,14 +6606,15 @@ class GCORegionalStack(Stack):
             "HelmTeardownStateMachine",
             definition_body=sfn.DefinitionBody.from_chainable(start_state),
             state_machine_type=sfn.StateMachineType.STANDARD,
-            # 16m drain + 3m quiesce + max(15m endpoint cleanup, the ordinary
-            # chart chain) + 5m Gateway deletion + 5m LBC uninstall. The chain's
-            # per-chart task timeouts (2m; _UNINSTALL_TIMEOUT_MINUTES for charts
-            # whose custom resources are deleted first) are ceilings for a
-            # stalled release, not expected durations: a chart that is not
-            # installed returns in seconds, so the chain's real length is set by
-            # the installed charts. The 56m cap leaves three minutes for the
-            # provider's final poll inside CloudFormation's one-hour ceiling.
+            # 16m drain + 1m drain check + 3m quiesce + max(2m endpoint cleanup
+            # + 20m accelerator poll, the ordinary chart chain) + 5m Gateway
+            # deletion + 5m LBC uninstall = 52m. The chain's per-chart task
+            # timeouts (2m; _UNINSTALL_TIMEOUT_MINUTES for charts whose custom
+            # resources are deleted first) are ceilings for a stalled release,
+            # not expected durations: a chart that is not installed returns in
+            # seconds, so the chain's real length is set by the installed
+            # charts. The 56m cap leaves three minutes for the provider's final
+            # poll inside CloudFormation's one-hour ceiling.
             timeout=Duration.minutes(56),
             tracing_enabled=True,
             logs=sfn.LogOptions(destination=teardown_log_group, level=sfn.LogLevel.ALL),

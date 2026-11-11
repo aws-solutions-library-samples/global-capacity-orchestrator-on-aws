@@ -20,6 +20,7 @@ from aws_cdk import aws_lambda as lambda_
 
 from gco.stacks import regional_stack as rs
 from tests._cfn_json import decode_cfn_json
+from tests._lambda_imports import load_lambda_module
 from tests.test_regional_stack import MockConfigLoader
 
 _ACCOUNT = "123456789012"
@@ -877,13 +878,55 @@ def test_teardown_waits_then_uninstalls_in_strict_reverse_order(feature_stack):
 
     endpoint_branch = branches["CleanupGatewayEndpoint"]
     endpoint_cleanup = endpoint_branch["States"]["CleanupGatewayEndpoint"]
-    assert endpoint_cleanup["End"] is True
-    assert endpoint_cleanup["TimeoutSeconds"] == 900
+    assert endpoint_cleanup["Next"] == "ConfirmAcceleratorDeployed"
+    assert endpoint_cleanup["TimeoutSeconds"] == 120
     endpoint_json = json.dumps(endpoint_cleanup, sort_keys=True)
     assert "cleanup_gateway_endpoint" in endpoint_json
     assert "$.RegistryRegion" in endpoint_json
     assert "$.ProjectName" in endpoint_json
     assert "$.EndpointGroupArn" in endpoint_json
+
+    # The Gateway is deleted only after GA has deployed the endpoint removal.
+    # The state machine polls by retrying the handler's not-yet-deployed error,
+    # so the wait is not bounded by one Lambda invocation.
+    confirm = endpoint_branch["States"]["ConfirmAcceleratorDeployed"]
+    assert confirm["End"] is True
+    assert confirm["TimeoutSeconds"] == 60
+    confirm_json = json.dumps(confirm, sort_keys=True)
+    assert "check_accelerator_deployed" in confirm_json
+    assert "$.EndpointGroupArn" in confirm_json
+    ga_handler = load_lambda_module("ga-registration")
+    poll = [
+        retry
+        for retry in confirm["Retry"]
+        if retry["ErrorEquals"] == [ga_handler.AcceleratorNotDeployedError.__name__]
+    ]
+    assert poll == [
+        {
+            "ErrorEquals": ["AcceleratorNotDeployedError"],
+            "IntervalSeconds": 30,
+            "MaxAttempts": 40,
+            "BackoffRate": 1,
+        }
+    ]
+    assert all("States.ALL" not in retry["ErrorEquals"] for retry in confirm["Retry"])
+
+    # The success-path ceilings fit the state machine's own cap.
+    teardown_provider = load_lambda_module("helm-installer", module_name="teardown_provider")
+    poll_seconds = poll[0]["IntervalSeconds"] * poll[0]["MaxAttempts"]
+    assert (
+        (
+            teardown_provider._IN_FLIGHT_LAMBDA_DRAIN_SECONDS
+            + drain_check["TimeoutSeconds"]
+            + quiesce["TimeoutSeconds"]
+            + endpoint_cleanup["TimeoutSeconds"]
+            + poll_seconds
+            + states["DeleteGatewayResources"]["TimeoutSeconds"]
+            + states[f"HelmUninstallChart-{lbc_chart}"]["TimeoutSeconds"]
+        )
+        == 52 * 60
+        <= definition["TimeoutSeconds"]
+    )
 
     chart_states = branches[f"HelmUninstallChart-{non_lbc_reverse[0]}"]["States"]
     for index, chart_name in enumerate(non_lbc_reverse):
@@ -1164,3 +1207,20 @@ def test_non_ga_partition_omits_registration_and_tears_down_directly(ga_disabled
     dependencies = _depends_on(teardown)
     assert any(item.startswith("GaDeregistration") for item in dependencies)
     assert any(item.startswith("HelmInstallCharts") for item in _depends_on(deregistration))
+
+    # Without an accelerator there is nothing to poll: the endpoint branch
+    # only withdraws the registry parameter.
+    _, teardown_machine = _single_resource(
+        template,
+        "AWS::StepFunctions::StateMachine",
+        "HelmTeardownStateMachine",
+    )
+    teardown_states = _state_machine_definition(teardown_machine)["States"]
+    branches = {
+        branch["StartAt"]: branch["States"]
+        for branch in teardown_states["CleanupEndpointAndCharts"]["Branches"]
+    }
+    endpoint_branch = branches["CleanupGatewayEndpoint"]
+    assert list(endpoint_branch) == ["CleanupGatewayEndpoint"]
+    assert endpoint_branch["CleanupGatewayEndpoint"]["End"] is True
+    assert "EndpointGroupArn" not in json.dumps(endpoint_branch)

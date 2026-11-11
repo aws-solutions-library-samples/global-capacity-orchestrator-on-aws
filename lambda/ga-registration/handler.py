@@ -14,7 +14,10 @@ have been applied:
 publish the Gateway hostname.
 
 Entrypoints:
-    - ``handle_task`` is the final Step Functions convergence task.
+    - ``handle_task`` is the final Step Functions convergence task. The Helm
+      teardown state machine also calls it to remove the endpoint
+      (``cleanup_gateway_endpoint``) and then to poll the accelerator
+      (``check_accelerator_deployed``).
     - ``lambda_handler`` preserves the legacy raw CloudFormation custom-resource
       protocol and dispatches Step Functions events carrying ``Action``.
     - ``on_delete_event`` is the CDK provider delete guard.
@@ -572,6 +575,31 @@ def _accelerator_arn_from_endpoint_group(endpoint_group_arn: str) -> str:
     return endpoint_group_arn.split("/listener/")[0]
 
 
+class AcceleratorNotDeployedError(Exception):
+    """The accelerator has not yet deployed its latest configuration change.
+
+    ``check_accelerator_deployed`` raises this, and the Helm teardown state
+    machine retries on exactly this error name to poll the accelerator.
+    """
+
+
+def _accelerator_released(ga_client: Any, endpoint_group_arn: str) -> tuple[bool, str]:
+    """Read the accelerator status once: ``(released, status)``.
+
+    The accelerator is released when it is ``DEPLOYED`` or no longer exists.
+    Any other describe failure raises to the caller.
+    """
+    accelerator_arn = _accelerator_arn_from_endpoint_group(endpoint_group_arn)
+    try:
+        accelerator = ga_client.describe_accelerator(AcceleratorArn=accelerator_arn)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "AcceleratorNotFoundException":
+            return True, "NOT_FOUND"
+        raise
+    status = str(accelerator.get("Accelerator", {}).get("Status", ""))
+    return status == "DEPLOYED", status
+
+
 def wait_for_accelerator_deployed(
     ga_client: Any,
     endpoint_group_arn: str,
@@ -584,20 +612,16 @@ def wait_for_accelerator_deployed(
     In strict mode a describe failure raises immediately instead of being
     reported as a timeout; a permissions gap must surface as itself.
     """
-    accelerator_arn = _accelerator_arn_from_endpoint_group(endpoint_group_arn)
     start_time = time.time()
     while time.time() - start_time < timeout_seconds:
         try:
-            accelerator = ga_client.describe_accelerator(AcceleratorArn=accelerator_arn)
-            status = accelerator.get("Accelerator", {}).get("Status", "")
+            released, status = _accelerator_released(ga_client, endpoint_group_arn)
         except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") == "AcceleratorNotFoundException":
-                return True
             if strict:
                 raise
             logger.warning("Failed to describe accelerator status: %s", exc)
             return False
-        if status == "DEPLOYED":
+        if released:
             return True
         logger.info("Accelerator status=%r; waiting for DEPLOYED", status)
         # nosemgrep: arbitrary-sleep - intentional GA redeployment polling
@@ -606,20 +630,26 @@ def wait_for_accelerator_deployed(
     return False
 
 
-def deregister_alb_from_ga(
-    ga_client: Any,
-    endpoint_group_arn: str,
-    *,
-    strict: bool = False,
-) -> None:
-    """Remove regional GA endpoints, then wait for managed ENI release."""
-    if strict:
-        remove_ga_endpoints(ga_client, endpoint_group_arn, strict=True)
-    else:
-        remove_ga_endpoints(ga_client, endpoint_group_arn)
-    deployed = wait_for_accelerator_deployed(ga_client, endpoint_group_arn, strict=strict)
-    if strict and not deployed:
-        raise TimeoutError("Global Accelerator did not reach DEPLOYED after endpoint removal")
+def check_accelerator_deployed(endpoint_group_arn: str) -> dict[str, str]:
+    """Check once that GA has deployed this Region's endpoint removal.
+
+    The teardown state machine polls this rather than having a Lambda wait in
+    place. Two Regions removing their endpoints at once (``destroy-all
+    --parallel``) took 12 to 13 minutes to deploy on a live run, too close to
+    the 15-minute Lambda limit. A describe failure raises as itself, so an
+    AccessDenied is neither retried nor reported as a timeout.
+    """
+    ga_client = boto3.client("globalaccelerator", region_name="us-west-2")
+    released, status = _accelerator_released(ga_client, endpoint_group_arn)
+    if not released:
+        raise AcceleratorNotDeployedError(f"Global Accelerator status is {status}")
+    return {"AcceleratorStatus": status}
+
+
+def deregister_alb_from_ga(ga_client: Any, endpoint_group_arn: str) -> None:
+    """Best-effort delete guard: remove regional GA endpoints, then wait for ENI release."""
+    remove_ga_endpoints(ga_client, endpoint_group_arn)
+    wait_for_accelerator_deployed(ga_client, endpoint_group_arn)
 
 
 def _optional_endpoint_group_arn(properties: dict[str, Any]) -> str | None:
@@ -751,7 +781,12 @@ def cleanup_gateway_endpoint(
     registry_region: str,
     project_name: str,
 ) -> dict[str, bool]:
-    """Strictly fence endpoint publication before Gateway deletion."""
+    """Strictly withdraw endpoint publication before Gateway deletion.
+
+    This removes the registry parameter and submits the GA endpoint removal.
+    The teardown state machine then polls ``check_accelerator_deployed``
+    before it deletes the Gateway, so the fence still holds.
+    """
     delete_alb_hostname_from_ssm(
         region,
         registry_region,
@@ -760,7 +795,7 @@ def cleanup_gateway_endpoint(
     )
     if endpoint_group_arn:
         ga_client = boto3.client("globalaccelerator", region_name="us-west-2")
-        deregister_alb_from_ga(ga_client, endpoint_group_arn, strict=True)
+        remove_ga_endpoints(ga_client, endpoint_group_arn, strict=True)
     return {
         "RegistryParameterDeleted": True,
         "GlobalAcceleratorDeregistered": bool(endpoint_group_arn),
@@ -777,6 +812,8 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
             or DEFAULT_REGISTRY_REGION,
             project_name=str(event.get("ProjectName", "gco")),
         )
+    if event.get("Action") == "check_accelerator_deployed":
+        return check_accelerator_deployed(str(event["EndpointGroupArn"]))
 
     return register_ga_endpoint(
         cluster_name=str(event["ClusterName"]),
