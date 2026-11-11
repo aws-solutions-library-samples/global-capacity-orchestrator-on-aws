@@ -953,6 +953,7 @@ class TestGlobalAcceleratorConvergence:
             health_check_path="/custom/health",
             health_check_interval=10,
             health_check_threshold=2,
+            wait_for_deployment=False,
         )
 
     def test_https_enforcement_failure_is_not_treated_as_success(self, ga_module):
@@ -1205,6 +1206,98 @@ class TestRegisterGatewayEndpoint:
             )
 
         wait.assert_not_called()
+        publish_mock.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("describe", "publishes"),
+        [
+            ({"Accelerator": {"Status": "DEPLOYED"}}, True),
+            ({"Accelerator": {"Status": "IN_PROGRESS"}}, False),
+        ],
+    )
+    def test_state_machine_registration_checks_once_instead_of_waiting(
+        self, ga_module, describe, publishes
+    ):
+        """The convergence task polls by retrying, so it never sleeps in place.
+
+        Live: in a parallel deploy, us-east-1 waited 11.3 minutes in-Lambda for
+        DEPLOYED, about 40 seconds short of its 720-second budget, because
+        us-west-2's AddEndpoints landed 4 minutes after its own.
+        """
+        handler, mock_boto_client, _ = ga_module
+        elb = MagicMock()
+        ga = MagicMock()
+        ga.describe_accelerator.return_value = describe
+        mock_boto_client.side_effect = lambda service, **_kwargs: (
+            ga if service == "globalaccelerator" else elb
+        )
+        get_k8s, find_alb, publish, remove_ca = self._core_patches(handler)
+        with (
+            get_k8s,
+            find_alb,
+            publish as publish_mock,
+            remove_ca as remove_ca_mock,
+            patch.object(handler, "register_alb_with_ga") as register,
+            patch.object(handler, "scrub_stale_ga_endpoints"),
+            patch.object(handler, "ensure_https_health_check"),
+            patch.object(handler, "wait_for_accelerator_deployed") as wait,
+        ):
+            if publishes:
+                result = handler.register_ga_endpoint(
+                    "test-cluster",
+                    "us-east-1",
+                    endpoint_group_arn=ENDPOINT_GROUP_ARN,
+                    wait_for_deployment=False,
+                )
+                assert result == {"AlbArn": PLATFORM_ALB_ARN, "AlbHostname": PLATFORM_ALB_DNS}
+                publish_mock.assert_called_once()
+            else:
+                with pytest.raises(
+                    handler.AcceleratorNotDeployedError, match="status is IN_PROGRESS"
+                ):
+                    handler.register_ga_endpoint(
+                        "test-cluster",
+                        "us-east-1",
+                        endpoint_group_arn=ENDPOINT_GROUP_ARN,
+                        wait_for_deployment=False,
+                    )
+                # An endpoint GA does not serve yet is never published.
+                publish_mock.assert_not_called()
+
+        register.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, PLATFORM_ALB_ARN)
+        ga.describe_accelerator.assert_called_once_with(AcceleratorArn=ACCELERATOR_ARN)
+        wait.assert_not_called()
+        remove_ca_mock.assert_called_once_with("/tmp/gco-ca.crt")
+
+    def test_state_machine_registration_raises_describe_failures_as_themselves(self, ga_module):
+        """AccessDenied fails the task through its ordinary retries, not the poll."""
+        handler, mock_boto_client, _ = ga_module
+        elb = MagicMock()
+        ga = MagicMock()
+        ga.describe_accelerator.side_effect = _client_error(
+            "AccessDeniedException", "DescribeAccelerator"
+        )
+        mock_boto_client.side_effect = lambda service, **_kwargs: (
+            ga if service == "globalaccelerator" else elb
+        )
+        get_k8s, find_alb, publish, remove_ca = self._core_patches(handler)
+        with (
+            get_k8s,
+            find_alb,
+            publish as publish_mock,
+            remove_ca,
+            patch.object(handler, "register_alb_with_ga"),
+            patch.object(handler, "scrub_stale_ga_endpoints"),
+            patch.object(handler, "ensure_https_health_check"),
+            pytest.raises(ClientError, match="AccessDeniedException"),
+        ):
+            handler.register_ga_endpoint(
+                "test-cluster",
+                "us-east-1",
+                endpoint_group_arn=ENDPOINT_GROUP_ARN,
+                wait_for_deployment=False,
+            )
+
         publish_mock.assert_not_called()
 
     def test_ga_convergence_failure_blocks_publication(self, ga_module):
@@ -1787,6 +1880,8 @@ class TestInvocationContracts:
             health_check_path="/api/v1/health",
             health_check_interval=30,
             health_check_threshold=3,
+            # The state machine polls by retrying; the task never waits in place.
+            wait_for_deployment=False,
         )
 
     def test_step_functions_cleanup_strictly_fences_registry_and_ga(self, ga_module):

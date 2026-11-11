@@ -516,14 +516,22 @@ _UNINSTALL_TIMEOUT_MINUTES: dict[str, int] = {
     SLURM_CLUSTER_CHART_NAME: 4,
 }
 
-#: How the stack-delete teardown waits for Global Accelerator to deploy this
-#: Region's endpoint removal before it deletes the Gateway's ALB. On live runs
-#: one Region's removal deployed in about 30 seconds, but two Regions removing
-#: theirs at once (``destroy-all --parallel``) took 12 to 13 minutes, which is
-#: too close to the 15-minute Lambda limit to wait inside one invocation. The
-#: state machine therefore polls: every 30 seconds, for up to 20 minutes.
-_GA_REMOVAL_POLL_INTERVAL_SECONDS = 30
+#: How the state machines wait for Global Accelerator to deploy this Region's
+#: endpoint change: they retry the GA Lambda's AcceleratorNotDeployedError
+#: every 30 seconds instead of having a Lambda wait in place. Another Region's
+#: change in the same accelerator can stretch the wait past what one 15-minute
+#: invocation allows. On live runs one Region's removal deployed in about 30
+#: seconds, but two Regions removing theirs at once (``destroy-all
+#: --parallel``) took 12 to 13 minutes, and in a ``deploy-all -p`` us-east-1's
+#: registration waited 11.3 minutes because us-west-2 registered 4 minutes
+#: after it.
+#:
+#: Teardown polls the removal for up to 20 minutes, which keeps the teardown
+#: inside its 56-minute cap. Convergence polls the registration for up to 30
+#: minutes; its state machine has two hours.
+_GA_DEPLOYED_POLL_INTERVAL_SECONDS = 30
 _GA_REMOVAL_POLL_ATTEMPTS = 40
+_GA_REGISTRATION_POLL_ATTEMPTS = 60
 
 
 #: (container ceiling, namespace ceiling) pairs the resource-quota invariant
@@ -4970,9 +4978,8 @@ class GCORegionalStack(Stack):
                         "globalaccelerator:RemoveEndpoints",
                         "globalaccelerator:UpdateEndpointGroup",
                         "globalaccelerator:DescribeEndpointGroup",
-                        # Registration waits for DEPLOYED, and the teardown's
-                        # check_accelerator_deployed task polls the same status
-                        # after endpoint removal.
+                        # Registration and teardown both read the accelerator
+                        # status to poll for DEPLOYED after an endpoint change.
                         "globalaccelerator:DescribeAccelerator",
                     ],
                     resources=["*"],
@@ -6152,6 +6159,17 @@ class GCORegionalStack(Stack):
                 result_path="$.endpointPublication",
                 task_timeout=sfn.Timeout.duration(Duration.minutes(16)),
             )
+            if self.global_accelerator_enabled:
+                # The handler registers the ALB, then raises this until the
+                # accelerator has deployed the change; only then does it
+                # publish the registry parameter. Every step is idempotent, so
+                # each retry re-checks the same registration.
+                task.add_retry(
+                    errors=["AcceleratorNotDeployedError"],
+                    interval=Duration.seconds(_GA_DEPLOYED_POLL_INTERVAL_SECONDS),
+                    max_attempts=_GA_REGISTRATION_POLL_ATTEMPTS,
+                    backoff_rate=1.0,
+                )
             task.add_retry(
                 errors=["States.ALL"],
                 max_attempts=3,
@@ -6529,7 +6547,7 @@ class GCORegionalStack(Stack):
             # failure such as AccessDenied fails the teardown as itself.
             confirm.add_retry(
                 errors=["AcceleratorNotDeployedError"],
-                interval=Duration.seconds(_GA_REMOVAL_POLL_INTERVAL_SECONDS),
+                interval=Duration.seconds(_GA_DEPLOYED_POLL_INTERVAL_SECONDS),
                 max_attempts=_GA_REMOVAL_POLL_ATTEMPTS,
                 backoff_rate=1.0,
             )
