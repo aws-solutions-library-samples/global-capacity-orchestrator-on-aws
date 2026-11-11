@@ -888,13 +888,34 @@ class TestHandleTask:
                 helm_handler, "run_helm", return_value=(1, "", "release: not found")
             ) as mock_run,
         ):
-            success, message = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
+            success, message = helm_handler.uninstall_chart("kueue", "kueue", "/tmp/kc")
 
         assert success is True
         assert "already uninstalled" in message
         args = mock_run.call_args.args[0]
         assert args[args.index("--timeout") + 1] == helm_handler.HELM_UNINSTALL_TIMEOUT
         assert mock_run.call_args.kwargs["command_timeout_seconds"] == 75
+
+    def test_keda_uninstall_waits_longer_for_its_crds(self):
+        """KEDA is last in the chain, and Helm's wait covers finalizing its CRDs.
+
+        Live: the ordinary 60-second deadline expired with
+        clustertriggerauthentications.keda.sh still Terminating.
+        """
+        with (
+            patch.object(
+                helm_handler,
+                "_delete_chart_custom_resources",
+                return_value=(True, "clean"),
+            ),
+            patch.object(helm_handler, "run_helm", return_value=(0, "", "")) as mock_run,
+        ):
+            success, _ = helm_handler.uninstall_chart("keda", "keda", "/tmp/kc")
+
+        assert success is True
+        args = mock_run.call_args.args[0]
+        assert args[args.index("--timeout") + 1] == "3m"
+        assert mock_run.call_args.kwargs["command_timeout_seconds"] == 195
 
     def test_lbc_not_found_uninstall_uses_dedicated_budget(self):
         with patch.object(

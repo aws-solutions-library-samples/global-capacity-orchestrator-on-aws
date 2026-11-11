@@ -936,7 +936,7 @@ def test_teardown_waits_then_uninstalls_in_strict_reverse_order(feature_stack):
         else:
             assert state["End"] is True
         assert state["TimeoutSeconds"] == {
-            "keda": 240,
+            "keda": 360,
             "argocd": 240,
             "crossplane": 360,
             "slinky-slurm": 240,

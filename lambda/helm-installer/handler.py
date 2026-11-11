@@ -83,7 +83,8 @@ HELM_INSTALL_RETRY_DELAY_SECONDS = 30
 # one-hour ceiling. Ordinary releases get a 60-second Helm deadline and a
 # 75-second process cap so each state-machine task fits its two-minute slot.
 # LBC receives a dedicated four-minute Helm deadline because it must remove
-# controller webhooks and finalizers after every Gateway-owned ALB is gone.
+# controller webhooks and finalizers after every Gateway-owned ALB is gone,
+# and KEDA a three-minute one (see KEDA_UNINSTALL_TIMEOUT below).
 HELM_UNINSTALL_TIMEOUT = "60s"
 HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 75
 LBC_CHART_NAME = "aws-load-balancer-controller"
@@ -91,8 +92,23 @@ LBC_UNINSTALL_TIMEOUT = "4m"
 LBC_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 270
 
 # KEDA's Helm release owns CRDs whose instances carry operator-managed
-# finalizers. Four bounded discovery calls plus two ordered deletion calls and
-# the final Helm uninstall fit inside the dedicated four-minute KEDA task.
+# finalizers. Four bounded discovery calls (40 s), two ordered deletion calls
+# (110 s) and the final Helm uninstall (195 s) fit inside the dedicated
+# six-minute KEDA task. ``helm uninstall --wait`` also waits for the API
+# server to finalize the release's CRDs, and KEDA is the last chart in the
+# teardown chain, uninstalled seconds after every earlier chart deleted its
+# own. On a live two-Region teardown the ordinary 60-second deadline ran out
+# with clustertriggerauthentications.keda.sh still Terminating, although the
+# release itself was already gone, and the stack-delete retry then cost a
+# full 16-minute drain. KEDA therefore gets a dedicated three-minute deadline.
+KEDA_CHART_NAME = "keda"
+KEDA_UNINSTALL_TIMEOUT = "3m"
+KEDA_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 195
+#: Charts whose uninstall gets a dedicated Helm deadline and process cap.
+_UNINSTALL_DEADLINES: dict[str, tuple[str, int]] = {
+    LBC_CHART_NAME: (LBC_UNINSTALL_TIMEOUT, LBC_UNINSTALL_COMMAND_TIMEOUT_SECONDS),
+    KEDA_CHART_NAME: (KEDA_UNINSTALL_TIMEOUT, KEDA_UNINSTALL_COMMAND_TIMEOUT_SECONDS),
+}
 KEDA_API_GROUPS = ("keda.sh", "eventing.keda.sh")
 KUEUE_API_GROUPS = ("kueue.x-k8s.io",)
 # Argo CD Applications carry the resources finalizer when their author asked
@@ -1005,11 +1021,9 @@ def uninstall_chart(chart_name: str, namespace: str, kubeconfig: str) -> tuple[b
             return False, f"{chart_name} pre-uninstall cleanup failed: {cleanup_message}"
         logger.info(cleanup_message)
 
-    helm_timeout = LBC_UNINSTALL_TIMEOUT if chart_name == LBC_CHART_NAME else HELM_UNINSTALL_TIMEOUT
-    command_timeout = (
-        LBC_UNINSTALL_COMMAND_TIMEOUT_SECONDS
-        if chart_name == LBC_CHART_NAME
-        else HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS
+    helm_timeout, command_timeout = _UNINSTALL_DEADLINES.get(
+        chart_name,
+        (HELM_UNINSTALL_TIMEOUT, HELM_UNINSTALL_COMMAND_TIMEOUT_SECONDS),
     )
     args = [
         "uninstall",

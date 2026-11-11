@@ -503,7 +503,10 @@ _OFF_BY_DEFAULT_CHART_KEYS = frozenset({"argocd", "crossplane"})
 #: namespaced then cluster-scoped, with a finalizer-strip retry) before the
 #: ``helm uninstall`` itself. Every other non-LBC chart gets two minutes.
 _UNINSTALL_TIMEOUT_MINUTES: dict[str, int] = {
-    "keda": 4,
+    # KEDA also gets a dedicated three-minute Helm deadline: it is the last
+    # chart in the chain, and Helm's wait covers finalizing its CRDs (see
+    # KEDA_UNINSTALL_TIMEOUT in lambda/helm-installer/handler.py).
+    "keda": 6,
     "argocd": 4,
     "crossplane": 6,
     # The Slinky cluster's NodeSets drain their Slurm nodes and carry

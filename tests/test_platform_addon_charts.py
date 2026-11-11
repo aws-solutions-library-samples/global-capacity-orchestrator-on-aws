@@ -314,7 +314,7 @@ class TestChartSelection:
 class TestStackDeleteBudgets:
     def test_custom_resource_charts_get_longer_uninstall_tasks(self) -> None:
         assert rs._UNINSTALL_TIMEOUT_MINUTES == {
-            "keda": 4,
+            "keda": 6,
             "argocd": 4,
             "crossplane": 6,
             "slinky-slurm": 4,
@@ -324,6 +324,15 @@ class TestStackDeleteBudgets:
         assert set(rs._UNINSTALL_TIMEOUT_MINUTES) <= set(
             helm_handler.CHART_CUSTOM_RESOURCE_API_GROUPS
         )
+
+    def test_keda_task_covers_its_cleanup_and_helm_deadline(self, helm_handler: Any) -> None:
+        """Four discovery calls, two deletion passes and Helm fit the KEDA task."""
+        ceiling = (
+            4 * helm_handler.KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS
+            + 2 * helm_handler.KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS
+            + helm_handler.KEDA_UNINSTALL_COMMAND_TIMEOUT_SECONDS
+        )
+        assert ceiling == 345 <= rs._UNINSTALL_TIMEOUT_MINUTES["keda"] * 60
 
 
 # ─── Chart value overrides ───────────────────────────────────────────────────
