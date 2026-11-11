@@ -47,6 +47,12 @@ _SECRET_KEYS = (
     "refreshToken",
     "idToken",
     "clientSecret",
+    # OAuth 2.0's own spellings, which NVIDIA Run:ai's token route
+    # (POST /api/v2/token, used by `gco capacity runai`) takes and returns.
+    "client_secret",
+    "access_token",
+    "refresh_token",
+    "id_token",
 )
 _SECRET_KEY_ALTERNATION = "|".join(_SECRET_KEYS)
 

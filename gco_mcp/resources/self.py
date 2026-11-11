@@ -59,6 +59,7 @@ from feature_flags import (
     FLAG_LOCAL_STORAGE_SYNC,
     FLAG_MISSION,
     FLAG_MODEL_UPLOAD,
+    FLAG_RUNAI_CAPACITY,
     FLAG_SEMANTIC_PROGRESS,
     FLAG_SWARM,
 )
@@ -80,6 +81,7 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "reserve_capacity": FLAG_CAPACITY_PURCHASE,
     "create_reservation": FLAG_CAPACITY_PURCHASE,
     "cancel_reservation": FLAG_DESTRUCTIVE_OPERATIONS,
+    "runai_capacity": FLAG_RUNAI_CAPACITY,
     # gco_mcp/tools/models.py / storage.py — local model-data upload + deletion
     "models_upload": FLAG_MODEL_UPLOAD,
     "upload_to_regional_bucket": FLAG_MODEL_UPLOAD,

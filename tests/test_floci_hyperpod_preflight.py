@@ -80,9 +80,16 @@ def network(verified_floci_endpoint):
 
 
 def _create_eks_cluster(name: str, network: dict[str, Any], *, authentication_mode: str) -> None:
+    """An ACTIVE cluster at ``_K8S``, the minor the preflight is asked about.
+
+    The preflight judges the minor the cluster runs, and one more than a minor
+    above it fails as a deploy EKS cannot make, so the cluster has to run the
+    minor cdk.json names for the AMI-tree check to be the one exercised.
+    """
     eks = boto3.client("eks", region_name=REGION)
     eks.create_cluster(
         name=name,
+        version=_K8S,
         roleArn=f"arn:aws:iam::{boto3.client('sts').get_caller_identity()['Account']}:role/eks",
         resourcesVpcConfig={
             "subnetIds": network["subnets"],
@@ -94,6 +101,7 @@ def _create_eks_cluster(name: str, network: dict[str, Any], *, authentication_mo
         },
     )
     eks.get_waiter("cluster_active").wait(name=name, WaiterConfig=_FAST_WAIT)
+    assert eks.describe_cluster(name=name)["cluster"]["version"] == _K8S
 
 
 def _delete_eks_cluster(name: str) -> None:

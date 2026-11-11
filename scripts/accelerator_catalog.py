@@ -101,6 +101,12 @@ class FamilyPolicy:
     manifest_allowed: bool
     reason: str | None
     replacements: tuple[str, ...]
+    #: The GPU model EC2 reports for the family (``DescribeInstanceTypes``
+    #: ``GpuInfo.Gpus[].Name``: ``H100``, ``A10G``, ...). Required for NVIDIA
+    #: families and absent for Neuron ones. It is what lets a GPU named by
+    #: something other than an instance type (a Kubernetes node label, a
+    #: Run:ai ``gpuType``) be matched to the EC2 families that carry it.
+    gpu_model: str | None = None
 
     @classmethod
     def from_mapping(cls, name: str, value: object) -> FamilyPolicy:
@@ -134,6 +140,18 @@ class FamilyPolicy:
             f"families.{name}.replacements",
             allow_empty=True,
         )
+        gpu_model_value = raw.get("gpu_model")
+        if accelerator_value == "nvidia":
+            if not isinstance(gpu_model_value, str) or not gpu_model_value.strip():
+                raise CatalogError(
+                    f"families.{name}.gpu_model is required for nvidia families (the "
+                    "DescribeInstanceTypes GpuInfo.Gpus[].Name, e.g. H100)"
+                )
+            gpu_model: str | None = gpu_model_value.strip()
+        elif gpu_model_value is not None:
+            raise CatalogError(f"families.{name}.gpu_model is only valid for nvidia families")
+        else:
+            gpu_model = None
         return cls(
             name=name,
             accelerator=cast(Accelerator, accelerator_value),
@@ -144,16 +162,21 @@ class FamilyPolicy:
             manifest_allowed=manifest_allowed_value,
             reason=reason_value,
             replacements=replacements,
+            gpu_model=gpu_model,
         )
 
     def to_mapping(self) -> dict[str, object]:
-        result: dict[str, object] = {
-            "accelerator": self.accelerator,
-            "architectures": list(self.architectures),
-            "track": self.track,
-            "generation": self.generation,
-            "lifecycle": self.lifecycle,
-        }
+        result: dict[str, object] = {"accelerator": self.accelerator}
+        if self.gpu_model is not None:
+            result["gpu_model"] = self.gpu_model
+        result.update(
+            {
+                "architectures": list(self.architectures),
+                "track": self.track,
+                "generation": self.generation,
+                "lifecycle": self.lifecycle,
+            }
+        )
         default_allowed = self.lifecycle == "active"
         if self.manifest_allowed != default_allowed or self.lifecycle == "announced":
             result["manifest_allowed"] = self.manifest_allowed
@@ -1067,6 +1090,7 @@ def validate_repository(
 class DiscoveredFamily:
     accelerator: Accelerator
     architectures: tuple[str, ...]
+    gpu_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1083,6 +1107,7 @@ class Discovery:
                 name: {
                     "accelerator": family.accelerator,
                     "architectures": list(family.architectures),
+                    **({"gpu_models": list(family.gpu_models)} if family.gpu_models else {}),
                 }
                 for name, family in sorted(self.families.items())
             },
@@ -1108,6 +1133,26 @@ def _detect_accelerator(instance: dict[str, object]) -> Accelerator | None:
         if isinstance(devices, list) and devices:
             return "neuron"
     return None
+
+
+def _nvidia_gpu_models(instance: dict[str, object]) -> set[str]:
+    """The ``GpuInfo.Gpus[].Name`` of every NVIDIA GPU an instance type carries."""
+    gpu_info = instance.get("GpuInfo")
+    models: set[str] = set()
+    if not isinstance(gpu_info, dict):
+        return models
+    for gpu in gpu_info.get("Gpus") or []:
+        if not isinstance(gpu, dict):
+            continue
+        manufacturer, name = gpu.get("Manufacturer"), gpu.get("Name")
+        if (
+            isinstance(manufacturer, str)
+            and manufacturer.casefold() == "nvidia"
+            and isinstance(name, str)
+            and name.strip()
+        ):
+            models.add(name.strip())
+    return models
 
 
 def _instance_architectures(instance: dict[str, object]) -> tuple[str, ...]:
@@ -1164,6 +1209,7 @@ def discover_accelerator_catalog(
     discovered_types: set[str] = set()
     family_accelerators: dict[str, Accelerator] = {}
     family_architectures: dict[str, set[str]] = {}
+    family_gpu_models: dict[str, set[str]] = {}
     for region_name in regions:
         client: Any = session.client("ec2", region_name=region_name, config=client_config)
         paginator: Any = client.get_paginator("describe_instance_types")
@@ -1195,12 +1241,14 @@ def discover_accelerator_catalog(
                 family_architectures.setdefault(family, set()).update(
                     _instance_architectures(instance)
                 )
+                family_gpu_models.setdefault(family, set()).update(_nvidia_gpu_models(instance))
                 discovered_types.add(instance_type)
 
     families = {
         name: DiscoveredFamily(
             accelerator=family_accelerators[name],
             architectures=tuple(sorted(family_architectures[name])),
+            gpu_models=tuple(sorted(family_gpu_models.get(name, set()))),
         )
         for name in sorted(family_accelerators)
     }
@@ -1292,10 +1340,13 @@ def compare_catalog(catalog: Catalog, discovery: Discovery) -> CatalogDrift:
     for name, discovered in sorted(discovery.families.items()):
         policy = catalog.families.get(name)
         if policy is None:
+            gpu_note = (
+                f", gpu_models={list(discovered.gpu_models)}" if discovered.gpu_models else ""
+            )
             metadata_changes.append(
                 f"New family `{name}` requires reviewed track, generation, and lifecycle policy "
                 f"(accelerator={discovered.accelerator}, "
-                f"architectures={list(discovered.architectures)})."
+                f"architectures={list(discovered.architectures)}{gpu_note})."
             )
             continue
         if policy.accelerator != discovered.accelerator:
@@ -1307,6 +1358,12 @@ def compare_catalog(catalog: Catalog, discovery: Discovery) -> CatalogDrift:
             metadata_changes.append(
                 f"`{name}` architectures changed: catalog={list(policy.architectures)}, "
                 f"EC2={list(discovered.architectures)}."
+            )
+        catalog_models = (policy.gpu_model,) if policy.gpu_model is not None else ()
+        if discovered.accelerator == "nvidia" and catalog_models != discovered.gpu_models:
+            metadata_changes.append(
+                f"`{name}` GPU model changed: catalog={list(catalog_models)}, "
+                f"EC2={list(discovered.gpu_models)}."
             )
     return CatalogDrift(
         added=tuple(sorted(actual - expected)),

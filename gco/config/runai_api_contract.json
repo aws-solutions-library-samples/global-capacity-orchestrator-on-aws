@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "description": "The NVIDIA Run:ai control-plane REST API surface cli/capacity/runai.py reads. .github/scripts/check_runai_api_contract.py checks it monthly against every API reference version NVIDIA publishes from min_version on, plus the unversioned latest. Field paths: `a.b` is a property, `a[]` an array's items, a leading `[]` the root array.",
+  "docs_root": "https://run-ai-docs.nvidia.com",
+  "min_version": "2.24",
+  "reviewed_versions": [
+    "2.24",
+    "2.25",
+    "2.26"
+  ],
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/api/v2/token",
+      "page": "authentication-and-authorization/tokens",
+      "request_fields": [
+        "grant_type",
+        "client_id",
+        "client_secret"
+      ],
+      "response_fields": [
+        "access_token"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/clusters",
+      "page": "organizations/clusters",
+      "response_fields": [
+        "[].uuid",
+        "[].name",
+        "[].version"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/node-pools",
+      "page": "organizations/node-pools",
+      "parameters": [
+        "limit",
+        "offset"
+      ],
+      "response_fields": [
+        "nodepools[].id",
+        "nodepools[].name",
+        "nodepools[].clusterId",
+        "nodepools[].phase",
+        "nodepools[].isDefault"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/nodes",
+      "page": "organizations/nodes",
+      "parameters": [
+        "limit",
+        "offset"
+      ],
+      "response_fields": [
+        "nodes[].name",
+        "nodes[].clusterUuid",
+        "nodes[].nodePool",
+        "nodes[].status",
+        "nodes[].gpuInfo.gpuType",
+        "nodes[].gpuInfo.gpuCount"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/nodes/telemetry",
+      "page": "organizations/nodes",
+      "parameters": [
+        "telemetryType",
+        "groupBy"
+      ],
+      "parameter_values": {
+        "telemetryType": [
+          "TOTAL_GPUS",
+          "ALLOCATED_GPUS",
+          "FREE_GPUS"
+        ],
+        "groupBy": [
+          "ClusterId",
+          "Nodepool"
+        ]
+      },
+      "response_fields": [
+        "timestamp",
+        "values[].value",
+        "values[].groups[].key",
+        "values[].groups[].value"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/org-unit/projects/node-pool-resources",
+      "page": "organizations/projects",
+      "parameters": [
+        "limit",
+        "offset"
+      ],
+      "response_fields": [
+        "nodePoolResources[].orgUnitId",
+        "nodePoolResources[].orgUnitName",
+        "nodePoolResources[].clusterId",
+        "nodePoolResources[].nodePoolName",
+        "nodePoolResources[].resources.gpu.deserved",
+        "nodePoolResources[].resources.gpu.limit",
+        "nodePoolResources[].quotaStatus.allocated.gpu"
+      ]
+    }
+  ]
+}

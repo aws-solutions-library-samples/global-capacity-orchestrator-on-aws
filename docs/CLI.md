@@ -524,7 +524,7 @@ If the selected `claude`, `codex`, or `opencode` binary is missing, Autopilot of
 Check and manage cluster capacity.
 
 <details>
-<summary>All <code>gco capacity</code> commands (23) — click to expand</summary>
+<summary>All <code>gco capacity</code> commands (24) — click to expand</summary>
 
 | Command | Description |
 | --- | --- |
@@ -539,6 +539,7 @@ Check and manage cluster capacity.
 | [`gco capacity reserve`](#gco-capacity-reserve) | Purchase a Capacity Block offering by ID. |
 | [`gco capacity find-training-plans`](#gco-capacity-find-training-plans) | Find SageMaker Training Plan offerings (reserved HyperPod capacity) across Regions in one ranked report. |
 | [`gco capacity training-plans`](#gco-capacity-training-plans) | List the SageMaker Training Plans the account holds, with their reserved capacity. |
+| [`gco capacity runai`](#gco-capacity-runai) | Read GPU capacity from an NVIDIA Run:ai control plane (read-only, outside the AWS Region ranking). |
 | [`gco capacity find-reservations`](#gco-capacity-find-reservations) | Find existing On-Demand Capacity Reservations (ODCRs) across regions in one ranked report. |
 | [`gco capacity create-reservation`](#gco-capacity-create-reservation) | Create an On-Demand Capacity Reservation in a specific Availability Zone (charges accrue until cancelled). |
 | [`gco capacity cancel-reservation`](#gco-capacity-cancel-reservation) | Cancel an On-Demand Capacity Reservation and stop its charges. |
@@ -903,6 +904,28 @@ gco capacity training-plans [OPTIONS]
 gco capacity training-plans
 gco capacity training-plans -r us-east-1 --status Active
 gco --output json capacity training-plans -i ml.p5.48xlarge
+```
+
+#### `gco capacity runai`
+
+Read GPU capacity from an [NVIDIA Run:ai](https://run-ai-docs.nvidia.com/) control plane, read-only: one token request and GET requests, nothing submitted. Each row is one Run:ai cluster and node pool with total, allocated and free GPUs, `whole_gpus_upper_bound` (the whole GPUs a new workload could be given, which accounts for fractional allocations), the nodes' GPU models with the EC2 families that carry the same model (through the accelerator catalog's `gpu_model`), and each project's quota headroom. Every row carries `observed_at` and `valid_until` because telemetry is a short-lived snapshot; a value Run:ai did not report is `null` (shown as `?`), never 0, and a 403 is an error, never "0 free". Rows say `source: runai` and `submit_compatible: false` and are not part of [`recommend-region`](#gco-capacity-recommend-region), which they have no Region or price for. Configure with `GCO_RUNAI_URL`, `GCO_RUNAI_CLIENT_ID` and `GCO_RUNAI_CLIENT_SECRET`, plus `GCO_RUNAI_CA_FILE` for a certificate signed by a private CA. Requires NVIDIA Run:ai 2.24 or later. See [RUNAI.md](RUNAI.md).
+
+```bash
+gco capacity runai [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--cluster` | Only this Run:ai cluster (name or ID) |
+| `--node-pool` | Only this node pool |
+| `--gpu-count` | Mark which node pools have this many whole GPUs free (`fits_gpu_count`) |
+| `--project` | Report this Run:ai project's quota headroom on each node pool (`project_headroom_gpus`, plus `within_project_quota` with `--gpu-count`) |
+| `--page-size` | Items per request on the paged list routes, 1–500 (default 500, the API's maximum) |
+
+```bash
+gco capacity runai
+gco capacity runai --gpu-count 4 --project team-a
+gco --output json capacity runai --cluster prod --node-pool h100
 ```
 
 #### `gco capacity find-reservations`
@@ -3309,6 +3332,7 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--dry-run` | | Validate without applying |
 | `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 | `--wait` | `-w` | Wait for job completion |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
@@ -3318,6 +3342,7 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 gco jobs submit examples/simple-job.yaml -n gco-jobs
 gco jobs submit job.yaml --dry-run
 gco jobs submit job.yaml -l team=ml -l priority=high
+gco jobs submit examples/simple-job.yaml --sandbox isolated
 ```
 
 #### `gco jobs submit-sqs`
@@ -3337,6 +3362,7 @@ gco jobs submit-sqs MANIFEST_PATH [OPTIONS]
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 
 `--auto-region` reads the manifest before ranking. A manifest routed to
 [SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) (the
@@ -3375,8 +3401,13 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
 | `--dry-run` | | Validate without applying |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 | `--wait` | `-w` | Wait for job completion |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
+
+`submit-direct` skips GCO's server-side admission, so `--sandbox` runs the
+[sandbox checks](NITRO_SANDBOXES.md#what-gco-checks-at-submission) itself before
+calling kubectl.
 
 **Example:**
 
@@ -3402,6 +3433,7 @@ Jobs are stored in DynamoDB and picked up by the target region's manifest proces
 | `--namespace` | `-n` | Kubernetes namespace |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 
 **Example:**
 
@@ -5535,7 +5567,7 @@ gco stacks hyperpod COMMAND [OPTIONS]
 | `--cluster-name` | | `enable` | The HyperPod cluster name (default `<project>-hyperpod`) |
 | `--yes` | `-y` | `enable`, `disable` | Skip confirmation |
 
-`preflight` runs against the live account with the AWS APIs alone (no kubectl, no CDK). Per Region: SageMaker HyperPod publishes a health-monitoring agent image there (the regional stack refuses to synthesize otherwise), HyperPod publishes a node AMI for the EKS minor the cluster runs (cdk.json `kubernetes_version`; read from the public SSM tree `/aws/service/sagemaker-hyperpod/ami/x86_64` — HyperPod picks the AMI from the cluster's version at `CreateCluster`, and the newest EKS minor has none until HyperPod catches up, see [HYPERPOD.md](HYPERPOD.md#enabling-it)), the account's `<instance type> for cluster usage` Service Quotas cover every instance group's count (a type with no such quota is not a HyperPod type in the Region), every `training_plan_arn` names a plan that exists, is `Active` or `Scheduled`, targets HyperPod clusters, reserves the group's instance type and sits in the configured zone, the configured Availability Zone exists, the regional EKS cluster (once deployed) is `ACTIVE` and authenticates with access entries, and no HyperPod cluster of the same name that this project does not own exists in the Region. An AWS error while checking (a denied call, throttling) is a warning, never a failure: only a fact that would break the deploy or keep the nodes from joining fails the preflight. `gco stacks deploy` and `deploy-all` run the same checks for every regional stack with HyperPod on; `--skip-hyperpod-preflight` bypasses them.
+`preflight` runs against the live account with the AWS APIs alone (no kubectl, no CDK). Per Region: SageMaker HyperPod publishes a health-monitoring agent image there (the regional stack refuses to synthesize otherwise), HyperPod publishes a node AMI for the EKS minor the cluster will run at `CreateCluster` (the version the deployed cluster reports, or cdk.json `kubernetes_version` before the first deploy; a cdk.json minor below the running one, or more than one above it, fails because the deploy could not apply it; read from the public SSM tree `/aws/service/sagemaker-hyperpod/ami/x86_64` — HyperPod picks the AMI from the cluster's version at `CreateCluster`, and the newest EKS minor has none until HyperPod catches up, see [HYPERPOD.md](HYPERPOD.md#enabling-it)), the account's `<instance type> for cluster usage` Service Quotas cover every instance group's count (a type with no such quota is not a HyperPod type in the Region), every `training_plan_arn` names a plan that exists, is `Active` or `Scheduled`, targets HyperPod clusters, reserves the group's instance type and sits in the configured zone, the configured Availability Zone exists, the regional EKS cluster (once deployed) is `ACTIVE` and authenticates with access entries, and no HyperPod cluster of the same name that this project does not own exists in the Region. An AWS error while checking (a denied call, throttling) is a warning, never a failure: only a fact that would break the deploy or keep the nodes from joining fails the preflight. `gco stacks deploy` and `deploy-all` run the same checks for every regional stack with HyperPod on; `--skip-hyperpod-preflight` bypasses them.
 
 **Example:**
 

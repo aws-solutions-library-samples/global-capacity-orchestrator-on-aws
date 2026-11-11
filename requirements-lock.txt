@@ -690,7 +690,7 @@ uvloop==0.23.0
     # via
     #   gco-cli
     #   gco-cli (pyproject.toml)
-virtualenv==21.14.10
+virtualenv==21.14.13
     # via pre-commit
 watchfiles==1.1.1
     # via fastmcp-slim

@@ -11,11 +11,17 @@ Checks, per Region:
 - ``agent-image``: SageMaker HyperPod publishes a health-monitoring agent
   image for the Region (the regional stack refuses to synthesize otherwise).
 - ``kubernetes-version``: SageMaker HyperPod publishes a node AMI for the EKS
-  minor the cluster runs (cdk.json ``kubernetes_version``). HyperPod picks
-  the AMI from the cluster's version at ``CreateCluster``; a minor without one
-  (the newest EKS minor, until HyperPod catches up) fails the deploy an hour
-  in. Read from the public SSM tree
-  ``/aws/service/sagemaker-hyperpod/ami/x86_64/eks-<minor>-...``.
+  minor the cluster will run at ``CreateCluster``. HyperPod picks the AMI from
+  the cluster's version then; a minor without one (the newest EKS minor, until
+  HyperPod catches up) fails the deploy an hour in. Read from the public SSM
+  tree ``/aws/service/sagemaker-hyperpod/ami/x86_64/eks-<minor>-...``. Before
+  the first deploy that minor is cdk.json ``kubernetes_version``; once the
+  cluster exists it is the version the cluster reports, because a cluster
+  upgraded outside the deploy no longer matches cdk.json. A cdk.json minor
+  below the running one fails (EKS cannot downgrade), as does one more than a
+  minor above it (EKS upgrades one minor at a time); one minor above is the
+  in-place upgrade the deploy runs before HyperPod is created, so that minor is
+  the one checked.
 - ``instance-types``: every instance group's ``<type> for cluster usage``
   Service Quota covers its ``instance_count``; a type with no such quota is
   not a HyperPod type in this Region.
@@ -38,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from gco.hyperpod_config import (
     HEALTH_MONITORING_AGENT_ACCOUNTS,
@@ -218,7 +224,83 @@ def _hyperpod_eks_minors(checker: _Checker) -> list[str] | None:
     return list(result) if isinstance(result, list) else None
 
 
-def _check_kubernetes_version(checker: _Checker, kubernetes_version: str) -> None:
+@dataclass(frozen=True)
+class _ClusterLookup:
+    """One ``DescribeCluster`` of the regional EKS cluster, shared by two checks.
+
+    ``cluster`` is ``None`` before the first deploy and when the call failed;
+    ``error`` says which, so ``eks-cluster`` can warn about a failed call while
+    ``kubernetes-version`` falls back to cdk.json in both cases.
+    """
+
+    cluster: dict[str, Any] | None
+    error: str | None = None
+
+    @property
+    def version(self) -> str | None:
+        version = (self.cluster or {}).get("version")
+        return version.strip() if isinstance(version, str) and version.strip() else None
+
+
+def _describe_eks_cluster(checker: _Checker, eks_cluster_name: str) -> _ClusterLookup:
+    try:
+        response = checker.client("eks").describe_cluster(name=eks_cluster_name)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+            return _ClusterLookup(cluster=None)
+        return _ClusterLookup(cluster=None, error=_error_text(exc))
+    except BotoCoreError as exc:
+        return _ClusterLookup(cluster=None, error=_error_text(exc))
+    return _ClusterLookup(cluster=dict(response.get("cluster") or {}))
+
+
+def _effective_minor(
+    checker: _Checker, configured: str, running: str | None, eks_cluster_name: str
+) -> tuple[str | None, str]:
+    """The minor HyperPod's ``CreateCluster`` would see, and how it was decided.
+
+    Returns ``(None, "")`` when the deploy itself would fail on the version,
+    after recording that failure.
+    """
+    if running is None:
+        return configured, "cdk.json kubernetes_version"
+    if running == configured:
+        return configured, f"{eks_cluster_name} runs it"
+    try:
+        run_key, want_key = _minor_key(running), _minor_key(configured)
+    except ValueError:
+        return configured, f"cdk.json kubernetes_version; {eks_cluster_name} reports {running!r}"
+    if want_key < run_key:
+        checker.add(
+            "kubernetes-version",
+            FAIL,
+            f"cdk.json kubernetes_version {configured} is below the {running} {eks_cluster_name} "
+            f"already runs, and EKS cannot downgrade a cluster, so the deploy would fail; set "
+            f"kubernetes_version to {running}",
+        )
+        return None, ""
+    one_minor_up = len(run_key) == len(want_key) == 2 and want_key == (
+        run_key[0],
+        run_key[1] + 1,
+    )
+    if not one_minor_up:
+        checker.add(
+            "kubernetes-version",
+            FAIL,
+            f"cdk.json kubernetes_version {configured} is more than one minor above the "
+            f"{running} {eks_cluster_name} runs, and EKS upgrades one minor at a time, so the "
+            "deploy would fail; step kubernetes_version up one minor per deploy",
+        )
+        return None, ""
+    return configured, f"the deploy upgrades {eks_cluster_name} from {running} before HyperPod"
+
+
+def _check_kubernetes_version(
+    checker: _Checker, kubernetes_version: str, lookup: _ClusterLookup, eks_cluster_name: str
+) -> None:
+    minor, source = _effective_minor(checker, kubernetes_version, lookup.version, eks_cluster_name)
+    if minor is None:
+        return  # the failure is already recorded
     minors = _hyperpod_eks_minors(checker)
     if minors is None:
         return  # the warning is already recorded
@@ -227,23 +309,32 @@ def _check_kubernetes_version(checker: _Checker, kubernetes_version: str) -> Non
             "kubernetes-version",
             WARN,
             f"no HyperPod node AMI parameters under {HYPERPOD_AMI_PARAMETER_ROOT} in "
-            f"{checker.region}; cannot confirm HyperPod supports EKS {kubernetes_version}",
+            f"{checker.region}; cannot confirm HyperPod supports EKS {minor}",
         )
-    elif kubernetes_version in minors:
+    elif minor in minors:
         checker.add(
             "kubernetes-version",
             PASS,
-            f"EKS {kubernetes_version}: HyperPod publishes a node AMI (newest {minors[-1]})",
+            f"EKS {minor} ({source}): HyperPod publishes a node AMI (newest {minors[-1]})",
+        )
+    elif lookup.version is not None and minor == lookup.version:
+        checker.add(
+            "kubernetes-version",
+            FAIL,
+            f"EKS {minor} ({source}): SageMaker HyperPod publishes no node AMI for this minor "
+            f"in {checker.region} (it does for {', '.join(minors)}), so CreateCluster would "
+            "fail; EKS cannot downgrade a running cluster, so HyperPod can join this one only "
+            "once HyperPod publishes the AMI",
         )
     else:
         checker.add(
             "kubernetes-version",
             FAIL,
-            f"EKS {kubernetes_version}: SageMaker HyperPod publishes no node AMI for this "
-            f"minor in {checker.region} (it does for {', '.join(minors)}), so CreateCluster "
-            f"would fail; deploy the cluster at a supported minor (cdk.json "
-            f"kubernetes_version, or --kubernetes-version on gco release validate) — EKS "
-            "cannot downgrade a running cluster",
+            f"EKS {minor} ({source}): SageMaker HyperPod publishes no node AMI for this minor "
+            f"in {checker.region} (it does for {', '.join(minors)}), so CreateCluster would "
+            "fail; deploy the cluster at a supported minor (cdk.json kubernetes_version, or "
+            "--kubernetes-version on gco release validate) — EKS cannot downgrade a running "
+            "cluster",
         )
 
 
@@ -402,24 +493,17 @@ def _check_availability_zone(checker: _Checker, config: Mapping[str, Any]) -> No
         checker.add("availability-zone", FAIL, f"{zone}: {state or 'not found'}")
 
 
-def _check_eks_cluster(checker: _Checker, eks_cluster_name: str) -> None:
-    def describe() -> dict[str, Any] | None:
-        try:
-            response = checker.client("eks").describe_cluster(name=eks_cluster_name)
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
-                return None
-            raise
-        return dict(response.get("cluster") or {})
-
-    cluster = checker.guarded("eks-cluster", describe)
+def _check_eks_cluster(checker: _Checker, eks_cluster_name: str, lookup: _ClusterLookup) -> None:
+    if lookup.error is not None:
+        checker.add("eks-cluster", WARN, f"could not check: {lookup.error}")
+        return
+    cluster = lookup.cluster
     if cluster is None:
-        if not any(c.name == "eks-cluster" for c in checker.checks):
-            checker.add(
-                "eks-cluster",
-                SKIP,
-                f"{eks_cluster_name} is not deployed yet; the deploy creates it and HyperPod joins it",
-            )
+        checker.add(
+            "eks-cluster",
+            SKIP,
+            f"{eks_cluster_name} is not deployed yet; the deploy creates it and HyperPod joins it",
+        )
         return
     status = str(cluster.get("status") or "")
     mode = str(((cluster.get("accessConfig") or {}).get("authenticationMode")) or "")
@@ -486,17 +570,21 @@ def run_preflight(
 ) -> HyperpodPreflightReport:
     """Check the validated ``hyperpod`` block for ``region`` against the live account.
 
-    ``kubernetes_version`` is the minor the regional cluster runs or will be
-    deployed at (cdk.json ``kubernetes_version``, or the run's override).
+    ``kubernetes_version`` is the minor the deploy asks for (cdk.json
+    ``kubernetes_version``, or the run's override). The regional cluster is
+    described once, first: its own version decides the ``kubernetes-version``
+    check once it exists, and its status the ``eks-cluster`` one.
     """
     checker = _Checker(region, client_factory)
     name = cluster_name(config, project)
+    eks_cluster_name = f"{project}-{region}"
+    lookup = _describe_eks_cluster(checker, eks_cluster_name)
     _check_agent_image(checker)
-    _check_kubernetes_version(checker, kubernetes_version)
+    _check_kubernetes_version(checker, kubernetes_version, lookup, eks_cluster_name)
     _check_instance_types(checker, config)
     _check_training_plans(checker, config)
     _check_availability_zone(checker, config)
-    _check_eks_cluster(checker, f"{project}-{region}")
+    _check_eks_cluster(checker, eks_cluster_name, lookup)
     _check_cluster_name(checker, name, project)
     return HyperpodPreflightReport(
         region=region, enabled=bool(config.get("enabled")), cluster=name, checks=checker.checks

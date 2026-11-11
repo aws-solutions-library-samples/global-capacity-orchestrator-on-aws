@@ -342,12 +342,20 @@ jobs:
           set -euo pipefail
           # Table to the job log + JSON to the artifact.
           # --ignorefile points at .trivyignore (dated CVE suppressions).
+          # --file-patterns teaches Trivy requirements-lock.txt, which it does
+          # not recognise by name. Without it this scan never read the
+          # top-level lockfile and only the weekly cve-scan did, so a HIGH in
+          # a locked package stayed invisible to every PR (virtualenv 21.14.10,
+          # CVE-2026-115586, failed cve-scan three Mondays running). The flag
+          # matches cve-scan.yml's, which tests/test_ci_trivy_scan_parity.py
+          # keeps true.
           trivy fs \
             --exit-code 0 \
             --severity HIGH,CRITICAL \
             --scanners vuln \
             --skip-version-check \
             --ignorefile .github/config/.trivyignore \
+            --file-patterns 'pip:requirements-lock\.txt$' \
             --format json \
             --output trivy-fs-report.json \
             .
@@ -357,6 +365,7 @@ jobs:
             --scanners vuln \
             --skip-version-check \
             --ignorefile .github/config/.trivyignore \
+            --file-patterns 'pip:requirements-lock\.txt$' \
             .
       - name: Upload trivy report
         if: always()

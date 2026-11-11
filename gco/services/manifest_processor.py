@@ -40,6 +40,8 @@ import hashlib
 import logging
 import os
 import re
+import time
+from collections.abc import Callable
 from typing import Any, cast
 
 import yaml
@@ -107,6 +109,12 @@ from gco.job_admission import (
     check_resource_caps as check_resource_caps,
 )
 from gco.job_admission import (
+    check_sandbox as check_sandbox,
+)
+from gco.job_admission import (
+    check_sandbox_runtime_class as check_sandbox_runtime_class,
+)
+from gco.job_admission import (
     check_security_context as check_security_context,
 )
 from gco.job_admission import (
@@ -153,8 +161,8 @@ from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-11-10T17:41:25Z
+# Generated from Git commit: c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe
 # Flowchart(s) generated from this file:
 #   * ``ManifestProcessor.apply_queued_job`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png``)
@@ -188,6 +196,61 @@ def _is_retryable_kubernetes_api_error(error: ApiException) -> bool:
     except TypeError, ValueError:
         status = 0
     return status == 0 or status in {408, 429} or status >= 500
+
+
+#: How long a RuntimeClass answer is reused. EKS adds or removes the sandbox
+#: RuntimeClasses only with a platform version or Kubernetes upgrade, both far
+#: slower than this.
+RUNTIME_CLASS_CACHE_SECONDS = 300.0
+
+
+class RuntimeClassPresence:
+    """Does a RuntimeClass exist on this cluster? For ``check_sandbox_runtime_class``.
+
+    Only a 404 means no. Any other failure (RBAC, throttling, a timeout) reads
+    as yes, is logged, and is not cached: this check exists to explain a pod
+    the API server would refuse anyway, so being unable to ask must not block a
+    submission. Answers are cached for ``RUNTIME_CLASS_CACHE_SECONDS``.
+    """
+
+    def __init__(
+        self,
+        read_runtime_class: Callable[[str], object],
+        *,
+        ttl_seconds: float = RUNTIME_CLASS_CACHE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._read = read_runtime_class
+        self._ttl = ttl_seconds
+        self._clock = clock
+        self._answers: dict[str, tuple[bool, float]] = {}
+
+    def __call__(self, name: str) -> bool:
+        now = self._clock()
+        cached = self._answers.get(name)
+        if cached is not None and now - cached[1] < self._ttl:
+            return cached[0]
+        try:
+            self._read(name)
+            exists = True
+        except ApiException as error:
+            if error.status != 404:
+                logger.warning(
+                    "Could not read RuntimeClass %s (HTTP %s); not checking it",
+                    sanitize_log_value(name),
+                    error.status,
+                )
+                return True
+            exists = False
+        except Exception as error:
+            logger.warning(
+                "Could not read RuntimeClass %s (%s); not checking it",
+                sanitize_log_value(name),
+                sanitize_log_value(str(error)),
+            )
+            return True
+        self._answers[name] = (exists, now)
+        return exists
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +365,12 @@ class ManifestProcessor:
 
         # Timeout for Kubernetes API calls (seconds)
         self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
+
+        # Whether a Nitro Sandbox RuntimeClass exists here (validate_manifest).
+        self.node_v1 = client.NodeV1Api()
+        self.runtime_class_exists = RuntimeClassPresence(
+            lambda name: self.node_v1.read_runtime_class(name, _request_timeout=self._k8s_timeout)
+        )
 
         # Resource quotas and limits. Defaults come from the shared source of
         # truth (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS): two
@@ -732,6 +801,16 @@ class ManifestProcessor:
             sec_valid, sec_error = self._validate_security_context(manifest)
             if not sec_valid:
                 return False, f"Security context validation failed: {sec_error}"
+
+            # AWS Nitro Sandbox constraints, then whether this cluster has the
+            # sandbox RuntimeClass at all (gco.job_admission).
+            sandbox_valid, sandbox_error = check_sandbox(manifest)
+            if sandbox_valid:
+                sandbox_valid, sandbox_error = check_sandbox_runtime_class(
+                    manifest, self.runtime_class_exists
+                )
+            if not sandbox_valid:
+                return False, f"Nitro Sandbox validation failed: {sandbox_error}"
 
             # Validate image sources (prevent pulling from untrusted registries)
             img_valid, img_error = self._validate_image_sources(manifest)

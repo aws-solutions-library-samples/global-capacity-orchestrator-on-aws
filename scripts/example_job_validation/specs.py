@@ -118,6 +118,16 @@ EXAMPLE_SPECS: dict[str, ExampleSpec] = {
             notes="two Jobs in one file; the GPU one waits for node provisioning",
         ),
         ExampleSpec("model-download-job", KUBECTL_APPLY, JOB_COMPLETES, timeout_seconds=1200),
+        ExampleSpec(
+            "nitro-sandbox-job",
+            SUBMIT_API,
+            JOB_COMPLETES,
+            notes=(
+                "an isolated-sandbox Job queued to gco-default; its pod exits 1 unless "
+                "its disks are virtio-blk devices, so completion means it ran in a "
+                "Nitro Sandbox. Needs EKS 1.36 or later"
+            ),
+        ),
         ExampleSpec("efs-output-job", SUBMIT_DIRECT, JOB_COMPLETES),
         ExampleSpec(
             "fsx-lustre-job",

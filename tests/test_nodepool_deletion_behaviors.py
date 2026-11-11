@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from click.testing import CliRunner
@@ -52,22 +52,45 @@ def tunnel(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return state
 
 
+def _close_passing_through_all_but(fake_fd: int, **fake: Any) -> MagicMock:
+    """An ``os.close`` stand-in that is fake for ``fake_fd`` only.
+
+    ``cli.nodepools.os`` is the os module, so patching ``os.close`` there is
+    process-wide: a finalizer that runs mid-test (a file or TemporaryDirectory
+    another test left to the garbage collector) closes its own descriptor
+    through the patch. Those calls reach the real ``os.close``, and the tests
+    count only calls for ``fake_fd``.
+    """
+    real_close = os.close
+    fake_close = MagicMock(**fake)
+
+    def close(fd: int) -> None:
+        if fd == fake_fd:
+            fake_close(fd)
+        else:
+            real_close(fd)
+
+    return MagicMock(side_effect=close)
+
+
 def test_k8s_client_closes_only_a_descriptor_it_still_owns() -> None:
     eks = MagicMock()
     eks.describe_cluster.return_value = _cluster_response()
     original = RuntimeError("fdopen failed before ownership transfer")
+    close = _close_passing_through_all_but(123, side_effect=OSError("already closed"))
+
     with (
         patch("cli.nodepools.boto3.client", return_value=eks),
         patch("cli.nodepools.tempfile.mkstemp", return_value=(123, "/tmp/gco-ca-test.crt")),
         patch("cli.nodepools.os.fdopen", side_effect=original),
-        patch("cli.nodepools.os.close", side_effect=OSError("already closed")) as close_fd,
+        patch("cli.nodepools.os.close", close),
         patch("cli.nodepools._unlink_temp_ca_cert") as unlink,
         pytest.raises(RuntimeError, match="fdopen failed") as exc_info,
     ):
         get_k8s_client("cluster", "us-east-1")
 
     assert exc_info.value is original
-    close_fd.assert_called_once_with(123)
+    assert [c for c in close.call_args_list if c == call(123)] == [call(123)]
     unlink.assert_called_once_with("/tmp/gco-ca-test.crt")
 
 
@@ -81,13 +104,13 @@ def test_k8s_client_write_failure_does_not_double_close_transferred_descriptor()
         patch("cli.nodepools.boto3.client", return_value=eks),
         patch("cli.nodepools.tempfile.mkstemp", return_value=(456, "/tmp/gco-ca-write.crt")),
         patch("cli.nodepools.os.fdopen", return_value=ca_file),
-        patch("cli.nodepools.os.close") as close_fd,
+        patch("cli.nodepools.os.close", _close_passing_through_all_but(456)) as close_fd,
         patch("cli.nodepools._unlink_temp_ca_cert") as unlink,
         pytest.raises(RuntimeError, match="write failed"),
     ):
         get_k8s_client("cluster", "us-east-1")
 
-    close_fd.assert_not_called()
+    assert call(456) not in close_fd.call_args_list
     unlink.assert_called_once_with("/tmp/gco-ca-write.crt")
 
 

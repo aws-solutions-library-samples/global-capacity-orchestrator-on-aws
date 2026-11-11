@@ -34,6 +34,7 @@ from .opencost import action_opencost
 from .platform_workloads import action_platform_workloads
 from .policy import action_policy
 from .preflight import action_preflight
+from .sandboxes import action_sandboxes
 from .schedulers import action_schedulers
 from .topology import action_topology
 from .tracing import action_tracing
@@ -54,6 +55,7 @@ __all__ = [
     "action_platform_workloads",
     "action_policy",
     "action_preflight",
+    "action_sandboxes",
     "action_schedulers",
     "action_sqs_lifecycle",
     "action_topology",

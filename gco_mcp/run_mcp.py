@@ -328,6 +328,10 @@ with _contextlib.suppress(ImportError):
 # GCO_ENABLE_DESTRUCTIVE_OPERATIONS (or GCO_ENABLE_ALL_TOOLS) is set.
 with _contextlib.suppress(ImportError):
     from tools.capacity import cancel_reservation  # noqa: F401
+# Read-only Run:ai capacity — present only when GCO_ENABLE_RUNAI_CAPACITY (or
+# GCO_ENABLE_ALL_TOOLS) is set.
+with _contextlib.suppress(ImportError):
+    from tools.capacity import runai_capacity  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.jobs import delete_job
@@ -406,18 +410,19 @@ with _contextlib.suppress(ImportError):
         swarm_status,
     )
 
-# Explicit reload compatibility for the two gated families in capacity.py.
+# Explicit reload compatibility for the three gated families in capacity.py.
 # A clean startup has just imported the module under the final environment and
 # must not reload it: doing so used to emit duplicate-component warnings for
 # every unconditional capacity tool.
 if _IS_RELOAD and (
     _feature_flags.is_enabled(_feature_flags.FLAG_CAPACITY_PURCHASE)
     or _feature_flags.is_enabled(_feature_flags.FLAG_DESTRUCTIVE_OPERATIONS)
+    or _feature_flags.is_enabled(_feature_flags.FLAG_RUNAI_CAPACITY)
 ):
     from tools import capacity as _cap_mod
 
     _importlib.reload(_cap_mod)
-    for _name in ("reserve_capacity", "create_reservation", "cancel_reservation"):
+    for _name in ("reserve_capacity", "create_reservation", "cancel_reservation", "runai_capacity"):
         if hasattr(_cap_mod, _name):
             globals()[_name] = getattr(_cap_mod, _name)
 
@@ -810,6 +815,7 @@ _PUBLIC_EXPORTS = [
     "reservation_check",
     "reserve_capacity",
     "retry_job",
+    "runai_capacity",
     "rollback_canary",
     "s3_inventory",
     "scale_inference",

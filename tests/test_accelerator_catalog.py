@@ -190,6 +190,7 @@ def test_announced_p6e_override_is_explicit_and_not_observed() -> None:
 
 _BASE_FAMILY: dict[str, object] = {
     "accelerator": "nvidia",
+    "gpu_model": "A10G",
     "architectures": ["amd64"],
     "track": "nvidia-general-x86",
     "generation": 5,
@@ -282,13 +283,19 @@ def _write_config_loader(path: Path, body: str) -> Path:
 def _discovery_matching(catalog: Catalog, *extra_types: str, regions: int = 2) -> Discovery:
     """Return a discovery whose families mirror ``catalog`` exactly."""
     families = {
-        name: DiscoveredFamily(accelerator=policy.accelerator, architectures=policy.architectures)
+        name: DiscoveredFamily(
+            accelerator=policy.accelerator,
+            architectures=policy.architectures,
+            gpu_models=(policy.gpu_model,) if policy.gpu_model is not None else (),
+        )
         for name, policy in catalog.families.items()
         if name in catalog.live_families
     }
     for extra in extra_types:
         family = extra.split(".", 1)[0]
-        families[family] = DiscoveredFamily(accelerator="nvidia", architectures=("amd64",))
+        families[family] = DiscoveredFamily(
+            accelerator="nvidia", architectures=("amd64",), gpu_models=("A10G",)
+        )
     return Discovery(
         regions=tuple(f"region-{index}" for index in range(regions)),
         instance_types=tuple(sorted((*catalog.instance_types, *extra_types))),
@@ -943,16 +950,18 @@ def test_discovery_unions_accelerator_types_across_enabled_regions(
     assert discovery.regions == ("eu-west-1", "us-east-1")
     assert discovery.instance_types == ("g5.2xlarge", "g5.xlarge", "g5g.xlarge", "inf2.xlarge")
     assert discovery.families == {
-        "g5": DiscoveredFamily(accelerator="nvidia", architectures=("amd64",)),
-        "g5g": DiscoveredFamily(accelerator="nvidia", architectures=("arm64",)),
+        "g5": DiscoveredFamily(accelerator="nvidia", architectures=("amd64",), gpu_models=("GPU",)),
+        "g5g": DiscoveredFamily(
+            accelerator="nvidia", architectures=("arm64",), gpu_models=("GPU",)
+        ),
         "inf2": DiscoveredFamily(accelerator="neuron", architectures=("amd64",)),
     }
     assert discovery.to_mapping() == {
         "regions_checked": ["eu-west-1", "us-east-1"],
         "instance_types": ["g5.2xlarge", "g5.xlarge", "g5g.xlarge", "inf2.xlarge"],
         "families": {
-            "g5": {"accelerator": "nvidia", "architectures": ["amd64"]},
-            "g5g": {"accelerator": "nvidia", "architectures": ["arm64"]},
+            "g5": {"accelerator": "nvidia", "architectures": ["amd64"], "gpu_models": ["GPU"]},
+            "g5g": {"accelerator": "nvidia", "architectures": ["arm64"], "gpu_models": ["GPU"]},
             "inf2": {"accelerator": "neuron", "architectures": ["amd64"]},
         },
     }
@@ -1086,6 +1095,102 @@ def test_compare_catalog_reports_added_removed_and_metadata_drift() -> None:
     }
 
 
+@pytest.mark.parametrize("value", [None, "", "   ", 7])
+def test_nvidia_family_requires_a_gpu_model(value: object) -> None:
+    family = {key: item for key, item in _BASE_FAMILY.items() if key != "gpu_model"}
+    if value is not None:
+        family["gpu_model"] = value
+    with pytest.raises(CatalogError, match=r"families\.g5\.gpu_model is required for nvidia"):
+        FamilyPolicy.from_mapping("g5", family)
+
+
+def test_neuron_family_rejects_a_gpu_model() -> None:
+    family = {**_BASE_FAMILY, "accelerator": "neuron", "track": "neuron-x86"}
+    with pytest.raises(CatalogError, match="gpu_model is only valid for nvidia families"):
+        FamilyPolicy.from_mapping("inf2", family)
+
+
+def test_gpu_model_is_trimmed_serialized_after_the_accelerator_and_round_trips() -> None:
+    policy = FamilyPolicy.from_mapping("g5", {**_BASE_FAMILY, "gpu_model": " A10G "})
+    assert policy.gpu_model == "A10G"
+    mapping = policy.to_mapping()
+    assert list(mapping)[:2] == ["accelerator", "gpu_model"]
+    assert FamilyPolicy.from_mapping("g5", mapping) == policy
+    neuron = FamilyPolicy.from_mapping(
+        "inf2",
+        {key: item for key, item in _BASE_FAMILY.items() if key != "gpu_model"}
+        | {"accelerator": "neuron", "track": "neuron-x86"},
+    )
+    assert neuron.gpu_model is None
+    assert "gpu_model" not in neuron.to_mapping()
+
+
+def test_every_checked_in_nvidia_family_names_its_gpu_model() -> None:
+    catalog = Catalog.load()
+    for name, policy in catalog.families.items():
+        if policy.accelerator == "nvidia":
+            assert policy.gpu_model, name
+        else:
+            assert policy.gpu_model is None, name
+
+
+@pytest.mark.parametrize(
+    ("instance", "expected"),
+    [
+        ({}, set()),
+        ({"GpuInfo": "nope"}, set()),
+        ({"GpuInfo": {"Gpus": None}}, set()),
+        (
+            {
+                "GpuInfo": {
+                    "Gpus": [
+                        "bogus",
+                        {"Manufacturer": "NVIDIA", "Name": " H100 "},
+                        {"Manufacturer": "nvidia", "Name": "H100"},
+                        {"Manufacturer": "AMD", "Name": "Radeon Pro V520"},
+                        {"Manufacturer": "NVIDIA", "Name": ""},
+                        {"Manufacturer": "NVIDIA"},
+                        {"Manufacturer": 7, "Name": "X"},
+                    ]
+                }
+            },
+            {"H100"},
+        ),
+    ],
+)
+def test_nvidia_gpu_models_reads_only_named_nvidia_gpus(
+    instance: dict[str, object], expected: set[str]
+) -> None:
+    assert accelerator_catalog._nvidia_gpu_models(instance) == expected
+
+
+def test_compare_catalog_reports_gpu_model_drift() -> None:
+    catalog = _synthetic_catalog(
+        {
+            "p5": _policy("p5", gpu_model="H100"),
+            "g6": _policy("g6", gpu_model="L4"),
+            "trn2": _policy("trn2", accelerator="neuron"),
+        },
+        ("g6.xlarge", "p5.48xlarge", "trn2.48xlarge"),
+    )
+    discovery = Discovery(
+        regions=("us-east-1",),
+        instance_types=("g6.xlarge", "p5.48xlarge", "p7.48xlarge", "trn2.48xlarge"),
+        families={
+            "p5": DiscoveredFamily("nvidia", ("amd64",), gpu_models=("H100", "H100-NVL")),
+            "g6": DiscoveredFamily("nvidia", ("amd64",), gpu_models=("L4",)),
+            "p7": DiscoveredFamily("nvidia", ("amd64",), gpu_models=("X300",)),
+            "trn2": DiscoveredFamily("neuron", ("amd64",)),
+        },
+    )
+    drift = compare_catalog(catalog, discovery)
+    assert drift.metadata_changes == (
+        "`p5` GPU model changed: catalog=['H100'], EC2=['H100', 'H100-NVL'].",
+        "New family `p7` requires reviewed track, generation, and lifecycle policy "
+        "(accelerator=nvidia, architectures=['amd64'], gpu_models=['X300']).",
+    )
+
+
 def test_compare_catalog_is_current_when_ec2_matches() -> None:
     catalog = Catalog.load()
     drift = compare_catalog(catalog, _discovery_matching(catalog, regions=4))
@@ -1148,11 +1253,15 @@ def test_refresh_refuses_family_metadata_drift(tmp_path: Path) -> None:
 
 
 def test_refresh_writes_live_types_with_a_fresh_utc_timestamp(tmp_path: Path) -> None:
-    catalog = _synthetic_catalog({"g5": _policy("g5")}, ("g5.xlarge",))
+    catalog = _synthetic_catalog({"g5": _policy("g5", gpu_model="A10G")}, ("g5.xlarge",))
     discovery = Discovery(
         regions=("us-east-1",),
         instance_types=("g5.2xlarge", "g5.xlarge"),
-        families={"g5": DiscoveredFamily(accelerator="nvidia", architectures=("amd64",))},
+        families={
+            "g5": DiscoveredFamily(
+                accelerator="nvidia", architectures=("amd64",), gpu_models=("A10G",)
+            )
+        },
     )
     output = tmp_path / "catalog.json"
 

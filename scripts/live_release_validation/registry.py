@@ -33,6 +33,7 @@ from .actions import (
     action_platform_workloads,
     action_policy,
     action_preflight,
+    action_sandboxes,
     action_schedulers,
     action_sqs_lifecycle,
     action_topology,
@@ -121,6 +122,12 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "Prove the SageMaker HyperPod instance group joined the cluster and runs work",
             ("topology",),
             action_hyperpod,
+        ),
+        ActionDefinition(
+            "sandboxes",
+            "Prove a Kueue-queued Job runs inside an AWS Nitro Sandbox",
+            ("topology",),
+            action_sandboxes,
         ),
         ActionDefinition(
             "opencost",

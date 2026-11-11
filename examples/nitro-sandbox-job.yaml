@@ -1,0 +1,74 @@
+# AWS Nitro Sandbox Job Example
+#
+# Runs one pod inside its own AWS Nitro Sandbox: a lightweight virtual machine
+# with its own Linux kernel, isolated from the node and from every other pod by
+# the Nitro hypervisor. Use it for code you do not trust, such as code an AI
+# agent generated or a tenant supplied. The pod checks that it is in a sandbox
+# (its disks are virtio-blk devices, which a Nitro instance never shows a normal
+# container) and fails if it is not.
+#
+# Prerequisites:
+#   - EKS 1.36 or later (cdk.json kubernetes_version) in a Region where EKS
+#     offers Nitro Sandboxes. EKS Auto Mode provisions a sandbox-capable node
+#     on demand; there is nothing else to enable.
+#   - CPU only: a sandbox has no GPU, Neuron or EFA passthrough, and GCO
+#     rejects a sandboxed manifest that requests one.
+#
+# Usage:
+#   gco jobs submit examples/nitro-sandbox-job.yaml --region us-east-1
+#   # or run any CPU manifest in a sandbox without editing it:
+#   gco jobs submit examples/simple-job.yaml --region us-east-1 --sandbox isolated
+#
+# Docs: ../docs/NITRO_SANDBOXES.md
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nitro-sandbox-job
+  namespace: gco-jobs
+  labels:
+    # Optional. Queued through Kueue like any other Job: gco-cluster-queue
+    # covers the eks.amazonaws.com/nitro-sandbox slot each sandbox pod uses.
+    kueue.x-k8s.io/queue-name: gco-default
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 1
+  template:
+    spec:
+      # The line that puts the pod in a sandbox. The RuntimeClass adds the
+      # node selector and the per-pod overhead (256Mi of memory plus one
+      # eks.amazonaws.com/nitro-sandbox slot); the rest is an ordinary pod.
+      runtimeClassName: isolated-sandbox
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+      - name: sandboxed
+        image: public.ecr.aws/docker/library/busybox:1.38.0
+        command:
+        - sh
+        - -c
+        - |
+          echo "machine: $(cat /sys/class/dmi/id/product_name)"
+          echo "kernel:  $(uname -r)"
+          echo "disks:   $(ls /sys/block | tr '\n' ' ')"
+          if ls /sys/block | grep -q '^vd'; then
+            echo "Running in an AWS Nitro Sandbox"
+          else
+            echo "No virtio-blk disk: this pod is not in a Nitro Sandbox" >&2
+            exit 1
+          fi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"

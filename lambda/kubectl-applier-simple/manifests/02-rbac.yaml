@@ -288,6 +288,16 @@ rules:
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
 
+  # RuntimeClass read — both submission paths refuse a manifest that asks for
+  # an AWS Nitro Sandbox on a cluster without that RuntimeClass, rather than
+  # accept a Job whose pods can never be created
+  # (gco.job_admission.check_sandbox_runtime_class). Cluster-scoped, so it
+  # cannot live in the namespaced Role; get on the two sandbox classes only.
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    resourceNames: ["confidential-sandbox", "isolated-sandbox"]
+    verbs: ["get"]
+
   # CRD read — Kueue resources
   - apiGroups: ["kueue.x-k8s.io"]
     resources: ["*"]

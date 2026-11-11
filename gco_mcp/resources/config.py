@@ -15,6 +15,7 @@ _FLAG_DESCRIPTIONS = {
     "GCO_ENABLE_LOCAL_METRICS": "Enable reads beneath GCO_METRICS_LOCAL_ROOT.",
     "GCO_ENABLE_LOCAL_STORAGE_SYNC": "Enable local storage sync operations.",
     "GCO_ENABLE_SEMANTIC_PROGRESS": "Enable LLM-based semantic progress scoring.",
+    "GCO_ENABLE_RUNAI_CAPACITY": "Enable the read-only NVIDIA Run:ai capacity reader (calls a non-AWS control plane).",
 }
 
 
@@ -77,6 +78,10 @@ def env_vars_resource() -> str:
             "| `AWS_REGION` | (from config) | Default AWS region for CLI commands. |",
             "| `AWS_PROFILE` | (default) | AWS CLI profile to use. |",
             "| `GCO_CONFIG_PATH` | `cdk.json` | Path to the CDK configuration file. |",
+            "| `GCO_RUNAI_URL` | (unset) | NVIDIA Run:ai control plane `gco capacity runai` reads (`https://host[:port]`). |",
+            "| `GCO_RUNAI_CLIENT_ID` | (unset) | Run:ai service account or user access key ID. |",
+            "| `GCO_RUNAI_CLIENT_SECRET` | (unset) | Its secret; read from the environment only, never a flag. |",
+            "| `GCO_RUNAI_CA_FILE` | (unset) | PEM bundle for a control plane certificate signed by a private CA; the only trust anchor when set. |",
             "\n## Services (Kubernetes)\n",
             "| Variable | Default | Description |",
             "|----------|---------|-------------|",

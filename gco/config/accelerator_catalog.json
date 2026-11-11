@@ -11,6 +11,7 @@
   "families": {
     "g4dn": {
       "accelerator": "nvidia",
+      "gpu_model": "T4",
       "architectures": [
         "amd64"
       ],
@@ -20,6 +21,7 @@
     },
     "g5": {
       "accelerator": "nvidia",
+      "gpu_model": "A10G",
       "architectures": [
         "amd64"
       ],
@@ -29,6 +31,7 @@
     },
     "g5g": {
       "accelerator": "nvidia",
+      "gpu_model": "T4g",
       "architectures": [
         "arm64"
       ],
@@ -38,6 +41,7 @@
     },
     "g6": {
       "accelerator": "nvidia",
+      "gpu_model": "L4",
       "architectures": [
         "amd64"
       ],
@@ -47,6 +51,7 @@
     },
     "g6e": {
       "accelerator": "nvidia",
+      "gpu_model": "L40S",
       "architectures": [
         "amd64"
       ],
@@ -56,6 +61,7 @@
     },
     "g6f": {
       "accelerator": "nvidia",
+      "gpu_model": "L4",
       "architectures": [
         "amd64"
       ],
@@ -65,6 +71,7 @@
     },
     "g7": {
       "accelerator": "nvidia",
+      "gpu_model": "RTX PRO 4500",
       "architectures": [
         "amd64"
       ],
@@ -74,6 +81,7 @@
     },
     "g7e": {
       "accelerator": "nvidia",
+      "gpu_model": "RTX PRO Server 6000",
       "architectures": [
         "amd64"
       ],
@@ -83,6 +91,7 @@
     },
     "gr6": {
       "accelerator": "nvidia",
+      "gpu_model": "L4",
       "architectures": [
         "amd64"
       ],
@@ -92,6 +101,7 @@
     },
     "gr6f": {
       "accelerator": "nvidia",
+      "gpu_model": "L4",
       "architectures": [
         "amd64"
       ],
@@ -119,6 +129,7 @@
     },
     "p3": {
       "accelerator": "nvidia",
+      "gpu_model": "V100",
       "architectures": [
         "amd64"
       ],
@@ -135,6 +146,7 @@
     },
     "p3dn": {
       "accelerator": "nvidia",
+      "gpu_model": "V100",
       "architectures": [
         "amd64"
       ],
@@ -151,6 +163,7 @@
     },
     "p4d": {
       "accelerator": "nvidia",
+      "gpu_model": "A100",
       "architectures": [
         "amd64"
       ],
@@ -160,6 +173,7 @@
     },
     "p4de": {
       "accelerator": "nvidia",
+      "gpu_model": "A100",
       "architectures": [
         "amd64"
       ],
@@ -169,6 +183,7 @@
     },
     "p5": {
       "accelerator": "nvidia",
+      "gpu_model": "H100",
       "architectures": [
         "amd64"
       ],
@@ -178,6 +193,7 @@
     },
     "p5e": {
       "accelerator": "nvidia",
+      "gpu_model": "H200",
       "architectures": [
         "amd64"
       ],
@@ -187,6 +203,7 @@
     },
     "p5en": {
       "accelerator": "nvidia",
+      "gpu_model": "H200",
       "architectures": [
         "amd64"
       ],
@@ -196,6 +213,7 @@
     },
     "p6-b200": {
       "accelerator": "nvidia",
+      "gpu_model": "B200",
       "architectures": [
         "amd64"
       ],
@@ -205,6 +223,7 @@
     },
     "p6-b300": {
       "accelerator": "nvidia",
+      "gpu_model": "B300",
       "architectures": [
         "amd64"
       ],
@@ -214,6 +233,7 @@
     },
     "p6e-gb200": {
       "accelerator": "nvidia",
+      "gpu_model": "GB200",
       "architectures": [
         "amd64"
       ],

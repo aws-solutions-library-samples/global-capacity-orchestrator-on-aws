@@ -161,6 +161,11 @@ not support yet, so a deployment that enables HyperPod sets
 deploy*: EKS cannot downgrade a running cluster, and a cluster already on an
 unsupported minor has to wait for HyperPod to add it. The preflight's
 `kubernetes-version` check reads the tree and fails on a minor without an AMI.
+It judges the minor the cluster will run when HyperPod is created: cdk.json's
+before the first deploy, and once the cluster exists the version the cluster
+itself reports, so a cluster upgraded outside the deploy is caught. A cdk.json
+minor below the running one fails (the deploy would try to downgrade), and so
+does one more than a minor above it (EKS upgrades one minor at a time).
 
 ```bash
 # Turn it on in cdk.json; the instance-group options rewrite the block's first

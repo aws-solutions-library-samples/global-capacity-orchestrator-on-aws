@@ -14,6 +14,7 @@ from urllib.parse import quote
 import requests
 import yaml
 
+from gco.job_admission import apply_sandbox
 from gco.job_envelope import build_job_message
 from gco.services.manifest_processor import TRAINJOB_API_VERSION, safe_load_all_yaml
 
@@ -21,8 +22,8 @@ from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-20T23:20:00Z
-# Generated from Git commit: 42cc3f2094423b3f8056fbc5c20652e222b0650f
+# Generated at (UTC): 2026-11-10T17:41:25Z
+# Generated from Git commit: c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe
 # Flowchart(s) generated from this file:
 #   * ``JobManager.submit_job`` -> ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.html``
 #     (PNG: ``diagrams/code_diagrams/cli/jobs.JobManager_submit_job.png``)
@@ -292,6 +293,7 @@ class JobManager:
         target_region: str | None = None,
         dry_run: bool = False,
         labels: dict[str, str] | None = None,
+        sandbox: str | None = None,
     ) -> dict[str, Any]:
         """
         Submit a job to GCO.
@@ -307,6 +309,8 @@ class JobManager:
             target_region: Force job to specific region
             dry_run: Validate without applying
             labels: Additional labels to add to manifests
+            sandbox: Run every pod in an AWS Nitro Sandbox of this mode
+                (``gco.job_admission.SANDBOX_MODES``)
 
         Returns:
             Submission result dictionary
@@ -329,6 +333,9 @@ class JobManager:
                     manifest["metadata"]["labels"] = {}
                 manifest["metadata"]["labels"].update(labels)
 
+        if sandbox:
+            apply_sandbox(manifest_list, sandbox)
+
         # Submit via API
         return self._aws_client.submit_manifests(
             manifests=manifest_list,
@@ -344,6 +351,7 @@ class JobManager:
         namespace: str | None = None,
         dry_run: bool = False,
         labels: dict[str, str] | None = None,
+        sandbox: str | None = None,
     ) -> dict[str, Any]:
         """
         Submit a job directly to a regional cluster using kubectl.
@@ -364,6 +372,8 @@ class JobManager:
                 rely on it reaching ``kubectl apply`` untouched.
             dry_run: Validate without applying
             labels: Additional labels to add to manifests
+            sandbox: Run every pod in an AWS Nitro Sandbox of this mode
+                (``gco.job_admission.SANDBOX_MODES``)
 
         Returns:
             Submission result dictionary
@@ -389,6 +399,9 @@ class JobManager:
                 if "labels" not in manifest["metadata"]:
                     manifest["metadata"]["labels"] = {}
                 manifest["metadata"]["labels"].update(labels)
+
+        if sandbox:
+            apply_sandbox(manifest_list, sandbox)
 
         # Get cluster name from stack
         stack = self._aws_client.get_regional_stack(region)
@@ -1183,6 +1196,7 @@ class JobManager:
         namespace: str | None = None,
         labels: dict[str, str] | None = None,
         priority: int = 0,
+        sandbox: str | None = None,
     ) -> dict[str, Any]:
         """
         Submit a job to a regional SQS queue for processing.
@@ -1203,6 +1217,8 @@ class JobManager:
                 validation enforces the allowlist.
             labels: Additional labels to add to manifests
             priority: Job priority (higher = more important)
+            sandbox: Run every pod in an AWS Nitro Sandbox of this mode
+                (``gco.job_admission.SANDBOX_MODES``)
 
         Returns:
             Submission result dictionary with message_id and queue info
@@ -1228,6 +1244,9 @@ class JobManager:
                 if "labels" not in manifest["metadata"]:
                     manifest["metadata"]["labels"] = {}
                 manifest["metadata"]["labels"].update(labels)
+
+        if sandbox:
+            apply_sandbox(manifest_list, sandbox)
 
         # Get queue URL from stack
         stack = self._aws_client.get_regional_stack(region)

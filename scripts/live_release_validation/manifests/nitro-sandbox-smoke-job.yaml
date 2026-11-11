@@ -1,0 +1,80 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gco-live-nitro-sandbox-__RUN_TOKEN__
+  namespace: gco-jobs
+  annotations:
+    # The cluster-managed gco-jobs/default-deny-ingress policy selects all pods.
+    checkov.io/skip1: CKV2_K8S_6=Protected by the cluster-managed gco-jobs default-deny-ingress NetworkPolicy
+  labels:
+    app.kubernetes.io/name: gco-live-release-validation
+    gco.aws/validation-run: __RUN_TOKEN__
+    gco.aws/validation-path: nitro-sandbox
+    # Queued like any other Job. Kueue adds the RuntimeClass overhead, one
+    # eks.amazonaws.com/nitro-sandbox slot, to the workload's requests, so
+    # completion also proves gco-cluster-queue covers that resource; a queue
+    # that did not would never admit the Job.
+    kueue.x-k8s.io/queue-name: gco-default
+spec:
+  backoffLimit: 0
+  # A node drain is not a workload failure. EKS Auto Mode consolidates nodes
+  # while the harness runs (the inference matrix leaves spare capacity behind
+  # it), and a pod evicted through the Eviction API carries the
+  # DisruptionTarget condition; with a zero backoff limit that eviction alone
+  # failed the Job even though the container had already exited 0. Let the
+  # Job replace a disrupted pod instead — a real non-zero exit still fails it
+  # on the spot.
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+            status: "True"
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gco-live-release-validation
+        gco.aws/validation-run: __RUN_TOKEN__
+        gco.aws/validation-path: nitro-sandbox
+    spec:
+      # An AWS Nitro Sandbox: EKS Auto Mode provisions a sandbox-capable node
+      # for it (docs/NITRO_SANDBOXES.md).
+      runtimeClassName: isolated-sandbox
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoke
+          # BusyBox 1.38.0 multi-platform index from the official Docker Hub tag API:
+          # https://hub.docker.com/v2/repositories/library/busybox/tags/1.38.0
+          image: docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+          imagePullPolicy: IfNotPresent
+          # The marker prints only inside a sandbox. A Nitro Sandbox's disks
+          # are virtio-blk devices (vd*), while a container on a Nitro instance
+          # outside one sees the instance's NVMe devices, so a pod that lost its
+          # runtime class on the way exits 1 instead of passing.
+          command:
+            - sh
+            - -c
+            - >-
+              echo "machine=$(cat /sys/class/dmi/id/product_name)";
+              echo "disks=$(ls /sys/block | tr '\n' ' ')";
+              ls /sys/block | grep -q '^vd' && echo GCO_LIVE_NITRO_SANDBOX___RUN_TOKEN__
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

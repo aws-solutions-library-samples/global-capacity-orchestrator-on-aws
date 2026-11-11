@@ -37,9 +37,9 @@
       "source_commit": "de508a874e7ac267180e26a4c6fc56c1cd0878c2"
     },
     "cli/jobs.py": {
-      "digest": "962680ef2d65b61f9950ab8b1d1fb347be9e01bb2c8ef5ed05d4dc4e426f742d",
-      "generated_at": "2026-09-20T23:20:00Z",
-      "source_commit": "42cc3f2094423b3f8056fbc5c20652e222b0650f"
+      "digest": "326b53d643894fb68f88de7396f39a4b418837e2d45278509fc492e947b735c1",
+      "generated_at": "2026-11-10T17:41:25Z",
+      "source_commit": "c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe"
     },
     "cli/stacks.py": {
       "digest": "855382fb0b70a372bd3d64933ffcbea1517e86c4123946247edd6dd23ae90e8c",
@@ -82,9 +82,9 @@
       "source_commit": "8cb8e766461f5b7f35205e12db980988598cf6d5"
     },
     "gco/services/manifest_processor.py": {
-      "digest": "69e8d1af2ad4909de594b6469d37244cac9e8659ee8820612f8cf974378e6c71",
-      "generated_at": "2026-09-18T02:11:36Z",
-      "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
+      "digest": "4bbefdf590959382c2c0dd53ad3e42a69f7341067c6aa4965c248ff3307aff44",
+      "generated_at": "2026-11-10T17:41:25Z",
+      "source_commit": "c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe"
     },
     "gco/services/mooncake_pd_proxy.py": {
       "digest": "89841dadd30d2470075071933743dc093930cefd3002f17e3dc1edb24b43ea5d",
@@ -92,9 +92,9 @@
       "source_commit": "95213a3dfe214f41ea8e3977b79711b1be061ac0"
     },
     "gco/services/queue_processor.py": {
-      "digest": "3503e14e09c5267bb37696089e46d3411d70e9801097d8926c0e3df72437fca5",
-      "generated_at": "2026-11-01T00:48:22Z",
-      "source_commit": "f6b3e38195627b51e21c8bc4a141943bc9c9ca62"
+      "digest": "e0db709a120a3a9103b87d1a02be61d5350c1daa9e851efc40456aaa74a9208d",
+      "generated_at": "2026-11-10T17:41:25Z",
+      "source_commit": "c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe"
     },
     "gco/services/request_size_middleware.py": {
       "digest": "6e8ece973df61e63706e7e654dd1387f21175f8b60ff7dca31f2f2a34e3af8a6",

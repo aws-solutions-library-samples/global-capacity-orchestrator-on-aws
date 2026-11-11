@@ -7,6 +7,8 @@ from typing import Any
 
 import click
 
+from gco.job_admission import SANDBOX_MODES, apply_sandbox
+
 from ..config import GCOConfig
 from ..jobs import JobInfo, get_job_manager, resolve_submission_identity
 from ..output import confirm, format_job_table, get_output_formatter
@@ -14,6 +16,17 @@ from ..output import confirm, format_job_table, get_output_formatter
 logger = logging.getLogger(__name__)
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
+
+#: ``--sandbox`` for every submit command (gco.job_admission.apply_sandbox).
+sandbox_option = click.option(
+    "--sandbox",
+    type=click.Choice(sorted(SANDBOX_MODES)),
+    help=(
+        "Run every pod in an AWS Nitro Sandbox: isolated sets runtimeClassName: "
+        "isolated-sandbox on each pod template. Needs EKS 1.36 or later; see "
+        "docs/NITRO_SANDBOXES.md"
+    ),
+)
 
 
 def _resolve_result_namespace(result: Any, fallback: str) -> str:
@@ -53,6 +66,7 @@ def jobs(config: Any) -> None:
     ),
 )
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
+@sandbox_option
 @click.option("--wait", "-w", is_flag=True, help="Wait for job completion")
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
@@ -64,6 +78,7 @@ def submit_job(
     dry_run: Any,
     check_policy: Any,
     label: Any,
+    sandbox: Any,
     wait: Any,
     timeout: Any,
 ) -> None:
@@ -95,6 +110,7 @@ def submit_job(
             manifest_path=manifest_path,
             namespace=namespace,
             target_region=target_region,
+            sandbox=sandbox,
         )
 
     try:
@@ -104,6 +120,7 @@ def submit_job(
             target_region=target_region,
             dry_run=dry_run,
             labels=labels if labels else None,
+            sandbox=sandbox,
         )
 
         if dry_run:
@@ -158,6 +175,7 @@ def submit_job(
 )
 @click.option("--dry-run", is_flag=True, help="Validate without applying")
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
+@sandbox_option
 @click.option("--wait", "-w", is_flag=True, help="Wait for job completion")
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
@@ -168,6 +186,7 @@ def submit_job_direct(
     namespace: Any,
     dry_run: Any,
     label: Any,
+    sandbox: Any,
     wait: Any,
     timeout: Any,
 ) -> None:
@@ -218,6 +237,7 @@ def submit_job_direct(
             namespace=namespace,
             dry_run=dry_run,
             labels=labels if labels else None,
+            sandbox=sandbox,
         )
 
         if dry_run:
@@ -264,6 +284,7 @@ def submit_job_direct(
 )
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @click.option("--priority", "-p", default=0, help="Job priority (higher = more important)")
+@sandbox_option
 @click.option(
     "--auto-region",
     is_flag=True,
@@ -280,6 +301,7 @@ def submit_job_sqs(
     namespace: Any,
     label: Any,
     priority: Any,
+    sandbox: Any,
     auto_region: Any,
 ) -> None:
     """Submit a job to a regional SQS queue for processing.
@@ -354,6 +376,7 @@ def submit_job_sqs(
             namespace=namespace,
             labels=labels if labels else None,
             priority=priority,
+            sandbox=sandbox,
         )
 
         formatter.print_success(f"Job queued successfully in {region}")
@@ -1205,6 +1228,7 @@ def _run_pre_submit_policy_check(
     manifest_path: str,
     namespace: str | None,
     target_region: str | None,
+    sandbox: str | None = None,
 ) -> None:
     """Advisory pre-submit check against the target region's live policy.
 
@@ -1228,6 +1252,9 @@ def _run_pre_submit_policy_check(
         for manifest in manifests:
             if isinstance(manifest, dict):
                 manifest.setdefault("metadata", {}).setdefault("namespace", effective_namespace)
+        if sandbox:
+            # Judge what will be sent: --sandbox changes the pod templates.
+            apply_sandbox(manifests, sandbox)
 
         regions = [target_region] if target_region else _policy_regions(config, None)
         policies = fetch_region_policies(job_manager._aws_client, regions)
@@ -1524,9 +1551,16 @@ def check_policy(
     help="Job priority (0-100, higher = more important)",
 )
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
+@sandbox_option
 @pass_config
 def submit_job_queue(
-    config: Any, manifest_path: Any, region: Any, namespace: Any, priority: Any, label: Any
+    config: Any,
+    manifest_path: Any,
+    region: Any,
+    namespace: Any,
+    priority: Any,
+    label: Any,
+    sandbox: Any,
 ) -> None:
     """Submit a job to the global DynamoDB queue for regional pickup.
 
@@ -1570,6 +1604,8 @@ def submit_job_queue(
         # Load manifest
         with open(manifest_path, encoding="utf-8") as f:
             manifest = safe_load_yaml(f, allow_aliases=False)
+        if sandbox:
+            apply_sandbox([manifest], sandbox)
 
         # Submit via API
         from ..aws_client import get_aws_client

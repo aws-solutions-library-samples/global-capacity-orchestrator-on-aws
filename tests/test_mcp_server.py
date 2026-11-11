@@ -198,13 +198,13 @@ class TestToolRegistration:
         # 139 before the platform add-on status trio
         # eks_capabilities_status + gitops_status + crossplane_status; 138
         # before deps_scan; 134 before fleet_status; 125 before the cost
-        # allocation/k8s/report family added 9). Optional families add 58
+        # allocation/k8s/report family added 9). Optional families add 60
         # more when every flag is enabled: capacity purchase (2), image
         # publish (3), destructive operations (16), model upload (2),
         # infrastructure deploy (4), infrastructure destroy (2), local metrics
         # (1), semantic progress (1), local storage sync (1), config
-        # management (11), Mission (10), and Swarm (6). The all-flags ceiling
-        # is therefore 215.
+        # management (11), Mission (10), Swarm (6), and NVIDIA Run:ai
+        # capacity (1). The all-flags ceiling is therefore 216.
         base_count = 156
         tool_names = [t.name for t in tools]
         expected = base_count
@@ -242,6 +242,8 @@ class TestToolRegistration:
         if "swarm_start" in tool_names:
             # The six swarm_* tools register together under GCO_ENABLE_SWARM.
             expected += 6
+        if "runai_capacity" in tool_names:
+            expected += 1  # gated by GCO_ENABLE_RUNAI_CAPACITY
         if "mission_start" in tool_names:
             # The ten mission_* tools register together under GCO_ENABLE_MISSION.
             expected += 10
@@ -685,6 +687,16 @@ class TestJobTools:
             assert "submit" in cmd
             assert "job.yaml" in cmd
             assert "-n" not in cmd
+            assert "--sandbox" not in cmd
+
+    @pytest.mark.parametrize("tool", ["submit_job_api", "submit_job_sqs"])
+    def test_submit_tools_pass_the_nitro_sandbox_mode(self, tool):
+        args = ("job.yaml",) if tool == "submit_job_api" else ("job.yaml", "us-east-1")
+        with patch("cli_runner.subprocess.run") as mock:
+            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+            getattr(run_mcp, tool)(*args, sandbox="isolated")
+            cmd = mock.call_args[0][0]
+            assert cmd[cmd.index("--sandbox") + 1] == "isolated"
 
     def test_get_job(self):
         with patch("cli_runner.subprocess.run") as mock:

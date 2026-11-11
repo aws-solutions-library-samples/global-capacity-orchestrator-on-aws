@@ -131,6 +131,13 @@ taint as a toleration), ClusterQueue `gco-hyperpod-queue` (quotas from
 other change. The examples below build a custom `user-queue` topology
 instead, which is the pattern for team-specific quotas.
 
+`gco-cluster-queue` also covers `eks.amazonaws.com/nitro-sandbox`. Kueue adds a
+pod's RuntimeClass overhead to the workload's requests, and every
+[AWS Nitro Sandbox](NITRO_SANDBOXES.md) pod's overhead includes one of these
+slots, so a ClusterQueue without it never admits a sandboxed Job. A custom
+ClusterQueue that should take sandboxed Jobs needs the same entry under
+`coveredResources`.
+
 Add the `kueue.x-k8s.io/queue-name` label and set resource limits to your Job:
 
 ```yaml

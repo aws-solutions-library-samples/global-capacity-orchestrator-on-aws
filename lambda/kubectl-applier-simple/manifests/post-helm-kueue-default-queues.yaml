@@ -37,7 +37,12 @@ spec:
   namespaceSelector: {}
   queueingStrategy: BestEffortFIFO
   resourceGroups:
-    - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+    # eks.amazonaws.com/nitro-sandbox: each AWS Nitro Sandbox pod consumes one
+    # through its RuntimeClass overhead, which Kueue adds to the workload's
+    # requests. A ClusterQueue that does not cover a requested resource can
+    # never admit the workload, so a sandboxed Job would stay suspended. Every
+    # sandbox pod is a pod, so the namespace pod quota bounds it.
+    - coveredResources: ["cpu", "memory", "nvidia.com/gpu", "eks.amazonaws.com/nitro-sandbox"]
       flavors:
         - name: gco-default-flavor
           resources:
@@ -47,6 +52,8 @@ spec:
               nominalQuota: "{{QUOTA_MAX_MEMORY}}"
             - name: "nvidia.com/gpu"
               nominalQuota: "{{QUOTA_MAX_GPU}}"
+            - name: "eks.amazonaws.com/nitro-sandbox"
+              nominalQuota: "{{QUOTA_MAX_PODS}}"
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
