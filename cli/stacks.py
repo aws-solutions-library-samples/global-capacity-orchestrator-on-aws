@@ -5164,13 +5164,17 @@ class StackManager:
         successful: list[str] = []
         failed: list[str] = []
 
-        # Capture implicit log-group names while the source stacks still
-        # exist; the exact derived names are deleted by ``finish`` below
-        # once their stacks are gone. Strict teardowns collect nothing —
-        # the live-validation harness owns fenced log-group deletion.
+        # Capture implicit log-group names and each stack's ID while the
+        # source stacks still exist. Once their stacks are gone, ``finish``
+        # below deletes the exact derived names, and any explicit log group
+        # that Lambda recreated after CloudFormation deleted it. Strict
+        # teardowns collect nothing — the live-validation harness owns fenced
+        # log-group deletion.
         implicit_log_groups: dict[str, dict[str, Any]] = {}
+        stack_identities: dict[str, dict[str, str]] = {}
         if not strict_identity:
             implicit_log_groups = self._collect_implicit_log_groups(stacks)
+            stack_identities = self._collect_stack_identities(stacks)
 
         def finish(overall: bool) -> tuple[bool, list[str], list[str]]:
             """Funnel every exit through the teardown sweeps.
@@ -5185,6 +5189,11 @@ class StackManager:
                 record_cleanup(
                     "implicit-log-groups",
                     self._cleanup_implicit_log_groups(implicit_log_groups, successful),
+                )
+            if stack_identities:
+                record_cleanup(
+                    "regenerated-log-groups",
+                    self._cleanup_regenerated_log_groups(stack_identities, successful),
                 )
             if overall and not keep_control_plane:
                 # Only after a complete teardown: while any stack survives,
@@ -5900,7 +5909,9 @@ class StackManager:
 
     # The service-side patterns implicit log groups follow. An explicit
     # ``AWS::Logs::LogGroup`` resource is deliberately absent here —
-    # CloudFormation owns those directly.
+    # CloudFormation owns those directly. The one gap, a group Lambda
+    # recreates after CloudFormation deleted it, is handled by
+    # ``_cleanup_regenerated_log_groups``.
     _EKS_CONTAINER_INSIGHTS_SUFFIXES = ("application", "dataplane", "host", "performance")
     # Where SageMaker HyperPod writes a cluster's node logs:
     # ``/aws/sagemaker/Clusters/<cluster name>/<cluster id>``, created with the
@@ -6033,6 +6044,87 @@ class StackManager:
             )
         for failure in outcome["errors"]:
             logger.warning("Implicit log-group cleanup failed for %s", failure)
+        return outcome
+
+    def _collect_stack_identities(self, stacks: Collection[str]) -> dict[str, dict[str, str]]:
+        """Each live stack's Region and stack ID, read before deletion.
+
+        A deleted stack can only be read by its ID. Best-effort like the
+        log-group collection: a stack that cannot be described is skipped
+        with a warning.
+        """
+        identities: dict[str, dict[str, str]] = {}
+        for stack_name in stacks:
+            try:
+                target = self._describe_stack_target(stack_name)
+            except Exception as exc:  # best-effort collection
+                logger.warning("Could not read the stack ID of %s: %s", stack_name, exc)
+                continue
+            if target is not None:
+                region, _cloudformation, stack = target
+                identities[stack_name] = {"region": region, "stack_id": str(stack["StackId"])}
+        return identities
+
+    def _cleanup_regenerated_log_groups(
+        self,
+        identities: Mapping[str, Mapping[str, str]],
+        successful_stacks: Collection[str],
+    ) -> dict[str, Any]:
+        """Delete explicit log groups that reappeared after CloudFormation deleted them.
+
+        A Lambda function's last log lines can arrive a few seconds after
+        CloudFormation has deleted the function's explicit log group, and
+        Lambda then creates the group again: untagged, with no retention, and
+        owned by no stack. A two-Region teardown left four CDK provider-framework
+        log groups behind this way.
+
+        For each deleted stack this reads, by stack ID, the
+        ``AWS::Logs::LogGroup`` resources CloudFormation reports as
+        ``DELETE_COMPLETE``, and deletes those that exist again. A retained
+        group (``DELETE_SKIPPED``) is never touched. Every error is recorded and
+        swallowed: cleanup never converts a successful destroy into a failure.
+        """
+        import boto3
+
+        outcome: dict[str, Any] = {"deleted": [], "errors": []}
+        for stack_name in sorted(successful_stacks):
+            identity = identities.get(stack_name)
+            if not identity:
+                continue
+            region = str(identity.get("region") or "")
+            try:
+                cloudformation = boto3.client("cloudformation", region_name=region)
+                paginator = cloudformation.get_paginator("list_stack_resources")
+                names = [
+                    str(item["PhysicalResourceId"])
+                    for page in paginator.paginate(StackName=str(identity["stack_id"]))
+                    for item in page.get("StackResourceSummaries", [])
+                    if item.get("ResourceType") == "AWS::Logs::LogGroup"
+                    and item.get("ResourceStatus") == "DELETE_COMPLETE"
+                    and item.get("PhysicalResourceId")
+                ]
+                logs_client = boto3.client("logs", region_name=region)
+            except Exception as exc:  # best-effort cleanup
+                outcome["errors"].append(f"{region}:{stack_name}: {type(exc).__name__}: {exc}")
+                continue
+            for name in names:
+                try:
+                    logs_client.delete_log_group(logGroupName=name)
+                except ClientError as exc:
+                    code = str(exc.response.get("Error", {}).get("Code") or "")
+                    if code != "ResourceNotFoundException":
+                        outcome["errors"].append(f"{region}:{name}: {code}")
+                except Exception as exc:  # best-effort cleanup
+                    outcome["errors"].append(f"{region}:{name}: {type(exc).__name__}: {exc}")
+                else:
+                    outcome["deleted"].append(f"{region}:{name}")
+        if outcome["deleted"]:
+            print(
+                f"  Deleted {len(outcome['deleted'])} CloudWatch log group(s) that Lambda "
+                "recreated after CloudFormation deleted them."
+            )
+        for failure in outcome["errors"]:
+            logger.warning("Regenerated log-group cleanup failed for %s", failure)
         return outcome
 
     def _cleanup_traffic_dial_parameters(self) -> dict[str, Any]:

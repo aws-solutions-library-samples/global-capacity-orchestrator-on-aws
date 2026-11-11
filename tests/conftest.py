@@ -324,10 +324,11 @@ def _no_real_mission_memory():
 # ephemeral-bastion sweep (EC2 TerminateInstances), the backup-vault purge,
 # the EKS security-group watchdog and its final pass, the implicit log-group
 # sweep (CloudWatch DeleteLogGroup on every Lambda/EKS/Container Insights
-# group the stacks imply), bastion IAM retirement, the traffic-dial SSM purge,
-# and the post-regional EBS volume sweep. Orchestration tests that mock
-# ``destroy`` / ``list_stacks`` but not these helpers otherwise fire real AWS
-# calls: slow and non-hermetic, and outright destructive when
+# group the stacks imply), the sweep of explicit log groups Lambda recreated
+# after CloudFormation deleted them, bastion IAM retirement, the traffic-dial
+# SSM purge, and the post-regional EBS volume sweep. Orchestration tests that
+# mock ``destroy`` / ``list_stacks`` but not these helpers otherwise fire real
+# AWS calls: slow and non-hermetic, and outright destructive when
 # ``config.project_name`` resolves to a live value (see the credential scrub
 # at the top of this module for the day that happened).
 #
@@ -346,6 +347,8 @@ _DESTROY_CLEANUP_STUBS: dict[str, object] = {
     "_start_eks_sg_watchdog": MagicMock(),
     "_collect_implicit_log_groups": {},
     "_cleanup_implicit_log_groups": {"deleted": [], "missing": [], "errors": []},
+    "_collect_stack_identities": {},
+    "_cleanup_regenerated_log_groups": {"deleted": [], "errors": []},
     "_cleanup_bastion_iam": {"completed_steps": 0, "absent_steps": 0, "errors": []},
     "_detach_stack_roles_from_instance_profiles": {"detached": [], "errors": []},
     "_cleanup_traffic_dial_parameters": {"deleted": [], "errors": []},
@@ -374,6 +377,9 @@ _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
     "TestEksSgWatchdog": frozenset({"_start_eks_sg_watchdog", "_cleanup_eks_security_groups"}),
     "TestImplicitLogGroupCleanup": frozenset(
         {"_collect_implicit_log_groups", "_cleanup_implicit_log_groups"}
+    ),
+    "TestRegeneratedLogGroupCleanup": frozenset(
+        {"_collect_stack_identities", "_cleanup_regenerated_log_groups"}
     ),
     "TestBastionIamCleanup": frozenset({"_cleanup_bastion_iam"}),
     "TestRoleInstanceProfileDetach": frozenset({"_detach_stack_roles_from_instance_profiles"}),
