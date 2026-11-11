@@ -14,8 +14,10 @@ have been applied:
 publish the Gateway hostname.
 
 Entrypoints:
-    - ``handle_task`` is the final Step Functions convergence task. The Helm
-      teardown state machine also calls it to remove the endpoint
+    - ``handle_task`` is the final Step Functions convergence task. Until the
+      accelerator has deployed the registration it raises
+      ``AcceleratorNotDeployedError``, which the state machine retries. The
+      Helm teardown state machine also calls it to remove the endpoint
       (``cleanup_gateway_endpoint``) and then to poll the accelerator
       (``check_accelerator_deployed``).
     - ``lambda_handler`` preserves the legacy raw CloudFormation custom-resource
@@ -41,8 +43,8 @@ import urllib3
 from botocore.exceptions import ClientError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-11T03:19:27Z
-# Generated from Git commit: 5728d2a73823e46017e512f15db4357ba78a50bc
+# Generated at (UTC): 2026-11-11T14:00:14Z
+# Generated from Git commit: 875626841c63952dfc3f54d0de46303435ee1678
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/ga-registration/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/ga-registration/handler.lambda_handler.png``)
@@ -578,8 +580,9 @@ def _accelerator_arn_from_endpoint_group(endpoint_group_arn: str) -> str:
 class AcceleratorNotDeployedError(Exception):
     """The accelerator has not yet deployed its latest configuration change.
 
-    ``check_accelerator_deployed`` raises this, and the Helm teardown state
-    machine retries on exactly this error name to poll the accelerator.
+    ``check_accelerator_deployed`` (teardown) and the state machine's
+    registration (convergence) raise this. Both state machines retry on
+    exactly this error name to poll the accelerator.
     """
 
 
@@ -686,8 +689,17 @@ def register_ga_endpoint(
     health_check_path: str = "/api/v1/health",
     health_check_interval: int = 30,
     health_check_threshold: int = 3,
+    wait_for_deployment: bool = True,
 ) -> dict[str, str]:
-    """Converge the Gateway ALB, optional GA endpoint, registry, and migration."""
+    """Converge the Gateway ALB, optional GA endpoint, registry, and migration.
+
+    ``wait_for_deployment=False`` is the convergence state machine's mode.
+    Instead of waiting in place for the accelerator to deploy the endpoint
+    change, it checks once and raises ``AcceleratorNotDeployedError`` before
+    publishing; the state machine retries this whole idempotent task until
+    the accelerator is deployed. The legacy raw CloudFormation path keeps the
+    in-Lambda wait.
+    """
     ca_path: str | None = None
     try:
         k8s_endpoint, token, ca_path = get_k8s_client(cluster_name, region)
@@ -744,21 +756,28 @@ def register_ga_endpoint(
             # earlier reports the deployment as complete while brand-new
             # connections to the global endpoint still black-hole for several
             # minutes, which a live release run proved by timing out on the
-            # first health probe after deploy. Wait strictly, within whatever
-            # remains of this handler's wall-clock budget.
-            remaining_budget = min(
-                GA_DEPLOYED_WAIT_SECONDS,
-                int(MAX_WAIT_SECONDS - (time.time() - start_time)),
-            )
-            if remaining_budget <= 0 or not wait_for_accelerator_deployed(
-                ga_client,
-                normalized_endpoint_group,
-                timeout_seconds=remaining_budget,
-                strict=True,
-            ):
-                raise TimeoutError(
-                    "Global Accelerator did not reach DEPLOYED after endpoint registration"
+            # first health probe after deploy. Publication therefore waits for
+            # DEPLOYED. Another Region's change can stretch that wait: in a live
+            # `deploy-all -p`, us-east-1 waited 11.3 minutes because us-west-2
+            # registered 4 minutes after it.
+            if not wait_for_deployment:
+                released, status = _accelerator_released(ga_client, normalized_endpoint_group)
+                if not released:
+                    raise AcceleratorNotDeployedError(f"Global Accelerator status is {status}")
+            else:
+                remaining_budget = min(
+                    GA_DEPLOYED_WAIT_SECONDS,
+                    int(MAX_WAIT_SECONDS - (time.time() - start_time)),
                 )
+                if remaining_budget <= 0 or not wait_for_accelerator_deployed(
+                    ga_client,
+                    normalized_endpoint_group,
+                    timeout_seconds=remaining_budget,
+                    strict=True,
+                ):
+                    raise TimeoutError(
+                        "Global Accelerator did not reach DEPLOYED after endpoint registration"
+                    )
         else:
             logger.info("EndpointGroupArn is not configured; skipping Global Accelerator")
 
@@ -823,6 +842,7 @@ def handle_task(event: dict[str, Any]) -> dict[str, Any]:
         or DEFAULT_REGISTRY_REGION,
         project_name=str(event.get("ProjectName", "gco")),
         **_health_check_contract(event),
+        wait_for_deployment=False,
     )
 
 

@@ -42,9 +42,9 @@
       "source_commit": "c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe"
     },
     "cli/stacks.py": {
-      "digest": "4b59c050bee6676473d2764a35d8fa15be87a351b6d80825c9d5627ddaa5c06b",
-      "generated_at": "2026-11-11T03:19:27Z",
-      "source_commit": "5728d2a73823e46017e512f15db4357ba78a50bc"
+      "digest": "1ff55f985dd81aa6aa4734690a0e417a1c758a4d51bc64165a645cec09011fd6",
+      "generated_at": "2026-11-11T14:00:14Z",
+      "source_commit": "875626841c63952dfc3f54d0de46303435ee1678"
     },
     "cli/upgrade.py": {
       "digest": "250666b92297af33ca69a20ac036804aad5c06234d609bce2a3044b0da689f3c",
@@ -142,9 +142,9 @@
       "source_commit": "3458f76ef1541be718c00458b8ecc8f7c770c6ad"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "5bd97344ec5727ed3efd6383faaa612d57cc817cda02d3bc0a24230ad9d1a770",
-      "generated_at": "2026-11-11T03:19:27Z",
-      "source_commit": "5728d2a73823e46017e512f15db4357ba78a50bc"
+      "digest": "e5862cc11a7e5a3b7763dc1e85d37319d489072a4495e1c67f66f5c084a539a8",
+      "generated_at": "2026-11-11T14:00:14Z",
+      "source_commit": "875626841c63952dfc3f54d0de46303435ee1678"
     },
     "gco_mcp/audit.py": {
       "digest": "c085762d44c367b22fdf200ee1764c38d26056111aa7f7fa87429b810695b689",
@@ -227,14 +227,14 @@
       "source_commit": "89b000378ed5a912a38c06f4feab2b029936ebcc"
     },
     "lambda/ga-registration/handler.py": {
-      "digest": "890ff8bd378c7e90752444449c0e0ae5854ebe18ed7748ab9ccf7b5db7bbf013",
-      "generated_at": "2026-11-11T03:19:27Z",
-      "source_commit": "5728d2a73823e46017e512f15db4357ba78a50bc"
+      "digest": "9337089762dd6318b68ccb45aaabfc955969b3d51621a964397666c7a0b23e8c",
+      "generated_at": "2026-11-11T14:00:14Z",
+      "source_commit": "875626841c63952dfc3f54d0de46303435ee1678"
     },
     "lambda/helm-installer/handler.py": {
-      "digest": "12e773f58f69bf2adbc76edd3089d5faaddd377c8a6f975a259d7945056f633f",
-      "generated_at": "2026-11-01T14:18:07Z",
-      "source_commit": "e9975a6893f9a2542214f6eb200b4fb05c3230eb"
+      "digest": "7bc813d8451e230549e06864d0eb2de94bb22de574415024e00f1584e0927ad0",
+      "generated_at": "2026-11-11T14:00:14Z",
+      "source_commit": "875626841c63952dfc3f54d0de46303435ee1678"
     },
     "lambda/helm-installer/teardown_provider.py": {
       "digest": "846fa5eb74ffc9ff796a97d04542084e1782a62826ceceb1a7efc9013158fb9c",

@@ -819,6 +819,24 @@ def test_install_state_machine_retries_and_continues_per_chart(feature_stack):
     assert publication["TimeoutSeconds"] == 960
     assert "Catch" not in publication
     _assert_retry(publication, attempts=3, interval=30, max_delay=180)
+    # Registration polls the accelerator by retrying the handler's
+    # not-yet-deployed error rather than waiting inside one invocation; any
+    # other failure keeps the ordinary States.ALL retries above.
+    ga_handler = load_lambda_module("ga-registration")
+    poll = [
+        retry
+        for retry in publication["Retry"]
+        if retry["ErrorEquals"] == [ga_handler.AcceleratorNotDeployedError.__name__]
+    ]
+    assert poll == [
+        {
+            "ErrorEquals": ["AcceleratorNotDeployedError"],
+            "IntervalSeconds": 30,
+            "MaxAttempts": 60,
+            "BackoffRate": 1,
+        }
+    ]
+    assert publication["Retry"][-1]["ErrorEquals"] == ["States.ALL"]
     publication_json = json.dumps(publication, sort_keys=True)
     assert "publish_gateway_endpoint" in publication_json
     assert "$.RegistryRegion" in publication_json
@@ -936,7 +954,7 @@ def test_teardown_waits_then_uninstalls_in_strict_reverse_order(feature_stack):
         else:
             assert state["End"] is True
         assert state["TimeoutSeconds"] == {
-            "keda": 240,
+            "keda": 360,
             "argocd": 240,
             "crossplane": 360,
             "slinky-slurm": 240,
@@ -1147,6 +1165,10 @@ def test_non_ga_partition_omits_registration_and_tears_down_directly(ga_disabled
     assert "Catch" not in helm_validation
     publication = states["PublishGatewayEndpoint"]
     assert publication["Next"] == "HelmInstallComplete"
+    # Without an accelerator there is nothing to poll.
+    assert all(
+        retry["ErrorEquals"] != ["AcceleratorNotDeployedError"] for retry in publication["Retry"]
+    )
     publication_json = json.dumps(publication, sort_keys=True)
     assert "publish_gateway_endpoint" in publication_json
     assert "$.RegistryRegion" in publication_json

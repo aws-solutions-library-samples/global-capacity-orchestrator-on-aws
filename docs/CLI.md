@@ -5201,7 +5201,8 @@ exports are still consumed. The sweeps that only make sense for a full teardown
 are skipped: the image-registry preflight, the backup-vault purge, bastion IAM
 retirement, and the traffic-dial parameter purge. Per-stack sweeps (orphaned
 bastions, roles held in instance profiles, implicit and recreated log groups,
-dynamically provisioned EBS volumes) still run for the stacks that went away.
+dynamically provisioned EBS volumes, the Region's add-on SSM parameters) still
+run for the stacks that went away.
 
 Data inside the regional stacks (EFS and FSx file systems, Valkey, Aurora,
 in-cluster volumes) is deleted with them — back it up to the cluster-shared bucket
@@ -5258,6 +5259,13 @@ a few seconds after its log group is gone, and Lambda then recreates the group
 with no tags and no retention. The sweep reads the deleted stack's resources by
 stack ID and only considers log groups that CloudFormation reports as deleted;
 a group CloudFormation retained is left alone.
+
+Once every regional stack is confirmed absent, `destroy-all` also deletes each
+Region's `/<project>/addons/<region>/` SSM parameters: the add-on status records
+that `gco stacks addons status` reads, the convergence replay input and
+execution record, and the teardown fence. The Helm and manifest tooling writes
+them at runtime, so CloudFormation never removes them; the next deployment in
+that Region writes them again.
 
 This cleanup is not an account-wide emptiness proof. ECR repositories or other
 resources configured for retention, and unexpected resources outside the known
