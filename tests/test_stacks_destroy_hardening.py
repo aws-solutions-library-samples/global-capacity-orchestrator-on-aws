@@ -1013,6 +1013,166 @@ class TestImplicitLogGroupCleanup:
         ]
 
 
+class TestRegeneratedLogGroupCleanup:
+    """Non-strict teardown deletes explicit log groups Lambda recreated.
+
+    A provider-framework Lambda's last log lines can land seconds after
+    CloudFormation deleted the function's explicit log group, and Lambda then
+    creates the group again, owned by no stack. Four such groups survived a
+    two-Region ``destroy-all`` and blocked the next live-validation baseline.
+    """
+
+    _STACK_ID = "arn:aws:cloudformation:us-east-1:111111111111:stack/gco-us-east-1/x"
+
+    def _manager(self):
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        return StackManager(config)
+
+    # -- collection ----------------------------------------------------
+
+    def test_collects_the_region_and_id_of_each_live_stack(self):
+        manager = self._manager()
+        target = ("us-east-1", MagicMock(), {"StackId": self._STACK_ID})
+
+        def describe(stack_name):
+            return None if stack_name == "gco-gone" else target
+
+        with patch.object(manager, "_describe_stack_target", side_effect=describe):
+            identities = manager._collect_stack_identities(["gco-us-east-1", "gco-gone"])
+
+        assert identities == {"gco-us-east-1": {"region": "us-east-1", "stack_id": self._STACK_ID}}
+
+    def test_collection_is_best_effort_per_stack(self, caplog):
+        manager = self._manager()
+        target = ("us-east-1", MagicMock(), {"StackId": self._STACK_ID})
+
+        def describe(stack_name):
+            if stack_name == "gco-broken":
+                raise RuntimeError("CloudFormation unavailable")
+            return target
+
+        with patch.object(manager, "_describe_stack_target", side_effect=describe):
+            identities = manager._collect_stack_identities(["gco-broken", "gco-us-east-1"])
+
+        assert list(identities) == ["gco-us-east-1"]
+        assert "Could not read the stack ID of gco-broken" in caplog.text
+
+    # -- deletion ------------------------------------------------------
+
+    @staticmethod
+    def _cloudformation(resources=(), error=None):
+        cloudformation = MagicMock()
+        paginator = cloudformation.get_paginator.return_value
+        if error is not None:
+            paginator.paginate.side_effect = error
+        else:
+            paginator.paginate.return_value = [{"StackResourceSummaries": list(resources)}]
+        return cloudformation
+
+    @staticmethod
+    def _log_group(name, status="DELETE_COMPLETE"):
+        return {
+            "ResourceType": "AWS::Logs::LogGroup",
+            "ResourceStatus": status,
+            "PhysicalResourceId": name,
+        }
+
+    def test_deletes_only_groups_cloudformation_already_deleted(self, capsys):
+        """A retained group, another resource type, or a blank ID is never touched."""
+        manager = self._manager()
+        cloudformation = self._cloudformation(
+            [
+                self._log_group("gco-us-east-1-GaDeregistrationProviderLogGroup-abc"),
+                self._log_group("gco-us-east-1-HelmTeardownProviderLogGroup-def"),
+                self._log_group("gco-us-east-1-RetainedLogGroup-ghi", status="DELETE_SKIPPED"),
+                self._log_group(""),
+                {
+                    "ResourceType": "AWS::SQS::Queue",
+                    "ResourceStatus": "DELETE_COMPLETE",
+                    "PhysicalResourceId": "gco-jobs",
+                },
+            ]
+        )
+        logs = MagicMock()
+        logs.delete_log_group.side_effect = [
+            None,
+            ClientError({"Error": {"Code": "ResourceNotFoundException"}}, "DeleteLogGroup"),
+        ]
+        clients = {("cloudformation", "us-east-1"): cloudformation, ("logs", "us-east-1"): logs}
+        identities = {
+            "gco-us-east-1": {"region": "us-east-1", "stack_id": self._STACK_ID},
+            "gco-us-west-2": {"region": "us-west-2", "stack_id": "still-failing"},
+        }
+
+        with patch(
+            "boto3.client", side_effect=lambda service, region_name: clients[(service, region_name)]
+        ):
+            # gco-global deleted but has no recorded identity; gco-us-west-2
+            # has one but did not delete.
+            outcome = manager._cleanup_regenerated_log_groups(
+                identities, ["gco-us-east-1", "gco-global"]
+            )
+
+        # A deleted stack is read by its ID; its name no longer resolves.
+        cloudformation.get_paginator.assert_called_once_with("list_stack_resources")
+        cloudformation.get_paginator.return_value.paginate.assert_called_once_with(
+            StackName=self._STACK_ID
+        )
+        assert [call.kwargs for call in logs.delete_log_group.call_args_list] == [
+            {"logGroupName": "gco-us-east-1-GaDeregistrationProviderLogGroup-abc"},
+            {"logGroupName": "gco-us-east-1-HelmTeardownProviderLogGroup-def"},
+        ]
+        # A group that did not come back is the normal case, not an outcome.
+        assert outcome == {
+            "deleted": ["us-east-1:gco-us-east-1-GaDeregistrationProviderLogGroup-abc"],
+            "errors": [],
+        }
+        assert "Deleted 1 CloudWatch log group(s) that Lambda recreated" in capsys.readouterr().out
+
+    def test_errors_are_recorded_and_swallowed(self, caplog, capsys):
+        """Cleanup must never convert a successful destroy into a failure."""
+        manager = self._manager()
+        logs = MagicMock()
+        logs.delete_log_group.side_effect = [
+            ClientError({"Error": {"Code": "AccessDeniedException"}}, "DeleteLogGroup"),
+            RuntimeError("connection reset"),
+        ]
+        clients = {
+            ("cloudformation", "us-east-1"): self._cloudformation(
+                [self._log_group("gco-a"), self._log_group("gco-b")]
+            ),
+            ("logs", "us-east-1"): logs,
+            ("cloudformation", "us-west-2"): self._cloudformation(
+                error=RuntimeError("stack listing failed")
+            ),
+        }
+        identities = {
+            "gco-us-east-1": {"region": "us-east-1", "stack_id": self._STACK_ID},
+            "gco-us-west-2": {"region": "us-west-2", "stack_id": "unreadable"},
+        }
+
+        with patch(
+            "boto3.client", side_effect=lambda service, region_name: clients[(service, region_name)]
+        ):
+            outcome = manager._cleanup_regenerated_log_groups(
+                identities, ["gco-us-east-1", "gco-us-west-2"]
+            )
+
+        assert outcome == {
+            "deleted": [],
+            "errors": [
+                "us-east-1:gco-a: AccessDeniedException",
+                "us-east-1:gco-b: RuntimeError: connection reset",
+                "us-west-2:gco-us-west-2: RuntimeError: stack listing failed",
+            ],
+        }
+        assert "Regenerated log-group cleanup failed for us-east-1:gco-a" in caplog.text
+        assert "Deleted" not in capsys.readouterr().out
+
+
 class TestBastionIamCleanup:
     """destroy-all retires the ephemeral-bastion IAM role + profile.
 
@@ -1405,6 +1565,48 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
         bastion_iam.assert_not_called()
         dial.assert_called_once()
         assert "traffic-dial-parameters" in {name for name, _ in cleanups}
+
+    def test_regenerated_log_groups_are_swept_only_for_destroyed_stacks(self):
+        """gco-us-east-1 deletes and gco-global fails: only the former is swept."""
+        from cli.stacks import StackManager
+
+        identities = {
+            "gco-us-east-1": {"region": "us-east-1", "stack_id": "stack-id-1"},
+            "gco-global": {"region": "us-east-2", "stack_id": "stack-id-2"},
+        }
+        with (
+            patch.object(
+                StackManager, "_collect_stack_identities", return_value=identities
+            ) as collect,
+            patch.object(
+                StackManager,
+                "_cleanup_regenerated_log_groups",
+                return_value={"deleted": [], "errors": []},
+            ) as sweep,
+        ):
+            (ok, _successful, failed), *_sweeps, cleanups = self._run(destroy_results=[True, False])
+
+        assert ok is False and failed == ["gco-global"]
+        collect.assert_called_once_with(["gco-global", "gco-us-east-1"])
+        sweep.assert_called_once_with(identities, ["gco-us-east-1"])
+        assert ("regenerated-log-groups", {"deleted": [], "errors": []}) in cleanups
+
+    def test_strict_teardown_never_sweeps_regenerated_log_groups(self):
+        from cli.stacks import StackManager
+
+        with (
+            patch.object(StackManager, "_collect_stack_identities") as collect,
+            patch.object(StackManager, "_cleanup_regenerated_log_groups") as sweep,
+        ):
+            (ok, _successful, _failed), *_sweeps, cleanups = self._run(
+                destroy_results=[True, True],
+                strict=True,
+            )
+
+        assert ok is True
+        collect.assert_not_called()
+        sweep.assert_not_called()
+        assert "regenerated-log-groups" not in {name for name, _ in cleanups}
 
 
 class TestKeepControlPlaneTeardown:

@@ -1486,19 +1486,17 @@ class TestDeletePaths:
             handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN)
 
         remove.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
-        wait.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, strict=False)
+        wait.assert_called_once_with(ga, ENDPOINT_GROUP_ARN)
 
-    def test_strict_deregister_rejects_failed_deployment_wait(self, ga_module):
+    def test_delete_guard_tolerates_an_accelerator_that_never_deploys(self, ga_module):
+        """The provider guards are best effort; a slow deployment never raises."""
         handler, _, _ = ga_module
         ga = MagicMock()
         with (
-            patch.object(handler, "remove_ga_endpoints") as remove,
+            patch.object(handler, "remove_ga_endpoints"),
             patch.object(handler, "wait_for_accelerator_deployed", return_value=False),
-            pytest.raises(TimeoutError, match="did not reach DEPLOYED"),
         ):
-            handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN, strict=True)
-
-        remove.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, strict=True)
+            handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN)
 
     def test_strict_endpoint_cleanup_accepts_absent_endpoint_group(self, ga_module):
         handler, _, _ = ga_module
@@ -1515,9 +1513,9 @@ class TestDeletePaths:
     def test_strict_wait_raises_describe_failures_instead_of_timeout(self, ga_module):
         """Regression: an AccessDenied describe was mislabeled as a GA timeout.
 
-        The teardown-time strict wait must surface the real error; reporting a
-        permissions gap as "did not reach DEPLOYED" sent operators debugging
-        Global Accelerator propagation instead of IAM.
+        The strict wait must surface the real error; reporting a permissions
+        gap as "did not reach DEPLOYED" sent operators debugging Global
+        Accelerator propagation instead of IAM.
         """
         handler, _, _ = ga_module
         ga = MagicMock()
@@ -1526,7 +1524,7 @@ class TestDeletePaths:
         )
 
         with pytest.raises(ClientError, match="AccessDeniedException"):
-            handler.deregister_alb_from_ga(ga, ENDPOINT_GROUP_ARN, strict=True)
+            handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN, strict=True)
 
         # The lenient path retains its best-effort behavior.
         assert handler.wait_for_accelerator_deployed(ga, ENDPOINT_GROUP_ARN) is False
@@ -1804,7 +1802,7 @@ class TestInvocationContracts:
         }
         with (
             patch.object(handler, "delete_alb_hostname_from_ssm") as delete_ssm,
-            patch.object(handler, "deregister_alb_from_ga") as deregister,
+            patch.object(handler, "remove_ga_endpoints") as remove,
         ):
             result = handler.handle_task(event)
 
@@ -1818,11 +1816,62 @@ class TestInvocationContracts:
             "globalaccelerator",
             region_name="us-west-2",
         )
-        deregister.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, strict=True)
+        remove.assert_called_once_with(ga, ENDPOINT_GROUP_ARN, strict=True)
+        # The state machine polls the deployment afterwards; the cleanup
+        # invocation itself never waits on the accelerator.
+        ga.describe_accelerator.assert_not_called()
         assert result == {
             "RegistryParameterDeleted": True,
             "GlobalAcceleratorDeregistered": True,
         }
+
+    @pytest.mark.parametrize(
+        ("describe", "status"),
+        [
+            ({"Accelerator": {"Status": "DEPLOYED"}}, "DEPLOYED"),
+            (_client_error("AcceleratorNotFoundException", "DescribeAccelerator"), "NOT_FOUND"),
+        ],
+    )
+    def test_step_functions_check_accepts_a_deployed_or_absent_accelerator(
+        self, ga_module, describe, status
+    ):
+        handler, mock_boto_client, _ = ga_module
+        ga = MagicMock()
+        mock_boto_client.return_value = ga
+        if isinstance(describe, Exception):
+            ga.describe_accelerator.side_effect = describe
+        else:
+            ga.describe_accelerator.return_value = describe
+        event = {"Action": "check_accelerator_deployed", "EndpointGroupArn": ENDPOINT_GROUP_ARN}
+
+        assert handler.handle_task(event) == {"AcceleratorStatus": status}
+
+        mock_boto_client.assert_called_once_with("globalaccelerator", region_name="us-west-2")
+        ga.describe_accelerator.assert_called_once_with(AcceleratorArn=ACCELERATOR_ARN)
+
+    def test_step_functions_check_signals_a_pending_deployment_for_retry(self, ga_module):
+        """IN_PROGRESS raises the one error name the state machine retries."""
+        handler, mock_boto_client, _ = ga_module
+        ga = MagicMock()
+        mock_boto_client.return_value = ga
+        ga.describe_accelerator.return_value = {"Accelerator": {"Status": "IN_PROGRESS"}}
+
+        with pytest.raises(handler.AcceleratorNotDeployedError, match="status is IN_PROGRESS"):
+            handler.check_accelerator_deployed(ENDPOINT_GROUP_ARN)
+
+        ga.describe_accelerator.assert_called_once_with(AcceleratorArn=ACCELERATOR_ARN)
+
+    def test_step_functions_check_raises_describe_failures_as_themselves(self, ga_module):
+        """AccessDenied must fail the teardown as itself, not be polled as pending."""
+        handler, mock_boto_client, _ = ga_module
+        ga = MagicMock()
+        mock_boto_client.return_value = ga
+        ga.describe_accelerator.side_effect = _client_error(
+            "AccessDeniedException", "DescribeAccelerator"
+        )
+
+        with pytest.raises(ClientError, match="AccessDeniedException"):
+            handler.check_accelerator_deployed(ENDPOINT_GROUP_ARN)
 
     def test_lambda_dispatches_step_functions_action(self, ga_module):
         handler, _, _ = ga_module

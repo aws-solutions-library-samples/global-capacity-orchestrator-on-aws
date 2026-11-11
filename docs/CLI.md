@@ -5200,8 +5200,8 @@ regional stacks; CloudFormation would otherwise refuse to delete a stack whose
 exports are still consumed. The sweeps that only make sense for a full teardown
 are skipped: the image-registry preflight, the backup-vault purge, bastion IAM
 retirement, and the traffic-dial parameter purge. Per-stack sweeps (orphaned
-bastions, roles held in instance profiles, implicit log groups, dynamically
-provisioned EBS volumes) still run for the stacks that went away.
+bastions, roles held in instance profiles, implicit and recreated log groups,
+dynamically provisioned EBS volumes) still run for the stacks that went away.
 
 Data inside the regional stacks (EFS and FSx file systems, Valkey, Aurora,
 in-cluster volumes) is deleted with them — back it up to the cluster-shared bucket
@@ -5252,13 +5252,19 @@ created out-of-band by Lambda (`/aws/lambda/<function>`), the EKS control plane
 (`/aws/containerinsights/<cluster>/...`), plus the ephemeral SSM bastion's IAM
 role and instance profile if a killed tunnel session left them behind.
 
+The sweep also deletes a destroyed stack's own log groups that exist again
+after CloudFormation deleted them. A Lambda function's last log lines can arrive
+a few seconds after its log group is gone, and Lambda then recreates the group
+with no tags and no retention. The sweep reads the deleted stack's resources by
+stack ID and only considers log groups that CloudFormation reports as deleted;
+a group CloudFormation retained is left alone.
+
 This cleanup is not an account-wide emptiness proof. ECR repositories or other
 resources configured for retention, and unexpected resources outside the known
-inventory, may remain. Only exact names derived from the destroyed stacks' own
-resources (captured before deletion) are considered, and only for stacks whose
-deletion succeeded. Sweep failures are reported best-effort and do not fail the
-destroy command; log groups belonging to stacks that failed to delete are left
-untouched.
+inventory, may remain. Only exact names taken from the destroyed stacks' own
+resources are considered, and only for stacks whose deletion succeeded. Sweep
+failures are reported best-effort and do not fail the destroy command; log
+groups belonging to stacks that failed to delete are left untouched.
 
 #### `gco stacks bootstrap`
 
