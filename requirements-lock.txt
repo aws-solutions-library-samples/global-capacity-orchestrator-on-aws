@@ -138,7 +138,7 @@ deepmerge==3.0.1
     # via zensical
 distlib==0.4.3
     # via virtualenv
-dnspython==2.9.0
+dnspython==2.9.2
     # via email-validator
 docstring-parser==0.18.0
     # via cyclopts
