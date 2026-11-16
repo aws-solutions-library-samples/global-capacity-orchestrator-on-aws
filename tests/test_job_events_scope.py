@@ -17,6 +17,7 @@ namespace the cluster-scoped reads must use.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -343,7 +344,7 @@ class TestDegradedLookups:
             pods=[_pod("trainer-fghij", "i-0replacement"), _pod("trainer-nonode", None)],
             pod_events=[],
             related={
-                ("Node", "i-0replacement"): Exception("(403) Forbidden"),
+                ("Node", "i-0replacement"): ApiException(status=403, reason="Forbidden"),
             },
         )
 
@@ -357,15 +358,21 @@ class TestDegradedLookups:
             ],
         )
         batch_v1 = MagicMock()
-        batch_v1.read_namespaced_job.side_effect = Exception("(404) Not Found")
+        batch_v1.read_namespaced_job.side_effect = ApiException(status=404, reason="Not Found")
         result = _collect(core, batch_v1=batch_v1)
         assert result["scope"]["errors"] == ["Job gco-jobs/trainer: (404) Not Found"]
         # Without the Job, only the plain "<job>-<suffix>" shape is trusted.
         assert result["scope"]["pods"] == ["trainer-zzzzz"]
 
-    def test_api_exceptions_are_reduced_to_status_and_reason(self) -> None:
-        """An ApiException's multi-line str (headers, body) does not land in scope.errors."""
-        refused = ApiException(status=403, reason="Forbidden")
+    def test_api_exceptions_are_reduced_to_status_and_standard_phrase(self) -> None:
+        """Only the HTTP status, with the standard phrase for it, reaches scope.errors.
+
+        An ApiException's str carries the response headers and body, and its
+        ``reason`` echoes whatever the server sent; neither may reach the
+        caller. The phrase is derived from the status code, not read from
+        the exception, so a server-supplied reason is never reflected.
+        """
+        refused = ApiException(status=403, reason="Forbidden by webhook internal-policy.example")
         refused.body = '{"kind":"Status","message":"nodeclaims.karpenter.sh is forbidden"}'
         core = FakeCoreV1(
             job_events=[],
@@ -382,6 +389,53 @@ class TestDegradedLookups:
             "NodeClaims: (404) Not Found",
             "Node i-0abc events: (403) Forbidden",
         ]
+        assert "internal-policy.example" not in json.dumps(result)
+
+    def test_exception_text_never_reaches_the_response(self) -> None:
+        """A non-API failure is reported by class name; its text stays in the log.
+
+        The kubernetes client lets transport errors through as urllib3
+        exceptions whose text names the API server host and the request URL,
+        and raises ``ApiException(status=0, reason=<raw SSL error>)`` for a
+        TLS failure. Both are the information-exposure shape CodeQL flags
+        (py/stack-trace-exposure, CWE-209): exception text in an HTTP
+        response. The server log keeps the full text for the operator.
+        """
+        leak = (
+            "HTTPSConnectionPool(host='ABCDEF0123456789.gr7.us-east-1.eks.amazonaws.com', port=443)"
+        )
+        core = FakeCoreV1(
+            job_events=[],
+            pods=[_pod("trainer-a1b2c", "i-0abc"), _pod("trainer-d3e4f", "i-0def")],
+            pod_events=[],
+            related={
+                ("Node", "i-0abc"): RuntimeError(leak),
+                ("Node", "i-0def"): ApiException(status=0, reason=f"SSLError\n{leak}"),
+            },
+        )
+        batch_v1 = MagicMock()
+        batch_v1.read_namespaced_job.side_effect = ConnectionError(leak)
+        custom_objects = MagicMock()
+        custom_objects.list_cluster_custom_object.side_effect = ApiException(
+            status=599, reason="Network Connect Timeout Error"
+        )
+        with patch("gco.services.api_shared.logger") as logger:
+            result = _collect(core, batch_v1=batch_v1, custom_objects=custom_objects)
+        assert result["scope"]["errors"] == [
+            "Job gco-jobs/trainer: ConnectionError",
+            "NodeClaims: ApiException (599)",
+            "Node i-0abc events: RuntimeError",
+            "Node i-0def events: ApiException (0)",
+        ]
+        assert "eks.amazonaws.com" not in json.dumps(result)
+        assert "Network Connect" not in json.dumps(result)
+        # The operator still sees the full text, once per failed lookup.
+        logged = " ".join(
+            str(arg)
+            for call in logger.warning.call_args_list + logger.info.call_args_list
+            for arg in call.args
+        )
+        assert logged.count("eks.amazonaws.com") == 3
 
     def test_nodeclaim_listing_failure_keeps_node_events(self) -> None:
         core = FakeCoreV1(
@@ -395,7 +449,9 @@ class TestDegradedLookups:
             },
         )
         custom_objects = MagicMock()
-        custom_objects.list_cluster_custom_object.side_effect = Exception("(404) Not Found")
+        custom_objects.list_cluster_custom_object.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
         result = _collect(core, custom_objects=custom_objects)
         assert [e["reason"] for e in _by_kind(result["events"], "Node")] == ["InstanceUnhealthy"]
         assert result["scope"]["nodeclaims"] == []
@@ -407,13 +463,13 @@ class TestDegradedLookups:
             pods=[_pod("trainer-a1b2c", "i-0refused"), _pod("trainer-d3e4f", "i-0readable")],
             pod_events=[],
             related={
-                ("Node", "i-0refused"): Exception("(403) Forbidden"),
+                ("Node", "i-0refused"): ApiException(status=403, reason="Forbidden"),
                 ("Node", "i-0readable"): [
                     _event(
                         "Node", "i-0readable", "DisruptionTerminating", "Disrupting Node: Drifted"
                     )
                 ],
-                ("NodeClaim", "gpu-ok"): Exception("(403) Forbidden"),
+                ("NodeClaim", "gpu-ok"): ApiException(status=403, reason="Forbidden"),
             },
         )
         custom_objects = _custom(
@@ -571,8 +627,6 @@ async def test_route_returns_the_collected_events_and_scope() -> None:
         namespace="gco-jobs",
         job_name="trainer",
     )
-    import json
-
     body = json.loads(response.body)
     assert body["count"] == 1
     assert body["events"] == collected["events"]

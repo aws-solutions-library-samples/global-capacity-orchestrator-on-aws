@@ -940,7 +940,12 @@ that no longer exists), `nodes`, `nodeclaims`, and `errors`, one entry per
 lookup that failed. The Job's events, the pod listing, and the namespace's pod
 events are required; the Job read, the NodeClaim listing, and each Node /
 NodeClaim event read are best-effort and reported in `errors`, so a cluster
-without Karpenter still answers with the Job and pod events.
+without Karpenter still answers with the Job and pod events. Each entry names
+the lookup and carries the Kubernetes API's HTTP status with its standard
+phrase (`NodeClaims: (404) Not Found`, `Node i-0abc… events: (403)
+Forbidden`) or, for a failure that is not an API refusal, the exception's
+class name (`Node i-0abc… events: MaxRetryError`). Exception text itself never
+leaves the service; the full error is in the manifest-processor's log.
 
 The read is by name, as the Job's own event lookup always was: a Job deleted
 and recreated under the same name within the event TTL also sees its

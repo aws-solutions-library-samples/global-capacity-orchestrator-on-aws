@@ -14,6 +14,7 @@ import re
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
+from http import HTTPStatus
 from typing import Any
 
 from fastapi import HTTPException
@@ -862,17 +863,28 @@ def _event_sort_key(event: dict[str, Any]) -> str:
 
 
 def _lookup_failure(exc: Exception) -> str:
-    """A one-line account of a failed Kubernetes read, for ``scope.errors``.
+    """A client-safe, one-line account of a failed Kubernetes read, for ``scope.errors``.
 
-    A kubernetes ``ApiException`` stringifies to several lines carrying the
-    response headers and body; its status and reason are what a caller needs
-    to tell a refused read (403) from an absent CRD (404).
+    What a caller needs is to tell a refused read (403) from an absent CRD
+    (404), so a kubernetes ``ApiException`` is reported as its HTTP status
+    and the standard phrase for that status (``(403) Forbidden``). Nothing
+    else about an exception reaches the response: an ``ApiException``'s
+    ``reason`` and body echo what the server sent (and for a connection
+    failure the client sets ``status=0`` with the raw SSL error as the
+    reason), and any other exception's text can carry internal hostnames,
+    request URLs and paths (a ``urllib3`` ``MaxRetryError`` names the API
+    server). Those stay in the server log; the caller gets the exception's
+    class name (CWE-209, the information-exposure shape CodeQL flags).
     """
     status = getattr(exc, "status", None)
-    reason = getattr(exc, "reason", None)
-    if status is not None and isinstance(reason, str) and reason:
-        return f"({status}) {reason}"
-    return str(exc)
+    if isinstance(status, int) and not isinstance(status, bool):
+        try:
+            return f"({status}) {HTTPStatus(status).phrase}"
+        except ValueError:
+            # Not an HTTP status: the kubernetes client's own ``status=0``
+            # for a transport failure, or a non-standard code.
+            return f"{type(exc).__name__} ({status})"
+    return type(exc).__name__
 
 
 def _nodeclaims_for_nodes(custom_objects: Any, nodes: set[str]) -> set[str]:
@@ -963,7 +975,7 @@ def _collect_job_events(
             "Could not read Job %s/%s for its completion mode: %s",
             sanitize_log_value(namespace),
             sanitize_log_value(job_name),
-            sanitize_log_value(_lookup_failure(exc)),
+            sanitize_log_value(exc),
         )
         errors.append(f"Job {namespace}/{job_name}: {_lookup_failure(exc)}")
 
@@ -1019,9 +1031,7 @@ def _collect_job_events(
         try:
             nodeclaims |= _nodeclaims_for_nodes(custom_objects, nodes)
         except Exception as exc:
-            logger.warning(
-                "Could not list NodeClaims: %s", sanitize_log_value(_lookup_failure(exc))
-            )
+            logger.warning("Could not list NodeClaims: %s", sanitize_log_value(exc))
             errors.append(f"NodeClaims: {_lookup_failure(exc)}")
 
     related_events: list[Any] = []
@@ -1042,7 +1052,7 @@ def _collect_job_events(
                     "Could not read events of %s %s: %s",
                     kind,
                     sanitize_log_value(target),
-                    sanitize_log_value(_lookup_failure(exc)),
+                    sanitize_log_value(exc),
                 )
                 errors.append(f"{kind} {target} events: {_lookup_failure(exc)}")
 
