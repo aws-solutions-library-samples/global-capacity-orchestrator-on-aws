@@ -282,6 +282,24 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list"]
 
+  # Event read beyond gco-jobs — GET /api/v1/jobs/.../events returns the Node
+  # and NodeClaim events behind an evicted pod (Karpenter / EKS Auto Mode's
+  # SpotInterrupted, InstanceTerminating, DisruptionTerminating, ...), which
+  # are the only record of why a node went away. Kubernetes files events about
+  # cluster-scoped objects in the `default` namespace, out of reach of the
+  # gco-jobs Role above (gco.services.api_shared._collect_job_events).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+
+  # NodeClaim read — the same endpoint resolves each node a Job's pods ran on
+  # to its Karpenter NodeClaim (status.nodeName) to include that NodeClaim's
+  # events. Cluster-scoped CRD; list-and-match because NodeClaims declare no
+  # selectable fields.
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodeclaims"]
+    verbs: ["get", "list"]
+
   # Metrics — required for GET /api/v1/jobs/.../metrics endpoint
   # (uses metrics.k8s.io/v1beta1 via custom_objects API)
   - apiGroups: ["metrics.k8s.io"]

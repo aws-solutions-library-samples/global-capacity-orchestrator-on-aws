@@ -176,7 +176,17 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
 @mcp.tool(tags={"safe", "jobs"})
 @audit_logged
 def get_job_events(job_name: str, region: str, namespace: str = "gco-jobs") -> str:
-    """Get Kubernetes events for a job (useful for debugging).
+    """Get Kubernetes events for a job, its pods, and the nodes they ran on.
+
+    Returns the job's own events, the events of every pod it has had within
+    the cluster's event TTL (including pods an eviction already deleted), and
+    the events of each pod's Node and Karpenter NodeClaim, where the cause of
+    a node's departure is recorded: ``SpotInterrupted``,
+    ``InstanceTerminating``, ``TerminatingOnInterruption``,
+    ``InstanceUnhealthy``, or ``DisruptionTerminating`` ("Disrupting Node:
+    Underutilized" / "Drifted") for consolidation and drift. Each event names
+    its ``involvedObject`` kind and name; ``scope`` lists the pods, deleted
+    pods, nodes and NodeClaims covered and any lookup that failed.
 
     Args:
         job_name: Name of the job.
@@ -192,7 +202,11 @@ def get_job_pods(job_name: str, region: str, namespace: str = "gco-jobs") -> str
     """Get pod details, placement, and container status for a job.
 
     Each pod carries a ``node`` block with the instance type and spot/on-demand
-    capacity type of the node it landed on.
+    capacity type of the node it landed on. A pod in the middle of an eviction
+    carries ``metadata.deletionTimestamp`` and, when a disruption is what is
+    deleting it, ``status.disruptionTarget`` with the mechanism's reason
+    (``EvictionByEvictionAPI`` for a Karpenter / EKS Auto Mode drain) — use
+    ``get_job_events`` for the node-level cause.
 
     Args:
         job_name: Name of the owning Kubernetes Job.
