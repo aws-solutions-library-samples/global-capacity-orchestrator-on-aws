@@ -198,7 +198,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "the model registry"
         ),
     )
-    parser.add_argument("--inference-gpu-count", type=int, default=0)
+    parser.add_argument(
+        "--inference-gpu-count",
+        type=int,
+        default=1,
+        help=(
+            "GPUs each endpoint replica requests (default 1, minimum 1). Every runtime "
+            "in the matrix is a GPU server; with 0 the pod requests no nvidia.com/gpu, "
+            "the device is never mounted, and vLLM crash-loops with 'Failed to infer "
+            "device type' until the readiness wait times out"
+        ),
+    )
     parser.add_argument(
         "--confirm-inference-deployment",
         action="store_true",
@@ -278,8 +288,11 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             parser.error(
                 "--confirm-inference-deployment is required when the inference action runs"
             )
-    if args.inference_gpu_count < 0:
-        parser.error("--inference-gpu-count must be non-negative")
+    if args.inference_gpu_count < 1:
+        parser.error(
+            "--inference-gpu-count must be at least 1: every runtime in the inference "
+            "matrix is a GPU server, and a replica that requests no GPU never gets one"
+        )
 
 
 def _settings_from_args(

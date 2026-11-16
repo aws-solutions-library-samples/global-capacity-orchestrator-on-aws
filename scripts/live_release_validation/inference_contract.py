@@ -302,12 +302,21 @@ def validate_inference_settings(settings: Any) -> None:
         raise ValueError("request_prompt must be non-empty")
     if not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", settings.namespace):
         raise ValueError("namespace must be a DNS-safe Kubernetes name")
+    # Every runtime in the matrix is a GPU server. A replica that requests no
+    # nvidia.com/gpu never has the device mounted, however GPU-shaped the node
+    # it lands on (Karpenter's equal-weight NodePool order puts gpu-x86-pool
+    # ahead of cpu-general-pool, so it usually does land on one), and vLLM
+    # crash-loops with "Failed to infer device type" until the readiness wait
+    # times out. Refuse that here, before anything deploys.
     if (
         not isinstance(settings.gpu_count, int)
         or isinstance(settings.gpu_count, bool)
-        or settings.gpu_count < 0
+        or settings.gpu_count < 1
     ):
-        raise ValueError("gpu_count must be a non-negative integer")
+        raise ValueError(
+            "gpu_count must be a positive integer: every runtime in the inference matrix "
+            "is a GPU server, and a replica that requests no GPU never gets one"
+        )
     for field_name in (
         "request_max_tokens",
         "baseline_replicas",
