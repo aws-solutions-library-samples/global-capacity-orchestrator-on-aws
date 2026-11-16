@@ -741,10 +741,9 @@ def _collect_pod_scheduling(core_v1: Any, pods: list[V1Pod]) -> dict[str, Any]:
 def _parse_event_to_dict(event: CoreV1Event) -> dict[str, Any]:
     """Parse a Kubernetes Event object to a dictionary.
 
-    ``eventTime`` is the timestamp an ``events.k8s.io/v1`` producer (the
-    scheduler, among others) sets instead of ``firstTimestamp`` /
-    ``lastTimestamp``; without it such an event has no time at all in the
-    core-API view and sorts to the end.
+    ``eventTime`` is the timestamp an ``events.k8s.io/v1`` producer sets; when
+    such an event carries no ``firstTimestamp`` / ``lastTimestamp`` in the
+    core-API view it would otherwise have no time at all and sort to the end.
     """
     event_time = getattr(event, "event_time", None)
     return {
@@ -964,7 +963,7 @@ def _collect_job_events(
             "Could not read Job %s/%s for its completion mode: %s",
             sanitize_log_value(namespace),
             sanitize_log_value(job_name),
-            sanitize_log_value(exc),
+            sanitize_log_value(_lookup_failure(exc)),
         )
         errors.append(f"Job {namespace}/{job_name}: {_lookup_failure(exc)}")
 
@@ -1020,7 +1019,9 @@ def _collect_job_events(
         try:
             nodeclaims |= _nodeclaims_for_nodes(custom_objects, nodes)
         except Exception as exc:
-            logger.warning("Could not list NodeClaims: %s", sanitize_log_value(exc))
+            logger.warning(
+                "Could not list NodeClaims: %s", sanitize_log_value(_lookup_failure(exc))
+            )
             errors.append(f"NodeClaims: {_lookup_failure(exc)}")
 
     related_events: list[Any] = []
@@ -1041,7 +1042,7 @@ def _collect_job_events(
                     "Could not read events of %s %s: %s",
                     kind,
                     sanitize_log_value(target),
-                    sanitize_log_value(exc),
+                    sanitize_log_value(_lookup_failure(exc)),
                 )
                 errors.append(f"{kind} {target} events: {_lookup_failure(exc)}")
 

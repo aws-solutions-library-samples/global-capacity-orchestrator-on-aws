@@ -159,7 +159,7 @@ class TestSpotReclamationScenario:
         ]
         pods = [_pod("trainer-fghij", "i-0replacement")]
         pod_events = [
-            # The deleted pod: scheduler (eventTime only), kubelet (source.host),
+            # The deleted pod: scheduler (modeled with eventTime only), kubelet (source.host),
             # Karpenter's nomination, and the eviction with no cause.
             _event(
                 "Pod",
@@ -318,8 +318,8 @@ class TestSpotReclamationScenario:
         result = _collect(self._core(), custom_objects=_custom(self._nodeclaims()))
         keys = [_event_sort_key(e) for e in result["events"]]
         assert keys == sorted(keys, reverse=True)
-        # The scheduler's eventTime-only record is dated, not sorted to the end
-        # as an empty key.
+        # An eventTime-only record is dated, not sorted to the end as an empty
+        # key.
         scheduled = next(e for e in result["events"] if e["reason"] == "Scheduled")
         assert scheduled["eventTime"] is not None
         assert _event_sort_key(scheduled) == scheduled["eventTime"]

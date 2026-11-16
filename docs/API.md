@@ -942,9 +942,15 @@ events are required; the Job read, the NodeClaim listing, and each Node /
 NodeClaim event read are best-effort and reported in `errors`, so a cluster
 without Karpenter still answers with the Job and pod events.
 
-Events are newest first. `eventTime` is populated for events the scheduler
-and other `events.k8s.io/v1` producers record without `firstTimestamp` /
-`lastTimestamp`.
+The read is by name, as the Job's own event lookup always was: a Job deleted
+and recreated under the same name within the event TTL also sees its
+predecessor's pods (they carry the same name shape), which then appear in
+`deleted_pods`.
+
+Events are newest first. `involvedObject.namespace` is `null` for the
+cluster-scoped Node and NodeClaim. `eventTime` carries the timestamp of an
+event recorded through the `events.k8s.io/v1` API when it has no
+`firstTimestamp` / `lastTimestamp`.
 
 **CLI:**
 
@@ -991,7 +997,7 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "involvedObject": {
         "kind": "Node",
         "name": "i-0a1b2c3d4e5f60789",
-        "namespace": "default"
+        "namespace": null
       }
     },
     {
@@ -1006,7 +1012,7 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "involvedObject": {
         "kind": "NodeClaim",
         "name": "gpu-spot-x7k2m",
-        "namespace": "default"
+        "namespace": null
       }
     },
     {

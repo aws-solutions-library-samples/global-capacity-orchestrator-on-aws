@@ -1411,7 +1411,7 @@ class TestRemainingJobsStateMatrix:
         assert "Node/i-0evicted" in result.output
         assert "Pod/trainer-abcde" in result.output
         assert "SpotInterrupted" in result.output
-        # The scheduler's event carries only eventTime; it is still dated.
+        # An event that carries only eventTime is still dated.
         assert "[2026-11-15T09:00:00]" in result.output
         formatter.print_info.assert_called_once()
         assert "trainer-abcde" in formatter.print_info.call_args.args[0]
