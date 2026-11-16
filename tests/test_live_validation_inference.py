@@ -347,7 +347,7 @@ class TestStrictSettings:
                 ),
             ),
             ("request_prompt", "A different deterministic prompt"),
-            ("gpu_count", 1),
+            ("gpu_count", 2),
             ("hpa_cpu_target", 55),
             ("command_timeout_seconds", 3),
             ("readiness_timeout_seconds", 3),
@@ -696,7 +696,7 @@ class TestCommandsAndResponses:
             "deploy",
         ]
         assert baseline_command[baseline_command.index("--framework") + 1] == "vllm"
-        assert baseline_command[baseline_command.index("--gpu-count") + 1] == "0"
+        assert baseline_command[baseline_command.index("--gpu-count") + 1] == "1"
         assert baseline_command[baseline_command.index("--health-path") + 1] == "/health"
         assert "--autoscale-metric" not in baseline_command
         assert "--mooncake-mode" not in baseline_command

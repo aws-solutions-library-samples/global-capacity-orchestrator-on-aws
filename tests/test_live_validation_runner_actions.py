@@ -2386,7 +2386,8 @@ class TestMainArgumentValidation:
             (["--min-free-disk-gib", "-1"], "--min-free-disk-gib must be zero or positive"),
             (["--optional-schedulers", "bogus"], "--optional-schedulers accepts yunikorn, slurm"),
             (["--optional-schedulers", "all,slurm"], "'all' cannot be combined"),
-            (["--inference-gpu-count", "-1"], "--inference-gpu-count must be non-negative"),
+            (["--inference-gpu-count", "-1"], "--inference-gpu-count must be at least 1"),
+            (["--inference-gpu-count", "0"], "--inference-gpu-count must be at least 1"),
         ],
     )
     def test_invalid_arguments_are_rejected(
@@ -2791,8 +2792,11 @@ class TestInferenceContractValidation:
             ),
             ({"request_prompt": "   "}, "request_prompt must be non-empty"),
             ({"namespace": "Bad_Namespace"}, "DNS-safe Kubernetes name"),
-            ({"gpu_count": True}, "gpu_count must be a non-negative integer"),
-            ({"gpu_count": -1}, "gpu_count must be a non-negative integer"),
+            ({"gpu_count": True}, "gpu_count must be a positive integer"),
+            ({"gpu_count": -1}, "gpu_count must be a positive integer"),
+            # The default that cost two release runs: no nvidia.com/gpu request,
+            # so the device is never mounted and vLLM cannot infer a device type.
+            ({"gpu_count": 0}, "gpu_count must be a positive integer"),
             ({"request_max_tokens": 0}, "request_max_tokens must be a positive integer"),
             ({"job_timeout_seconds": True}, "job_timeout_seconds must be a positive integer"),
             ({"baseline_replicas": 2}, "start with one replica"),

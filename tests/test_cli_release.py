@@ -186,7 +186,8 @@ class TestHarnessInvocation:
         assert value_of("--inference-sglang-model-revision") == "d" * 40
         assert value_of("--inference-triton-image").endswith("e" * 64)
         assert not any("tgi" in value for value in command)
-        assert value_of("--inference-gpu-count") == "0"
+        # The matrix is GPU-only, so the default is one GPU per replica, never 0.
+        assert value_of("--inference-gpu-count") == "1"
         assert "--confirm-inference-deployment" in command
         assert value_of("--repo-root") == str(fake_processes.repo_root)
         assert "--confirm-kms-key-deletion" in command

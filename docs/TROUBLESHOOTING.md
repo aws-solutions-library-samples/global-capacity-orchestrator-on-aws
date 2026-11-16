@@ -26,6 +26,7 @@ Common issues and their solutions.
   - [Service Account Issues](#service-account-issues)
 - [Inference Issues](#inference-issues)
   - [Invoke Says the Model Does Not Exist](#invoke-says-the-model-does-not-exist)
+  - [vLLM Fails to Infer Device Type on a GPU Node](#vllm-fails-to-infer-device-type-on-a-gpu-node)
   - [Invoke Returns an HTML 504 Gateway Time-out](#invoke-returns-an-html-504-gateway-time-out)
 - [Lambda Issues](#lambda-issues)
   - [Lambda Timeout](#lambda-timeout)
@@ -544,6 +545,28 @@ gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0 --gpu-count 1 \
 ```
 
 To call the model the endpoint serves without recreating it, send the request body yourself: `gco inference invoke my-llm -d '{"model": "<served model>", "prompt": "Hello", "max_tokens": 50}'`.
+
+### vLLM Fails to Infer Device Type on a GPU Node
+
+**Symptom**: The endpoint never reaches `running`. Its `inference` container crash-loops (`gco inference status` shows restarts climbing; the TLS sidecar stays healthy) and the container log ends with:
+
+```text
+RuntimeError: Failed to infer device type, please set the environment variable `VLLM_LOGGING_LEVEL=DEBUG` ...
+```
+
+The pod is on a GPU node (`gco inference status` or the node's `node.kubernetes.io/instance-type` label says `g4dn`, `g5`, `g6`, …), which makes the message look like a driver or node-image problem. In a `gco release validate` run the `inference` action fails after its 30-minute readiness wait with the same summary (`inference CrashLoopBackOff, last exit 1 Error (restarts=9), on g4dn.xlarge/t4`).
+
+**Cause**: The replica requested no GPU. A pod only has the device mounted when its container requests `nvidia.com/gpu`; the node being a GPU instance is not enough. vLLM's GPU image then finds no CUDA device and refuses to start. The deployment was made with `--gpu-count 0` (or through `gco release validate` on a release up to v8.22.0, whose `--inference-gpu-count` defaulted to `0`). The pod still lands on a GPU node because it tolerates the `nvidia.com/gpu` taint and Karpenter orders equal-weight NodePools by name in reverse, which puts `gpu-x86-pool` ahead of `cpu-general-pool` for a pod that fits either. Telltale: the pod's `FailedScheduling` events before placement list only `Insufficient cpu` / `Insufficient memory`, never `Insufficient nvidia.com/gpu`.
+
+**Solution**: Request the GPU:
+
+```bash
+gco inference delete my-llm -y
+# once it no longer shows in `gco inference list`:
+gco inference deploy my-llm -i <vllm image> --gpu-count 1 ...
+```
+
+`gco release validate` now defaults to one GPU per replica and refuses `--inference-gpu-count 0`.
 
 ### Invoke Returns an HTML 504 Gateway Time-out
 

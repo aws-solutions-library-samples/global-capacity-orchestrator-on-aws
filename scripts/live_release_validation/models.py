@@ -209,7 +209,13 @@ class RunSettings:
     request_max_tokens: int = 8
     namespace: str = "gco-inference"
     health_path: str = "/health"
-    gpu_count: int = 0
+    #: GPUs each endpoint replica requests. Never 0: the matrix's runtimes
+    #: (the vLLM and SGLang GPU images, Triton) need the device, and a pod
+    #: that requests no ``nvidia.com/gpu`` never has it mounted, however
+    #: GPU-shaped the node it lands on. Two release runs spent ~40 minutes
+    #: each on a g4dn.xlarge watching vLLM fail to infer a device type
+    #: before this default and ``validate_inference_settings`` said so.
+    gpu_count: int = 1
     baseline_replicas: int = 1
     autoscale_initial_replicas: int = 1
     hpa_min_replicas: int = 2

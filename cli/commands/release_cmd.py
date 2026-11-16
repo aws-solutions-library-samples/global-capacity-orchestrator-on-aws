@@ -143,7 +143,16 @@ def release() -> None:
         "for the run and removed afterwards."
     ),
 )
-@click.option("--inference-gpu-count", type=click.IntRange(min=0), default=0, show_default=True)
+@click.option(
+    "--inference-gpu-count",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help=(
+        "GPUs each inference endpoint replica requests. Every runtime in the matrix "
+        "is a GPU server, so this is never 0."
+    ),
+)
 @click.option(
     "--optional-schedulers",
     "optional_schedulers",
