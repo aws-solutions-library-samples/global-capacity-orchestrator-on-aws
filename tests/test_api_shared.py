@@ -385,6 +385,72 @@ class TestParsePodToDict:
         assert len(init_statuses) == 1
         assert init_statuses[0]["name"] == "init-setup"
 
+    def test_pod_not_being_deleted_reports_no_deletion_or_disruption(self):
+        """A live pod: deletionTimestamp None, disruptionTarget None.
+
+        The MagicMock pod has no real deletion_timestamp or conditions (they
+        are MagicMocks), which is exactly the malformed-object case the
+        type guards exist for: neither may leak into the response.
+        """
+        pod = self._make_pod(container_statuses=[])
+        result = _parse_pod_to_dict(pod)
+        assert result["metadata"]["deletionTimestamp"] is None
+        assert result["status"]["disruptionTarget"] is None
+
+    def test_pod_mid_eviction_reports_deletion_and_disruption_target(self):
+        """A pod being evicted carries both signals before it disappears."""
+        pod = self._make_pod(container_statuses=[])
+        pod.metadata.deletion_timestamp = datetime(2026, 11, 15, 10, 0, 0, tzinfo=UTC)
+        scheduled = MagicMock()
+        scheduled.type = "PodScheduled"
+        scheduled.status = "True"
+        disruption = MagicMock()
+        disruption.type = "DisruptionTarget"
+        disruption.status = "True"
+        disruption.reason = "EvictionByEvictionAPI"
+        disruption.message = "Eviction API: evicting"
+        disruption.last_transition_time = datetime(2026, 11, 15, 10, 0, 0, tzinfo=UTC)
+        pod.status.conditions = [scheduled, disruption]
+
+        result = _parse_pod_to_dict(pod)
+        assert result["metadata"]["deletionTimestamp"] == "2026-11-15T10:00:00+00:00"
+        assert result["status"]["disruptionTarget"] == {
+            "reason": "EvictionByEvictionAPI",
+            "message": "Eviction API: evicting",
+            "since": "2026-11-15T10:00:00+00:00",
+        }
+
+    def test_disruption_target_false_or_absent_is_none(self):
+        """Only a True DisruptionTarget means a disruption is deleting the pod."""
+        pod = self._make_pod(container_statuses=[])
+        cleared = MagicMock()
+        cleared.type = "DisruptionTarget"
+        cleared.status = "False"
+        pod.status.conditions = [cleared]
+        assert _parse_pod_to_dict(pod)["status"]["disruptionTarget"] is None
+
+        other = MagicMock()
+        other.type = "Ready"
+        other.status = "True"
+        pod.status.conditions = [other]
+        assert _parse_pod_to_dict(pod)["status"]["disruptionTarget"] is None
+
+    def test_disruption_target_tolerates_malformed_fields(self):
+        """Non-string reason/message and an unusable transition time become None."""
+        pod = self._make_pod(container_statuses=[])
+        disruption = MagicMock()
+        disruption.type = "DisruptionTarget"
+        disruption.status = "True"
+        disruption.reason = 42
+        disruption.message = None
+        disruption.last_transition_time = None
+        pod.status.conditions = [disruption]
+        assert _parse_pod_to_dict(pod)["status"]["disruptionTarget"] == {
+            "reason": None,
+            "message": None,
+            "since": None,
+        }
+
 
 # ---------------------------------------------------------------------------
 # _parse_event_to_dict
@@ -450,6 +516,18 @@ class TestParseEventToDict:
         result = _parse_event_to_dict(event)
         assert result["firstTimestamp"] is None
         assert result["lastTimestamp"] is None
+
+    def test_event_time_is_reported_only_when_it_is_a_timestamp(self):
+        """events.k8s.io producers set eventTime instead of first/lastTimestamp.
+
+        The MagicMock's event_time attribute is a MagicMock, the malformed
+        shape the type guard turns into None; a real datetime is serialized.
+        """
+        event = self._make_event()
+        assert _parse_event_to_dict(event)["eventTime"] is None
+
+        event.event_time = datetime(2026, 11, 15, 9, 0, 0, tzinfo=UTC)
+        assert _parse_event_to_dict(event)["eventTime"] == "2026-11-15T09:00:00+00:00"
 
 
 # ---------------------------------------------------------------------------

@@ -357,6 +357,52 @@ class TestManifestProcessorRole:
             "surface can report the instance type a pod landed on"
         )
 
+    def test_manifest_processor_cluster_read_lists_cluster_scoped_events(self, rbac_docs):
+        """Events outside gco-jobs must be listable so node events reach the job read.
+
+        GET /api/v1/jobs/.../events (gco.services.api_shared._collect_job_events)
+        lists the events of the Node and NodeClaim each of a Job's pods ran on
+        — where Karpenter / EKS Auto Mode publish SpotInterrupted,
+        InstanceTerminating and DisruptionTerminating. Kubernetes records the
+        events of cluster-scoped objects in the `default` namespace, which the
+        namespaced gco-manifest-processor Role (events in gco-jobs only) cannot
+        reach. Without this rule every such read is refused and the endpoint
+        degrades to the Job and pod events alone, recording the refusal in
+        `scope.errors` — deliberate, but it leaves the interruption cause
+        permanently invisible.
+        """
+        role = _find_doc(rbac_docs, "ClusterRole", "gco-manifest-processor-cluster-read")
+        event_verbs: set[str] = set()
+        for rule in role.get("rules", []):
+            if "" in rule.get("apiGroups", []) and "events" in rule.get("resources", []):
+                event_verbs.update(rule.get("verbs", []))
+        assert {"get", "list"} <= event_verbs, (
+            "cluster-read role must grant core events 'get' and 'list' so the "
+            "job events read can return Node and NodeClaim events"
+        )
+
+    def test_manifest_processor_cluster_read_lists_nodeclaims(self, rbac_docs):
+        """Karpenter NodeClaims must be listable to attribute node events to a pod.
+
+        _collect_job_events resolves each node a Job's pods ran on to its
+        NodeClaim by listing karpenter.sh/v1 NodeClaims and matching
+        status.nodeName (the CRD declares no selectable fields). Read-only:
+        the processor never creates or disrupts nodes.
+        """
+        role = _find_doc(rbac_docs, "ClusterRole", "gco-manifest-processor-cluster-read")
+        nodeclaim_verbs: set[str] = set()
+        for rule in role.get("rules", []):
+            if "karpenter.sh" in rule.get("apiGroups", []) and "nodeclaims" in rule.get(
+                "resources", []
+            ):
+                nodeclaim_verbs.update(rule.get("verbs", []))
+        assert {"get", "list"} <= nodeclaim_verbs, (
+            "cluster-read role must grant karpenter.sh nodeclaims 'get' and 'list'"
+        )
+        assert nodeclaim_verbs <= READ_ONLY_VERBS, (
+            f"nodeclaims must stay read-only, got {nodeclaim_verbs - READ_ONLY_VERBS}"
+        )
+
     def test_manifest_processor_cluster_read_gets_only_the_sandbox_runtime_classes(self, rbac_docs):
         """Both submission paths read the Nitro Sandbox RuntimeClasses, and only those.
 

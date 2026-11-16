@@ -19,9 +19,9 @@ from gco.services.api_shared import (
     BulkDeleteRequest,
     _check_namespace,
     _check_processor,
+    _collect_job_events,
     _collect_pod_scheduling,
     _empty_scheduling_info,
-    _parse_event_to_dict,
     _parse_job_to_dict,
     _parse_pod_to_dict,
     internal_server_error,
@@ -441,32 +441,26 @@ async def get_job_logs(
 
 @router.get("/{namespace}/{name}/events")
 async def get_job_events(namespace: str, name: str) -> Response:
-    """Get events related to a Job."""
+    """Get events related to a Job: its own, its pods', and their nodes'.
+
+    Covers every pod the Job has had within the event TTL — including pods an
+    eviction already deleted — plus the Node and Karpenter NodeClaim each pod
+    ran on, where the cause of a node's departure is published
+    (``SpotInterrupted``, ``InstanceTerminating``, ``DisruptionTerminating``,
+    …). Each event names its ``involvedObject.kind``; ``scope`` lists the
+    pods, deleted pods, nodes and NodeClaims covered and any lookup that
+    failed.
+    """
     processor = _check_processor()
     _check_namespace(namespace, processor)
 
     try:
-        field_selector = f"involvedObject.name={name},involvedObject.kind=Job"
-        job_events = processor.core_v1.list_namespaced_event(
-            namespace=namespace, field_selector=field_selector
-        )
-
-        pods = processor.core_v1.list_namespaced_pod(
-            namespace=namespace, label_selector=f"job-name={name}"
-        )
-
-        pod_events = []
-        for pod in pods.items:
-            field_selector = f"involvedObject.name={pod.metadata.name},involvedObject.kind=Pod"
-            events = processor.core_v1.list_namespaced_event(
-                namespace=namespace, field_selector=field_selector
-            )
-            pod_events.extend(events.items)
-
-        all_events = [_parse_event_to_dict(e) for e in job_events.items]
-        all_events.extend([_parse_event_to_dict(e) for e in pod_events])
-        all_events.sort(
-            key=lambda e: e.get("lastTimestamp") or e.get("firstTimestamp") or "", reverse=True
+        collected = _collect_job_events(
+            processor.core_v1,
+            processor.batch_v1,
+            processor.custom_objects,
+            namespace=namespace,
+            job_name=name,
         )
 
         response = {
@@ -475,8 +469,9 @@ async def get_job_events(namespace: str, name: str) -> Response:
             "timestamp": datetime.now(UTC).isoformat(),
             "job_name": name,
             "namespace": namespace,
-            "count": len(all_events),
-            "events": all_events,
+            "count": len(collected["events"]),
+            "events": collected["events"],
+            "scope": collected["scope"],
         }
 
         return JSONResponse(status_code=200, content=response)

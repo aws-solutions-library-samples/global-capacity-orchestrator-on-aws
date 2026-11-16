@@ -654,7 +654,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `submit_job_api` | Submit a job via [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html) with SigV4 auth | low-risk | — |
 | `get_job` | Get details of a specific job | safe | — |
 | `get_job_logs` | Get logs from a job | safe | — |
-| `get_job_events` | Get Kubernetes events for a job (debugging) | safe | — |
+| `get_job_events` | Get Kubernetes events for a job, its pods (including deleted ones), and their Nodes / NodeClaims | safe | — |
 | `get_job_pods` | Get pod placement, phase, and container status for a job | safe | — |
 | `get_pod_logs` | Get a bounded log tail from one specific pod and optional container | safe | — |
 | `get_job_metrics` | Get CPU and memory usage for every pod in a job | safe | — |

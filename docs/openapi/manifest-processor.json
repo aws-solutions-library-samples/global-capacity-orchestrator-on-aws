@@ -1100,7 +1100,7 @@
     },
     "/api/v1/jobs/{namespace}/{name}/events": {
       "get": {
-        "description": "Get events related to a Job.",
+        "description": "Get events related to a Job: its own, its pods', and their nodes'.\n\nCovers every pod the Job has had within the event TTL \u2014 including pods an\neviction already deleted \u2014 plus the Node and Karpenter NodeClaim each pod\nran on, where the cause of a node's departure is published\n(``SpotInterrupted``, ``InstanceTerminating``, ``DisruptionTerminating``,\n\u2026). Each event names its ``involvedObject.kind``; ``scope`` lists the\npods, deleted pods, nodes and NodeClaims covered and any lookup that\nfailed.",
         "operationId": "get_job_events_api_v1_jobs__namespace___name__events_get",
         "parameters": [
           {

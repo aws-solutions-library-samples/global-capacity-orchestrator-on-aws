@@ -723,10 +723,14 @@ def delete_job(config: Any, job_name: Any, namespace: Any, region: Any, yes: Any
 @click.option("--region", "-r", required=True, help="Job region (required)")
 @pass_config
 def get_job_events(config: Any, job_name: Any, namespace: Any, region: Any) -> None:
-    """Get Kubernetes events for a job.
+    """Get Kubernetes events for a job, its pods, and the nodes they ran on.
 
-    Shows events related to the job and its pods, useful for debugging
-    scheduling issues, resource problems, or startup failures.
+    Shows the job's own events, the events of every pod it has had (including
+    pods an eviction already deleted), and the events of each pod's Node and
+    Karpenter NodeClaim, where the cause of a node's departure is recorded
+    (SpotInterrupted, InstanceTerminating, DisruptionTerminating, ...).
+    Useful for debugging scheduling issues, resource problems, startup
+    failures, and interrupted runs.
 
     Examples:
         gco jobs events my-job --region us-east-1
@@ -740,25 +744,52 @@ def get_job_events(config: Any, job_name: Any, namespace: Any, region: Any) -> N
 
         if config.output_format == "table":
             events = result.get("events", [])
+            scope = result.get("scope") or {}
             if not events:
                 formatter.print_info("No events found for this job")
+                _print_job_event_scope_notes(formatter, scope)
                 return
 
             print(f"\n  Events for {job_name} ({result.get('count', 0)} total)")
-            print("  " + "-" * 70)
+            print("  " + "-" * 100)
             for event in events:
                 event_type = event.get("type") or "Normal"
+                involved = event.get("involvedObject") or {}
+                target = f"{involved.get('kind') or '?'}/{involved.get('name') or '?'}"[:34]
                 reason = (event.get("reason") or "")[:20]
                 message = (event.get("message") or "")[:50]
-                timestamp = (event.get("lastTimestamp") or event.get("firstTimestamp") or "")[:19]
+                timestamp = (
+                    event.get("lastTimestamp")
+                    or event.get("firstTimestamp")
+                    or event.get("eventTime")
+                    or ""
+                )[:19]
                 marker = "⚠" if event_type == "Warning" else "✓"
-                print(f"  {marker} [{timestamp}] {reason:<20} {message}")
+                print(f"  {marker} [{timestamp}] {target:<34} {reason:<20} {message}")
+            _print_job_event_scope_notes(formatter, scope)
         else:
             formatter.print(result)
 
     except Exception as e:
         formatter.print_error(f"Failed to get job events: {e}")
         sys.exit(1)
+
+
+def _print_job_event_scope_notes(formatter: Any, scope: dict[str, Any]) -> None:
+    """Say what the events read covered beyond the live pods, and what it could not.
+
+    The table above lists events by involved object; these notes explain
+    where a ``Pod/…`` row for a pod that no longer exists came from, and name
+    any Node / NodeClaim lookup the cluster refused, so an empty node section
+    reads as "not resolved" rather than "nothing happened".
+    """
+    deleted_pods = scope.get("deleted_pods") or []
+    if deleted_pods:
+        formatter.print_info(
+            "Includes events of pods that no longer exist: " + ", ".join(deleted_pods)
+        )
+    for error in scope.get("errors") or []:
+        formatter.print_warning(f"Lookup failed: {error}")
 
 
 @jobs.command("pods")
@@ -789,23 +820,39 @@ def get_job_pods(config: Any, job_name: Any, namespace: Any, region: Any) -> Non
                 return
 
             print(f"\n  Pods for {job_name} ({result.get('count', 0)} total)")
-            print("  " + "-" * 96)
+            print("  " + "-" * 98)
             print(
                 "  NAME                                    NODE                    "
-                "INSTANCE TYPE     STATUS     RESTARTS"
+                "INSTANCE TYPE     STATUS       RESTARTS"
             )
-            print("  " + "-" * 96)
+            print("  " + "-" * 98)
+            disruptions: list[str] = []
             for pod in pods:
-                name = (pod.get("metadata", {}).get("name") or "")[:40]
+                metadata = pod.get("metadata", {})
+                status = pod.get("status", {})
+                name = (metadata.get("name") or "")[:40]
                 node = (pod.get("spec", {}).get("nodeName") or "")[:22]
                 node_info = pod.get("node") or {}
                 instance_type = str(node_info.get("instance_type") or "-")[:17]
-                phase = (pod.get("status", {}).get("phase") or "Unknown")[:10]
+                # A pod with a deletionTimestamp is on its way out whatever its
+                # phase still says; kubectl shows the same.
+                phase = (
+                    "Terminating"
+                    if metadata.get("deletionTimestamp")
+                    else (status.get("phase") or "Unknown")
+                )[:12]
                 restarts = sum(
-                    c.get("restartCount", 0)
-                    for c in (pod.get("status", {}).get("containerStatuses") or [])
+                    c.get("restartCount", 0) for c in (status.get("containerStatuses") or [])
                 )
-                print(f"  {name:<40} {node:<23} {instance_type:<17} {phase:<10} {restarts}")
+                print(f"  {name:<40} {node:<23} {instance_type:<17} {phase:<12} {restarts}")
+                disruption = status.get("disruptionTarget")
+                if disruption:
+                    disruptions.append(
+                        f"{metadata.get('name')}: {disruption.get('reason') or 'disruption'}"
+                        f" ({disruption.get('message') or 'no message'})"
+                    )
+            for line in disruptions:
+                formatter.print_warning(f"Being disrupted: {line}")
         else:
             formatter.print(result)
 
