@@ -3620,11 +3620,19 @@ gco jobs delete old-job -r us-west-2 -n ml-jobs -y
 
 #### `gco jobs events`
 
-Get Kubernetes events for a job.
+Get Kubernetes events for a job, its pods, and the nodes they ran on.
 
 ```bash
 gco jobs events JOB_NAME [OPTIONS]
 ```
+
+Shows the job's own events, the events of every pod it has had within the
+cluster's event TTL (including pods an eviction already deleted), and the
+events of each pod's Node and Karpenter NodeClaim, where the cause of a
+node's departure is recorded: `SpotInterrupted`, `InstanceTerminating`,
+`TerminatingOnInterruption`, `InstanceUnhealthy`, or `DisruptionTerminating`
+("Disrupting Node: Underutilized" / "Drifted") for consolidation and drift.
+The pod itself only ever reads "Evicted pod: Forceful Termination".
 
 **Options:**
 
@@ -3639,6 +3647,22 @@ gco jobs events JOB_NAME [OPTIONS]
 gco jobs events my-job --region us-east-1
 gco jobs events training-job -r us-west-2 -n ml-jobs
 ```
+
+```text
+  Events for my-job (4 total)
+  ----------------------------------------------------------------------------------------------------
+  ✓ [2026-11-15T10:00:05] Pod/my-job-abc12                   Evicted              Evicted pod: Forceful Termination
+  ⚠ [2026-11-15T10:00:00] Node/i-0a1b2c3d4e5f60789           SpotInterrupted      Spot interruption warning was triggered
+  ⚠ [2026-11-15T10:00:00] NodeClaim/gpu-spot-x7k2m           SpotInterrupted      Spot interruption warning was triggered
+  ✓ [2026-11-15T09:00:00] Job/my-job                         SuccessfulCreate     Created pod: my-job-abc12
+  ℹ Includes events of pods that no longer exist: my-job-abc12
+```
+
+A `Lookup failed:` warning names any Node or NodeClaim read the cluster
+refused, so an absent node section reads as "not resolved" rather than
+"nothing happened". `--output json` adds the `scope` block (`pods`,
+`deleted_pods`, `nodes`, `nodeclaims`, `errors`); see
+[Get Job Events](API.md#get-job-events).
 
 #### `gco jobs pods`
 
@@ -3665,15 +3689,20 @@ gco jobs pods training-job -r us-west-2 -n ml-jobs
 
 ```text
   Pods for my-job (2 total)
-  ------------------------------------------------------------------------------------------------
-  NAME                                    NODE                    INSTANCE TYPE     STATUS     RESTARTS
-  ------------------------------------------------------------------------------------------------
-  my-job-abc123                           ip-10-0-1-100.ec2.inte  g5.2xlarge        Running    0
-  my-job-def456                           ip-10-0-2-40.ec2.inter  g5.4xlarge        Running    0
+  --------------------------------------------------------------------------------------------------
+  NAME                                    NODE                    INSTANCE TYPE     STATUS       RESTARTS
+  --------------------------------------------------------------------------------------------------
+  my-job-abc123                           ip-10-0-1-100.ec2.inte  g5.2xlarge        Terminating  0
+  my-job-def456                           ip-10-0-2-40.ec2.inter  g5.4xlarge        Running      0
+  ⚠ Being disrupted: my-job-abc123: EvictionByEvictionAPI (Eviction API: evicting)
 ```
 
-`--output json` adds a per-pod `node` block and a job-wide `scheduling` block;
-see [Get Job Pods](API.md#get-job-pods).
+A pod with a `deletionTimestamp` shows `Terminating` whatever phase it still
+reports, as `kubectl` does, and a pod a disruption is deleting is called out
+with its `DisruptionTarget` reason (`EvictionByEvictionAPI` for a Karpenter /
+EKS Auto Mode drain). `--output json` adds a per-pod `node` block, each pod's
+`metadata.deletionTimestamp` and `status.disruptionTarget`, and a job-wide
+`scheduling` block; see [Get Job Pods](API.md#get-job-pods).
 
 #### `gco jobs metrics`
 

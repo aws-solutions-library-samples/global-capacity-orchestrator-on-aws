@@ -1060,6 +1060,89 @@ class TestRenderingAndConfirmations:
         assert "Unknown" in result.output
         assert "5" in result.output
 
+    def test_pod_table_shows_terminating_and_names_the_disruption(self) -> None:
+        """A pod mid-eviction reads Terminating, and its DisruptionTarget is called out.
+
+        The phase a pod reports while its grace period runs is still Running;
+        kubectl shows Terminating from the deletionTimestamp and so does this
+        table. The DisruptionTarget condition names the mechanism deleting
+        the pod, which is the last in-flight trace before the pod disappears.
+        """
+        manager = MagicMock()
+        manager.get_job_pods.return_value = {
+            "count": 2,
+            "pods": [
+                {
+                    "metadata": {
+                        "name": "trainer-abcde",
+                        "deletionTimestamp": "2026-11-15T10:00:00+00:00",
+                    },
+                    "spec": {"nodeName": "i-0evicted"},
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [],
+                        "disruptionTarget": {
+                            "reason": "EvictionByEvictionAPI",
+                            "message": "Eviction API: evicting",
+                            "since": "2026-11-15T10:00:00+00:00",
+                        },
+                    },
+                },
+                {
+                    "metadata": {"name": "trainer-fghij", "deletionTimestamp": None},
+                    "spec": {"nodeName": "i-0replacement"},
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [],
+                        "disruptionTarget": None,
+                    },
+                },
+            ],
+        }
+        result, _, formatter = _invoke(
+            ["jobs", "pods", "trainer", "--region", "us-east-1"], manager
+        )
+        assert result.exit_code == 0, result.output
+        lines = result.output.splitlines()
+        evicted = next(line for line in lines if "trainer-abcde" in line)
+        survivor = next(line for line in lines if "trainer-fghij" in line)
+        assert "Terminating" in evicted
+        assert "Running" in survivor and "Terminating" not in survivor
+        formatter.print_warning.assert_called_once()
+        warning = formatter.print_warning.call_args.args[0]
+        assert "trainer-abcde" in warning
+        assert "EvictionByEvictionAPI" in warning
+        assert "Eviction API: evicting" in warning
+
+    def test_pod_table_disruption_without_reason_or_message_still_warns(self) -> None:
+        manager = MagicMock()
+        manager.get_job_pods.return_value = {
+            "count": 1,
+            "pods": [
+                {
+                    "metadata": {"name": "trainer-abcde", "deletionTimestamp": "2026-11-15T10Z"},
+                    "spec": {},
+                    "status": {"phase": "Running", "disruptionTarget": {}},
+                }
+            ],
+        }
+        result, _, formatter = _invoke(
+            ["jobs", "pods", "trainer", "--region", "us-east-1"], manager
+        )
+        assert result.exit_code == 0, result.output
+        # An empty condition dict is falsy: nothing to announce.
+        formatter.print_warning.assert_not_called()
+
+        manager.get_job_pods.return_value["pods"][0]["status"]["disruptionTarget"] = {
+            "reason": None,
+            "message": None,
+        }
+        result, _, formatter = _invoke(
+            ["jobs", "pods", "trainer", "--region", "us-east-1"], manager
+        )
+        assert result.exit_code == 0, result.output
+        assert "disruption (no message)" in formatter.print_warning.call_args.args[0]
+
     def test_logs_forwards_history_and_trainjob_node_options(self) -> None:
         manager = MagicMock()
         manager.get_job_logs.return_value = "line"
@@ -1268,6 +1351,8 @@ class TestRemainingJobsStateMatrix:
         assert "⚠" in result.output
         assert "✓" in result.output
         assert "Created" in result.output
+        # An event without an involvedObject still renders, as an unknown target.
+        assert "?/?" in result.output
 
         manager.get_job_events.side_effect = RuntimeError("events denied")
         result, _, formatter = _invoke(
@@ -1275,6 +1360,84 @@ class TestRemainingJobsStateMatrix:
         )
         assert result.exit_code == 1
         assert "events denied" in formatter.print_error.call_args.args[0]
+
+    def test_events_table_names_node_events_and_explains_scope(self) -> None:
+        """Node and NodeClaim events render with their kind; the scope notes follow.
+
+        The table used to carry only reason and message, which is ambiguous
+        once a job's events, an evicted pod's events, and its node's
+        SpotInterrupted sit in one list. The involved object is now a column,
+        a deleted pod's inclusion is announced, and a refused lookup is a
+        warning rather than silence.
+        """
+        manager = MagicMock()
+        manager.get_job_events.return_value = {
+            "count": 3,
+            "events": [
+                {
+                    "type": "Warning",
+                    "reason": "SpotInterrupted",
+                    "message": "Spot interruption warning was triggered",
+                    "lastTimestamp": "2026-11-15T10:00:00+00:00",
+                    "involvedObject": {"kind": "Node", "name": "i-0evicted"},
+                },
+                {
+                    "type": "Normal",
+                    "reason": "Evicted",
+                    "message": "Evicted pod: Forceful Termination",
+                    "lastTimestamp": "2026-11-15T10:00:05+00:00",
+                    "involvedObject": {"kind": "Pod", "name": "trainer-abcde"},
+                },
+                {
+                    "type": "Normal",
+                    "reason": "Scheduled",
+                    "message": "Successfully assigned gco-jobs/trainer-abcde to i-0evicted",
+                    "eventTime": "2026-11-15T09:00:00+00:00",
+                    "involvedObject": {"kind": "Pod", "name": "trainer-abcde"},
+                },
+            ],
+            "scope": {
+                "pods": ["trainer-abcde"],
+                "deleted_pods": ["trainer-abcde"],
+                "nodes": ["i-0evicted"],
+                "nodeclaims": [],
+                "errors": ["NodeClaims: (403) Forbidden"],
+            },
+        }
+        result, _, formatter = _invoke(
+            ["jobs", "events", "trainer", "--region", "us-east-1"], manager
+        )
+        assert result.exit_code == 0, result.output
+        assert "Node/i-0evicted" in result.output
+        assert "Pod/trainer-abcde" in result.output
+        assert "SpotInterrupted" in result.output
+        # An event that carries only eventTime is still dated.
+        assert "[2026-11-15T09:00:00]" in result.output
+        formatter.print_info.assert_called_once()
+        assert "trainer-abcde" in formatter.print_info.call_args.args[0]
+        formatter.print_warning.assert_called_once()
+        assert "NodeClaims: (403) Forbidden" in formatter.print_warning.call_args.args[0]
+
+    def test_events_table_empty_still_reports_failed_lookups(self) -> None:
+        manager = MagicMock()
+        manager.get_job_events.return_value = {
+            "count": 0,
+            "events": [],
+            "scope": {
+                "pods": [],
+                "deleted_pods": [],
+                "nodes": [],
+                "nodeclaims": [],
+                "errors": ["Job gco-jobs/trainer: (404) Not Found"],
+            },
+        }
+        result, _, formatter = _invoke(
+            ["jobs", "events", "trainer", "--region", "us-east-1"], manager
+        )
+        assert result.exit_code == 0, result.output
+        formatter.print_info.assert_called_once_with("No events found for this job")
+        formatter.print_warning.assert_called_once()
+        assert "(404) Not Found" in formatter.print_warning.call_args.args[0]
 
     def test_pod_logs_content_empty_and_error(self) -> None:
         manager = MagicMock()

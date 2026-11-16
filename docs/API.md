@@ -907,7 +907,50 @@ gco jobs logs multi-container-job -r us-east-1 --container sidecar
 GET /api/v1/jobs/{namespace}/{name}/events
 ```
 
-Get Kubernetes events related to a Job and its pods.
+Get the Kubernetes events related to a Job: the Job's own, those of every pod
+it has had, and those of the Node and Karpenter NodeClaim each pod ran on.
+
+The pod-level view alone cannot explain an interrupted run. When Karpenter or
+EKS Auto Mode takes a node away, the cause is published on the Node and the
+NodeClaim (`SpotInterrupted`, `InstanceTerminating`,
+`TerminatingOnInterruption`, `InstanceUnhealthy`, `DisruptionTerminating` with
+"Disrupting Node: Underutilized" or "Drifted" for consolidation and drift);
+the pod itself only gets `Evicted` with "Evicted pod: Forceful Termination".
+And since the eviction deletes the pod, a read limited to pods that still
+exist loses even that. This endpoint therefore reads:
+
+- the Job's events;
+- the events of every pod the Job has had within the cluster's event TTL (one
+  hour by default): its current pods, the pods its own `SuccessfulCreate` /
+  `SuccessfulDelete` events name, and any pod carrying the Job controller's
+  name shape for this Job (`<job>-<5 characters>`, plus
+  `<job>-<index>-<5 characters>` when the Job is `completionMode: Indexed`);
+- the events of every node those pods ran on, resolved from the live pods'
+  `spec.nodeName` and, for deleted pods, from the scheduler's `Scheduled`
+  record, the kubelet's `source.host`, and Karpenter's `Nominated` record;
+- the events of the NodeClaims behind those nodes, resolved from the live
+  NodeClaims' `status.nodeName` and from `Nominated` records (which still
+  name a NodeClaim that has since been deleted).
+
+Each event carries its `involvedObject.kind` (`Job`, `Pod`, `Node`,
+`NodeClaim`) and name. The `scope` block says what the read covered, so an
+empty node section can be told apart from a node that could not be resolved:
+`pods` and `deleted_pods` (the pods whose events are included and the subset
+that no longer exists), `nodes`, `nodeclaims`, and `errors`, one entry per
+lookup that failed. The Job's events, the pod listing, and the namespace's pod
+events are required; the Job read, the NodeClaim listing, and each Node /
+NodeClaim event read are best-effort and reported in `errors`, so a cluster
+without Karpenter still answers with the Job and pod events.
+
+The read is by name, as the Job's own event lookup always was: a Job deleted
+and recreated under the same name within the event TTL also sees its
+predecessor's pods (they carry the same name shape), which then appear in
+`deleted_pods`.
+
+Events are newest first. `involvedObject.namespace` is `null` for the
+cluster-scoped Node and NodeClaim. `eventTime` carries the timestamp of an
+event recorded through the `events.k8s.io/v1` API when it has no
+`firstTimestamp` / `lastTimestamp`.
 
 **CLI:**
 
@@ -922,31 +965,85 @@ gco jobs events training-job -n ml-jobs -r us-west-2
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2026-11-15T10:30:00Z",
   "job_name": "training-job-001",
   "namespace": "gco-jobs",
-  "count": 3,
+  "count": 4,
   "events": [
     {
       "type": "Normal",
-      "reason": "SuccessfulCreate",
-      "message": "Created pod: training-job-001-abc123",
+      "reason": "Evicted",
+      "message": "Evicted pod: Forceful Termination",
       "count": 1,
-      "firstTimestamp": "2024-01-15T10:00:00Z",
-      "lastTimestamp": "2024-01-15T10:00:00Z",
-      "source": {
-        "component": "job-controller",
-        "host": null
-      },
+      "firstTimestamp": "2026-11-15T10:00:05Z",
+      "lastTimestamp": "2026-11-15T10:00:05Z",
+      "eventTime": null,
+      "source": {"component": "karpenter", "host": null},
+      "involvedObject": {
+        "kind": "Pod",
+        "name": "training-job-001-abc12",
+        "namespace": "gco-jobs"
+      }
+    },
+    {
+      "type": "Warning",
+      "reason": "SpotInterrupted",
+      "message": "Spot interruption warning was triggered",
+      "count": 1,
+      "firstTimestamp": "2026-11-15T10:00:00Z",
+      "lastTimestamp": "2026-11-15T10:00:00Z",
+      "eventTime": null,
+      "source": {"component": "karpenter", "host": null},
+      "involvedObject": {
+        "kind": "Node",
+        "name": "i-0a1b2c3d4e5f60789",
+        "namespace": null
+      }
+    },
+    {
+      "type": "Warning",
+      "reason": "SpotInterrupted",
+      "message": "Spot interruption warning was triggered",
+      "count": 1,
+      "firstTimestamp": "2026-11-15T10:00:00Z",
+      "lastTimestamp": "2026-11-15T10:00:00Z",
+      "eventTime": null,
+      "source": {"component": "karpenter", "host": null},
+      "involvedObject": {
+        "kind": "NodeClaim",
+        "name": "gpu-spot-x7k2m",
+        "namespace": null
+      }
+    },
+    {
+      "type": "Normal",
+      "reason": "SuccessfulCreate",
+      "message": "Created pod: training-job-001-abc12",
+      "count": 1,
+      "firstTimestamp": "2026-11-15T09:00:00Z",
+      "lastTimestamp": "2026-11-15T09:00:00Z",
+      "eventTime": null,
+      "source": {"component": "job-controller", "host": null},
       "involvedObject": {
         "kind": "Job",
         "name": "training-job-001",
         "namespace": "gco-jobs"
       }
     }
-  ]
+  ],
+  "scope": {
+    "pods": ["training-job-001-abc12", "training-job-001-def34"],
+    "deleted_pods": ["training-job-001-abc12"],
+    "nodes": ["i-0a1b2c3d4e5f60789", "i-0fedcba9876543210"],
+    "nodeclaims": ["gpu-spot-p9q4r", "gpu-spot-x7k2m"],
+    "errors": []
+  }
 }
 ```
+
+A pod that is still being evicted (its grace period running) is not yet in
+`deleted_pods`; [Get Job Pods](#get-job-pods) reports it with
+`metadata.deletionTimestamp` and `status.disruptionTarget`.
 
 ### Get Job Pods
 
@@ -980,6 +1077,7 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
         "name": "training-job-001-abc123",
         "namespace": "gco-jobs",
         "creationTimestamp": "2024-01-15T10:00:00Z",
+        "deletionTimestamp": null,
         "labels": {"job-name": "training-job-001"},
         "uid": "pod-uid-123"
       },
@@ -1003,7 +1101,8 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
             "startedAt": "2024-01-15T10:00:10Z"
           }
         ],
-        "initContainerStatuses": []
+        "initContainerStatuses": [],
+        "disruptionTarget": null
       },
       "node": {
         "name": "ip-10-0-1-100.ec2.internal",
@@ -1045,6 +1144,31 @@ denormalized so a caller iterating pods does not have to join. It is `null` for
 a pod that has not been scheduled; that pod then appears in
 `scheduling.unscheduled` with the scheduler's reason. `scheduling` has the same
 shape and meaning as on [Get Job](#get-job).
+
+A pod in the middle of an eviction is still listed while its grace period
+runs, with `metadata.deletionTimestamp` set and, when a disruption is what is
+deleting it, `status.disruptionTarget` carrying the Kubernetes
+`DisruptionTarget` condition's `reason`, `message`, and `since`:
+
+```json
+"metadata": {"name": "training-job-001-abc123", "deletionTimestamp": "2026-11-15T10:00:05Z", "...": "..."},
+"status": {
+  "phase": "Running",
+  "disruptionTarget": {
+    "reason": "EvictionByEvictionAPI",
+    "message": "Eviction API: evicting",
+    "since": "2026-11-15T10:00:05Z"
+  },
+  "...": "..."
+}
+```
+
+`EvictionByEvictionAPI` is how a Karpenter / EKS Auto Mode drain shows up
+(other reasons: `PreemptionByScheduler`, `DeletionByTaintManager`,
+`TerminationByKubelet`). The condition names the mechanism, not the cause
+behind the node's departure; for that, read the Node and NodeClaim events on
+[Get Job Events](#get-job-events). `disruptionTarget` is `null` when the
+condition is absent or not `True`.
 
 ### Get Job Metrics
 

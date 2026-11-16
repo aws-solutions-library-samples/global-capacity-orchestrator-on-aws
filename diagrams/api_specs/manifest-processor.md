@@ -269,7 +269,15 @@ Delete a Job, optionally requiring its immutable Kubernetes UID.
 
 ### `GET /api/v1/jobs/{namespace}/{name}/events`
 
-Get events related to a Job.
+Get events related to a Job: its own, its pods', and their nodes'.
+
+Covers every pod the Job has had within the event TTL — including pods an
+eviction already deleted — plus the Node and Karpenter NodeClaim each pod
+ran on, where the cause of a node's departure is published
+(``SpotInterrupted``, ``InstanceTerminating``, ``DisruptionTerminating``,
+…). Each event names its ``involvedObject.kind``; ``scope`` lists the
+pods, deleted pods, nodes and NodeClaims covered and any lookup that
+failed.
 
 - **Operation ID:** `get_job_events_api_v1_jobs__namespace___name__events_get`
 - **Tags:** Jobs
