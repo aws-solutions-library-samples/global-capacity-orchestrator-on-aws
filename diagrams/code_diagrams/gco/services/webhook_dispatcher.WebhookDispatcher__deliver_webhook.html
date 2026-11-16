@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-16T20:28:30Z">
-        <meta name="gco-source-commit" content="3c21b4eec4ebed24c6ca9e80a33302966592d8db">
-        <meta name="gco-flow-digest" content="d6a7b955028e8cd3">
+        <meta name="gco-generated-at" content="2026-11-16T21:53:25Z">
+        <meta name="gco-source-commit" content="e87c6c2875ea52716c5fb87a7843816a863f6298">
+        <meta name="gco-flow-digest" content="d40437b685ebedb7">
         <title>Webhook delivery boundary (DNS pinning, HMAC, retries, redacted accounting)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,23 +208,23 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1437=>operation: 'Deliver one logical webhook with bounded, address-pinned attempts.'
-op1439=>operation: raw_webhook_id = webhook.get('id')
-op1441=>operation: webhook_id = raw_webhook_id if isinstance(raw_webhook_id, str) else '<unknown>'
-op1443=>operation: raw_url = webhook.get('url')
-op1445=>operation: url = raw_url if isinstance(raw_url, str) else ''
-op1447=>operation: raw_event = payload.get('event')
-op1449=>operation: event = raw_event if isinstance(raw_event, str) else 'unknown'
-op1451=>operation: secret = webhook.get('secret')
-op1453=>operation: start_time = datetime.now(UTC)
-op1455=>operation: self._deliveries_total += 1
-op1457=>operation: target: _ValidatedWebhookTarget | None = None
-op1459=>operation: attempts = 0
-op1461=>operation: last_error: str | None = None
-op1463=>operation: last_status_code: int | None = None
-op1465=>operation: successful_status_code: int | None = None
-op1467=>operation: validation_error: str | None = None
-op1470=>operation: if not isinstance(raw_url, str):
+        <div><textarea id="code" style="width: 100%;" rows="11">op526=>operation: 'Deliver one logical webhook with bounded, address-pinned attempts.'
+op528=>operation: raw_webhook_id = webhook.get('id')
+op530=>operation: webhook_id = raw_webhook_id if isinstance(raw_webhook_id, str) else '<unknown>'
+op532=>operation: raw_url = webhook.get('url')
+op534=>operation: url = raw_url if isinstance(raw_url, str) else ''
+op536=>operation: raw_event = payload.get('event')
+op538=>operation: event = raw_event if isinstance(raw_event, str) else 'unknown'
+op540=>operation: secret = webhook.get('secret')
+op542=>operation: start_time = datetime.now(UTC)
+op544=>operation: self._deliveries_total += 1
+op546=>operation: target: _ValidatedWebhookTarget | None = None
+op548=>operation: attempts = 0
+op550=>operation: last_error: str | None = None
+op552=>operation: last_status_code: int | None = None
+op554=>operation: successful_status_code: int | None = None
+op556=>operation: validation_error: str | None = None
+op559=>operation: if not isinstance(raw_url, str):
     validation_error = 'Webhook URL must be a string'
 else:
     target, validation_error = _resolve_webhook_target(raw_url, self.allowed_domains or None)
@@ -267,53 +267,53 @@ else:
         logger.info('Webhook delivered: webhook_id=%s %s status=%s attempts=%s', webhook_id, target.log_identity, successful_status_code, attempts)
         self._deliveries_success += 1
         return WebhookDeliveryResult(webhook_id=webhook_id, url=url, event=event, success=True, status_code=successful_status_code, attempts=attempts, duration_ms=duration)
-cond1469=>condition: exception raised?
-cond1472=>condition: except asyncio.CancelledError
-op1476=>operation: self._deliveries_failed += 1
-sub1478=>subroutine: logger.info('Webhook delivery cancelled: webhook_id=%s', webhook_id)
-sub1480=>subroutine: raise
-cond1482=>condition: except Exception as exc
-op1486=>operation: last_error = f'Delivery failure: {type(exc).__name__}'
-sub1488=>subroutine: logger.error('Webhook delivery raised: webhook_id=%s error_type=%s', webhook_id, type(exc).__name__)
-op1493=>operation: duration = (datetime.now(UTC) - start_time).total_seconds() * 1000
-op1495=>operation: log_identity = target.log_identity if target is not None else 'target=unvalidated'
-sub1497=>subroutine: logger.error('Webhook delivery failed: webhook_id=%s %s attempts=%s status=%s error=%s', webhook_id, log_identity, attempts, last_status_code, last_error)
-op1499=>operation: self._deliveries_failed += 1
-io1504=>inputoutput: output: WebhookDeliveryResult(webhook_id=webhook_id, url=url, event=event, success=False, status_code=last_status_code, error=last_error, attempts=attempts, duration_ms=duration)
-e1502=>end: end function return
+cond558=>condition: exception raised?
+cond561=>condition: except asyncio.CancelledError
+op565=>operation: self._deliveries_failed += 1
+sub567=>subroutine: logger.info('Webhook delivery cancelled: webhook_id=%s', webhook_id)
+sub569=>subroutine: raise
+cond571=>condition: except Exception as exc
+op575=>operation: last_error = f'Delivery failure: {type(exc).__name__}'
+sub577=>subroutine: logger.error('Webhook delivery raised: webhook_id=%s error_type=%s', webhook_id, type(exc).__name__)
+op582=>operation: duration = (datetime.now(UTC) - start_time).total_seconds() * 1000
+op584=>operation: log_identity = target.log_identity if target is not None else 'target=unvalidated'
+sub586=>subroutine: logger.error('Webhook delivery failed: webhook_id=%s %s attempts=%s status=%s error=%s', webhook_id, log_identity, attempts, last_status_code, last_error)
+op588=>operation: self._deliveries_failed += 1
+io593=>inputoutput: output: WebhookDeliveryResult(webhook_id=webhook_id, url=url, event=event, success=False, status_code=last_status_code, error=last_error, attempts=attempts, duration_ms=duration)
+e591=>end: end function return
 
-op1437->op1439
-op1439->op1441
-op1441->op1443
-op1443->op1445
-op1445->op1447
-op1447->op1449
-op1449->op1451
-op1451->op1453
-op1453->op1455
-op1455->op1457
-op1457->op1459
-op1459->op1461
-op1461->op1463
-op1463->op1465
-op1465->op1467
-op1467->op1470
-op1470->cond1469
-cond1469(yes)->cond1472
-cond1472(yes)->op1476
-op1476->sub1478
-sub1478->sub1480
-cond1472(no)->cond1482
-cond1482(yes)->op1486
-op1486->sub1488
-sub1488->op1493
-op1493->op1495
-op1495->sub1497
-sub1497->op1499
-op1499->io1504
-io1504->e1502
-cond1482(no)->op1493
-cond1469(no)->op1493
+op526->op528
+op528->op530
+op530->op532
+op532->op534
+op534->op536
+op536->op538
+op538->op540
+op540->op542
+op542->op544
+op544->op546
+op546->op548
+op548->op550
+op550->op552
+op552->op554
+op554->op556
+op556->op559
+op559->cond558
+cond558(yes)->cond561
+cond561(yes)->op565
+op565->sub567
+sub567->sub569
+cond561(no)->cond571
+cond571(yes)->op575
+op575->sub577
+sub577->op582
+op582->op584
+op584->sub586
+sub586->op588
+op588->io593
+io593->e591
+cond571(no)->op582
+cond558(no)->op582
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -323,17 +323,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-16T20:28:30Z -->
-        <!-- Generated from Git commit: 3c21b4eec4ebed24c6ca9e80a33302966592d8db -->
+        <!-- Generated at (UTC): 2026-11-16T21:53:25Z -->
+        <!-- Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-16T20:28:30Z">2026-11-16T20:28:30Z</time>
+            Generated at (UTC): <time datetime="2026-11-16T21:53:25Z">2026-11-16T21:53:25Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>3c21b4eec4ebed24c6ca9e80a33302966592d8db</code>
+            Source commit: <code>e87c6c2875ea52716c5fb87a7843816a863f6298</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>d6a7b955028e8cd3</code>
+            Flow content SHA-256: <code>d40437b685ebedb7</code>
           </p>
           <div id="canvas"></div>
         </div>

@@ -67,14 +67,14 @@
       "source_commit": "3c21b4eec4ebed24c6ca9e80a33302966592d8db"
     },
     "gco/services/health_monitor.py": {
-      "digest": "c40ffc5824401b4dc5bc4d25698f888bd4760dbd334f3d31ea7743575f9dc2cb",
-      "generated_at": "2026-11-16T20:28:30Z",
-      "source_commit": "3c21b4eec4ebed24c6ca9e80a33302966592d8db"
+      "digest": "a417102aba4ebf84bd5e74fddefb86a038080f63059c1228d98937f6844a4167",
+      "generated_at": "2026-11-16T21:53:25Z",
+      "source_commit": "e87c6c2875ea52716c5fb87a7843816a863f6298"
     },
     "gco/services/inference_monitor.py": {
-      "digest": "b84287f4c859f1d12db240014c8179283dba579c073661384b870a4424bd1bb2",
-      "generated_at": "2026-11-16T20:28:30Z",
-      "source_commit": "3c21b4eec4ebed24c6ca9e80a33302966592d8db"
+      "digest": "448cf6427fd6a79dd5928a33003659681216577191458f408ebd4cda60b24e47",
+      "generated_at": "2026-11-16T21:53:25Z",
+      "source_commit": "e87c6c2875ea52716c5fb87a7843816a863f6298"
     },
     "gco/services/manifest_api.py": {
       "digest": "9bb96d43bfe44356bb007d300327ae83824bf37459eadf09aae88019f4c51b92",
@@ -82,9 +82,9 @@
       "source_commit": "8cb8e766461f5b7f35205e12db980988598cf6d5"
     },
     "gco/services/manifest_processor.py": {
-      "digest": "03b8d5901332dae1c9468304fbb7a9abe2fa2988c51d3594c6ce1858adab6b29",
-      "generated_at": "2026-11-16T20:28:30Z",
-      "source_commit": "3c21b4eec4ebed24c6ca9e80a33302966592d8db"
+      "digest": "ae422c7588a192a2b2cab811230974278af296b233a0c5d67230e9afb5d8accf",
+      "generated_at": "2026-11-16T21:53:25Z",
+      "source_commit": "e87c6c2875ea52716c5fb87a7843816a863f6298"
     },
     "gco/services/mooncake_pd_proxy.py": {
       "digest": "89841dadd30d2470075071933743dc093930cefd3002f17e3dc1edb24b43ea5d",
@@ -112,9 +112,9 @@
       "source_commit": "745b3fa3a9af9380bfe2797a5d9716fe8ce3a557"
     },
     "gco/services/webhook_dispatcher.py": {
-      "digest": "d6d8e952c77128be54fbefaa0a93b3860726b044e9249bbbcefa37fae298c6bd",
-      "generated_at": "2026-11-16T20:28:30Z",
-      "source_commit": "3c21b4eec4ebed24c6ca9e80a33302966592d8db"
+      "digest": "65dcb64caab1112089bb0a439c07e7e00d1d2cacfb4085598c25bdc82f1cb363",
+      "generated_at": "2026-11-16T21:53:25Z",
+      "source_commit": "e87c6c2875ea52716c5fb87a7843816a863f6298"
     },
     "gco/stacks/analytics_stack.py": {
       "digest": "811189b245bc017d39390bc38976f5fdf4304c982624409248c87e199cb5cc6a",
@@ -252,9 +252,9 @@
       "source_commit": "b8faa9689385cea16155a285a7f70cf6d488e512"
     },
     "lambda/kubectl-applier-simple/handler.py": {
-      "digest": "51f10ee978661361934d87b3e88cdd7220f7b8cab708353c216e74258fb425ba",
-      "generated_at": "2026-11-16T20:28:30Z",
-      "source_commit": "3c21b4eec4ebed24c6ca9e80a33302966592d8db"
+      "digest": "182eca49bcc4112da690fb803cad5a94c4f4b3ff7dc6692aec9bc49c876b1e2d",
+      "generated_at": "2026-11-16T21:53:25Z",
+      "source_commit": "e87c6c2875ea52716c5fb87a7843816a863f6298"
     },
     "lambda/proxy-shared/proxy_utils.py": {
       "digest": "69c3c986d6d33faae988eebd3041b8277ef4b84d1883fbbe3e756356b01a5f09",

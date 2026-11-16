@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-16T20:28:30Z">
-        <meta name="gco-source-commit" content="3c21b4eec4ebed24c6ca9e80a33302966592d8db">
-        <meta name="gco-flow-digest" content="d48fb29f35d57d2c">
+        <meta name="gco-generated-at" content="2026-11-16T21:53:25Z">
+        <meta name="gco-source-commit" content="e87c6c2875ea52716c5fb87a7843816a863f6298">
+        <meta name="gco-flow-digest" content="7692bc89eacf73f0">
         <title>Inference endpoint authorized desired-state reconciliation</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,109 +208,109 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op613=>operation: 'Implementation for one endpoint after authority has been installed.'
-op615=>operation: name = endpoint['endpoint_name']
-op617=>operation: desired_state = endpoint.get('desired_state', 'deploying')
-op619=>operation: target_regions = endpoint.get('target_regions', [])
-op621=>operation: spec = endpoint.get('spec', {})
-op623=>operation: ns = endpoint.get('namespace', self.namespace)
-op625=>operation: lifecycle_value = endpoint.get('lifecycle_id')
-op627=>operation: lifecycle_id = lifecycle_value if isinstance(lifecycle_value, str) and lifecycle_value else None
-cond630=>condition: if desired_state == 'deleted'
-op634=>operation: generation = endpoint.get('deletion_generation')
-op636=>operation: deletion_regions = endpoint.get('deletion_regions')
-cond639=>condition: if not isinstance(generation, str) or not isinstance(deletion_regions, list)
-sub643=>subroutine: self.store.update_desired_state(name, 'deleted', expected_lifecycle_id=lifecycle_id)
-io648=>inputoutput: output: {'action': 'initialize_deletion', 'endpoint': name}
-e646=>end: end function return
-cond655=>condition: if self.region not in deletion_regions
-io662=>inputoutput: output: None
-e660=>end: end function return
-cond669=>condition: if self._cleanup_ack_is_terminal(endpoint, self.region)
-io676=>inputoutput: output: None
-e674=>end: end function return
-io685=>inputoutput: output: self._reconcile_deleted(endpoint, ns, spec if isinstance(spec, dict) else None)
-e683=>end: end function return
-cond692=>condition: if self.region not in target_regions
-op696=>operation: cleanup_regions = endpoint.get('cleanup_regions')
-cond699=>condition: if not isinstance(cleanup_regions, list) or self.region not in cleanup_regions
-io706=>inputoutput: output: None
-e704=>end: end function return
-cond713=>condition: if self._cleanup_ack_is_terminal(endpoint, self.region)
-io720=>inputoutput: output: None
-e718=>end: end function return
-op726=>operation: cleanup = self._delete_resources(name, ns, spec if isinstance(spec, dict) else None, expected_lifecycle_id=lifecycle_id)
-op728=>operation: state, written = self._record_cleanup_observation(endpoint, cleanup)
-io733=>inputoutput: output: {'action': 'cleanup', 'endpoint': name, 'reason': 'region_removed', 'cleanup_complete': state == 'deleted' and written}
-e731=>end: end function return
-cond740=>condition: if desired_state in ('deploying', 'running')
-cond745=>condition: if not isinstance(spec, dict)
-op749=>operation: error = 'endpoint spec must be a mapping'
-sub770=>subroutine: logger.error('Rejecting invalid endpoint %s: %s', name, error)
-sub772=>subroutine: self.store.update_region_status(name, self.region, 'failed', error=error, **self._status_write_conditions(endpoint))
-io777=>inputoutput: output: {'action': 'reject', 'endpoint': name, 'reason': 'invalid_spec'}
-e775=>end: end function return
-cond754=>condition: if 'mooncake' in spec and 'canary' in spec
-op758=>operation: error = "endpoint spec cannot combine 'mooncake' and 'canary' blocks"
-io765=>inputoutput: output: await self._reconcile_running(name, ns, spec, endpoint)
-e763=>end: end function return
-cond784=>condition: if desired_state == 'stopped'
-io791=>inputoutput: output: self._reconcile_stopped(name, ns, spec if isinstance(spec, dict) else None, endpoint)
-e789=>end: end function return
-io800=>inputoutput: output: None
-e798=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op298=>operation: 'Implementation for one endpoint after authority has been installed.'
+op300=>operation: name = endpoint['endpoint_name']
+op302=>operation: desired_state = endpoint.get('desired_state', 'deploying')
+op304=>operation: target_regions = endpoint.get('target_regions', [])
+op306=>operation: spec = endpoint.get('spec', {})
+op308=>operation: ns = endpoint.get('namespace', self.namespace)
+op310=>operation: lifecycle_value = endpoint.get('lifecycle_id')
+op312=>operation: lifecycle_id = lifecycle_value if isinstance(lifecycle_value, str) and lifecycle_value else None
+cond315=>condition: if desired_state == 'deleted'
+op319=>operation: generation = endpoint.get('deletion_generation')
+op321=>operation: deletion_regions = endpoint.get('deletion_regions')
+cond324=>condition: if not isinstance(generation, str) or not isinstance(deletion_regions, list)
+sub328=>subroutine: self.store.update_desired_state(name, 'deleted', expected_lifecycle_id=lifecycle_id)
+io333=>inputoutput: output: {'action': 'initialize_deletion', 'endpoint': name}
+e331=>end: end function return
+cond340=>condition: if self.region not in deletion_regions
+io347=>inputoutput: output: None
+e345=>end: end function return
+cond354=>condition: if self._cleanup_ack_is_terminal(endpoint, self.region)
+io361=>inputoutput: output: None
+e359=>end: end function return
+io370=>inputoutput: output: self._reconcile_deleted(endpoint, ns, spec if isinstance(spec, dict) else None)
+e368=>end: end function return
+cond377=>condition: if self.region not in target_regions
+op381=>operation: cleanup_regions = endpoint.get('cleanup_regions')
+cond384=>condition: if not isinstance(cleanup_regions, list) or self.region not in cleanup_regions
+io391=>inputoutput: output: None
+e389=>end: end function return
+cond398=>condition: if self._cleanup_ack_is_terminal(endpoint, self.region)
+io405=>inputoutput: output: None
+e403=>end: end function return
+op411=>operation: cleanup = self._delete_resources(name, ns, spec if isinstance(spec, dict) else None, expected_lifecycle_id=lifecycle_id)
+op413=>operation: state, written = self._record_cleanup_observation(endpoint, cleanup)
+io418=>inputoutput: output: {'action': 'cleanup', 'endpoint': name, 'reason': 'region_removed', 'cleanup_complete': state == 'deleted' and written}
+e416=>end: end function return
+cond425=>condition: if desired_state in ('deploying', 'running')
+cond430=>condition: if not isinstance(spec, dict)
+op434=>operation: error = 'endpoint spec must be a mapping'
+sub455=>subroutine: logger.error('Rejecting invalid endpoint %s: %s', name, error)
+sub457=>subroutine: self.store.update_region_status(name, self.region, 'failed', error=error, **self._status_write_conditions(endpoint))
+io462=>inputoutput: output: {'action': 'reject', 'endpoint': name, 'reason': 'invalid_spec'}
+e460=>end: end function return
+cond439=>condition: if 'mooncake' in spec and 'canary' in spec
+op443=>operation: error = "endpoint spec cannot combine 'mooncake' and 'canary' blocks"
+io450=>inputoutput: output: await self._reconcile_running(name, ns, spec, endpoint)
+e448=>end: end function return
+cond469=>condition: if desired_state == 'stopped'
+io476=>inputoutput: output: self._reconcile_stopped(name, ns, spec if isinstance(spec, dict) else None, endpoint)
+e474=>end: end function return
+io485=>inputoutput: output: None
+e483=>end: end function return
 
-op613->op615
-op615->op617
-op617->op619
-op619->op621
-op621->op623
-op623->op625
-op625->op627
-op627->cond630
-cond630(yes)->op634
-op634->op636
-op636->cond639
-cond639(yes)->sub643
-sub643->io648
-io648->e646
-cond639(no)->cond655
-cond655(yes)->io662
-io662->e660
-cond655(no)->cond669
-cond669(yes)->io676
-io676->e674
-cond669(no)->io685
-io685->e683
-cond630(no)->cond692
-cond692(yes)->op696
-op696->cond699
-cond699(yes)->io706
-io706->e704
-cond699(no)->cond713
-cond713(yes)->io720
-io720->e718
-cond713(no)->op726
-op726->op728
-op728->io733
-io733->e731
-cond692(no)->cond740
-cond740(yes)->cond745
-cond745(yes)->op749
-op749->sub770
-sub770->sub772
-sub772->io777
-io777->e775
-cond745(no)->cond754
-cond754(yes)->op758
-op758->sub770
-cond754(no)->io765
-io765->e763
-cond740(no)->cond784
-cond784(yes)->io791
-io791->e789
-cond784(no)->io800
-io800->e798
+op298->op300
+op300->op302
+op302->op304
+op304->op306
+op306->op308
+op308->op310
+op310->op312
+op312->cond315
+cond315(yes)->op319
+op319->op321
+op321->cond324
+cond324(yes)->sub328
+sub328->io333
+io333->e331
+cond324(no)->cond340
+cond340(yes)->io347
+io347->e345
+cond340(no)->cond354
+cond354(yes)->io361
+io361->e359
+cond354(no)->io370
+io370->e368
+cond315(no)->cond377
+cond377(yes)->op381
+op381->cond384
+cond384(yes)->io391
+io391->e389
+cond384(no)->cond398
+cond398(yes)->io405
+io405->e403
+cond398(no)->op411
+op411->op413
+op413->io418
+io418->e416
+cond377(no)->cond425
+cond425(yes)->cond430
+cond430(yes)->op434
+op434->sub455
+sub455->sub457
+sub457->io462
+io462->e460
+cond430(no)->cond439
+cond439(yes)->op443
+op443->sub455
+cond439(no)->io450
+io450->e448
+cond425(no)->cond469
+cond469(yes)->io476
+io476->e474
+cond469(no)->io485
+io485->e483
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -320,17 +320,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-16T20:28:30Z -->
-        <!-- Generated from Git commit: 3c21b4eec4ebed24c6ca9e80a33302966592d8db -->
+        <!-- Generated at (UTC): 2026-11-16T21:53:25Z -->
+        <!-- Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-16T20:28:30Z">2026-11-16T20:28:30Z</time>
+            Generated at (UTC): <time datetime="2026-11-16T21:53:25Z">2026-11-16T21:53:25Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>3c21b4eec4ebed24c6ca9e80a33302966592d8db</code>
+            Source commit: <code>e87c6c2875ea52716c5fb87a7843816a863f6298</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>d48fb29f35d57d2c</code>
+            Flow content SHA-256: <code>7692bc89eacf73f0</code>
           </p>
           <div id="canvas"></div>
         </div>

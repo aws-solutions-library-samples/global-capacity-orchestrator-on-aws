@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-16T20:28:30Z">
-        <meta name="gco-source-commit" content="3c21b4eec4ebed24c6ca9e80a33302966592d8db">
-        <meta name="gco-flow-digest" content="b44b90d73f5481fc">
+        <meta name="gco-generated-at" content="2026-11-16T21:53:25Z">
+        <meta name="gco-source-commit" content="e87c6c2875ea52716c5fb87a7843816a863f6298">
+        <meta name="gco-flow-digest" content="67b326d60c4d6180">
         <title>REST manifest validation pipeline (structure, kinds, limits, tolerations, images)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,11 +208,11 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1401=>operation: 'Validate a Kubernetes manifest for security and resource constraints.\n\n        ``default_namespace`` is the request-level destination for manifests\n        that omit ``metadata.namespace``. Validation and apply must resolve the\n        same effective namespace or the request default could bypass the\n        namespace allowlist.\n\n        Returns: ``(is_valid, error_message)``.\n        '
-cond1404=>condition: if not self.validation_enabled
-io1411=>inputoutput: output: (True, None)
-e1409=>end: end function return
-op1418=>operation: if not self._check_yaml_depth(manifest):
+        <div><textarea id="code" style="width: 100%;" rows="11">op490=>operation: 'Validate a Kubernetes manifest for security and resource constraints.\n\n        ``default_namespace`` is the request-level destination for manifests\n        that omit ``metadata.namespace``. Validation and apply must resolve the\n        same effective namespace or the request default could bypass the\n        namespace allowlist.\n\n        Returns: ``(is_valid, error_message)``.\n        '
+cond493=>condition: if not self.validation_enabled
+io500=>inputoutput: output: (True, None)
+e498=>end: end function return
+op507=>operation: if not self._check_yaml_depth(manifest):
     return (False, f'Manifest exceeds maximum nesting depth of {self.yaml_max_depth} levels')
 required_fields = ['apiVersion', 'kind', 'metadata']
 for field in required_fields:
@@ -248,21 +248,21 @@ img_valid, img_error = self._validate_image_sources(manifest)
 if not img_valid:
     return (False, img_error or 'Untrusted image sources detected')
 return (True, None)
-cond1417=>condition: exception raised?
-cond1420=>condition: except Exception as e
-sub1424=>subroutine: logger.error(f'Error validating manifest: {e}')
-io1429=>inputoutput: output: (False, f'Validation error: {e!s}')
-e1427=>end: end function return
+cond506=>condition: exception raised?
+cond509=>condition: except Exception as e
+sub513=>subroutine: logger.error(f'Error validating manifest: {e}')
+io518=>inputoutput: output: (False, f'Validation error: {e!s}')
+e516=>end: end function return
 
-op1401->cond1404
-cond1404(yes)->io1411
-io1411->e1409
-cond1404(no)->op1418
-op1418->cond1417
-cond1417(yes)->cond1420
-cond1420(yes)->sub1424
-sub1424->io1429
-io1429->e1427
+op490->cond493
+cond493(yes)->io500
+io500->e498
+cond493(no)->op507
+op507->cond506
+cond506(yes)->cond509
+cond509(yes)->sub513
+sub513->io518
+io518->e516
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -272,17 +272,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-16T20:28:30Z -->
-        <!-- Generated from Git commit: 3c21b4eec4ebed24c6ca9e80a33302966592d8db -->
+        <!-- Generated at (UTC): 2026-11-16T21:53:25Z -->
+        <!-- Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-16T20:28:30Z">2026-11-16T20:28:30Z</time>
+            Generated at (UTC): <time datetime="2026-11-16T21:53:25Z">2026-11-16T21:53:25Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>3c21b4eec4ebed24c6ca9e80a33302966592d8db</code>
+            Source commit: <code>e87c6c2875ea52716c5fb87a7843816a863f6298</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>b44b90d73f5481fc</code>
+            Flow content SHA-256: <code>67b326d60c4d6180</code>
           </p>
           <div id="canvas"></div>
         </div>
