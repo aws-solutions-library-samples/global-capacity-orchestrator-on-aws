@@ -328,7 +328,7 @@ async def get_job_logs(
     timestamps: bool = Query(False, description="Include timestamps in log lines"),
 ) -> Response:
     """Get logs from a Job's pods."""
-    from kubernetes.client.rest import ApiException as K8sApiException
+    from kubernetes.client.exceptions import ApiException as K8sApiException
 
     processor = _check_processor()
     _check_namespace(namespace, processor)

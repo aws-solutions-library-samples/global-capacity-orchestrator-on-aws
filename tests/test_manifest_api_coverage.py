@@ -591,6 +591,7 @@ class TestPollJobsEdgeCases:
 
         processor = object.__new__(ManifestProcessor)
         processor._k8s_timeout = 10
+        processor.api_client = MagicMock()
         processor.batch_v1 = MagicMock()
         processor.validate_manifest = MagicMock(return_value=(True, None))
         processor._inject_security_defaults = MagicMock()
@@ -606,9 +607,7 @@ class TestPollJobsEdgeCases:
             ApiException(status=404),
             persisted_job,
         ]
-        processor.batch_v1.create_namespaced_job.side_effect = TimeoutError(
-            "response lost after create"
-        )
+        create = MagicMock(side_effect=TimeoutError("response lost after create"))
         manifest = {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -623,14 +622,17 @@ class TestPollJobsEdgeCases:
             },
         }
 
-        with pytest.raises(RetryableQueuedJobApplyError, match="inconclusive"):
-            processor.apply_queued_job(manifest, "gco-jobs", queue_job_id)
+        import gco.services.manifest_processor as module
 
-        adopted = processor.apply_queued_job(manifest, "gco-jobs", queue_job_id)
+        with patch.object(module, "create_job_from_manifest", create):
+            with pytest.raises(RetryableQueuedJobApplyError, match="inconclusive"):
+                processor.apply_queued_job(manifest, "gco-jobs", queue_job_id)
+
+            adopted = processor.apply_queued_job(manifest, "gco-jobs", queue_job_id)
         assert adopted.status == "unchanged"
         assert adopted.name == deterministic_name
         assert adopted.uid == "k8s-uid-after-timeout"
-        assert processor.batch_v1.create_namespaced_job.call_count == 1
+        assert create.call_count == 1
 
     def test_poll_jobs_with_k8s_uid(self, mock_manifest_processor):
         """Test poll jobs when Kubernetes returns a UID."""

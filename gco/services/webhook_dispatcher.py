@@ -75,8 +75,8 @@ from urllib.parse import ParseResult, urlparse
 
 import httpx2
 from kubernetes import client, config
+from kubernetes.client.exceptions import ApiException
 from kubernetes.client.models import V1Job
-from kubernetes.client.rest import ApiException
 from kubernetes.watch import Watch
 
 from gco.services.leader_lease import (

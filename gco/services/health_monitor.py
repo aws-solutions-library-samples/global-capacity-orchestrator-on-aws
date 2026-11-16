@@ -32,7 +32,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from kubernetes import client, config
-from kubernetes.client.rest import ApiException
+from kubernetes.client.exceptions import ApiException
 
 from gco.k8s_api_versions import METRICS_API_GROUP, METRICS_API_VERSION
 from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization

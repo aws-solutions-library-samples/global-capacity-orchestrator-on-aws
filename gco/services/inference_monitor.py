@@ -51,8 +51,8 @@ from typing import Any, NoReturn, TypedDict
 from urllib.parse import urlsplit
 
 from kubernetes import client, config
+from kubernetes.client.exceptions import ApiException
 from kubernetes.client.models import V1Deployment
-from kubernetes.client.rest import ApiException
 
 from gco.hyperpod_config import (
     CAPACITY_PROVIDER_HYPERPOD,

@@ -18,7 +18,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from kubernetes.client import ApiClient
+from kubernetes.client import ApiClient, V1Job
 from kubernetes.client.rest import ApiException
 
 from tests._auth import bypass_backend_auth
@@ -795,7 +795,9 @@ class TestRetryJobManifest:
         # from the round trip and the comparison fails.
         _, manifest = await _retry(_failed_job_object())
         with ApiClient() as api:
-            model = api.deserialize(SimpleNamespace(data=json.dumps(manifest)), "V1Job")
+            # V1Job.from_dict is the model's own wire-dict reader (the client's
+            # ApiClient.deserialize wraps it and changed its signature in 37.0).
+            model = V1Job.from_dict(manifest)
             assert api.sanitize_for_serialization(model) == manifest
 
     async def test_controller_labels_copied_onto_an_unlabeled_job_are_dropped(self):

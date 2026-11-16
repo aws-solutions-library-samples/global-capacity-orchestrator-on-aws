@@ -45,7 +45,7 @@ import boto3
 import urllib3
 import yaml
 from kubernetes import client, dynamic
-from kubernetes.client.rest import ApiException
+from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit

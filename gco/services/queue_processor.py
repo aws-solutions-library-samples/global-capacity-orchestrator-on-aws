@@ -83,7 +83,7 @@ from typing import Any
 
 import boto3
 from kubernetes import client, config, dynamic
-from kubernetes.client.rest import ApiException
+from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 from gco.hyperpod_config import (
