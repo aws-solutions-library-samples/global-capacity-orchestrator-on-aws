@@ -147,6 +147,7 @@ from gco.job_admission import (
 from gco.job_admission import (
     weighted_pod_specs as weighted_pod_specs,
 )
+from gco.k8s_objects import json_object, present
 from gco.manifest_security_policy import (
     MANIFEST_SECURITY_POLICY_DEFAULTS,
     parse_boolean_environment,
@@ -257,14 +258,10 @@ def create_job_from_manifest(
     response.read()
     # ``object`` decodes the JSON as-is; the generated typed methods pass the
     # model name here and get the Pydantic validation this path avoids.
-    created: object = api_client.response_deserialize(
+    created = api_client.response_deserialize(
         response, {"200": "object", "201": "object", "202": "object"}
     ).data
-    if not isinstance(created, dict):
-        raise RuntimeError(
-            "Kubernetes API answered the Job create with something other than a Job object"
-        )
-    return cast(dict[str, Any], created)
+    return json_object(created, "the Job create response")
 
 
 def _job_identity(job: Any) -> tuple[dict[str, Any], str, str, str]:
@@ -659,9 +656,11 @@ class ManifestProcessor:
                     namespace, _request_timeout=self._k8s_timeout
                 )
                 entry["resource_quotas"] = {
-                    item.metadata.name: dict(item.status.hard or {})
-                    if item.status and item.status.hard
-                    else dict(item.spec.hard or {})
+                    present(item.metadata, "resourcequota.metadata").name: (
+                        dict(item.status.hard or {})
+                        if item.status and item.status.hard
+                        else dict(present(item.spec, "resourcequota.spec").hard or {})
+                    )
                     for item in quotas.items
                 }
 
@@ -669,7 +668,7 @@ class ManifestProcessor:
                     namespace, _request_timeout=self._k8s_timeout
                 )
                 entry["limit_ranges"] = {
-                    item.metadata.name: [
+                    present(item.metadata, "limitrange.metadata").name: [
                         {
                             "type": limit.type,
                             "max": dict(limit.max or {}),
@@ -677,7 +676,7 @@ class ManifestProcessor:
                             "default": dict(limit.default or {}),
                             "defaultRequest": dict(limit.default_request or {}),
                         }
-                        for limit in (item.spec.limits or [])
+                        for limit in (present(item.spec, "limitrange.spec").limits or [])
                     ]
                     for item in limit_ranges.items
                 }
@@ -1590,9 +1589,9 @@ class ManifestProcessor:
 
     def _job_to_dict(self, job: V1Job) -> dict[str, Any]:
         """Convert a Kubernetes Job object to a dictionary."""
-        metadata = job.metadata
-        status = job.status
-        spec = job.spec
+        metadata = present(job.metadata, "job.metadata")
+        status = present(job.status, "job.status")
+        spec = present(job.spec, "job.spec")
 
         return {
             "metadata": {
@@ -1631,7 +1630,7 @@ class ManifestProcessor:
 
     def _get_job_status(self, job: V1Job) -> str:
         """Determine the status of a job: running, completed, or failed."""
-        status = job.status
+        status = present(job.status, "job.status")
         conditions = status.conditions or []
 
         for condition in conditions:

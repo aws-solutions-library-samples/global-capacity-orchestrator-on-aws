@@ -30,6 +30,7 @@ import urllib3
 from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 
+from gco.k8s_objects import ObjectShapeError
 from gco.services.manifest_processor import (
     ManifestProcessor,
     RetryableQueuedJobApplyError,
@@ -294,7 +295,7 @@ class TestCreateJobFromManifest:
         api.param_serialize.return_value = ("POST", "http://x", {}, "{}", [])
         api.call_api.return_value = response
         api.response_deserialize.return_value = MagicMock(data=["not", "a", "job"])
-        with pytest.raises(RuntimeError, match="something other than a Job object"):
+        with pytest.raises(ObjectShapeError, match="the Job create response is not a JSON object"):
             create_job_from_manifest(api, NAMESPACE, _gpu_job(), request_timeout=5)
 
 

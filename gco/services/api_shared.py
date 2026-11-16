@@ -28,6 +28,7 @@ from gco.hyperpod_config import (
     INSTANCE_GROUP_LABEL,
     NODE_HEALTH_STATUS_LABEL,
 )
+from gco.k8s_objects import present
 from gco.services.manifest_processor import ManifestProcessor
 from gco.services.metrics_publisher import ManifestProcessorMetrics
 from gco.services.request_context import current_request_id
@@ -288,9 +289,9 @@ def _check_namespace(namespace: str, processor: ManifestProcessor) -> None:
 
 def _parse_job_to_dict(job: V1Job) -> dict[str, Any]:
     """Parse a Kubernetes Job object to a dictionary."""
-    metadata = job.metadata
-    status = job.status
-    spec = job.spec
+    metadata = present(job.metadata, "job.metadata")
+    status = present(job.status, "job.status")
+    spec = present(job.spec, "job.spec")
 
     conditions = status.conditions or []
     computed_status = "pending"
@@ -368,9 +369,9 @@ def _parse_job_to_dict(job: V1Job) -> dict[str, Any]:
 
 def _parse_pod_to_dict(pod: V1Pod) -> dict[str, Any]:
     """Parse a Kubernetes Pod object to a dictionary."""
-    metadata = pod.metadata
-    status = pod.status
-    spec = pod.spec
+    metadata = present(pod.metadata, "pod.metadata")
+    status = present(pod.status, "pod.status")
+    spec = present(pod.spec, "pod.spec")
 
     container_statuses = []
     for cs in status.container_statuses or []:

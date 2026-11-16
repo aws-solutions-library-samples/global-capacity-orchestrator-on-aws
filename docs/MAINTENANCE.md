@@ -385,9 +385,18 @@ constant still says `v1beta1`, as the reminder.
   checks against the pinned client's models offline. Single-resource deletes
   now return plain dicts (nothing in GCO reads a delete's result), and
   `ApiException` is imported from its defining module,
-  `kubernetes.client.exceptions`. The client ships `py.typed`; mypy keeps
-  treating it as untyped (`follow_imports = "skip"` in `pyproject.toml`, with
-  the reasoning) until the services adopt the Optional-typed models.
+  `kubernetes.client.exceptions`. The client ships `py.typed`, and mypy
+  follows it: the generated models type `metadata`, `spec` and `status` as
+  Optional (a request body may omit them), while on an object the API server
+  returns they are never absent, so the services narrow them with
+  `gco.k8s_objects.present` (and the `object`-typed answers of the
+  custom-objects API with `json_object`) instead of branching on a `None` no
+  real response carries. A new access to such a field should do the same;
+  `getattr(obj, "field", None)` only hides the type. The client's
+  hand-written modules (`config`, `watch`, `dynamic`, the `client.rest`
+  transport and `ApiClient.close`) are unannotated and are exempted from
+  `disallow_untyped_calls` alone (`untyped_calls_exclude` in
+  `pyproject.toml`).
 - **Why 37.0.1 and not 37.0.2.** 37.0.2 (2026-11-06) raised its floor to
   `python-dateutil>=3.0.0` (dependabot, kubernetes-client/python#2757) while
   botocore — every release through 1.44.x — caps it `<3.0.0`, so the two

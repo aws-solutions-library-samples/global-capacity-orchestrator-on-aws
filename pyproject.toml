@@ -480,6 +480,23 @@ mypy_path = "gco_mcp"
 # annotating our own code — it only suppresses errors from imports.
 ignore_missing_imports = true
 disable_error_code = ["import-untyped", "import-not-found"]
+# kubernetes client 37 ships py.typed, and its generated package
+# (kubernetes.client: the models and the API classes) is annotated, so calls
+# into it are checked like any typed code; the Optional metadata/spec/status
+# of returned objects are narrowed with gco.k8s_objects.present. Its
+# hand-written modules are not annotated: config (load_incluster_config,
+# load_kube_config), watch (Watch, Watch.stream), dynamic (DynamicClient)
+# and the transport in client.rest (RESTResponse.read), plus
+# ApiClient.close. Calling an unannotated function is an error under
+# disallow_untyped_calls; these packages are exempted from that one rule
+# only, so what they return still carries whatever type they declare (or Any).
+untyped_calls_exclude = [
+    "kubernetes.config",
+    "kubernetes.watch",
+    "kubernetes.dynamic",
+    "kubernetes.client.rest",
+    "kubernetes.client.api_client",
+]
 exclude = [
     "cdk\\.out",
     "\\.venv",
@@ -501,21 +518,6 @@ exclude = [
 module = "gco_mcp.*"
 follow_imports = "skip"
 
-# The kubernetes client is checked as it was through 36.x: untyped (every
-# model and API method resolves to Any). 37.0 ships py.typed with models
-# generated from the OpenAPI spec, where metadata, spec and status are all
-# Optional — true to the wire format, but GCO reads them on objects the API
-# server has just returned, where they are never absent. Following the new
-# types reports about 170 such accesses across the services and the CLI
-# (`job.metadata.name`, `pod.status.phase`, `job.status.active`, ...), each
-# needing a None guard or a narrowing assert and, under the 100% coverage
-# floor, a test for a branch no real response takes, plus a handful of
-# `object`-typed custom-object results to cast. That is a typed-model adoption
-# of its own, not part of moving the pin; the client's typing is parked here
-# until it is done. Nothing about runtime behaviour depends on this section.
-[[tool.mypy.overrides]]
-module = ["kubernetes", "kubernetes.*"]
-follow_imports = "skip"
 
 # gco/stacks/ is type-checked separately by lint:mypy:stacks (with CDK
 # installed). When the strict job runs without CDK, aws_cdk.Stack resolves

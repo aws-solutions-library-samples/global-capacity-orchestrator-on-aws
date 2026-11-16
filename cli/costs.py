@@ -14,6 +14,8 @@ from typing import Any
 
 import boto3
 
+from gco.k8s_objects import present
+
 from .config import GCOConfig, get_config
 
 logger = logging.getLogger(__name__)
@@ -243,38 +245,41 @@ class CostTracker:
                     continue
 
                 for pod in pods.items:
-                    if pod.status.phase not in ("Running", "Pending"):
-                        continue
+                    status = present(pod.status, "pod.status")
+                    phase = status.phase
 
-                    name = pod.metadata.name
+                    if phase not in ("Running", "Pending"):
+                        continue
+                    name = present(present(pod.metadata, "pod.metadata").name, "pod.metadata.name")
+
+                    spec = present(pod.spec, "pod.spec")
                     gpu_count = 0
                     instance_type = "unknown"
-
                     # Get GPU requests
-                    for container in pod.spec.containers or []:
-                        requests = container.resources.requests or {}
+                    for container in spec.containers or []:
+                        resources = present(container.resources, "container.resources")
+                        requests = resources.requests or {}
                         gpu_req = requests.get(  # nosec B113  # dict.get(), not HTTP requests
                             "nvidia.com/gpu", "0"
                         )
                         gpu_count += int(gpu_req)
 
                     # Get node instance type
-                    if pod.spec.node_name:
+                    if spec.node_name:
                         try:
-                            node = v1.read_node(pod.spec.node_name)
-                            instance_type = node.metadata.labels.get(
+                            node = v1.read_node(spec.node_name)
+                            node_labels = present(node.metadata, "node.metadata").labels or {}
+                            instance_type = node_labels.get(
                                 "node.kubernetes.io/instance-type", "unknown"
                             )
                         except Exception as e:
-                            logger.debug(
-                                "Failed to get node info for %s: %s", pod.spec.node_name, e
-                            )
+                            logger.debug("Failed to get node info for %s: %s", spec.node_name, e)
 
                     # Calculate cost
                     hourly_rate = checker.get_on_demand_price(instance_type, region) or 0.0
 
                     # Calculate runtime
-                    start_time = pod.status.start_time
+                    start_time = status.start_time
                     if start_time:
                         runtime = datetime.now(UTC) - start_time
                         runtime_hours = runtime.total_seconds() / 3600
@@ -293,7 +298,7 @@ class CostTracker:
                             runtime_hours=round(runtime_hours, 2),
                             estimated_cost=round(hourly_rate * runtime_hours, 4),
                             region=region,
-                            status=pod.status.phase,
+                            status=phase,
                         )
                     )
 
