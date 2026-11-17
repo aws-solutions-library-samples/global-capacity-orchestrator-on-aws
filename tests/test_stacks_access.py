@@ -7,10 +7,13 @@ cdk.json::context.regional and falling back to `-r`), cluster name
 defaulting to `<project_name>-{region}`, and the EKS access-entry creation path:
 translating `sts:assumed-role` ARNs to IAM role ARNs, invoking
 `aws eks update-kubeconfig` and `create-access-entry` via patched
-subprocess.run, and swallowing the "already exists" error on rerun
-so the command is idempotent.
+subprocess.run, and tolerating only ResourceInUseException (the entry
+already exists) on rerun so the command is idempotent. Every other
+failure of the access-entry, policy or kubectl step exits non-zero; an
+API server this host cannot reach only warns.
 """
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,10 +21,132 @@ from click.testing import CliRunner
 
 from cli.commands.stacks_cmd import stacks
 
+#: What the AWS CLI prints when the principal already has an access entry.
+_ENTRY_EXISTS = (
+    "An error occurred (ResourceInUseException) when calling the CreateAccessEntry "
+    "operation: The specified access entry resource is already in use on this cluster."
+)
+
 
 @pytest.fixture
 def runner():
     return CliRunner()
+
+
+def _access_run(*, create=None, associate=None, kubectl=(0, "NAME STATUS\nnode1 Ready\n", "")):
+    """``subprocess.run`` stand-in: ``create``/``associate`` stderr fails that step."""
+    import json
+
+    calls: list[str] = []
+
+    def side_effect(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        cmd_str = " ".join(cmd)
+        calls.append(cmd_str)
+        if "create-access-entry" in cmd_str and create is not None:
+            raise subprocess.CalledProcessError(254, cmd, stderr=create)
+        if "associate-access-policy" in cmd_str and associate is not None:
+            raise subprocess.CalledProcessError(254, cmd, stderr=associate)
+        response = MagicMock(returncode=0, stderr="", stdout="")
+        if "describe-cluster" in cmd_str:
+            response.stdout = json.dumps({"public": True, "private": True, "publicCidrs": []})
+        elif "get-caller-identity" in cmd_str:
+            response.stdout = "arn:aws:iam::123456789012:user/dev\n"
+        elif "kubectl" in cmd_str:
+            response.returncode, response.stdout, response.stderr = kubectl
+        return response
+
+    return side_effect, calls
+
+
+class TestStacksAccessFailures:
+    """Only an existing entry is benign; every other failure exits non-zero.
+
+    The command used to print "may already exist" for an AccessDenied or an
+    unknown cluster, report an Unauthorized kubectl as "connected but no nodes
+    found", and exit 0 either way.
+    """
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "An error occurred (AccessDeniedException) when calling the CreateAccessEntry "
+            "operation: User is not authorized to perform: eks:CreateAccessEntry",
+            "An error occurred (ResourceNotFoundException) when calling the "
+            "CreateAccessEntry operation: No cluster found for name: gco-us-east-1.",
+        ],
+    )
+    def test_a_failed_access_entry_stops_with_the_aws_error(self, runner, stderr):
+        side_effect, calls = _access_run(create=stderr)
+        with patch("subprocess.run", side_effect=side_effect), patch("time.sleep"):
+            result = runner.invoke(stacks, ["access", "-r", "us-east-1"])
+
+        assert result.exit_code == 1, result.output
+        assert stderr in result.output
+        assert "may already exist" not in result.output
+        assert not any("associate-access-policy" in call for call in calls)
+
+    def test_a_failed_policy_association_stops_with_the_aws_error(self, runner):
+        denied = (
+            "An error occurred (AccessDeniedException) when calling the "
+            "AssociateAccessPolicy operation: not authorized"
+        )
+        side_effect, calls = _access_run(associate=denied)
+        with patch("subprocess.run", side_effect=side_effect), patch("time.sleep"):
+            result = runner.invoke(stacks, ["access", "-r", "us-east-1"])
+
+        assert result.exit_code == 1, result.output
+        assert denied in result.output
+        assert not any(call.startswith("kubectl") for call in calls)
+
+    def test_an_existing_association_is_benign(self, runner):
+        side_effect, _calls = _access_run(
+            create=_ENTRY_EXISTS,
+            associate="An error occurred (ResourceInUseException) when calling the "
+            "AssociateAccessPolicy operation: already in use",
+        )
+        with patch("subprocess.run", side_effect=side_effect), patch("time.sleep"):
+            result = runner.invoke(stacks, ["access", "-r", "us-east-1"])
+
+        assert result.exit_code == 0, result.output
+        assert "Policy already associated" in result.output
+        assert "Access configured successfully. 1 node(s) ready." in result.output
+
+    def test_an_unauthorized_kubectl_exits_nonzero_with_its_error(self, runner):
+        side_effect, _calls = _access_run(
+            kubectl=(1, "", "error: You must be logged in to the server (Unauthorized)")
+        )
+        with patch("subprocess.run", side_effect=side_effect), patch("time.sleep"):
+            result = runner.invoke(stacks, ["access", "-r", "us-east-1"])
+
+        assert result.exit_code == 1, result.output
+        assert "You must be logged in to the server (Unauthorized)" in result.output
+        assert "no nodes found" not in result.output
+
+    def test_a_kubectl_failure_without_output_names_its_exit_status(self, runner):
+        side_effect, _calls = _access_run(kubectl=(2, "", ""))
+        with patch("subprocess.run", side_effect=side_effect), patch("time.sleep"):
+            result = runner.invoke(stacks, ["access", "-r", "us-east-1"])
+
+        assert result.exit_code == 1, result.output
+        assert "kubectl get nodes failed: exit status 2" in result.output
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "Unable to connect to the server: net/http: TLS handshake timeout",
+            'Get "https://ABC.gr7.us-east-1.eks.amazonaws.com/api": context deadline exceeded',
+            "dial tcp: lookup abc.eks.amazonaws.com: no such host",
+        ],
+    )
+    def test_an_unreachable_api_server_only_warns_and_shows_kubectls_error(self, runner, stderr):
+        side_effect, _calls = _access_run(kubectl=(1, "", stderr))
+        with patch("subprocess.run", side_effect=side_effect), patch("time.sleep"):
+            result = runner.invoke(stacks, ["access", "-r", "us-east-1"])
+
+        assert result.exit_code == 0, result.output
+        assert f"kubectl: {stderr}" in result.output
+        assert "kubectl could not reach the API server" in result.output
 
 
 class TestStacksAccessCommand:
@@ -187,8 +312,6 @@ class TestStacksAccessCommand:
 
     def test_handles_existing_access_entry(self, runner):
         """Should handle 'already exists' gracefully."""
-        import subprocess
-
         with patch("subprocess.run") as mock_run, patch("time.sleep"):
 
             def side_effect(*args, **kwargs):
@@ -196,7 +319,7 @@ class TestStacksAccessCommand:
                 cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
 
                 if "create-access-entry" in cmd_str:
-                    raise subprocess.CalledProcessError(1, cmd, stderr="already exists")
+                    raise subprocess.CalledProcessError(1, cmd, stderr=_ENTRY_EXISTS)
 
                 mock = MagicMock(returncode=0, stderr="")
                 if "get-caller-identity" in cmd_str:
@@ -211,7 +334,8 @@ class TestStacksAccessCommand:
 
             result = runner.invoke(stacks, ["access", "-r", "us-east-1"])
             # Should not fail — handles existing entry gracefully
-            assert "Access entry may already exist" in result.output
+            assert result.exit_code == 0, result.output
+            assert "Access entry already exists" in result.output
 
 
 class TestStacksAccessEndpointWarning:
@@ -233,7 +357,6 @@ class TestStacksAccessEndpointWarning:
         reporting a network timeout to mimic a private-only cluster.
         """
         import json
-        import subprocess
 
         def side_effect(*args, **kwargs):
             cmd = args[0] if args else kwargs.get("args", [])
@@ -258,7 +381,7 @@ class TestStacksAccessEndpointWarning:
             elif "create-access-entry" in cmd_str:
                 # Idempotent — pretend it already exists, exercising the
                 # CalledProcessError path without affecting anything else.
-                raise subprocess.CalledProcessError(1, cmd, stderr="already exists")
+                raise subprocess.CalledProcessError(1, cmd, stderr=_ENTRY_EXISTS)
             return mock
 
         return side_effect
@@ -308,15 +431,14 @@ class TestStacksAccessEndpointWarningExtended:
     probe (so the access-entry steps still run when AWS is unreachable),
     the CIDR-allowlist info-line vs. the noisy private-only warning,
     and the kubectl-failure pattern matcher that decides between the
-    structured remediation hint and the legacy 'no nodes found' fallback.
+    structured remediation hint (unreachable API server, exit 0) and a
+    failure that prints kubectl's error and exits 1.
     """
 
     def test_describe_cluster_failure_does_not_block_setup(self, runner):
         """A failing describe-cluster step is logged but doesn't abort
         the access-entry creation flow.
         """
-        import subprocess
-
         with patch("subprocess.run") as mock_run, patch("time.sleep"):
 
             def side_effect(*args, **kwargs):
@@ -408,9 +530,8 @@ class TestStacksAccessEndpointWarningExtended:
         ],
     )
     def test_kubectl_network_error_surfaces_remediation(self, runner, stderr_phrase):
-        """Each of the four stderr phrases the matcher recognises should
-        trip the structured remediation hint, not the legacy
-        ``no nodes found`` line.
+        """Each of these connection failures should trip the structured
+        remediation hint and exit 0, not fail the command.
         """
         import json
 
@@ -447,10 +568,10 @@ class TestStacksAccessEndpointWarningExtended:
         assert "PUBLIC_AND_PRIVATE" in result.output
         assert "gco stacks deploy gco-us-east-1" in result.output
 
-    def test_kubectl_non_network_failure_falls_back_to_legacy(self, runner):
+    def test_kubectl_non_network_failure_exits_nonzero_with_its_error(self, runner):
         """When kubectl exits non-zero with a non-network stderr (e.g.
-        permission denied), the fallback message is the legacy 'no
-        nodes found' line — the structured hint would be misleading.
+        permission denied), the command fails and prints kubectl's error:
+        it used to report "kubectl connected but no nodes found" and exit 0.
         """
         import json
 
@@ -474,12 +595,16 @@ class TestStacksAccessEndpointWarningExtended:
             mock_run.side_effect = side_effect
             result = runner.invoke(stacks, ["access", "-r", "us-east-1"])
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         # Neither the CIDR-allowlist line nor the remediation pointer
         # should fire on a non-network kubectl failure.
         assert "PUBLIC_AND_PRIVATE" not in result.output
-        # The legacy fallback line is what surfaces here.
-        assert "no nodes found" in result.output
+        assert "no nodes found" not in result.output
+        assert (
+            "kubectl get nodes failed: Error from server (Forbidden): nodes is forbidden"
+            in result.output
+        )
+        assert "rerun 'gco stacks access'" in result.output
 
     def test_private_only_describes_query_shape_once(self, runner):
         """The describe-cluster probe must hit the right JMESPath query

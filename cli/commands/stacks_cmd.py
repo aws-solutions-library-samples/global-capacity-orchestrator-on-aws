@@ -790,6 +790,28 @@ def stack_outputs(config: Any, stack_name: Any, region: Any) -> None:
         sys.exit(1)
 
 
+#: kubectl's wording when it never reached the API server (connect, DNS, TLS
+#: and request timeouts); kubectl prefixes most of them with the first phrase.
+_KUBECTL_CONNECT_FAILURES = (
+    "unable to connect to the server",
+    "i/o timeout",
+    "no route to host",
+    "connection refused",
+    "dial tcp",
+    "tls handshake timeout",
+    "context deadline exceeded",
+    "client.timeout exceeded",
+    "no such host",
+    "network is unreachable",
+)
+
+
+def _kubectl_could_not_connect(stderr: str) -> bool:
+    """Return whether a failed kubectl call never reached the API server."""
+    lowered = stderr.lower()
+    return any(phrase in lowered for phrase in _KUBECTL_CONNECT_FAILURES)
+
+
 @stacks.command("access")
 @click.option("--cluster", "-c", help="Cluster name (default: <project_name>-<region>)")
 @click.option("--region", "-r", help="AWS region (default: first deployment region)")
@@ -799,6 +821,13 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
 
     Updates kubeconfig, creates an EKS access entry for your IAM principal,
     and associates the cluster admin policy. Handles assumed roles automatically.
+
+    Exits non-zero when a step fails: an access entry that cannot be created
+    (one that already exists is fine), a policy that cannot be associated, or
+    a final 'kubectl get nodes' that fails for any reason but reaching the
+    API server, whose error is printed. An API server this host cannot reach
+    (a private endpoint, a CIDR allowlist) is a warning: the access still
+    applies from inside the network.
 
     Examples:
         gco stacks access
@@ -947,7 +976,9 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                 principal_arn = f"arn:{partition}:iam::{account_id}:role/{role_name.group(1)}"
                 formatter.print_info(f"Using role ARN: {principal_arn}")
 
-        # Step 3: Create access entry
+        # Step 3: Create access entry. Only ResourceInUseException means the
+        # entry exists; anything else (AccessDenied, an unknown cluster, an
+        # authentication mode without access entries) stops here.
         formatter.print_info("Creating EKS access entry...")
         try:
             subprocess.run(
@@ -966,8 +997,10 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                 capture_output=True,
                 text=True,
             )
-        except subprocess.CalledProcessError:
-            formatter.print_info("Access entry may already exist")
+        except subprocess.CalledProcessError as exc:
+            if "ResourceInUseException" not in (exc.stderr or ""):
+                raise
+            formatter.print_info("Access entry already exists")
 
         # Step 4: Associate admin policy
         formatter.print_info("Associating cluster admin policy...")
@@ -992,8 +1025,15 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                 capture_output=True,
                 text=True,
             )
-        except subprocess.CalledProcessError:
-            formatter.print_info("Policy may already be associated")
+        except subprocess.CalledProcessError as exc:
+            # The API re-associates an existing policy without error; tolerate
+            # only an explicit conflict, never AccessDenied or a missing entry.
+            detail = exc.stderr or ""
+            if "ResourceInUseException" not in detail and "already associated" not in (
+                detail.lower()
+            ):
+                raise
+            formatter.print_info("Policy already associated")
 
         # Step 5: Verify access
         formatter.print_info("Waiting for permissions to propagate...")
@@ -1007,35 +1047,31 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
             text=True,
             check=False,
         )
+        stderr = (result.stderr or "").strip()
         if result.returncode == 0:
             node_count = len(
                 [line for line in result.stdout.strip().split("\n")[1:] if line.strip()]
             )
             print(result.stdout)
             formatter.print_info(f"Access configured successfully. {node_count} node(s) ready.")
-        elif private_endpoint_only:
-            # Don't double-warn — we already explained this above. Just
-            # restate the fix so the operator doesn't have to scroll up.
-            formatter.print_warning(
-                "kubectl could not reach the API server, as expected for a "
-                "private-only cluster from outside the VPC. The IAM access entry "
-                "and admin policy association above did succeed, so kubectl will "
-                "work from inside the VPC (e.g. SSM Session Manager into a node) "
-                "or after redeploying with endpoint_access=PUBLIC_AND_PRIVATE."
-            )
-        else:
-            stderr = (result.stderr or "").strip()
-            # When the laptop's egress IP isn't in the CIDR allowlist, AWS
-            # returns the API server endpoint but kubectl times out at the
-            # TLS handshake. Surface the same actionable hint as the
-            # private-only case.
-            looks_like_network_block = (
-                "i/o timeout" in stderr
-                or "no route to host" in stderr
-                or "connection refused" in stderr
-                or "dial tcp" in stderr
-            )
-            if looks_like_network_block:
+        elif _kubectl_could_not_connect(stderr):
+            # Reachability is a property of this host's network path, not of
+            # the access just granted, so it warns rather than fails.
+            formatter.print_info(f"kubectl: {stderr}")
+            if private_endpoint_only:
+                # Don't double-warn — we already explained this above. Just
+                # restate the fix so the operator doesn't have to scroll up.
+                formatter.print_warning(
+                    "kubectl could not reach the API server, as expected for a "
+                    "private-only cluster from outside the VPC. The IAM access entry "
+                    "and admin policy association above did succeed, so kubectl will "
+                    "work from inside the VPC (e.g. SSM Session Manager into a node) "
+                    "or after redeploying with endpoint_access=PUBLIC_AND_PRIVATE."
+                )
+            else:
+                # When the laptop's egress IP isn't in the CIDR allowlist, AWS
+                # returns the API server endpoint but kubectl times out at the
+                # TLS handshake.
                 formatter.print_warning(
                     "kubectl could not reach the API server. If the cluster's "
                     "endpoint_access is restricted to a CIDR allowlist, confirm "
@@ -1043,10 +1079,19 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                     '"PUBLIC_AND_PRIVATE" in cdk.json and run: gco stacks deploy '
                     f"{config.project_name}-{region} -y"
                 )
-            else:
-                formatter.print_warning(
-                    "kubectl connected but no nodes found (cluster may be scaling to zero)"
-                )
+        else:
+            # The API server answered (Unauthorized, Forbidden) or kubectl
+            # could not even build a request (a broken credential plugin).
+            formatter.print_error(
+                f"kubectl get nodes failed: {stderr or f'exit status {result.returncode}'}"
+            )
+            formatter.print_error(
+                "The access entry and the admin policy association were applied, but "
+                "kubectl cannot use them yet. A new access entry can take a minute to "
+                "reach the cluster: rerun 'gco stacks access', and run 'gco cluster "
+                "doctor' if it still fails."
+            )
+            sys.exit(1)
 
     except subprocess.CalledProcessError as e:
         formatter.print_error(f"Command failed: {e.stderr or e.stdout or str(e)}")

@@ -740,7 +740,9 @@ def test_setup_access_uses_default_region_and_tolerates_existing_access() -> Non
             )
             return SimpleNamespace(stdout=value, returncode=0)
         if "create-access-entry" in argv or "associate-access-policy" in argv:
-            raise subprocess.CalledProcessError(1, argv, stderr="already exists")
+            raise subprocess.CalledProcessError(
+                254, argv, stderr="An error occurred (ResourceInUseException): in use"
+            )
         if argv[0] == "kubectl":
             return SimpleNamespace(returncode=1, stdout="", stderr="i/o timeout")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -755,8 +757,8 @@ def test_setup_access_uses_default_region_and_tolerates_existing_access() -> Non
     assert result.exit_code == 0, result.output
     assert "test-gco-eu-central-1" in result.output
     assert "private-only cluster" in result.output
-    assert "Access entry may already exist" in result.output
-    assert "Policy may already be associated" in result.output
+    assert "Access entry already exists" in result.output
+    assert "Policy already associated" in result.output
     assert any("arn:aws:iam::123456789012:role/Admin" in command for command in commands)
 
 
@@ -778,9 +780,10 @@ def test_setup_access_malformed_assumed_role_keeps_original_principal() -> None:
         patch("time.sleep"),
     ):
         result = _invoke_stacks(["access", "-r", "us-east-1"])
-    assert result.exit_code == 0, result.output
+    # kubectl reached the API server and was refused: that fails the command.
+    assert result.exit_code == 1, result.output
     assert "CIDR allowlist" in result.output
-    assert "connected but no nodes found" in result.output
+    assert "kubectl get nodes failed: authorization failed" in result.output
     assert not any(
         command.args[0][:3] == ["aws", "sts", "get-caller-identity"]
         and "Account" in command.args[0]

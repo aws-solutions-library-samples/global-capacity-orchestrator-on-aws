@@ -5354,6 +5354,16 @@ gco stacks access -r us-west-2                # Specific region
 gco stacks access -c my-cluster -r eu-west-1  # Custom cluster name
 ```
 
+The command exits non-zero when a step fails: an access entry that cannot be
+created (only `ResourceInUseException`, an entry that already exists, is
+tolerated), a policy that cannot be associated, or a final
+`kubectl get nodes` that fails for any reason other than reaching the API
+server. kubectl's error is printed; an `Unauthorized` right after the entry
+was created usually means it has not reached the cluster yet, so rerun the
+command. An API server this host cannot reach (a private endpoint, or a CIDR
+allowlist that leaves out your egress IP) only warns: the access entry and
+policy still apply to callers inside the network.
+
 The access entry this creates is required even when you reach a PRIVATE
 endpoint through `gco cluster tunnel` — the tunnel solves reachability,
 not authentication. `gco cluster doctor` reports which of the two is
