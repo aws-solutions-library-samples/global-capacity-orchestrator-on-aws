@@ -27,6 +27,9 @@ Environment Variables:
     MAX_GPU_PER_MANIFEST: Maximum GPUs per manifest (default: 16)
     ALLOWED_NAMESPACES: Comma-separated list of allowed namespaces
     VALIDATION_ENABLED: Enable/disable validation (default: true)
+    K8S_API_TIMEOUT: Seconds each Kubernetes API request attempt may take
+        (default: 30); applied to every call, including those that name no
+        timeout of their own (gco.services.k8s_client)
 
 Usage:
     processor = create_manifest_processor_from_env()
@@ -35,11 +38,13 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any, cast
@@ -159,6 +164,7 @@ from gco.models import (
     ResourceStatus,
 )
 from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
+from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -446,23 +452,25 @@ class ManifestProcessor:
                 logger.error(f"Failed to load Kubernetes configuration: {e}")
                 raise
 
-        # Initialize API clients
-        self.api_client = client.ApiClient()
-        self.api_client.configuration.request_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
-        self.core_v1 = client.CoreV1Api()
-        self.apps_v1 = client.AppsV1Api()
-        self.batch_v1 = client.BatchV1Api()
-        self.networking_v1 = client.NetworkingV1Api()
-        self.custom_objects = client.CustomObjectsApi()
+        # Timeout for Kubernetes API calls (seconds). The client applies one
+        # only when a call names it, so every API below shares one client that
+        # supplies this default (gco.services.k8s_client).
+        self._k8s_timeout = k8s_api_timeout_from_env()
+        self.api_client = BoundedApiClient(default_request_timeout=self._k8s_timeout)
+        self.core_v1 = client.CoreV1Api(self.api_client)
+        self.apps_v1 = client.AppsV1Api(self.api_client)
+        self.batch_v1 = client.BatchV1Api(self.api_client)
+        self.networking_v1 = client.NetworkingV1Api(self.api_client)
+        self.custom_objects = client.CustomObjectsApi(self.api_client)
 
-        # Dynamic client for CRDs - lazy initialized to avoid cluster connection during init
+        # Dynamic client for CRDs - lazy initialized to avoid cluster connection
+        # during init, and built once under a lock because requests reach it
+        # from worker threads.
         self._dynamic_client: dynamic.DynamicClient | None = None
-
-        # Timeout for Kubernetes API calls (seconds)
-        self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
+        self._dynamic_client_lock = threading.Lock()
 
         # Whether a Nitro Sandbox RuntimeClass exists here (validate_manifest).
-        self.node_v1 = client.NodeV1Api()
+        self.node_v1 = client.NodeV1Api(self.api_client)
         self.runtime_class_exists = RuntimeClassPresence(
             lambda name: self.node_v1.read_runtime_class(name, _request_timeout=self._k8s_timeout)
         )
@@ -791,10 +799,15 @@ class ManifestProcessor:
 
     @property
     def dynamic_client(self) -> dynamic.DynamicClient:
-        """Lazy-initialized dynamic client for CRD support."""
-        if self._dynamic_client is None:
-            self._dynamic_client = dynamic.DynamicClient(self.api_client)
-        return self._dynamic_client
+        """Lazy-initialized dynamic client for CRD support.
+
+        Constructing it runs API discovery, so concurrent first requests wait
+        for one construction instead of each starting their own.
+        """
+        with self._dynamic_client_lock:
+            if self._dynamic_client is None:
+                self._dynamic_client = dynamic.DynamicClient(self.api_client)
+            return self._dynamic_client
 
     def _parse_cpu_string(self, cpu_str: object) -> int:
         """A CPU quantity in millicores (any form the API server accepts); empty is 0."""
@@ -999,8 +1012,10 @@ class ManifestProcessor:
             # Process each manifest
             for i, manifest_data in enumerate(request.manifests):
                 try:
-                    # Validate manifest
-                    is_valid, error_msg = self.validate_manifest(manifest_data, request.namespace)
+                    # Off the event loop: the sandbox check can read a RuntimeClass.
+                    is_valid, error_msg = await asyncio.to_thread(
+                        self.validate_manifest, manifest_data, request.namespace
+                    )
                     if not is_valid:
                         error_msg = f"Manifest {i + 1} validation failed: {error_msg}"
                         errors.append(error_msg)
@@ -1275,8 +1290,6 @@ class ManifestProcessor:
                             f"Job {name} already exists and is finished, deleting before recreating"
                         )
                         await self.delete_resource(api_version, kind, name, namespace)
-                        import asyncio
-
                         await asyncio.sleep(1)
                         await self._create_resource(manifest_data)
                         status = "created"
@@ -1361,19 +1374,27 @@ class ManifestProcessor:
         *,
         api_resource: Any | None = None,
     ) -> dict[str, Any] | None:
-        """Check if a resource already exists using dynamic client."""
+        """Check if a resource already exists using dynamic client.
+
+        Discovery and the read block on the API server, so they run in a
+        worker thread rather than on the event loop, as in every async method
+        here.
+        """
         try:
             # Reuse an already-authorized discovery result when supplied so a
             # status request cannot observe a different resource definition
             # between the scope check and the actual read.
-            if api_resource is None:
-                api_resource = self._get_api_resource(api_version, kind)
+            resolved = (
+                api_resource
+                if api_resource is not None
+                else await asyncio.to_thread(self._get_api_resource, api_version, kind)
+            )
 
             # Try to get the resource
-            if namespace and api_resource.namespaced:
-                resource = api_resource.get(name=name, namespace=namespace)
+            if namespace and resolved.namespaced:
+                resource = await asyncio.to_thread(resolved.get, name=name, namespace=namespace)
             else:
-                resource = api_resource.get(name=name)
+                resource = await asyncio.to_thread(resolved.get, name=name)
 
             if resource is not None:
                 return dict(resource.to_dict())
@@ -1412,10 +1433,12 @@ class ManifestProcessor:
             kind = manifest_data.get("kind", "")
             namespace = manifest_data.get("metadata", {}).get("namespace")
 
-            api_resource = self._get_api_resource(api_version, kind)
+            api_resource = await asyncio.to_thread(self._get_api_resource, api_version, kind)
             if namespace and api_resource.namespaced:
-                return api_resource.create(body=manifest_data, namespace=namespace)
-            return api_resource.create(body=manifest_data)
+                return await asyncio.to_thread(
+                    api_resource.create, body=manifest_data, namespace=namespace
+                )
+            return await asyncio.to_thread(api_resource.create, body=manifest_data)
         except Exception as e:
             logger.error(f"Error creating resource: {e}")
             raise
@@ -1429,18 +1452,20 @@ class ManifestProcessor:
             namespace = manifest_data.get("metadata", {}).get("namespace")
 
             # Get the API resource
-            api_resource = self._get_api_resource(api_version, kind)
+            api_resource = await asyncio.to_thread(self._get_api_resource, api_version, kind)
 
             # Update the resource using patch (server-side apply)
             if namespace and api_resource.namespaced:
-                api_resource.patch(
+                await asyncio.to_thread(
+                    api_resource.patch,
                     body=manifest_data,
                     name=name,
                     namespace=namespace,
                     content_type="application/merge-patch+json",
                 )
             else:
-                api_resource.patch(
+                await asyncio.to_thread(
+                    api_resource.patch,
                     body=manifest_data,
                     name=name,
                     content_type="application/merge-patch+json",
@@ -1470,7 +1495,7 @@ class ManifestProcessor:
 
         try:
             # Get the API resource
-            api_resource = self._get_api_resource(api_version, kind)
+            api_resource = await asyncio.to_thread(self._get_api_resource, api_version, kind)
             if not api_resource.namespaced:
                 return ResourceStatus(
                     api_version=api_version,
@@ -1482,7 +1507,7 @@ class ManifestProcessor:
                 )
 
             # Every authorized GVK is namespaced; never drop the namespace.
-            api_resource.delete(name=name, namespace=namespace)
+            await asyncio.to_thread(api_resource.delete, name=name, namespace=namespace)
 
             return ResourceStatus(
                 api_version=api_version,
@@ -1559,8 +1584,10 @@ class ManifestProcessor:
 
         for ns in namespaces_to_query:
             try:
-                job_list = self.batch_v1.list_namespaced_job(
-                    namespace=ns, _request_timeout=self._k8s_timeout
+                job_list = await asyncio.to_thread(
+                    self.batch_v1.list_namespaced_job,
+                    namespace=ns,
+                    _request_timeout=self._k8s_timeout,
                 )
                 for job in job_list.items:
                     job_dict = self._job_to_dict(job)
@@ -1656,7 +1683,7 @@ class ManifestProcessor:
             }
 
         try:
-            api_resource = self._get_api_resource(api_version, kind)
+            api_resource = await asyncio.to_thread(self._get_api_resource, api_version, kind)
             if not api_resource.namespaced:
                 return {
                     "api_version": api_version,

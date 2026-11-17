@@ -1,7 +1,13 @@
-"""Job listing, details, logs, events, metrics, delete, and retry endpoints."""
+"""Job listing, details, logs, events, metrics, delete, and retry endpoints.
+
+The Kubernetes client is synchronous, so every route runs its client calls in a
+worker thread (``asyncio.to_thread``): one slow API-server answer then holds up
+only its own request, not every request on the event loop.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -50,6 +56,13 @@ def _decode_pod_log_response(response: Any) -> str:
     finally:
         if callable(release_conn):
             release_conn()
+
+
+def _read_pod_log(processor: Any, log_kwargs: dict[str, Any]) -> str:
+    """Read one pod's log and decode it; both steps wait on the API server."""
+    return _decode_pod_log_response(
+        processor.core_v1.read_namespaced_pod_log(**log_kwargs, _preload_content=False)
+    )
 
 
 def _parse_exact_label_selector(selector: str | None) -> list[tuple[str, str]]:
@@ -296,15 +309,18 @@ async def get_job(namespace: str, name: str) -> Response:
     _check_namespace(namespace, processor)
 
     try:
-        job = processor.batch_v1.read_namespaced_job(name=name, namespace=namespace)
+        job = await asyncio.to_thread(
+            processor.batch_v1.read_namespaced_job, name=name, namespace=namespace
+        )
         job_info = _parse_job_to_dict(job)
+        scheduling = await asyncio.to_thread(_job_scheduling, processor, namespace, name)
 
         response = {
             "cluster_id": processor.cluster_id,
             "region": processor.region,
             "timestamp": datetime.now(UTC).isoformat(),
             **job_info,
-            "scheduling": _job_scheduling(processor, namespace, name),
+            "scheduling": scheduling,
         }
 
         return JSONResponse(status_code=200, content=response)
@@ -337,7 +353,9 @@ async def get_job_logs(
 
     try:
         try:
-            processor.batch_v1.read_namespaced_job(name=name, namespace=namespace)
+            await asyncio.to_thread(
+                processor.batch_v1.read_namespaced_job, name=name, namespace=namespace
+            )
         except K8sApiException as e:
             if e.status == 404:
                 raise HTTPException(
@@ -346,8 +364,10 @@ async def get_job_logs(
                 ) from e
             raise
 
-        pods = processor.core_v1.list_namespaced_pod(
-            namespace=namespace, label_selector=f"job-name={name}"
+        pods = await asyncio.to_thread(
+            processor.core_v1.list_namespaced_pod,
+            namespace=namespace,
+            label_selector=f"job-name={name}",
         )
 
         if not pods.items:
@@ -395,10 +415,7 @@ async def get_job_logs(
         pod_spec = present(pod.spec, "pod.spec")
 
         try:
-            log_response = processor.core_v1.read_namespaced_pod_log(
-                **log_kwargs, _preload_content=False
-            )
-            logs = _decode_pod_log_response(log_response)
+            logs = await asyncio.to_thread(_read_pod_log, processor, log_kwargs)
         except K8sApiException as e:
             if e.status == 400:
                 error_body = str(e.body) if e.body else str(e.reason)
@@ -462,7 +479,8 @@ async def get_job_events(namespace: str, name: str) -> Response:
     _check_namespace(namespace, processor)
 
     try:
-        collected = _collect_job_events(
+        collected = await asyncio.to_thread(
+            _collect_job_events,
             processor.core_v1,
             processor.batch_v1,
             processor.custom_objects,
@@ -494,13 +512,17 @@ async def get_job_pods(namespace: str, name: str) -> Response:
     _check_namespace(namespace, processor)
 
     try:
-        pods = processor.core_v1.list_namespaced_pod(
-            namespace=namespace, label_selector=f"job-name={name}"
+        pods = await asyncio.to_thread(
+            processor.core_v1.list_namespaced_pod,
+            namespace=namespace,
+            label_selector=f"job-name={name}",
         )
         pod_list = [_parse_pod_to_dict(pod) for pod in pods.items]
 
         try:
-            scheduling = _collect_pod_scheduling(processor.core_v1, pods.items)
+            scheduling = await asyncio.to_thread(
+                _collect_pod_scheduling, processor.core_v1, pods.items
+            )
         except Exception as exc:  # pragma: no cover - collector swallows its own
             logger.warning(
                 "Could not resolve node placement for %s/%s: %s",
@@ -558,7 +580,9 @@ async def get_pod_logs(
     _check_namespace(namespace, processor)
 
     try:
-        pod = processor.core_v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+        pod = await asyncio.to_thread(
+            processor.core_v1.read_namespaced_pod, name=pod_name, namespace=namespace
+        )
         job_name_label = (present(pod.metadata, "pod.metadata").labels or {}).get("job-name")
         if job_name_label != name:
             raise HTTPException(
@@ -574,10 +598,7 @@ async def get_pod_logs(
         if container:
             log_kwargs["container"] = container
 
-        log_response = processor.core_v1.read_namespaced_pod_log(
-            **log_kwargs, _preload_content=False
-        )
-        logs = _decode_pod_log_response(log_response)
+        logs = await asyncio.to_thread(_read_pod_log, processor, log_kwargs)
 
         response = {
             "cluster_id": processor.cluster_id,
@@ -607,8 +628,10 @@ async def get_job_metrics(namespace: str, name: str) -> Response:
     _check_namespace(namespace, processor)
 
     try:
-        pods = processor.core_v1.list_namespaced_pod(
-            namespace=namespace, label_selector=f"job-name={name}"
+        pods = await asyncio.to_thread(
+            processor.core_v1.list_namespaced_pod,
+            namespace=namespace,
+            label_selector=f"job-name={name}",
         )
 
         if not pods.items:
@@ -623,7 +646,8 @@ async def get_job_metrics(namespace: str, name: str) -> Response:
                 pod_name = present(present(pod.metadata, "pod.metadata").name, "pod.metadata.name")
                 try:
                     metrics = json_object(
-                        processor.custom_objects.get_namespaced_custom_object(
+                        await asyncio.to_thread(
+                            processor.custom_objects.get_namespaced_custom_object,
                             group=METRICS_API_GROUP,
                             version=METRICS_API_VERSION,
                             namespace=namespace,
@@ -708,7 +732,9 @@ async def delete_job(
         }
         deleted_uid: str | None = None
         if expected_uid is not None:
-            current = processor.batch_v1.read_namespaced_job(name=name, namespace=namespace)
+            current = await asyncio.to_thread(
+                processor.batch_v1.read_namespaced_job, name=name, namespace=namespace
+            )
             deleted_uid = str(getattr(current.metadata, "uid", "") or "")
             if deleted_uid != expected_uid:
                 raise HTTPException(
@@ -724,7 +750,7 @@ async def delete_job(
             )
         else:
             delete_kwargs["propagation_policy"] = "Background"
-        processor.batch_v1.delete_namespaced_job(**delete_kwargs)
+        await asyncio.to_thread(processor.batch_v1.delete_namespaced_job, **delete_kwargs)
 
         response = {
             "cluster_id": processor.cluster_id,
@@ -803,8 +829,11 @@ async def bulk_delete_jobs(request: BulkDeleteRequest) -> Response:
                 job_name = job.get("metadata", {}).get("name")
                 job_namespace = job.get("metadata", {}).get("namespace")
                 try:
-                    processor.batch_v1.delete_namespaced_job(
-                        name=job_name, namespace=job_namespace, propagation_policy="Background"
+                    await asyncio.to_thread(
+                        processor.batch_v1.delete_namespaced_job,
+                        name=job_name,
+                        namespace=job_namespace,
+                        propagation_policy="Background",
                     )
                     deleted_jobs.append({"name": job_name, "namespace": job_namespace})
                 except Exception as e:
@@ -850,7 +879,7 @@ async def retry_job(namespace: str, name: str) -> Response:
 
     try:
         try:
-            original_job = _read_job_object(processor, name, namespace)
+            original_job = await asyncio.to_thread(_read_job_object, processor, name, namespace)
         except Exception as e:
             if "NotFound" in str(e) or "404" in str(e):
                 raise HTTPException(

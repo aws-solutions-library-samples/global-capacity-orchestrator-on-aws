@@ -338,7 +338,8 @@ async def health_check() -> JSONResponse:
             )
 
         try:
-            manifest_processor.core_v1.list_namespace(limit=1)
+            # In a worker thread so a slow API server cannot stall /healthz too.
+            await asyncio.to_thread(manifest_processor.core_v1.list_namespace, limit=1)
             api_healthy = True
         except Exception as e:
             logger.error(f"Kubernetes API health check failed: {e}")
@@ -471,7 +472,9 @@ async def get_job_validation_policy() -> dict[str, Any]:
         # a config-file read.
         "source": "deployed-cluster-runtime",
         "policy": manifest_processor.effective_job_validation_policy(),
-        "cluster_enforcement": manifest_processor.cluster_resource_governance(),
+        "cluster_enforcement": await asyncio.to_thread(
+            manifest_processor.cluster_resource_governance
+        ),
     }
 
 

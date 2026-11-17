@@ -1569,6 +1569,79 @@ class TestKubernetesConfigLoading:
                 )
 
 
+class TestBoundedKubernetesClient:
+    """Every Kubernetes request the processor makes carries a timeout.
+
+    kubernetes-client 37 reads no timeout from its Configuration, so the old
+    ``configuration.request_timeout`` assignment bounded nothing, and the typed
+    APIs each built their own default client. They now share one
+    ``BoundedApiClient`` (tests/test_k8s_client.py covers the client itself).
+    """
+
+    @staticmethod
+    def _processor() -> ManifestProcessor:
+        with patch("gco.services.manifest_processor.config"):
+            return ManifestProcessor("test-cluster", "us-east-1", {})
+
+    def test_every_api_shares_one_bounded_client(self, monkeypatch):
+        from gco.services.k8s_client import BoundedApiClient
+
+        monkeypatch.setenv("K8S_API_TIMEOUT", "7")
+        processor = self._processor()
+
+        assert isinstance(processor.api_client, BoundedApiClient)
+        assert processor.api_client.default_request_timeout == processor._k8s_timeout == 7
+        for api in (
+            processor.core_v1,
+            processor.apps_v1,
+            processor.batch_v1,
+            processor.networking_v1,
+            processor.custom_objects,
+            processor.node_v1,
+        ):
+            assert api.api_client is processor.api_client
+        # The removed no-op: Configuration has no such setting and nothing read it.
+        assert not hasattr(processor.api_client.configuration, "request_timeout")
+
+    def test_an_invalid_timeout_fails_construction(self, monkeypatch):
+        monkeypatch.setenv("K8S_API_TIMEOUT", "0")
+        with pytest.raises(ValueError, match="K8S_API_TIMEOUT"):
+            self._processor()
+
+    def test_the_dynamic_client_is_built_on_the_bounded_client(self):
+        processor = self._processor()
+        with patch("gco.services.manifest_processor.dynamic.DynamicClient") as dynamic_client:
+            assert processor.dynamic_client is dynamic_client.return_value
+        dynamic_client.assert_called_once_with(processor.api_client)
+
+    def test_concurrent_first_requests_build_one_dynamic_client(self):
+        """Requests resolve resources from worker threads; discovery must run once."""
+        import threading
+        import time
+
+        processor = self._processor()
+
+        def slow_discovery(_api_client):
+            time.sleep(0.2)
+            return object()
+
+        with patch(
+            "gco.services.manifest_processor.dynamic.DynamicClient", side_effect=slow_discovery
+        ) as dynamic_client:
+            seen: list[object] = []
+            workers = [
+                threading.Thread(target=lambda: seen.append(processor.dynamic_client))
+                for _ in range(4)
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(5)
+
+        assert dynamic_client.call_count == 1
+        assert len(seen) == 4 and len({id(client) for client in seen}) == 1
+
+
 class TestListJobs:
     """Tests for list_jobs method."""
 

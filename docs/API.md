@@ -2430,6 +2430,15 @@ All error responses follow this format:
 | 500 | Internal Server Error |
 | 503 | Service Unavailable - Processor not ready |
 
+**Kubernetes API timeouts:**
+
+Every Kubernetes API request the manifest processor makes is bounded:
+`K8S_API_TIMEOUT` seconds per attempt (default 30), with a read that times out
+retried up to three times. An API server that does not answer in time fails
+the request with the route's usual error status (for most routes the generic
+500 below) instead of holding the connection open, and it delays only that
+request: the client calls run in worker threads, not on the event loop.
+
 **Request correlation:**
 
 Every response carries an `X-Request-ID` header with a server-generated

@@ -317,6 +317,15 @@ class TestApplyManifest:
         qp, _res = self._setup_mocks()
         assert qp.apply_manifest(_job()).status == "created"
 
+    def test_the_dynamic_client_is_built_on_a_bounded_client(self):
+        """Its discovery, reads and writes name no timeout; the client supplies one."""
+        from gco.services.k8s_client import BoundedApiClient
+
+        qp, _res = self._setup_mocks()
+        qp.apply_manifest(_job())
+        (api_client,) = qp.dynamic.DynamicClient.call_args.args
+        assert isinstance(api_client, BoundedApiClient)
+
     def test_update_on_409(self):
         from kubernetes.client.rest import ApiException
 

@@ -46,6 +46,8 @@ Configuration via environment variables:
                              (e.g. "nvidia,pytorch"). Empty/unset uses the
                              REST processor's secure defaults. Keep in sync
                              with cdk.json::job_validation_policy.trusted_dockerhub_orgs.
+    K8S_API_TIMEOUT:         Seconds each Kubernetes API request attempt may
+                             take (default: 30, gco.services.k8s_client)
 
 Security policy toggles (all default to true except ``BLOCK_RUN_AS_ROOT``
 which defaults to false, matching job_validation_policy.manifest_security_policy
@@ -107,6 +109,7 @@ from gco.job_envelope import DEFAULT_JOB_NAMESPACE
 from gco.manifest_security_policy import parse_boolean_environment
 from gco.models import ResourceStatus
 from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
+from gco.services.k8s_client import BoundedApiClient
 from gco.services.manifest_processor import (
     ADDON_KIND_HINTS,
     DEFAULT_ALLOWED_KINDS,
@@ -187,9 +190,10 @@ ALLOWED_KINDS = (
 )
 # Whether a Nitro Sandbox RuntimeClass exists here (validate_manifest). The
 # client is built per lookup because the Kubernetes configuration is loaded
-# after import.
+# after import; like every client here it bounds each request
+# (gco.services.k8s_client).
 runtime_class_exists = RuntimeClassPresence(
-    lambda name: client.NodeV1Api().read_runtime_class(name)
+    lambda name: client.NodeV1Api(BoundedApiClient()).read_runtime_class(name)
 )
 # Defaults come from the shared source of truth
 # (gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS - two full
@@ -786,7 +790,7 @@ def apply_manifest(m: dict[str, Any]) -> ResourceStatus:
             message=message,
         )
 
-    dyn = dynamic.DynamicClient(client.ApiClient())
+    dyn = dynamic.DynamicClient(BoundedApiClient())
     try:
         resource = dyn.resources.get(api_version=api_version, kind=kind)
     except ResourceNotFoundError:
