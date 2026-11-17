@@ -515,7 +515,7 @@ gco jobs list -a --namespace gco-jobs --status running
 |-----------|------|---------|-------------|
 | `namespace` | string | - | Filter by namespace |
 | `status` | string | - | Filter by status |
-| `limit` | int | 50 | Maximum jobs to return |
+| `limit` | int | 50 | Maximum jobs to return (1-1000; anything else is a `400`) |
 
 **Response:**
 

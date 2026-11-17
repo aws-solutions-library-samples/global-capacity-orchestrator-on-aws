@@ -34,7 +34,7 @@ The global API Gateway invokes this Lambda for `/api/v1/global/*` routes.
 2. Describes the deterministic `<project>-regional-api-<region>` [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) stack in each region.
 3. Extracts and strictly validates the `RegionalApiEndpoint` output as that region's AWS `execute-api` HTTPS `/prod` URL under `AWS_URL_SUFFIX`.
 4. Uses the Lambda execution-role credentials to SigV4-sign each request for `execute-api` in the target region.
-5. Queries regions in parallel with a bounded endpoint-discovery cache.
+5. Queries regions in parallel with a bounded endpoint-discovery cache. Each regional request is sent once (urllib3's own retries are off) and must finish two seconds before the invocation's remaining time runs out (`context.get_remaining_time_in_millis()`; 27 seconds without a context), so a slow region is reported as an error and the aggregate still answers within the function's 29-second timeout.
 6. Merges and sorts successful results while returning bounded per-region errors.
 
 Discovery fails closed if any required bridge is absent or invalid. A previously complete endpoint map may be reused only within the bounded stale-cache window after a transient CloudFormation failure.
@@ -78,10 +78,12 @@ The execution role receives only:
 
 ## Failure Behavior
 
+- A `limit` that is not an integer from 1 to 1000 (the regional jobs API's own ceiling), or a `DELETE` body that is not a JSON object, is a `400` and no region is queried. The per-region request asks for twice the `limit`, capped at 1000.
 - Missing/invalid configuration or incomplete bridge discovery fails the aggregate request closed.
 - Regional non-2xx responses become bounded `HTTP <status>` errors.
 - Credential, TLS, JSON, and transport failures become `Authenticated regional API request failed` without leaking internal details.
 - A regional health endpoint may return authenticated JSON with HTTP 503; that degraded payload remains useful and is included.
+- A region the request budget no longer covers is reported as `No time left to query the region` without a request.
 
 ## Dependencies
 
