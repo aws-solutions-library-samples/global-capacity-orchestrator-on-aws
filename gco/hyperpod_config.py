@@ -46,6 +46,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from gco.k8s_quantity import parse_quantity
+
 #: The cdk.json block and its per-Region overlay.
 HYPERPOD_FEATURE_KEY = "hyperpod"
 HYPERPOD_REGIONS_KEY = "hyperpod_regions"
@@ -125,8 +127,6 @@ NAME_PATTERN = re.compile(r"^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}$")
 TRAINING_PLAN_ARN_PATTERN = re.compile(
     r"^arn:aws[a-z\-]*:sagemaker:[a-z0-9\-]+:[0-9]{12}:training-plan/.+$"
 )
-#: Kubernetes quantity, as the Kueue ClusterQueue nominal quotas accept it.
-QUANTITY_PATTERN = re.compile(r"^[0-9]+(\.[0-9]+)?([EPTGMk]i?|m)?$")
 #: An Availability Zone name (``us-east-1a``), the only zone form a cluster takes.
 AVAILABILITY_ZONE_PATTERN = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d[a-z]$")
 
@@ -241,11 +241,21 @@ def _require_name(value: object, path: str) -> str:
 
 
 def _require_quantity(value: object, path: str) -> str:
-    if not isinstance(value, str) or not QUANTITY_PATTERN.match(value.strip()):
-        raise HyperpodConfigError(
-            f"{path} must be a Kubernetes quantity string (for example 1000, 4Ti), got {value!r}"
-        )
-    return value.strip()
+    """A non-negative quantity string, as the Kueue ClusterQueue nominal quotas take it.
+
+    Parsed as the API server parses it (:mod:`gco.k8s_quantity`). The regex this
+    replaced listed the binary suffixes as ``[EPTGMk]i?``, which accepted the
+    invalid ``4ki`` and refused ``4Ki``.
+    """
+    if isinstance(value, str):
+        try:
+            if parse_quantity(value) >= 0:
+                return value.strip()
+        except ValueError:
+            pass
+    raise HyperpodConfigError(
+        f"{path} must be a Kubernetes quantity string (for example 1000, 4Ti), got {value!r}"
+    )
 
 
 def _validate_instance_group(raw: object, path: str) -> dict[str, Any]:

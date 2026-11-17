@@ -796,12 +796,12 @@ class ManifestProcessor:
             self._dynamic_client = dynamic.DynamicClient(self.api_client)
         return self._dynamic_client
 
-    def _parse_cpu_string(self, cpu_str: str) -> int:
-        """Parse CPU string to millicores"""
+    def _parse_cpu_string(self, cpu_str: object) -> int:
+        """A CPU quantity in millicores (any form the API server accepts); empty is 0."""
         return parse_cpu_millicores(cpu_str)
 
-    def _parse_memory_string(self, memory_str: str) -> int:
-        """Parse memory string to bytes"""
+    def _parse_memory_string(self, memory_str: object) -> int:
+        """A memory quantity in bytes (any form the API server accepts); empty is 0."""
         return parse_memory_bytes(memory_str)
 
     def _check_yaml_depth(self, obj: Any, current_depth: int = 0) -> bool:

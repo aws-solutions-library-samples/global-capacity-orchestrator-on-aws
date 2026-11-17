@@ -28,13 +28,15 @@ Configuration via environment variables:
     ALLOWED_KINDS:           Comma-separated resource-kind allowlist shared
                              with the REST manifest processor
     MAX_GPU_PER_MANIFEST:    Max GPUs summed across all containers
-                             (regular + init + ephemeral) (default: 4)
-    MAX_CPU_PER_MANIFEST:    Max CPU summed across all containers; accepts
-                             K8s suffixes ("500m" or "10" for cores)
-                             (default: 10000 millicores = 10 cores)
-    MAX_MEMORY_PER_MANIFEST: Max memory summed across all containers;
-                             accepts K8s suffixes ("32Gi", "256Mi") or
-                             a bare byte count (default: 32Gi)
+                             (regular + init + ephemeral)
+    MAX_CPU_PER_MANIFEST:    Max CPU summed across all containers; any
+                             Kubernetes quantity ("500m", "10", "0.5")
+    MAX_MEMORY_PER_MANIFEST: Max memory summed across all containers; any
+                             Kubernetes quantity ("32Gi", "256Mi", a bare
+                             byte count)
+                             The three caps default to
+                             gco.resource_governance.DEFAULT_MANIFEST_RESOURCE_CAPS,
+                             the REST processor's defaults.
     TRUSTED_REGISTRIES:      Comma-separated list of registry domains
                              (e.g. "nvcr.io,public.ecr.aws"). Empty/unset
                              uses the REST processor's secure defaults.
@@ -97,6 +99,9 @@ from gco.job_admission import (
     check_sandbox,
     check_sandbox_runtime_class,
     hyperpod_routing,
+    parse_cpu_millicores,
+    parse_memory_bytes,
+    resource_totals,
 )
 from gco.job_envelope import DEFAULT_JOB_NAMESPACE
 from gco.manifest_security_policy import parse_boolean_environment
@@ -131,45 +136,22 @@ logging.basicConfig(
 log = logging.getLogger("queue-processor")
 
 
-def _parse_cpu_string(cpu_str: str) -> int:
-    """Parse a Kubernetes-style CPU string to millicores.
+def _parse_cpu_string(cpu_str: object) -> int:
+    """A CPU quantity in millicores (``"500m"`` -> 500, ``"4"`` -> 4000, ``0.5`` -> 500).
 
-    Accepts:
-      - Millicore suffix: "500m" -> 500
-      - Whole cores: "4" -> 4000
+    Any form the API server accepts, through the parser the REST gate uses
+    (:func:`gco.job_admission.parse_cpu_millicores`); an empty value is 0.
     """
-    if not cpu_str:
-        return 0
-    s = cpu_str.strip()
-    if s.endswith("m"):
-        return int(s[:-1])
-    return int(s) * 1000
+    return parse_cpu_millicores(cpu_str)
 
 
-def _parse_memory_string(memory_str: str) -> int:
-    """Parse a Kubernetes-style memory string to bytes.
+def _parse_memory_string(memory_str: object) -> int:
+    """A memory quantity in bytes (``"1Gi"``, ``"512M"``, ``2147483648``, ``"1e9"``).
 
-    Accepts binary suffixes (Ki, Mi, Gi, Ti), decimal suffixes (k, M, G),
-    or a bare byte count.
+    Any form the API server accepts, through the parser the REST gate uses
+    (:func:`gco.job_admission.parse_memory_bytes`); an empty value is 0.
     """
-    if not memory_str:
-        return 0
-    s = memory_str.strip()
-    if s.endswith("Ki"):
-        return int(float(s[:-2]) * 1024)
-    if s.endswith("Mi"):
-        return int(float(s[:-2]) * 1024**2)
-    if s.endswith("Gi"):
-        return int(float(s[:-2]) * 1024**3)
-    if s.endswith("Ti"):
-        return int(float(s[:-2]) * 1024**4)
-    if s.endswith("k"):
-        return int(float(s[:-1]) * 1000)
-    if s.endswith("M"):
-        return int(float(s[:-1]) * 1000**2)
-    if s.endswith("G"):
-        return int(float(s[:-1]) * 1000**3)
-    return int(float(s))
+    return parse_memory_bytes(memory_str)
 
 
 # --- Configuration from environment ---
@@ -666,24 +648,11 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
         # our security intent: an operator's configured "max CPU/memory/GPU
         # per manifest" is a hard cap on the total resources a submitter
         # can request regardless of which container kind carries the request.
-        total_gpu = 0
-        total_cpu = 0
-        total_memory = 0
-        for pod_spec, multiplier in weighted_pod_specs:
-            for _container_type, c in _iter_containers(pod_spec):
-                res = c.get("resources", {}) or {}
-                limits = res.get("limits", {}) or {}
-                requests = res.get("requests", {}) or {}
-                gpu = limits.get("nvidia.com/gpu") or requests.get("nvidia.com/gpu", "0")  # nosec B113  # dict.get(), not HTTP requests
-                total_gpu += multiplier * int(gpu)
-                cpu_str = limits.get("cpu") or requests.get("cpu", "0")  # nosec B113  # dict.get(), not HTTP requests
-                if isinstance(cpu_str, str) and cpu_str.endswith("m"):
-                    total_cpu += multiplier * int(cpu_str[:-1])
-                else:
-                    total_cpu += multiplier * int(float(cpu_str) * 1000)
-                mem_str = limits.get("memory") or requests.get("memory", "0")  # nosec B113  # dict.get(), not HTTP requests
-                mem_bytes = _parse_memory_string(str(mem_str))
-                total_memory += multiplier * mem_bytes
+        try:
+            total_cpu, total_memory, total_gpu = resource_totals(weighted_pod_specs)
+        except ValueError as exc:
+            # Same message shape as the REST gate (job_admission.check_resource_caps).
+            return False, f"Resource limit validation error: {exc}"
 
         errors = []
         if total_gpu > MAX_GPU:
@@ -697,7 +666,7 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
             )
         if errors:
             hint = (
-                "To raise limits, update queue_processor in cdk.json "
+                "To raise limits, update job_validation_policy.resource_quotas in cdk.json "
                 "and redeploy (see examples/README.md#troubleshooting)"
             )
             return False, "; ".join(errors) + f". {hint}"

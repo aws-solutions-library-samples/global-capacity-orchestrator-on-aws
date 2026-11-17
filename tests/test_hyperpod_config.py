@@ -142,6 +142,16 @@ class TestValidation:
                 {"queue": {"max_memory": "lots"}},
                 r"hyperpod\.queue\.max_memory must be a Kubernetes quantity",
             ),
+            # The old pattern read binary suffixes as [EPTGMk]i?: "4ki" passed and
+            # "4Ki" failed. A negative quota is refused as well.
+            (
+                {"queue": {"max_memory": "4ki"}},
+                r"hyperpod\.queue\.max_memory must be a Kubernetes quantity",
+            ),
+            (
+                {"queue": {"max_cpu": "-1"}},
+                r"hyperpod\.queue\.max_cpu must be a Kubernetes quantity",
+            ),
             (
                 {"removal_policy": "keep"},
                 r"hyperpod\.removal_policy must be one of destroy, retain",
@@ -151,6 +161,12 @@ class TestValidation:
     def test_malformed_blocks_fail_by_name(self, raw: object, match: str) -> None:
         with pytest.raises(hp.HyperpodConfigError, match=match):
             _validate(raw)
+
+    @pytest.mark.parametrize("quantity", ["4Ki", "1.5Ti", "2e3", " 64 "])
+    def test_queue_quotas_take_any_api_server_quantity(self, quantity: str) -> None:
+        assert _validate({"queue": {"max_memory": quantity}})["queue"]["max_memory"] == (
+            quantity.strip()
+        )
 
     def test_disabled_block_may_have_no_instance_groups(self) -> None:
         assert _validate({"instance_groups": []})["instance_groups"] == []

@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from kubernetes import client as kubernetes_client
 
+from gco.job_admission import parse_cpu_millicores, parse_memory_bytes
 from gco.k8s_api_versions import METRICS_API_GROUP, METRICS_API_VERSION
 from gco.k8s_objects import json_object, present
 from gco.models import ManifestSubmissionRequest
@@ -633,27 +634,13 @@ async def get_job_metrics(namespace: str, name: str) -> Response:
                     )
 
                     containers_metrics = []
-                    for container in metrics.get("containers", []):
-                        cpu_str = container.get("usage", {}).get("cpu", "0")
-                        memory_str = container.get("usage", {}).get("memory", "0")
-
-                        cpu_millicores = 0
-                        if cpu_str.endswith("n"):
-                            cpu_millicores = int(cpu_str[:-1]) // 1000000
-                        elif cpu_str.endswith("m"):
-                            cpu_millicores = int(cpu_str[:-1])
-                        else:
-                            cpu_millicores = int(cpu_str) * 1000
-
-                        memory_bytes = 0
-                        if memory_str.endswith("Ki"):
-                            memory_bytes = int(memory_str[:-2]) * 1024
-                        elif memory_str.endswith("Mi"):
-                            memory_bytes = int(memory_str[:-2]) * 1024 * 1024
-                        elif memory_str.endswith("Gi"):
-                            memory_bytes = int(memory_str[:-2]) * 1024 * 1024 * 1024
-                        else:
-                            memory_bytes = int(memory_str)
+                    for container in metrics.get("containers") or []:
+                        usage = container.get("usage") or {}
+                        # metrics-server renders canonical quantities, which can
+                        # carry any SI suffix ("2507348u", "1e9"); millicores are
+                        # rounded up, as `kubectl top` (Quantity.MilliValue) does.
+                        cpu_millicores = parse_cpu_millicores(usage.get("cpu"))
+                        memory_bytes = parse_memory_bytes(usage.get("memory"))
 
                         total_cpu_millicores += cpu_millicores
                         total_memory_bytes += memory_bytes

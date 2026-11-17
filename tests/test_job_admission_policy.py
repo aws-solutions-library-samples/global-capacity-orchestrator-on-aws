@@ -27,7 +27,9 @@ from gco.job_admission import (
     check_tolerations,
     hyperpod_routing,
     parse_cpu_millicores,
+    parse_gpu_count,
     parse_memory_bytes,
+    resource_totals,
     weighted_pod_specs,
 )
 
@@ -246,6 +248,108 @@ class TestQuantityParsersMatchTheGate:
     )
     def test_memory(self, value: str, expected: int) -> None:
         assert parse_memory_bytes(value) == expected
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(None, 0), ("", 0), ("  ", 0), (1, 1), ("2", 2), (4.0, 4)],
+    )
+    def test_gpu(self, value: object, expected: int) -> None:
+        assert parse_gpu_count(value) == expected
+
+    @pytest.mark.parametrize("parse", [parse_cpu_millicores, parse_memory_bytes, parse_gpu_count])
+    def test_absent_values_count_as_zero(self, parse: Any) -> None:
+        assert parse(None) == 0
+
+
+def _job_with_resources(resources: Any, *, multiplier_kind: str = "Job") -> dict[str, Any]:
+    """A trusted-image Job whose one container carries ``resources`` verbatim."""
+    container: dict[str, Any] = {"name": "trainer", "image": "docker.io/pytorch/pytorch:latest"}
+    if resources is not ...:
+        container["resources"] = resources
+    return {
+        "apiVersion": "batch/v1",
+        "kind": multiplier_kind,
+        "metadata": {"name": "train", "namespace": "gco-jobs"},
+        "spec": {"template": {"spec": {"containers": [container]}}},
+    }
+
+
+class TestResourceCapsAcceptWhatTheApiServerAccepts:
+    """Regression: the gate refused quantities the API server takes.
+
+    ``cpu: 1`` written as a YAML number failed with ``'int' object has no
+    attribute 'strip'`` and ``"0.5"`` CPU with ``invalid literal for int()``,
+    so a valid manifest was rejected at the front door.
+    """
+
+    @pytest.fixture
+    def policy(self, processor: Any) -> JobValidationPolicy:
+        result: JobValidationPolicy = processor.job_validation_policy()
+        return result
+
+    @pytest.mark.parametrize(
+        "resources",
+        [
+            {"limits": {"cpu": 1, "memory": 2147483648}},
+            {"requests": {"cpu": 0.5, "memory": "512Mi"}},
+            {"limits": {"cpu": "1.5", "memory": "1.5Gi"}},
+            {"limits": {"cpu": "1e0", "memory": "1e9"}},
+            {"limits": {"nvidia.com/gpu": 1}},
+            None,
+            {"requests": None, "limits": None},
+            ...,  # no resources key at all
+        ],
+    )
+    def test_admits(self, resources: Any, policy: JobValidationPolicy) -> None:
+        assert check_resource_caps(_job_with_resources(resources), policy) == (True, "")
+
+    @pytest.mark.parametrize(
+        ("resources", "fragment"),
+        [
+            ({"limits": {"nvidia.com/gpu": "0.5"}}, "nvidia.com/gpu: '0.5' is not a whole number"),
+            ({"limits": {"cpu": -400000}}, "cpu: -400000 is negative"),
+            ({"limits": {"cpu": True}}, "cpu: True is not a Kubernetes quantity"),
+            ({"limits": {"memory": "2Gib"}}, "memory: '2Gib' is not a Kubernetes quantity"),
+        ],
+    )
+    def test_rejects_invalid_quantities_naming_the_container(
+        self, resources: Any, fragment: str, policy: JobValidationPolicy
+    ) -> None:
+        ok, message = check_resource_caps(_job_with_resources(resources), policy)
+        assert ok is False
+        assert message.startswith("Resource limit validation error: container 'trainer' ")
+        assert fragment in message
+
+    def test_a_cap_breach_names_the_key_that_sets_the_caps(
+        self, policy: JobValidationPolicy
+    ) -> None:
+        ok, message = check_resource_caps(_job_with_resources({"limits": {"cpu": 500}}), policy)
+        assert ok is False
+        assert "CPU 500000m exceeds max" in message
+        assert "update job_validation_policy.resource_quotas in cdk.json" in message
+
+
+class TestResourceTotals:
+    def test_sums_every_container_kind_weighted_by_view(self) -> None:
+        spec = {
+            "containers": [{"resources": {"limits": {"cpu": "1", "memory": "1Gi"}}}],
+            "initContainers": [{"resources": {"requests": {"cpu": 0.5}}}],
+            "ephemeralContainers": [{"resources": {"limits": {"nvidia.com/gpu": 2}}}],
+        }
+        assert resource_totals([(spec, 3)]) == (4500, 3 * 2**30, 6)
+
+    def test_null_container_lists_count_as_empty(self) -> None:
+        spec = {"containers": None, "initContainers": None, "ephemeralContainers": None}
+        assert resource_totals([(spec, 1)]) == (0, 0, 0)
+
+    def test_a_limit_wins_over_a_request(self) -> None:
+        spec = {"containers": [{"resources": {"requests": {"cpu": 8}, "limits": {"cpu": 2}}}]}
+        assert resource_totals([(spec, 1)]) == (2000, 0, 0)
+
+    def test_an_invalid_quantity_names_the_container_type_and_field(self) -> None:
+        spec = {"initContainers": [{"name": "setup", "resources": {"limits": {"memory": "lots"}}}]}
+        with pytest.raises(ValueError, match=r"^initContainer 'setup' memory: 'lots' is not"):
+            resource_totals([(spec, 1)])
 
 
 def _hyperpod_toleration() -> dict[str, str]:

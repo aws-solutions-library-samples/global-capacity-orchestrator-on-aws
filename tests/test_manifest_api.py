@@ -614,6 +614,27 @@ class TestStatusEndpointWithProcessor:
                 assert data["service"] == "GCO Manifest Processor API"
                 assert "environment" in data
 
+    def test_status_reports_the_cap_defaults_the_processors_enforce(
+        self, mock_manifest_processor, monkeypatch
+    ):
+        """Regression: /status reported 10 / 32Gi / 4 when the variables were unset."""
+        from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
+
+        for name in ("MAX_CPU_PER_MANIFEST", "MAX_MEMORY_PER_MANIFEST", "MAX_GPU_PER_MANIFEST"):
+            monkeypatch.delenv(name, raising=False)
+        with patch(
+            "gco.services.manifest_api.create_manifest_processor_from_env",
+            return_value=mock_manifest_processor,
+        ):
+            from fastapi.testclient import TestClient
+
+            from gco.services.manifest_api import app
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                environment = client.get("/api/v1/status", headers={}).json()["environment"]
+        for key in ("max_cpu_per_manifest", "max_memory_per_manifest", "max_gpu_per_manifest"):
+            assert environment[key] == str(DEFAULT_MANIFEST_RESOURCE_CAPS[key])
+
 
 class TestListJobsEndpoint:
     """Tests for GET /api/v1/jobs endpoint."""

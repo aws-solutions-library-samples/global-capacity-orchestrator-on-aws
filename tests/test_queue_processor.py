@@ -897,6 +897,71 @@ class TestParseCpuString:
         assert qp._parse_cpu_string("") == 0
 
 
+class TestSqsGateAcceptsWhatTheApiServerAccepts:
+    """Regression: the SQS gate shares the REST gate's quantity parser.
+
+    Its own suffix table refused ``Pi`` and raised on a fractional or invalid
+    quantity instead of returning a rejection; both gates now count a manifest
+    through ``gco.job_admission.resource_totals``.
+    """
+
+    @staticmethod
+    def _with_resources(resources):
+        job = _job()
+        job["spec"]["template"]["spec"]["containers"][0]["resources"] = resources
+        return job
+
+    @pytest.mark.parametrize(
+        "resources",
+        [
+            {"limits": {"cpu": 1, "memory": 2147483648}},
+            {"requests": {"cpu": 0.5, "memory": "1.5Gi"}},
+            {"limits": {"cpu": "1e0"}},
+            None,
+            {"requests": None},
+        ],
+    )
+    def test_admits(self, resources):
+        qp = _reload()
+        assert qp.validate_manifest(self._with_resources(resources)) == (True, "")
+
+    def test_a_pebibyte_is_parsed_and_capped(self):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(self._with_resources({"limits": {"memory": "1Pi"}}))
+        assert ok is False
+        assert reason.startswith("Memory 1048576Gi exceeds max")
+        assert "update job_validation_policy.resource_quotas in cdk.json" in reason
+
+    @pytest.mark.parametrize(
+        ("resources", "fragment"),
+        [
+            ({"limits": {"cpu": "-1"}}, "cpu: '-1' is negative"),
+            ({"limits": {"memory": "2Gib"}}, "memory: '2Gib' is not a Kubernetes quantity"),
+        ],
+    )
+    def test_an_invalid_quantity_is_a_rejection_not_an_exception(self, resources, fragment):
+        qp = _reload()
+        ok, reason = qp.validate_manifest(self._with_resources(resources))
+        assert ok is False
+        assert reason.startswith("Resource limit validation error: container 'worker' ")
+        assert fragment in reason
+
+    def test_a_fractional_gpu_is_a_rejection(self):
+        qp = _reload()
+        job = _job(gpu=1)
+        job["spec"]["template"]["spec"]["containers"][0]["resources"]["limits"] = {
+            "nvidia.com/gpu": "0.5"
+        }
+        ok, reason = qp.validate_manifest(job)
+        assert ok is False
+        assert "is not a whole number of devices" in reason
+
+    def test_the_cap_parsers_take_numbers(self):
+        qp = _reload()
+        assert qp._parse_cpu_string(0.5) == 500
+        assert qp._parse_memory_string(1024) == 1024
+
+
 class TestParseMemoryString:
     """Validates: queue_processor._parse_memory_string correctly converts
     Kubernetes-style memory strings to bytes (regression for deploy-time

@@ -395,6 +395,59 @@ class TestNodeMetricsCache:
         assert health_monitor._last_metrics_time is None
 
 
+class TestNodeMetricsCacheAge:
+    """Regression: the cache age read ``timedelta.seconds``, only the seconds field.
+
+    A snapshot one day and five seconds old has ``.seconds == 5``, so it was
+    served as fresh. A snapshot stamped in the future (the wall clock stepped
+    backwards) is not served either.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "age",
+        [timedelta(days=1, seconds=5), timedelta(seconds=-30)],
+        ids=["a-day-old", "from-the-future"],
+    )
+    async def test_a_snapshot_outside_the_window_is_refetched(self, health_monitor, age):
+        from datetime import datetime
+
+        health_monitor._cache_duration = 30
+        health_monitor._cached_metrics = {"items": [{"stale": True}]}
+        health_monitor._last_metrics_time = datetime.now(UTC) - age
+        fresh = {"items": [{"fresh": True}]}
+        health_monitor.metrics_v1beta1.list_cluster_custom_object.return_value = fresh
+
+        assert await health_monitor._get_node_metrics() == fresh
+        health_monitor.metrics_v1beta1.list_cluster_custom_object.assert_called_once()
+
+
+class TestUtilizationQuantities:
+    def test_microcore_usage_is_summed_unrounded(self, health_monitor):
+        node = MagicMock()
+        node.metadata.name = "node-1"
+        node.status.allocatable = {"cpu": 4}
+        health_monitor.core_v1.list_node.return_value.items = [node]
+        # 2507348u is 2.507348 cores of 4: 62.6837 %, not the 63 % that
+        # rounding each node's usage up to whole millicores would report.
+        metrics = {"items": [{"usage": {"cpu": "2507348u"}}]}
+        assert health_monitor._calculate_cpu_utilization(metrics) == pytest.approx(62.6837)
+
+    @pytest.mark.asyncio
+    async def test_pending_requests_take_numeric_quantities(self, health_monitor):
+        pod = MagicMock()
+        pod.metadata.namespace = "gco-jobs"
+        pod.status.phase = "Pending"
+        container = MagicMock()
+        container.resources.requests = {"cpu": 0.5, "memory": 1073741824, "nvidia.com/gpu": 1}
+        pod.spec.containers = [container]
+        health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [pod]
+
+        requested = await health_monitor._calculate_pending_requested_resources()
+
+        assert (requested.cpu_vcpus, requested.memory_gb, requested.gpus) == (0.5, 1.0, 1)
+
+
 class TestCpuUtilizationEdgeCases:
     """Tests for CPU utilization calculation edge cases."""
 

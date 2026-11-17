@@ -34,8 +34,10 @@ from botocore.exceptions import ClientError
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
+from gco.job_admission import parse_cpu_millicores, parse_gpu_count, parse_memory_bytes
 from gco.k8s_api_versions import METRICS_API_GROUP, METRICS_API_VERSION
 from gco.k8s_objects import json_object, present
+from gco.k8s_quantity import parse_quantity
 from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization
 from gco.services.leader_lease import (
     LEASE_MIN_DURATION_SECONDS,
@@ -194,7 +196,10 @@ class HealthMonitor:
             if (
                 self._cached_metrics
                 and self._last_metrics_time
-                and (now - self._last_metrics_time).seconds < self._cache_duration
+                # total_seconds(): timedelta.seconds is only the seconds field, so a
+                # snapshot a day old read as fresh. Bounded below so a wall clock
+                # stepped backwards refetches instead of serving the snapshot.
+                and 0 <= (now - self._last_metrics_time).total_seconds() < self._cache_duration
             ):
                 return self._cached_metrics
 
@@ -238,30 +243,16 @@ class HealthMonitor:
             for node in nodes.items:
                 node_name = present(node.metadata, "node.metadata").name
                 allocatable = present(node.status, "node.status").allocatable or {}
-                cpu_capacity = allocatable.get("cpu", "0")
-                # Convert CPU capacity to millicores
-                if cpu_capacity.endswith("m"):
-                    cpu_capacity_millicores = int(cpu_capacity[:-1])
-                else:
-                    cpu_capacity_millicores = int(cpu_capacity) * 1000
+                cpu_capacity_millicores = parse_cpu_millicores(allocatable.get("cpu"))
                 node_capacities[node_name] = cpu_capacity_millicores
                 total_cpu_capacity += cpu_capacity_millicores
 
             # Calculate usage from metrics
             for item in node_metrics.get("items", []):
-                cpu_usage = item["usage"]["cpu"]
-
-                # Convert CPU usage to millicores
-                if cpu_usage.endswith("n"):
-                    cpu_usage_millicores = int(cpu_usage[:-1]) / 1_000_000
-                elif cpu_usage.endswith("u"):
-                    cpu_usage_millicores = int(cpu_usage[:-1]) / 1_000
-                elif cpu_usage.endswith("m"):
-                    cpu_usage_millicores = int(cpu_usage[:-1])
-                else:
-                    cpu_usage_millicores = int(cpu_usage) * 1000
-
-                total_cpu_usage += cpu_usage_millicores
+                # Exact, unrounded: metrics-server reports usage in nano- or
+                # microcores, and rounding each node up would bias the sum.
+                cpu_usage_cores = parse_quantity(item["usage"]["cpu"])
+                total_cpu_usage += float(cpu_usage_cores * 1000)
 
             if total_cpu_capacity > 0:
                 return (total_cpu_usage / total_cpu_capacity) * 100
@@ -301,29 +292,9 @@ class HealthMonitor:
 
         return 0.0
 
-    def _parse_memory_string(self, memory_str: str) -> int:
-        """Parse Kubernetes memory string to bytes"""
-        if not memory_str:
-            return 0
-
-        memory_str = memory_str.strip()
-
-        # Handle different units
-        if memory_str.endswith("Ki"):
-            return int(memory_str[:-2]) * 1024
-        if memory_str.endswith("Mi"):
-            return int(memory_str[:-2]) * 1024 * 1024
-        if memory_str.endswith("Gi"):
-            return int(memory_str[:-2]) * 1024 * 1024 * 1024
-        if memory_str.endswith("Ti"):
-            return int(memory_str[:-2]) * 1024 * 1024 * 1024 * 1024
-        if memory_str.endswith("k"):
-            return int(memory_str[:-1]) * 1000
-        if memory_str.endswith("M"):
-            return int(memory_str[:-1]) * 1000 * 1000
-        if memory_str.endswith("G"):
-            return int(memory_str[:-1]) * 1000 * 1000 * 1000
-        return int(memory_str)
+    def _parse_memory_string(self, memory_str: object) -> int:
+        """A memory quantity in bytes (any form the API server accepts); empty is 0."""
+        return parse_memory_bytes(memory_str)
 
     async def _calculate_gpu_utilization(self) -> float:
         """Calculate cluster-wide GPU utilization percentage"""
@@ -343,16 +314,16 @@ class HealthMonitor:
             )
             for node in nodes.items:
                 allocatable = present(node.status, "node.status").allocatable or {}
-                gpu_capacity = allocatable.get("nvidia.com/gpu", "0")
-                total_gpu_capacity += int(gpu_capacity)
+                total_gpu_capacity += parse_gpu_count(allocatable.get("nvidia.com/gpu"))
 
             # Calculate GPU requests from running pods
             for pod in pods.items:
                 if present(pod.status, "pod.status").phase == "Running":
                     for container in present(pod.spec, "pod.spec").containers:
                         if container.resources and container.resources.requests:
-                            gpu_request = container.resources.requests.get("nvidia.com/gpu", "0")
-                            total_gpu_requested += int(gpu_request)
+                            total_gpu_requested += parse_gpu_count(
+                                container.resources.requests.get("nvidia.com/gpu")
+                            )
 
             if total_gpu_capacity > 0:
                 return (total_gpu_requested / total_gpu_capacity) * 100
@@ -436,21 +407,18 @@ class HealthMonitor:
                 for container in present(pod.spec, "pod.spec").containers:
                     if container.resources and container.resources.requests:
                         # CPU
-                        cpu_request = container.resources.requests.get("cpu", "0")
-                        if cpu_request.endswith("m"):
-                            total_cpu_millicores += int(cpu_request[:-1])
-                        elif cpu_request.endswith("n"):
-                            total_cpu_millicores += int(cpu_request[:-1]) / 1_000_000
-                        else:
-                            total_cpu_millicores += float(cpu_request) * 1000
+                        total_cpu_millicores += parse_cpu_millicores(
+                            container.resources.requests.get("cpu")
+                        )
 
                         # Memory
                         memory_request = container.resources.requests.get("memory", "0")
                         total_memory_bytes += self._parse_memory_string(memory_request)
 
                         # GPUs
-                        gpu_request = container.resources.requests.get("nvidia.com/gpu", "0")
-                        total_gpus += int(gpu_request)
+                        total_gpus += parse_gpu_count(
+                            container.resources.requests.get("nvidia.com/gpu")
+                        )
 
             # Convert to vCPUs and GB
             cpu_vcpus = total_cpu_millicores / 1000

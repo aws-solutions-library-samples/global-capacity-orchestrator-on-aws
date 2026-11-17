@@ -26,6 +26,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from gco.k8s_quantity import parse_quantity
+
 DEFAULT_RESOURCE_QUOTA: Mapping[str, str] = MappingProxyType(
     {
         # Namespace-wide aggregate ceilings (ResourceQuota on requests.*):
@@ -54,27 +56,15 @@ DEFAULT_RESOURCE_QUOTA: Mapping[str, str] = MappingProxyType(
 def parse_k8s_quantity(value: object) -> float:
     """Parse a Kubernetes resource quantity into a float of base units.
 
-    Supports the quantity forms GCO's manifests actually use: bare integers
-    and decimals (``8``, ``0.5``), CPU millicores (``250m``), and the binary
-    and decimal suffixes (``Ki Mi Gi Ti Pi`` / ``k M G T P``).
+    Any quantity the API server accepts, string or number (``8``, ``0.5``,
+    ``250m``, ``32Gi``, ``1e9``), through :func:`gco.k8s_quantity.parse_quantity`.
+    The sign is kept, so a caller can name a negative configuration value in
+    its own error.
 
     Raises:
         ValueError: If the value is not a parseable quantity.
     """
-    text = str(value).strip()
-    if not text:
-        raise ValueError("empty resource quantity")
-    binary = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50}
-    decimal = {"k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
-    for suffix, factor in binary.items():
-        if text.endswith(suffix):
-            return float(text[: -len(suffix)]) * factor
-    if text.endswith("m"):
-        return float(text[:-1]) / 1000.0
-    for suffix, factor in decimal.items():
-        if text.endswith(suffix):
-            return float(text[: -len(suffix)]) * factor
-    return float(text)
+    return float(parse_quantity(value))
 
 
 DEFAULT_MANIFEST_RESOURCE_CAPS: Mapping[str, object] = MappingProxyType(

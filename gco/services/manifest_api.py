@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
 from gco.services import tracing
 from gco.services.auth_middleware import AuthenticationMiddleware
 from gco.services.central_queue_worker import CentralQueueWorker
@@ -388,9 +389,19 @@ async def get_service_status() -> dict[str, Any]:
         "environment": {
             "cluster_name": os.getenv("CLUSTER_NAME", "unknown"),
             "region": os.getenv("REGION", "unknown"),
-            "max_cpu_per_manifest": os.getenv("MAX_CPU_PER_MANIFEST", "10"),
-            "max_memory_per_manifest": os.getenv("MAX_MEMORY_PER_MANIFEST", "32Gi"),
-            "max_gpu_per_manifest": os.getenv("MAX_GPU_PER_MANIFEST", "4"),
+            # The defaults the processors enforce when the variable is unset.
+            "max_cpu_per_manifest": os.getenv(
+                "MAX_CPU_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_cpu_per_manifest"]),
+            ),
+            "max_memory_per_manifest": os.getenv(
+                "MAX_MEMORY_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_memory_per_manifest"]),
+            ),
+            "max_gpu_per_manifest": os.getenv(
+                "MAX_GPU_PER_MANIFEST",
+                str(DEFAULT_MANIFEST_RESOURCE_CAPS["max_gpu_per_manifest"]),
+            ),
             "allowed_namespaces": os.getenv("ALLOWED_NAMESPACES", "gco-jobs"),
             "validation_enabled": os.getenv("VALIDATION_ENABLED", "true"),
         },
