@@ -2,8 +2,11 @@
 
 import ast
 import json
+import os
 import re
 import stat
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -1789,16 +1792,18 @@ def test_release_stage_one_never_writes_to_main() -> None:
 def test_release_stage_two_publishes_only_the_merged_release_commit() -> None:
     """Stage 2 (release-publish.yml) tags main's merge commit, idempotently.
 
-    It reacts only to main pushes that change VERSION, refuses to move an
-    existing v-tag (immutability), verifies every version mirror agrees
-    before tagging, and gates push-event publishes on the `Release vX.Y.Z`
-    commit subject so a stray VERSION edit is never auto-tagged.
+    It reacts only to main pushes that change VERSION, tags the newest
+    first-parent commit that changed VERSION rather than the run's head,
+    refuses to move an existing v-tag (immutability), verifies every version
+    mirror agrees before tagging, and gates every publish on the
+    `Release vX.Y.Z` commit subject so a stray VERSION edit is never tagged.
     """
     workflow = _read(".github/workflows/release-publish.yml")
 
     assert "branches: [main]" in workflow
     assert "- VERSION" in workflow
-    assert 'git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}" "$GITHUB_SHA"' in workflow
+    assert 'git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}" "$RELEASE_SHA"' in workflow
+    assert "git log -1 --first-parent --format=%H -- VERSION" in workflow
     assert 'git push origin "refs/tags/v${NEW_VERSION}"' in workflow
     assert "--verify-tag" in workflow
     # Immutability + idempotency guards.
@@ -1809,6 +1814,175 @@ def test_release_stage_two_publishes_only_the_merged_release_commit() -> None:
     assert "refusing to tag" in workflow
     # Push-event publishes require a release commit subject.
     assert 'pattern="^Release v${NEW_VERSION//./\\\\.}( \\(#[0-9]+\\))?$"' in workflow
+
+
+_WORKFLOW_EXPRESSION = re.compile(r"\$\{\{\s*(.+?)\s*\}\}")
+_STEP_OUTPUT_EXPRESSION = re.compile(r"steps\.([\w-]+)\.outputs\.([\w-]+)")
+
+
+def _git(cwd: Path, *args: str, env: dict[str, str]) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, env=env, capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
+
+
+def _release_repository(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A checkout of a main branch whose first commit is the v1.0.0 release."""
+    env = {
+        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "tester",
+        "GIT_AUTHOR_EMAIL": "tester@example.com",
+        "GIT_COMMITTER_NAME": "tester",
+        "GIT_COMMITTER_EMAIL": "tester@example.com",
+    }
+    origin = tmp_path / "origin.git"
+    checkout = tmp_path / "checkout"
+    _git(tmp_path, "init", "--quiet", "--bare", "--initial-branch=main", str(origin), env=env)
+    _git(tmp_path, "init", "--quiet", "--initial-branch=main", str(checkout), env=env)
+    _git(checkout, "remote", "add", "origin", str(origin), env=env)
+    _commit_version(checkout, "1.0.0", "Release v1.0.0 (#1)", env)
+    return checkout, env
+
+
+def _commit_version(checkout: Path, version: str, subject: str, env: dict[str, str]) -> str:
+    (checkout / "gco").mkdir(exist_ok=True)
+    (checkout / "cli").mkdir(exist_ok=True)
+    (checkout / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    (checkout / "gco/__init__.py").write_text("", encoding="utf-8")
+    (checkout / "gco/_version.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    (checkout / "cli/__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    return _commit_all(checkout, subject, env)
+
+
+def _commit_all(checkout: Path, subject: str, env: dict[str, str]) -> str:
+    _git(checkout, "add", "--all", env=env)
+    _git(checkout, "commit", "--quiet", "--allow-empty", "-m", subject, env=env)
+    return _git(checkout, "rev-parse", "HEAD", env=env)
+
+
+def _run_release_publish(
+    checkout: Path, event_name: str, env: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], dict[str, dict[str, str]]]:
+    """Run release-publish.yml's shell steps, up to the tag push, as the runner would.
+
+    The GitHub Release step is the one step left out: it needs the GitHub API.
+    """
+    job = yaml.safe_load(_read(".github/workflows/release-publish.yml"))["jobs"]["publish"]
+    runner = checkout.parent / "runner"
+    runner.mkdir(exist_ok=True)
+    outputs: dict[str, dict[str, str]] = {}
+
+    def resolve(expression: str) -> str:
+        if expression == "github.event_name":
+            return event_name
+        match = _STEP_OUTPUT_EXPRESSION.fullmatch(expression)
+        assert match, f"unhandled workflow expression in release-publish.yml: {expression}"
+        return outputs.get(match.group(1), {}).get(match.group(2), "")
+
+    result = subprocess.CompletedProcess[str]([], 0, "", "")
+    for index, step in enumerate(job["steps"]):
+        if "run" not in step or step["name"].startswith("Create GitHub Release"):
+            continue
+        condition = step.get("if")
+        if condition is not None:
+            left, _, right = condition.partition(" == ")
+            assert right.startswith("'") and right.endswith("'"), condition
+            if resolve(left) != right.strip("'"):
+                continue
+        output_file = runner / f"output-{index}"
+        output_file.write_text("", encoding="utf-8")
+        step_env = {
+            **env,
+            "GITHUB_SHA": _git(checkout, "rev-parse", "HEAD", env=env),
+            "GITHUB_OUTPUT": str(output_file),
+            "GITHUB_ENV": str(runner / "env"),
+            "GITHUB_STEP_SUMMARY": str(runner / "summary.md"),
+            "RUNNER_TEMP": str(runner),
+        }
+        for name, value in (step.get("env") or {}).items():
+            step_env[name] = _WORKFLOW_EXPRESSION.sub(lambda m: resolve(m.group(1)), str(value))
+        result = subprocess.run(
+            ["bash", "-e", "-c", step["run"]],
+            cwd=checkout,
+            env=step_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            break
+        if "id" in step:
+            lines = output_file.read_text(encoding="utf-8").splitlines()
+            outputs[step["id"]] = dict(line.split("=", 1) for line in lines)
+    return result, outputs
+
+
+def test_release_publish_dispatch_tags_the_release_commit_not_mains_head(
+    tmp_path: Path,
+) -> None:
+    """A re-dispatch after later merges tags, and then resumes on, the release commit.
+
+    GITHUB_SHA of a dispatch is main's head, not the release: tagging it
+    released unmerged-at-release-time commits under vX.Y.Z, and a second
+    dispatch then failed the immutability check forever.
+    """
+    checkout, env = _release_repository(tmp_path)
+    release = _git(checkout, "rev-parse", "HEAD", env=env)
+    (checkout / "feature.txt").write_text("later work\n", encoding="utf-8")
+    head = _commit_all(checkout, "feat: later work (#2)", env)
+
+    result, outputs = _run_release_publish(checkout, "workflow_dispatch", env)
+
+    assert result.returncode == 0, result.stderr
+    origin = tmp_path / "origin.git"
+    assert _git(origin, "rev-parse", "v1.0.0^{commit}", env=env) == release != head
+    assert outputs["gate"]["publish"] == "true"
+
+    # The documented recovery path: dispatching again resumes instead of failing.
+    _git(checkout, "checkout", "--quiet", "main", env=env)
+    resumed, _ = _run_release_publish(checkout, "workflow_dispatch", env)
+
+    assert resumed.returncode == 0, resumed.stderr
+    assert f"Tag v1.0.0 already points at {release}" in resumed.stdout
+
+
+def test_release_publish_never_tags_a_version_change_that_is_not_a_release(
+    tmp_path: Path,
+) -> None:
+    """A hand-edited VERSION is skipped on push and refused on dispatch, never tagged."""
+    checkout, env = _release_repository(tmp_path)
+    _commit_version(checkout, "1.0.1", "chore: edit VERSION by hand (#3)", env)
+
+    pushed, outputs = _run_release_publish(checkout, "push", env)
+
+    assert pushed.returncode == 0, pushed.stderr
+    assert outputs["gate"]["publish"] == "false"
+    summary = (tmp_path / "runner/summary.md").read_text(encoding="utf-8")
+    assert "chore: edit VERSION by hand (#3)" in summary
+
+    _git(checkout, "checkout", "--quiet", "main", env=env)
+    dispatched, _ = _run_release_publish(checkout, "workflow_dispatch", env)
+
+    assert dispatched.returncode != 0
+    assert "not a release commit" in dispatched.stderr
+    assert _git(checkout, "tag", "--list", env=env) == ""
+    assert _git(tmp_path / "origin.git", "tag", "--list", env=env) == ""
+
+
+def test_release_publish_refuses_to_move_an_existing_tag(tmp_path: Path) -> None:
+    checkout, env = _release_repository(tmp_path)
+    _git(checkout, "tag", "-a", "v1.0.1", "-m", "elsewhere", env=env)
+    released = _commit_version(checkout, "1.0.1", "Release v1.0.1 (#4)", env)
+
+    result, _ = _run_release_publish(checkout, "push", env)
+
+    assert result.returncode != 0
+    assert f"not {released}" in result.stderr
+    assert "Released tags are immutable" in result.stderr
 
 
 def test_release_workflows_share_one_serialized_concurrency_group() -> None:
