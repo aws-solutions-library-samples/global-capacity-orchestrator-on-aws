@@ -325,6 +325,83 @@ def test_checkout_release_without_preserved_files(release_repo: Path) -> None:
     assert (release_repo / "cdk.json").is_file()
 
 
+def _pre_upgrade_copies(root: Path) -> list[Path]:
+    return sorted(root.glob("cdk.json.pre-upgrade-*"))
+
+
+def test_checkout_release_leaves_no_copy_once_cdk_json_is_back(release_repo: Path) -> None:
+    (release_repo / "cdk.json").write_text('{"context": {"project_name": "mine"}}\n')
+    engine.checkout_release(release_repo, ReleaseTag((8, 1, 0), "v8.1.0"))
+    assert _pre_upgrade_copies(release_repo) == []
+
+
+def test_a_failed_checkout_writes_the_operators_cdk_json_back(release_repo: Path) -> None:
+    """An untracked file the release adds fails ``git checkout`` after cdk.json was reset.
+
+    ``--untracked-files=no`` cannot see the clash coming. The reset cdk.json
+    used to stay at the committed defaults (project name, Regions, toggles).
+    """
+    _git(release_repo, "checkout", "--quiet", "main")
+    (release_repo / "NEW.md").write_text("added by the release\n")
+    _git(release_repo, "add", "NEW.md")
+    _git(release_repo, "commit", "--quiet", "-m", "release 8.2.0")
+    _git(release_repo, "tag", "v8.2.0")
+    _git(release_repo, "checkout", "--quiet", "--detach", "v8.0.1")
+    (release_repo / "NEW.md").write_text("the operator's own notes\n")
+    mine = b'{"context": {"project_name": "mine", "regions": ["eu-west-1"]}}\n'
+    (release_repo / "cdk.json").write_bytes(mine)
+
+    with pytest.raises(UpgradeError, match="would be overwritten by checkout") as raised:
+        engine.checkout_release(release_repo, ReleaseTag((8, 2, 0), "v8.2.0"))
+
+    assert (release_repo / "cdk.json").read_bytes() == mine
+    assert _git(release_repo, "describe", "--tags", "--exact-match", "HEAD").strip() == "v8.0.1"
+    (copy,) = _pre_upgrade_copies(release_repo)
+    assert copy.read_bytes() == mine
+    assert f"cdk.json is written back as it was; a copy is kept at {copy}" in str(raised.value)
+
+
+def test_a_restore_that_cannot_write_names_the_copy(release_repo: Path) -> None:
+    mine = b'{"context": {"project_name": "mine"}}\n'
+    (release_repo / "cdk.json").write_bytes(mine)
+    real_write_bytes = Path.write_bytes
+
+    def refuse_cdk_json(self: Path, data: bytes) -> int:
+        if self.name == "cdk.json":
+            raise PermissionError("read-only file system")
+        return real_write_bytes(self, data)
+
+    with (
+        patch.object(Path, "write_bytes", refuse_cdk_json),
+        pytest.raises(UpgradeError, match=r"Could not restore cdk\.json") as raised,
+    ):
+        engine.checkout_release(release_repo, ReleaseTag((8, 1, 0), "v8.1.0"))
+
+    (copy,) = _pre_upgrade_copies(release_repo)
+    assert copy.read_bytes() == mine
+    assert f"saved in {copy}; copy it over {release_repo / 'cdk.json'}" in str(raised.value)
+
+
+def test_a_backup_that_cannot_be_written_stops_before_any_change(release_repo: Path) -> None:
+    mine = '{"context": {"project_name": "mine"}}\n'
+    (release_repo / "cdk.json").write_text(mine)
+    real_open = Path.open
+
+    def refuse_new_files(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if mode == "xb":
+            raise PermissionError("denied")
+        return real_open(self, mode, *args, **kwargs)
+
+    with (
+        patch.object(Path, "open", refuse_new_files),
+        pytest.raises(UpgradeError, match=r"Could not write the backup .*nothing was changed"),
+    ):
+        engine.checkout_release(release_repo, ReleaseTag((8, 1, 0), "v8.1.0"))
+
+    assert (release_repo / "cdk.json").read_text() == mine
+    assert _git(release_repo, "describe", "--tags", "--exact-match", "HEAD").strip() == "v8.0.1"
+
+
 # ---------------------------------------------------------------------------
 # The local install
 # ---------------------------------------------------------------------------

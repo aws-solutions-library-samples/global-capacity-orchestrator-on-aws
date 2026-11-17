@@ -50,8 +50,11 @@ release, while the control plane is updated in place and keeps its state:
    `vMAJOR.MINOR.PATCH` (or the tag named with `--ref`).
 2. **Move the checkout.** `git checkout --detach <tag>`. `cdk.json` is the
    deployment's configuration, not the release's, so its exact bytes are
-   snapshotted first and written back afterwards — your project name, Regions and
-   feature toggles are what deploys, not the release's defaults.
+   snapshotted first, copied to `cdk.json.pre-upgrade-<UTC time>`, and written
+   back afterwards — your project name, Regions and feature toggles are what
+   deploys, not the release's defaults. The bytes are written back even when
+   the checkout fails; the copy is deleted once they are back and kept when
+   anything fails.
 3. **Refresh the local install.** `pip install -e '.[cdk,...]'` when the running
    `gco` is the editable install of this checkout: the `cdk` extra plus every
    extra that was already installed, so the CDK library the redeploy synthesizes
@@ -186,6 +189,12 @@ Every step reports what it did, and the command tells you where it stopped.
 
 - **Before the checkout** (dirty tree, no release tags, no container runtime):
   nothing has changed. Fix the cause and rerun.
+- **At the checkout** (`git checkout --quiet --detach <tag> failed`, for
+  example because an untracked file is in the way of one the release adds):
+  `cdk.json` is written back as it was, and the message names the
+  `cdk.json.pre-upgrade-<UTC time>` copy it kept. Move the named file aside,
+  delete the copy, and rerun. If the message says `cdk.json` itself could not
+  be restored, copy that file over `cdk.json` before running anything else.
 - **After the checkout, during the install refresh**: the checkout is on the new
   release; the message names the `pip`/`uv` command to run by hand, then
   `gco upgrade --skip-checkout` finishes the stack cycle.

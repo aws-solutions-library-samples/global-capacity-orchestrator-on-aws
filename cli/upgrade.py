@@ -8,8 +8,10 @@ CloudFormation stacks — to a tagged release in one pass:
    the highest ``vMAJOR.MINOR.PATCH`` (or the tag named with ``--ref``).
 2. **Move the checkout.** ``git checkout --detach <tag>`` with ``cdk.json``
    preserved byte-for-byte: the deployment's configuration is the operator's,
-   not the release's, so it is snapshotted before the checkout and written back
-   afterwards.
+   not the release's, so it is snapshotted (and copied to
+   ``cdk.json.pre-upgrade-<UTC time>``) before the checkout and written back
+   afterwards, also when the checkout fails. The copy is kept only when
+   something fails.
 3. **Refresh the local install.** ``pip install -e '.[cdk,...]'`` (``cdk`` plus
    every extra already installed) when the running CLI is
    the editable install of this checkout, ``npm ci`` when the checkout carries
@@ -42,8 +44,9 @@ import re
 import shutil
 import subprocess  # fixed argv only, never a shell string
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -274,14 +277,62 @@ def checkout_is_at(root: Path, tag: ReleaseTag) -> bool:
     return head == target
 
 
+def _back_up_preserved_files(root: Path, snapshots: Mapping[str, bytes]) -> dict[str, Path]:
+    """Write each snapshot next to its file before git touches anything.
+
+    The in-memory snapshot dies with the process, so a crash, or a restore
+    that cannot write, would otherwise lose the deployment's configuration.
+    Each copy gets a new name (``cdk.json.pre-upgrade-<UTC time>``), so an
+    older one an earlier failed run left behind is never overwritten.
+    """
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backups: dict[str, Path] = {}
+    for name, data in snapshots.items():
+        backup = root / f"{name}.pre-upgrade-{stamp}"
+        try:
+            with backup.open("xb") as handle:
+                handle.write(data)
+        except OSError as exc:
+            raise UpgradeError(
+                f"Could not write the backup {backup} before the checkout ({exc}); "
+                "nothing was changed."
+            ) from exc
+        backups[name] = backup
+    return backups
+
+
+def _restore_preserved_files(
+    root: Path, snapshots: Mapping[str, bytes], backups: Mapping[str, Path]
+) -> list[str]:
+    """Write back every snapshot whose file no longer holds its bytes; return their names."""
+    restored: list[str] = []
+    for name, data in snapshots.items():
+        path = root / name
+        try:
+            if path.is_file() and path.read_bytes() == data:
+                continue
+            path.write_bytes(data)
+        except OSError as exc:
+            raise UpgradeError(
+                f"Could not restore {name} after git checkout ({exc}). Your version is "
+                f"saved in {backups[name]}; copy it over {path} before running gco again."
+            ) from exc
+        restored.append(name)
+    return restored
+
+
 def checkout_release(root: Path, tag: ReleaseTag, *, log: Logger = _quiet) -> dict[str, Any]:
     """Detach the checkout onto ``tag`` while preserving the deployment's own files.
 
     ``cdk.json`` is tracked, but its contents (project name, Regions, feature
     toggles) describe this deployment rather than the release, so its exact
-    bytes are captured first, reset so git will switch branches, and written
-    back once the release is checked out. Any other local modification aborts
-    before the checkout — the operator decides what to do with real work.
+    bytes are captured first, copied to ``cdk.json.pre-upgrade-<UTC time>``,
+    reset so git will switch branches, and written back once the checkout
+    finishes, also when git fails (an untracked file the release adds makes
+    the checkout fail, and ``--untracked-files=no`` cannot see it coming).
+    The copy is deleted once the bytes are back, and kept, and named in the
+    error, when anything fails. Any other local modification aborts before the
+    checkout — the operator decides what to do with real work.
     """
     state = inspect_checkout(root)
     if state.dirty_paths:
@@ -296,20 +347,29 @@ def checkout_release(root: Path, tag: ReleaseTag, *, log: Logger = _quiet) -> di
         path = root / name
         if path.is_file():
             snapshots[name] = path.read_bytes()
-    if state.preserved_modified:
-        # git refuses to switch when a modified tracked file differs between the
-        # two commits; the bytes are safe in ``snapshots`` and come right back.
-        run_git(root, "checkout", "--quiet", "--", *state.preserved_modified)
+    backups = _back_up_preserved_files(root, snapshots)
 
-    log(f"Checking out {tag.name} (was {state.ref} at {state.head})...")
-    run_git(root, "checkout", "--quiet", "--detach", tag.name)
+    try:
+        if state.preserved_modified:
+            # git refuses to switch when a modified tracked file differs between
+            # the two commits; the bytes are safe in ``snapshots`` and come back
+            # in ``finally``.
+            run_git(root, "checkout", "--quiet", "--", *state.preserved_modified)
 
-    restored: list[str] = []
-    for name, data in snapshots.items():
-        path = root / name
-        if not path.is_file() or path.read_bytes() != data:
-            path.write_bytes(data)
-            restored.append(name)
+        log(f"Checking out {tag.name} (was {state.ref} at {state.head})...")
+        run_git(root, "checkout", "--quiet", "--detach", tag.name)
+    except UpgradeError as exc:
+        # ``finally`` writes the bytes back before this propagates; a restore
+        # that fails raises its own error, naming the copy, in its place.
+        kept = "".join(
+            f"\n{name} is written back as it was; a copy is kept at {backups[name]}"
+            for name in sorted(backups)
+        )
+        raise UpgradeError(f"{exc}{kept}") from exc
+    finally:
+        restored = _restore_preserved_files(root, snapshots, backups)
+    for backup in backups.values():
+        backup.unlink(missing_ok=True)
     return {
         "previous_ref": state.ref,
         "previous_head": state.head,
