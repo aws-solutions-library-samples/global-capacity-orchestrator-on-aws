@@ -1399,7 +1399,13 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
 GET /api/v1/queue/jobs
 ```
 
-List jobs in the global queue with optional filters.
+List one page of jobs in the global queue, with optional filters.
+
+Jobs come in no particular order: DynamoDB scan order, which is neither
+newest first nor by priority, and is not sorted within a page either. To read
+every match, repeat the request with `cursor` set to the previous page's
+`next_cursor` until it is `null`, then sort the collected jobs if you need an
+order.
 
 **CLI:**
 
@@ -1419,9 +1425,10 @@ gco queue list -s running
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `target_region` | string | Filter by target region |
-| `status` | string | Filter by status (queued, claimed, running, succeeded, failed, cancelled) |
+| `status` | string | Filter by status (queued, claimed, applying, pending, running, succeeded, failed, cancelled) |
 | `namespace` | string | Filter by namespace |
-| `limit` | int | Maximum results (default: 100) |
+| `limit` | int | Maximum results, 1-1000 (default: 100) |
+| `cursor` | string | The previous page's `next_cursor`. It is bound to the filters it was issued with; another combination answers `422` |
 
 **Response:**
 
@@ -1437,11 +1444,18 @@ gco queue list -s running
       "namespace": "gco-jobs",
       "status": "queued",
       "priority": 10,
-      "submitted_at": "2024-01-15T10:00:00Z"
+      "submitted_at": "2024-01-15T10:00:00.000000Z"
     }
-  ]
+  ],
+  "next_cursor": null,
+  "partial": false
 }
 ```
+
+`next_cursor` is `null` on the last page. `partial` is `true` when this page's
+scan used up its 20,000-item evaluation budget with more of the table still
+unread, so the page can hold fewer than `limit` jobs; `next_cursor` then
+continues the listing.
 
 ### Get Queued Job
 

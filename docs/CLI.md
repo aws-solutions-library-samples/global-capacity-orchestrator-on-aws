@@ -4702,6 +4702,11 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
 
 List jobs in the global queue.
 
+It shows one page of up to `--limit` jobs, in no particular order: the queue's
+scan order, which is neither newest first nor by priority. `--output json`
+includes the page's `next_cursor`; see
+[List Queued Jobs](API.md#list-queued-jobs) for reading the rest.
+
 ```bash
 gco queue list [OPTIONS]
 ```

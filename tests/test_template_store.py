@@ -1930,7 +1930,8 @@ class TestJobStore:
             limit=2,
         )
 
-        assert [job["job_id"] for job in jobs] == ["newer", "older"]
+        # Scan order, not newest first (see test_pages_keep_scan_order_across_the_cursor).
+        assert [job["job_id"] for job in jobs] == ["older", "newer"]
         assert cursor is None
         assert partial is False
         assert mock_dynamodb.scan.call_count == 2
@@ -1950,6 +1951,36 @@ class TestJobStore:
                 "#status": "status",
                 "#namespace": "namespace",
             }
+
+    def test_pages_keep_scan_order_across_the_cursor(self, job_store, mock_dynamodb):
+        """Concatenated pages are exactly the scan; no page is re-sorted.
+
+        Each page used to be sorted newest first while the cursor followed
+        scan order, so page 1 looked newest-first even when page 2 held a
+        newer job, as job "c" does here.
+        """
+
+        def job(job_id, submitted_at):
+            return {"job_id": job_id, "status": "queued", "submitted_at": submitted_at}
+
+        mock_dynamodb.scan.side_effect = [
+            {
+                "Items": [
+                    job("a", "2026-01-01T00:00:00.000000Z"),
+                    job("b", "2026-01-02T00:00:00.000000Z"),
+                    job("c", "2026-01-03T00:00:00.000000Z"),
+                ],
+                "ScannedCount": 3,
+            },
+            {"Items": [job("c", "2026-01-03T00:00:00.000000Z")], "ScannedCount": 1},
+        ]
+
+        first, cursor, _ = job_store.list_jobs_page(limit=2)
+        second, end, _ = job_store.list_jobs_page(limit=2, cursor=cursor)
+
+        assert [entry["job_id"] for entry in first + second] == ["a", "b", "c"]
+        assert end is None
+        assert mock_dynamodb.scan.call_args_list[1].kwargs["ExclusiveStartKey"] == {"job_id": "b"}
 
     @pytest.mark.parametrize(
         ("second_item", "expected_key"),

@@ -1447,7 +1447,13 @@ class JobStore:
         limit: int = 100,
         cursor: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, bool]:
-        """Return one bounded scan page plus an opaque continuation cursor."""
+        """Return one bounded scan page plus an opaque continuation cursor.
+
+        Jobs come in DynamoDB scan order, which follows neither submission
+        time nor priority, and the cursor resumes that order. Sorting each
+        page would suggest an order across pages that they do not have, so a
+        caller that needs one sorts the jobs it has collected.
+        """
         limit = min(max(int(limit), 1), 1_000)
         filters = self._list_filter_identity(target_region, status, namespace)
         filter_parts: list[str] = []
@@ -1516,7 +1522,6 @@ class JobStore:
                 _MAX_LIST_EVALUATED_ITEMS,
             )
         parsed = [self._parse_job_item(item) for item in items]
-        parsed.sort(key=lambda job: job.get("submitted_at") or "", reverse=True)
         next_cursor = self._encode_list_cursor(next_key, filters) if next_key else None
         return parsed, next_cursor, partial
 
