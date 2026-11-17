@@ -5082,6 +5082,12 @@ Manage CDK infrastructure stacks.
 
 </details>
 
+The commands that run the CDK CLI start it in its own process group. When
+`gco` receives SIGTERM while CDK runs (cancelling an MCP deploy or destroy task
+sends one), it terminates that process group, and every one a `--parallel` run
+started, before it exits with status 143. CloudFormation still completes or
+rolls back the stack operation that was already in progress.
+
 #### `gco stacks list`
 
 List all GCO stacks.

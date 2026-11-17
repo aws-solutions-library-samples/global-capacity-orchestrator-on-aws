@@ -59,7 +59,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from threading import Event, Lock, RLock, Thread, local
+from threading import Event, Lock, RLock, Thread, current_thread, local, main_thread
+from types import FrameType
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypedDict
 
 from botocore.exceptions import ClientError
@@ -1341,6 +1342,44 @@ def cdk_asset_consumer(project_root: str | Path) -> Iterator[None]:
     )
 
 
+class StackOperationTerminated(SystemExit):
+    """SIGTERM arrived while CDK was running; exits with status 143.
+
+    A ``SystemExit`` so the ``except Exception`` handlers of the stack
+    commands and orchestration cannot swallow it and start the next CDK run.
+    """
+
+
+@contextmanager
+def _sigterm_raises_terminated() -> Iterator[None]:
+    """Turn SIGTERM into ``StackOperationTerminated`` while CDK runs.
+
+    CDK starts in its own session, so a SIGTERM that kills this process
+    outright (an MCP task cancel sends one) leaves CDK deploying or destroying
+    with no parent. Raising instead unwinds through ``_run_cdk`` and the
+    parallel helpers, which terminate every CDK process group. Only the main
+    thread can install a handler; the previous one is restored afterwards.
+    """
+    if current_thread() is not main_thread():
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGTERM)
+
+    def terminate_handler(signum: int, frame: FrameType | None) -> None:
+        raise StackOperationTerminated(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate_handler)
+    try:
+        yield
+    finally:
+        # ``None`` means a handler installed outside Python; the default is
+        # the closest restorable one.
+        signal.signal(
+            signal.SIGTERM, previous_handler if previous_handler is not None else signal.SIG_DFL
+        )
+
+
 class StackManager:
     """Manages CDK stack operations."""
 
@@ -2097,39 +2136,38 @@ class StackManager:
                 "CREATE_NEW_PROCESS_GROUP",
                 0,
             )
-        process = subprocess.Popen(  # nosemgrep: dangerous-subprocess-use-audit - static CDK argv, no shell
-            cdk_cmd,
-            **popen_kwargs,
-        )
-        with self._active_cdk_lock:
-            self._active_cdk_processes[process.pid] = process
-        if self._cdk_cancel_event.is_set():
-            self._terminate_cdk_process(process)
-            with self._active_cdk_lock:
-                self._active_cdk_processes.pop(process.pid, None)
-            raise RuntimeError("CDK operation cancelled during process start")
-
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            self._terminate_cdk_process(process)
-            logger.warning(
-                "cdk command timed out after %ss: %s",
-                timeout,
-                " ".join(cdk_cmd),
-            )
-            raise subprocess.TimeoutExpired(
+        # From the start of the process to its cleanup, SIGTERM raises here
+        # instead of killing this process, so the cleanup below always runs.
+        with _sigterm_raises_terminated():
+            process = subprocess.Popen(  # nosemgrep: dangerous-subprocess-use-audit - static CDK argv, no shell
                 cdk_cmd,
-                exc.timeout,
-                output=exc.output,
-                stderr=exc.stderr,
-            ) from exc
-        except BaseException:
-            self._terminate_cdk_process(process)
-            raise
-        finally:
-            with self._active_cdk_lock:
-                self._active_cdk_processes.pop(process.pid, None)
+                **popen_kwargs,
+            )
+            try:
+                with self._active_cdk_lock:
+                    self._active_cdk_processes[process.pid] = process
+                if self._cdk_cancel_event.is_set():
+                    raise RuntimeError("CDK operation cancelled during process start")
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                self._terminate_cdk_process(process)
+                logger.warning(
+                    "cdk command timed out after %ss: %s",
+                    timeout,
+                    " ".join(cdk_cmd),
+                )
+                raise subprocess.TimeoutExpired(
+                    cdk_cmd,
+                    exc.timeout,
+                    output=exc.output,
+                    stderr=exc.stderr,
+                ) from exc
+            except BaseException:
+                self._terminate_cdk_process(process)
+                raise
+            finally:
+                with self._active_cdk_lock:
+                    self._active_cdk_processes.pop(process.pid, None)
         return subprocess.CompletedProcess(
             cdk_cmd,
             process.returncode,
@@ -4809,36 +4847,39 @@ class StackManager:
                 except Exception as e:
                     logger.debug("Cleanup of %s failed: %s", output_dir, e)
 
-        self._cdk_cancel_event.clear()
-        futures: dict[Any, str] = {}
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            futures = {executor.submit(deploy_single, stack): stack for stack in stacks}
-
-            for future in as_completed(futures):
-                stack_name, success = future.result()
-
-                with lock:
-                    if success:
-                        successful.append(stack_name)
-                    else:
-                        failed.append(stack_name)
-
-                    if on_stack_complete:
-                        on_stack_complete(stack_name, success)
-        except BaseException:
-            # Terminate registered process groups before waiting for executor
-            # shutdown; the context-manager form waits first and can deadlock an
-            # interrupted orchestration behind a still-running CDK worker.
-            self.cancel_active_cdk_processes()
-            for future in futures:
-                future.cancel()
-            executor.shutdown(wait=True, cancel_futures=True)
-            raise
-        else:
-            executor.shutdown(wait=True)
-        finally:
+        # Workers cannot install a signal handler; the main thread holds one for
+        # the batch so SIGTERM reaches the cancellation below.
+        with _sigterm_raises_terminated():
             self._cdk_cancel_event.clear()
+            futures: dict[Any, str] = {}
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
+                futures = {executor.submit(deploy_single, stack): stack for stack in stacks}
+
+                for future in as_completed(futures):
+                    stack_name, success = future.result()
+
+                    with lock:
+                        if success:
+                            successful.append(stack_name)
+                        else:
+                            failed.append(stack_name)
+
+                        if on_stack_complete:
+                            on_stack_complete(stack_name, success)
+            except BaseException:
+                # Terminate registered process groups before waiting for executor
+                # shutdown; the context-manager form waits first and can deadlock an
+                # interrupted orchestration behind a still-running CDK worker.
+                self.cancel_active_cdk_processes()
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
+            finally:
+                self._cdk_cancel_event.clear()
 
         return successful, failed
 
@@ -5598,33 +5639,36 @@ class StackManager:
                 except Exception as e:
                     logger.debug("Cleanup of %s failed: %s", output_dir, e)
 
-        self._cdk_cancel_event.clear()
-        futures: dict[Any, str] = {}
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            futures = {executor.submit(destroy_single, stack): stack for stack in stacks}
-
-            for future in as_completed(futures):
-                stack_name, success = future.result()
-
-                with lock:
-                    if success:
-                        successful.append(stack_name)
-                    else:
-                        failed.append(stack_name)
-
-                    if on_stack_complete:
-                        on_stack_complete(stack_name, success)
-        except BaseException:
-            self.cancel_active_cdk_processes()
-            for future in futures:
-                future.cancel()
-            executor.shutdown(wait=True, cancel_futures=True)
-            raise
-        else:
-            executor.shutdown(wait=True)
-        finally:
+        # Workers cannot install a signal handler; the main thread holds one for
+        # the batch so SIGTERM reaches the cancellation below.
+        with _sigterm_raises_terminated():
             self._cdk_cancel_event.clear()
+            futures: dict[Any, str] = {}
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
+                futures = {executor.submit(destroy_single, stack): stack for stack in stacks}
+
+                for future in as_completed(futures):
+                    stack_name, success = future.result()
+
+                    with lock:
+                        if success:
+                            successful.append(stack_name)
+                        else:
+                            failed.append(stack_name)
+
+                        if on_stack_complete:
+                            on_stack_complete(stack_name, success)
+            except BaseException:
+                self.cancel_active_cdk_processes()
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
+            finally:
+                self._cdk_cancel_event.clear()
 
         return successful, failed
 

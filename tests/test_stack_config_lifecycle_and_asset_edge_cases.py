@@ -2467,6 +2467,141 @@ def test_run_cdk_cancels_process_started_during_race(stack_manager: Any) -> None
     terminate.assert_called_once_with(process)
 
 
+@contextmanager
+def _sigterm_must_not_reach_previous_handler() -> Iterator[Any]:
+    """Guard the test process: a missing handler would let SIGTERM kill pytest."""
+    import signal
+
+    def previous(signum: int, frame: Any) -> None:
+        raise AssertionError("SIGTERM reached the previous handler")
+
+    original = signal.signal(signal.SIGTERM, previous)
+    try:
+        yield previous
+    finally:
+        signal.signal(signal.SIGTERM, original)
+
+
+def test_sigterm_while_cdk_runs_terminates_its_process_group(stack_manager: Any) -> None:
+    """An MCP task cancel sends SIGTERM to gco; CDK runs in its own session.
+
+    With no handler Python died without unwinding, so _run_cdk never
+    terminated CDK, which kept deploying with no parent.
+    """
+    import signal
+
+    from cli.stacks import StackOperationTerminated
+
+    process = MagicMock(pid=4242)
+    process.communicate.side_effect = lambda **_kwargs: signal.raise_signal(signal.SIGTERM)
+    stack_manager._cdk_path = "cdk"
+    stack_manager._ensure_cdk_toolchain = MagicMock()
+    stack_manager._get_python_path = MagicMock(return_value="pythonpath")
+
+    with (
+        _sigterm_must_not_reach_previous_handler() as previous,
+        patch("cli.stacks.subprocess.Popen", return_value=process),
+        patch.object(stack_manager, "_terminate_cdk_process") as terminate,
+    ):
+        with pytest.raises(StackOperationTerminated) as raised:
+            stack_manager._run_cdk(["deploy", "gco-us-east-1"])
+        assert signal.getsignal(signal.SIGTERM) is previous
+
+    assert raised.value.code == 128 + signal.SIGTERM
+    assert isinstance(raised.value, SystemExit) and not isinstance(raised.value, Exception)
+    terminate.assert_called_once_with(process)
+    assert stack_manager._active_cdk_processes == {}
+
+
+def test_sigterm_during_a_parallel_batch_cancels_every_cdk_process(
+    stack_manager: Any,
+) -> None:
+    """Workers cannot install a handler, so the main thread holds one for the batch."""
+    import signal
+
+    from cli.stacks import StackOperationTerminated
+
+    def interrupted_wait(_futures: Any) -> Iterator[Any]:
+        signal.raise_signal(signal.SIGTERM)
+        yield from ()
+
+    with (
+        _sigterm_must_not_reach_previous_handler() as previous,
+        patch("cli.stacks.as_completed", side_effect=interrupted_wait),
+        patch.object(stack_manager, "deploy", return_value=True),
+        patch.object(stack_manager, "destroy", return_value=True),
+        patch.object(stack_manager, "cancel_active_cdk_processes") as cancel,
+    ):
+        for run in (
+            lambda: stack_manager._deploy_stacks_parallel(
+                stacks=["gco-us-east-1", "gco-us-west-2"],
+                require_approval=False,
+                outputs_file=None,
+                parameters=None,
+                tags=None,
+                progress="events",
+                on_stack_start=None,
+                on_stack_complete=None,
+                max_workers=2,
+                allow_bootstrap=True,
+                bootstrap_stacks=None,
+                expected_stack_ids=None,
+                prepared_change_sets=None,
+                authorize_stack=None,
+            ),
+            lambda: stack_manager._destroy_stacks_parallel(
+                stacks=["gco-us-east-1", "gco-us-west-2"],
+                force=True,
+                on_stack_start=None,
+                on_stack_complete=None,
+                max_workers=2,
+                expected_stack_ids=None,
+                authorize_stack=None,
+                allow_bootstrap=True,
+                bootstrap_stacks=None,
+                prepared_change_sets=None,
+            ),
+        ):
+            with pytest.raises(StackOperationTerminated):
+                run()
+            assert signal.getsignal(signal.SIGTERM) is previous
+
+    assert cancel.call_count == 2
+
+
+def test_sigterm_handler_is_only_installed_on_the_main_thread() -> None:
+    import signal
+    import threading
+
+    from cli.stacks import _sigterm_raises_terminated
+
+    seen: list[Any] = []
+
+    def worker() -> None:
+        with _sigterm_raises_terminated():
+            seen.append(signal.getsignal(signal.SIGTERM))
+
+    before = signal.getsignal(signal.SIGTERM)
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+    assert seen == [before]
+
+
+def test_sigterm_handler_installed_outside_python_restores_the_default() -> None:
+    import signal
+
+    from cli.stacks import _sigterm_raises_terminated
+
+    original = signal.getsignal(signal.SIGTERM)
+    try:
+        with patch("cli.stacks.signal.getsignal", return_value=None), _sigterm_raises_terminated():
+            pass
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGTERM, original)
+
+
 def test_run_cdk_terminates_process_on_caller_exception(stack_manager: Any) -> None:
     process = MagicMock(pid=77)
     process.communicate.side_effect = KeyboardInterrupt()
