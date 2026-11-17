@@ -9,7 +9,7 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
@@ -318,15 +318,19 @@ def forward_request(
     headers: dict[str, str],
     body: str | None,
     timeout: float = 29.0,
+    resign_headers: Callable[[], dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Forward over authenticated TLS within one deadline.
 
-    Read-only methods replay retryable statuses and transport failures.
+    Read-only methods replay retryable statuses and transport failures, each
+    replay with the fresh HMAC envelope ``resign_headers`` returns: the
+    backend accepts a nonce once and refuses a replayed envelope with 403.
     Mutating methods are replayed only after the load balancer's own 503,
-    which it serves before selecting a target (see ``_is_load_balancer_503``);
-    every other answer or failure may have reached a target and is relayed
-    after exactly one attempt. Plaintext, non-443, and credential-bearing
-    targets are rejected before any network request.
+    which it serves before selecting a target (see ``_is_load_balancer_503``),
+    and that replay is byte-identical because no target saw the first
+    envelope. Every other answer or failure may have reached a target and is
+    relayed after exactly one attempt. Plaintext, non-443, and
+    credential-bearing targets are rejected before any network request.
     """
     parsed_target = urlsplit(target_url)
     try:
@@ -372,17 +376,22 @@ def forward_request(
     last_exception: Exception | None = None
     last_response: urllib3.BaseHTTPResponse | None = None
     attempts_made = 0
+    request_headers = _outbound_headers(headers)
 
     for attempt in range(max_attempts):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         attempts_made = attempt + 1
+        if attempt > 0 and read_only and resign_headers is not None:
+            # A retry that reaches the pod which consumed the first nonce would
+            # otherwise get "403 Forbidden" instead of the real answer.
+            request_headers = _outbound_headers({**headers, **resign_headers()})
         try:
             response = transport.request(
                 method,
                 target_url,
-                headers=_outbound_headers(headers),
+                headers=request_headers,
                 body=encoded_body,
                 timeout=urllib3.Timeout(total=remaining),
             )

@@ -33,15 +33,16 @@ API Gateway (proxy integration) — all routes are forwarded through this Lambda
 8. The Lambda returns the buffered upstream response to the caller
 
 Only safe read-only methods (`GET`, `HEAD`, `OPTIONS`) use bounded exponential
-backoff for 429/502/503/504 or transport timeouts. Mutating methods are attempted
-once so the proxy cannot duplicate a successful write whose response was lost,
-with one narrow exception: the ALB's own `503 Service Temporarily Unavailable`
-page, which the load balancer serves before selecting a target when it has none
-to hand the request to. That write provably never reached the backend, so the
-proxy replays it within the same attempt budget. The page is recognized by its
-exact body, and any `Server` header must be `awselb/2.0`; a target's 503, an ALB
-502/504 (produced after a target was selected), and transport failures are still
-never replayed.
+backoff for 429/502/503/504 or transport timeouts, and each retry is signed
+afresh because the backend refuses a reused nonce with 403. Mutating methods
+are attempted once so the proxy cannot duplicate a successful write whose
+response was lost, with one narrow exception: the ALB's own `503 Service
+Temporarily Unavailable` page, which the load balancer serves before selecting
+a target when it has none to hand the request to. That write provably never
+reached the backend, so the proxy replays it within the same attempt budget.
+The page is recognized by its exact body, and any `Server` header must be
+`awselb/2.0`; a target's 503, an ALB 502/504 (produced after a target was
+selected), and transport failures are still never replayed.
 
 ## Input
 

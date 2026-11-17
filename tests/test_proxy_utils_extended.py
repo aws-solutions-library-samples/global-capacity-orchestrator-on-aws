@@ -14,9 +14,12 @@ balancer), never after a target's 503, an ALB 502/504, or a transport
 failure.
 """
 
+import hashlib
+import hmac
 import json
 import time
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlsplit
 
 import pytest
 import urllib3
@@ -863,6 +866,134 @@ class TestForwardRequestSuccess:
         request_timeout = mock_http.request.call_args.kwargs["timeout"]
         assert isinstance(request_timeout, urllib3.Timeout)
         assert 0 < request_timeout.total <= 5.0
+
+
+class _NonceCheckingBackend:
+    """The backend's HMAC check (gco/services/auth_middleware.py), in miniature.
+
+    A valid envelope consumes its nonce; a nonce seen before is refused with
+    the middleware's 403. ``answers`` are what the service behind the
+    middleware returns to successive authenticated requests.
+    """
+
+    def __init__(self, key: str, answers: list[MagicMock]) -> None:
+        self.key = key
+        self.answers = list(answers)
+        self.seen_nonces: list[str] = []
+        self.replays = 0
+
+    def request(self, method, url, headers, body, timeout):
+        parsed = urlsplit(url)
+        target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        canonical = "\n".join(
+            [
+                "v1",
+                headers["x-gco-timestamp"],
+                headers["x-gco-nonce"],
+                method,
+                target,
+                hashlib.sha256(body or b"").hexdigest(),
+            ]
+        )
+        expected = hmac.new(self.key.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+        assert hmac.compare_digest(expected, headers["x-gco-signature"])
+        if headers["x-gco-nonce"] in self.seen_nonces:
+            self.replays += 1
+            return _target_response(
+                403,
+                b'{"detail":"Forbidden - requests must come through authenticated API Gateway"}',
+            )
+        self.seen_nonces.append(headers["x-gco-nonce"])
+        return self.answers.pop(0)
+
+
+class TestReadOnlyRetriesSignAfresh:
+    """Each read-only retry carries a new HMAC envelope (finding L3).
+
+    The backend accepts a nonce once. Re-sending the first attempt's envelope
+    turned a retry that reached the same pod into "403 Forbidden - requests
+    must come through authenticated API Gateway" instead of the real answer.
+    """
+
+    def test_every_retry_carries_the_envelope_resign_headers_returns(self, proxy_module):
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [
+            _target_response(503, b'{"detail":"not ready"}'),
+            _target_response(502, b"bad gateway"),
+            _target_response(200, b'{"ok":true}'),
+        ]
+        fresh = iter(
+            [
+                {"x-gco-nonce": "n2", "x-gco-signature": "s2"},
+                {"x-gco-nonce": "n3", "x-gco-signature": "s3"},
+            ]
+        )
+        resign = MagicMock(side_effect=lambda: next(fresh))
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request(
+                "https://example.com/api",
+                "GET",
+                {"accept": "application/json", "x-gco-nonce": "n1", "x-gco-signature": "s1"},
+                None,
+                resign_headers=resign,
+            )
+
+        assert result["statusCode"] == 200
+        sent = [call.kwargs["headers"] for call in mock_http.request.call_args_list]
+        assert [headers["x-gco-nonce"] for headers in sent] == ["n1", "n2", "n3"]
+        assert [headers["x-gco-signature"] for headers in sent] == ["s1", "s2", "s3"]
+        assert all(headers["accept"] == "application/json" for headers in sent)
+        assert resign.call_count == 2
+
+    def test_retry_of_a_503_from_a_nonce_checking_backend_returns_the_real_answer(
+        self, proxy_module
+    ):
+        pu, _ = proxy_module
+        target_url = "https://example.com/api/v1/jobs?limit=5"
+        backend = _NonceCheckingBackend(
+            "signing-key",
+            [
+                _target_response(503, b'{"detail":"Manifest processor not ready"}'),
+                _target_response(200, b'{"jobs":[]}'),
+            ],
+        )
+
+        def sign():
+            return pu.build_signed_headers("signing-key", "GET", target_url, None)
+
+        with patch.object(pu, "_http", backend), patch.object(pu.time, "sleep"):
+            result = pu.forward_request(target_url, "GET", sign(), None, resign_headers=sign)
+
+        assert result["statusCode"] == 200
+        assert result["body"] == '{"jobs":[]}'
+        assert backend.replays == 0
+        assert len(set(backend.seen_nonces)) == 2
+
+    def test_mutating_replay_after_the_load_balancer_503_keeps_its_envelope(self, proxy_module):
+        """No target saw the first envelope, so the replay stays byte-identical."""
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [
+            _load_balancer_503(),
+            _target_response(201, b'{"id":"job-1"}'),
+        ]
+        resign = MagicMock()
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request(
+                "https://example.com/api",
+                "POST",
+                {"x-gco-nonce": "n1"},
+                "{}",
+                resign_headers=resign,
+            )
+
+        assert result["statusCode"] == 201
+        resign.assert_not_called()
+        first, second = mock_http.request.call_args_list
+        assert first.kwargs["headers"] == second.kwargs["headers"] == {"x-gco-nonce": "n1"}
 
 
 class TestBoundedEnvParsing:

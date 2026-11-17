@@ -46,7 +46,7 @@ accounting attribution.
 Creates the short-lived HMAC envelope over version, timestamp, random nonce,
 method, exact path/query, and SHA-256 body digest.
 
-### `forward_request(target_url, http_method, headers, body, timeout)`
+### `forward_request(target_url, http_method, headers, body, timeout, resign_headers=None)`
 
 Forwards an HTTPS request within one deadline using the strict private-root
 connection pool returned by `backend_tls.get_backend_http_pool()`. Only safe
@@ -55,8 +55,12 @@ timeouts with bounded exponential backoff; mutating methods are attempted
 exactly once, except after the ALB's own `503 Service Temporarily Unavailable`
 page (`_is_load_balancer_503`: exact body, `Server` header absent or
 `awselb/2.0`), which the load balancer serves before selecting a target and
-therefore proves the write never reached the backend. TLS failures return
-bounded errors without exposing trust state.
+therefore proves the write never reached the backend. Each read-only retry
+carries the fresh HMAC envelope `resign_headers()` returns (the proxies pass
+`build_signed_headers` bound to the request): the backend accepts a nonce once
+and refuses a replayed envelope with 403. The mutating replay after the ALB's
+503 is sent byte-identical, since no target saw the first envelope. TLS
+failures return bounded errors without exposing trust state.
 
 ### `build_target_url(endpoint, path, query_params)`
 
