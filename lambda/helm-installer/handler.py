@@ -92,15 +92,16 @@ LBC_UNINSTALL_TIMEOUT = "4m"
 LBC_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 270
 
 # KEDA's Helm release owns CRDs whose instances carry operator-managed
-# finalizers. Four bounded discovery calls (40 s), two ordered deletion calls
-# (110 s) and the final Helm uninstall (195 s) fit inside the dedicated
-# six-minute KEDA task. ``helm uninstall --wait`` also waits for the API
-# server to finalize the release's CRDs, and KEDA is the last chart in the
-# teardown chain, uninstalled seconds after every earlier chart deleted its
-# own. On a live two-Region teardown the ordinary 60-second deadline ran out
-# with clustertriggerauthentications.keda.sh still Terminating, although the
-# release itself was already gone, and the stack-delete retry then cost a
-# full 16-minute drain. KEDA therefore gets a dedicated three-minute deadline.
+# finalizers. The release lookup (10 s), four bounded discovery calls (40 s),
+# two ordered deletion calls (110 s) and the final Helm uninstall (195 s) fit
+# inside the dedicated six-minute KEDA task. ``helm uninstall --wait`` also
+# waits for the API server to finalize the release's CRDs, and KEDA is the
+# last chart in the teardown chain, uninstalled seconds after every earlier
+# chart deleted its own. On a live two-Region teardown the ordinary 60-second
+# deadline ran out with clustertriggerauthentications.keda.sh still
+# Terminating, although the release itself was already gone, and the
+# stack-delete retry then cost a full 16-minute drain. KEDA therefore gets a
+# dedicated three-minute deadline.
 KEDA_CHART_NAME = "keda"
 KEDA_UNINSTALL_TIMEOUT = "3m"
 KEDA_UNINSTALL_COMMAND_TIMEOUT_SECONDS = 195
@@ -138,6 +139,12 @@ CROSSPLANE_API_GROUPS = (
 #: release; the operator chart itself (slinky-slurm-operator) installs later
 #: in teardown order and needs nothing.
 SLINKY_API_GROUPS = ("slinky.slurm.net",)
+#: The cleanup runs only while GCO's own release of the chart exists (see
+#: ``uninstall_chart``): when it does, GCO's controller is the one reconciling
+#: these groups. KEDA's and Kueue's uninstall, and that of the Slinky operator
+#: paired with the slurm chart, delete their CRDs and with them every instance
+#: cluster-wide, and Crossplane runs once per cluster, so those charts' cleanup
+#: covers every namespace.
 CHART_CUSTOM_RESOURCE_API_GROUPS: dict[str, tuple[str, ...]] = {
     "keda": KEDA_API_GROUPS,
     "kueue": KUEUE_API_GROUPS,
@@ -145,6 +152,13 @@ CHART_CUSTOM_RESOURCE_API_GROUPS: dict[str, tuple[str, ...]] = {
     "crossplane": CROSSPLANE_API_GROUPS,
     "slinky-slurm": SLINKY_API_GROUPS,
 }
+#: Charts whose cleanup stays inside the release namespace and leaves every
+#: cluster-scoped type alone. GCO runs Argo CD in namespaced mode
+#: (``createClusterRoles: false``), so its controller reconciles only the
+#: Applications and AppProjects in its own namespace, its CRDs stay on
+#: uninstall, and ``argoproj.io`` is also the group of Argo Workflows,
+#: Rollouts and Events, whose objects elsewhere are not GCO's.
+CHART_CUSTOM_RESOURCES_IN_RELEASE_NAMESPACE: frozenset[str] = frozenset({"argocd"})
 #: Resource types (``plural.group``) or whole API groups that a chart's
 #: cleanup deletes in a pass of their own, once every other type of the same
 #: scope is gone: one ``kubectl delete`` issues its deletes in order but
@@ -164,6 +178,9 @@ KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT = "45s"
 KEDA_CUSTOM_RESOURCE_COMMAND_TIMEOUT_SECONDS = 55
 KEDA_CUSTOM_RESOURCE_DISCOVERY_TIMEOUT_SECONDS = 10
 CUSTOM_RESOURCE_FINALIZER_STRIP_TIMEOUT_SECONDS = 30
+# ``helm status`` before a custom-resource cleanup: one Secret list against the
+# API server, capped like a discovery call.
+HELM_RELEASE_LOOKUP_TIMEOUT_SECONDS = 10
 
 # Validation intentionally has tighter command caps than chart installation:
 # these are read-only convergence checks and should never consume an entire
@@ -807,13 +824,18 @@ def install_chart(
 
 
 def _strip_custom_resource_finalizers(
-    kubeconfig: str, resource_types: list[str], namespaced: bool
+    kubeconfig: str,
+    resource_types: list[str],
+    namespaced: bool,
+    namespace: str | None = None,
 ) -> str | None:
     """Remove finalizers from every remaining instance of the given types.
 
     Recovery path for a delete that stalled because the finalizer-clearing
     controller is already gone (e.g. a teardown retry after a partial
-    uninstall). Returns an error string, or ``None`` on success.
+    uninstall). Namespaced types are listed across every namespace, or in
+    ``namespace`` alone when one is given. Returns an error string, or
+    ``None`` on success.
     """
     env = os.environ.copy()
     env["KUBECONFIG"] = kubeconfig
@@ -824,7 +846,7 @@ def _strip_custom_resource_finalizers(
                 *common,
                 "get",
                 resource_type,
-                "--all-namespaces",
+                *(["-n", namespace] if namespace else ["--all-namespaces"]),
                 "-o",
                 'jsonpath={range .items[*]}{.metadata.namespace}{","}{.metadata.name}{"\\n"}{end}',
             ]
@@ -871,27 +893,41 @@ def _strip_custom_resource_finalizers(
     return None
 
 
-def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bool, str]:
+def _delete_chart_custom_resources(
+    chart_name: str, kubeconfig: str, namespace: str | None = None
+) -> tuple[bool, str]:
     """Delete a chart's custom resources before uninstalling its controller.
 
-    Applies to every chart in ``CHART_CUSTOM_RESOURCE_API_GROUPS``. Resource
+    Applies to every chart in ``CHART_CUSTOM_RESOURCE_API_GROUPS``; the
+    caller runs it only while GCO's release of the chart exists. Resource
     discovery keeps this compatible with the exact chart version in use
     instead of maintaining a second CRD list here. Namespaced resources are
     deleted first across every namespace, then cluster-scoped ones; within a
     scope, the chart's ``CHART_CUSTOM_RESOURCES_DELETED_LAST`` types get a
-    pass of their own after the rest. ``kubectl delete --wait`` does not
-    return until controller-owned finalizers are gone, so Helm can safely
-    remove the controller and CRDs afterwards (see
-    ``_delete_custom_resource_pass`` for the stalled-wait recovery).
+    pass of their own after the rest. A chart in
+    ``CHART_CUSTOM_RESOURCES_IN_RELEASE_NAMESPACE`` gets the namespaced pass
+    in its release namespace alone (``namespace``, defaulting to the
+    chart's ``charts.yaml`` namespace) and no cluster-scoped pass.
+    ``kubectl delete --wait`` does not return until controller-owned
+    finalizers are gone, so Helm can safely remove the controller and CRDs
+    afterwards (see ``_delete_custom_resource_pass`` for the stalled-wait
+    recovery).
     """
     env = os.environ.copy()
     env["KUBECONFIG"] = kubeconfig
     common = ["kubectl", "--kubeconfig", kubeconfig, "--request-timeout=30s"]
     resources_by_scope: dict[bool, list[str]] = {True: [], False: []}
 
+    only_namespace: str | None = None
+    if chart_name in CHART_CUSTOM_RESOURCES_IN_RELEASE_NAMESPACE:
+        only_namespace = namespace or str(
+            load_charts_config().get("charts", {}).get(chart_name, {}).get("namespace", "default")
+        )
+    scopes = (True,) if only_namespace else (True, False)
+
     api_groups = CHART_CUSTOM_RESOURCE_API_GROUPS[chart_name]
     for api_group in api_groups:
-        for namespaced in (True, False):
+        for namespaced in scopes:
             try:
                 discovery = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - fixed argv, no shell=True
                     [
@@ -919,7 +955,7 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
 
     deleted_last = CHART_CUSTOM_RESOURCES_DELETED_LAST.get(chart_name, frozenset())
     deleted_types = 0
-    for namespaced in (True, False):
+    for namespaced in scopes:
         resources = list(dict.fromkeys(resources_by_scope[namespaced]))
         last = [
             name
@@ -930,22 +966,34 @@ def _delete_chart_custom_resources(chart_name: str, kubeconfig: str) -> tuple[bo
         for batch in passes:
             if not batch:
                 continue
-            pass_error = _delete_custom_resource_pass(chart_name, kubeconfig, batch, namespaced)
+            pass_error = _delete_custom_resource_pass(
+                chart_name, kubeconfig, batch, namespaced, only_namespace
+            )
             if pass_error is not None:
                 return False, pass_error
             deleted_types += len(batch)
-    return True, f"Deleted and waited for {deleted_types} {chart_name} custom resource type(s)"
+    where = f" in namespace {only_namespace}" if only_namespace else ""
+    return (
+        True,
+        f"Deleted and waited for {deleted_types} {chart_name} custom resource type(s){where}",
+    )
 
 
 def _delete_custom_resource_pass(
-    chart_name: str, kubeconfig: str, resources: list[str], namespaced: bool
+    chart_name: str,
+    kubeconfig: str,
+    resources: list[str],
+    namespaced: bool,
+    namespace: str | None = None,
 ) -> str | None:
     """Delete every instance of ``resources`` and wait until they are gone.
 
-    If the wait stalls — the finalizer-clearing controller may already be
-    gone on a teardown retry — finalizers are stripped from the survivors and
-    the delete retried once, so teardown self-heals instead of wedging CRDs
-    in Terminating. Returns an error string, or ``None`` on success.
+    Namespaced types are deleted across every namespace, or in ``namespace``
+    alone when one is given. If the wait stalls — the finalizer-clearing
+    controller may already be gone on a teardown retry — finalizers are
+    stripped from the survivors and the delete retried once, so teardown
+    self-heals instead of wedging CRDs in Terminating. Returns an error
+    string, or ``None`` on success.
     """
     env = os.environ.copy()
     env["KUBECONFIG"] = kubeconfig
@@ -962,7 +1010,7 @@ def _delete_custom_resource_pass(
         f"--timeout={KEDA_CUSTOM_RESOURCE_DELETE_TIMEOUT}",
     ]
     if namespaced:
-        command.append("--all-namespaces")
+        command.extend(["-n", namespace] if namespace else ["--all-namespaces"])
 
     scope = "namespaced" if namespaced else "cluster-scoped"
     failure: str | None = None
@@ -985,7 +1033,7 @@ def _delete_custom_resource_pass(
         f"{scope} {chart_name} custom-resource delete stalled ({failure}); "
         "stripping finalizers and retrying once"
     )
-    strip_error = _strip_custom_resource_finalizers(kubeconfig, resources, namespaced)
+    strip_error = _strip_custom_resource_finalizers(kubeconfig, resources, namespaced, namespace)
     if strip_error is not None:
         return (
             f"Failed to delete {scope} {chart_name} custom resources "
@@ -1013,10 +1061,55 @@ def _delete_custom_resource_pass(
     return None
 
 
+def _helm_release_present(release: str, namespace: str, kubeconfig: str) -> tuple[bool, str | None]:
+    """Ask Helm whether ``release`` exists in ``namespace``.
+
+    Returns ``(present, error)``. Any record of the release, whatever its
+    state (a half-finished uninstall included), is ``(True, None)`` and Helm's
+    explicit release-absence error is ``(False, None)``. Every other outcome
+    (a timeout, an API or RBAC error) is ``(False, error)``: the caller cannot
+    tell whether the release is there.
+    """
+    code, _stdout, stderr = run_helm(
+        ["status", release, "-n", namespace, "-o", "json"],
+        kubeconfig,
+        command_timeout_seconds=HELM_RELEASE_LOOKUP_TIMEOUT_SECONDS,
+        log_output=False,
+    )
+    if code == 0:
+        return True, None
+    if "release: not found" in stderr.lower():
+        return False, None
+    return False, _bounded_diagnostic(stderr, 512)
+
+
 def uninstall_chart(chart_name: str, namespace: str, kubeconfig: str) -> tuple[bool, str]:
-    """Uninstall a Helm chart within the synchronous teardown budget."""
+    """Uninstall a Helm chart within the synchronous teardown budget.
+
+    A chart with a custom-resource cleanup (``CHART_CUSTOM_RESOURCE_API_GROUPS``)
+    first asks Helm whether GCO's release exists and runs the cleanup only if
+    it does. A disabled chart comes through here on every deploy, and without
+    GCO's release the objects of the chart's API groups belong to an
+    installation GCO does not manage (an operator's own Argo CD, say). A
+    lookup that fails for any other reason fails the uninstall instead of
+    guessing.
+    """
     if chart_name in CHART_CUSTOM_RESOURCE_API_GROUPS:
-        cleaned, cleanup_message = _delete_chart_custom_resources(chart_name, kubeconfig)
+        present, lookup_error = _helm_release_present(chart_name, namespace, kubeconfig)
+        if lookup_error is not None:
+            return False, (
+                f"Could not tell whether release {chart_name} exists in {namespace}: {lookup_error}"
+            )
+        if not present:
+            logger.info(
+                f"Release {chart_name} not found in {namespace}; skipping the cleanup of "
+                f"{', '.join(CHART_CUSTOM_RESOURCE_API_GROUPS[chart_name])} objects"
+            )
+            return True, (
+                f"Chart {chart_name} not found (already uninstalled); "
+                "custom-resource cleanup skipped"
+            )
+        cleaned, cleanup_message = _delete_chart_custom_resources(chart_name, kubeconfig, namespace)
         if not cleaned:
             return False, f"{chart_name} pre-uninstall cleanup failed: {cleanup_message}"
         logger.info(cleanup_message)

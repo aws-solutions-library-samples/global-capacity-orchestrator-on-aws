@@ -1164,8 +1164,9 @@ _FEATURE_RESOURCE_INVENTORY: dict[
     ),
     # Self-managed Argo CD (cdk.json helm.argocd; post-helm-argocd-access.yaml).
     # Bindings before the roles they reference. The AppProject is normally
-    # gone already: the helm installer deletes every argoproj.io object before
-    # it uninstalls the chart (the CRDs stay, so this delete is a clean no-op).
+    # gone already: the helm installer deletes every argoproj.io object in
+    # argocd before it uninstalls the chart (the CRDs stay, so this delete is a
+    # clean no-op).
     ("{{ARGOCD_ENABLED}}", True): (
         ("rbac.authorization.k8s.io/v1", "RoleBinding", "gco-jobs", "gco-argocd-deploy"),
         ("rbac.authorization.k8s.io/v1", "Role", "gco-jobs", "gco-argocd-deploy"),
