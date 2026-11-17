@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, Response
 
-from gco.services.api_shared import WebhookRequest
+from gco.services.api_shared import WebhookRequest, internal_server_error
 from gco.services.webhook_dispatcher import validate_webhook_url
 
 if TYPE_CHECKING:
@@ -44,8 +44,7 @@ async def list_webhooks(namespace: str | None = None) -> Response:
             },
         )
     except Exception as e:
-        logger.error(f"Failed to list webhooks: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list webhooks: {e!s}") from e
+        raise internal_server_error("listing webhooks", e) from e
 
 
 @router.post("")
@@ -88,8 +87,7 @@ async def create_webhook(request: WebhookRequest) -> Response:
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
-        logger.error(f"Failed to create webhook: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create webhook: {e!s}") from e
+        raise internal_server_error("creating webhook", e) from e
 
 
 @router.delete("/{webhook_id}")
@@ -110,5 +108,4 @@ async def delete_webhook(webhook_id: str) -> Response:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete webhook: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete webhook: {e!s}") from e
+        raise internal_server_error("deleting webhook", e) from e

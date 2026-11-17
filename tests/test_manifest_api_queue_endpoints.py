@@ -1141,7 +1141,12 @@ class TestPollAndProcessJobsEndpoint:
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.post("/api/v1/queue/poll", headers=_REQUEST_HEADERS)
                 assert response.status_code == 500
-                assert "K8s API error" in response.json()["detail"]
+                # The cause stays in the server log under the request id.
+                detail = response.json()["detail"]
+                assert "K8s API error" not in detail
+                assert detail == (
+                    f"Internal server error (request-id: {response.headers['X-Request-ID']})"
+                )
 
     def test_poll_and_process_jobs_store_not_initialized(self, mock_manifest_processor):
         """Test polling when job store is not initialized."""

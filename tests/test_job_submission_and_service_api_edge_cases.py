@@ -1246,6 +1246,86 @@ async def test_jobs_route_500_details_never_echo_exception_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_route_500_details_never_echo_exception_text() -> None:
+    """The queue, template and webhook routes answer a store failure with the generic 500.
+
+    A DynamoDB error names the table, the account and the caller's role, and
+    these twelve handlers used to return its text as the detail. They now go
+    through internal_server_error like the jobs routes above: the client gets
+    the constant detail and a request id, the log keeps the cause.
+    """
+    import gco.services.api_routes.queue as queue_routes
+    import gco.services.api_routes.templates as template_routes
+    import gco.services.api_routes.webhooks as webhook_routes
+    from gco.services import api_shared
+    from gco.services.api_shared import JobTemplateRequest, WebhookEvent, WebhookRequest
+
+    marker = "arn:aws:sts::123456789012:assumed-role/secret-internal-role"
+    failure = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": f"{marker} is not authorized"}},
+        "Scan",
+    )
+    store = MagicMock()
+    for method in (
+        "list_jobs_page",
+        "get_job",
+        "cancel_job",
+        "get_job_count_summary",
+        "list_templates",
+        "create_template",
+        "get_template",
+        "delete_template",
+        "list_webhooks",
+        "create_webhook",
+        "delete_webhook",
+    ):
+        getattr(store, method).side_effect = failure
+
+    route_calls = [
+        lambda: queue_routes.list_queued_jobs(None, None, None, 100, None),
+        lambda: queue_routes.get_queued_job("job-1\nforged"),
+        lambda: queue_routes.cancel_queued_job("job-1", None),
+        lambda: queue_routes.get_queue_stats(),
+        lambda: queue_routes.poll_and_process_jobs(5),
+        lambda: template_routes.list_templates(),
+        lambda: template_routes.create_template(
+            JobTemplateRequest(name="tpl", manifest=_base_job())
+        ),
+        lambda: template_routes.get_template("tpl"),
+        lambda: template_routes.delete_template("tpl"),
+        lambda: webhook_routes.list_webhooks(None),
+        lambda: webhook_routes.create_webhook(
+            WebhookRequest(url="https://hooks.example.com/x", events=[WebhookEvent.JOB_COMPLETED])
+        ),
+        lambda: webhook_routes.delete_webhook("hook-1"),
+    ]
+    with (
+        patch.object(queue_routes, "_get_job_store", return_value=store),
+        patch.object(queue_routes, "_check_processor", return_value=_api_processor()),
+        patch.object(queue_routes, "process_queued_jobs_once", AsyncMock(side_effect=failure)),
+        patch.object(template_routes, "_get_template_store", return_value=store),
+        patch.object(webhook_routes, "_get_webhook_store", return_value=store),
+        # Registration validates the URL first; that check is not under test.
+        patch.object(webhook_routes, "validate_webhook_url", return_value=(True, None)),
+        patch.object(api_shared, "logger") as api_logger,
+    ):
+        for route_call in route_calls:
+            with pytest.raises(HTTPException) as error:
+                await route_call()
+            assert error.value.status_code == 500
+            detail = str(error.value.detail)
+            assert re.fullmatch(r"Internal server error \(request-id: [0-9a-f]{32}\)", detail)
+            assert marker not in detail
+
+    logged = [call.args for call in api_logger.error.call_args_list]
+    assert len(logged) == len(route_calls)
+    assert all(args[-1] is failure for args in logged)
+    # A queue job id is the caller's input, so it reaches the log sanitized.
+    assert logged[1][1] == "getting queued job job-1\\nforged"
+    assert logged[2][1] == "cancelling queued job job-1"
+
+
+@pytest.mark.asyncio
 async def test_jobs_bulk_delete_missing_timestamp_and_per_job_failure() -> None:
     import gco.services.api_routes.jobs as routes
     from gco.services.api_shared import BulkDeleteRequest

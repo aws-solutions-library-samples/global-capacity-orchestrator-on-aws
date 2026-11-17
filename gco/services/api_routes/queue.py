@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 
-from gco.services.api_shared import QueuedJobRequest, _check_processor
+from gco.services.api_shared import QueuedJobRequest, _check_processor, internal_server_error
 from gco.services.central_queue_worker import process_queued_jobs_once
 from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobSubmissionConflict
@@ -198,8 +198,7 @@ async def list_queued_jobs(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as e:
-        logger.error(f"Failed to list queued jobs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list jobs: {e!s}") from e
+        raise internal_server_error("listing queued jobs", e) from e
 
 
 @router.get("/jobs/{job_id}")
@@ -217,8 +216,7 @@ async def get_queued_job(job_id: str) -> Response:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to get job %s: %s", sanitize_log_value(job_id), e)
-        raise HTTPException(status_code=500, detail=f"Failed to get job: {e!s}") from e
+        raise internal_server_error(f"getting queued job {sanitize_log_value(job_id)}", e) from e
 
 
 @router.delete("/jobs/{job_id}")
@@ -244,8 +242,7 @@ async def cancel_queued_job(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to cancel job %s: %s", sanitize_log_value(job_id), e)
-        raise HTTPException(status_code=500, detail=f"Failed to cancel job: {e!s}") from e
+        raise internal_server_error(f"cancelling queued job {sanitize_log_value(job_id)}", e) from e
 
 
 @router.get("/stats")
@@ -273,8 +270,7 @@ async def get_queue_stats() -> Response:
             },
         )
     except Exception as e:
-        logger.error(f"Failed to get queue stats: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get stats: {e!s}") from e
+        raise internal_server_error("getting queue stats", e) from e
 
 
 @router.post("/poll")
@@ -307,5 +303,4 @@ async def poll_and_process_jobs(
             },
         )
     except Exception as e:
-        logger.error(f"Failed to poll jobs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to poll jobs: {e!s}") from e
+        raise internal_server_error("polling queued jobs", e) from e

@@ -49,8 +49,7 @@ async def list_templates() -> Response:
             },
         )
     except Exception as e:
-        logger.error(f"Failed to list templates: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list templates: {e!s}") from e
+        raise internal_server_error("listing templates", e) from e
 
 
 @router.post("/api/v1/templates")
@@ -75,8 +74,7 @@ async def create_template(request: JobTemplateRequest) -> Response:
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
-        logger.error(f"Failed to create template: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create template: {e!s}") from e
+        raise internal_server_error("creating template", e) from e
 
 
 @router.get("/api/v1/templates/{name}")
@@ -94,8 +92,7 @@ async def get_template(name: str) -> Response:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get template: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get template: {e!s}") from e
+        raise internal_server_error("getting template", e) from e
 
 
 @router.delete("/api/v1/templates/{name}")
@@ -116,8 +113,7 @@ async def delete_template(name: str) -> Response:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete template: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete template: {e!s}") from e
+        raise internal_server_error("deleting template", e) from e
 
 
 @router.post("/api/v1/jobs/from-template/{name}")
