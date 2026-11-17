@@ -359,10 +359,12 @@ ENV GCO_DEV_CONTAINER=1
 WORKDIR /workspace
 
 # Copy project metadata first for better caching
-COPY pyproject.toml ./
+COPY pyproject.toml requirements-lock.txt ./
 COPY gco/_version.py ./gco/_version.py
 
-# Install Python dependencies.
+# Install Python dependencies, the transitive graph constrained by the
+# committed lock (as the service images and CI do), so two builds of one
+# commit get the same packages instead of whatever PyPI serves that day.
 #
 # PyPI / CDN connections occasionally drop mid-download — most often
 # during large wheels like ``pydantic-monty`` or ``aws-cdk-lib`` — and
@@ -379,7 +381,7 @@ COPY gco/_version.py ./gco/_version.py
 RUN for attempt in 1 2 3; do \
         if pip install --no-cache-dir \
             --retries 10 --timeout 120 --resume-retries 5 \
-            -e ".[dev,mcp]"; then \
+            -c requirements-lock.txt -e ".[dev,mcp]"; then \
             break; \
         fi; \
         if [ "${attempt}" -eq 3 ]; then \
@@ -394,7 +396,7 @@ RUN for attempt in 1 2 3; do \
 COPY . .
 
 # Install the CLI in editable mode
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -c requirements-lock.txt -e .
 
 # Default command
 CMD ["/bin/bash"]

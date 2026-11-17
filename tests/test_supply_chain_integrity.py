@@ -383,6 +383,23 @@ def test_project_installs_are_constrained_by_the_lock() -> None:
     assert _project_install_commands("pip install uv") == []
 
 
+def test_dev_container_installs_the_project_against_the_lock() -> None:
+    """Dockerfile.dev constrains its project installs the way CI and the service images do.
+
+    Its ``.[dev,mcp]`` install resolved every transitive dependency against
+    live PyPI, so two builds of one commit could ship different packages.
+    """
+    commands = [
+        command
+        for run in _dockerfile_run_instructions(_read("Dockerfile.dev"))
+        for command in _project_install_commands(run)
+    ]
+    assert len(commands) == 2, commands
+    for command in commands:
+        assert "-c requirements-lock.txt" in command, command
+    assert "COPY pyproject.toml requirements-lock.txt ./" in _read("Dockerfile.dev")
+
+
 def test_workflows_do_not_execute_mutable_remote_installers() -> None:
     workflows = "\n".join(
         path.read_text(encoding="utf-8")
