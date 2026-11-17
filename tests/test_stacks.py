@@ -1388,6 +1388,44 @@ class TestStackDeploymentOrder:
 
         assert result == ["gco-regional-api-us-east-1", "gco-us-west-2", "gco-us-east-1"]
 
+    def test_analytics_stack_is_ordered_with_the_control_plane(self):
+        """``<project>-analytics`` is a global-tier stack, never a base regional one.
+
+        app.py makes the analytics stack depend on the global stack and the API
+        Gateway stack on the analytics stack, so it deploys between the two and
+        is destroyed between them. A keep-control-plane teardown (destroy-all
+        --keep-control-plane, gco upgrade) must never list it: that would delete
+        Studio home directories and Cognito users the operator was told survive.
+        """
+        from cli.stacks import get_stack_deployment_order, get_stack_destroy_order
+
+        stacks = [
+            "acme-us-east-1",
+            "acme-analytics",
+            "acme-global",
+            "acme-regional-api-us-east-1",
+            "acme-api-gateway",
+            "acme-monitoring",
+        ]
+
+        assert get_stack_deployment_order(stacks, project_name="acme")[:3] == [
+            "acme-global",
+            "acme-analytics",
+            "acme-api-gateway",
+        ]
+        assert get_stack_destroy_order(stacks, project_name="acme") == [
+            "acme-monitoring",
+            "acme-regional-api-us-east-1",
+            "acme-us-east-1",
+            "acme-api-gateway",
+            "acme-analytics",
+            "acme-global",
+        ]
+        assert get_stack_destroy_order(stacks, project_name="acme", keep_control_plane=True) == [
+            "acme-regional-api-us-east-1",
+            "acme-us-east-1",
+        ]
+
     def test_deployment_order_non_gco_project(self):
         """#139: ordering is by suffix, so a non-``gco`` project orders
         identically. Regression for the hardcoded ``gco-*`` priority dict."""
@@ -1477,6 +1515,48 @@ class TestStackManagerOrchestrated:
             "gco-regional-api-us-west-2",
             "gco-monitoring",
         ]
+
+    def test_deploy_orchestrated_deploys_analytics_between_global_and_api_gateway(self):
+        """The analytics stack is a sequential global-tier deploy, not a regional one.
+
+        As a "regional" stack it was deployed with --exclusively, in parallel
+        with the regional stacks, and its route refresh redeployed the API
+        Gateway stack that the regional stacks import from while they deployed.
+        """
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        stacks = [
+            "gco-us-east-1",
+            "gco-analytics",
+            "gco-global",
+            "gco-regional-api-us-east-1",
+            "gco-api-gateway",
+            "gco-monitoring",
+            "gco-us-west-2",
+        ]
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "list_stacks", return_value=stacks),
+            patch.object(StackManager, "deploy", return_value=True) as mock_deploy,
+        ):
+            manager = StackManager(config)
+            success, _, failed = manager.deploy_orchestrated(require_approval=False, parallel=True)
+
+        assert success is True
+        assert failed == []
+        calls = [
+            (call.kwargs["stack_name"], call.kwargs.get("exclusively", False))
+            for call in mock_deploy.call_args_list
+        ]
+        assert calls[:3] == [
+            ("gco-global", False),
+            ("gco-analytics", False),
+            ("gco-api-gateway", False),
+        ]
+        assert [name for name, _ in calls].count("gco-analytics") == 1
+        assert sorted(name for name, _ in calls[3:5]) == ["gco-us-east-1", "gco-us-west-2"]
 
     def test_destroy_orchestrated_orders_regional_bridges_before_base_stacks(self):
         """Sequential destroy releases bridge VPC imports before base teardown."""

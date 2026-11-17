@@ -819,7 +819,14 @@ class TestEksSecurityGroupCleanup:
             patch.object(
                 manager,
                 "list_stacks",
-                return_value=["gco-global", "gco-api-gateway", "gco-monitoring", "gco-us-east-1"],
+                return_value=[
+                    "gco-global",
+                    "gco-api-gateway",
+                    "gco-monitoring",
+                    "gco-analytics",
+                    "gco-regional-api-us-east-1",
+                    "gco-us-east-1",
+                ],
             ),
             patch.object(manager, "_cleanup_eks_security_groups") as mock_clean,
         ):
@@ -827,6 +834,13 @@ class TestEksSecurityGroupCleanup:
         # Only the regional stack is cleaned.
         called_stacks = [c.args[0] for c in mock_clean.call_args_list]
         assert called_stacks == ["gco-us-east-1"]
+
+    def test_a_stack_naming_no_region_owns_no_cluster_security_group(self, manager: Any) -> None:
+        with patch("boto3.client") as client:
+            outcome = manager._cleanup_eks_security_groups("gco-analytics", region="us-east-1")
+        client.assert_not_called()
+        assert outcome["skipped"] == "not-a-regional-stack"
+        assert outcome["errors"] == [] and outcome["deleted"] == []
 
 
 class TestClusterVolumeCleanup:
@@ -1058,11 +1072,30 @@ class TestClusterVolumeCleanup:
 
     def test_public_wrapper_skips_global_stacks(self, manager: Any) -> None:
         with patch.object(manager, "_cleanup_cluster_volumes") as worker:
-            for stack in ("gco-global", "gco-api-gateway", "gco-monitoring"):
+            for stack in (
+                "gco-global",
+                "gco-api-gateway",
+                "gco-monitoring",
+                "gco-analytics",
+                "gco-regional-api-us-east-1",
+            ):
                 assert manager.cleanup_cluster_volumes(stack)["skipped"] == "not-a-regional-stack"
             worker.assert_not_called()
             manager.cleanup_cluster_volumes("gco-us-east-1", retain=True)
         worker.assert_called_once_with("gco-us-east-1", region=None, retain=True)
+
+    def test_a_stack_naming_no_region_is_never_swept(self, manager: Any) -> None:
+        """``gco-analytics`` used to resolve to the Region ``analytics``.
+
+        The operator then saw ``Could not dispose of EBS volume gco-analytics:
+        EndpointConnectionError ... eks.analytics.amazonaws.com``.
+        """
+        with patch("boto3.client") as client, patch("builtins.print") as printed:
+            outcome = manager._cleanup_cluster_volumes("gco-analytics", region="us-east-1")
+        client.assert_not_called()
+        printed.assert_not_called()
+        assert outcome["skipped"] == "not-a-regional-stack"
+        assert outcome["errors"] == [] and outcome["deleted"] == []
 
 
 class TestEksSgWatchdog:

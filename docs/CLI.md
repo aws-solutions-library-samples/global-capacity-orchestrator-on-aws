@@ -5212,17 +5212,19 @@ gco stacks destroy-all [OPTIONS]
 | `--parallel` | `-p` | Destroy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
 | `--retain-volumes` | | Report each cluster's orphaned EBS volumes instead of deleting them |
-| `--keep-control-plane` | | Destroy only the regional API bridges and regional stacks; leave the global, API Gateway and monitoring stacks standing (scale to zero workload Regions) |
+| `--keep-control-plane` | | Destroy only the regional API bridges and regional stacks; leave the global, API Gateway, monitoring and analytics stacks standing (scale to zero workload Regions) |
 | `--enable` | | Evaluate the same app the overridden deploy did (`NAME[,NAME...]`, repeatable). Not required for deletion — `DeleteStack` removes whatever the deployed template contains |
 
 ##### Keeping the control plane (`--keep-control-plane`)
 
 `--keep-control-plane` scales the deployment to zero workload Regions instead of
 removing it. Only the regional API bridges and the base regional stacks are
-destroyed; `<project>-global`, `<project>-api-gateway` and `<project>-monitoring`
-stay, together with everything they own — the DynamoDB tables, the model and
-cluster-shared buckets, the image registry, EFS recovery points in the backup
-vault, and the cost-report bucket. Before anything is deleted the monitoring stack
+destroyed; `<project>-global`, `<project>-api-gateway`, `<project>-monitoring`
+and, when deployed, `<project>-analytics` stay, together with everything they
+own — the DynamoDB tables, the model and cluster-shared buckets, the image
+registry, EFS recovery points in the backup vault, the cost-report bucket, and
+the analytics stack's Studio home directories, Cognito users and notebook
+outputs. Before anything is deleted the monitoring stack
 is updated in place with `--context gco:control-plane-only=true` (the run-scoped
 equivalent of an empty `deployment_regions.regional`) so it stops referencing the
 regional stacks; CloudFormation would otherwise refuse to delete a stack whose

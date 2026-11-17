@@ -747,7 +747,7 @@ def test_stacks_destroy_all_confirms_retries_cleanup_and_then_succeeds(
     destroy_order.assert_called_once_with(
         stack_names, project_name="test-gco", keep_control_plane=False
     )
-    manager.cleanup_orphaned_network_interfaces.assert_called_once_with()
+    manager.cleanup_orphaned_network_interfaces.assert_called_once_with(keep_control_plane=False)
     sleep.assert_called_once_with(30)
     assert manager.destroy_orchestrated.call_count == 2
     assert manager.destroy_orchestrated.call_args.kwargs["parallel"] is True

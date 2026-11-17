@@ -380,7 +380,8 @@ def deploy_all_orchestrated(
     """Deploy all stacks in the correct order.
 
     Deploys in four phases:
-    1. Global stacks (gco-global, gco-api-gateway)
+    1. Global stacks (gco-global, then gco-analytics when enabled, then
+       gco-api-gateway, which imports the analytics stack's Studio wiring)
     2. Regional stacks (gco-us-east-1, etc.) - can be parallelized
     3. Regional API bridges (gco-regional-api-us-east-1, etc.) - depend on
        their regional stacks
@@ -481,7 +482,8 @@ def deploy_all_orchestrated(
     is_flag=True,
     help=(
         "Destroy only the regional API bridges and regional stacks; leave the global, "
-        "API Gateway and monitoring stacks standing (scale to zero workload Regions)"
+        "API Gateway, monitoring and analytics stacks standing (scale to zero workload "
+        "Regions)"
     ),
 )
 @click.option(
@@ -508,7 +510,8 @@ def destroy_all_orchestrated(
     1. Monitoring stack (<project>-monitoring)
     2. Regional API bridges (<project>-regional-api-<region>)
     3. Base regional stacks (<project>-<region>) - can be parallelized
-    4. Global stacks (<project>-api-gateway, <project>-global)
+    4. Global stacks (<project>-api-gateway, then <project>-analytics when
+       deployed, then <project>-global)
 
     Automatically retries up to 3 times (with 30s waits) if any stacks fail,
     which handles transient issues like orphaned resources during teardown.
@@ -528,9 +531,10 @@ def destroy_all_orchestrated(
     --keep-control-plane scales the deployment to zero workload Regions
     instead of removing it: only phases 2 and 3 run, after the monitoring
     stack is updated in place so it stops referencing the regional stacks.
-    The global, API Gateway and monitoring stacks — and the shared state they
-    own (DynamoDB tables, the model and cluster-shared buckets, the image
-    registry, EFS recovery points, cost reports) — stay. Data inside the
+    The global, API Gateway and monitoring stacks, the analytics stack when
+    deployed, and the shared state they own (DynamoDB tables, the model and
+    cluster-shared buckets, the image registry, EFS recovery points, cost
+    reports, Studio home directories and Cognito users) stay. Data inside the
     regional stacks (EFS and FSx file systems, Valkey, Aurora, in-cluster
     volumes) is still deleted, so back it up to the cluster-shared bucket
     first. Remove the Regions from cdk.json afterwards ('gco stacks regions
@@ -570,7 +574,7 @@ def destroy_all_orchestrated(
         )
         if keep_control_plane:
             # Only the workload tier goes; the control-plane stacks are updated
-            # in place (monitoring) or left alone (global, API Gateway).
+            # in place (monitoring) or left alone (global, API Gateway, analytics).
             stacks = list(ordered)
 
         if not yes:
@@ -609,7 +613,7 @@ def destroy_all_orchestrated(
                     "Inspecting VPCs for resources that can block teardown "
                     "(orphaned ENIs, EKS security groups)..."
                 )
-                manager.cleanup_orphaned_network_interfaces()
+                manager.cleanup_orphaned_network_interfaces(keep_control_plane=keep_control_plane)
                 formatter.print_warning(
                     f"Attempt {attempt}/{max_attempts}: waiting 30 seconds before retrying..."
                 )
@@ -649,8 +653,9 @@ def destroy_all_orchestrated(
 
         if success and keep_control_plane:
             formatter.print_success(
-                "Workload tier destroyed; the global, API Gateway and monitoring stacks are "
-                "standing. Run 'gco stacks regions remove <region>' to make the scale-down "
+                "Workload tier destroyed; the global, API Gateway and monitoring stacks (and "
+                "the analytics stack, when deployed) are standing. Run "
+                "'gco stacks regions remove <region>' to make the scale-down "
                 "permanent, or 'gco stacks deploy-all' to recreate the regional stacks."
             )
         elif success:

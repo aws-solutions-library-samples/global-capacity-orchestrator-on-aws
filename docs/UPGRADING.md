@@ -31,9 +31,11 @@ recreates every regional stack, and the data inside those stacks goes with them.
 ## How an upgrade works
 
 GCO has two tiers of stacks. The **control plane** — `<project>-global`,
-`<project>-api-gateway` and `<project>-monitoring` — holds the shared state:
+`<project>-api-gateway`, `<project>-monitoring` and, when the analytics
+environment is enabled, `<project>-analytics` — holds the shared state:
 DynamoDB tables, the model and cluster-shared S3 buckets, the image registry, the
-backup vault, the cost-report bucket, the auth secret and the private TLS root.
+backup vault, the cost-report bucket, the auth secret, the private TLS root, and
+the SageMaker Studio domain with its home directories and Cognito users.
 The **workload tier** — one `<project>-<region>` stack and one
 `<project>-regional-api-<region>` bridge per entry in
 `deployment_regions.regional` — holds the EKS clusters and everything that runs
@@ -70,10 +72,10 @@ release, while the control plane is updated in place and keeps its state:
    delete cannot leave the stack in `DELETE_FAILED`. The teardown is the one in
    the release you upgrade from (see [Run the upgrade](#3-run-the-upgrade)), so upgrades from v8.14.0 or
    earlier do not get this sweep; see [If it stops halfway](#if-it-stops-halfway).
-5. **Deploy-all on the new release.** `<project>-global` and
-   `<project>-api-gateway` are updated in place, the regional stacks and their
-   bridges are recreated from `cdk.json`, and the monitoring stack is updated back
-   to the full topology.
+5. **Deploy-all on the new release.** `<project>-global`,
+   `<project>-api-gateway` and (when enabled) `<project>-analytics` are updated
+   in place, the regional stacks and their bridges are recreated from
+   `cdk.json`, and the monitoring stack is updated back to the full topology.
 
 Expect 45–90 minutes for a single Region (EKS cluster deletion and creation
 dominate); `--parallel` overlaps the regional work when there are several.
@@ -91,6 +93,7 @@ dominate); `--parallel` overlaps the regional work when there are several.
 | Cluster-shared bucket, model bucket, DynamoDB tables (jobs, templates, webhooks, vector store), ECR image registry | global stack | Survive — updated in place |
 | Auth secret, private TLS root CA, API Gateway, WAF, aggregator | API Gateway stack | Survive — updated in place |
 | Cost-report bucket, Glue/Athena, alarms, dashboard | monitoring stack | Survive — updated in place (the dashboard briefly shows only its control-plane sections while the workload tier is down) |
+| SageMaker Studio domain, Studio home directories (EFS), Cognito users, analytics buckets | analytics stack, when enabled | Survive — updated in place |
 | Global Accelerator, endpoint groups, traffic-dial state | global stack | Survive; the regional ALBs re-register as the regional stacks come back |
 | CDK bootstrap stacks, IAM roles outside GCO | account | Untouched |
 

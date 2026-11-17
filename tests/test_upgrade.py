@@ -598,6 +598,25 @@ def test_split_stacks_orders_the_workload_tier_for_teardown() -> None:
     assert workload == ["gco-regional-api-us-east-1", "gco-us-east-1"]
 
 
+def test_split_stacks_keeps_the_analytics_stack_in_the_control_plane() -> None:
+    """The upgrade must never plan (or run) the analytics stack's deletion.
+
+    It owns Studio home directories and Cognito users; the upgrade promises
+    the control plane survives.
+    """
+    stacks = [
+        "gco-global",
+        "gco-api-gateway",
+        "gco-analytics",
+        "gco-us-east-1",
+        "gco-regional-api-us-east-1",
+        "gco-monitoring",
+    ]
+    control_plane, workload = engine.split_stacks(stacks, "gco")
+    assert control_plane == ["gco-global", "gco-api-gateway", "gco-analytics", "gco-monitoring"]
+    assert workload == ["gco-regional-api-us-east-1", "gco-us-east-1"]
+
+
 def test_build_plan_fetches_and_probes(tmp_path: Path) -> None:
     tags = engine.parse_release_tags(["v8.0.1", "v8.1.0"])
     with (
@@ -732,7 +751,7 @@ def test_run_stack_cycle_retries_the_teardown_and_merges_destroyed_stacks() -> N
     assert result.teardown_attempts == 2
     assert result.destroyed == ["gco-regional-api-us-east-1", "gco-us-east-1"]
     assert waits == [5]
-    manager.cleanup_orphaned_network_interfaces.assert_called_once_with()
+    manager.cleanup_orphaned_network_interfaces.assert_called_once_with(keep_control_plane=True)
     manager.deploy_orchestrated.assert_called_once()
 
 

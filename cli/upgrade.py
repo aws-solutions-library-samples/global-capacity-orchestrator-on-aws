@@ -21,9 +21,9 @@ CloudFormation stacks — to a tagged release in one pass:
    (:meth:`cli.stacks.StackManager.destroy_orchestrated` with
    ``keep_control_plane=True`` — the monitoring stack is first updated in place
    so it stops referencing the regional stacks), then run the ordinary
-   deploy-all: the global and API Gateway stacks are updated in place and the
-   regional stacks, their API bridges and the monitoring stack are recreated
-   from the new release.
+   deploy-all: the global, API Gateway and (when enabled) analytics stacks are
+   updated in place and the regional stacks, their API bridges and the
+   monitoring stack are recreated from the new release.
 
 Step 4 deletes every regional stack, and with it the data those stacks own
 (EFS and FSx file systems, Valkey, Aurora, in-cluster volumes, the
@@ -630,9 +630,9 @@ def run_stack_cycle(
     The teardown uses the same retry loop as ``gco stacks destroy-all``: a
     failed attempt clears the orphaned network interfaces that typically block
     VPC deletion, waits, and tries again. The redeploy is a single
-    ``deploy_orchestrated`` pass — global and API Gateway stacks update in
-    place, regional stacks and their bridges are recreated, monitoring is
-    updated back to the full topology.
+    ``deploy_orchestrated`` pass — global, API Gateway and analytics stacks
+    update in place, regional stacks and their bridges are recreated,
+    monitoring is updated back to the full topology.
 
     Raises:
         cli.stacks.AssetPermissionError: before any stack is touched, when a
@@ -652,7 +652,7 @@ def run_stack_cycle(
         result.teardown_attempts = attempt
         if attempt > 1:
             log("Clearing orphaned network interfaces that can block VPC deletion...")
-            manager.cleanup_orphaned_network_interfaces()
+            manager.cleanup_orphaned_network_interfaces(keep_control_plane=True)
             log(f"Teardown attempt {attempt}/{max_attempts} in {retry_wait_seconds:.0f}s...")
             wait(retry_wait_seconds)
         ok, destroyed, failed = manager.destroy_orchestrated(

@@ -12,9 +12,11 @@ This module handles:
     - Lambda source synchronization (copies handler code + dependencies before synth)
     - CDK stack deployment with proper dependency ordering:
         1. Global stack (partition-wide state, plus Global Accelerator in `aws`)
-        2. API Gateway stack (auth secret, Lambda proxy)
-        3. Regional stacks in parallel (EKS, VPC, ALB per region)
-        4. Monitoring stack (CloudWatch dashboards, alarms)
+        2. Optional analytics stack (SageMaker Studio, Cognito); the API
+           Gateway stack imports its Studio wiring
+        3. API Gateway stack (auth secret, Lambda proxy)
+        4. Regional stacks in parallel (EKS, VPC, ALB per region)
+        5. Monitoring stack (CloudWatch dashboards, alarms)
     - Parallel deployment of regional stacks via ThreadPoolExecutor
     - Stack destruction in reverse dependency order
     - FSx for Lustre enable/disable toggle
@@ -4253,6 +4255,27 @@ class StackManager:
 
         return None
 
+    def _regional_stack_region(self, stack_name: str) -> str | None:
+        """Return the Region a base regional stack ``<project>-<region>`` names, else None.
+
+        Only base regional stacks own an EKS cluster, its CSI volumes, its
+        security group and the ``/{project}/addons/{region}`` parameters. The
+        sweeps for those derive the Region from the stack name, so every other
+        stack (global, API Gateway, monitoring, analytics, the regional API
+        bridges) must yield None rather than a pseudo-Region such as
+        ``analytics``, which would send AWS calls to an endpoint like
+        ``eks.analytics.amazonaws.com``.
+        """
+        project_name = self.config.project_name
+        prefix = f"{project_name}-"
+        if not stack_name.startswith(prefix) or stack_name.endswith("-monitoring"):
+            return None
+        if _is_pre_regional_stack(stack_name, project_name=project_name):
+            return None
+        if stack_name.startswith(f"{prefix}regional-api-"):
+            return None
+        return stack_name[len(prefix) :] or None
+
     def _mirror_target_regions(self, stack_name: str | None, all_stacks: bool) -> list[str]:
         """Regional regions to auto-mirror images for on this deploy.
 
@@ -4398,7 +4421,8 @@ class StackManager:
         """
         Deploy all stacks in the correct order.
 
-        Deploys global stacks first, then base regional stacks, regional API
+        Deploys global stacks first (the optional analytics stack between the
+        global and API Gateway stacks), then base regional stacks, regional API
         bridges, and finally monitoring. Parallelism never crosses a dependency
         level.
 
@@ -4488,11 +4512,15 @@ class StackManager:
 
         # Separate stacks into four dependency levels by suffix/marker so
         # ordering is independent of project_name (#139):
-        # 1. Pre-regional global stacks (<project>-global, <project>-api-gateway)
+        # 1. Pre-regional global stacks (<project>-global, then the optional
+        #    <project>-analytics, whose Studio wiring the API Gateway imports,
+        #    then <project>-api-gateway)
         # 2. Base regional stacks (<project>-<region>, parallel-safe)
         # 3. Regional API bridges (<project>-regional-api-<region>, depend on base)
         # 4. Monitoring (depends on regional stacks)
-        pre_regional_stacks = [s for s in ordered_stacks if s.endswith(("-global", "-api-gateway"))]
+        pre_regional_stacks = [
+            s for s in ordered_stacks if _is_pre_regional_stack(s, project_name=project_name)
+        ]
         regional_api_stacks = [
             s
             for s in ordered_stacks
@@ -4505,7 +4533,8 @@ class StackManager:
         regional_stacks = [
             s
             for s in ordered_stacks
-            if not s.endswith(("-global", "-api-gateway", "-monitoring"))
+            if not s.endswith("-monitoring")
+            and not _is_pre_regional_stack(s, project_name=project_name)
             and not _is_regional_api_bridge_stack(
                 s,
                 project_name=project_name,
@@ -5017,8 +5046,9 @@ class StackManager:
 
         ``keep_control_plane`` tears down only the workload tier — the regional
         API bridges and the base regional stacks — and leaves
-        ``<project>-global``, ``<project>-api-gateway`` and
-        ``<project>-monitoring`` standing. It first updates the monitoring
+        ``<project>-global``, ``<project>-api-gateway``,
+        ``<project>-monitoring`` and, when deployed, ``<project>-analytics``
+        standing. It first updates the monitoring
         stack in place so it no longer references the regional stacks (see
         :meth:`detach_monitoring_from_regions`), then skips every sweep that
         only makes sense when the whole deployment is going away: the
@@ -6184,7 +6214,8 @@ class StackManager:
         import boto3
 
         project_name = self.config.project_name
-        region = region or stack_name.replace(f"{project_name}-", "", 1)
+        stack_region = self._regional_stack_region(stack_name)
+        region = region or stack_region
         path = f"/{project_name}/addons/{region}"
         outcome: dict[str, Any] = {
             "stack": stack_name,
@@ -6192,6 +6223,12 @@ class StackManager:
             "deleted": [],
             "errors": [],
         }
+        if stack_region is None:
+            # The tree belongs to the Region's regional stack. Resolving any other
+            # stack to a real Region (the analytics stack's is the API Gateway
+            # Region) would delete a live regional stack's records.
+            outcome["skipped"] = "not-a-regional-stack"
+            return outcome
         try:
             ssm = boto3.client("ssm", region_name=region)
             paginator = ssm.get_paginator("get_parameters_by_path")
@@ -6288,10 +6325,11 @@ class StackManager:
         outcome: dict[str, Any] = {"detached": [], "errors": []}
         if not regional_stacks:
             return outcome
-        project_name = self.config.project_name
         iam = boto3.client("iam")
         for stack_name in regional_stacks:
-            region = stack_name.replace(f"{project_name}-", "", 1)
+            region = self._regional_stack_region(stack_name)
+            if region is None:
+                continue
             try:
                 cfn = boto3.client("cloudformation", region_name=region)
                 role_names: list[str] = []
@@ -6356,16 +6394,15 @@ class StackManager:
         Called between destroy retries to remove orphaned security groups
         that block VPC deletion.
         """
-        stacks = self.list_stacks()
-        # Regional stacks are everything that isn't a named global stack;
-        # classify by suffix so this works for any project_name (#139).
+        # Only base regional stacks own an EKS cluster; every other stack
+        # (bridges and the analytics stack included) would yield a pseudo-Region.
         regional_stacks = [
-            s for s in stacks if not s.endswith(("-global", "-api-gateway", "-monitoring"))
+            s for s in self.list_stacks() if self._regional_stack_region(s) is not None
         ]
         for stack_name in regional_stacks:
             self._cleanup_eks_security_groups(stack_name)
 
-    def cleanup_orphaned_network_interfaces(self) -> None:
+    def cleanup_orphaned_network_interfaces(self, *, keep_control_plane: bool = False) -> None:
         """Report and clear resources that can block VPC deletion, across all
         regional stacks. Run between destroy retries.
 
@@ -6378,16 +6415,27 @@ class StackManager:
         what the next retry is waiting on. Service-managed ENIs (Global
         Accelerator, ELB) are released asynchronously by AWS once the endpoint /
         load balancer is gone, so we report them rather than fight them.
+
+        The analytics stack owns a VPC too (SageMaker Studio, EMR Serverless)
+        in the API Gateway Region, but no EKS cluster, so a full teardown sweeps
+        only its ENIs, in that Region. ``keep_control_plane`` teardowns keep
+        the analytics stack standing and leave its VPC alone.
         """
-        stacks = self.list_stacks()
-        regional_stacks = [
-            s for s in stacks if not s.endswith(("-global", "-api-gateway", "-monitoring"))
-        ]
-        for stack_name in regional_stacks:
-            # Existing behaviour first: clear the EKS cluster SG + its ENIs.
-            self._cleanup_eks_security_groups(stack_name)
-            # Then report (and safely clear) anything else lingering in the VPC.
-            summary = self._summarize_orphaned_enis(stack_name)
+        project_name = self.config.project_name
+        for stack_name in self.list_stacks():
+            if self._regional_stack_region(stack_name) is not None:
+                # Existing behaviour first: clear the EKS cluster SG + its ENIs.
+                self._cleanup_eks_security_groups(stack_name)
+                # Then report (and safely clear) anything else lingering in the VPC.
+                summary = self._summarize_orphaned_enis(stack_name)
+            elif not keep_control_plane and _is_analytics_stack(
+                stack_name, project_name=project_name
+            ):
+                summary = self._summarize_orphaned_enis(
+                    stack_name, region=self._get_deploy_region(stack_name)
+                )
+            else:
+                continue
             self._print_orphaned_eni_summary(stack_name, summary)
 
     @staticmethod
@@ -6413,7 +6461,12 @@ class StackManager:
             return "eks"
         return "other"
 
-    def _summarize_orphaned_enis(self, stack_name: str) -> dict[str, int]:
+    def _summarize_orphaned_enis(
+        self,
+        stack_name: str,
+        *,
+        region: str | None = None,
+    ) -> dict[str, int]:
         """Inspect the stack's VPC(s) for lingering ENIs, categorize them, and
         best-effort delete the ones that are safe to remove.
 
@@ -6421,13 +6474,16 @@ class StackManager:
         ``RequesterManaged`` (i.e. not owned by a service like GA / ELB, which
         rejects manual deletion and releases the ENI on its own schedule).
 
+        ``region`` defaults to the one a base regional stack's name encodes;
+        any other stack is inspected only in an explicitly given Region.
+
         Returns a dict of counts: per-category totals plus ``deleted`` and
         ``vpcs``. Wholly best-effort — any AWS error degrades to the counts
         gathered so far rather than raising into the destroy flow.
         """
         import boto3
 
-        region = stack_name.replace(f"{self.config.project_name}-", "", 1)
+        region = region or self._regional_stack_region(stack_name)
         summary: dict[str, int] = {
             "global_accelerator": 0,
             "elb": 0,
@@ -6436,6 +6492,8 @@ class StackManager:
             "deleted": 0,
             "vpcs": 0,
         }
+        if region is None:
+            return summary
         try:
             ec2 = boto3.client("ec2", region_name=region)
             vpcs = ec2.describe_vpcs(
@@ -6507,8 +6565,8 @@ class StackManager:
         """Delete empty EKS SGs, optionally by one exact preauthorized ID."""
         import boto3
 
-        project_name = self.config.project_name
-        region = region or stack_name.replace(f"{project_name}-", "", 1)
+        stack_region = self._regional_stack_region(stack_name)
+        region = region or stack_region
         cluster_name = stack_name
         outcome: dict[str, Any] = {
             "stack": stack_name,
@@ -6519,6 +6577,10 @@ class StackManager:
             "blocked_by_enis": [],
             "errors": [],
         }
+        if stack_region is None:
+            # Only a base regional stack owns an EKS cluster security group.
+            outcome["skipped"] = "not-a-regional-stack"
+            return outcome
 
         try:
             ec2 = boto3.client("ec2", region_name=region)
@@ -6606,10 +6668,11 @@ class StackManager:
         """Sweep one regional stack's orphaned CSI volumes; no-op for global stacks.
 
         Entry point for the single-stack ``gco stacks destroy`` path, which has no
-        orchestrated cleanup barrier of its own. Global stacks host no cluster, so
-        they resolve to no work rather than a derived pseudo-Region.
+        orchestrated cleanup barrier of its own. Global, analytics and bridge
+        stacks host no cluster, so they resolve to no work rather than a derived
+        pseudo-Region.
         """
-        if stack_name.endswith(("-global", "-api-gateway", "-monitoring")):
+        if self._regional_stack_region(stack_name) is None:
             return {"stack": stack_name, "skipped": "not-a-regional-stack"}
         return self._cleanup_cluster_volumes(stack_name, region=region, retain=retain)
 
@@ -6644,8 +6707,8 @@ class StackManager:
         """
         import boto3
 
-        project_name = self.config.project_name
-        region = region or stack_name.replace(f"{project_name}-", "", 1)
+        stack_region = self._regional_stack_region(stack_name)
+        region = region or stack_region
         cluster_name = stack_name
         cluster_tag = f"kubernetes.io/cluster/{cluster_name}"
         outcome: dict[str, Any] = {
@@ -6658,6 +6721,10 @@ class StackManager:
             "surviving": [],
             "errors": [],
         }
+        if stack_region is None:
+            # Only a base regional stack's cluster provisions CSI volumes.
+            outcome["skipped"] = "not-a-regional-stack"
+            return outcome
 
         try:
             # Ordering gate: a live cluster means its CSI driver may still be
@@ -6992,6 +7059,27 @@ def _is_regional_api_bridge_stack(
     return bool(region) and f"{project_name}-{region}" in stack_names
 
 
+def _is_analytics_stack(stack: str, *, project_name: str) -> bool:
+    """Return whether ``stack`` is the optional ``<project>-analytics`` stack.
+
+    Compare the exact name: ``analytics`` is valid inside a project name, so a
+    substring test matches every stack of a project such as ``dataanalytics``.
+    """
+    return stack == f"{project_name}-analytics"
+
+
+def _is_pre_regional_stack(stack: str, *, project_name: str) -> bool:
+    """Return whether ``stack`` belongs to the global tier the regional stacks depend on.
+
+    That is ``<project>-global``, ``<project>-api-gateway`` and, when enabled,
+    ``<project>-analytics``, which lives in the API Gateway Region and owns no
+    EKS cluster. It is kept by a keep-control-plane teardown like the other two.
+    """
+    return stack.endswith(("-global", "-api-gateway")) or _is_analytics_stack(
+        stack, project_name=project_name
+    )
+
+
 def _get_stack_destroy_phases(
     stacks: list[str],
     *,
@@ -7002,6 +7090,11 @@ def _get_stack_destroy_phases(
     Returns monitoring, regional API bridge, base regional, and pre-regional
     global phases. The public preview helper and the execution path both flatten
     this result, so custom project names and bridge dependencies cannot drift.
+
+    The pre-regional phase deletes the API Gateway stack, then the analytics
+    stack whose Studio wiring it imports, then the global stack both depend on
+    (see ``app.py``). Deleting the API Gateway stack first means the analytics
+    teardown never has to redeploy it to drop those imports.
     """
     stack_names = set(stacks)
     monitoring_stacks = sorted(
@@ -7024,7 +7117,8 @@ def _get_stack_destroy_phases(
         (
             stack
             for stack in stacks
-            if not stack.endswith(("-global", "-api-gateway", "-monitoring"))
+            if not stack.endswith("-monitoring")
+            and not _is_pre_regional_stack(stack, project_name=project_name)
             and not _is_regional_api_bridge_stack(
                 stack,
                 project_name=project_name,
@@ -7033,11 +7127,17 @@ def _get_stack_destroy_phases(
         ),
         reverse=True,
     )
+
+    def pre_regional_position(stack: str) -> int:
+        if stack.endswith("-api-gateway"):
+            return 1
+        if _is_analytics_stack(stack, project_name=project_name):
+            return 2
+        return 3
+
     pre_regional_stacks = sorted(
-        (stack for stack in stacks if stack.endswith(("-global", "-api-gateway"))),
-        key=lambda stack: (
-            1 if stack.endswith("-api-gateway") else (2 if stack.endswith("-global") else 0)
-        ),
+        (stack for stack in stacks if _is_pre_regional_stack(stack, project_name=project_name)),
+        key=pre_regional_position,
     )
     return (
         monitoring_stacks,
@@ -7056,9 +7156,12 @@ def get_stack_deployment_order(
     Get the correct deployment order for stacks.
 
     Order: global stacks first, then regional stacks.
-    Global stacks: <project>-global, <project>-api-gateway,
-    <project>-analytics, <project>-monitoring
+    Global stacks: <project>-global, <project>-analytics,
+    <project>-api-gateway, <project>-monitoring
     Regional stacks: <project>-{region} (e.g., gco-us-east-1)
+
+    The analytics stack depends on the global stack and the API Gateway stack
+    imports its Studio wiring (``app.py``), so it deploys between the two.
 
     Named stacks are classified by suffix so ordering is independent of
     ``project_name`` (#139): a non-``gco`` deployment (``acme-global`` …)
@@ -7073,8 +7176,8 @@ def get_stack_deployment_order(
     # Named (non-regional) stack priority by suffix (lower = deploy first).
     suffix_priority = {
         "-global": 1,
+        "-analytics": 1.5,
         "-api-gateway": 2,
-        "-analytics": 2.5,
         "-monitoring": 3,
     }
 

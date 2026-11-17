@@ -434,6 +434,21 @@ class TestSummarizeOrphanedEnis:
             Filters=[{"Name": "tag:aws:cloudformation:stack-name", "Values": ["gco-eu-west-1"]}]
         )
 
+    def test_a_stack_naming_no_region_is_inspected_only_in_a_given_region(self):
+        manager = self._manager()
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_vpcs.return_value = {"Vpcs": []}
+
+        with patch("boto3.client", return_value=mock_ec2) as mock_client:
+            assert manager._summarize_orphaned_enis("gco-analytics")["vpcs"] == 0
+            mock_client.assert_not_called()
+            manager._summarize_orphaned_enis("gco-analytics", region="us-east-2")
+
+        mock_client.assert_called_once_with("ec2", region_name="us-east-2")
+        mock_ec2.describe_vpcs.assert_called_once_with(
+            Filters=[{"Name": "tag:aws:cloudformation:stack-name", "Values": ["gco-analytics"]}]
+        )
+
     def test_no_vpcs_returns_zeroed_summary(self):
         manager = self._manager()
         mock_ec2 = MagicMock()
@@ -568,6 +583,53 @@ class TestCleanupOrphanedNetworkInterfaces:
         for stack in ("gco-us-east-1", "gco-eu-west-1"):
             mock_sg.assert_any_call(stack)
             mock_summarize.assert_any_call(stack)
+
+    @pytest.mark.parametrize("keep_control_plane", [False, True])
+    def test_analytics_vpc_is_swept_in_its_own_region_and_bridges_are_skipped(
+        self, keep_control_plane
+    ):
+        """No sweep runs against a pseudo-Region (``analytics``, ``regional-api-…``).
+
+        The analytics stack owns a VPC in the API Gateway Region but no EKS
+        cluster: a full teardown sweeps only its ENIs there, and a
+        keep-control-plane teardown, which keeps it standing, leaves it alone.
+        """
+        from unittest.mock import call
+
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+
+        with (
+            patch.object(
+                StackManager,
+                "list_stacks",
+                return_value=[
+                    "gco-global",
+                    "gco-analytics",
+                    "gco-us-east-1",
+                    "gco-regional-api-us-east-1",
+                ],
+            ),
+            patch.object(StackManager, "_get_deploy_region", return_value="us-east-2"),
+            patch.object(StackManager, "_cleanup_eks_security_groups") as mock_sg,
+            patch.object(
+                StackManager, "_summarize_orphaned_enis", return_value={}
+            ) as mock_summarize,
+            patch.object(StackManager, "_print_orphaned_eni_summary") as mock_print,
+            patch.object(StackManager, "_find_project_root", return_value=Path(".")),
+        ):
+            StackManager(config).cleanup_orphaned_network_interfaces(
+                keep_control_plane=keep_control_plane
+            )
+
+        mock_sg.assert_called_once_with("gco-us-east-1")
+        expected = [call("gco-us-east-1")]
+        if not keep_control_plane:
+            expected.insert(0, call("gco-analytics", region="us-east-2"))
+        assert mock_summarize.call_args_list == expected
+        assert mock_print.call_count == len(expected)
 
 
 class TestCleanupOrphanedBastions:
@@ -1385,6 +1447,21 @@ class TestAddonParameterCleanup:
         assert outcome["deleted"] == names[10:]
         assert outcome["errors"] == [", ".join(names[:10]) + ": RuntimeError: Throttling"]
 
+    def test_a_stack_other_than_a_base_regional_one_is_skipped_whatever_its_region(self):
+        """The analytics stack lives in the API Gateway Region, which can host a regional stack.
+
+        Resolved to that Region, the sweep would delete the live regional
+        stack's records, so only ``<project>-<region>`` stacks are swept.
+        """
+        manager = self._manager()
+        with patch("boto3.client") as client:
+            for stack_name in ("gco-analytics", "gco-regional-api-us-east-1", "gco-global"):
+                outcome = manager._cleanup_addon_parameters(stack_name, region="us-east-1")
+                assert outcome["skipped"] == "not-a-regional-stack"
+                assert outcome["deleted"] == [] and outcome["errors"] == []
+            assert manager._cleanup_addon_parameters("gco-analytics")["region"] is None
+        client.assert_not_called()
+
 
 class TestDestroyOrchestratedImplicitCleanupWiring:
     """The sweep runs on every non-strict exit path and never in strict mode."""
@@ -1875,6 +1952,124 @@ class TestKeepControlPlaneTeardown:
         mocks["dial"].assert_not_called()
 
 
+class TestAnalyticsStackTeardownPhase:
+    """``<project>-analytics`` is torn down with the global tier, never as a regional stack.
+
+    Classified as a base regional stack it was deleted by keep-control-plane
+    teardowns and ``gco upgrade`` (with Studio home directories and Cognito
+    users), and every per-Region sweep derived the Region ``analytics`` from
+    its name and called endpoints such as ``eks.analytics.amazonaws.com``.
+    """
+
+    _ALL_STACKS = [
+        "gco-global",
+        "gco-api-gateway",
+        "gco-analytics",
+        "gco-us-east-1",
+        "gco-regional-api-us-east-1",
+        "gco-monitoring",
+    ]
+
+    def _run(self, *, keep_control_plane: bool):
+        from contextlib import ExitStack
+
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        config.global_region = "us-east-2"
+        destroyed: list[str] = []
+
+        def fake_destroy(stack_name, **_kwargs):
+            destroyed.append(stack_name)
+            return True
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(StackManager, "list_stacks", return_value=list(self._ALL_STACKS))
+            )
+            stack.enter_context(
+                patch.object(StackManager, "detach_monitoring_from_regions", return_value=True)
+            )
+            watchdog = stack.enter_context(
+                patch.object(StackManager, "_start_eks_sg_watchdog", return_value=MagicMock())
+            )
+            security_groups = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_eks_security_groups",
+                    return_value={"errors": [], "blocked_by_enis": []},
+                )
+            )
+            stack.enter_context(
+                patch.object(StackManager, "_destroy_phase_remaining_stacks", return_value=[])
+            )
+            stack.enter_context(patch.object(StackManager, "destroy", side_effect=fake_destroy))
+            roles = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_detach_stack_roles_from_instance_profiles",
+                    return_value={"detached": [], "errors": []},
+                )
+            )
+            volumes = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_cluster_volumes",
+                    return_value={"deleted": [], "surviving": [], "errors": []},
+                )
+            )
+            addons = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_addon_parameters",
+                    return_value={"deleted": [], "errors": []},
+                )
+            )
+            result = StackManager(config).destroy_orchestrated(
+                force=True, keep_control_plane=keep_control_plane
+            )
+        per_region_sweeps = {
+            "watchdog": [call.args[0] for call in watchdog.call_args_list],
+            "security_groups": [call.args[0] for call in security_groups.call_args_list],
+            "roles": roles.call_args.args[0],
+            "volumes": [call.args[0] for call in volumes.call_args_list],
+            "addons": [call.args[0] for call in addons.call_args_list],
+        }
+        return result, destroyed, per_region_sweeps
+
+    def test_full_teardown_deletes_it_after_the_api_gateway_and_before_global(self):
+        (ok, _successful, failed), destroyed, sweeps = self._run(keep_control_plane=False)
+
+        assert ok is True and failed == []
+        # The API Gateway stack imports the analytics stack's Studio wiring and
+        # both depend on the global stack, so no import-dropping redeploy is needed.
+        assert destroyed == [
+            "gco-monitoring",
+            "gco-regional-api-us-east-1",
+            "gco-us-east-1",
+            "gco-api-gateway",
+            "gco-analytics",
+            "gco-global",
+        ]
+        assert sweeps == {
+            "watchdog": ["gco-us-east-1"],
+            "security_groups": ["gco-us-east-1"],
+            "roles": ["gco-us-east-1"],
+            "volumes": ["gco-us-east-1"],
+            "addons": ["gco-us-east-1"],
+        }
+
+    def test_keep_control_plane_leaves_it_standing(self):
+        (ok, successful, failed), destroyed, sweeps = self._run(keep_control_plane=True)
+
+        assert ok is True and failed == []
+        assert destroyed == ["gco-regional-api-us-east-1", "gco-us-east-1"]
+        assert sorted(successful) == ["gco-regional-api-us-east-1", "gco-us-east-1"]
+        assert sweeps["roles"] == ["gco-us-east-1"]
+        assert sweeps["volumes"] == ["gco-us-east-1"]
+
+
 class TestDetachMonitoringFromRegions:
     def _manager(self):
         from cli.stacks import StackManager
@@ -2112,3 +2307,17 @@ class TestRoleInstanceProfileDetach:
         assert outcome["detached"] == []
         assert outcome["errors"][0].startswith("gco-us-east-1: ")
         assert outcome["errors"][1] == "gco-us-west-2: RuntimeError: boom"
+
+    def test_stacks_that_name_no_region_are_skipped(self) -> None:
+        """Only ``<project>-<region>`` names a Region; ``_run`` rejects any pseudo-Region."""
+        cfn = MagicMock()
+        cfn.get_paginator.return_value = self._paginator([{"StackResourceSummaries": []}])
+
+        outcome = self._run(
+            cfn,
+            MagicMock(),
+            ["gco-analytics", "gco-regional-api-us-east-1", "gco-global", "gco-us-east-1"],
+        )
+
+        assert outcome == {"detached": [], "errors": []}
+        cfn.get_paginator.return_value.paginate.assert_called_once_with(StackName="gco-us-east-1")

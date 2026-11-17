@@ -189,8 +189,9 @@ def upgrade(
          scales the workload tier to zero — the monitoring stack is updated
          in place so it stops referencing the regional stacks, then every
          regional API bridge and regional stack is DESTROYED;
-      4. updates the global, API Gateway and monitoring stacks in place and
-         recreates the regional stacks from cdk.json on the new release.
+      4. updates the global, API Gateway, monitoring and (when enabled)
+         analytics stacks in place and recreates the regional stacks from
+         cdk.json on the new release.
 
     Step 3 deletes the data inside the regional stacks (EFS and FSx file
     systems, Valkey, Aurora, in-cluster volumes, the regional-shared bucket
