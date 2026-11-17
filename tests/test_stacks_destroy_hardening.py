@@ -1463,6 +1463,194 @@ class TestAddonParameterCleanup:
         client.assert_not_called()
 
 
+class TestDestroyOrchestratedSweepsLogGroupsOnException:
+    """An exception that ends the teardown still sweeps the stacks already deleted.
+
+    Their log-group names and stack IDs were collected from live stacks, so a
+    re-run cannot find them: skipping the sweep leaked them for good.
+    """
+
+    _STACKS = ["gco-global", "gco-us-east-1", "gco-us-west-2", "gco-monitoring"]
+    _COLLECTED = {
+        name: {"region": "us-east-1", "log_groups": [f"/aws/lambda/{name}"]} for name in _STACKS
+    }
+    _IDENTITIES = {name: {"region": "us-east-1", "stack_id": f"arn:{name}"} for name in _STACKS}
+
+    def _run(
+        self,
+        *,
+        destroy,
+        present,
+        parallel=False,
+        on_cleanup=None,
+        security_groups=None,
+        parallel_destroy=None,
+    ):
+        from contextlib import ExitStack
+
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        config.global_region = "us-east-2"
+        cleanups: list[str] = []
+
+        def record(name, _details):
+            cleanups.append(name)
+            if on_cleanup is not None:
+                on_cleanup(name)
+
+        def exists(stack_name, *_args, **_kwargs):
+            if isinstance(present.get(stack_name), Exception):
+                raise present[stack_name]
+            return present.get(stack_name, True)
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(StackManager, "list_stacks", return_value=list(self._STACKS))
+            )
+            stack.enter_context(
+                patch.object(StackManager, "_start_eks_sg_watchdog", return_value=MagicMock())
+            )
+            stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_eks_security_groups",
+                    side_effect=security_groups,
+                    return_value={"errors": [], "blocked_by_enis": []},
+                )
+            )
+            stack.enter_context(
+                patch.object(StackManager, "_destroy_phase_remaining_stacks", return_value=[])
+            )
+            stack.enter_context(
+                patch.object(StackManager, "_stack_exists_in_cloudformation", side_effect=exists)
+            )
+            stack.enter_context(patch.object(StackManager, "destroy", side_effect=destroy))
+            if parallel_destroy is not None:
+                stack.enter_context(
+                    patch.object(
+                        StackManager, "_destroy_stacks_parallel", side_effect=parallel_destroy
+                    )
+                )
+            stack.enter_context(
+                patch.object(
+                    StackManager, "_collect_implicit_log_groups", return_value=self._COLLECTED
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    StackManager, "_collect_stack_identities", return_value=self._IDENTITIES
+                )
+            )
+            implicit = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_implicit_log_groups",
+                    return_value={"deleted": [], "missing": [], "errors": []},
+                )
+            )
+            regenerated = stack.enter_context(
+                patch.object(
+                    StackManager,
+                    "_cleanup_regenerated_log_groups",
+                    return_value={"deleted": [], "errors": []},
+                )
+            )
+            try:
+                result = StackManager(config).destroy_orchestrated(
+                    force=True, parallel=parallel, on_cleanup_complete=record
+                )
+            except BaseException as exc:
+                result = exc
+        return result, implicit, regenerated, cleanups
+
+    def test_an_exception_from_destroy_sweeps_what_was_already_deleted(self):
+        def destroy(stack_name, **_kwargs):
+            if stack_name == "gco-monitoring":
+                return True
+            raise RuntimeError("ExpiredToken")
+
+        result, implicit, regenerated, cleanups = self._run(
+            destroy=destroy, present={"gco-monitoring": False}
+        )
+
+        assert isinstance(result, RuntimeError) and str(result) == "ExpiredToken"
+        implicit.assert_called_once_with(self._COLLECTED, ["gco-monitoring"])
+        regenerated.assert_called_once_with(self._IDENTITIES, ["gco-monitoring"])
+        assert {"implicit-log-groups", "regenerated-log-groups"} <= set(cleanups)
+        assert "traffic-dial-parameters" not in cleanups
+
+    def test_a_parallel_phase_cut_short_is_swept_by_confirmed_absence(self):
+        """The interrupted batch never reports what it deleted; CloudFormation does."""
+
+        def parallel_destroy(**_kwargs):
+            raise KeyboardInterrupt
+
+        result, implicit, _regenerated, _cleanups = self._run(
+            destroy=lambda stack_name, **_kwargs: True,
+            present={"gco-monitoring": False, "gco-us-east-1": False},
+            parallel=True,
+            parallel_destroy=parallel_destroy,
+        )
+
+        assert isinstance(result, KeyboardInterrupt)
+        implicit.assert_called_once_with(self._COLLECTED, ["gco-monitoring", "gco-us-east-1"])
+
+    def test_an_exception_from_the_watchdog_cleanup_is_swept(self):
+        result, implicit, _regenerated, _cleanups = self._run(
+            destroy=lambda stack_name, **_kwargs: True,
+            present={"gco-monitoring": False, "gco-us-east-1": False, "gco-us-west-2": False},
+            security_groups=RuntimeError("Throttling"),
+        )
+
+        assert isinstance(result, RuntimeError) and str(result) == "Throttling"
+        implicit.assert_called_once_with(
+            self._COLLECTED, ["gco-monitoring", "gco-us-east-1", "gco-us-west-2"]
+        )
+
+    def test_an_unconfirmed_absence_keeps_that_stacks_log_groups(self, caplog):
+        def destroy(stack_name, **_kwargs):
+            raise RuntimeError("ExpiredToken")
+
+        result, implicit, _regenerated, _cleanups = self._run(
+            destroy=destroy,
+            present={"gco-monitoring": OSError("unreachable"), "gco-us-east-1": False},
+        )
+
+        assert isinstance(result, RuntimeError)
+        implicit.assert_called_once_with(self._COLLECTED, ["gco-us-east-1"])
+        assert "Could not confirm gco-monitoring is deleted" in caplog.text
+
+    def test_a_failing_sweep_never_masks_the_error_that_ended_the_teardown(self, caplog):
+        def destroy(stack_name, **_kwargs):
+            raise RuntimeError("ExpiredToken")
+
+        def on_cleanup(name):
+            if name == "implicit-log-groups":
+                raise OSError("checkpoint write failed")
+
+        result, _implicit, _regenerated, _cleanups = self._run(
+            destroy=destroy, present={}, on_cleanup=on_cleanup
+        )
+
+        assert isinstance(result, RuntimeError) and str(result) == "ExpiredToken"
+        assert "Log-group sweep after a failed teardown failed" in caplog.text
+
+    def test_an_exception_after_finish_started_is_not_swept_twice(self):
+        def on_cleanup(name):
+            if name == "traffic-dial-parameters":
+                raise OSError("checkpoint write failed")
+
+        result, implicit, regenerated, _cleanups = self._run(
+            destroy=lambda stack_name, **_kwargs: True, present={}, on_cleanup=on_cleanup
+        )
+
+        assert isinstance(result, OSError)
+        implicit.assert_called_once()
+        regenerated.assert_called_once()
+
+
 class TestDestroyOrchestratedImplicitCleanupWiring:
     """The sweep runs on every non-strict exit path and never in strict mode."""
 

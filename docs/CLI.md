@@ -5311,7 +5311,10 @@ resources configured for retention, and unexpected resources outside the known
 inventory, may remain. Only exact names taken from the destroyed stacks' own
 resources are considered, and only for stacks whose deletion succeeded. Sweep
 failures are reported best-effort and do not fail the destroy command; log
-groups belonging to stacks that failed to delete are left untouched.
+groups belonging to stacks that failed to delete are left untouched. When an
+error interrupts the teardown, the log-group sweep still runs, for every stack
+CloudFormation confirms is gone, before the error is reported: the names were
+read from the live stacks, so a later run could not find them.
 
 #### `gco stacks bootstrap`
 

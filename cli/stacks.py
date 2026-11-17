@@ -5220,7 +5220,8 @@ class StackManager:
 
         # Capture implicit log-group names and each stack's ID while the
         # source stacks still exist. Once their stacks are gone, ``finish``
-        # below deletes the exact derived names, and any explicit log group
+        # below (``sweep_after_exception`` when an exception ends the
+        # teardown) deletes the exact derived names, and any explicit log group
         # that Lambda recreated after CloudFormation deleted it. Strict
         # teardowns collect nothing — the live-validation harness owns fenced
         # log-group deletion.
@@ -5230,6 +5231,21 @@ class StackManager:
             implicit_log_groups = self._collect_implicit_log_groups(stacks)
             stack_identities = self._collect_stack_identities(stacks)
 
+        def sweep_log_groups(deleted_stacks: Collection[str]) -> None:
+            """Delete the log groups collected for ``deleted_stacks``."""
+            if implicit_log_groups:
+                record_cleanup(
+                    "implicit-log-groups",
+                    self._cleanup_implicit_log_groups(implicit_log_groups, deleted_stacks),
+                )
+            if stack_identities:
+                record_cleanup(
+                    "regenerated-log-groups",
+                    self._cleanup_regenerated_log_groups(stack_identities, deleted_stacks),
+                )
+
+        finishing = False
+
         def finish(overall: bool) -> tuple[bool, list[str], list[str]]:
             """Funnel every exit through the teardown sweeps.
 
@@ -5237,18 +5253,12 @@ class StackManager:
             still cleans up the stacks that DID delete (implicit log
             groups), while the success-only sweeps (runtime traffic-dial
             parameters) run exactly when everything is gone. New exit
-            paths must return through here as well.
+            paths must return through here as well; an exception runs
+            the log-group part through ``sweep_after_exception`` instead.
             """
-            if implicit_log_groups:
-                record_cleanup(
-                    "implicit-log-groups",
-                    self._cleanup_implicit_log_groups(implicit_log_groups, successful),
-                )
-            if stack_identities:
-                record_cleanup(
-                    "regenerated-log-groups",
-                    self._cleanup_regenerated_log_groups(stack_identities, successful),
-                )
+            nonlocal finishing
+            finishing = True
+            sweep_log_groups(successful)
             if overall and not keep_control_plane:
                 # Only after a complete teardown: while any stack survives,
                 # the accelerator may still be live and a manual override on
@@ -5262,101 +5272,53 @@ class StackManager:
                 )
             return overall, successful, failed
 
-        for stack_name in post_regional_stacks:
-            if on_stack_start:
-                on_stack_start(stack_name)
-            success = self.destroy(
-                stack_name=stack_name,
-                force=force,
-                expected_stack_id=(expected_stack_ids or {}).get(stack_name),
-                **destroy_safety,
-            )
-            (successful if success else failed).append(stack_name)
-            if on_stack_complete:
-                on_stack_complete(stack_name, success)
+        def sweep_after_exception() -> None:
+            """Sweep the log groups of the collected stacks CloudFormation no longer has.
 
-        phase_remaining = self._destroy_phase_remaining_stacks(
-            "post-regional",
-            post_regional_stacks,
-            expected_stack_ids,
-        )
-        for stack_name in phase_remaining:
-            if stack_name not in failed:
-                failed.append(stack_name)
-        if any(stack in failed for stack in post_regional_stacks) or phase_remaining:
-            return finish(False)
+            Their names and IDs were collected from live stacks only, so a
+            later run cannot find them. An exception can cut a parallel phase
+            short before it reports what it deleted, so absence is read from
+            CloudFormation, not from ``successful``; a stack whose absence is
+            not confirmed keeps its log groups.
+            """
+            deleted: list[str] = []
+            for stack_name in sorted(set(implicit_log_groups) | set(stack_identities)):
+                try:
+                    if not self._stack_exists_in_cloudformation(stack_name):
+                        deleted.append(stack_name)
+                except Exception as exc:
+                    logger.warning("Could not confirm %s is deleted: %s", stack_name, exc)
+            sweep_log_groups(deleted)
 
-        if regional_api_stacks:
-            if parallel and len(regional_api_stacks) > 1:
-                successful_api, failed_api = self._destroy_stacks_parallel(
-                    stacks=regional_api_stacks,
+        try:
+            for stack_name in post_regional_stacks:
+                if on_stack_start:
+                    on_stack_start(stack_name)
+                success = self.destroy(
+                    stack_name=stack_name,
                     force=force,
-                    on_stack_start=on_stack_start,
-                    on_stack_complete=on_stack_complete,
-                    max_workers=max_workers,
-                    expected_stack_ids=expected_stack_ids,
-                    authorize_stack=authorize_stack,
-                    allow_bootstrap=allow_bootstrap,
-                    bootstrap_stacks=bootstrap_stacks,
-                    prepared_change_sets=prepared_change_sets,
-                    strict_deployment_token=strict_deployment_token,
-                    on_change_set_prepared=on_change_set_prepared,
-                    on_ecr_repository_created=on_ecr_repository_created,
+                    expected_stack_id=(expected_stack_ids or {}).get(stack_name),
+                    **destroy_safety,
                 )
-                successful.extend(successful_api)
-                failed.extend(failed_api)
-            else:
-                for stack_name in regional_api_stacks:
-                    if on_stack_start:
-                        on_stack_start(stack_name)
-                    success = self.destroy(
-                        stack_name=stack_name,
-                        force=force,
-                        expected_stack_id=(expected_stack_ids or {}).get(stack_name),
-                        **destroy_safety,
-                    )
-                    (successful if success else failed).append(stack_name)
-                    if on_stack_complete:
-                        on_stack_complete(stack_name, success)
+                (successful if success else failed).append(stack_name)
+                if on_stack_complete:
+                    on_stack_complete(stack_name, success)
+
             phase_remaining = self._destroy_phase_remaining_stacks(
-                "regional API bridge",
-                regional_api_stacks,
+                "post-regional",
+                post_regional_stacks,
                 expected_stack_ids,
             )
             for stack_name in phase_remaining:
                 if stack_name not in failed:
                     failed.append(stack_name)
-            if any(stack in failed for stack in regional_api_stacks) or phase_remaining:
+            if any(stack in failed for stack in post_regional_stacks) or phase_remaining:
                 return finish(False)
 
-        watchdog_stops: dict[str, Event] = {}
-        watchdog_threads: dict[str, Thread] = {}
-        watchdog_targets = (
-            [
-                name
-                for name in regional_stacks
-                if strict_resources.get(name, {}).get("cluster_security_group_id")
-            ]
-            if strict_identity
-            else list(regional_stacks)
-        )
-        try:
-            for stack_name in watchdog_targets:
-                details = strict_resources.get(stack_name, {})
-                stop_event = Event()
-                watchdog_stops[stack_name] = stop_event
-                watchdog_threads[stack_name] = self._start_eks_sg_watchdog(
-                    stack_name,
-                    stop_event,
-                    region=details.get("region"),
-                    security_group_id=details.get("cluster_security_group_id"),
-                    vpc_id=details.get("vpc_id"),
-                )
-
-            if regional_stacks:
-                if parallel and len(regional_stacks) > 1:
-                    successful_regional, failed_regional = self._destroy_stacks_parallel(
-                        stacks=regional_stacks,
+            if regional_api_stacks:
+                if parallel and len(regional_api_stacks) > 1:
+                    successful_api, failed_api = self._destroy_stacks_parallel(
+                        stacks=regional_api_stacks,
                         force=force,
                         on_stack_start=on_stack_start,
                         on_stack_complete=on_stack_complete,
@@ -5370,10 +5332,10 @@ class StackManager:
                         on_change_set_prepared=on_change_set_prepared,
                         on_ecr_repository_created=on_ecr_repository_created,
                     )
-                    successful.extend(successful_regional)
-                    failed.extend(failed_regional)
+                    successful.extend(successful_api)
+                    failed.extend(failed_api)
                 else:
-                    for stack_name in regional_stacks:
+                    for stack_name in regional_api_stacks:
                         if on_stack_start:
                             on_stack_start(stack_name)
                         success = self.destroy(
@@ -5385,124 +5347,201 @@ class StackManager:
                         (successful if success else failed).append(stack_name)
                         if on_stack_complete:
                             on_stack_complete(stack_name, success)
-        finally:
-            for stop_event in watchdog_stops.values():
-                stop_event.set()
-            for stack_name, thread in watchdog_threads.items():
-                try:
-                    thread.join(timeout=5)
-                except Exception as exc:
-                    logger.exception("Could not join teardown watchdog for %s", stack_name)
-                    record_cleanup(
-                        "eks-security-group",
-                        {"stack": stack_name, "errors": [f"{type(exc).__name__}: {exc}"]},
-                    )
-                    if strict_identity and stack_name not in failed:
+                phase_remaining = self._destroy_phase_remaining_stacks(
+                    "regional API bridge",
+                    regional_api_stacks,
+                    expected_stack_ids,
+                )
+                for stack_name in phase_remaining:
+                    if stack_name not in failed:
                         failed.append(stack_name)
-                    continue
-                details = strict_resources.get(stack_name, {})
-                if strict_identity and thread.is_alive():
-                    outcome = {
-                        "stack": stack_name,
-                        "errors": ["watchdog thread did not stop"],
-                    }
-                else:
-                    outcome = self._cleanup_eks_security_groups(
+                if any(stack in failed for stack in regional_api_stacks) or phase_remaining:
+                    return finish(False)
+
+            watchdog_stops: dict[str, Event] = {}
+            watchdog_threads: dict[str, Thread] = {}
+            watchdog_targets = (
+                [
+                    name
+                    for name in regional_stacks
+                    if strict_resources.get(name, {}).get("cluster_security_group_id")
+                ]
+                if strict_identity
+                else list(regional_stacks)
+            )
+            try:
+                for stack_name in watchdog_targets:
+                    details = strict_resources.get(stack_name, {})
+                    stop_event = Event()
+                    watchdog_stops[stack_name] = stop_event
+                    watchdog_threads[stack_name] = self._start_eks_sg_watchdog(
                         stack_name,
+                        stop_event,
                         region=details.get("region"),
                         security_group_id=details.get("cluster_security_group_id"),
                         vpc_id=details.get("vpc_id"),
                     )
-                record_cleanup("eks-security-group", outcome)
-                if (
-                    strict_identity
-                    and (outcome.get("errors") or outcome.get("blocked_by_enis"))
-                    and stack_name not in failed
-                ):
+
+                if regional_stacks:
+                    if parallel and len(regional_stacks) > 1:
+                        successful_regional, failed_regional = self._destroy_stacks_parallel(
+                            stacks=regional_stacks,
+                            force=force,
+                            on_stack_start=on_stack_start,
+                            on_stack_complete=on_stack_complete,
+                            max_workers=max_workers,
+                            expected_stack_ids=expected_stack_ids,
+                            authorize_stack=authorize_stack,
+                            allow_bootstrap=allow_bootstrap,
+                            bootstrap_stacks=bootstrap_stacks,
+                            prepared_change_sets=prepared_change_sets,
+                            strict_deployment_token=strict_deployment_token,
+                            on_change_set_prepared=on_change_set_prepared,
+                            on_ecr_repository_created=on_ecr_repository_created,
+                        )
+                        successful.extend(successful_regional)
+                        failed.extend(failed_regional)
+                    else:
+                        for stack_name in regional_stacks:
+                            if on_stack_start:
+                                on_stack_start(stack_name)
+                            success = self.destroy(
+                                stack_name=stack_name,
+                                force=force,
+                                expected_stack_id=(expected_stack_ids or {}).get(stack_name),
+                                **destroy_safety,
+                            )
+                            (successful if success else failed).append(stack_name)
+                            if on_stack_complete:
+                                on_stack_complete(stack_name, success)
+            finally:
+                for stop_event in watchdog_stops.values():
+                    stop_event.set()
+                for stack_name, thread in watchdog_threads.items():
+                    try:
+                        thread.join(timeout=5)
+                    except Exception as exc:
+                        logger.exception("Could not join teardown watchdog for %s", stack_name)
+                        record_cleanup(
+                            "eks-security-group",
+                            {"stack": stack_name, "errors": [f"{type(exc).__name__}: {exc}"]},
+                        )
+                        if strict_identity and stack_name not in failed:
+                            failed.append(stack_name)
+                        continue
+                    details = strict_resources.get(stack_name, {})
+                    if strict_identity and thread.is_alive():
+                        outcome = {
+                            "stack": stack_name,
+                            "errors": ["watchdog thread did not stop"],
+                        }
+                    else:
+                        outcome = self._cleanup_eks_security_groups(
+                            stack_name,
+                            region=details.get("region"),
+                            security_group_id=details.get("cluster_security_group_id"),
+                            vpc_id=details.get("vpc_id"),
+                        )
+                    record_cleanup("eks-security-group", outcome)
+                    if (
+                        strict_identity
+                        and (outcome.get("errors") or outcome.get("blocked_by_enis"))
+                        and stack_name not in failed
+                    ):
+                        failed.append(stack_name)
+
+            phase_remaining = self._destroy_phase_remaining_stacks(
+                "regional",
+                regional_stacks,
+                expected_stack_ids,
+            )
+            for stack_name in phase_remaining:
+                if stack_name not in failed:
                     failed.append(stack_name)
+            if any(stack in failed for stack in regional_stacks) or phase_remaining:
+                return finish(False)
 
-        phase_remaining = self._destroy_phase_remaining_stacks(
-            "regional",
-            regional_stacks,
-            expected_stack_ids,
-        )
-        for stack_name in phase_remaining:
-            if stack_name not in failed:
-                failed.append(stack_name)
-        if any(stack in failed for stack in regional_stacks) or phase_remaining:
-            return finish(False)
+            # Every regional stack is verifiably absent here, so each EKS cluster and
+            # its CSI driver are gone and the volumes it provisioned can never
+            # reattach, and nothing can write a cluster's add-on bookkeeping in SSM
+            # again. Running after the barrier (rather than inside the per-stack
+            # loop above) means parallel and sequential teardowns publish the same
+            # outcomes in the same order, with no concurrent access to the report.
+            # Cleanup results deliberately do not feed ``failed``: these stacks are
+            # already deleted, and relabeling one as failed would send the CLI's
+            # retry loop back to CDK for a stack that no longer exists.
+            for stack_name in regional_stacks:
+                stack_region = strict_resources.get(stack_name, {}).get("region")
+                record_cleanup(
+                    "dynamic-pvs",
+                    self._cleanup_cluster_volumes(
+                        stack_name,
+                        region=stack_region,
+                        retain=retain_volumes,
+                    ),
+                )
+                record_cleanup(
+                    "addon-parameters",
+                    self._cleanup_addon_parameters(stack_name, region=stack_region),
+                )
 
-        # Every regional stack is verifiably absent here, so each EKS cluster and
-        # its CSI driver are gone and the volumes it provisioned can never
-        # reattach, and nothing can write a cluster's add-on bookkeeping in SSM
-        # again. Running after the barrier (rather than inside the per-stack
-        # loop above) means parallel and sequential teardowns publish the same
-        # outcomes in the same order, with no concurrent access to the report.
-        # Cleanup results deliberately do not feed ``failed``: these stacks are
-        # already deleted, and relabeling one as failed would send the CLI's
-        # retry loop back to CDK for a stack that no longer exists.
-        for stack_name in regional_stacks:
-            stack_region = strict_resources.get(stack_name, {}).get("region")
-            record_cleanup(
-                "dynamic-pvs",
-                self._cleanup_cluster_volumes(
-                    stack_name,
-                    region=stack_region,
-                    retain=retain_volumes,
-                ),
-            )
-            record_cleanup(
-                "addon-parameters",
-                self._cleanup_addon_parameters(stack_name, region=stack_region),
-            )
-
-        for stack_name in pre_regional_stacks:
-            if on_stack_start:
-                on_stack_start(stack_name)
-            is_global_stack = stack_name == global_stack_name
-            if is_global_stack:
-                # The vault was emptied when the teardown started, but the
-                # backup plan's schedules (daily 03:00 UTC, Sundays 04:00 UTC)
-                # may have written a recovery point since, and CloudFormation
-                # cannot delete a vault that holds one.
-                sweep_backup_vault(f"before deleting {stack_name}")
-            success = self.destroy(
-                stack_name=stack_name,
-                force=force,
-                expected_stack_id=(expected_stack_ids or {}).get(stack_name),
-                **destroy_safety,
-            )
-            if (
-                not success
-                and is_global_stack
-                and sweep_backup_vault(f"before retrying {stack_name}").get("resource_status")
-                == "DELETE_FAILED"
-            ):
-                # A job that finished between the sweep and the delete still
-                # writes a recovery point; the vault is empty again now.
-                print(f"  {stack_name}: its backup vault was not empty; retrying the delete once.")
+            for stack_name in pre_regional_stacks:
+                if on_stack_start:
+                    on_stack_start(stack_name)
+                is_global_stack = stack_name == global_stack_name
+                if is_global_stack:
+                    # The vault was emptied when the teardown started, but the
+                    # backup plan's schedules (daily 03:00 UTC, Sundays 04:00 UTC)
+                    # may have written a recovery point since, and CloudFormation
+                    # cannot delete a vault that holds one.
+                    sweep_backup_vault(f"before deleting {stack_name}")
                 success = self.destroy(
                     stack_name=stack_name,
                     force=force,
                     expected_stack_id=(expected_stack_ids or {}).get(stack_name),
                     **destroy_safety,
                 )
-            (successful if success else failed).append(stack_name)
-            if on_stack_complete:
-                on_stack_complete(stack_name, success)
+                if (
+                    not success
+                    and is_global_stack
+                    and sweep_backup_vault(f"before retrying {stack_name}").get("resource_status")
+                    == "DELETE_FAILED"
+                ):
+                    # A job that finished between the sweep and the delete still
+                    # writes a recovery point; the vault is empty again now.
+                    print(
+                        f"  {stack_name}: its backup vault was not empty; retrying the delete once."
+                    )
+                    success = self.destroy(
+                        stack_name=stack_name,
+                        force=force,
+                        expected_stack_id=(expected_stack_ids or {}).get(stack_name),
+                        **destroy_safety,
+                    )
+                (successful if success else failed).append(stack_name)
+                if on_stack_complete:
+                    on_stack_complete(stack_name, success)
 
-            phase_remaining = self._destroy_phase_remaining_stacks(
-                "pre-regional global",
-                [stack_name],
-                expected_stack_ids,
-            )
-            for remaining_stack in phase_remaining:
-                if remaining_stack not in failed:
-                    failed.append(remaining_stack)
-            if not success or phase_remaining:
-                return finish(False)
+                phase_remaining = self._destroy_phase_remaining_stacks(
+                    "pre-regional global",
+                    [stack_name],
+                    expected_stack_ids,
+                )
+                for remaining_stack in phase_remaining:
+                    if remaining_stack not in failed:
+                        failed.append(remaining_stack)
+                if not success or phase_remaining:
+                    return finish(False)
 
-        return finish(len(failed) == 0)
+            return finish(len(failed) == 0)
+        except BaseException:
+            if not finishing:
+                try:
+                    sweep_after_exception()
+                except Exception:
+                    # Never mask the exception that ended the teardown.
+                    logger.exception("Log-group sweep after a failed teardown failed")
+            raise
 
     def _destroy_stacks_parallel(
         self,
