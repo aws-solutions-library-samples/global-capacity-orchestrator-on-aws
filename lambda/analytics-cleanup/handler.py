@@ -2,8 +2,11 @@
 
 Runs as a CloudFormation custom resource on stack deletion. Removes all
 SageMaker apps, spaces and user profiles from the Studio domain (waiting
-for each to fully drain) and all EFS access points from the Studio file
-system so CloudFormation can delete the domain and EFS cleanly.
+for each to fully drain), the EFS resource policies, every access point on
+the Studio file system (the presigned-URL Lambda creates one per user, and
+EFS requires them gone before DeleteFileSystem), the SageMaker-managed home
+EFS with its mount targets, and the SageMaker-managed NFS security groups,
+so CloudFormation can delete the domain, the EFS and the VPC cleanly.
 
 If draining apps/spaces/user-profiles fails, the handler raises — this
 fails the custom resource and stops CloudFormation before it tries (and
@@ -147,6 +150,12 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     # managed EFS have resource policies that block DescribeMountTargets.
     if efs_id:
         _delete_efs_resource_policy(region, efs_id)
+        # The per-user access points the presigned-URL Lambda created: EFS
+        # requires a file system's access points gone before DeleteFileSystem
+        # (https://docs.aws.amazon.com/efs/latest/ug/delete-efs-fs.html), which
+        # CloudFormation calls on the Studio EFS after this resource. Listing
+        # them needs the resource policy removed first.
+        errors.extend(_delete_access_points(region, efs_id))
     sm_efs_id = _get_sagemaker_home_efs_id(region, domain_id)
     if sm_efs_id:
         _delete_efs_resource_policy(region, sm_efs_id)
