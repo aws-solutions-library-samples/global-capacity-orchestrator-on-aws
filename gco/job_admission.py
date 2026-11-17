@@ -347,6 +347,27 @@ def validate_resource_kind(
     return True, None
 
 
+def within_nesting_depth(document: object, max_depth: int) -> bool:
+    """Whether ``document`` nests dicts and lists no more than ``max_depth`` levels deep.
+
+    The ``yaml_max_depth`` check both submission paths apply before any other.
+    The top-level document is depth 0 and each dict or list adds one; a value
+    deeper than the limit fails it. The walk is iterative and stops at the
+    first value past the limit, so no document, however deep, can exhaust the
+    interpreter's stack here.
+    """
+    pending: list[tuple[object, int]] = [(document, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > max_depth:
+            return False
+        if isinstance(value, dict):
+            pending.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list):
+            pending.extend((child, depth + 1) for child in value)
+    return True
+
+
 def _positive_quantity(value: Any) -> bool:
     """True if a K8s resource quantity is present and greater than zero."""
     if value is None:

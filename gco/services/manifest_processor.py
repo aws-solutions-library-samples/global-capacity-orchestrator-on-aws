@@ -152,6 +152,9 @@ from gco.job_admission import (
 from gco.job_admission import (
     weighted_pod_specs as weighted_pod_specs,
 )
+from gco.job_admission import (
+    within_nesting_depth as within_nesting_depth,
+)
 from gco.k8s_objects import json_object, present
 from gco.manifest_security_policy import (
     MANIFEST_SECURITY_POLICY_DEFAULTS,
@@ -820,23 +823,19 @@ class ManifestProcessor:
     def _check_yaml_depth(self, obj: Any, current_depth: int = 0) -> bool:
         """Check if a parsed YAML/JSON object exceeds max nesting depth.
 
-        Recursively walks dicts and lists. Returns False if depth exceeds
+        Walks dicts and lists through
+        :func:`gco.job_admission.within_nesting_depth`, the check the SQS
+        consumer applies too. Returns False if depth exceeds
         ``self.yaml_max_depth``.
 
         Args:
             obj: The parsed object to check (dict, list, or scalar).
-            current_depth: Current recursion depth (callers should leave at 0).
+            current_depth: Depth ``obj`` sits at already (callers should leave at 0).
 
         Returns:
             True if the object is within the depth limit, False otherwise.
         """
-        if current_depth > self.yaml_max_depth:
-            return False
-        if isinstance(obj, dict):
-            return all(self._check_yaml_depth(v, current_depth + 1) for v in obj.values())
-        if isinstance(obj, list):
-            return all(self._check_yaml_depth(item, current_depth + 1) for item in obj)
-        return True
+        return within_nesting_depth(obj, self.yaml_max_depth - current_depth)
 
     def validate_manifest(
         self,

@@ -48,6 +48,8 @@ Configuration via environment variables:
                              with cdk.json::job_validation_policy.trusted_dockerhub_orgs.
     K8S_API_TIMEOUT:         Seconds each Kubernetes API request attempt may
                              take (default: 30, gco.services.k8s_client)
+    YAML_MAX_DEPTH:          Maximum manifest nesting depth (default: 50),
+                             the REST processor's variable and default
 
 Security policy toggles (all default to true except ``BLOCK_RUN_AS_ROOT``
 which defaults to false, matching job_validation_policy.manifest_security_policy
@@ -104,6 +106,7 @@ from gco.job_admission import (
     parse_cpu_millicores,
     parse_memory_bytes,
     resource_totals,
+    within_nesting_depth,
 )
 from gco.job_envelope import DEFAULT_JOB_NAMESPACE
 from gco.manifest_security_policy import parse_boolean_environment
@@ -255,6 +258,10 @@ BLOCK_RUN_AS_ROOT = parse_boolean_environment("BLOCK_RUN_AS_ROOT", False)
 # manifest_processor.require_accelerator_toleration so the SQS path is not a
 # bypass.
 REQUIRE_ACCELERATOR_TOLERATION = parse_boolean_environment("REQUIRE_ACCELERATOR_TOLERATION", True)
+
+# Maximum manifest nesting depth: the variable and default the REST processor
+# reads (create_manifest_processor_from_env), checked the same way.
+YAML_MAX_DEPTH = int(os.environ.get("YAML_MAX_DEPTH", "50"))
 
 
 def _is_registry_domain(entry: str) -> bool:
@@ -473,10 +480,16 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
     and accelerator tolerations unioned across views for the toleration
     check.
 
+    Before any of these, the manifest must nest no deeper than
+    ``YAML_MAX_DEPTH`` levels (``yaml_max_depth``, default 50), checked by
+    the function the REST path uses and reported in its words.
+
     Returns:
         ``(True, "")`` if the manifest is accepted, otherwise
         ``(False, reason)`` where ``reason`` is a human-readable string.
     """
+    if not within_nesting_depth(m, YAML_MAX_DEPTH):
+        return False, f"Manifest exceeds maximum nesting depth of {YAML_MAX_DEPTH} levels"
     kind = m.get("kind")
     if not kind:
         return False, "missing 'kind'"
@@ -878,7 +891,9 @@ def process_one_message() -> bool:
 
     try:
         body = json.loads(msg.get("Body", ""))
-    except (json.JSONDecodeError, TypeError) as e:
+    except (json.JSONDecodeError, TypeError, RecursionError) as e:
+        # RecursionError: one SQS message has room for more nesting than the
+        # parser can follow (it gives up near 120k levels, 240 KB).
         log.error("Malformed SQS message body; retaining for retry/DLQ: %s", e)
         return False
 

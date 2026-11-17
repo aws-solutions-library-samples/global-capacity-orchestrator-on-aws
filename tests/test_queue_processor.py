@@ -44,6 +44,7 @@ _QP_ENV_VARS = (
     "TRUSTED_REGISTRIES",
     "TRUSTED_DOCKERHUB_ORGS",
     "REQUIRE_ACCELERATOR_TOLERATION",
+    "YAML_MAX_DEPTH",
     "JOBS_TABLE_NAME",
     "DYNAMODB_REGION",
     "QP_JOB_QUEUE_MAX_RECEIVE_COUNT",
@@ -296,6 +297,67 @@ class TestNamespaceConfig:
         qp = _reload()
         assert qp.validate_manifest(_job(gpu=2))[0] is True
         assert qp.validate_manifest(_job(gpu=3))[0] is False
+
+
+class TestNestingDepth:
+    """The SQS path enforces the REST path's ``yaml_max_depth`` limit.
+
+    It used to skip the check, so a manifest the REST path refused for its
+    nesting was applied when it arrived through the queue instead.
+    """
+
+    @staticmethod
+    def _deep_job(depth: int) -> dict:
+        """A valid Job whose one annotation nests ``depth`` dicts deep."""
+        nested: object = "leaf"
+        for _ in range(depth):
+            nested = {"nested": nested}
+        job = _job()
+        job["metadata"]["annotations"] = {"deep": nested}
+        return job
+
+    def test_a_manifest_past_the_default_limit_is_rejected_as_the_rest_path_rejects_it(self):
+        from unittest.mock import patch
+
+        from gco.services.manifest_processor import ManifestProcessor
+
+        qp = _reload()
+        with patch("gco.services.manifest_processor.config"):
+            rest = ManifestProcessor("c", "us-east-1", {"allowed_namespaces": ["gco-jobs"]})
+        assert qp.YAML_MAX_DEPTH == rest.yaml_max_depth == 50
+
+        deep = self._deep_job(60)
+        expected = "Manifest exceeds maximum nesting depth of 50 levels"
+        assert qp.validate_manifest(deep) == (False, expected)
+        assert rest.validate_manifest(deep) == (False, expected)
+        assert qp.validate_manifest(self._deep_job(40)) == (True, "")
+
+    def test_yaml_max_depth_sets_the_limit(self, monkeypatch):
+        monkeypatch.setenv("YAML_MAX_DEPTH", "8")
+        qp = _reload()
+        assert qp.validate_manifest(self._deep_job(4)) == (True, "")
+        assert qp.validate_manifest(self._deep_job(6)) == (
+            False,
+            "Manifest exceeds maximum nesting depth of 8 levels",
+        )
+
+    def test_a_body_too_deep_for_the_json_parser_is_retained_as_malformed(self):
+        """Nesting past the parser's own limit fails the message instead of the process."""
+        qp = _reload()
+        sqs = MagicMock()
+        qp.boto3 = MagicMock()
+        qp.boto3.client.return_value = sqs
+        depth = 130_000  # about 260 KB, within one SQS message
+        sqs.receive_message.return_value = {
+            "Messages": [
+                {
+                    "ReceiptHandle": "receipt",
+                    "Body": '{"job_id": "deep", "manifests": [' + "[" * depth + "]" * depth + "]}",
+                }
+            ]
+        }
+        assert qp.process_one_message() is False
+        sqs.delete_message.assert_not_called()
 
 
 # ── Apply Manifest ───────────────────────────────────────────────────────
