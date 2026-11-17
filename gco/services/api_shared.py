@@ -9,13 +9,14 @@ manifest_api.py and the routers.
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException
 from kubernetes.client.models import CoreV1Event, V1Job, V1Pod
@@ -1074,13 +1075,29 @@ def _collect_job_events(
 def _apply_template_parameters(
     manifest: dict[str, Any], parameters: dict[str, Any]
 ) -> dict[str, Any]:
-    """Apply parameter substitutions to a manifest template."""
-    import json
-    import re
+    """Apply parameter substitutions to a manifest template.
 
-    manifest_str = json.dumps(manifest)
-    for key, value in parameters.items():
-        pattern = r"\{\{\s*" + re.escape(key) + r"\s*\}\}"
-        manifest_str = re.sub(pattern, str(value), manifest_str)
-    result: dict[str, Any] = json.loads(manifest_str)
-    return result
+    Every ``{{ key }}`` in a string (a value or a mapping key) becomes
+    ``str(parameters[key])``, verbatim and in one pass: a value is text inside
+    the string that held its placeholder, so quotes and backslashes in it stay
+    as written, it cannot add structure to the manifest, and a placeholder
+    inside a value is not expanded. Placeholders without a parameter stay as
+    they are. Returns a new manifest; the template is not modified.
+    """
+    if not parameters:
+        return copy.deepcopy(manifest)
+    rendered = {key: str(value) for key, value in parameters.items()}
+    placeholder = re.compile(
+        r"\{\{\s*(" + "|".join(re.escape(key) for key in rendered) + r")\s*\}\}"
+    )
+
+    def substitute(node: Any) -> Any:
+        if isinstance(node, str):
+            return placeholder.sub(lambda match: rendered[match.group(1)], node)
+        if isinstance(node, dict):
+            return {substitute(key): substitute(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [substitute(item) for item in node]
+        return node
+
+    return cast(dict[str, Any], substitute(manifest))

@@ -1875,6 +1875,14 @@ gco slurm accounting -r us-east-1 --since 7d --state COMPLETED
 
 Templates allow you to define reusable job configurations with parameter substitution.
 
+A parameter replaces each `{{name}}` placeholder inside a string of the
+manifest (a value or a mapping key) as plain text, in one pass: quotes and
+backslashes in the value stay as written, a placeholder inside a value is not
+expanded, and a value cannot add structure to the manifest. Placeholders go
+inside strings (`"image": "{{image}}"`, `["python", "-c", "{{code}}"]`), and the
+result is always a string, which Kubernetes accepts for quantities such as
+`"{{gpu_count}}"`. A placeholder with no parameter is left as written.
+
 ### List Templates
 
 ```http
@@ -2595,7 +2603,7 @@ awscurl --service execute-api --region "$API_REGION" \
       "spec": {
         "template": {
           "spec": {
-            "containers": [{"name": "main", "image": "{{image}}", "command": {{command}}}],
+            "containers": [{"name": "main", "image": "{{image}}", "command": ["python", "-c", "{{code}}"]}],
             "restartPolicy": "Never"
           }
         }
@@ -2611,6 +2619,6 @@ awscurl --service execute-api --region "$API_REGION" \
   -d '{
     "name": "my-python-job",
     "namespace": "gco-jobs",
-    "parameters": {"command": "[\"python\", \"-c\", \"print(1+1)\"]"}
+    "parameters": {"code": "print(1+1)"}
   }'
 ```

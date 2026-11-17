@@ -574,3 +574,33 @@ class TestApplyTemplateParameters:
         manifest = {"metadata": {"name": "static"}}
         result = _apply_template_parameters(manifest, {})
         assert result["metadata"]["name"] == "static"
+        assert result is not manifest
+
+    @pytest.mark.parametrize(
+        "value",
+        ['say "hi"', "C:\\path\\to", "\\1 and \\g<0>", "line\nbreak"],
+        ids=["quotes", "backslashes", "regex-group-syntax", "newline"],
+    )
+    def test_a_value_is_inserted_verbatim(self, value):
+        """Substitution used to run re.sub over the manifest's JSON text, so a
+        quote broke the JSON and a backslash broke the regex replacement (a
+        500 from create-job-from-template either way)."""
+        manifest = {"spec": {"args": ["--message={{ msg }}"]}}
+        result = _apply_template_parameters(manifest, {"msg": value})
+        assert result["spec"]["args"] == [f"--message={value}"]
+
+    def test_a_value_cannot_add_structure_to_the_manifest(self):
+        """A parameter is text inside its string, never JSON spliced into the manifest."""
+        manifest = {"spec": {"containers": [{"name": "main", "image": "{{ image }}"}]}}
+        injected = 'busybox", "securityContext": {"privileged": true}, "x": "'
+        result = _apply_template_parameters(manifest, {"image": injected})
+        assert result["spec"]["containers"] == [{"name": "main", "image": injected}]
+
+    def test_placeholders_in_keys_are_substituted_and_values_are_not_re_expanded(self):
+        manifest = {"metadata": {"labels": {"{{ key }}": "{{ first }}"}}, "spec": {"replicas": 2}}
+        result = _apply_template_parameters(
+            manifest, {"key": "team", "first": "{{ second }}", "second": "never"}
+        )
+        assert result == {"metadata": {"labels": {"team": "{{ second }}"}}, "spec": {"replicas": 2}}
+        # The template itself is left as it was.
+        assert manifest["metadata"]["labels"] == {"{{ key }}": "{{ first }}"}
