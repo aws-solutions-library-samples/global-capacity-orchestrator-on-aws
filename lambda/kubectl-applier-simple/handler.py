@@ -1271,7 +1271,7 @@ def _delete_exact_resources(
     if not targets:
         return result
 
-    dynamic_client = dynamic.DynamicClient(client.ApiClient())
+    dynamic_client = dynamic.DynamicClient(_api_client())
     delete_options = client.V1DeleteOptions(propagation_policy="Background")
     for api_version, kind, namespace, name in targets:
         identifier = f"{api_version}/{kind}/{namespace or '<cluster>'}/{name}"
@@ -1410,6 +1410,55 @@ def get_eks_token(cluster_name: str, region: str) -> str:
     return f"k8s-aws-v1.{token_b64}"
 
 
+#: (connect, read) seconds for every Kubernetes API call that does not set its
+#: own ``_request_timeout``, the 30-second request bound the helm installer's
+#: kubectl calls use. Without one the client passes urllib3 ``timeout=None``,
+#: and urllib3 applies it to the socket (``settimeout(None)`` overrides
+#: ``socket.setdefaulttimeout``), so a call could block forever: one stalled
+#: API-server connection held the invocation until Lambda's 15-minute limit,
+#: and the 5-minute gateway teardown task, which has no retry, failed with it.
+_K8S_REQUEST_TIMEOUT_SECONDS = (10.0, 30.0)
+
+
+class _BoundedApiClient(client.ApiClient):
+    """An ApiClient whose calls default to ``_K8S_REQUEST_TIMEOUT_SECONDS``.
+
+    Every typed API method and the dynamic client, discovery included, send
+    their requests through ``call_api``.
+    """
+
+    def call_api(
+        self,
+        method: Any,
+        url: Any,
+        header_params: Any = None,
+        body: Any = None,
+        post_params: Any = None,
+        _request_timeout: Any = None,
+    ) -> Any:
+        return super().call_api(
+            method,
+            url,
+            header_params,
+            body,
+            post_params,
+            _request_timeout=(
+                _K8S_REQUEST_TIMEOUT_SECONDS if _request_timeout is None else _request_timeout
+            ),
+        )
+
+
+def _api_client() -> client.ApiClient:
+    """The ApiClient ``configure_k8s_client`` installed, or a new bounded one.
+
+    ``ApiClient.get_default`` makes a plain, unbounded client when none is
+    installed, as for a caller that loaded a kubeconfig itself (the kind CI
+    jobs that call ``_delete_exact_resources``).
+    """
+    installed = client.ApiClient.get_default()
+    return installed if isinstance(installed, _BoundedApiClient) else _BoundedApiClient()
+
+
 def configure_k8s_client(cluster_name: str, region: str) -> None:
     """Configure Kubernetes client for EKS cluster."""
     eks = get_eks_client()
@@ -1423,13 +1472,11 @@ def configure_k8s_client(cluster_name: str, region: str) -> None:
     configuration.host = cluster["endpoint"]
     configuration.verify_ssl = True
 
-    # Set connection timeouts (important for Lambda!)
+    # The invocation's calls are sequential, so one connection serves them.
+    # urllib3 retries a call that cannot connect, and an idempotent one whose
+    # read fails or times out (_K8S_REQUEST_TIMEOUT_SECONDS), up to three times.
     configuration.connection_pool_maxsize = 1
     configuration.retries = 3
-    # Set socket timeout to 30 seconds
-    import socket
-
-    socket.setdefaulttimeout(30)
 
     # Decode and write CA certificate to temp file using secure method
     ca_cert = base64.b64decode(cluster["certificateAuthority"]["data"])
@@ -1456,6 +1503,8 @@ def configure_k8s_client(cluster_name: str, region: str) -> None:
     )
 
     client.Configuration.set_default(configuration)
+    # Typed APIs built without an api_client use this one.
+    client.ApiClient.set_default(_BoundedApiClient(configuration))
 
 
 def restart_deployments(namespace: str, deployment_names: list[str]) -> dict[str, Any]:
@@ -2997,7 +3046,7 @@ def validate_manifests(
     }
 
     configure_k8s_client(cluster_name, region)
-    dynamic_client = dynamic.DynamicClient(client.ApiClient())
+    dynamic_client = dynamic.DynamicClient(_api_client())
     resource_cache: dict[tuple[str, str], Any] = {}
     validated_resources: list[dict[str, str]] = []
     failures: list[str] = []

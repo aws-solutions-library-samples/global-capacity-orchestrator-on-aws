@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import boto3
 import pytest
+import urllib3
 import yaml
 
 
@@ -4935,6 +4936,7 @@ class TestEksClientPlumbing:
             patch.object(handler_module, "get_eks_client", return_value=eks),
             patch.object(handler_module, "get_eks_token", return_value="k8s-aws-v1.tok") as token,
             patch.object(handler_module.client.Configuration, "set_default") as set_default,
+            patch.object(handler_module.client.ApiClient, "set_default") as set_api_client,
             patch("tempfile.mkstemp", return_value=(fd, str(ca_path))) as mkstemp,
             patch("socket.setdefaulttimeout") as set_timeout,
         ):
@@ -4942,7 +4944,8 @@ class TestEksClientPlumbing:
 
         eks.describe_cluster.assert_called_once_with(name="gco-us-east-1")
         mkstemp.assert_called_once_with(suffix=".crt")
-        set_timeout.assert_called_once_with(30)
+        # The process-wide socket default never bounded the client's sockets.
+        set_timeout.assert_not_called()
         token.assert_called_once_with("gco-us-east-1", "us-east-1")
         assert ca_path.read_bytes() == ca_pem
         configuration = set_default.call_args.args[0]
@@ -4953,6 +4956,9 @@ class TestEksClientPlumbing:
         assert configuration.retries == 3
         assert configuration.ssl_ca_cert == str(ca_path)
         assert configuration.api_key == {"authorization": "Bearer k8s-aws-v1.tok"}
+        api_client = set_api_client.call_args.args[0]
+        assert isinstance(api_client, handler_module._BoundedApiClient)
+        assert api_client.configuration is configuration
 
     def test_configure_closes_the_descriptor_when_the_ca_write_fails(
         self, handler_module, tmp_path
@@ -4966,8 +4972,8 @@ class TestEksClientPlumbing:
             patch.object(handler_module, "get_eks_client", return_value=eks),
             patch.object(handler_module, "get_eks_token") as token,
             patch.object(handler_module.client.Configuration, "set_default") as set_default,
+            patch.object(handler_module.client.ApiClient, "set_default") as set_api_client,
             patch("tempfile.mkstemp", return_value=(fd, str(ca_path))),
-            patch("socket.setdefaulttimeout"),
             patch.object(handler_module.os, "fdopen", side_effect=OSError("disk full")),
             patch.object(handler_module.os, "close", wraps=os.close) as close,
             pytest.raises(OSError, match="disk full"),
@@ -4977,6 +4983,107 @@ class TestEksClientPlumbing:
         close.assert_called_once_with(fd)
         token.assert_not_called()
         set_default.assert_not_called()
+        set_api_client.assert_not_called()
+
+
+class TestKubernetesRequestTimeout:
+    """Every Kubernetes call carries a bounded timeout down to urllib3 (finding L4).
+
+    Kubernetes 37 hands urllib3 ``timeout=None`` for a call without
+    ``_request_timeout``, and urllib3 then blocks on the socket with no limit,
+    whatever ``socket.setdefaulttimeout`` says. No call in the applier passed
+    one, so a stalled API-server connection held the invocation until the
+    15-minute Lambda limit.
+    """
+
+    @staticmethod
+    def _bounded_client(handler_module):
+        configuration = handler_module.client.Configuration()
+        configuration.host = "https://ABCDEF.gr7.us-east-1.eks.amazonaws.com"
+        api_client = handler_module._BoundedApiClient(configuration)
+        response = urllib3.HTTPResponse(
+            body=b'{"kind":"Namespace","apiVersion":"v1","metadata":{"name":"gco-system"}}',
+            status=200,
+            headers={"Content-Type": "application/json"},
+            preload_content=False,
+        )
+        pool_request = MagicMock(return_value=response)
+        api_client.rest_client.pool_manager.request = pool_request
+        return api_client, pool_request
+
+    def test_typed_api_calls_send_the_default_timeout_to_urllib3(self, handler_module):
+        api_client, pool_request = self._bounded_client(handler_module)
+
+        namespace = handler_module.client.CoreV1Api(api_client).read_namespace("gco-system")
+
+        assert namespace.metadata.name == "gco-system"
+        timeout = pool_request.call_args.kwargs["timeout"]
+        assert isinstance(timeout, urllib3.Timeout)
+        assert (timeout.connect_timeout, timeout.read_timeout) == (
+            handler_module._K8S_REQUEST_TIMEOUT_SECONDS
+        )
+
+    def test_an_explicit_request_timeout_is_kept(self, handler_module):
+        api_client, pool_request = self._bounded_client(handler_module)
+
+        handler_module.client.CoreV1Api(api_client).read_namespace("gco-system", _request_timeout=5)
+
+        assert pool_request.call_args.kwargs["timeout"].total == 5
+
+    def test_dynamic_client_requests_go_through_the_same_bound(self, handler_module):
+        api_client, pool_request = self._bounded_client(handler_module)
+        dynamic_client = handler_module.dynamic.DynamicClient(api_client, discoverer=MagicMock())
+
+        dynamic_client.request("GET", "/api/v1/namespaces/gco-system")
+
+        timeout = pool_request.call_args.kwargs["timeout"]
+        assert (timeout.connect_timeout, timeout.read_timeout) == (
+            handler_module._K8S_REQUEST_TIMEOUT_SECONDS
+        )
+
+    def test_typed_apis_after_configure_send_a_bounded_timeout(
+        self, handler_module, monkeypatch, tmp_path
+    ):
+        """The applier's own call shape: configure, then ``client.XxxApi()``."""
+        monkeypatch.setattr(handler_module.client.ApiClient, "_default", None)
+        eks = MagicMock()
+        eks.describe_cluster.return_value = TestEksClientPlumbing._cluster(b"ca")
+        ca_path = tmp_path / "eks-ca.crt"
+        fd = os.open(ca_path, os.O_RDWR | os.O_CREAT, 0o600)
+        response = urllib3.HTTPResponse(
+            body=b'{"kind":"Gateway","metadata":{"name":"gco-gateway"}}',
+            status=200,
+            headers={"Content-Type": "application/json"},
+            preload_content=False,
+        )
+
+        with (
+            patch.object(handler_module, "get_eks_client", return_value=eks),
+            patch.object(handler_module, "get_eks_token", return_value="k8s-aws-v1.tok"),
+            patch.object(handler_module.client.Configuration, "set_default"),
+            patch("tempfile.mkstemp", return_value=(fd, str(ca_path))),
+            patch.object(urllib3.PoolManager, "request", return_value=response) as pool_request,
+        ):
+            handler_module.configure_k8s_client("gco-us-east-1", "us-east-1")
+            handler_module.client.CustomObjectsApi().get_namespaced_custom_object(
+                "gateway.networking.k8s.io", "v1", "gco-system", "gateways", "gco-gateway"
+            )
+
+        timeout = pool_request.call_args.kwargs["timeout"]
+        assert timeout is not None
+        assert (timeout.connect_timeout, timeout.read_timeout) == (
+            handler_module._K8S_REQUEST_TIMEOUT_SECONDS
+        )
+        installed = handler_module.client.ApiClient.get_default()
+        assert isinstance(installed, handler_module._BoundedApiClient)
+        assert handler_module._api_client() is installed
+
+    def test_dynamic_client_without_an_installed_default_is_still_bounded(
+        self, handler_module, monkeypatch
+    ):
+        monkeypatch.setattr(handler_module.client.ApiClient, "_default", None)
+
+        assert isinstance(handler_module._api_client(), handler_module._BoundedApiClient)
 
 
 class TestSendResponse:
