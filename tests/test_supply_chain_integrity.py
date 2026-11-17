@@ -400,6 +400,49 @@ def test_dev_container_installs_the_project_against_the_lock() -> None:
     assert "COPY pyproject.toml requirements-lock.txt ./" in _read("Dockerfile.dev")
 
 
+def test_retried_artifact_uploads_overwrite_only_their_own_first_attempt() -> None:
+    """Retries overwrite, so no two uploads in one workflow may share a name.
+
+    The artifact service can fail the finalize call after it has recorded the
+    artifact, and upload-artifact v4+ refuses a second upload under that name
+    (409 "an artifact with this name already exists"), so retries that kept
+    the caller's ``overwrite: false`` could never succeed. They now overwrite,
+    which replaces only the step's own first attempt as long as every upload
+    in a workflow has its own name and every matrix leg names its artifact
+    after its leg.
+    """
+    action = yaml.safe_load(_read(".github/actions/upload-artifact-with-retry/action.yml"))
+    uploads = [
+        step
+        for step in action["runs"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+    assert len(uploads) == 3
+    assert uploads[0]["with"]["overwrite"] == "${{ inputs.overwrite }}"
+    assert [upload["with"]["overwrite"] for upload in uploads[1:]] == [True, True]
+
+    checked = 0
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        names: list[str] = []
+        for job_id, job in workflow["jobs"].items():
+            matrix = (job.get("strategy") or {}).get("matrix")
+            for step in job.get("steps") or []:
+                uses = str(step.get("uses", ""))
+                if uses != "./.github/actions/upload-artifact-with-retry" and not uses.startswith(
+                    "actions/upload-artifact@"
+                ):
+                    continue
+                name = str(step["with"]["name"])
+                if matrix:
+                    assert "${{ matrix." in name, f"{path.name}:{job_id}: every leg uploads {name}"
+                names.append(name)
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        assert not duplicates, f"{path.name}: several uploads share {duplicates}"
+        checked += len(names)
+    assert checked >= 30, checked
+
+
 def test_workflows_do_not_execute_mutable_remote_installers() -> None:
     workflows = "\n".join(
         path.read_text(encoding="utf-8")
