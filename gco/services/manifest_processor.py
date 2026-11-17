@@ -870,23 +870,16 @@ class ManifestProcessor:
                 )
 
             # Validate resource kind using the policy shared with the SQS path.
-            kind = manifest.get("kind", "")
             kind_valid, kind_error = validate_resource_kind(manifest, self.allowed_kinds)
             if not kind_valid:
                 return False, kind_error
 
-            # Validate resource limits for workload resources
-            if kind in [
-                "Deployment",
-                "Job",
-                "CronJob",
-                "StatefulSet",
-                "DaemonSet",
-                "TrainJob",
-            ]:
-                resource_valid, resource_error = self._validate_resource_limits(manifest)
-                if not resource_valid:
-                    return False, resource_error
+            # Every manifest is held to the caps, whatever its kind: a bare Pod
+            # runs on the same nodes as a Job's template, and a manifest with
+            # no pod spec sums to zero. The SQS consumer gates the same way.
+            resource_valid, resource_error = self._validate_resource_limits(manifest)
+            if not resource_valid:
+                return False, resource_error
 
             # Require accelerator jobs to carry a matching toleration.
             if self.require_accelerator_toleration:

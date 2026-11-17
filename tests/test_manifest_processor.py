@@ -253,6 +253,58 @@ class TestResourceLimitValidation:
         assert is_valid is False
         assert "cdk.json" in error
 
+    @staticmethod
+    def _pod(kind: str = "Pod", *, gpu: int, cpu: str, memory: str) -> dict:
+        """A tolerating, trusted-image workload whose only problem can be its size."""
+        pod_spec = {
+            "restartPolicy": "Never",
+            "tolerations": [
+                {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+            ],
+            "containers": [
+                {
+                    "name": "main",
+                    "image": "nvcr.io/nvidia/pytorch:24.01-py3",
+                    "resources": {"limits": {"nvidia.com/gpu": gpu, "cpu": cpu, "memory": memory}},
+                }
+            ],
+        }
+        spec = pod_spec if kind == "Pod" else {"template": {"spec": pod_spec}}
+        return {
+            "apiVersion": "v1" if kind == "Pod" else "apps/v1",
+            "kind": kind,
+            "metadata": {"name": "big", "namespace": "gco-jobs"},
+            "spec": spec,
+        }
+
+    def test_bare_pod_over_the_caps_is_rejected(self, processor):
+        """A bare Pod is held to the per-manifest caps a Job's template is.
+
+        The cap check used to run only for a fixed list of workload kinds that
+        left out Pod, an allowed kind, so one Pod could ask for 8 GPUs where
+        the cap is 4 (the SQS consumer already rejected the same manifest).
+        """
+        is_valid, error = processor.validate_manifest(self._pod(gpu=8, cpu="64", memory="512Gi"))
+        assert is_valid is False
+        assert "CPU 64000m exceeds max 10000m" in error
+        assert "Memory 512Gi exceeds max 32Gi" in error
+        assert "GPU 8 exceeds max 4" in error
+
+    def test_bare_pod_within_the_caps_is_admitted(self, processor):
+        assert processor.validate_manifest(self._pod(gpu=1, cpu="2", memory="4Gi")) == (
+            True,
+            None,
+        )
+
+    def test_caps_do_not_depend_on_a_kind_list(self, processor):
+        """An operator-allowed pod-template kind is capped without being named in code."""
+        processor.allowed_kinds = {*processor.allowed_kinds, "ReplicaSet"}
+        is_valid, error = processor.validate_manifest(
+            self._pod("ReplicaSet", gpu=8, cpu="1", memory="1Gi")
+        )
+        assert is_valid is False
+        assert "GPU 8 exceeds max 4" in error
+
 
 class TestSecurityContextValidation:
     """Tests for security context validation."""
