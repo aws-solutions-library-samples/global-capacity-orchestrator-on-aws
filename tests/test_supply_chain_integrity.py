@@ -1430,7 +1430,35 @@ def test_dependency_scan_credentials_are_default_branch_only() -> None:
     ) in workflow
     assert "persist-credentials: false" in workflow
     assert "persist-credentials: true" not in workflow
-    assert "steps.scan.outputs.scan_complete == 'true'" in workflow
+    assert "needs.deps-scan.outputs.scan_complete == 'true'" in workflow
+
+
+def test_dependency_scan_keeps_each_credential_in_its_own_job() -> None:
+    """The scan's third-party code never shares a job with the issue-writing token.
+
+    The scan installs latest-PyPI packages and runs a ~7,000-line script. With
+    ``issues: write`` and ``id-token: write`` granted workflow-wide, the OIDC
+    request variables were present during those installs and the issue-writing
+    GITHUB_TOKEN reached the scan step. Now the scan job alone can mint the AWS
+    OIDC token, and the job that writes issues checks nothing out and runs only
+    ``gh`` against the scan job's outputs and uploaded report.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/deps-scan.yml"))
+    assert workflow["permissions"] == {"contents": "read"}
+    scan, issue = workflow["jobs"]["deps-scan"], workflow["jobs"]["drift-issue"]
+    assert scan["permissions"] == {"contents": "read", "id-token": "write"}
+    assert issue["permissions"] == {"issues": "write"}
+    assert issue["needs"] == "deps-scan"
+    assert set(scan["outputs"]) == {"has_drift", "scan_complete"}
+    issue_steps = issue["steps"]
+    assert [step.get("uses", "").split("@")[0] for step in issue_steps if "uses" in step] == [
+        "actions/download-artifact"
+    ]
+    for step in issue_steps:
+        assert "steps.scan" not in json.dumps(step), step.get("name")
+    scan_runs = "\n".join(step.get("run", "") for step in scan["steps"])
+    # The runner image's AWS CLI v2; pip's awscli is v1 and pins botocore exactly.
+    assert "pip install awscli" not in scan_runs
 
 
 def test_dependency_scanner_records_incomplete_queries_before_issue_closure() -> None:
@@ -2136,15 +2164,19 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
 
 
 def test_incomplete_dependency_scan_ends_with_a_failing_step() -> None:
+    """An incomplete scan fails its job after uploading its report, and still refreshes."""
     workflow = _read(".github/workflows/deps-scan.yml")
-    failure_step = workflow.index("- name: Fail an incomplete dependency scan")
-
-    assert failure_step > workflow.index("- name: Close the resolved drift issue")
-    failure_contract = workflow[failure_step:]
-    assert "always()" in failure_contract
-    assert "steps.scan.outputs.scan_complete != 'true'" in failure_contract
-    assert "exit 1" in failure_contract
-    assert "SCAN_COMPLETE: ${{ steps.scan.outputs.scan_complete }}" in workflow
+    jobs = yaml.safe_load(workflow)["jobs"]
+    scan_steps = [step.get("name") for step in jobs["deps-scan"]["steps"]]
+    assert scan_steps[-1] == "Fail an incomplete dependency scan"
+    assert scan_steps.index("Upload the drift report") < len(scan_steps) - 1
+    failure = jobs["deps-scan"]["steps"][-1]
+    assert "always()" in failure["if"]
+    assert "steps.scan.outputs.scan_complete != 'true'" in failure["if"]
+    assert "exit 1" in failure["run"]
+    # The issue job must still run after that deliberate failure.
+    assert jobs["drift-issue"]["if"].startswith("always() &&")
+    assert "SCAN_COMPLETE: ${{ needs.deps-scan.outputs.scan_complete }}" in workflow
     assert "The report is partial because one or more checks were incomplete" in workflow
 
 
