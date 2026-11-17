@@ -15,8 +15,11 @@ alert when detection fails or managed resources differ from the template.
 
 1. Start `DetectStackDrift` for the configured stack.
 2. Poll `DescribeStackDriftDetectionStatus` to a bounded terminal state.
-3. Return without notification when the stack is `IN_SYNC`.
-4. List drifted resources and publish a compact JSON SNS notification otherwise.
+3. If the detection is still running when polling gives up, publish a
+   "did not finish" notice and stop: the stack's drift status is not final yet.
+4. Return without notification unless the stack is `DRIFTED` (`IN_SYNC`,
+   `NOT_CHECKED` and `UNKNOWN` are not drift).
+5. List the drifted resources and publish a compact JSON SNS notification.
 
 ## Environment
 
@@ -30,9 +33,13 @@ alert when detection fails or managed resources differ from the template.
 
 ## Alert Behavior
 
-Detection failures and detected drift publish JSON summaries. Drift alerts list
-logical ID, physical ID, resource type, and drift status. SNS subjects are
-truncated defensively to the service's 100-character limit.
+Detection failures, detections that did not finish within the polling window,
+and detected drift publish JSON summaries, each under its own subject. Drift
+alerts list the `MODIFIED` and `DELETED` resources with logical ID, physical
+ID, resource type, and drift status, and list apart (`not_checked_resources`)
+the resources drift detection did not check, such as types it does not
+support. SNS subjects are truncated defensively to the service's 100-character
+limit.
 
 ## Operational Notes
 

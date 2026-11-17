@@ -2,9 +2,10 @@
 
 ``lambda/drift-detection/handler.py`` starts DetectStackDrift, polls the
 asynchronous detection to a terminal state and publishes an SNS alert when
-the stack has drifted (or when detection itself failed). These tests pin the
-environment contract, the three outcomes, the poll loop's terminal/timeout
-behaviour, server-side drift filtering with pagination, and the 100-character
+the stack has drifted (or when detection itself failed or did not finish).
+These tests pin the environment contract, the outcomes, the poll loop's
+terminal/timeout behaviour, server-side drift filtering with pagination,
+NOT_CHECKED resources reported apart from drifted ones, and the 100-character
 SNS subject limit. The stack-side wiring (rule, topic, IAM) is covered by
 ``tests/test_drift_detection.py``.
 """
@@ -132,6 +133,7 @@ class TestOutcomes:
             "detection_status": "DETECTION_COMPLETE",
             "stack_drift_status": "DRIFTED",
             "drifted_resource_count": 2,
+            "not_checked_resource_count": 0,
             "drift_published": True,
         }
         # Filtered server-side so large stacks only return what drifted.
@@ -195,6 +197,88 @@ class TestOutcomes:
         handler.lambda_handler({}, None)
 
         assert _published_message(sns)["reason"] == "Unknown detection failure"
+
+    @pytest.mark.parametrize("last_status", [{}, {"StackDriftStatus": "UNKNOWN"}])
+    def test_unfinished_detection_is_a_did_not_finish_notice_not_drift(
+        self, handler, aws, last_status
+    ):
+        """Before: the missing or UNKNOWN status was "not IN_SYNC", so drift."""
+        cfn, sns = aws
+        cfn.describe_stack_drift_detection_status.return_value = {
+            "DetectionStatus": "DETECTION_IN_PROGRESS",
+            **last_status,
+        }
+
+        result = handler.lambda_handler({}, None)
+
+        assert result == {
+            "stack_name": _STACK,
+            "detection_status": "DETECTION_IN_PROGRESS",
+            "stack_drift_status": None,
+            "drift_published": True,
+        }
+        cfn.get_paginator.assert_not_called()
+        sns.publish.assert_called_once()
+        assert sns.publish.call_args.kwargs["Subject"] == (
+            f"[GCO] Drift detection did not finish for {_STACK}"
+        )
+        assert _published_message(sns) == {
+            "stack_name": _STACK,
+            "region": "us-east-1",
+            "detection_id": "det-1",
+            "detection_status": "DETECTION_IN_PROGRESS",
+            "waited_seconds": 0,
+        }
+
+    @pytest.mark.parametrize("stack_drift_status", ["NOT_CHECKED", "UNKNOWN", None])
+    def test_a_finished_detection_alerts_only_on_drifted(self, handler, aws, stack_drift_status):
+        cfn, sns = aws
+        cfn.describe_stack_drift_detection_status.return_value = {
+            "DetectionStatus": "DETECTION_COMPLETE",
+            "StackDriftStatus": stack_drift_status,
+        }
+
+        result = handler.lambda_handler({}, None)
+
+        assert result["drift_published"] is False
+        sns.publish.assert_not_called()
+
+    def test_not_checked_resources_are_reported_apart_from_drift(self, handler, aws):
+        cfn, sns = aws
+        cfn.describe_stack_drift_detection_status.return_value = {
+            "DetectionStatus": "DETECTION_COMPLETE",
+            "StackDriftStatus": "DRIFTED",
+        }
+        cfn.get_paginator.return_value.paginate.return_value = [
+            {
+                "StackResourceDrifts": [
+                    {
+                        "LogicalResourceId": "JobsTable",
+                        "PhysicalResourceId": "gco-jobs",
+                        "ResourceType": "AWS::DynamoDB::Table",
+                        "StackResourceDriftStatus": "MODIFIED",
+                    },
+                    {
+                        "LogicalResourceId": "KubectlApply",
+                        "PhysicalResourceId": "kubectl-KubectlApply",
+                        "ResourceType": "Custom::KubectlApply",
+                        "StackResourceDriftStatus": "NOT_CHECKED",
+                    },
+                ]
+            }
+        ]
+
+        result = handler.lambda_handler({}, None)
+
+        assert result["drifted_resource_count"] == 1
+        assert result["not_checked_resource_count"] == 1
+        message = _published_message(sns)
+        assert message["drifted_resource_count"] == 1
+        assert [item["logical_id"] for item in message["drifted_resources"]] == ["JobsTable"]
+        assert message["not_checked_resource_count"] == 1
+        assert message["not_checked_resources"] == [
+            {"logical_id": "KubectlApply", "resource_type": "Custom::KubectlApply"}
+        ]
 
 
 class TestPolling:
