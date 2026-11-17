@@ -54,8 +54,8 @@ from diagrams.code_diagrams._renderer import (
     write_readme,
 )
 from diagrams.code_diagrams._source_marker import (
+    MARKER_SOURCE_ROOTS,
     SENTINEL,
-    is_marker_source,
     strip_all_markers,
     strip_markers_from,
     upsert_markers,
@@ -562,13 +562,22 @@ def prune_retired_markers(project_root: Path, *, charted: set[str]) -> int:
     A full ``strip_all_markers`` + reinsert pass would rewrite every charted
     source on every run, which is exactly the catalogue-wide churn incremental
     generation exists to avoid. Only genuinely retired sources are touched.
+
+    Walks only :data:`MARKER_SOURCE_ROOTS`, as ``strip_all_markers`` and the
+    repository contract do. Walking the whole project and filtering afterwards
+    crossed ``.venv``, ``node_modules`` and every ``.worktrees`` checkout:
+    about forty times the files, and half a minute on a developer machine.
     """
+    candidates: list[Path] = []
+    for root in MARKER_SOURCE_ROOTS:
+        root_path = project_root / root
+        candidates.extend([root_path] if root_path.is_file() else root_path.rglob("*.py"))
     modified = 0
-    for source_path in sorted(project_root.rglob("*.py")):
+    for source_path in sorted(candidates):
+        if not source_path.is_file():
+            continue
         relative = source_path.relative_to(project_root).as_posix()
         if relative in charted or "-build" in relative:
-            continue
-        if not is_marker_source(relative):
             continue
         original = source_path.read_text(encoding="utf-8")
         if SENTINEL not in original:

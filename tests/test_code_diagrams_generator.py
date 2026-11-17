@@ -45,9 +45,11 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -1283,6 +1285,40 @@ class TestPruneRetiredMarkers:
         before = outside.read_bytes()
         assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 0
         assert outside.read_bytes() == before
+
+    def test_only_the_marker_roots_are_walked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pruning never descends into .venv, node_modules or .worktrees.
+
+        It used to rglob the whole project and filter afterwards: 122,328
+        files instead of 2,938 on a developer checkout, about half a minute.
+        """
+        retired = self._write(tmp_path, "gco/retired.py", self._MARKED)
+        self._write(tmp_path, ".venv/lib/site.py", self._MARKED)
+        self._write(tmp_path, ".worktrees/other/cli/retired.py", self._MARKED)
+        walked: list[Path] = []
+        original_rglob = Path.rglob
+
+        def recording_rglob(self: Path, pattern: str, **kwargs: Any) -> Iterator[Path]:
+            walked.append(self)
+            return original_rglob(self, pattern, **kwargs)
+
+        monkeypatch.setattr(Path, "rglob", recording_rglob)
+        assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 1
+        assert source_marker_mod.SENTINEL not in retired.read_text(encoding="utf-8")
+        allowed = {tmp_path / root for root in source_marker_mod.MARKER_SOURCE_ROOTS}
+        assert walked and set(walked) <= allowed
+
+    def test_a_directory_named_like_a_source_is_skipped(self, tmp_path: Path) -> None:
+        (tmp_path / "gco" / "odd.py").mkdir(parents=True)
+        assert generate_mod.prune_retired_markers(tmp_path, charted=set()) == 0
+
+    def test_a_checkout_under_a_build_directory_is_still_pruned(self, tmp_path: Path) -> None:
+        root = tmp_path / "workspace" / "gco-build"
+        retired = self._write(root, "cli/retired.py", self._MARKED)
+        assert generate_mod.prune_retired_markers(root, charted=set()) == 1
+        assert source_marker_mod.SENTINEL not in retired.read_text(encoding="utf-8")
 
     def test_unmarked_sources_are_never_rewritten(self, tmp_path: Path) -> None:
         plain = self._write(tmp_path, "cli/plain.py", "def f():\n    return True\n")
