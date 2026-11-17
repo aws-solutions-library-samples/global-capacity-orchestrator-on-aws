@@ -4661,7 +4661,7 @@ Manage the global job queue (DynamoDB-backed). The job queue provides centralize
 | [`gco queue submit`](#gco-queue-submit) | Submit a job to the global queue for regional pickup. |
 | [`gco queue list`](#gco-queue-list) | List jobs in the global queue. |
 | [`gco queue get`](#gco-queue-get) | Get details of a queued job including status history. |
-| [`gco queue cancel`](#gco-queue-cancel) | Cancel a queued job (only works for jobs not yet running). |
+| [`gco queue cancel`](#gco-queue-cancel) | Cancel a queued job (only while it is still queued, before a region claims it). |
 | [`gco queue stats`](#gco-queue-stats) | Get job queue statistics by region and status. |
 
 </details>
@@ -4751,7 +4751,9 @@ gco queue get abc123-def456 --region us-east-1
 
 #### `gco queue cancel`
 
-Cancel a queued job (only works for jobs not yet running).
+Cancel a queued job (only while it is still queued, before a region claims it).
+A job that is already `claimed`, `applying`, `pending`, `running` or finished cannot be
+cancelled here; the API answers `409`.
 
 ```bash
 gco queue cancel JOB_ID [OPTIONS]

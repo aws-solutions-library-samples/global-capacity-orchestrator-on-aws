@@ -1506,7 +1506,9 @@ gco queue get abc123-def456 --region us-east-1
 DELETE /api/v1/queue/jobs/{job_id}
 ```
 
-Cancel a queued job. Only works for jobs in `queued` or `claimed` status.
+Cancel a queued job. Only a job still in `queued` status can be cancelled; once a
+region has claimed it (`claimed`, `applying`, `pending`, `running`, or a final
+status) the call answers `409`, as it does for an unknown job ID.
 
 **CLI:**
 
