@@ -5666,13 +5666,14 @@ gco stacks addons COMMAND [OPTIONS]
 | `--region` | `-r` | AWS region (default: first deployment region) |
 | `--all-regions` | `-A` | Apply across all deployment regions |
 
-`status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply.
+`status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply. An active teardown fence (`_teardown`) shows as `teardown-active`. The command exits 1 when any row is not healthy or a Region's records cannot be read. With `gco -o json` or `-o yaml` it prints one list of `{region, name, status, message}` rows across the Regions; a Region whose records cannot be read contributes a row with status `error` and no name.
 
 **Example:**
 
 ```bash
 gco stacks addons status
 gco stacks addons status --all-regions
+gco -o json stacks addons status --all-regions
 gco stacks addons install -r us-west-2
 ```
 

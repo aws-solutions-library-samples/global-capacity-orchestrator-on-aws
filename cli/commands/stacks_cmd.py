@@ -3032,15 +3032,30 @@ def addons_cmd(config: Any) -> None:
 def addons_status(config: Any, region: Any, all_regions: bool) -> None:
     """Show per-chart add-on install status (from SSM).
 
+    With -o json or -o yaml the output is one list of
+    {region, name, status, message} rows across the Regions; a Region whose
+    status cannot be read contributes a row with status "error" and no name.
+    Exits 1 when a Region cannot be read or any row is not healthy.
+
     Examples:
         gco stacks addons status
         gco stacks addons status -r us-west-2
         gco stacks addons status --all-regions
+        gco -o json stacks addons status --all-regions
     """
     formatter = get_output_formatter(config)
     project = _project_name()
+    table = config.output_format == "table"
+    rows: list[dict[str, Any]] = []
+    healthy = True
     for target in _target_regions(config, region, all_regions):
-        _addons_status_one(formatter, project, target)
+        region_rows, region_healthy = _addons_status_one(formatter, project, target, table=table)
+        rows.extend(region_rows)
+        healthy = healthy and region_healthy
+    if not table:
+        formatter.print(rows)
+    if not healthy:
+        sys.exit(1)
 
 
 # Terminal states the installer, kubectl applier and validators record when a
@@ -3048,10 +3063,18 @@ def addons_status(config: Any, region: Any, all_regions: bool) -> None:
 _ADDON_HEALTHY_STATUSES = frozenset({"installed", "uninstalled", "absent", "applied", "validated"})
 # SSM parameters under /<project>/addons/<region>/ that are not status records.
 _ADDON_BOOKKEEPING_PARAMS = frozenset({"_input", "_execution"})
+# The teardown provider's fence: its value is the teardown execution name.
+_ADDON_TEARDOWN_FENCE = "_teardown"
 
 
-def _addons_status_one(formatter: Any, project: str, region: str) -> None:
-    """Print the add-on status table for a single region."""
+def _addons_status_one(
+    formatter: Any, project: str, region: str, *, table: bool = True
+) -> tuple[list[dict[str, Any]], bool]:
+    """Read one Region's add-on status records, printing them in table mode.
+
+    Returns the Region's ``{region, name, status, message}`` rows and whether
+    it is healthy: readable, with every row in a healthy state.
+    """
     import json
 
     import boto3
@@ -3065,8 +3088,9 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
         for page in paginator.paginate(Path=prefix, Recursive=False):
             params.extend(page.get("Parameters", []))
     except Exception as e:
-        formatter.print_error(f"[{region}] Failed to read add-on status from SSM: {e}")
-        return
+        message = f"Failed to read add-on status from SSM: {e}"
+        formatter.print_error(f"[{region}] {message}")
+        return [{"region": region, "name": None, "status": "error", "message": message}], False
 
     rows = []
     for p in params:
@@ -3074,6 +3098,11 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
         # _input (replay input) and _execution (orchestrator run metadata)
         # are bookkeeping, not add-on status records.
         if name in _ADDON_BOOKKEEPING_PARAMS:
+            continue
+        if name == _ADDON_TEARDOWN_FENCE:
+            # Not JSON, so it used to read as an "unknown" chart; an active
+            # fence means the add-ons are being (or were) torn down.
+            rows.append((name, "teardown-active", f"execution {p.get('Value', '')}"))
             continue
         try:
             data = json.loads(p["Value"])
@@ -3089,14 +3118,22 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
             message = message[:80]
         rows.append((name, status, message))
 
+    rows.sort()
+    records = [
+        {"region": region, "name": name, "status": status, "message": message}
+        for name, status, message in rows
+    ]
+    healthy = all(status in _ADDON_HEALTHY_STATUSES for _name, status, _message in rows)
+    if not table:
+        return records, healthy
+
     if not rows:
         formatter.print_info(
             f"[{region}] No add-on status recorded under {prefix} yet. "
             "The installer writes status as charts are processed."
         )
-        return
+        return records, healthy
 
-    rows.sort()
     formatter.print_info(f"Add-on status for {project} in {region}:")
     for name, status, message in rows:
         line = f"  {name:<28} {status:<12} {message}"
@@ -3104,6 +3141,7 @@ def _addons_status_one(formatter: Any, project: str, region: str) -> None:
             formatter.print_success(line)
         else:
             formatter.print_error(line)
+    return records, healthy
 
 
 @addons_cmd.command("install")

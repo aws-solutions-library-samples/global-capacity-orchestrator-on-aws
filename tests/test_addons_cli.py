@@ -9,7 +9,10 @@ across every configured regional deployment region.
 Covered:
 * ``_target_regions``: single-region (explicit / first-regional / default) and
   all-regions resolution from cdk.json.
-* ``addons status`` for one region and ``--all-regions`` (both regions shown).
+* ``addons status`` for one region and ``--all-regions`` (both regions shown),
+  the ``-o json`` document of ``{region, name, status, message}`` rows, and
+  the non-zero exit for a failed chart, an active teardown fence, or a Region
+  whose status cannot be read.
 * ``addons install`` for one region and ``--all-regions`` (execution started in
   each), plus the missing-input error path and a non-zero exit when a region
   has no persisted input.
@@ -146,7 +149,8 @@ class TestAddonsStatus:
         ):
             result = runner.invoke(cli, ["stacks", "addons", "status", "-r", "us-east-1"])
 
-        assert result.exit_code == 0, result.output
+        # A failed chart fails the command (it used to exit 0).
+        assert result.exit_code == 1, result.output
         assert "keda" in result.output
         assert "volcano" in result.output
         assert "installed" in result.output
@@ -176,6 +180,103 @@ class TestAddonsStatus:
         assert "us-west-2" in result.output
         assert "keda" in result.output
         assert "kueue" in result.output
+
+
+@mock_aws
+class TestAddonsStatusMachineOutput:
+    """``-o json`` used to return ``{"status": "ok"}``: every row went to print_success
+    (table mode only) or print_error (stderr), and the MCP ``addons_status`` tool
+    passes that document on."""
+
+    @staticmethod
+    def _invoke(args, regional=("us-east-1",)):
+        from cli.commands import stacks_cmd
+        from cli.main import cli
+
+        with (
+            patch.object(stacks_cmd, "_project_name", return_value="gco"),
+            patch.object(stacks_cmd, "_load_cdk_json", return_value={"regional": list(regional)}),
+        ):
+            return CliRunner().invoke(cli, args)
+
+    def test_json_lists_every_region_s_rows(self, aws_creds_env):
+        _seed_addon_status("us-east-1", "gco", "keda", "installed")
+        _seed_addon_status("us-west-2", "gco", "kueue", "validated")
+
+        result = self._invoke(
+            ["-o", "json", "stacks", "addons", "status", "--all-regions"],
+            regional=("us-east-1", "us-west-2"),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == [
+            {"region": "us-east-1", "name": "keda", "status": "installed", "message": "ok"},
+            {"region": "us-west-2", "name": "kueue", "status": "validated", "message": "ok"},
+        ]
+
+    def test_yaml_and_an_empty_region_give_an_empty_list(self, aws_creds_env):
+        import yaml
+
+        result = self._invoke(["-o", "yaml", "stacks", "addons", "status", "-r", "us-east-1"])
+
+        assert result.exit_code == 0, result.output
+        assert yaml.safe_load(result.stdout) == []
+
+    def test_a_failed_chart_keeps_the_document_and_exits_nonzero(self, aws_creds_env):
+        _seed_addon_status("us-east-1", "gco", "keda", "installed")
+        _seed_addon_status("us-east-1", "gco", "volcano", "failed")
+
+        result = self._invoke(["-o", "json", "stacks", "addons", "status", "-r", "us-east-1"])
+
+        assert result.exit_code == 1, result.output
+        rows = json.loads(result.stdout)
+        assert [(row["name"], row["status"]) for row in rows] == [
+            ("keda", "installed"),
+            ("volcano", "failed"),
+        ]
+
+    def test_an_active_teardown_fence_is_reported_and_unhealthy(self, aws_creds_env):
+        _seed_addon_status("us-east-1", "gco", "keda", "uninstalled")
+        boto3.client("ssm", region_name="us-east-1").put_parameter(
+            Name="/gco/addons/us-east-1/_teardown",
+            Value="teardown-abc123",
+            Type="String",
+        )
+
+        result = self._invoke(["-o", "json", "stacks", "addons", "status", "-r", "us-east-1"])
+
+        assert result.exit_code == 1, result.output
+        assert json.loads(result.stdout)[0] == {
+            "region": "us-east-1",
+            "name": "_teardown",
+            "status": "teardown-active",
+            "message": "execution teardown-abc123",
+        }
+
+    def test_an_unreadable_region_is_a_row_and_exits_nonzero(self, aws_creds_env):
+        _seed_addon_status("us-east-1", "gco", "keda", "installed")
+        real_client = boto3.client
+
+        def client(service, region_name=None, **kwargs):
+            if region_name == "us-west-2":
+                raise RuntimeError("AccessDenied")
+            return real_client(service, region_name=region_name, **kwargs)
+
+        with patch("boto3.client", side_effect=client):
+            result = self._invoke(
+                ["-o", "json", "stacks", "addons", "status", "--all-regions"],
+                regional=("us-east-1", "us-west-2"),
+            )
+
+        assert result.exit_code == 1, result.output
+        rows = json.loads(result.stdout)
+        assert rows[-1] == {
+            "region": "us-west-2",
+            "name": None,
+            "status": "error",
+            "message": "Failed to read add-on status from SSM: AccessDenied",
+        }
+        assert "[us-west-2] Failed to read add-on status from SSM: AccessDenied" in result.stderr
 
 
 # ---------------------------------------------------------------------------
