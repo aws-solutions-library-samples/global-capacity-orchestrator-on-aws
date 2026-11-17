@@ -657,9 +657,9 @@ class TestCollectPodState:
             }
             if node_name is not None:
                 wire["spec"]["nodeName"] = node_name  # type: ignore[index]
-            response = MagicMock()
-            response.data = json.dumps(wire)
-            return k8s_client.ApiClient().deserialize(response, "V1Pod")
+            # V1Pod.from_dict is the model's own wire-dict reader (the client's
+            # ApiClient.deserialize wraps it and changed its signature in 37.0).
+            return k8s_client.V1Pod.from_dict(wire)
 
         pods = [
             _wire_pod(

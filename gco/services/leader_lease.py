@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from kubernetes.client.rest import ApiException
+from kubernetes.client.exceptions import ApiException
 
 logger = logging.getLogger(__name__)
 

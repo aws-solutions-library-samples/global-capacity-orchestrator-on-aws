@@ -36,6 +36,7 @@ import yaml
 from kubernetes.client import CustomObjectsApi
 
 import gco
+from gco.k8s_objects import json_object
 
 logger = logging.getLogger(__name__)
 
@@ -679,10 +680,13 @@ def list_cluster_nodepools(
             cluster_name, region, server=server, tls_server_name=tls_server_name
         )
 
-        nodepools = custom_api.list_cluster_custom_object(
-            group="karpenter.sh",
-            version="v1",
-            plural="nodepools",
+        nodepools = json_object(
+            custom_api.list_cluster_custom_object(
+                group="karpenter.sh",
+                version="v1",
+                plural="nodepools",
+            ),
+            "the NodePool list",
         )
 
         result = []

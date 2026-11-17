@@ -56,7 +56,7 @@ dependencies = [
     "requests==2.34.2",
     "pyyaml==6.0.3",
     "constructs==10.8.1",
-    "kubernetes==36.0.3",
+    "kubernetes==37.0.1",
     "fastapi==0.162.0",
     "uvicorn==0.54.0",
     "pydantic==2.14.2",
@@ -137,7 +137,7 @@ image-health-monitor = [
     "fastapi==0.162.0",
     "httptools==0.9.0",
     "httpx2==2.16.0",
-    "kubernetes==36.0.3",
+    "kubernetes==37.0.1",
     "opentelemetry-api==1.45.2",
     "opentelemetry-exporter-otlp-proto-common==1.45.2",
     "opentelemetry-instrumentation-fastapi==0.66b2",
@@ -156,7 +156,7 @@ image-manifest-processor = [
     "fastapi==0.162.0",
     "httptools==0.9.0",
     "httpx2==2.16.0",
-    "kubernetes==36.0.3",
+    "kubernetes==37.0.1",
     "opentelemetry-api==1.45.2",
     "opentelemetry-exporter-otlp-proto-common==1.45.2",
     "opentelemetry-instrumentation-fastapi==0.66b2",
@@ -193,13 +193,13 @@ image-inference-proxy = [
 image-inference-monitor = [
     "boto3==1.43.123",
     "botocore==1.43.123",
-    "kubernetes==36.0.3",
+    "kubernetes==37.0.1",
     "prometheus-client==0.26.0",
     "pyyaml==6.0.3",
 ]
 image-queue-processor = [
     "boto3==1.43.123",
-    "kubernetes==36.0.3",
+    "kubernetes==37.0.1",
     "pyyaml==6.0.3",
 ]
 image-cost-monitor = [
@@ -475,11 +475,28 @@ warn_unused_ignores = true
 # makes every invocation agree with CI, so nobody "fixes" a real suppression
 # and breaks the build.
 mypy_path = "gco_mcp"
-# Ignore missing imports from untyped third-party libraries (boto3, kubernetes,
-# aws_cdk, etc. don't ship type stubs we can rely on). This is NOT a license
-# to skip annotating our own code — it only suppresses errors from imports.
+# Ignore missing imports from untyped third-party libraries (boto3, aws_cdk,
+# etc. don't ship type stubs we can rely on). This is NOT a license to skip
+# annotating our own code — it only suppresses errors from imports.
 ignore_missing_imports = true
 disable_error_code = ["import-untyped", "import-not-found"]
+# kubernetes client 37 ships py.typed, and its generated package
+# (kubernetes.client: the models and the API classes) is annotated, so calls
+# into it are checked like any typed code; the Optional metadata/spec/status
+# of returned objects are narrowed with gco.k8s_objects.present. Its
+# hand-written modules are not annotated: config (load_incluster_config,
+# load_kube_config), watch (Watch, Watch.stream), dynamic (DynamicClient)
+# and the transport in client.rest (RESTResponse.read), plus
+# ApiClient.close. Calling an unannotated function is an error under
+# disallow_untyped_calls; these packages are exempted from that one rule
+# only, so what they return still carries whatever type they declare (or Any).
+untyped_calls_exclude = [
+    "kubernetes.config",
+    "kubernetes.watch",
+    "kubernetes.dynamic",
+    "kubernetes.client.rest",
+    "kubernetes.client.api_client",
+]
 exclude = [
     "cdk\\.out",
     "\\.venv",
@@ -500,6 +517,7 @@ exclude = [
 [[tool.mypy.overrides]]
 module = "gco_mcp.*"
 follow_imports = "skip"
+
 
 # gco/stacks/ is type-checked separately by lint:mypy:stacks (with CDK
 # installed). When the strict job runs without CDK, aws_cdk.Stack resolves

@@ -83,7 +83,7 @@ from typing import Any
 
 import boto3
 from kubernetes import client, config, dynamic
-from kubernetes.client.rest import ApiException
+from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 from gco.hyperpod_config import (
@@ -115,8 +115,8 @@ from gco.services.structured_logging import sanitize_log_value
 from gco.services.template_store import JobStore
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-10T17:41:25Z
-# Generated from Git commit: c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe
+# Generated at (UTC): 2026-11-16T20:28:30Z
+# Generated from Git commit: 3c21b4eec4ebed24c6ca9e80a33302966592d8db
 # Flowchart(s) generated from this file:
 #   * ``validate_manifest`` -> ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/queue_processor.validate_manifest.png``)

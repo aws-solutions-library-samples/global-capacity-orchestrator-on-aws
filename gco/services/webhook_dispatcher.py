@@ -75,10 +75,11 @@ from urllib.parse import ParseResult, urlparse
 
 import httpx2
 from kubernetes import client, config
+from kubernetes.client.exceptions import ApiException
 from kubernetes.client.models import V1Job
-from kubernetes.client.rest import ApiException
 from kubernetes.watch import Watch
 
+from gco.k8s_objects import present
 from gco.services.leader_lease import (
     LeaseIdentity,
     lease_duration_from_env,
@@ -87,8 +88,8 @@ from gco.services.leader_lease import (
 from gco.services.template_store import WebhookStore, get_webhook_store
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-08T19:00:07Z
-# Generated from Git commit: 231725d929e3dfd3c3768eba41d413effef39d67
+# Generated at (UTC): 2026-11-16T21:53:25Z
+# Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298
 # Flowchart(s) generated from this file:
 #   * ``WebhookDispatcher._deliver_webhook`` -> ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/webhook_dispatcher.WebhookDispatcher__deliver_webhook.png``)
@@ -361,7 +362,7 @@ class WebhookDispatcher:
 
     def _compute_job_status(self, job: V1Job) -> str:
         """Compute the effective status of a Kubernetes job."""
-        status = job.status
+        status = present(job.status, "job.status")
         conditions = status.conditions or []
 
         for condition in conditions:
@@ -405,8 +406,8 @@ class WebhookDispatcher:
 
     def _build_payload(self, event: WebhookEvent, job: V1Job) -> dict[str, Any]:
         """Build the webhook payload for a job event."""
-        metadata = job.metadata
-        status = job.status
+        metadata = present(job.metadata, "job.metadata")
+        status = present(job.status, "job.status")
 
         return {
             "event": event.value,
@@ -602,7 +603,8 @@ class WebhookDispatcher:
 
     async def _dispatch_event(self, event: WebhookEvent, job: V1Job) -> list[WebhookDeliveryResult]:
         """Dispatch webhooks for a job event."""
-        namespace = job.metadata.namespace
+        metadata = present(job.metadata, "job.metadata")
+        namespace = metadata.namespace
         payload = self._build_payload(event, job)
 
         # Get webhooks subscribed to this event
@@ -636,7 +638,7 @@ class WebhookDispatcher:
 
         logger.info(
             f"Dispatching {len(webhooks)} webhooks for {event.value} "
-            f"(job={job.metadata.name}, namespace={namespace})"
+            f"(job={metadata.name}, namespace={namespace})"
         )
 
         # Dispatch all webhooks concurrently. _deliver_webhook owns normal
@@ -679,9 +681,10 @@ class WebhookDispatcher:
 
     async def _process_job_event(self, event_type: str, job: V1Job) -> None:
         """Process a Kubernetes job event."""
-        job_uid = job.metadata.uid
-        job_name = job.metadata.name
-        namespace = job.metadata.namespace
+        metadata = present(job.metadata, "job.metadata")
+        job_uid = present(metadata.uid, "job.metadata.uid")
+        job_name = metadata.name
+        namespace = metadata.namespace
 
         # Skip system namespaces
         if namespace in ("kube-system", "kube-public", "kube-node-lease"):
@@ -847,13 +850,14 @@ class WebhookDispatcher:
                 _request_timeout=self._k8s_timeout,
             )
             for job in jobs.items:
-                namespace = job.metadata.namespace
+                metadata = present(job.metadata, "job.metadata")
+                namespace = metadata.namespace
                 if namespace in ("kube-system", "kube-public", "kube-node-lease"):
                     continue
                 if self.namespaces and namespace not in self.namespaces:
                     continue
 
-                job_uid = job.metadata.uid
+                job_uid = present(metadata.uid, "job.metadata.uid")
                 status = self._compute_job_status(job)
                 self._job_state_cache.set_state(job_uid, status)
 

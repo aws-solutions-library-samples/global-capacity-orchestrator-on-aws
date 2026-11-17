@@ -45,12 +45,12 @@ import boto3
 import urllib3
 import yaml
 from kubernetes import client, dynamic
-from kubernetes.client.rest import ApiException
+from kubernetes.client.exceptions import ApiException
 from kubernetes.dynamic.exceptions import NotFoundError, ResourceNotFoundError
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-31T03:37:14Z
-# Generated from Git commit: 69410dc0745abef57030947bdac84489fb805d23
+# Generated at (UTC): 2026-11-16T21:53:25Z
+# Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/kubectl-applier-simple/handler.lambda_handler.png``)
@@ -1663,7 +1663,7 @@ def _verify_workload_credentials(
     for namespace, sa_name in platform_sas + workload_sas:
         try:
             sa = v1.read_namespaced_service_account(sa_name, namespace)
-            annotations = sa.metadata.annotations or {}
+            annotations = (sa.metadata.annotations if sa.metadata else None) or {}
             if "eks.amazonaws.com/role-arn" not in annotations:
                 warnings.append(
                     f"{namespace}/{sa_name}: missing eks.amazonaws.com/role-arn annotation"
@@ -2020,8 +2020,11 @@ def apply_manifests(
                                 # matches — if so, skip. If the volumeHandle changed (new
                                 # FSx file system), force-remove the old PV and recreate.
                                 existing = v1.read_persistent_volume(name)
+                                existing_spec = existing.spec
                                 existing_handle = (
-                                    existing.spec.csi.volume_handle if existing.spec.csi else None
+                                    existing_spec.csi.volume_handle
+                                    if existing_spec and existing_spec.csi
+                                    else None
                                 )
                                 new_handle = doc.get("spec", {}).get("csi", {}).get("volumeHandle")
 
@@ -2070,7 +2073,7 @@ def apply_manifests(
                                 existing_pvc = v1.read_namespaced_persistent_volume_claim(
                                     name, namespace
                                 )
-                                if existing_pvc.status.phase == "Lost":
+                                if existing_pvc.status and existing_pvc.status.phase == "Lost":
                                     logger.info(
                                         f"PVC {namespace}/{name} is Lost (bound PV was "
                                         f"recreated), deleting and recreating"

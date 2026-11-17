@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from kubernetes import client as kubernetes_client
 
 from gco.k8s_api_versions import METRICS_API_GROUP, METRICS_API_VERSION
+from gco.k8s_objects import json_object, present
 from gco.models import ManifestSubmissionRequest
 from gco.services.api_shared import (
     BulkDeleteRequest,
@@ -328,7 +329,7 @@ async def get_job_logs(
     timestamps: bool = Query(False, description="Include timestamps in log lines"),
 ) -> Response:
     """Get logs from a Job's pods."""
-    from kubernetes.client.rest import ApiException as K8sApiException
+    from kubernetes.client.exceptions import ApiException as K8sApiException
 
     processor = _check_processor()
     _check_namespace(namespace, processor)
@@ -360,23 +361,27 @@ async def get_job_logs(
 
         sorted_pods = sorted(
             pods.items,
-            key=lambda p: p.metadata.creation_timestamp or datetime.min.replace(tzinfo=UTC),
+            key=lambda p: (
+                present(p.metadata, "pod.metadata").creation_timestamp
+                or datetime.min.replace(tzinfo=UTC)
+            ),
             reverse=True,
         )
         pod = sorted_pods[0]
+        pod_metadata = present(pod.metadata, "pod.metadata")
 
         pod_phase = pod.status.phase if pod.status else "Unknown"
         if pod_phase == "Pending":
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"Pod '{pod.metadata.name}' is still Pending — logs are not yet available. "
+                    f"Pod '{pod_metadata.name}' is still Pending — logs are not yet available. "
                     "The node may still be provisioning. Use 'gco jobs events' to check."
                 ),
             )
 
         log_kwargs: dict[str, Any] = {
-            "name": pod.metadata.name,
+            "name": pod_metadata.name,
             "namespace": namespace,
             "tail_lines": tail,
             "previous": previous,
@@ -386,6 +391,7 @@ async def get_job_logs(
             log_kwargs["container"] = container
         if since_seconds:
             log_kwargs["since_seconds"] = since_seconds
+        pod_spec = present(pod.spec, "pod.spec")
 
         try:
             log_response = processor.core_v1.read_namespaced_pod_log(
@@ -396,7 +402,7 @@ async def get_job_logs(
             if e.status == 400:
                 error_body = str(e.body) if e.body else str(e.reason)
                 if "waiting" in error_body.lower() or "not found" in error_body.lower():
-                    available = [c.name for c in pod.spec.containers]
+                    available = [c.name for c in pod_spec.containers]
                     raise HTTPException(
                         status_code=400,
                         detail=(
@@ -408,8 +414,8 @@ async def get_job_logs(
                 raise HTTPException(status_code=400, detail=f"Bad request: {error_body}") from e
             raise
 
-        available_containers = [c.name for c in pod.spec.containers]
-        init_containers = [c.name for c in (pod.spec.init_containers or [])]
+        available_containers = [c.name for c in pod_spec.containers]
+        init_containers = [c.name for c in (pod_spec.init_containers or [])]
 
         response = {
             "cluster_id": processor.cluster_id,
@@ -417,7 +423,7 @@ async def get_job_logs(
             "timestamp": datetime.now(UTC).isoformat(),
             "job_name": name,
             "namespace": namespace,
-            "pod_name": pod.metadata.name,
+            "pod_name": pod_metadata.name,
             "container": container or (available_containers[0] if available_containers else None),
             "available_containers": available_containers,
             "init_containers": init_containers,
@@ -552,7 +558,7 @@ async def get_pod_logs(
 
     try:
         pod = processor.core_v1.read_namespaced_pod(name=pod_name, namespace=namespace)
-        job_name_label = pod.metadata.labels.get("job-name")
+        job_name_label = (present(pod.metadata, "pod.metadata").labels or {}).get("job-name")
         if job_name_label != name:
             raise HTTPException(
                 status_code=400, detail=f"Pod '{pod_name}' does not belong to job '{name}'"
@@ -613,13 +619,17 @@ async def get_job_metrics(namespace: str, name: str) -> Response:
 
         try:
             for pod in pods.items:
+                pod_name = present(present(pod.metadata, "pod.metadata").name, "pod.metadata.name")
                 try:
-                    metrics = processor.custom_objects.get_namespaced_custom_object(
-                        group=METRICS_API_GROUP,
-                        version=METRICS_API_VERSION,
-                        namespace=namespace,
-                        plural="pods",
-                        name=pod.metadata.name,
+                    metrics = json_object(
+                        processor.custom_objects.get_namespaced_custom_object(
+                            group=METRICS_API_GROUP,
+                            version=METRICS_API_VERSION,
+                            namespace=namespace,
+                            plural="pods",
+                            name=pod_name,
+                        ),
+                        "the pod metrics",
                     )
 
                     containers_metrics = []
@@ -657,15 +667,11 @@ async def get_job_metrics(namespace: str, name: str) -> Response:
                             }
                         )
 
-                    pod_metrics.append(
-                        {"pod_name": pod.metadata.name, "containers": containers_metrics}
-                    )
+                    pod_metrics.append({"pod_name": pod_name, "containers": containers_metrics})
 
                 except Exception as e:
-                    logger.warning(f"Could not get metrics for pod {pod.metadata.name}: {e}")
-                    pod_metrics.append(
-                        {"pod_name": pod.metadata.name, "error": "Metrics not available"}
-                    )
+                    logger.warning(f"Could not get metrics for pod {pod_name}: {e}")
+                    pod_metrics.append({"pod_name": pod_name, "error": "Metrics not available"})
 
         except Exception as e:
             logger.warning(f"Metrics API not available: {e}")

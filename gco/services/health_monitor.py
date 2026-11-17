@@ -32,9 +32,10 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from kubernetes import client, config
-from kubernetes.client.rest import ApiException
+from kubernetes.client.exceptions import ApiException
 
 from gco.k8s_api_versions import METRICS_API_GROUP, METRICS_API_VERSION
+from gco.k8s_objects import json_object, present
 from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization
 from gco.services.leader_lease import (
     LEASE_MIN_DURATION_SECONDS,
@@ -45,8 +46,8 @@ from gco.services.leader_lease import (
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-04T13:42:40Z
-# Generated from Git commit: c8a2c18a0d540e23acd5eda86d3aab9db69e5c41
+# Generated at (UTC): 2026-11-16T21:53:25Z
+# Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298
 # Flowchart(s) generated from this file:
 #   * ``HealthMonitor.get_health_status`` -> ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/health_monitor.HealthMonitor_get_health_status.png``)
@@ -198,12 +199,15 @@ class HealthMonitor:
                 return self._cached_metrics
 
             # Fetch fresh metrics
-            node_metrics: dict[str, Any] = await asyncio.to_thread(
-                self.metrics_v1beta1.list_cluster_custom_object,
-                group=METRICS_API_GROUP,
-                version=METRICS_API_VERSION,
-                plural="nodes",
-                _request_timeout=self._k8s_timeout,
+            node_metrics = json_object(
+                await asyncio.to_thread(
+                    self.metrics_v1beta1.list_cluster_custom_object,
+                    group=METRICS_API_GROUP,
+                    version=METRICS_API_VERSION,
+                    plural="nodes",
+                    _request_timeout=self._k8s_timeout,
+                ),
+                "the node metrics",
             )
 
             # Update cache
@@ -232,8 +236,9 @@ class HealthMonitor:
             node_capacities = {}
 
             for node in nodes.items:
-                node_name = node.metadata.name
-                cpu_capacity = node.status.allocatable.get("cpu", "0")
+                node_name = present(node.metadata, "node.metadata").name
+                allocatable = present(node.status, "node.status").allocatable or {}
+                cpu_capacity = allocatable.get("cpu", "0")
                 # Convert CPU capacity to millicores
                 if cpu_capacity.endswith("m"):
                     cpu_capacity_millicores = int(cpu_capacity[:-1])
@@ -276,7 +281,8 @@ class HealthMonitor:
             nodes = self.core_v1.list_node(_request_timeout=self._k8s_timeout)
 
             for node in nodes.items:
-                memory_capacity = node.status.allocatable.get("memory", "0")
+                allocatable = present(node.status, "node.status").allocatable or {}
+                memory_capacity = allocatable.get("memory", "0")
                 # Convert memory capacity to bytes
                 memory_capacity_bytes = self._parse_memory_string(memory_capacity)
                 total_memory_capacity += memory_capacity_bytes
@@ -336,13 +342,14 @@ class HealthMonitor:
                 self.core_v1.list_node, _request_timeout=self._k8s_timeout
             )
             for node in nodes.items:
-                gpu_capacity = node.status.allocatable.get("nvidia.com/gpu", "0")
+                allocatable = present(node.status, "node.status").allocatable or {}
+                gpu_capacity = allocatable.get("nvidia.com/gpu", "0")
                 total_gpu_capacity += int(gpu_capacity)
 
             # Calculate GPU requests from running pods
             for pod in pods.items:
-                if pod.status.phase == "Running":
-                    for container in pod.spec.containers:
+                if present(pod.status, "pod.status").phase == "Running":
+                    for container in present(pod.spec, "pod.spec").containers:
                         if container.resources and container.resources.requests:
                             gpu_request = container.resources.requests.get("nvidia.com/gpu", "0")
                             total_gpu_requested += int(gpu_request)
@@ -367,11 +374,11 @@ class HealthMonitor:
 
             for pod in pods.items:
                 # Skip system namespaces
-                if pod.metadata.namespace in ["kube-system", "kube-public", "kube-node-lease"]:
+                namespace = present(pod.metadata, "pod.metadata").namespace
+                if namespace in ["kube-system", "kube-public", "kube-node-lease"]:
                     continue
-
                 # Count running pods as active jobs
-                if pod.status.phase == "Running":
+                if present(pod.status, "pod.status").phase == "Running":
                     active_jobs += 1
 
             return active_jobs
@@ -392,12 +399,13 @@ class HealthMonitor:
 
             for pod in pods.items:
                 # Skip system namespaces
-                if pod.metadata.namespace in ["kube-system", "kube-public", "kube-node-lease"]:
+                namespace = present(pod.metadata, "pod.metadata").namespace
+                if namespace in ["kube-system", "kube-public", "kube-node-lease"]:
                     continue
-
-                if pod.status.phase == "Running":
+                phase = present(pod.status, "pod.status").phase
+                if phase == "Running":
                     active_jobs += 1
-                elif pod.status.phase == "Pending":
+                elif phase == "Pending":
                     pending_pods += 1
 
             return active_jobs, pending_pods
@@ -419,14 +427,13 @@ class HealthMonitor:
 
             for pod in pods.items:
                 # Skip system namespaces
-                if pod.metadata.namespace in ["kube-system", "kube-public", "kube-node-lease"]:
+                namespace = present(pod.metadata, "pod.metadata").namespace
+                if namespace in ["kube-system", "kube-public", "kube-node-lease"]:
                     continue
-
                 # Only count pending pods
-                if pod.status.phase != "Pending":
+                if present(pod.status, "pod.status").phase != "Pending":
                     continue
-
-                for container in pod.spec.containers:
+                for container in present(pod.spec, "pod.spec").containers:
                     if container.resources and container.resources.requests:
                         # CPU
                         cpu_request = container.resources.requests.get("cpu", "0")
@@ -636,13 +643,16 @@ class HealthMonitor:
         self._last_alb_sync = now
 
         try:
-            gateway = self.metrics_v1beta1.get_namespaced_custom_object(
-                group="gateway.networking.k8s.io",
-                version="v1",
-                namespace="gco-system",
-                plural="gateways",
-                name="gco-gateway",
-                _request_timeout=self._k8s_timeout,
+            gateway = json_object(
+                self.metrics_v1beta1.get_namespaced_custom_object(
+                    group="gateway.networking.k8s.io",
+                    version="v1",
+                    namespace="gco-system",
+                    plural="gateways",
+                    name="gco-gateway",
+                    _request_timeout=self._k8s_timeout,
+                ),
+                "the Gateway",
             )
             addresses = gateway.get("status", {}).get("addresses", [])
             current_hostname = next(

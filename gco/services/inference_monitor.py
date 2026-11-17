@@ -51,14 +51,15 @@ from typing import Any, NoReturn, TypedDict
 from urllib.parse import urlsplit
 
 from kubernetes import client, config
+from kubernetes.client.exceptions import ApiException
 from kubernetes.client.models import V1Deployment
-from kubernetes.client.rest import ApiException
 
 from gco.hyperpod_config import (
     CAPACITY_PROVIDER_HYPERPOD,
     CAPACITY_PROVIDER_LABEL,
     hyperpod_toleration,
 )
+from gco.k8s_objects import present
 from gco.models.inference_models import (
     GPU_NAME_NODE_LABEL,
     INFERENCE_PROBE_TIMEOUT_SECONDS,
@@ -69,8 +70,8 @@ from gco.services.inference_store import InferenceEndpointStore
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-01T14:18:07Z
-# Generated from Git commit: e9975a6893f9a2542214f6eb200b4fb05c3230eb
+# Generated at (UTC): 2026-11-16T21:53:25Z
+# Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298
 # Flowchart(s) generated from this file:
 #   * ``InferenceMonitor._reconcile_endpoint_authorized`` -> ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/inference_monitor.InferenceMonitor__reconcile_endpoint_authorized.png``)
@@ -1442,7 +1443,8 @@ class InferenceMonitor:
         lease_duration = self.reconcile_interval * 3
         try:
             lease = coordination_v1.read_namespaced_lease(lease_name, self.namespace)
-            current_holder = lease.spec.holder_identity
+            spec = present(lease.spec, "lease.spec")
+            current_holder = spec.holder_identity
             expired = self._lease_is_expired(lease, now)
             annotations = self._lease_annotations(lease)
             observed_epoch = annotations.get(_LEADER_EPOCH_ANNOTATION)
@@ -1460,16 +1462,16 @@ class InferenceMonitor:
             elif current_holder in (None, "") or expired:
                 epoch = secrets.token_hex(32)
                 self._leader_epoch = epoch
-                lease.spec.holder_identity = holder
-                lease.spec.acquire_time = now
-                transitions = getattr(lease.spec, "lease_transitions", None)
-                lease.spec.lease_transitions = int(transitions or 0) + 1
+                spec.holder_identity = holder
+                spec.acquire_time = now
+                transitions = getattr(spec, "lease_transitions", None)
+                spec.lease_transitions = int(transitions or 0) + 1
                 logger.info("Acquiring leader lease as %s with a new epoch", holder)
             else:
                 return False
 
-            lease.spec.renew_time = now
-            lease.spec.lease_duration_seconds = lease_duration
+            spec.renew_time = now
+            spec.lease_duration_seconds = lease_duration
             self._stamp_lease_epoch(lease, epoch)
             coordination_v1.replace_namespaced_lease(lease_name, self.namespace, lease)
             self._lease_name = lease_name
@@ -1516,19 +1518,20 @@ class InferenceMonitor:
         lease_name = self._lease_name
         holder = self._lease_holder
         epoch = self._leader_epoch
-        if not all(isinstance(value, str) and value for value in (lease_name, holder, epoch)):
+        if not (lease_name and holder and epoch):
             return False
         coordination_v1 = client.CoordinationV1Api()
         now = datetime.now(UTC)
         try:
             lease = coordination_v1.read_namespaced_lease(lease_name, self.namespace)
+            spec = present(lease.spec, "lease.spec")
             if (
-                lease.spec.holder_identity != holder
+                spec.holder_identity != holder
                 or self._lease_annotations(lease).get(_LEADER_EPOCH_ANNOTATION) != epoch
                 or self._lease_is_expired(lease, now)
             ):
                 return False
-            lease.spec.renew_time = now
+            spec.renew_time = now
             coordination_v1.replace_namespaced_lease(lease_name, self.namespace, lease)
             return True
         except Exception:
@@ -1573,7 +1576,7 @@ class InferenceMonitor:
             self._leadership_lost.set()
             raise ReconcileFencedError("leader Lease could not be verified") from error
         if (
-            lease.spec.holder_identity != self._lease_holder
+            present(lease.spec, "lease.spec").holder_identity != self._lease_holder
             or self._lease_annotations(lease).get(_LEADER_EPOCH_ANNOTATION) != self._leader_epoch
             or self._lease_is_expired(lease, datetime.now(UTC))
         ):
@@ -2581,7 +2584,7 @@ class InferenceMonitor:
                 ),
             )
             _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            config_map.metadata.resource_version = resource_version
+            present(config_map.metadata, "config_map.metadata").resource_version = resource_version
             self._assert_mutation_authority()
             self.core_v1.patch_namespaced_config_map(
                 cm_name, ns, config_map, _request_timeout=self._k8s_timeout
@@ -3151,7 +3154,8 @@ class InferenceMonitor:
             if error.status == 404:
                 return None
             raise
-        return self._authorize_resource(
+        # The resource it was given, or None once it has deleted it.
+        authorized: V1Deployment | None = self._authorize_resource(
             deployment,
             kind="deployment",
             resource_name=name,
@@ -3172,11 +3176,14 @@ class InferenceMonitor:
             ),
         )
 
+        return authorized
+
     def _get_deployment_image(self, deployment: V1Deployment) -> str | None:
         """Get the image of the first container in a deployment."""
-        containers = deployment.spec.template.spec.containers
+        pod_spec = present(deployment.spec.template.spec, "deployment.spec.template.spec")
+        containers = pod_spec.containers
         if containers:
-            image: str = containers[0].image
+            image: str | None = containers[0].image
             return image
         return None
 
@@ -4287,7 +4294,15 @@ class InferenceMonitor:
             node_selector["karpenter.sh/capacity-type"] = capacity_type
         elif capacity_type == CAPACITY_PROVIDER_HYPERPOD:
             node_selector[CAPACITY_PROVIDER_LABEL] = CAPACITY_PROVIDER_HYPERPOD
-            tolerations.append(client.V1Toleration(**hyperpod_toleration()))
+            hyperpod = hyperpod_toleration()
+            tolerations.append(
+                client.V1Toleration(
+                    key=hyperpod["key"],
+                    operator=hyperpod["operator"],
+                    value=hyperpod["value"],
+                    effect=hyperpod["effect"],
+                )
+            )
 
         # SGLang's prebuilt kernels need compute capability >= 8.0; the
         # shipped inference NodePool's cheapest fit is a T4 (g4dn), where the
@@ -4337,9 +4352,8 @@ class InferenceMonitor:
             )
             if affinity is None:
                 affinity = client.V1Affinity(node_affinity=client.V1NodeAffinity())
-            affinity.node_affinity.preferred_during_scheduling_ignored_during_execution = [
-                preference
-            ]
+            node_affinity = present(affinity.node_affinity, "affinity.node_affinity")
+            node_affinity.preferred_during_scheduling_ignored_during_execution = [preference]
 
         labels = {
             "app": app_label,
@@ -4466,9 +4480,10 @@ class InferenceMonitor:
 
         # Land role pods on the EFA fabric when KV transfer runs over RDMA,
         # preserving the GPU asks already built into the pod.
-        apply_efa_scheduling(mooncake, deployment.spec.template.spec)
+        template = deployment.spec.template
+        apply_efa_scheduling(mooncake, present(template.spec, "deployment.spec.template.spec"))
         if config_digest is not None:
-            template_metadata = deployment.spec.template.metadata
+            template_metadata = present(template.metadata, "deployment.spec.template.metadata")
             template_metadata.annotations = {
                 **(template_metadata.annotations or {}),
                 MOONCAKE_CONFIG_DIGEST_ANNOTATION: config_digest,
@@ -4972,7 +4987,7 @@ class InferenceMonitor:
                     "proxy deployment disappeared during reconciliation"
                 ) from error
             _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            deployment.metadata.resource_version = resource_version
+            present(deployment.metadata, "deployment.metadata").resource_version = resource_version
             self._assert_mutation_authority()
             # A JSON merge patch replaces the containers and volumes lists
             # wholesale (a strategic merge would key them by name and merge each
@@ -5185,7 +5200,7 @@ class InferenceMonitor:
                 ),
             )
             _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            body.metadata.resource_version = resource_version
+            present(body.metadata, "config_map.metadata").resource_version = resource_version
             self._assert_mutation_authority()
             self.core_v1.patch_namespaced_config_map(
                 cm_name, ns, body, _request_timeout=self._k8s_timeout
@@ -5274,7 +5289,7 @@ class InferenceMonitor:
         if getattr(existing, "data", None) == body.data:
             return
         _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-        body.metadata.resource_version = resource_version
+        present(body.metadata, "config_map.metadata").resource_version = resource_version
         self._assert_mutation_authority()
         self.core_v1.patch_namespaced_config_map(
             cm_name, ns, body, _request_timeout=self._k8s_timeout
@@ -5693,7 +5708,7 @@ class InferenceMonitor:
             )
             current_image = self._get_deployment_image(deployment)
             current_replicas = deployment.spec.replicas or 1
-            ready_replicas = deployment.status.ready_replicas or 0
+            ready_replicas = present(deployment.status, "deployment.status").ready_replicas or 0
             if current_image != canary_image:
                 self._update_deployment_image(canary_name, namespace, canary_image)
                 ready_replicas = 0
@@ -6843,7 +6858,7 @@ class InferenceMonitor:
                 ),
             )
             _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            hpa.metadata.resource_version = resource_version
+            present(hpa.metadata, "hpa.metadata").resource_version = resource_version
             self._assert_mutation_authority()
             autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler(
                 hpa_name,

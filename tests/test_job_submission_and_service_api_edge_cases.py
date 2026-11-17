@@ -71,6 +71,7 @@ def _bare_processor() -> Any:
     processor.cluster_id = "cluster"
     processor.region = "us-east-1"
     processor._k8s_timeout = 7
+    processor.api_client = MagicMock()
     processor.batch_v1 = MagicMock()
     processor.core_v1 = MagicMock()
     processor.custom_objects = MagicMock()
@@ -619,20 +620,49 @@ def test_apply_queued_job_rejects_invalid_envelopes(mutate: Any, message: str) -
         processor.apply_queued_job(manifest, "gco-jobs", "queue-1")
 
 
+def _created_job_dict(queue_id: str = "queue-1", *, uid: str = "uid-1") -> dict[str, Any]:
+    """What create_job_from_manifest hands back: the server's Job as a plain dict."""
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": "trainer-deterministic",
+            "namespace": "gco-jobs",
+            "uid": uid,
+            "annotations": {"gco.io/queue-job-id": queue_id},
+        },
+    }
+
+
 def test_apply_queued_job_create_and_adopt_successes() -> None:
+    import gco.services.manifest_processor as module
+
     processor = _bare_processor()
     processor.batch_v1.read_namespaced_job.side_effect = ApiException(status=404)
-    processor.batch_v1.create_namespaced_job.return_value = _queued_job_object()
-    created = processor.apply_queued_job(_base_job(), "gco-jobs", "queue-1")
+    with patch.object(
+        module, "create_job_from_manifest", return_value=_created_job_dict()
+    ) as create:
+        created = processor.apply_queued_job(_base_job(), "gco-jobs", "queue-1")
     assert (created.status, created.uid) == ("created", "uid-1")
+    # The create carries the processor's bounded timeout and the manifest as
+    # mutated for the queue (deterministic name, labels, annotations).
+    create.assert_called_once()
+    args, kwargs = create.call_args
+    assert args[0] is processor.api_client
+    assert args[1] == "gco-jobs"
+    assert args[2]["metadata"]["annotations"]["gco.io/queue-job-id"] == "queue-1"
+    assert kwargs == {"request_timeout": 7}
+    # The typed create, whose client-side validation this path exists to avoid,
+    # is never called.
+    processor.batch_v1.create_namespaced_job.assert_not_called()
 
     processor = _bare_processor()
     processor.batch_v1.read_namespaced_job.side_effect = [
         ApiException(status=404),
         _queued_job_object(),
     ]
-    processor.batch_v1.create_namespaced_job.side_effect = ApiException(status=409)
-    adopted = processor.apply_queued_job(_base_job(), "gco-jobs", "queue-1")
+    with patch.object(module, "create_job_from_manifest", side_effect=ApiException(status=409)):
+        adopted = processor.apply_queued_job(_base_job(), "gco-jobs", "queue-1")
     assert adopted.status == "unchanged"
 
 
@@ -669,13 +699,16 @@ def test_apply_queued_job_lookup_error_matrix(
 def test_apply_queued_job_create_error_matrix(
     create_error: Exception, expected_exception: str
 ) -> None:
+    import gco.services.manifest_processor as module
     from gco.services.manifest_processor import RetryableQueuedJobApplyError
 
     processor = _bare_processor()
     processor.batch_v1.read_namespaced_job.side_effect = ApiException(status=404)
-    processor.batch_v1.create_namespaced_job.side_effect = create_error
     exception = RetryableQueuedJobApplyError if expected_exception == "retryable" else ApiException
-    with pytest.raises(exception):
+    with (
+        patch.object(module, "create_job_from_manifest", side_effect=create_error),
+        pytest.raises(exception),
+    ):
         processor.apply_queued_job(_base_job(), "gco-jobs", "queue-1")
 
 
@@ -691,6 +724,7 @@ def test_apply_queued_job_create_error_matrix(
 def test_apply_queued_job_concurrent_adoption_error_matrix(
     adoption_error: Exception, expected_exception: str
 ) -> None:
+    import gco.services.manifest_processor as module
     from gco.services.manifest_processor import RetryableQueuedJobApplyError
 
     processor = _bare_processor()
@@ -698,9 +732,11 @@ def test_apply_queued_job_concurrent_adoption_error_matrix(
         ApiException(status=404),
         adoption_error,
     ]
-    processor.batch_v1.create_namespaced_job.side_effect = ApiException(status=409)
     exception = RetryableQueuedJobApplyError if expected_exception == "retryable" else ApiException
-    with pytest.raises(exception):
+    with (
+        patch.object(module, "create_job_from_manifest", side_effect=ApiException(status=409)),
+        pytest.raises(exception),
+    ):
         processor.apply_queued_job(_base_job(), "gco-jobs", "queue-1")
 
 

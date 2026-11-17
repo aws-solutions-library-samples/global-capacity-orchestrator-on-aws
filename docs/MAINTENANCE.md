@@ -366,21 +366,46 @@ constant still says `v1beta1`, as the reminder.
   dependencies and in the extras that restate it) and
   `lambda/kubectl-applier-simple/requirements.txt`, plus the container
   re-lock of `requirements-lock.txt`.
-- **kubernetes 37.x is a migration, not a pin bump.** 37.0.0 moved the client
-  to the modern OpenAPI generator (see its changelog): typed API calls now
-  validate a dict body against strict Pydantic models before sending, so a
-  user Job manifest with an unquoted quantity such as `nvidia.com/gpu: 1` —
-  which the API server accepts — is rejected client-side by the central
-  queue's `apply_queued_job` (`create_namespaced_job(body=manifest)`). The
-  release also ships `py.typed` (about 320 new mypy findings) and returns
-  plain dicts from single-resource deletes. 37.0.1 (2026-10-09) changes none
-  of that — its fixes cover type-checker exports and the deprecated
-  `kubernetes.client.apis` import path, and the same unquoted-quantity Job
-  body still raises `pydantic.ValidationError` before any request is sent
-  (re-checked 2026-11-01 against the real library). GCO stays on 36.x until
-  that path normalizes or bypasses client-side validation and the move is
-  proven against a real API server; the scan's Version Consistency row keeps
-  the lag visible meanwhile.
+- **kubernetes 37.x was a migration, not a pin bump; GCO is on 37.0.1.**
+  37.0.0 moved the client to the modern OpenAPI generator (see its
+  changelog): the typed API methods validate a `dict` body against strict
+  Pydantic models before sending it, and every resource quantity is a strict
+  string there, so a user Job manifest with `nvidia.com/gpu: 1` — which the
+  API server accepts, since `Quantity` unmarshals from a JSON number — was
+  rejected client-side before any request. The central queue's
+  `apply_queued_job` therefore creates its Job through
+  `gco.services.manifest_processor.create_job_from_manifest`: the client's
+  own `param_serialize` / `call_api` / `response_deserialize` steps, with an
+  explicit `Content-Type` (37.x omits it on `create` and `delete`,
+  kubernetes-client/python#2782), the body on the wire exactly as the user
+  wrote it, and the server's answer decoded as a plain `dict`. The REST and
+  SQS submission paths already go through the dynamic client, which never
+  validated bodies; the kubectl-applier Lambda keeps the typed methods for
+  GCO's own manifests, which `tests/test_kubectl_applier_typed_manifests.py`
+  checks against the pinned client's models offline. Single-resource deletes
+  now return plain dicts (nothing in GCO reads a delete's result), and
+  `ApiException` is imported from its defining module,
+  `kubernetes.client.exceptions`. The client ships `py.typed`, and mypy
+  follows it: the generated models type `metadata`, `spec` and `status` as
+  Optional (a request body may omit them), while on an object the API server
+  returns they are never absent, so the services narrow them with
+  `gco.k8s_objects.present` (and the `object`-typed answers of the
+  custom-objects API with `json_object`) instead of branching on a `None` no
+  real response carries. A new access to such a field should do the same;
+  `getattr(obj, "field", None)` only hides the type. The client's
+  hand-written modules (`config`, `watch`, `dynamic`, the `client.rest`
+  transport and `ApiClient.close`) are unannotated and are exempted from
+  `disallow_untyped_calls` alone (`untyped_calls_exclude` in
+  `pyproject.toml`).
+- **Why 37.0.1 and not 37.0.2.** 37.0.2 (2026-11-06) raised its floor to
+  `python-dateutil>=3.0.0` (dependabot, kubernetes-client/python#2757) while
+  botocore — every release through 1.44.x — caps it `<3.0.0`, so the two
+  cannot be installed together. 37.0.2's other changes are dependency floors
+  (`oauthlib>=4.0.0`, already satisfied), two `kubernetes.utils` quantity
+  parsing fixes and a websocket proxy-auth fix, none of which GCO reaches.
+  Move to 37.0.2+ once botocore drops or lifts its `python-dateutil` cap
+  (boto/botocore#3715 tracks removing the dependency) or kubernetes relaxes
+  the floor; the monthly scan reports the newer release meanwhile.
 
 ### Deploy and verify
 

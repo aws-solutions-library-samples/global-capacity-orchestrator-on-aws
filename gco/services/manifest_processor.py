@@ -46,8 +46,8 @@ from typing import Any, cast
 
 import yaml
 from kubernetes import client, config, dynamic
+from kubernetes.client.exceptions import ApiException
 from kubernetes.client.models import V1Job
-from kubernetes.client.rest import ApiException
 from kubernetes.dynamic.exceptions import ResourceNotFoundError
 
 # Pure admission helpers and the policy constants they read live in
@@ -147,6 +147,7 @@ from gco.job_admission import (
 from gco.job_admission import (
     weighted_pod_specs as weighted_pod_specs,
 )
+from gco.k8s_objects import json_object, present
 from gco.manifest_security_policy import (
     MANIFEST_SECURITY_POLICY_DEFAULTS,
     parse_boolean_environment,
@@ -161,8 +162,8 @@ from gco.resource_governance import DEFAULT_MANIFEST_RESOURCE_CAPS
 from gco.services.structured_logging import configure_structured_logging, sanitize_log_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-10T17:41:25Z
-# Generated from Git commit: c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe
+# Generated at (UTC): 2026-11-16T21:53:25Z
+# Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298
 # Flowchart(s) generated from this file:
 #   * ``ManifestProcessor.apply_queued_job`` -> ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/manifest_processor.ManifestProcessor_apply_queued_job.png``)
@@ -196,6 +197,100 @@ def _is_retryable_kubernetes_api_error(error: ApiException) -> bool:
     except TypeError, ValueError:
         status = 0
     return status == 0 or status in {408, 429} or status >= 500
+
+
+#: ``POST`` target of ``BatchV1Api.create_namespaced_job``, used verbatim.
+_JOBS_RESOURCE_PATH = "/apis/batch/v1/namespaces/{namespace}/jobs"
+
+
+def create_job_from_manifest(
+    api_client: client.ApiClient,
+    namespace: str,
+    manifest: dict[str, Any],
+    *,
+    request_timeout: float | int | None,
+) -> dict[str, Any]:
+    """Create a Job from a user manifest exactly as written, returning the server's Job.
+
+    The typed ``BatchV1Api.create_namespaced_job`` validates a ``dict`` body
+    against the generated Pydantic models before sending it (kubernetes
+    client 37.0.0 onwards). Those models render every resource quantity as a
+    strict string, so a manifest that says ``nvidia.com/gpu: 1`` — the form
+    the examples use, and one the API server accepts, since ``Quantity``
+    unmarshals from a JSON number — is rejected client-side before any
+    request is made; an unknown field (a new API-server feature this client
+    has not been generated for yet) is rejected the same way. The central
+    queue's job is to hand the user's manifest to the API server and let the
+    server be the judge, as the REST and SQS paths do through the dynamic
+    client, so this goes through the client's own serialize, transport and
+    deserialize steps without the model layer: ``param_serialize`` renders
+    the same URL, path parameter and bearer-token header the typed method
+    would, the body is sent as the caller's JSON (a number stays a number),
+    and the response is decoded as a plain ``dict`` that cannot fail shape
+    validation either.
+
+    ``Content-Type`` is set explicitly. The generated 37.x methods omit it on
+    ``create`` and ``delete`` (kubernetes-client/python#2782); kube-apiserver
+    falls back to JSON for a missing header, but a proxy in front of it may
+    not.
+
+    Raises :class:`ApiException` (the client's status-specific subclasses:
+    ``ConflictException`` for 409, …) exactly as the typed method does, so
+    the caller's adoption and retry classification is unchanged, and lets a
+    transport failure (a ``urllib3`` timeout) propagate as itself.
+    """
+    method, url, headers, body, post_params = api_client.param_serialize(
+        method="POST",
+        resource_path=_JOBS_RESOURCE_PATH,
+        path_params={"namespace": namespace},
+        header_params={"Accept": "application/json", "Content-Type": "application/json"},
+        body=manifest,
+        auth_settings=["BearerToken"],
+    )
+    response = api_client.call_api(
+        method,
+        url,
+        header_params=headers,
+        body=body,
+        post_params=post_params,
+        _request_timeout=request_timeout,
+    )
+    response.read()
+    # ``object`` decodes the JSON as-is; the generated typed methods pass the
+    # model name here and get the Pydantic validation this path avoids.
+    created = api_client.response_deserialize(
+        response, {"200": "object", "201": "object", "202": "object"}
+    ).data
+    return json_object(created, "the Job create response")
+
+
+def _job_identity(job: Any) -> tuple[dict[str, Any], str, str, str]:
+    """``(annotations, uid, name, namespace)`` of a Job, typed model or plain dict.
+
+    The adoption path reads the Job through the typed client (``V1Job``, with
+    attribute access); the create path receives the server's answer as a
+    ``dict`` (:func:`create_job_from_manifest`). Both carry the same four
+    identity facts, and the caller must not care which shape it got.
+    """
+    metadata: Any
+    if isinstance(job, dict):
+        metadata = job.get("metadata") or {}
+        annotations = metadata.get("annotations") or {}
+        uid = metadata.get("uid")
+        name = metadata.get("name")
+        namespace = metadata.get("namespace")
+    else:
+        metadata = getattr(job, "metadata", None)
+        annotations = getattr(metadata, "annotations", None) or {}
+        uid = getattr(metadata, "uid", None)
+        name = getattr(metadata, "name", None)
+        namespace = getattr(metadata, "namespace", None)
+    return (
+        dict(annotations) if isinstance(annotations, dict) else {},
+        str(uid or ""),
+        str(name or ""),
+        str(namespace or ""),
+    )
 
 
 #: How long a RuntimeClass answer is reused. EKS adds or removes the sandbox
@@ -561,9 +656,11 @@ class ManifestProcessor:
                     namespace, _request_timeout=self._k8s_timeout
                 )
                 entry["resource_quotas"] = {
-                    item.metadata.name: dict(item.status.hard or {})
-                    if item.status and item.status.hard
-                    else dict(item.spec.hard or {})
+                    present(item.metadata, "resourcequota.metadata").name: (
+                        dict(item.status.hard or {})
+                        if item.status and item.status.hard
+                        else dict(present(item.spec, "resourcequota.spec").hard or {})
+                    )
                     for item in quotas.items
                 }
 
@@ -571,7 +668,7 @@ class ManifestProcessor:
                     namespace, _request_timeout=self._k8s_timeout
                 )
                 entry["limit_ranges"] = {
-                    item.metadata.name: [
+                    present(item.metadata, "limitrange.metadata").name: [
                         {
                             "type": limit.type,
                             "max": dict(limit.max or {}),
@@ -579,7 +676,7 @@ class ManifestProcessor:
                             "default": dict(limit.default or {}),
                             "defaultRequest": dict(limit.default_request or {}),
                         }
-                        for limit in (item.spec.limits or [])
+                        for limit in (present(item.spec, "limitrange.spec").limits or [])
                     ]
                     for item in limit_ranges.items
                 }
@@ -1052,6 +1149,9 @@ class ManifestProcessor:
             raise QueuedJobNotCreatedError(f"Queued Job validation failed: {validation_error}")
         self._inject_security_defaults(manifest)
 
+        # A V1Job when adopted through the typed read, the server's plain dict
+        # when created (create_job_from_manifest); _job_identity reads both.
+        job: V1Job | dict[str, Any]
         try:
             job = self.batch_v1.read_namespaced_job(
                 name=deterministic_name,
@@ -1068,10 +1168,13 @@ class ManifestProcessor:
                     ) from error
                 raise
             try:
-                job = self.batch_v1.create_namespaced_job(
-                    namespace=namespace,
-                    body=manifest,
-                    _request_timeout=self._k8s_timeout,
+                # Not the typed create: see create_job_from_manifest for why
+                # the user's manifest must reach the API server unvalidated.
+                job = create_job_from_manifest(
+                    self.api_client,
+                    namespace,
+                    manifest,
+                    request_timeout=self._k8s_timeout,
                 )
                 operation = "created"
                 message = "Deterministic Kubernetes Job created"
@@ -1114,14 +1217,13 @@ class ManifestProcessor:
                 "Kubernetes Job lookup was inconclusive; retry deterministic adoption"
             ) from read_error
 
-        actual_annotations = getattr(job.metadata, "annotations", None) or {}
+        actual_annotations, uid, actual_name, actual_namespace = _job_identity(job)
         if actual_annotations.get("gco.io/queue-job-id") != queue_job_id:
             raise RuntimeError(
                 f"Kubernetes Job name collision for {namespace}/{deterministic_name}"
             )
-        uid = str(getattr(job.metadata, "uid", "") or "")
-        actual_name = str(getattr(job.metadata, "name", "") or deterministic_name)
-        actual_namespace = str(getattr(job.metadata, "namespace", "") or namespace)
+        actual_name = actual_name or deterministic_name
+        actual_namespace = actual_namespace or namespace
         if not uid:
             raise RuntimeError("Kubernetes API returned a queued Job without a UID")
         return ResourceStatus(
@@ -1487,9 +1589,9 @@ class ManifestProcessor:
 
     def _job_to_dict(self, job: V1Job) -> dict[str, Any]:
         """Convert a Kubernetes Job object to a dictionary."""
-        metadata = job.metadata
-        status = job.status
-        spec = job.spec
+        metadata = present(job.metadata, "job.metadata")
+        status = present(job.status, "job.status")
+        spec = present(job.spec, "job.spec")
 
         return {
             "metadata": {
@@ -1528,7 +1630,7 @@ class ManifestProcessor:
 
     def _get_job_status(self, job: V1Job) -> str:
         """Determine the status of a job: running, completed, or failed."""
-        status = job.status
+        status = present(job.status, "job.status")
         conditions = status.conditions or []
 
         for condition in conditions:
