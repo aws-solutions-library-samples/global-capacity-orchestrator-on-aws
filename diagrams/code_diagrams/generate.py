@@ -45,6 +45,7 @@ from pathlib import Path
 # ``pip install -e .``. The project root is two parents up.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from diagrams.code_diagrams._readme import newest_stamp
 from diagrams.code_diagrams._renderer import (
     RenderedTarget,
     _output_stem_for,
@@ -180,9 +181,15 @@ def newest_provenance_stamp(manifest: dict[str, dict[str, str]]) -> tuple[str, s
 
     The catalogue README carries one stamp describing the most recent
     regeneration; per-source stamps live in the manifest and the markers.
+    :func:`newest_stamp` is the README writer's own choice, so the two agree
+    even when sources tie on ``generated_at``.
     """
-    newest = max(manifest.values(), key=lambda entry: entry["generated_at"])
-    return newest["generated_at"], newest["source_commit"]
+    newest = newest_stamp(
+        (entry["generated_at"], entry["source_commit"]) for entry in manifest.values()
+    )
+    if newest is None:
+        raise ValueError(f"{PROVENANCE_MANIFEST_NAME} records no sources")
+    return newest
 
 
 def write_provenance_manifest(

@@ -1362,6 +1362,29 @@ class TestReadmeMixedVintage:
             assert "b" * 40 in header
             assert "2026-09-01T12:00:00Z" not in header
 
+    def test_readme_and_contract_break_a_timestamp_tie_the_same_way(self) -> None:
+        """Two sources stamped in one second must not leave the index unverifiable.
+
+        The writer iterates in ``TARGETS`` order and the contract iterates the
+        manifest in path order; with ``generated_at`` alone as the key, each
+        kept the first of the tied stamps it met, so the README recorded one
+        commit and ``--check`` expected the other.
+        """
+        tied = "2026-09-01T12:00:00Z"
+        results = [self._result("beta", tied, "a" * 40), self._result("alpha", tied, "b" * 40)]
+        manifest = {
+            "cli/alpha.py": {"digest": "0", "generated_at": tied, "source_commit": "b" * 40},
+            "cli/beta.py": {"digest": "0", "generated_at": tied, "source_commit": "a" * 40},
+        }
+        header = render_readme(results, output_dir=Path("/tmp/out")).split("###")[0]
+        assert generate_mod.newest_provenance_stamp(manifest) == (tied, "b" * 40)
+        assert "b" * 40 in header
+        assert "a" * 40 not in header
+
+    def test_an_empty_manifest_has_no_newest_stamp(self) -> None:
+        with pytest.raises(ValueError, match="records no sources"):
+            generate_mod.newest_provenance_stamp({})
+
 
 class TestProvenanceSchemaVersions:
     """A pre-v2 manifest fails loudly, then self-heals via a full regeneration."""
