@@ -150,7 +150,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install the docs toolchain
-        run: pip install -e ".[docs]"
+        run: pip install -c requirements-lock.txt -e ".[docs]"
       - name: Build the wiki (strict)
         # Identical build to the PR-side lint:zensical:strict job:
         # scripts/build_wiki.py stages the site's source tree (wiki/ pages,

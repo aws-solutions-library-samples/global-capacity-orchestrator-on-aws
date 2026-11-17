@@ -318,6 +318,71 @@ def test_workflows_never_pip_install_a_package_pyproject_declares() -> None:
     )
 
 
+# Jobs that install the project without the lock, each for a stated reason.
+_UNCONSTRAINED_PROJECT_INSTALLS = {
+    # Proves a cold install resolves from pyproject.toml's metadata alone.
+    ("unit-tests.yml", "unit-fresh-install"),
+}
+
+
+def _project_install_commands(run: str) -> list[str]:
+    """Every ``pip install`` invocation in ``run`` that installs the project itself."""
+    joined = re.sub(r"\\\n\s*", " ", run)
+    commands = []
+    for invocation in re.findall(r"pip install([^\n|;&]*)", joined):
+        tokens = [token.strip("\"'") for token in invocation.split()]
+        if any(token == "." or token.startswith(".[") for token in tokens):
+            commands.append(" ".join(["pip", "install", *invocation.split()]))
+    return commands
+
+
+def test_project_installs_are_constrained_by_the_lock() -> None:
+    """Every job that installs the project resolves its transitive graph from the lock.
+
+    ``pip install -e ".[extra]"`` alone resolves every transitive dependency
+    against live PyPI, so mypy, the strict wiki build and the Pages site could
+    change or break between two runs of one commit: 58 of the 127 packages
+    ``.[docs]`` resolved to had already moved past the lock when this guard
+    landed. The lock has no direct references, so it works as a constraints
+    file, the way the service Dockerfiles use it. A ``--no-deps`` install
+    (after ``pip install -r requirements-lock.txt``) resolves nothing, and
+    deps-scan.yml resolves against latest on purpose.
+    """
+    sources = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    sources += sorted((ROOT / ".github" / "actions").glob("*/action.yml"))
+    unconstrained: list[str] = []
+    exempted: set[tuple[str, str]] = set()
+    for path in sources:
+        if path.name == "deps-scan.yml":
+            continue
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        jobs = document.get("jobs") or {"runs": document.get("runs") or {}}
+        for job_id, job in jobs.items():
+            for step in job.get("steps") or []:
+                for command in _project_install_commands(step.get("run") or ""):
+                    tokens = command.split()
+                    if "--no-deps" in tokens or "-c requirements-lock.txt" in command:
+                        continue
+                    key = (path.name, job_id)
+                    if key in _UNCONSTRAINED_PROJECT_INSTALLS:
+                        exempted.add(key)
+                        continue
+                    unconstrained.append(f"{path.relative_to(ROOT)}:{job_id}: {command}")
+
+    assert not unconstrained, (
+        "project installs must constrain the transitive graph with "
+        "`-c requirements-lock.txt`: " + "; ".join(unconstrained)
+    )
+    assert exempted == _UNCONSTRAINED_PROJECT_INSTALLS, (
+        "an exemption no longer matches an unconstrained install; drop it"
+    )
+    assert _project_install_commands('pip install -e ".[docs]" && x') == [
+        'pip install -e ".[docs]"'
+    ]
+    assert _project_install_commands("pip install \\\n  -e .") == ["pip install -e ."]
+    assert _project_install_commands("pip install uv") == []
+
+
 def test_workflows_do_not_execute_mutable_remote_installers() -> None:
     workflows = "\n".join(
         path.read_text(encoding="utf-8")
@@ -502,7 +567,7 @@ def test_every_kind_image_load_goes_through_the_preload_script() -> None:
             installs = [
                 index
                 for index, step in enumerate(steps)
-                if re.search(r"pip install -e [\"']?\.", step.get("run") or "")
+                if re.search(r"pip install [^\n]*-e [\"']?\.", step.get("run") or "")
             ]
             for index, step in enumerate(steps):
                 run = step.get("run") or ""
@@ -651,7 +716,7 @@ def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> 
     assert "playwright install --with-deps --only-shell chromium" in chromium
     assert "for attempt in 1 2 3" in chromium
     assert by_name["Install project (renderers, Lambda helpers and the capture code)"]["run"] == (
-        'pip install -e ".[diagrams]"'
+        'pip install -c requirements-lock.txt -e ".[diagrams]"'
     )
     upload = by_name["Upload the dashboard captures"]
     assert upload["if"] == "always()"

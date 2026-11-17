@@ -99,7 +99,7 @@ jobs:
         # render_mooncake_config / build_kv_transfer_config live in
         # gco.services.inference_monitor, which imports the kubernetes client
         # (the [image-inference-monitor] group). [test] brings pytest.
-        run: pip install -e ".[image-inference-monitor,test]"
+        run: pip install -c requirements-lock.txt -e ".[image-inference-monitor,test]"
       - name: Resolve the Mooncake image (single source of truth)
         # The version is read from cli.images so this job always validates the
         # exact image GCO defaults to — bump the constant and CI re-validates.

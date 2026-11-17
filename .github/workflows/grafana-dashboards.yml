@@ -86,7 +86,7 @@ jobs:
         # validate_grafana_dashboards.py imports yaml and nothing else outside
         # the stdlib, and pyyaml is a base project dependency — so installing
         # the project covers it without naming a third-party package here.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
 
       - name: Extract dashboards from the applier manifests
         run: |

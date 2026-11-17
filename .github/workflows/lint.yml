@@ -144,7 +144,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install yamllint
-        run: pip install -e ".[lint]"
+        run: pip install -c requirements-lock.txt -e ".[lint]"
       - name: yamllint --strict .
         run: yamllint -c .github/config/.yamllint.yml --strict .
 
@@ -238,7 +238,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install the docs toolchain
-        run: pip install -e ".[docs]"
+        run: pip install -c requirements-lock.txt -e ".[docs]"
       - name: Stage the wiki sources and build strictly with Zensical
         run: python scripts/build_wiki.py build
 
@@ -347,7 +347,7 @@ jobs:
           # Install full project + mcp extras so mypy can resolve real types
           # for boto3, kubernetes, fastapi, click, fastmcp. CDK is intentionally
           # NOT installed here — gco/stacks/ is checked in lint-mypy-stacks.
-          pip install -e ".[typecheck,mcp]"
+          pip install -c requirements-lock.txt -e ".[typecheck,mcp]"
       - name: Cache mypy results
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -379,7 +379,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install typecheck + cdk dependencies
         run: |
-          pip install -e ".[cdk,typecheck]"
+          pip install -c requirements-lock.txt -e ".[cdk,typecheck]"
       - name: Cache mypy results
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -412,7 +412,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install typecheck dependencies
         run: |
-          pip install -e ".[typecheck]"
+          pip install -c requirements-lock.txt -e ".[typecheck]"
       - name: Cache mypy results
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:

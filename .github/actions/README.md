@@ -110,7 +110,7 @@ steps:
   - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
     with:
       python-version-file: ".python-version"
-  - run: pip install -e ".[cdk]"
+  - run: pip install -c requirements-lock.txt -e ".[cdk]"
   - uses: ./.github/actions/build-lambda-package
 ```
 

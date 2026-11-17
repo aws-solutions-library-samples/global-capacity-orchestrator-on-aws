@@ -636,7 +636,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install CLI
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
       - name: Exercise CLI surface
         run: |
           python -c "from cli import GCOConfig, JobManager, CapacityChecker; print('CLI imports OK')"
@@ -662,7 +662,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install CLI with CDK and test dependencies
-        run: pip install -e ".[cdk,test]"
+        run: pip install -c requirements-lock.txt -e ".[cdk,test]"
       - name: Exercise native Windows imports and asset locks
         shell: pwsh
         run: |
@@ -727,7 +727,7 @@ jobs:
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - name: Install CLI
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
       - name: Resolve every launch plan without agent CLIs installed
         run: |
           gco autopilot --help
@@ -1226,8 +1226,11 @@ jobs:
         # own toolchain (pytest, pytest-xdist, moto, ruff, mypy, aws-cdk-lib,
         # etc.) installs against live PyPI on every run. That means a
         # transitive bump to pluggy or coverage between PR runs could
-        # silently change test behavior. Locking everything keeps every job
-        # reproducible against a known pinned tree.
+        # silently change test behavior. Locking everything, and installing
+        # every job against the lock (`-r requirements-lock.txt`, or
+        # `-c requirements-lock.txt` beside the project install), keeps every
+        # job reproducible against a known pinned tree; unit:fresh-install is
+        # the deliberate cold exception.
         env:
           # pip-compile invokes pip, which can hit interactive keyring prompts
           # on CI ("Unhandled exception: EOF when reading a line"). Disabling
@@ -1313,8 +1316,8 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install core + inference-monitor image dependencies
         run: |
-          pip install -e .
-          pip install -e ".[image-inference-monitor]"
+          pip install -c requirements-lock.txt -e .
+          pip install -c requirements-lock.txt -e ".[image-inference-monitor]"
       - name: Import health-monitor + manifest-processor
         run: |
           python -c "from gco.services.health_api import app; print('health-monitor OK')"

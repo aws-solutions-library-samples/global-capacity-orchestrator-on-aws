@@ -114,7 +114,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project (provides PyYAML for the validator)
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Derive the Helm pin from the production installer Dockerfile
         # lambda/helm-installer/Dockerfile is the single source for the Helm
         # version + checksum: this step loads HELM_VERSION / HELM_SHA256 from
@@ -175,7 +175,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
       - name: Install pinned kubeconform
         run: |
           set -euo pipefail
@@ -341,7 +341,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
       - name: Import each Lambda handler
         run: python3 .github/scripts/verify_lambda_imports.py
 
@@ -379,7 +379,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install test dependencies
         run: |
-          pip install -e ".[test]"
+          pip install -c requirements-lock.txt -e ".[test]"
       - name: Run integration pytest
         run: |
           pytest tests/test_integration.py -v --tb=short \
@@ -420,7 +420,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install dev + mcp
         run: |
-          pip install -e ".[dev,mcp]"
+          pip install -c requirements-lock.txt -e ".[dev,mcp]"
       - name: Run MCP integration tests
         run: |
           pytest tests/test_mcp_integration.py -v --tb=short \
@@ -478,7 +478,7 @@ jobs:
         # [mcp] brings fastmcp so the gco server entry in the generated
         # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
         # can actually boot under claude.
-        run: pip install -e ".[mcp]"
+        run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
         run: pip install uv
       - name: Boot the autopilot session to the credential boundary
@@ -536,7 +536,7 @@ jobs:
         # [mcp] brings fastmcp so the gco server entry in the generated
         # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
         # can actually boot under codex.
-        run: pip install -e ".[mcp]"
+        run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
         run: pip install uv
       - name: Boot the codex autopilot session to the credential boundary
@@ -597,7 +597,7 @@ jobs:
         # [mcp] brings fastmcp so the gco server entry in the generated
         # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
         # can actually boot under opencode.
-        run: pip install -e ".[mcp]"
+        run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
         run: pip install uv
       - name: Boot the opencode autopilot session to the credential boundary
@@ -1626,7 +1626,7 @@ jobs:
         # stack calls, and the SQS job envelope `gco jobs submit-sqs` builds —
         # and parse manifests with PyYAML, so the project supplies its own
         # dependencies to this job.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Reclaim runner disk space before Kind image builds
         uses: ./.github/actions/free-disk-space
       - name: Pre-pull Kind bootstrap images with retry
@@ -3412,7 +3412,7 @@ jobs:
         # -e . provides PyYAML for validate_helm_charts.py --emit-* and the
         # render step below, which parses the shipped cost-monitor manifest
         # rather than patching it with sed.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Derive the Helm pin from the production installer Dockerfile
         # Single source: lambda/helm-installer/Dockerfile (see the
         # charts-valid job for the full rationale).
@@ -4620,7 +4620,7 @@ jobs:
         # gco.services.manifest_processor importable so the can-i sweep
         # derives (group, plural) pairs from the SAME constants production
         # enforces — no hardcoded copy to drift.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Derive the Helm pin from the production installer Dockerfile
         # Single source: lambda/helm-installer/Dockerfile (see the
         # charts-valid job for the full rationale).
@@ -5972,7 +5972,7 @@ jobs:
         # own helpers, the teardown runs the Lambda handlers' own functions and
         # the dashboards are captured by the CLI's screenshot code. The
         # diagrams extra is the pinned Playwright those commands need.
-        run: pip install -e ".[diagrams]"
+        run: pip install -c requirements-lock.txt -e ".[diagrams]"
       - name: Install the headless Chromium the captures drive (with retry)
         run: |
           set -euo pipefail

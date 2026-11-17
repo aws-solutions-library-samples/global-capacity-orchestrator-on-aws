@@ -87,7 +87,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install security tooling
         run: |
-          pip install -e ".[security]"
+          pip install -c requirements-lock.txt -e ".[security]"
       - name: Validate tracked demo GIFs
         # Decode untrusted media only in this ephemeral, read-only job. The
         # script also bounds file size, canvas dimensions, and frame count.
@@ -651,7 +651,7 @@ jobs:
       - name: Install locked CDK + Python dependencies and synthesize
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          pip install -e ".[cdk]"
+          pip install -c requirements-lock.txt -e ".[cdk]"
       - uses: ./.github/actions/build-lambda-package
       - name: cdk synth
         run: npm exec -- cdk synth --quiet
