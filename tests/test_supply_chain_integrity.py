@@ -2163,6 +2163,80 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
     ) in kubectl_section
 
 
+def _dockerfile_run_instructions(content: str) -> list[str]:
+    """Every RUN instruction, its continuation lines joined into one command."""
+    runs: list[str] = []
+    current: str | None = None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if current is None:
+            if not stripped.startswith("RUN "):
+                continue
+            current = ""
+            stripped = stripped.removeprefix("RUN ")
+        current += " " + stripped.removesuffix("\\").strip()
+        if not stripped.endswith("\\"):
+            runs.append(current.strip())
+            current = None
+    return runs
+
+
+_CURL_DOWNLOAD = re.compile(r'curl\s+(?P<flags>(?:-\S+\s+)*)"(?P<url>[^"]+)"\s+-o\s+(?P<out>\S+)')
+
+
+def test_dev_container_downloads_fail_closed_and_are_checksummed() -> None:
+    """Every vendor download in Dockerfile.dev stops on HTTP errors and is verified.
+
+    The image mounts ~/.aws and the host Docker socket, so its binaries run
+    with the contributor's AWS credentials and root-equivalent access to the
+    host Docker daemon. kubectl and the AWS CLI zip were fetched without
+    ``--fail`` or a checksum, and the Docker archive without a checksum, while
+    the comments said every tool was verified. Each download must now be a
+    ``curl --fail`` to an output file that ``sha256sum -c`` checks in the same
+    RUN, and the three new anchors are literals a build-arg cannot override.
+    """
+    dockerfile = _read("Dockerfile.dev")
+    checked: list[str] = []
+    for run in _dockerfile_run_instructions(dockerfile):
+        downloads = list(_CURL_DOWNLOAD.finditer(run))
+        invocations = re.findall(r"\bcurl\s+[-\"]", run)
+        assert len(downloads) == len(invocations), f"unrecognised curl shape: {run}"
+        for download in downloads:
+            flags = download.group("flags").split()
+            assert "--fail" in flags or any(
+                flag.startswith("-") and not flag.startswith("--") and "f" in flag for flag in flags
+            ), f"download without --fail: {download.group('url')}"
+            out = re.escape(download.group("out"))
+            assert re.search(rf'echo "\$\{{[A-Z0-9_]+\}}  {out}" \| sha256sum -c -', run), (
+                f"download without a checksum: {download.group('url')}"
+            )
+            checked.append(download.group("url"))
+    assert len(checked) == 7, checked
+
+    for name in ("KUBECTL_SHA256", "AWSCLI_SHA256", "DOCKER_SHA256"):
+        assert f"ARG {name}" not in dockerfile
+    for anchor in (
+        'amd64) KUBECTL_SHA256="c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4"',
+        'arm64) KUBECTL_SHA256="fcc16f63186659d9722014b7e02d5fdd2d4e669cb8c0ab66365d7d3b8ba03509"',
+        'amd64) AWSCLI_SHA256="14cb35809ad7547dd3c69fa9899a3975fbd850b6a6791f3fe264856490cd9a63"',
+        'arm64) AWSCLI_SHA256="f6eb845fbacb11bee87de3f5fbe8043773cbe89d0414607b44b71e216eb9226b"',
+        'amd64) DOCKER_SHA256="9ac225999fd5e863f7694c728ef23d480616b1e5639328fa309befd4243d69eb"',
+        'arm64) DOCKER_SHA256="873b3e0207857c3b2f28392fb922f3ea6efe37620c16d4d4aaf2fef409c90b73"',
+    ):
+        assert anchor in dockerfile, anchor
+    assert "ARG KUBECTL_VERSION=v1.37.2" in dockerfile
+    assert "ARG AWSCLI_VERSION=2.39.3" in dockerfile
+    assert "ARG DOCKER_VERSION=29.9.2" in dockerfile
+
+    # One kubectl release, one amd64 binary: the installer Lambda pins the same.
+    installer = _read("lambda/helm-installer/Dockerfile")
+    installer_version = re.search(r"dl\.k8s\.io/release/(v[\d.]+)/", installer)
+    installer_sha = re.search(r"([0-9a-f]{64})\s+/tmp/kubectl", installer)
+    assert installer_version and installer_sha
+    if installer_version.group(1) == "v1.37.2":
+        assert f'amd64) KUBECTL_SHA256="{installer_sha.group(1)}"' in dockerfile
+
+
 def test_latest_cdk_enum_install_is_isolated_and_cannot_cost_the_report() -> None:
     """The latest aws-cdk-lib lives in its own virtualenv, and its install may fail.
 
