@@ -173,7 +173,10 @@ def strip_all_markers(project_root: Path) -> int:
     for source_path in search_roots:
         if not source_path.is_file():
             continue
-        if any(frag in str(source_path) for frag in skip_fragments):
+        # Relative, so a checkout whose own path contains a fragment is still
+        # walked.
+        relative = source_path.relative_to(project_root).as_posix()
+        if any(frag in relative for frag in skip_fragments):
             continue
         original = source_path.read_text(encoding="utf-8")
         if SENTINEL not in original:

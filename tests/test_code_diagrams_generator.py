@@ -1532,6 +1532,24 @@ class TestSourceMarkerEdgeCases:
         assert "mod.func" in marked
         assert "(PNG:" not in marked
 
+    def test_strip_all_markers_walks_a_checkout_whose_path_names_a_bundle(
+        self, tmp_path: Path
+    ) -> None:
+        """The bundle skip applies inside the project, never to the checkout's own path."""
+        root = tmp_path / "helm-installer-build" / "checkout"
+        marked = root / "gco" / "jobs.py"
+        marked.parent.mkdir(parents=True)
+        marked.write_text(
+            f"import os\n\n# <{SENTINEL}> BEGIN - auto-inserted, do not edit\n# <{SENTINEL}> END\n",
+            encoding="utf-8",
+        )
+        bundled = root / "lambda" / "helm-installer-build" / "copy.py"
+        bundled.parent.mkdir(parents=True)
+        bundled.write_text(marked.read_text(encoding="utf-8"), encoding="utf-8")
+        assert strip_all_markers(root) == 1
+        assert SENTINEL not in marked.read_text(encoding="utf-8")
+        assert SENTINEL in bundled.read_text(encoding="utf-8")
+
     def test_strip_all_markers_ignores_unmarked_and_missing_files(self, tmp_path: Path) -> None:
         """Only files actually carrying a marker may be rewritten."""
         for package in ("gco", "cli", "gco_mcp", "lambda"):
