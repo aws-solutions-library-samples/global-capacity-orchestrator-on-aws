@@ -29,8 +29,14 @@
 #     commit is the resume case and skips tag creation.
 #
 # Concurrency:
-#   Shares the `release` group with stage 1 so a publish never interleaves
-#   with the next release's branch cut.
+#   Its own `release-publish` group, never cancelled. GitHub keeps at most
+#   one pending run per group and a newer queued run cancels it, whatever
+#   cancel-in-progress says, so sharing stage 1's group let a Release
+#   dispatch cancel a publish waiting behind a running stage 1, and that
+#   merged version was never tagged. The two stages need no serializing
+#   against each other: stage 1 reads only main and the tags, and the next
+#   release PR cannot pass CI and merge before this run finishes. Publish
+#   runs serialize among themselves, so two never race the same tag.
 #
 # Permissions model:
 #   `contents: write` on the built-in GITHUB_TOKEN covers the tag push and
@@ -55,7 +61,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: release
+  group: release-publish
   cancel-in-progress: false
 
 permissions:

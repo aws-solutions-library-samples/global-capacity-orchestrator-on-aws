@@ -2138,17 +2138,32 @@ def test_release_publish_refuses_to_move_an_existing_tag(tmp_path: Path) -> None
     assert "Released tags are immutable" in result.stderr
 
 
-def test_release_workflows_share_one_serialized_concurrency_group() -> None:
-    """Both stages share `group: release` and never cancel in-flight runs.
+def test_release_stages_never_cancel_each_other() -> None:
+    """Each stage serializes in a group of its own and never cancels a run.
 
-    A publish interleaving with the next release's branch cut (or a canceled
-    half-publish) is exactly the torn state the old single-stage atomic push
-    protected against; the shared no-cancel group is its replacement.
+    GitHub keeps at most one pending run per concurrency group, and a newer
+    queued run cancels the pending one even with ``cancel-in-progress: false``.
+    While both stages shared ``group: release``, a Release dispatch made while
+    stage 1 was running cancelled a publish queued behind it, and that merged
+    version was never tagged or released.
     """
+    groups = {}
     for path in (".github/workflows/release.yml", ".github/workflows/release-publish.yml"):
-        workflow = _read(path)
-        assert "group: release" in workflow, path
-        assert "cancel-in-progress: false" in workflow, path
+        concurrency = yaml.safe_load(_read(path))["concurrency"]
+        assert concurrency["cancel-in-progress"] is False, path
+        groups[path] = concurrency["group"]
+    assert groups == {
+        ".github/workflows/release.yml": "release",
+        ".github/workflows/release-publish.yml": "release-publish",
+    }
+    # No other workflow may join either group and cancel a pending release run.
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        if f".github/workflows/{path.name}" in groups:
+            continue
+        group = (yaml.safe_load(path.read_text(encoding="utf-8")).get("concurrency") or {}).get(
+            "group"
+        )
+        assert group not in groups.values(), path.name
 
 
 def test_model_sync_uses_an_immutable_official_aws_cli_image() -> None:
