@@ -1952,6 +1952,145 @@ class TestKeepControlPlaneTeardown:
         mocks["dial"].assert_not_called()
 
 
+class TestGlobalStackBackupVaultRace:
+    """The global vault is emptied again right before its stack is deleted.
+
+    The first sweep runs when the teardown starts; the global stack goes last,
+    often an hour later, and a scheduled backup in between left the vault
+    non-empty (a live run hit DELETE_FAILED at 04:48:56 after starting at 03:35).
+    """
+
+    _ALL_STACKS = ["gco-global", "gco-api-gateway", "gco-us-east-1"]
+
+    def _run(self, *, destroy_results, sweeps, strict=False):
+        from contextlib import ExitStack
+
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        config.global_region = "us-east-2"
+        events: list[str] = []
+        cleanups: list[tuple[str, dict]] = []
+        destroy_results = iter(destroy_results)
+        sweeps = iter(sweeps)
+
+        def fake_destroy(stack_name, **_kwargs):
+            events.append(f"destroy {stack_name}")
+            return next(destroy_results)
+
+        def fake_sweep(**kwargs):
+            events.append("sweep")
+            return next(sweeps)
+
+        strict_kwargs = {}
+        if strict:
+            strict_kwargs = {
+                "expected_stack_ids": {name: f"arn:{name}" for name in self._ALL_STACKS},
+                "authorize_stack": MagicMock(),
+            }
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(StackManager, "list_stacks", return_value=list(self._ALL_STACKS))
+            )
+            stack.enter_context(
+                patch.object(StackManager, "_resolve_strict_teardown_resources", return_value={})
+            )
+            vault = stack.enter_context(
+                patch.object(StackManager, "_cleanup_backup_vault", side_effect=fake_sweep)
+            )
+            stack.enter_context(
+                patch.object(StackManager, "_destroy_phase_remaining_stacks", return_value=[])
+            )
+            stack.enter_context(patch.object(StackManager, "destroy", side_effect=fake_destroy))
+            result = StackManager(config).destroy_orchestrated(
+                force=True,
+                on_cleanup_complete=lambda name, details: cleanups.append((name, details)),
+                **strict_kwargs,
+            )
+        return result, events, cleanups, vault
+
+    def test_the_vault_is_swept_again_immediately_before_the_global_delete(self):
+        empty = {"status": "completed", "resource_status": "CREATE_COMPLETE", "errors": []}
+        (ok, successful, failed), events, cleanups, vault = self._run(
+            destroy_results=[True, True, True], sweeps=[empty, empty]
+        )
+
+        assert ok is True and failed == []
+        assert successful == ["gco-us-east-1", "gco-api-gateway", "gco-global"]
+        assert events == [
+            "sweep",
+            "destroy gco-us-east-1",
+            "destroy gco-api-gateway",
+            "sweep",
+            "destroy gco-global",
+        ]
+        assert [name for name, _ in cleanups if name == "backup-vault"] == ["backup-vault"] * 2
+        for call_ in vault.call_args_list:
+            assert call_.kwargs == {
+                "expected_stack_id": None,
+                "authorize_stack": None,
+                "require_expected_identity": False,
+            }
+
+    def test_a_delete_the_vault_blocked_is_retried_once_after_another_sweep(self, capsys):
+        empty = {"status": "completed", "resource_status": "CREATE_COMPLETE", "errors": []}
+        blocked = {"status": "completed", "resource_status": "DELETE_FAILED", "errors": []}
+        (ok, successful, failed), events, _cleanups, _vault = self._run(
+            destroy_results=[True, True, False, True], sweeps=[empty, empty, blocked]
+        )
+
+        assert ok is True and failed == []
+        assert successful[-1] == "gco-global"
+        assert events[-4:] == ["sweep", "destroy gco-global", "sweep", "destroy gco-global"]
+        assert "its backup vault was not empty; retrying the delete once" in (
+            capsys.readouterr().out
+        )
+
+    def test_a_delete_that_failed_elsewhere_is_not_retried(self):
+        empty = {"status": "completed", "resource_status": "CREATE_COMPLETE", "errors": []}
+        absent = {"status": "vault-resource-absent", "errors": []}
+        (ok, _successful, failed), events, _cleanups, _vault = self._run(
+            destroy_results=[True, True, False, False], sweeps=[empty, empty, absent]
+        )
+
+        assert ok is False
+        assert failed == ["gco-global"]
+        assert events.count("destroy gco-global") == 1
+
+    def test_a_retried_delete_that_fails_again_is_reported(self):
+        empty = {"status": "completed", "resource_status": "CREATE_COMPLETE", "errors": []}
+        blocked = {"status": "completed", "resource_status": "DELETE_FAILED", "errors": []}
+        (ok, _successful, failed), events, _cleanups, _vault = self._run(
+            destroy_results=[True, True, False, False], sweeps=[empty, empty, blocked]
+        )
+
+        assert ok is False
+        assert failed == ["gco-global"]
+        assert events.count("destroy gco-global") == 2
+
+    def test_strict_teardowns_fail_closed_before_the_global_delete(self):
+        empty = {"status": "completed", "resource_status": "CREATE_COMPLETE", "errors": []}
+        broken = {"status": "partial", "errors": [{"error": "AccessDeniedException"}]}
+        with pytest.raises(
+            RuntimeError, match="Strict backup-vault cleanup failed before deleting gco-global"
+        ):
+            self._run(destroy_results=[True, True], sweeps=[empty, broken], strict=True)
+
+    def test_strict_sweeps_carry_the_checkpointed_global_identity(self):
+        empty = {"status": "completed", "resource_status": "CREATE_COMPLETE", "errors": []}
+        (ok, _successful, _failed), _events, _cleanups, vault = self._run(
+            destroy_results=[True, True, True], sweeps=[empty, empty], strict=True
+        )
+
+        assert ok is True
+        assert vault.call_count == 2
+        for call_ in vault.call_args_list:
+            assert call_.kwargs["expected_stack_id"] == "arn:gco-global"
+            assert call_.kwargs["require_expected_identity"] is True
+            assert call_.kwargs["authorize_stack"] is not None
+
+
 class TestAnalyticsStackTeardownPhase:
     """``<project>-analytics`` is torn down with the global tier, never as a regional stack.
 

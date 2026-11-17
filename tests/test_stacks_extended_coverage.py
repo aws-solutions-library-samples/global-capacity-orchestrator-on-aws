@@ -689,7 +689,7 @@ class TestCleanupBackupVault:
         )
         backup = MagicMock()
         backup.describe_backup_vault.return_value = {"BackupVaultArn": vault_arn}
-        backup.get_paginator.return_value = _make_paginator(
+        backup.recovery_points = _make_paginator(
             [
                 {
                     "RecoveryPoints": [
@@ -698,6 +698,10 @@ class TestCleanupBackupVault:
                     ]
                 }
             ]
+        )
+        backup.backup_jobs = _make_paginator_callable([{"BackupJobs": []}])
+        backup.get_paginator.side_effect = lambda operation: (
+            backup.backup_jobs if operation == "list_backup_jobs" else backup.recovery_points
         )
         if recovery_delete_error is not None:
             backup.delete_recovery_point.side_effect = recovery_delete_error
@@ -720,10 +724,11 @@ class TestCleanupBackupVault:
             StackName=self._STACK_ID
         )
         backup.describe_backup_vault.assert_called_once_with(BackupVaultName="GcoBackupVault")
-        backup.get_paginator.assert_called_once_with("list_recovery_points_by_backup_vault")
-        backup.get_paginator.return_value.paginate.assert_called_once_with(
-            BackupVaultName="GcoBackupVault"
-        )
+        assert [call.args for call in backup.get_paginator.call_args_list] == [
+            ("list_backup_jobs",),
+            ("list_recovery_points_by_backup_vault",),
+        ]
+        backup.recovery_points.paginate.assert_called_once_with(BackupVaultName="GcoBackupVault")
         assert backup.delete_recovery_point.call_count == 2
         assert "Cleaned up 2 backup recovery points" in capsys.readouterr().out
 
@@ -748,6 +753,147 @@ class TestCleanupBackupVault:
         with patch("boto3.client", side_effect=client):
             manager._cleanup_backup_vault()
         assert backup.delete_recovery_point.call_count == 2
+
+    def test_unfinished_jobs_are_stopped_before_the_points_are_deleted(
+        self, manager: Any, capsys: Any
+    ) -> None:
+        """A scheduled job must not add a recovery point right after the sweep."""
+        resources = [
+            {
+                "LogicalResourceId": "BackupVault",
+                "ResourceType": "AWS::Backup::BackupVault",
+                "PhysicalResourceId": (
+                    "arn:aws:backup:us-east-2:123456789012:backup-vault:GcoBackupVault"
+                ),
+                "ResourceStatus": "DELETE_FAILED",
+            }
+        ]
+        _cloudformation, backup, client = self._clients(resources=resources)
+        order: list[str] = []
+        backup.delete_recovery_point.side_effect = lambda **_kwargs: order.append("delete")
+
+        def stop_jobs(backup_client: Any, vault_name: str) -> dict[str, list[Any]]:
+            assert backup_client is backup
+            assert vault_name == "GcoBackupVault"
+            order.append("stop")
+            return {"stopped": ["job-1"], "unstoppable": [], "errors": [{"error": "denied"}]}
+
+        with (
+            patch("boto3.client", side_effect=client),
+            patch.object(manager, "_stop_backup_vault_jobs", side_effect=stop_jobs),
+        ):
+            result = manager._cleanup_backup_vault()
+
+        assert order == ["stop", "delete", "delete"]
+        assert result["stopped_backup_jobs"] == ["job-1"]
+        assert result["errors"] == [{"error": "denied"}]
+        assert result["status"] == "partial"
+        assert result["resource_status"] == "DELETE_FAILED"
+        assert "Stopped 1 unfinished AWS Backup job(s) writing to GcoBackupVault" in (
+            capsys.readouterr().out
+        )
+
+    def test_a_vault_cloudformation_already_deleted_is_absent(self, manager: Any) -> None:
+        """After a stack delete that failed elsewhere, the vault resource is DELETE_COMPLETE."""
+        resources = [
+            {
+                "LogicalResourceId": "BackupVault",
+                "ResourceType": "AWS::Backup::BackupVault",
+                "PhysicalResourceId": "GcoBackupVault",
+                "ResourceStatus": "DELETE_COMPLETE",
+            }
+        ]
+        _cloudformation, backup, client = self._clients(resources=resources)
+        with patch("boto3.client", side_effect=client):
+            result = manager._cleanup_backup_vault()
+        assert result["status"] == "vault-resource-absent"
+        assert result["errors"] == []
+        backup.describe_backup_vault.assert_not_called()
+
+
+def _client_error(code: str, operation: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": code}}, operation)
+
+
+class TestStopBackupVaultJobs:
+    """``ListBackupJobs`` takes one state per call; every unfinished job gets a stop request."""
+
+    @staticmethod
+    def _backup(jobs_by_state: dict[str, list[dict[str, Any]]]) -> Any:
+        backup = MagicMock()
+        backup.get_paginator.return_value.paginate.side_effect = lambda ByBackupVaultName, ByState: [
+            {"BackupJobs": jobs_by_state.get(ByState, [])}
+        ]
+        return backup
+
+    def test_stops_each_unfinished_job_of_the_exact_vault(self, manager: Any) -> None:
+        backup = self._backup(
+            {
+                "CREATED": [{"BackupJobId": "job-created", "BackupVaultName": "vault"}],
+                "RUNNING": [
+                    {"BackupJobId": "job-running", "BackupVaultName": "vault"},
+                    {"BackupJobId": "job-elsewhere", "BackupVaultName": "other-vault"},
+                    {"BackupVaultName": "vault"},
+                ],
+            }
+        )
+
+        outcome = manager._stop_backup_vault_jobs(backup, "vault")
+
+        backup.get_paginator.assert_called_once_with("list_backup_jobs")
+        assert [
+            call.kwargs for call in backup.get_paginator.return_value.paginate.call_args_list
+        ] == [
+            {"ByBackupVaultName": "vault", "ByState": state}
+            for state in ("CREATED", "PENDING", "RUNNING")
+        ]
+        assert [call.kwargs for call in backup.stop_backup_job.call_args_list] == [
+            {"BackupJobId": "job-created"},
+            {"BackupJobId": "job-running"},
+        ]
+        assert outcome == {
+            "stopped": ["job-created", "job-running"],
+            "unstoppable": [],
+            "errors": [],
+        }
+
+    def test_a_job_that_already_finished_is_not_an_error(self, manager: Any) -> None:
+        backup = self._backup(
+            {
+                "PENDING": [
+                    {"BackupJobId": "job-done", "BackupVaultName": "vault"},
+                    {"BackupJobId": "job-gone", "BackupVaultName": "vault"},
+                ]
+            }
+        )
+        backup.stop_backup_job.side_effect = [
+            _client_error("InvalidRequestException", "StopBackupJob"),
+            _client_error("ResourceNotFoundException", "StopBackupJob"),
+        ]
+
+        outcome = manager._stop_backup_vault_jobs(backup, "vault")
+
+        assert outcome == {
+            "stopped": [],
+            "unstoppable": [
+                {"backup_job_id": "job-done", "code": "InvalidRequestException"},
+                {"backup_job_id": "job-gone", "code": "ResourceNotFoundException"},
+            ],
+            "errors": [],
+        }
+
+    def test_other_failures_are_recorded_not_raised(self, manager: Any) -> None:
+        backup = self._backup({"RUNNING": [{"BackupJobId": "job-1", "BackupVaultName": "vault"}]})
+        backup.stop_backup_job.side_effect = _client_error("AccessDeniedException", "StopBackupJob")
+        outcome = manager._stop_backup_vault_jobs(backup, "vault")
+        assert outcome["stopped"] == [] and outcome["unstoppable"] == []
+        assert outcome["errors"][0]["error"].startswith("ClientError: ")
+
+        listing = MagicMock()
+        listing.get_paginator.side_effect = RuntimeError("throttled")
+        assert manager._stop_backup_vault_jobs(listing, "vault")["errors"] == [
+            {"error": "RuntimeError: throttled"}
+        ]
 
 
 # ---------------------------------------------------------------------------

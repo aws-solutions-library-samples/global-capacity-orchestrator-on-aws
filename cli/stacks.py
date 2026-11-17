@@ -136,6 +136,8 @@ _CLOUDFORMATION_DELETE_HEARTBEAT_SECONDS = 60.0
 _CLOUDFORMATION_SETTLE_UNKNOWN_TIMEOUT_SECONDS = 60.0
 _CLOUDFORMATION_SETTLE_UNKNOWN_POLL_SECONDS = 5.0
 _BOOTSTRAP_HEALTHY_STATUSES = frozenset({"CREATE_COMPLETE", "UPDATE_COMPLETE"})
+# AWS Backup job states that can still write a recovery point.
+_BACKUP_JOB_UNFINISHED_STATES = ("CREATED", "PENDING", "RUNNING")
 # CDK's ``prepare-change-set`` mode can return before a fresh CREATE change set
 # is visible through CloudFormation's read path. Poll only that authoritative
 # fresh-create absence window; every access, identity, tag, and ownership error
@@ -5187,22 +5189,31 @@ class StackManager:
                 self._detach_stack_roles_from_instance_profiles(list(regional_stacks)),
             )
 
-        # The backup vault belongs to the global stack. When that stack stays,
-        # so do its recovery points: they are the EFS backups an operator may
-        # restore from once the regional stacks are recreated.
-        if not keep_control_plane:
-            global_stack_name = f"{project_name}-global"
-            backup = self._cleanup_backup_vault(
+        global_stack_name = f"{project_name}-global"
+
+        def sweep_backup_vault(when: str) -> dict[str, Any]:
+            """Stop the global vault's backup jobs and delete its recovery points.
+
+            Strict teardowns fail closed on any error, before ``when``.
+            """
+            outcome = self._cleanup_backup_vault(
                 expected_stack_id=(expected_stack_ids or {}).get(global_stack_name),
                 authorize_stack=authorize_stack,
                 require_expected_identity=strict_identity,
             )
-            record_cleanup("backup-vault", backup)
-            if strict_identity and backup.get("errors"):
+            record_cleanup("backup-vault", outcome)
+            if strict_identity and outcome.get("errors"):
                 raise RuntimeError(
-                    "Strict backup-vault cleanup failed before stack deletion: "
-                    + json.dumps(backup["errors"], sort_keys=True)
+                    f"Strict backup-vault cleanup failed {when}: "
+                    + json.dumps(outcome["errors"], sort_keys=True)
                 )
+            return outcome
+
+        # The backup vault belongs to the global stack. When that stack stays,
+        # so do its recovery points: they are the EFS backups an operator may
+        # restore from once the regional stacks are recreated.
+        if not keep_control_plane:
+            sweep_backup_vault("before stack deletion")
 
         successful: list[str] = []
         failed: list[str] = []
@@ -5448,12 +5459,34 @@ class StackManager:
         for stack_name in pre_regional_stacks:
             if on_stack_start:
                 on_stack_start(stack_name)
+            is_global_stack = stack_name == global_stack_name
+            if is_global_stack:
+                # The vault was emptied when the teardown started, but the
+                # backup plan's schedules (daily 03:00 UTC, Sundays 04:00 UTC)
+                # may have written a recovery point since, and CloudFormation
+                # cannot delete a vault that holds one.
+                sweep_backup_vault(f"before deleting {stack_name}")
             success = self.destroy(
                 stack_name=stack_name,
                 force=force,
                 expected_stack_id=(expected_stack_ids or {}).get(stack_name),
                 **destroy_safety,
             )
+            if (
+                not success
+                and is_global_stack
+                and sweep_backup_vault(f"before retrying {stack_name}").get("resource_status")
+                == "DELETE_FAILED"
+            ):
+                # A job that finished between the sweep and the delete still
+                # writes a recovery point; the vault is empty again now.
+                print(f"  {stack_name}: its backup vault was not empty; retrying the delete once.")
+                success = self.destroy(
+                    stack_name=stack_name,
+                    force=force,
+                    expected_stack_id=(expected_stack_ids or {}).get(stack_name),
+                    **destroy_safety,
+                )
             (successful if success else failed).append(stack_name)
             if on_stack_complete:
                 on_stack_complete(stack_name, success)
@@ -5556,6 +5589,38 @@ class StackManager:
 
         return successful, failed
 
+    @staticmethod
+    def _stop_backup_vault_jobs(backup_client: Any, vault_name: str) -> dict[str, list[Any]]:
+        """Ask AWS Backup to stop every unfinished job writing into ``vault_name``.
+
+        ``ListBackupJobs`` takes one state per call. A job that finishes between
+        the listing and the stop request (or one AWS Backup cannot stop) is
+        reported as ``unstoppable``, not as an error: whatever it writes, the
+        recovery-point sweep that follows deletes, or the global stack's retry
+        does.
+        """
+        outcome: dict[str, list[Any]] = {"stopped": [], "unstoppable": [], "errors": []}
+        try:
+            paginator = backup_client.get_paginator("list_backup_jobs")
+            for state in _BACKUP_JOB_UNFINISHED_STATES:
+                for page in paginator.paginate(ByBackupVaultName=vault_name, ByState=state):
+                    for job in page.get("BackupJobs", []):
+                        job_id = str(job.get("BackupJobId") or "")
+                        if not job_id or job.get("BackupVaultName") != vault_name:
+                            continue
+                        try:
+                            backup_client.stop_backup_job(BackupJobId=job_id)
+                        except ClientError as exc:
+                            code = str(exc.response.get("Error", {}).get("Code") or "")
+                            if code not in ("InvalidRequestException", "ResourceNotFoundException"):
+                                raise
+                            outcome["unstoppable"].append({"backup_job_id": job_id, "code": code})
+                        else:
+                            outcome["stopped"].append(job_id)
+        except Exception as exc:  # the recovery-point sweep still runs
+            outcome["errors"].append({"error": f"{type(exc).__name__}: {exc}"})
+        return outcome
+
     def _cleanup_backup_vault(
         self,
         *,
@@ -5563,7 +5628,14 @@ class StackManager:
         authorize_stack: StackAuthorizationCallback | None = None,
         require_expected_identity: bool = False,
     ) -> dict[str, Any]:
-        """Delete points only from the exact stack resource's physical vault."""
+        """Empty only the exact stack resource's physical vault.
+
+        Unfinished backup jobs writing into the vault are stopped first, so a
+        scheduled job cannot add a recovery point right after the sweep. The
+        vault resource's CloudFormation status is reported as
+        ``resource_status``: ``DELETE_FAILED`` after a stack delete means the
+        vault is what blocked it.
+        """
         import boto3
 
         global_region = self.config.global_region
@@ -5573,6 +5645,7 @@ class StackManager:
             "stack_id": expected_stack_id,
             "status": "not-needed",
             "deleted_recovery_points": 0,
+            "stopped_backup_jobs": [],
             "errors": [],
         }
 
@@ -5602,6 +5675,8 @@ class StackManager:
                     for resource in page.get("StackResourceSummaries", [])
                     if resource.get("ResourceType") == "AWS::Backup::BackupVault"
                     and resource.get("PhysicalResourceId")
+                    # A stack delete that failed elsewhere has already deleted it.
+                    and resource.get("ResourceStatus") != "DELETE_COMPLETE"
                 )
             if not resources:
                 result["status"] = "vault-resource-absent"
@@ -5646,8 +5721,17 @@ class StackManager:
                     "physical_id": physical_id,
                     "vault_name": vault_name,
                     "vault_arn": vault_arn,
+                    "resource_status": str(resource.get("ResourceStatus") or ""),
                 }
             )
+            jobs = self._stop_backup_vault_jobs(backup_client, vault_name)
+            result["stopped_backup_jobs"] = jobs["stopped"]
+            result["errors"].extend(jobs["errors"])
+            if jobs["stopped"]:
+                print(
+                    f"  Stopped {len(jobs['stopped'])} unfinished AWS Backup job(s) "
+                    f"writing to {vault_name}"
+                )
             paginator = backup_client.get_paginator("list_recovery_points_by_backup_vault")
             for page in paginator.paginate(BackupVaultName=vault_name):
                 for recovery_point in page.get("RecoveryPoints", []):

@@ -5277,6 +5277,14 @@ is named, so nothing survives silently.
 Deletion is irreversible, so use `--retain-volumes` if you want to keep
 Prometheus history or take snapshots first.
 
+CloudFormation cannot delete a backup vault that still holds recovery points, so
+a full `destroy-all` empties the global stack's AWS Backup vault twice: when the
+teardown starts, and again right before it deletes `<project>-global`, often an
+hour later, by which time the daily (03:00 UTC) or weekly (Sundays 04:00 UTC)
+backup may have written a new recovery point. Each pass first stops the backup
+jobs still writing to that vault. If the global stack's delete still fails on
+the vault, it is emptied again and the delete is retried once.
+
 After stack deletion, `destroy-all` makes a best-effort sweep of known resources
 that CloudFormation never modeled. It targets the implicit CloudWatch log groups
 created out-of-band by Lambda (`/aws/lambda/<function>`), the EKS control plane
