@@ -81,6 +81,16 @@ _INTERNAL_SIGNATURE_HEADERS = frozenset(
 )
 _RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 _RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# The backend pool disables urllib3's retries (backend_tls.py), so urllib3
+# raises transport failures unwrapped: NewConnectionError when a connection
+# cannot be opened (refused, unreachable, unresolvable), ProtocolError when one
+# is reset, closed or cut short mid-exchange, and ConnectTimeoutError or
+# ReadTimeoutError when the backend does not answer in time. The first two
+# mean 503 and the timeouts 504, as in the Node streaming proxy
+# (transportFailureKind). NewConnectionError subclasses ConnectTimeoutError,
+# so it must be classified before the timeouts.
+_TRANSPORT_FAILURES = (urllib3.exceptions.TimeoutError, urllib3.exceptions.ProtocolError)
+_CONNECTION_FAILURES = (urllib3.exceptions.NewConnectionError, urllib3.exceptions.ProtocolError)
 # The one upstream answer a mutating request may be replayed after: the
 # Application Load Balancer's own 503. The load balancer serves it when it has
 # no target to send the request to (no registered or healthy target, or the
@@ -419,10 +429,7 @@ def forward_request(
         except urllib3.exceptions.SSLError:
             logger.exception("Backend TLS verification failed")
             return _tls_failure_response()
-        except (urllib3.exceptions.MaxRetryError, urllib3.exceptions.TimeoutError) as error:
-            if isinstance(getattr(error, "reason", None), urllib3.exceptions.SSLError):
-                logger.exception("Backend TLS verification failed")
-                return _tls_failure_response()
+        except _TRANSPORT_FAILURES as error:
             last_exception = error
             if not read_only:
                 # The write may have been applied: report this failure
@@ -430,17 +437,19 @@ def forward_request(
                 # load balancer 503 that would claim nothing reached the
                 # backend.
                 logger.warning(
-                    "Upstream %s failed on attempt %d; not replaying a mutating request",
+                    "Upstream %s failed on attempt %d (%s); not replaying a mutating request",
                     method,
                     attempt + 1,
+                    type(error).__name__,
                 )
                 last_response = None
                 break
             logger.warning(
-                "Upstream %s failed on attempt %d/%d",
+                "Upstream %s failed on attempt %d/%d (%s)",
                 method,
                 attempt + 1,
                 max_attempts,
+                type(error).__name__,
             )
         except Exception:
             logger.exception("Unexpected proxy forwarding failure")
@@ -460,7 +469,7 @@ def forward_request(
     if last_response is not None:
         return _build_success_response(last_response)
     if last_exception is not None:
-        status_code = 503 if isinstance(last_exception, urllib3.exceptions.MaxRetryError) else 504
+        status_code = 503 if isinstance(last_exception, _CONNECTION_FAILURES) else 504
         return {
             "statusCode": status_code,
             "headers": {"Content-Type": "application/json"},

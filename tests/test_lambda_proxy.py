@@ -197,8 +197,8 @@ class TestForwardRequest:
 
     def test_returns_503_on_connection_failure_after_retries(self, proxy_utils_module):
         proxy_utils, _, mock_pool = proxy_utils_module
-        mock_pool.request.side_effect = urllib3.exceptions.MaxRetryError(
-            pool=None, url="https://example.com", reason="Connection refused"
+        mock_pool.request.side_effect = urllib3.exceptions.NewConnectionError(
+            MagicMock(), "Failed to establish a new connection: [Errno 111] Connection refused"
         )
 
         result = proxy_utils.forward_request("https://example.com/api", "POST", {}, '{"data": 1}')

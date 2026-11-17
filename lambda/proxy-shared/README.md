@@ -51,7 +51,7 @@ method, exact path/query, and SHA-256 body digest.
 Forwards an HTTPS request within one deadline using the strict private-root
 connection pool returned by `backend_tls.get_backend_http_pool()`. Only safe
 read-only methods (`GET`, `HEAD`, `OPTIONS`) retry 429/502/503/504 or transport
-timeouts with bounded exponential backoff; mutating methods are attempted
+failures with bounded exponential backoff; mutating methods are attempted
 exactly once, except after the ALB's own `503 Service Temporarily Unavailable`
 page (`_is_load_balancer_503`: exact body, `Server` header absent or
 `awselb/2.0`), which the load balancer serves before selecting a target and
@@ -59,8 +59,13 @@ therefore proves the write never reached the backend. Each read-only retry
 carries the fresh HMAC envelope `resign_headers()` returns (the proxies pass
 `build_signed_headers` bound to the request): the backend accepts a nonce once
 and refuses a replayed envelope with 403. The mutating replay after the ALB's
-503 is sent byte-identical, since no target saw the first envelope. TLS
-failures return bounded errors without exposing trust state.
+503 is sent byte-identical, since no target saw the first envelope. The
+pool runs with urllib3's retries off, so the failures arrive unwrapped: a
+connection that cannot be opened (refused, unreachable, unresolvable) or that
+is reset, closed or cut short ends in `503 Service unavailable`, and a connect
+or read timeout in `504 Gateway timeout`, the same mapping as the Node
+streaming proxy. TLS failures return bounded errors without exposing trust
+state.
 
 ### `build_target_url(endpoint, path, query_params)`
 
