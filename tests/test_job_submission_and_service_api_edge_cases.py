@@ -3033,6 +3033,38 @@ def test_queue_route_accepts_a_configured_target_region() -> None:
 
 
 @pytest.mark.asyncio
+async def test_template_route_answers_400_for_a_manifest_the_request_model_refuses() -> None:
+    """Templates are stored unvalidated, so their manifest is the caller's input.
+
+    The request model's ValueError used to fall into the generic handler and
+    answer "Internal server error"; POST /api/v1/manifests answers the same
+    error with 400 and its message, and so does this route now.
+    """
+    import gco.services.api_routes.templates as routes
+    from gco.services.api_shared import JobFromTemplateRequest
+
+    store = MagicMock()
+    store.get_template.return_value = {"manifest": {"apiVersion": "batch/v1", "kind": "Job"}}
+    processor = _api_processor()
+    processor.process_manifest_submission = AsyncMock()
+    with (
+        patch.object(routes, "_get_template_store", return_value=store),
+        patch.object(routes, "_check_processor", return_value=processor),
+        patch.object(routes, "_check_namespace"),
+        pytest.raises(HTTPException) as error,
+    ):
+        await routes.create_job_from_template(
+            "t", JobFromTemplateRequest(name="run", namespace="gco-jobs")
+        )
+
+    assert error.value.status_code == 400
+    assert error.value.detail == (
+        "Invalid manifest at index 0: Either spec or data must be provided for most resource types"
+    )
+    processor.process_manifest_submission.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_template_route_preserves_processor_http_error() -> None:
     import gco.services.api_routes.templates as routes
     from gco.services.api_shared import JobFromTemplateRequest

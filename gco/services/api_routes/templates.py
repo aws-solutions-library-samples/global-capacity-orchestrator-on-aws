@@ -143,9 +143,14 @@ async def create_job_from_template(name: str, request: JobFromTemplateRequest) -
             manifest["metadata"]["labels"] = {}
         manifest["metadata"]["labels"]["gco.io/template"] = name
 
-        submission_request = ManifestSubmissionRequest(
-            manifests=[manifest], namespace=request.namespace, dry_run=False, validate=True
-        )
+        try:
+            submission_request = ManifestSubmissionRequest(
+                manifests=[manifest], namespace=request.namespace, dry_run=False, validate=True
+            )
+        except ValueError as e:
+            # Templates are stored unvalidated, so a bad manifest is the
+            # caller's input, answered as POST /api/v1/manifests answers it.
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
         result = await processor.process_manifest_submission(submission_request)
 
