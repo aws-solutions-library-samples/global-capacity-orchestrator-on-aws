@@ -67,14 +67,26 @@ _REGION_STATUS_WORK_INDEX = "region-status-work-index"
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 
 
+def _iso_utc(moment: datetime) -> str:
+    """``moment`` as ``YYYY-MM-DDTHH:MM:SS.ffffffZ``, always with six fractional digits.
+
+    Store timestamps are compared as strings: in DynamoDB conditions
+    (``lease_expires_at > :now``) and as the ``work_sort`` / ``priority_sort``
+    GSI range keys. ``isoformat()`` drops the fraction when it is zero, and
+    ``...:10Z`` sorts after ``...:10.5Z``, so only a fixed width keeps string
+    order equal to time order.
+    """
+    return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
 def _utc_now_iso() -> str:
-    """Return current UTC time in ISO format with Z suffix."""
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    """Return the current UTC time in the store's fixed-width ISO format."""
+    return _iso_utc(datetime.now(UTC))
 
 
 def _claim_lease_expiry_iso(lease_seconds: int) -> str:
     """Return a bounded lease expiry for crash-safe regional claims."""
-    return (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat().replace("+00:00", "Z")
+    return _iso_utc(datetime.now(UTC) + timedelta(seconds=lease_seconds))
 
 
 class JobSubmissionConflict(RuntimeError):

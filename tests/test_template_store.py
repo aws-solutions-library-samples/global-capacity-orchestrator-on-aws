@@ -2108,6 +2108,101 @@ class TestJobStore:
 # =============================================================================
 
 
+class TestTimestampFormat:
+    """Store timestamps keep a fixed width, so their string order is their time order.
+
+    DynamoDB compares them as strings (``lease_expires_at > :now``,
+    ``lease_expires_at <= :now``) and sorts the work index by them.
+    ``isoformat()`` drops a zero fraction, and ``...:10Z`` sorts after
+    ``...:10.300000Z``: an expired whole-second lease still renewed, and could
+    not be recovered, for the rest of that second.
+    """
+
+    FIXED_WIDTH = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z"
+
+    @staticmethod
+    def _frozen(moment):
+        from datetime import datetime
+
+        class Frozen(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return moment
+
+        return patch("gco.services.template_store.datetime", Frozen)
+
+    @staticmethod
+    def _at(second, microsecond=0):
+        from datetime import UTC, datetime
+
+        return datetime(2026, 1, 1, 0, 0, second, microsecond, tzinfo=UTC)
+
+    def test_a_whole_second_keeps_its_fraction(self):
+        from gco.services.template_store import _claim_lease_expiry_iso, _utc_now_iso
+
+        with self._frozen(self._at(10)):
+            assert _utc_now_iso() == "2026-01-01T00:00:10.000000Z"
+            assert _claim_lease_expiry_iso(30) == "2026-01-01T00:00:40.000000Z"
+
+    def test_string_order_is_time_order(self):
+        from gco.services.template_store import _utc_now_iso
+
+        instants = [self._at(9, 999999), self._at(10), self._at(10, 300000), self._at(11)]
+        rendered = []
+        for instant in instants:
+            with self._frozen(instant):
+                rendered.append(_utc_now_iso())
+        assert sorted(rendered) == rendered
+
+        lease_expires_at, now = rendered[1], rendered[2]
+        assert not lease_expires_at > now  # renew_claim refuses the expired lease
+        assert lease_expires_at <= now  # requeue_expired_jobs recovers it
+
+    def test_claim_and_renew_write_and_compare_fixed_width_values(self):
+        import re
+
+        with patch("boto3.resource") as resource:
+            table = resource.return_value.Table.return_value
+            store = JobStore(table_name="jobs", region="us-east-1", claim_lease_seconds=60)
+        table.get_item.return_value = {
+            "Item": {
+                "job_id": "job-1",
+                "status": "queued",
+                "target_region": "us-east-1",
+                "updated_at": "2026-01-01T00:00:00.000000Z",
+                "claim_generation": 0,
+                "status_history": "[]",
+            }
+        }
+        table.update_item.return_value = {"Attributes": {"job_id": "job-1"}}
+
+        with self._frozen(self._at(10)):
+            store.claim_job("job-1", "us-east-1", "worker-1")
+            store.renew_claim("job-1", "us-east-1", "worker-1", "token", 1)
+
+        for call in table.update_item.call_args_list:
+            values = call.kwargs["ExpressionAttributeValues"]
+            for key in (":now", ":lease_expires_at", ":work_sort"):
+                assert re.fullmatch(self.FIXED_WIDTH, values[key]), (key, values[key])
+        assert values[":lease_expires_at"] == "2026-01-01T00:01:10.000000Z"
+
+    def test_submission_sort_keys_use_the_fixed_width(self):
+        with patch("boto3.resource") as resource:
+            table = resource.return_value.Table.return_value
+            store = JobStore(table_name="jobs", region="us-east-1")
+        with self._frozen(self._at(10)):
+            store.submit_job(
+                job_id="job-1",
+                manifest={"metadata": {"name": "j"}},
+                target_region="us-east-1",
+                priority=40,
+            )
+        item = table.put_item.call_args.kwargs["Item"]
+        assert item["submitted_at"] == "2026-01-01T00:00:10.000000Z"
+        assert item["priority_sort"] == "060#2026-01-01T00:00:10.000000Z#job-1"
+        assert item["work_sort"] == item["priority_sort"]
+
+
 class TestCentralQueueWorkerOrdering:
     """The worker must migrate pre-GSI records before it polls the priority GSI."""
 
