@@ -297,6 +297,57 @@ class TestSubmitManifestsEndpoint:
                 )
                 assert "At least one manifest" in response.text
 
+    def test_a_configmap_without_data_reaches_the_processor(self, mock_manifest_processor):
+        """A ConfigMap needs no ``data``: ``binaryData`` alone, or nothing at all, is valid.
+
+        The request model used to demand ``spec`` or ``data``, so this route
+        answered 400 for manifests the API server accepts, while the validate
+        route, which does not build the model, passed them.
+        """
+        from fastapi.testclient import TestClient
+
+        from gco.models import ManifestSubmissionResponse, ResourceStatus
+        from gco.services.manifest_api import app
+
+        configmaps = [
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "empty"}},
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "blob"},
+                "binaryData": {"payload": "AAEC"},
+            },
+        ]
+        mock_manifest_processor.process_manifest_submission = AsyncMock(
+            return_value=ManifestSubmissionResponse(
+                success=True,
+                cluster_id="test-cluster",
+                region="us-east-1",
+                resources=[
+                    ResourceStatus("v1", "ConfigMap", name, "gco-jobs", "created")
+                    for name in ("empty", "blob")
+                ],
+            )
+        )
+        with (
+            patch(
+                "gco.services.manifest_api.create_manifest_processor_from_env",
+                return_value=mock_manifest_processor,
+            ),
+            patch("gco.services.manifest_api.ManifestProcessorMetrics"),
+            patch("gco.services.manifest_api.get_template_store", return_value=MagicMock()),
+            patch("gco.services.manifest_api.get_webhook_store", return_value=MagicMock()),
+            patch("gco.services.manifest_api.get_job_store", return_value=MagicMock()),
+            TestClient(app, raise_server_exceptions=False) as client,
+        ):
+            response = client.post(
+                "/api/v1/manifests", json={"manifests": configmaps, "namespace": "gco-jobs"}
+            )
+
+        assert response.status_code == 200, response.text
+        (submission,) = mock_manifest_processor.process_manifest_submission.call_args.args
+        assert submission.manifests == configmaps
+
 
 class TestValidateManifestsEndpoint:
     """Tests for POST /api/v1/manifests/validate endpoint."""

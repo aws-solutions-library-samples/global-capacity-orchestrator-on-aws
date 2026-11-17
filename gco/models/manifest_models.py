@@ -16,11 +16,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+#: Kinds that are complete without ``spec`` or ``data``: every field of a
+#: ConfigMap (``data``, ``binaryData``) and of a Secret (``data``,
+#: ``stringData``, ``type``) is optional, and a Namespace or ServiceAccount
+#: needs only its metadata. Any other kind without ``spec`` or ``data`` is a
+#: manifest with nothing to apply, such as a Job without its pod template.
+SPECLESS_KINDS = frozenset({"ConfigMap", "Namespace", "Secret", "ServiceAccount"})
+
 
 @dataclass
 class KubernetesManifest:
     """
     Represents a single Kubernetes manifest.
+
+    A manifest must carry ``spec`` or ``data`` unless its kind is in
+    :data:`SPECLESS_KINDS`.
 
     Attributes:
         apiVersion: Kubernetes API version (e.g., 'apps/v1', 'v1')
@@ -58,11 +68,7 @@ class KubernetesManifest:
             raise ValueError("data must be a dictionary")
 
         # At least one of spec or data should be present for most resources
-        if (
-            self.spec is None
-            and self.data is None
-            and self.kind not in ["Namespace", "ServiceAccount"]
-        ):
+        if self.spec is None and self.data is None and self.kind not in SPECLESS_KINDS:
             raise ValueError("Either spec or data must be provided for most resource types")
 
     def get_name(self) -> str:

@@ -750,6 +750,32 @@ class TestKubernetesManifestValidationEdgeCases:
         )
         assert manifest.kind == "ServiceAccount"
 
+    @pytest.mark.parametrize(
+        ("kind", "content"),
+        [
+            ("ConfigMap", {"binaryData": {"blob": "AAEC"}}),
+            ("ConfigMap", {}),
+            ("Secret", {"stringData": {"token": "not-a-real-token"}}),
+            ("Secret", {"type": "kubernetes.io/dockerconfigjson"}),
+        ],
+        ids=[
+            "configmap-binary-data-only",
+            "empty-configmap",
+            "secret-string-data-only",
+            "secret-type-only",
+        ],
+    )
+    def test_configmaps_and_secrets_need_neither_spec_nor_data(self, kind, content):
+        """Their payload fields are all optional, so the API server accepts these shapes."""
+        manifest = {"apiVersion": "v1", "kind": kind, "metadata": {"name": "x"}, **content}
+        assert KubernetesManifest.from_dict(manifest).kind == kind
+        assert ManifestSubmissionRequest(manifests=[manifest]).manifests == [manifest]
+
+    @pytest.mark.parametrize("kind", ["Job", "CronJob", "Deployment", "Pod", "Service", "TrainJob"])
+    def test_a_workload_without_spec_is_still_rejected(self, kind):
+        with pytest.raises(ValueError, match="Either spec or data must be provided"):
+            KubernetesManifest(apiVersion="v1", kind=kind, metadata={"name": "x"})
+
 
 class TestManifestSubmissionRequestValidation:
     """Tests for ManifestSubmissionRequest validation edge cases."""
