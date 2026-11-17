@@ -1380,31 +1380,29 @@ def send_response(
 
 
 def get_eks_token(cluster_name: str, region: str) -> str:
-    """Generate EKS authentication token using STS presigned URL."""
-    from botocore.signers import RequestSigner
+    """Generate EKS authentication token using STS presigned URL.
 
-    # Create STS client
+    The URL is the STS client's resolved endpoint, signed by that client's own
+    signer, so host and signing region always match the partition: in aws-cn
+    the host is ``sts.<region>.amazonaws.com.cn``, and a hand-built
+    ``.amazonaws.com`` host there yields a token EKS rejects.
+    """
     session = boto3.Session()
     sts_client = session.client("sts", region_name=region)
-    service_id = sts_client.meta.service_model.service_id
+    sts_endpoint = str(sts_client.meta.endpoint_url).rstrip("/")
 
-    # Create request signer
-    signer = RequestSigner(
-        service_id, region, "sts", "v4", session.get_credentials(), session.events
-    )
-
-    # Build the presigned URL for GetCallerIdentity
-    params = {
-        "method": "GET",
-        "url": f"https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
-        "body": {},
-        "headers": {"x-k8s-aws-id": cluster_name},
-        "context": {},
-    }
-
-    # Generate presigned URL (valid for 60 seconds)
-    url = signer.generate_presigned_url(
-        params, region_name=region, expires_in=60, operation_name=""
+    # Presigned GetCallerIdentity, valid for 60 seconds, with the cluster name
+    # in the signed x-k8s-aws-id header.
+    url = sts_client._request_signer.generate_presigned_url(
+        request_dict={
+            "method": "GET",
+            "url": f"{sts_endpoint}/?Action=GetCallerIdentity&Version=2011-06-15",
+            "body": {},
+            "headers": {"x-k8s-aws-id": cluster_name},
+            "context": {},
+        },
+        operation_name="GetCallerIdentity",
+        expires_in=60,
     )
 
     # Encode as base64 and create the k8s-aws-v1 token

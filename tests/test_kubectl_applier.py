@@ -20,7 +20,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
+from urllib.parse import parse_qs, urlsplit
 
+import boto3
 import pytest
 import yaml
 
@@ -4848,49 +4850,68 @@ class TestEksClientPlumbing:
         boto_client.assert_called_once_with("eks")
         assert first is second is boto_client.return_value
 
-    def test_eks_token_wraps_a_presigned_get_caller_identity_url(self, handler_module):
+    @pytest.mark.parametrize(
+        ("region", "sts_endpoint"),
+        [
+            ("cn-north-1", "https://sts.cn-north-1.amazonaws.com.cn"),
+            ("us-east-1", "https://sts.us-east-1.amazonaws.com/"),
+            # Legacy STS endpoint resolution: the global host, us-east-1 scope.
+            ("us-west-2", "https://sts.amazonaws.com"),
+        ],
+    )
+    def test_eks_token_wraps_a_presigned_get_caller_identity_url(
+        self, handler_module, region, sts_endpoint
+    ):
         """The token is k8s-aws-v1. + unpadded urlsafe base64 of the signed URL,
-        which must carry the cluster name in the x-k8s-aws-id header."""
+        which must carry the cluster name in the x-k8s-aws-id header and the
+        STS client's resolved endpoint as its host."""
+        presigned = f"{sts_endpoint.rstrip('/')}/?Action=GetCallerIdentity&X-Amz-Signature=beef"
+        sts_client = MagicMock()
+        sts_client.meta.endpoint_url = sts_endpoint
+        sts_client._request_signer.generate_presigned_url.return_value = presigned
         session = MagicMock()
-        session.client.return_value.meta.service_model.service_id = "STS"
-        signer = MagicMock()
-        presigned = (
-            "https://sts.us-west-2.amazonaws.com/?Action=GetCallerIdentity"
-            "&Version=2011-06-15&X-Amz-Signature=deadbeef"
-        )
-        signer.generate_presigned_url.return_value = presigned
+        session.client.return_value = sts_client
 
-        with (
-            patch.object(handler_module.boto3, "Session", return_value=session),
-            patch("botocore.signers.RequestSigner", return_value=signer) as signer_cls,
-        ):
-            token = handler_module.get_eks_token("gco-us-west-2", "us-west-2")
+        with patch.object(handler_module.boto3, "Session", return_value=session):
+            token = handler_module.get_eks_token(f"gco-{region}", region)
 
         prefix, _, encoded = token.partition(".")
         assert prefix == "k8s-aws-v1"
         assert "=" not in encoded
         padded = encoded + "=" * (-len(encoded) % 4)
         assert base64.urlsafe_b64decode(padded).decode("utf-8") == presigned
-        session.client.assert_called_once_with("sts", region_name="us-west-2")
-        signer_cls.assert_called_once_with(
-            "STS",
-            "us-west-2",
-            "sts",
-            "v4",
-            session.get_credentials.return_value,
-            session.events,
+        session.client.assert_called_once_with("sts", region_name=region)
+        # The client's own signer: its signing region matches its endpoint.
+        sts_client._request_signer.generate_presigned_url.assert_called_once_with(
+            request_dict={
+                "method": "GET",
+                "url": f"{sts_endpoint.rstrip('/')}/?Action=GetCallerIdentity&Version=2011-06-15",
+                "body": {},
+                "headers": {"x-k8s-aws-id": f"gco-{region}"},
+                "context": {},
+            },
+            operation_name="GetCallerIdentity",
+            expires_in=60,
         )
-        params = signer.generate_presigned_url.call_args.args[0]
-        assert params["method"] == "GET"
-        assert params["url"].startswith(
-            "https://sts.us-west-2.amazonaws.com/?Action=GetCallerIdentity"
+
+    def test_aws_cn_token_is_signed_for_the_china_sts_host(self, handler_module):
+        """Real botocore, offline: the token EKS in cn-north-1 accepts."""
+        session = boto3.Session(
+            aws_access_key_id="AKIDEXAMPLE",
+            aws_secret_access_key="example-secret",
+            region_name="cn-north-1",
         )
-        assert params["headers"] == {"x-k8s-aws-id": "gco-us-west-2"}
-        assert signer.generate_presigned_url.call_args.kwargs == {
-            "region_name": "us-west-2",
-            "expires_in": 60,
-            "operation_name": "",
-        }
+        with patch.object(handler_module.boto3, "Session", return_value=session):
+            token = handler_module.get_eks_token("gco-cn-north-1", "cn-north-1")
+
+        encoded = token.removeprefix("k8s-aws-v1.")
+        url = urlsplit(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode())
+        query = parse_qs(url.query)
+        assert url.netloc == "sts.cn-north-1.amazonaws.com.cn"
+        assert query["Action"] == ["GetCallerIdentity"]
+        assert query["X-Amz-Credential"][0].endswith("/cn-north-1/sts/aws4_request")
+        assert query["X-Amz-SignedHeaders"] == ["host;x-k8s-aws-id"]
+        assert query["X-Amz-Expires"] == ["60"]
 
     @staticmethod
     def _cluster(ca_pem: bytes) -> dict:

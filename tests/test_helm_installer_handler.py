@@ -29,7 +29,9 @@ import tempfile
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlsplit
 
+import boto3
 import pytest
 import yaml
 
@@ -2627,45 +2629,60 @@ class TestSendResponse:
 class TestEksAuthentication:
     """EKS bearer tokens and kubeconfig files are produced offline from STS signing."""
 
-    def test_token_is_presigned_sts_url_in_k8s_aws_v1_format(self):
-        presigned = (
-            "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity"
-            "&Version=2011-06-15&X-Amz-Signature=deadbeef"
-        )
+    @pytest.mark.parametrize(
+        ("region", "sts_endpoint"),
+        [
+            ("cn-north-1", "https://sts.cn-north-1.amazonaws.com.cn"),
+            ("us-east-1", "https://sts.us-east-1.amazonaws.com/"),
+            # Legacy STS endpoint resolution: the global host, us-east-1 scope.
+            ("us-west-2", "https://sts.amazonaws.com"),
+        ],
+    )
+    def test_token_presigns_the_clients_resolved_sts_endpoint(self, region, sts_endpoint):
+        presigned = f"{sts_endpoint.rstrip('/')}/?Action=GetCallerIdentity&X-Amz-Signature=beef"
+        sts_client = MagicMock()
+        sts_client.meta.endpoint_url = sts_endpoint
+        sts_client._request_signer.generate_presigned_url.return_value = presigned
         session = MagicMock()
-        session.client.return_value.meta.service_model.service_id = "STS"
-        signer = MagicMock()
-        signer.generate_presigned_url.return_value = presigned
-        with (
-            patch.object(helm_handler.boto3, "Session", return_value=session),
-            patch("botocore.signers.RequestSigner", return_value=signer) as signer_cls,
-        ):
-            token = helm_handler.get_eks_token("gco-us-east-1", "us-east-1")
+        session.client.return_value = sts_client
+        with patch.object(helm_handler.boto3, "Session", return_value=session):
+            token = helm_handler.get_eks_token(f"gco-{region}", region)
 
         expected_suffix = base64.urlsafe_b64encode(presigned.encode()).decode().rstrip("=")
         assert token == f"k8s-aws-v1.{expected_suffix}"
         assert "=" not in token
-        session.client.assert_called_once_with("sts", region_name="us-east-1")
-        signer_cls.assert_called_once_with(
-            "STS",
-            "us-east-1",
-            "sts",
-            "v4",
-            session.get_credentials.return_value,
-            session.events,
+        session.client.assert_called_once_with("sts", region_name=region)
+        # The client's own signer: its signing region matches its endpoint.
+        sts_client._request_signer.generate_presigned_url.assert_called_once_with(
+            request_dict={
+                "method": "GET",
+                "url": f"{sts_endpoint.rstrip('/')}/?Action=GetCallerIdentity&Version=2011-06-15",
+                "body": {},
+                "headers": {"x-k8s-aws-id": f"gco-{region}"},
+                "context": {},
+            },
+            operation_name="GetCallerIdentity",
+            expires_in=60,
         )
-        presign = signer.generate_presigned_url.call_args
-        params = presign.args[0]
-        assert params["method"] == "GET"
-        assert params["url"].startswith(
-            "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity"
+
+    def test_aws_cn_token_is_signed_for_the_china_sts_host(self):
+        """Real botocore, offline: the token EKS in cn-north-1 accepts."""
+        session = boto3.Session(
+            aws_access_key_id="AKIDEXAMPLE",
+            aws_secret_access_key="example-secret",
+            region_name="cn-north-1",
         )
-        assert params["headers"] == {"x-k8s-aws-id": "gco-us-east-1"}
-        assert presign.kwargs == {
-            "region_name": "us-east-1",
-            "expires_in": 60,
-            "operation_name": "",
-        }
+        with patch.object(helm_handler.boto3, "Session", return_value=session):
+            token = helm_handler.get_eks_token("gco-cn-north-1", "cn-north-1")
+
+        encoded = token.removeprefix("k8s-aws-v1.")
+        url = urlsplit(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode())
+        query = parse_qs(url.query)
+        assert url.netloc == "sts.cn-north-1.amazonaws.com.cn"
+        assert query["Action"] == ["GetCallerIdentity"]
+        assert query["X-Amz-Credential"][0].endswith("/cn-north-1/sts/aws4_request")
+        assert query["X-Amz-SignedHeaders"] == ["host;x-k8s-aws-id"]
+        assert query["X-Amz-Expires"] == ["60"]
 
     def test_kubeconfig_embeds_cluster_endpoint_ca_and_token_in_private_file(self):
         eks = MagicMock()
