@@ -160,18 +160,29 @@ jobs:
           pip install -e ".[security]"
       - name: Install latest aws-cdk-lib (for CDK enum drift check)
         # The CDK-enum section of dependency-scan.sh introspects
-        # ``aws_cdk.aws_lambda.Runtime`` (Python and Node.js managed runtimes)
-        # and ``aws_cdk.aws_rds.AuroraPostgresEngineVersion`` to find the
-        # newest enum members shipped by the library, then compares them
-        # against the constants pinned in ``gco/stacks/constants.py``.
-        # We install ``--upgrade`` (no version pin) on purpose so the
-        # check reflects the absolute latest enums available, even when
-        # ``aws-cdk-lib`` itself is also drifting (which is reported
-        # separately by the Python-deps section). When this step is
-        # skipped or fails, the scan logs a one-line note and the rest
-        # of the surfaces still report drift.
+        # ``aws_cdk.aws_lambda.Runtime`` (the Python and Node.js managed
+        # runtimes) to find the newest enum members shipped by the library,
+        # then compares them against the constants pinned in
+        # ``gco/stacks/constants.py``. We install the latest release (no
+        # version pin) on purpose so the check reflects the absolute latest
+        # enums available, even when ``aws-cdk-lib`` itself is also drifting
+        # (which is reported separately by the Python-deps section).
+        #
+        # In a virtualenv of its own, named to the scan by CDK_ENUM_PYTHON:
+        # the scan's project install pins aws-cdk-lib exactly, so a latest
+        # copy in the scan's environment is downgraded before the enum
+        # section reads it. CDK_ENUM_PYTHON is exported before the install,
+        # so a failed install (a PyPI blip) leaves the enum check skipped
+        # with a one-line note, never reading the pinned library instead;
+        # continue-on-error keeps that failure from skipping the scan, and
+        # the rest of the surfaces still report drift.
+        continue-on-error: true
         run: |
-          pip install --upgrade aws-cdk-lib
+          set -euo pipefail
+          venv="${RUNNER_TEMP}/cdk-latest"
+          echo "CDK_ENUM_PYTHON=${venv}/bin/python" >> "$GITHUB_ENV"
+          python -m venv "$venv"
+          "${venv}/bin/pip" install --quiet aws-cdk-lib
       - name: Derive Helm/kubectl pins from the production installer Dockerfile
         # lambda/helm-installer/Dockerfile is the single source for both
         # pins: this loads HELM_VERSION / HELM_SHA256 / KUBECTL_VERSION /

@@ -1025,15 +1025,16 @@ except tokenize.TokenError:
 #
 # Used by the CDK-enum drift check in ``dependency-scan.sh`` to compare
 # the ``LAMBDA_PYTHON_RUNTIME`` constant against the newest Lambda
-# Python runtime the installed CDK can construct. The dep-scan workflow
-# installs the latest ``aws-cdk-lib`` for this; locally the helper just
-# reflects whatever is on the active interpreter.
+# Python runtime the installed CDK can construct. It runs under
+# ``$CDK_ENUM_PYTHON`` when set (the deps-scan workflow's virtualenv with
+# the latest ``aws-cdk-lib``); locally the helper just reflects whatever is
+# on the active interpreter.
 #
 # Suffixed members (``PYTHON_3_14_PROVIDED`` if it ever exists) are
 # ignored — the regex anchor on ``$`` keeps the result aligned with the
 # canonical "X.Y" runtime CDK exposes today.
 get_latest_lambda_python_runtime() {
-  python3 -c "
+  "${CDK_ENUM_PYTHON:-python3}" -c "
 import re
 try:
     from aws_cdk import aws_lambda
@@ -1052,10 +1053,11 @@ if versions:
 # get_latest_lambda_nodejs_runtime
 #
 # Prints the highest canonical ``NODEJS_<major>_X`` member exposed by the
-# installed aws-cdk-lib. This is the Node equivalent of the Python helper
-# above and feeds the managed Lambda runtime drift check.
+# installed aws-cdk-lib (under ``$CDK_ENUM_PYTHON`` when set). This is the
+# Node equivalent of the Python helper above and feeds the managed Lambda
+# runtime drift check.
 get_latest_lambda_nodejs_runtime() {
-  python3 -c "
+  "${CDK_ENUM_PYTHON:-python3}" -c "
 import re
 try:
     from aws_cdk import aws_lambda

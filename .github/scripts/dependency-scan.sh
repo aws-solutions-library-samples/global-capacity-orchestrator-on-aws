@@ -84,7 +84,9 @@
 #    on $GITHUB_OUTPUT so the calling workflow can manage a rolling issue.
 #
 # Environment inputs:
-#   WORKFLOWS_DIR  default: .github/workflows
+#   WORKFLOWS_DIR    default: .github/workflows
+#   CDK_ENUM_PYTHON  default: python3; the interpreter whose aws-cdk-lib the
+#                    CDK enum check reads
 #
 # Outputs (via $GITHUB_OUTPUT):
 #   has_drift     "true" when any version is outdated, else "false"
@@ -1853,10 +1855,13 @@ PRECOMMIT_COUNT="$(wc -l < "$PRECOMMIT_RESULTS" 2>/dev/null | tr -d ' ')"
 # the "Aurora PostgreSQL engine" section validates it against the live RDS
 # API — the authoritative source — instead of the CDK library's catalog.
 #
-# The deps-scan workflow installs the latest ``aws-cdk-lib`` for this
-# section; locally the helper just reflects whatever's already on the
-# active interpreter. If aws-cdk-lib isn't importable we skip with a
-# one-line note (mirrors the AWS-creds skip pattern used elsewhere).
+# ``CDK_ENUM_PYTHON`` names the interpreter whose aws-cdk-lib is read. The
+# deps-scan workflow points it at a virtualenv holding the latest release:
+# the project install at the top of this scan pins aws-cdk-lib exactly, so a
+# latest copy in the scan's own environment is downgraded before this
+# section runs. Unset (a local run), the section reads whatever the active
+# interpreter has. If aws-cdk-lib isn't importable we skip with a one-line
+# note (mirrors the AWS-creds skip pattern used elsewhere).
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking CDK enum constants ==="
@@ -1864,7 +1869,7 @@ echo "=== Checking CDK enum constants ==="
 CDK_ENUM_RESULTS="$(mktemp)"
 CDK_ENUM_SKIP_REASON=""
 
-if ! python3 -c "import aws_cdk" 2>/dev/null; then
+if ! "${CDK_ENUM_PYTHON:-python3}" -c "import aws_cdk" 2>/dev/null; then
   CDK_ENUM_SKIP_REASON="aws-cdk-lib not importable. Install with 'pip install aws-cdk-lib' to enable."
   echo "  $CDK_ENUM_SKIP_REASON"
 else

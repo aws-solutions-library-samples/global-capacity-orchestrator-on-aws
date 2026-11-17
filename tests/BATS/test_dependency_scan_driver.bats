@@ -1384,6 +1384,29 @@ findings_path() {
     grep -q '^curl https://docs.aws.amazon.com/pcs/latest/userguide/slurm-versions.html$' "$CALLS"
 }
 
+@test "the CDK enum check reads the interpreter CDK_ENUM_PYTHON names, not python3" {
+    local root="$BATS_TEST_TMPDIR/checkout"
+    make_consistent_checkout "$root"
+    build_catalog "$root"
+    # The scan's own python3 has no aws_cdk here and the named interpreter
+    # does, so a completed enum check can only have read the latter.
+    write_stub "$FAKE_BIN" cdk-latest-python <<'STUB'
+#!/usr/bin/env bash
+FAKE_AWS_CDK=present exec python3 "$@"
+STUB
+    run_scan "$root" FAKE_AWS_CDK=absent CDK_ENUM_PYTHON="$FAKE_BIN/cdk-latest-python"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CDK enum constants:       0"* ]]
+    [[ "$output" != *"aws-cdk-lib not importable"* ]]
+    grep -qx 'scan_complete=true' "$GITHUB_OUTPUT"
+    # A named interpreter that cannot import aws_cdk (its install failed) is
+    # a skipped check, never a silent fallback to the scan's pinned copy.
+    run_scan "$root" FAKE_AWS_CDK=present CDK_ENUM_PYTHON="$BATS_TEST_TMPDIR/absent/python"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CDK enum constants:       (skipped)"* ]]
+    grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
+}
+
 @test "with drift and skipped sections the report carries the incomplete warning and the collapsed skip list" {
     local root="$BATS_TEST_TMPDIR/checkout"
     make_consistent_checkout "$root"

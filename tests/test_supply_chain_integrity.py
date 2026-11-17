@@ -2163,6 +2163,31 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
     ) in kubectl_section
 
 
+def test_latest_cdk_enum_install_is_isolated_and_cannot_cost_the_report() -> None:
+    """The latest aws-cdk-lib lives in its own virtualenv, and its install may fail.
+
+    Installed into the scan's environment it was downgraded again by the
+    scan's exact-pinned project install before the CDK-enum section read it,
+    and a PyPI blip failed the job before any report or issue was written.
+    CDK_ENUM_PYTHON is exported before the install, so a failed install skips
+    the enum check instead of reading the pinned library.
+    """
+    step = _workflow_job_step(
+        ".github/workflows/deps-scan.yml",
+        "deps-scan",
+        "Install latest aws-cdk-lib (for CDK enum drift check)",
+    )
+    assert step["continue-on-error"] is True
+    run = step["run"]
+    assert "pip install --upgrade aws-cdk-lib" not in run
+    assert run.index('echo "CDK_ENUM_PYTHON=${venv}/bin/python"') < run.index(
+        'python -m venv "$venv"'
+    )
+    assert '"${venv}/bin/pip" install --quiet aws-cdk-lib' in run
+    scanner = _read(".github/scripts/dependency-scan.sh")
+    assert '"${CDK_ENUM_PYTHON:-python3}" -c "import aws_cdk"' in scanner
+
+
 def test_incomplete_dependency_scan_ends_with_a_failing_step() -> None:
     """An incomplete scan fails its job after uploading its report, and still refreshes."""
     workflow = _read(".github/workflows/deps-scan.yml")
