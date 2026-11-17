@@ -3258,6 +3258,7 @@ class TestStackManagerDestroyAnalyticsFallback:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (
@@ -3385,6 +3386,7 @@ class TestStackManagerDestroyExclusively:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (
@@ -3428,6 +3430,7 @@ class TestStackManagerDestroyExclusively:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (

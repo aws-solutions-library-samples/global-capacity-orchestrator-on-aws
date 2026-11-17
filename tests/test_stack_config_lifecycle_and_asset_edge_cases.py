@@ -2790,6 +2790,94 @@ def test_strict_and_standard_analytics_deploy_refresh_routes(
 
 
 @pytest.mark.parametrize(
+    "stack_name",
+    ["dataanalytics-api-gateway", "dataanalytics-us-east-1", "dataanalytics-global"],
+)
+def test_analytics_route_refresh_needs_the_exact_analytics_stack(
+    stack_manager: Any, stack_name: str
+) -> None:
+    """``analytics`` is valid inside a project name; only ``<project>-analytics`` is that stack.
+
+    With a substring test every deploy of project ``dataanalytics`` refreshed
+    the API routes, and since ``dataanalytics-api-gateway`` contains the word
+    too, the refresh redeployed itself without bound.
+    """
+    import cli.stacks as stacks
+
+    stack_manager.config.project_name = "dataanalytics"
+    original = stacks.StackManager.deploy
+    _ready_deploy_manager(stack_manager)
+    with (
+        patch.object(stacks, "_detect_container_runtime", return_value="docker"),
+        patch.object(stack_manager, "deploy", return_value=True) as recursive,
+    ):
+        assert original(stack_manager, stack_name=stack_name) is True
+    recursive.assert_not_called()
+
+    _ready_deploy_manager(stack_manager)
+    stack_manager._describe_stack_target = MagicMock(return_value=None)
+    stack_manager._preflight_strict_change_set = MagicMock()
+    stack_manager._execute_prepared_change_set = MagicMock(return_value=True)
+    strict = {
+        **_strict_deploy_kwargs(),
+        "stack_name": stack_name,
+        "expected_stack_ids": {stack_name: None},
+        "prepared_change_sets": {stack_name: {}},
+    }
+    with (
+        patch.object(stacks, "_detect_container_runtime", return_value="docker"),
+        patch.object(stack_manager, "deploy", return_value=True) as recursive,
+    ):
+        assert original(stack_manager, **strict) is True
+    recursive.assert_not_called()
+
+    _ready_deploy_manager(stack_manager)
+    with (
+        patch.object(stacks, "_detect_container_runtime", return_value="docker"),
+        patch.object(stack_manager, "deploy", return_value=True) as recursive,
+    ):
+        assert original(stack_manager, stack_name="dataanalytics-analytics") is True
+    assert recursive.call_args.kwargs["stack_name"] == "dataanalytics-api-gateway"
+
+
+def test_destroy_takes_analytics_paths_only_for_the_exact_analytics_stack(
+    stack_manager: Any,
+) -> None:
+    """A destroy of any ``dataanalytics-*`` stack used to take the cdk.json lock.
+
+    It also toggled analytics and redeployed the API Gateway stack first. The
+    lock is process-wide, so ``destroy-all --parallel`` ran one stack at a time.
+    """
+    import cli.stacks as stacks
+
+    stack_manager.config.project_name = "dataanalytics"
+    with (
+        patch.object(stacks, "_find_cdk_json") as find_config,
+        patch.object(stacks, "_config_mutation_lock") as config_lock,
+        patch.object(stack_manager, "_destroy", return_value=True),
+    ):
+        assert stack_manager.destroy(stack_name="dataanalytics-us-east-1") is True
+    find_config.assert_not_called()
+    config_lock.assert_not_called()
+
+    _ready_destroy_manager(stack_manager)
+    stack_manager._stack_exists_in_cloudformation.return_value = True
+    stack_manager._get_stack_status.return_value = "DELETE_IN_PROGRESS"
+    assert stack_manager._destroy(stack_name="dataanalytics-api-gateway") is True
+    stack_manager._ensure_analytics_enabled_for_destroy.assert_not_called()
+    stack_manager._remove_api_gateway_analytics_dependency.assert_not_called()
+
+    _ready_destroy_manager(stack_manager)
+    assert stack_manager._destroy(
+        stack_name="dataanalytics-us-east-1",
+        expected_stack_ids={"dataanalytics-us-east-1": "arn:stack"},
+        authorize_stack=MagicMock(),
+    )
+    stack_manager._remove_api_gateway_analytics_dependency.assert_not_called()
+    stack_manager._cloudformation_delete_stack.assert_called_once()
+
+
+@pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"all_stacks": True, "expected_stack_id": "arn:x"}, "cannot use all_stacks"),

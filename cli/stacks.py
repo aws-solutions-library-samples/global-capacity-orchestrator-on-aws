@@ -2430,7 +2430,7 @@ class StackManager:
             if not success:
                 self._diagnose_deploy_failure(stack_name)
 
-            if success and "analytics" in stack_name:
+            if success and _is_analytics_stack(stack_name, project_name=self.config.project_name):
                 api_gateway_stack = f"{self.config.project_name}-api-gateway"
                 print(f"  Updating {api_gateway_stack} with analytics routes...")
                 success = self.deploy(
@@ -2534,7 +2534,12 @@ class StackManager:
         # gco-api-gateway to wire in the /studio/* routes (the API gateway
         # imports the Cognito pool ARN and presigned-URL Lambda ARN from
         # the analytics stack).
-        if success and stack_name and "analytics" in stack_name and not all_stacks:
+        if (
+            success
+            and stack_name
+            and not all_stacks
+            and _is_analytics_stack(stack_name, project_name=self.config.project_name)
+        ):
             api_gateway_stack = f"{self.config.project_name}-api-gateway"
             print(f"  Updating {api_gateway_stack} with analytics routes...")
             success = self.deploy(
@@ -2572,7 +2577,11 @@ class StackManager:
     ) -> bool:
         """Destroy stacks while restoring any temporary config mutation exactly."""
         config_path: Path | None = None
-        if stack_name and not all_stacks and "analytics" in stack_name:
+        if (
+            stack_name
+            and not all_stacks
+            and _is_analytics_stack(stack_name, project_name=self.config.project_name)
+        ):
             config_path = _find_cdk_json()
             if config_path is None:
                 raise RuntimeError("cdk.json not found before analytics destroy")
@@ -2677,7 +2686,7 @@ class StackManager:
         if strict_identity and stack_name and not all_stacks:
             if self._cdk_cancel_event.is_set():
                 raise RuntimeError(f"Strict teardown cancelled before deleting {stack_name}")
-            if "analytics" in stack_name:
+            if _is_analytics_stack(stack_name, project_name=self.config.project_name):
                 if expected_stack_ids is None:
                     raise RuntimeError(
                         "Identity-fenced analytics teardown requires the complete expected "
@@ -2731,7 +2740,7 @@ class StackManager:
         if (
             stack_name
             and not all_stacks
-            and "analytics" in stack_name
+            and _is_analytics_stack(stack_name, project_name=self.config.project_name)
             and self._stack_exists_in_cloudformation(stack_name)
         ):
             toggle_restored = self._ensure_analytics_enabled_for_destroy()
@@ -2740,7 +2749,11 @@ class StackManager:
         # gco-api-gateway imports. CloudFormation blocks deletion of stacks
         # with consumed exports. To break the dependency, redeploy the API
         # gateway with analytics disabled first, then destroy analytics.
-        if stack_name and not all_stacks and "analytics" in stack_name:
+        if (
+            stack_name
+            and not all_stacks
+            and _is_analytics_stack(stack_name, project_name=self.config.project_name)
+        ):
             safe_to_destroy = self._remove_api_gateway_analytics_dependency(
                 allow_bootstrap=allow_bootstrap,
                 bootstrap_stacks=bootstrap_stacks,
