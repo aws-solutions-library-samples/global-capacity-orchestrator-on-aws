@@ -237,6 +237,16 @@ sidecar); the rotator trusts only the GCO internal CA, projected from the
 `gco-monitoring-trust` Secret, and fails before reading any credential when
 that CA is missing.
 
+The new password reaches the Secret before Grafana changes: the rotator first
+stores it under an extra `admin-password-pending` key, then resets Grafana,
+then moves it into `admin-password` (retrying that write) and removes the extra
+key. If a run fails partway, the Secret still holds the password Grafana
+accepts in one of the two keys, the Job fails visibly, and the next run (the
+Job's retry or the next schedule) checks which one Grafana accepts and keeps
+that one in `admin-password` before rotating again. While a run is unfinished,
+`gco monitoring users` may read the previous password from `admin-password`;
+the next run fixes it.
+
 The cadence is configurable and defaults to monthly:
 
 ```json

@@ -12,14 +12,23 @@ restarting the pod does not change the live password. Rotation therefore resets
 the password through Grafana's admin HTTP API and then updates the Secret that
 ``gco monitoring`` reads at runtime.
 
-Order is admin-API-first so the live password and the Secret only diverge for
-the single Secret-patch call that follows a successful reset:
+The new password is written to the Secret before Grafana changes, so at every
+step the Secret holds the password Grafana accepts in one of two keys and a
+failure at any point can be finished by the next run:
 
-  1. Read the current admin user/password from the Secret.
+  1. Read the current admin user/password from the Secret. If an earlier run
+     left a staged ``admin-password-pending``, settle it first: keep whichever
+     of the two passwords Grafana accepts in ``admin-password``.
   2. Generate a new strong password.
   3. ``GET  /api/user``                     -> the admin user's numeric id.
-  4. ``PUT  /api/admin/users/<id>/password`` with the new password.
-  5. Patch the Secret's ``admin-password`` to the new value.
+  4. Stage the new password in the Secret's ``admin-password-pending``.
+  5. ``PUT  /api/admin/users/<id>/password`` with the new password. If this
+     fails, the run settles at once (the reset may have reached Grafana even
+     though its response did not arrive) and then fails.
+  6. Patch ``admin-password`` to the new value and drop the staged copy, with
+     a few retries. If that keeps failing the run fails loudly; the staged copy
+     is what Grafana accepts, and the next run (the Job's retry or the next
+     schedule) moves it into place.
 
 Least privilege: the only Kubernetes permission the CronJob's ServiceAccount is
 granted is ``get``/``patch`` on the single Grafana Secret in the ``monitoring``
@@ -39,10 +48,12 @@ needs no bundle.
 from __future__ import annotations
 
 import base64
+import contextlib
 import logging
 import os
 import secrets
 import sys
+import time
 from urllib.parse import urlsplit
 
 import requests
@@ -66,11 +77,23 @@ DEFAULT_SERVICE_URL = "https://grafana-tls.monitoring.svc.cluster.local:3443"
 
 _ADMIN_USER_KEY = "admin-user"
 _ADMIN_PASSWORD_KEY = "admin-password"  # nosec B105  # data key inside the Secret, not the value
+# Holds a new password from just before Grafana is reset until admin-password
+# carries it; present only while a rotation is in flight or was interrupted.
+_PENDING_PASSWORD_KEY = "admin-password-pending"  # nosec B105  # data key, not the value
+
+# Attempts (and the base of the linear backoff between them) for the final
+# Secret write, the one step that runs after Grafana already changed.
+_PROMOTE_ATTEMPTS = 3
+_PROMOTE_RETRY_DELAY_SECONDS = 2.0
 
 # 24 random bytes -> ~32 URL-safe characters. Comfortably above any sane
 # minimum-length policy while staying a valid Grafana password.
 _PASSWORD_ENTROPY_BYTES = 24
 _HTTP_TIMEOUT_SECONDS = 15
+
+
+class RotationStateError(RuntimeError):
+    """Grafana accepts neither password the Secret holds; rotation cannot proceed."""
 
 
 def generate_password(n_bytes: int = _PASSWORD_ENTROPY_BYTES) -> str:
@@ -102,17 +125,36 @@ def tls_verify_for(service_url: str) -> str | bool:
     return str(ca_file)
 
 
-def read_admin_credentials(
+def _encode(value: str) -> str:
+    return base64.b64encode(value.encode("utf-8")).decode("utf-8")
+
+
+def _decode(value: str | bytes) -> str:
+    return base64.b64decode(value).decode("utf-8")
+
+
+def read_secret_state(
     core_v1: client.CoreV1Api, namespace: str, secret_name: str
-) -> tuple[str, str]:
-    """Return ``(admin_user, admin_password)`` decoded from the Grafana Secret."""
+) -> tuple[str, str, str | None]:
+    """Return ``(admin_user, admin_password, staged_password_or_None)`` from the Secret."""
     secret = core_v1.read_namespaced_secret(secret_name, namespace)
     data = secret.data or {}
     missing = [k for k in (_ADMIN_USER_KEY, _ADMIN_PASSWORD_KEY) if k not in data]
     if missing:
         raise KeyError(f"Secret {namespace}/{secret_name} is missing key(s): {', '.join(missing)}")
-    user = base64.b64decode(data[_ADMIN_USER_KEY]).decode("utf-8")
-    password = base64.b64decode(data[_ADMIN_PASSWORD_KEY]).decode("utf-8")
+    staged = data.get(_PENDING_PASSWORD_KEY)
+    return (
+        _decode(data[_ADMIN_USER_KEY]),
+        _decode(data[_ADMIN_PASSWORD_KEY]),
+        _decode(staged) if staged else None,
+    )
+
+
+def read_admin_credentials(
+    core_v1: client.CoreV1Api, namespace: str, secret_name: str
+) -> tuple[str, str]:
+    """Return ``(admin_user, admin_password)`` decoded from the Grafana Secret."""
+    user, password, _staged = read_secret_state(core_v1, namespace, secret_name)
     return user, password
 
 
@@ -147,31 +189,142 @@ def reset_admin_password(
     resp.raise_for_status()
 
 
+def stage_pending_password(
+    core_v1: client.CoreV1Api, namespace: str, secret_name: str, new_password: str
+) -> None:
+    """Record ``new_password`` as staged, before Grafana is reset to it."""
+    core_v1.patch_namespaced_secret(
+        secret_name, namespace, {"data": {_PENDING_PASSWORD_KEY: _encode(new_password)}}
+    )
+
+
 def patch_secret_password(
     core_v1: client.CoreV1Api, namespace: str, secret_name: str, new_password: str
 ) -> None:
-    """Write the new password back into the Grafana Secret (base64 ``data``)."""
-    encoded = base64.b64encode(new_password.encode("utf-8")).decode("utf-8")
+    """Write ``new_password`` to ``admin-password`` and drop any staged copy, in one patch."""
     core_v1.patch_namespaced_secret(
-        secret_name, namespace, {"data": {_ADMIN_PASSWORD_KEY: encoded}}
+        secret_name,
+        namespace,
+        {"data": {_ADMIN_PASSWORD_KEY: _encode(new_password), _PENDING_PASSWORD_KEY: None}},
     )
+
+
+def grafana_accepts(service_url: str, auth: tuple[str, str], verify: str | bool = True) -> bool:
+    """Whether Grafana authenticates ``auth``: ``False`` on 401, raise on other errors."""
+    resp = requests.get(
+        f"{service_url}/api/user", auth=auth, timeout=_HTTP_TIMEOUT_SECONDS, verify=verify
+    )
+    if resp.status_code == 401:
+        return False
+    resp.raise_for_status()
+    return True
+
+
+def settle_staged_password(
+    core_v1: client.CoreV1Api,
+    namespace: str,
+    secret_name: str,
+    service_url: str,
+    user: str,
+    current_password: str,
+    staged_password: str,
+    verify: str | bool = True,
+) -> str:
+    """Make the Secret agree with Grafana after an interrupted rotation.
+
+    Keeps whichever of the two passwords Grafana accepts in ``admin-password``
+    (dropping the staged copy) and returns it.
+    """
+    if grafana_accepts(service_url, (user, current_password), verify):
+        core_v1.patch_namespaced_secret(
+            secret_name, namespace, {"data": {_PENDING_PASSWORD_KEY: None}}
+        )
+        logger.info("Discarded a staged Grafana admin password that was never applied")
+        return current_password
+    if grafana_accepts(service_url, (user, staged_password), verify):
+        patch_secret_password(core_v1, namespace, secret_name, staged_password)
+        logger.warning(
+            "Finished an interrupted rotation: Grafana already used the staged admin "
+            "password, now written to %s in secret %s/%s",
+            _ADMIN_PASSWORD_KEY,
+            namespace,
+            secret_name,
+        )
+        return staged_password
+    raise RotationStateError(
+        f"Grafana accepts neither {_ADMIN_PASSWORD_KEY} nor {_PENDING_PASSWORD_KEY} from "
+        f"secret {namespace}/{secret_name}; reset the admin password by hand and store it "
+        f"in {_ADMIN_PASSWORD_KEY}"
+    )
+
+
+def _promote_staged_password(
+    core_v1: client.CoreV1Api, namespace: str, secret_name: str, new_password: str
+) -> None:
+    """Move the applied password into ``admin-password``, retrying a failed write."""
+    attempt = 1
+    while True:
+        try:
+            patch_secret_password(core_v1, namespace, secret_name, new_password)
+            return
+        except ApiException as exc:
+            if attempt >= _PROMOTE_ATTEMPTS:
+                logger.error(
+                    "Grafana now uses the new admin password, but writing it to %s in "
+                    "secret %s/%s failed %s times (%s); it is kept in %s, and the next "
+                    "run moves it into place",
+                    _ADMIN_PASSWORD_KEY,
+                    namespace,
+                    secret_name,
+                    _PROMOTE_ATTEMPTS,
+                    exc.reason,
+                    _PENDING_PASSWORD_KEY,
+                )
+                raise
+            time.sleep(_PROMOTE_RETRY_DELAY_SECONDS * attempt)
+            attempt += 1
 
 
 def rotate(core_v1: client.CoreV1Api, namespace: str, secret_name: str, service_url: str) -> None:
     """Rotate the Grafana admin password end to end.
 
     Resolves the transport trust first (so a missing CA bundle fails before
-    any credential is read), reads the current credential, resets the live
-    password through the admin API, then persists the new value to the
-    Secret. The password itself is never logged.
+    any credential is read), reads the current credential (settling a
+    rotation an earlier run left half done), stages the new password in the
+    Secret, resets the live password through the admin API, then moves the
+    new value into ``admin-password``. The password itself is never logged.
     """
     verify = tls_verify_for(service_url)
-    user, current_password = read_admin_credentials(core_v1, namespace, secret_name)
+    user, current_password, staged = read_secret_state(core_v1, namespace, secret_name)
+    if staged is not None:
+        current_password = settle_staged_password(
+            core_v1, namespace, secret_name, service_url, user, current_password, staged, verify
+        )
     new_password = generate_password()
     auth = (user, current_password)
     user_id = get_admin_user_id(service_url, auth, verify)
-    reset_admin_password(service_url, auth, user_id, new_password, verify)
-    patch_secret_password(core_v1, namespace, secret_name, new_password)
+    # From here on the Secret holds the password Grafana accepts in one of
+    # its two keys, whatever fails next.
+    stage_pending_password(core_v1, namespace, secret_name, new_password)
+    try:
+        reset_admin_password(service_url, auth, user_id, new_password, verify)
+    except Exception:
+        # The reset may have reached Grafana even if its response did not
+        # arrive: settle on whichever password it accepts now. If that fails
+        # too, the next run settles it.
+        with contextlib.suppress(Exception):
+            settle_staged_password(
+                core_v1,
+                namespace,
+                secret_name,
+                service_url,
+                user,
+                current_password,
+                new_password,
+                verify,
+            )
+        raise
+    _promote_staged_password(core_v1, namespace, secret_name, new_password)
     # Audit line carries only non-secret identifiers (username, user id, service
     # URL, namespace/secret names). The password itself is never logged.
     # nosemgrep: python-logger-credential-disclosure
@@ -208,6 +361,7 @@ def main() -> int:
         internal_tls.InternalTLSError,
         KeyError,
         ValueError,
+        RotationStateError,
     ) as exc:
         # Only the caught exception is logged; it carries no credential material.
         # nosemgrep: python-logger-credential-disclosure
