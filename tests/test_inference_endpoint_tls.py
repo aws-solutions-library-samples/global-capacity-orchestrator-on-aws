@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping
+from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -1714,15 +1715,127 @@ def test_leader_change_does_not_change_the_pd_proxy_pod_template(
     assert after["metadata"]["annotations"]["gco.io/leader-epoch"] == "epoch-b"
 
 
+#: The proxy container's environment as v8.22.x and v8.23.0 rendered it for
+#: ``_pd_spec()``. Of the first nine entries, all but the two
+#: ``NO_DECODE_BACKEND_STATUS``/``MESSAGE`` ones are settings the program never
+#: acted on.
+RELEASED_PD_PROXY_ENV: list[dict[str, Any]] = [
+    {"name": "PD_PROXY_RESIDENCY_TIMEOUT_SECONDS", "value": "2"},
+    {"name": "PD_PROXY_RESIDENCY_CHECK_BLOCKING", "value": "false"},
+    {"name": "PD_PROXY_RESIDENCY_MISS_TARGET", "value": "prefill"},
+    {"name": "PD_PROXY_DECODE_ROUTING", "value": "ready_only"},
+    {"name": "PD_PROXY_NO_DECODE_BACKEND_ACTION", "value": "reject"},
+    {"name": "PD_PROXY_NO_DECODE_BACKEND_STATUS", "value": "503"},
+    {"name": "PD_PROXY_NO_DECODE_BACKEND_MESSAGE", "value": "no available decode backend"},
+    {"name": "PD_PROXY_SCHEDULING", "value": "round_robin"},
+    {"name": "PD_PROXY_STORE_ADDRESS", "value": "mooncake-master:50051"},
+    {
+        "name": "ADMIN_API_KEY",
+        "valueFrom": {"secretKeyRef": {"key": "ADMIN_API_KEY", "name": "chat-admin"}},
+    },
+    {"name": "PD_PROXY_HOST", "value": "127.0.0.1"},
+    {"name": "PD_PROXY_PORT", "value": "8000"},
+    {
+        "name": "PD_PROXY_PREFILL_URL",
+        "value": "https://chat-prefill.gco-inference.svc.cluster.local:8443",
+    },
+    {
+        "name": "PD_PROXY_DECODE_URL",
+        "value": "https://chat-decode.gco-inference.svc.cluster.local:8443",
+    },
+    {"name": "PD_PROXY_CA_FILE", "value": "/var/run/gco/ca/ca.crt"},
+]
+
+#: The program the PD proxy pod runs, exactly as it exists in this checkout.
+PD_PROXY_PROGRAM = Path(__file__).resolve().parents[1] / "gco" / "services" / "mooncake_pd_proxy.py"
+
+
+def _is_environment_read(node: ast.AST) -> bool:
+    """``os.environ.get(...)``, ``os.getenv(...)`` or ``os.environ[...]``."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        owner = ast.unparse(node.func.value)
+        return (owner, node.func.attr) in {("os.environ", "get"), ("os", "getenv")}
+    return isinstance(node, ast.Subscript) and ast.unparse(node.value) == "os.environ"
+
+
+def _program_settings(source: str) -> dict[str, str]:
+    """Each environment variable the program reads, by the module global holding it."""
+    settings: dict[str, str] = {}
+    for statement in ast.parse(source).body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        reads = [node for node in ast.walk(statement.value) if _is_environment_read(node)]
+        for read in reads:
+            key = read.args[0] if isinstance(read, ast.Call) else read.slice
+            assert isinstance(key, ast.Constant), ast.unparse(read)
+            [target] = statement.targets
+            assert isinstance(target, ast.Name), ast.unparse(statement)
+            settings[key.value] = target.id
+    return settings
+
+
+def _container_env(body: Mapping[str, Any], container_name: str) -> list[dict[str, Any]]:
+    """One container's ``env`` list from a Deployment in wire form."""
+    [container] = [
+        container
+        for container in body["spec"]["template"]["spec"]["containers"]
+        if container["name"] == container_name
+    ]
+    env: list[dict[str, Any]] = container.get("env") or []
+    return env
+
+
+def test_every_setting_the_pd_proxy_program_reads_is_used() -> None:
+    """Finding I17: the program read a residency timeout it never applied."""
+    source = PD_PROXY_PROGRAM.read_text(encoding="utf-8")
+    used = {
+        node.id
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+
+    unused = {
+        variable: name for variable, name in _program_settings(source).items() if name not in used
+    }
+
+    assert unused == {}
+
+
+def test_pd_proxy_gets_exactly_the_settings_its_program_reads(monitor: InferenceMonitor) -> None:
+    """Finding I17: a new proxy carries no setting its program ignores and lacks none it reads."""
+    created = _pd_proxy_pass(monitor, "epoch-a", None)
+
+    rendered = {variable["name"] for variable in _container_env(created, "proxy")}
+
+    assert rendered == set(_program_settings(PD_PROXY_PROGRAM.read_text(encoding="utf-8")))
+
+
+def test_pd_proxy_of_an_earlier_release_keeps_its_environment(
+    monitor: InferenceMonitor,
+) -> None:
+    """A proxy an earlier release created keeps that environment, names, values and order:
+    dropping the settings its program ignores would change the pod template and roll it."""
+    live = _pd_proxy_pass(monitor, "epoch-old", None)
+    live["metadata"]["resourceVersion"] = "9"
+    _container_env(live, "proxy")[:] = deepcopy(RELEASED_PD_PROXY_ENV)
+
+    patch_body = _pd_proxy_pass(monitor, "epoch-new", live)
+
+    assert _container_env(patch_body, "proxy") == RELEASED_PD_PROXY_ENV
+    assert _merge_patch(live, patch_body)["spec"]["template"] == live["spec"]["template"]
+
+
 @pytest.mark.parametrize("release", ["v8.22.x", "v8.23.0"])
 def test_pd_proxy_of_an_earlier_release_is_not_rolled_by_the_upgrade(
     monitor: InferenceMonitor, monkeypatch: pytest.MonkeyPatch, release: str
 ) -> None:
     """The proxy as v8.22.x/v8.23.0 rendered it (provenance and their digest on the
-    pod template) keeps its pod template through the new release's merge patch."""
+    pod template, their environment on the proxy container) keeps its pod
+    template through the new release's merge patch."""
     monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
     live = _pd_proxy_pass(monitor, "epoch-old", None)
     live["metadata"]["resourceVersion"] = "9"
+    _container_env(live, "proxy")[:] = deepcopy(RELEASED_PD_PROXY_ENV)
     live["spec"]["template"]["metadata"]["annotations"] = {
         "gco.io/lifecycle-id": "life-1",
         "gco.io/region-generation": "gen-1",

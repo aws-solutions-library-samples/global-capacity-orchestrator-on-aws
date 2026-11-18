@@ -1,8 +1,7 @@
 """Front-door routing for disaggregated prefill-decode endpoints.
 
 A disaggregated (or ``both``-mode) endpoint is reached through a lightweight
-proxy that runs the residency check and coordinates the prefill and decode
-pods. The shared ``gco-system/gco-gateway`` HTTPRoute sends ``/inference`` to
+proxy that coordinates the prefill and decode pods. The shared ``gco-system/gco-gateway`` HTTPRoute sends ``/inference`` to
 ``gco-system/inference-proxy``; that authenticated platform proxy then reaches
 the endpoint's internal ClusterIP Service. The endpoint front has two enforced
 boundaries:

@@ -315,54 +315,29 @@ _REGION_TOKEN_PATTERN = re.compile(
 
 # --- PD proxy behavior -------------------------------------------------------
 #
-# The prefill-decode proxy that fronts a disaggregated endpoint checks whether a
-# prompt's KV blocks already live in the shared store before it sends the prompt
-# to a prefill pod. That check is bounded: it is given this many seconds, and a
-# miss or a check that does not finish in time is treated as "not resident" so
-# the prompt goes to prefill without the request waiting any longer. Holding the
-# bound here keeps the proxy responsive even when the store is slow or
-# unreachable.
-PD_PROXY_RESIDENCY_TIMEOUT_SECONDS = 2
-
-# Default strategy for spreading requests across the backends of a single role.
-PD_PROXY_DEFAULT_SCHEDULING = "round_robin"
-
-# Where a residency miss or timed-out lookup is sent. The prompt always goes to
-# a prefill pod in that case; the proxy never stalls the request on the store.
-PD_PROXY_RESIDENCY_MISS_TARGET = "prefill"
-
-# The residency lookup never blocks the request: a slow or failed store check
-# falls through to prefill rather than holding the client.
-PD_PROXY_RESIDENCY_BLOCKING = "false"
-
-# Decode-phase requests only ever reach decode pods that report Ready; pods that
-# are still starting are skipped.
-PD_PROXY_DECODE_ROUTING_READY_ONLY = "ready_only"
-
-# When no decode pod reports Ready, the proxy refuses the request outright
-# instead of streaming a partial generation. The refusal carries a stable
-# status and message so clients can distinguish "no backend yet" from a model
-# error.
-PD_PROXY_NO_DECODE_BACKEND_ACTION_REJECT = "reject"
+# When the prefill-decode proxy that fronts a disaggregated endpoint cannot hand
+# a request to a decode pod, it refuses the request instead of streaming a
+# partial generation. The refusal carries a stable status and message so
+# clients can distinguish "no backend yet" from a model error. These are the
+# settings the proxy program (gco/services/mooncake_pd_proxy.py) reads besides
+# its listen address, role Service URLs, CA bundle and admin key;
+# ``build_pd_proxy_config`` renders them.
 PD_PROXY_NO_DECODE_BACKEND_STATUS = "503"
 PD_PROXY_NO_DECODE_BACKEND_MESSAGE = "no available decode backend"
-
-# Environment variable names the proxy container reads to pick up the behavior
-# above. Surfacing them here keeps the proxy's runtime contract in one place;
-# the reconcile path attaches the values produced by ``build_pd_proxy_config``.
-PD_PROXY_RESIDENCY_TIMEOUT_ENV = "PD_PROXY_RESIDENCY_TIMEOUT_SECONDS"
-PD_PROXY_RESIDENCY_BLOCKING_ENV = "PD_PROXY_RESIDENCY_CHECK_BLOCKING"
-PD_PROXY_RESIDENCY_MISS_TARGET_ENV = "PD_PROXY_RESIDENCY_MISS_TARGET"
-PD_PROXY_DECODE_ROUTING_ENV = "PD_PROXY_DECODE_ROUTING"
-PD_PROXY_NO_DECODE_BACKEND_ACTION_ENV = "PD_PROXY_NO_DECODE_BACKEND_ACTION"
 PD_PROXY_NO_DECODE_BACKEND_STATUS_ENV = "PD_PROXY_NO_DECODE_BACKEND_STATUS"
 PD_PROXY_NO_DECODE_BACKEND_MESSAGE_ENV = "PD_PROXY_NO_DECODE_BACKEND_MESSAGE"
-PD_PROXY_SCHEDULING_ENV = "PD_PROXY_SCHEDULING"
-PD_PROXY_STORE_ADDRESS_ENV = "PD_PROXY_STORE_ADDRESS"
+
+# The first setting releases up to v8.23.0 gave every PD proxy, and one the
+# program never acted on. A live proxy that carries it keeps that release's
+# environment (see ``build_pd_proxy_config``).
+PD_PROXY_RELEASED_ENV_MARKER = "PD_PROXY_RESIDENCY_TIMEOUT_SECONDS"
 
 # Marker label carried by proxy pods so a Service can select the proxy alone,
 # distinct from the prefill/decode role pods (which carry their own role marker).
 PD_PROXY_ROLE_LABEL = "proxy"
+
+# Name of the container that runs the proxy program in each proxy pod.
+PD_PROXY_CONTAINER = "proxy"
 
 # TCP port the proxy container listens on for authenticated serving requests.
 PD_PROXY_PORT = 8000
@@ -988,52 +963,66 @@ def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -
         container.resources.limits.setdefault(EFA_RESOURCE_NAME, "1")
 
 
-def build_pd_proxy_config(mooncake: dict[str, Any]) -> dict[str, str]:
-    """Return the environment the prefill-decode proxy runs with.
+def build_pd_proxy_config(
+    mooncake: Mapping[str, Any], *, released_layout: bool = False
+) -> dict[str, str]:
+    """Return the settings the prefill-decode proxy runs with.
 
-    The proxy fronts a disaggregated endpoint and decides, per request, whether
-    to consult the shared store and which backends to dispatch to. Its behavior
-    is fixed by the values returned here so every disaggregated endpoint front
-    behaves identically:
+    A proxy gets the settings its program (``gco/services/mooncake_pd_proxy.py``)
+    reads: the stable status and message it answers with, instead of streaming
+    any partial output, when it cannot reach a decode backend. The rest of its
+    environment (listen address, role Service URLs, CA bundle, admin key) is
+    added by :meth:`InferenceMonitor._create_pd_proxy`.
 
-    - It looks up whether the prompt's KV blocks already reside in the store
-      before sending the prompt to prefill, and that lookup is bounded to
-      ``PD_PROXY_RESIDENCY_TIMEOUT_SECONDS`` seconds.
-    - A miss, or a lookup that does not finish in time, is treated as "not
-      resident": the prompt is sent to a prefill pod and the request is never
-      held waiting on the store.
-    - Decode-phase requests are routed only to decode pods reporting Ready, so a
-      pod that is still starting is skipped.
-    - When no decode pod reports Ready, the proxy refuses the request with a
-      stable status and message rather than streaming any partial output.
-
-    The residency bound is held constant rather than read from the spec so the
-    responsiveness guarantee cannot be weakened per endpoint. The store address
-    points at the shared in-region master, and the same-role dispatch strategy
-    falls back to round-robin when the spec names none.
+    Releases up to v8.23.0 also rendered seven settings the program never acted
+    on: a bounded, non-blocking store residency lookup it never made (three
+    settings), Ready-only decode routing, a reject action for an unreachable
+    decode backend, a same-role scheduling strategy, and the store address. The
+    role Services already route only to Ready pods and kube-proxy spreads
+    requests across them. With ``released_layout`` the result is that
+    environment exactly: names, values and order. A proxy those releases
+    created keeps it, because dropping a variable changes the pod template, and
+    the Deployment would then restart every proxy pod and cut the streams they
+    serve.
 
     Args:
-        mooncake: The ``spec["mooncake"]`` block; its optional ``proxy`` section
-            supplies the same-role scheduling strategy.
+        mooncake: The ``spec["mooncake"]`` block; the released layout reads the
+            scheduling strategy of its optional ``proxy`` section.
+        released_layout: Render the environment of releases up to v8.23.0.
 
     Returns:
         A mapping of environment variable name to value, ready to attach to the
         proxy container.
     """
+    if not released_layout:
+        return {
+            PD_PROXY_NO_DECODE_BACKEND_STATUS_ENV: PD_PROXY_NO_DECODE_BACKEND_STATUS,
+            PD_PROXY_NO_DECODE_BACKEND_MESSAGE_ENV: PD_PROXY_NO_DECODE_BACKEND_MESSAGE,
+        }
     proxy = mooncake.get("proxy", {}) or {}
-    scheduling = proxy.get("scheduling") or PD_PROXY_DEFAULT_SCHEDULING
-    store_address = f"{MOONCAKE_MASTER_SERVICE}:{MOONCAKE_MASTER_RPC_PORT}"
     return {
-        PD_PROXY_RESIDENCY_TIMEOUT_ENV: str(PD_PROXY_RESIDENCY_TIMEOUT_SECONDS),
-        PD_PROXY_RESIDENCY_BLOCKING_ENV: PD_PROXY_RESIDENCY_BLOCKING,
-        PD_PROXY_RESIDENCY_MISS_TARGET_ENV: PD_PROXY_RESIDENCY_MISS_TARGET,
-        PD_PROXY_DECODE_ROUTING_ENV: PD_PROXY_DECODE_ROUTING_READY_ONLY,
-        PD_PROXY_NO_DECODE_BACKEND_ACTION_ENV: PD_PROXY_NO_DECODE_BACKEND_ACTION_REJECT,
+        PD_PROXY_RELEASED_ENV_MARKER: "2",
+        "PD_PROXY_RESIDENCY_CHECK_BLOCKING": "false",
+        "PD_PROXY_RESIDENCY_MISS_TARGET": "prefill",
+        "PD_PROXY_DECODE_ROUTING": "ready_only",
+        "PD_PROXY_NO_DECODE_BACKEND_ACTION": "reject",
         PD_PROXY_NO_DECODE_BACKEND_STATUS_ENV: PD_PROXY_NO_DECODE_BACKEND_STATUS,
         PD_PROXY_NO_DECODE_BACKEND_MESSAGE_ENV: PD_PROXY_NO_DECODE_BACKEND_MESSAGE,
-        PD_PROXY_SCHEDULING_ENV: scheduling,
-        PD_PROXY_STORE_ADDRESS_ENV: store_address,
+        "PD_PROXY_SCHEDULING": proxy.get("scheduling") or "round_robin",
+        "PD_PROXY_STORE_ADDRESS": f"{MOONCAKE_MASTER_SERVICE}:{MOONCAKE_MASTER_RPC_PORT}",
     }
+
+
+def _carries_released_pd_proxy_env(deployment: Any) -> bool:
+    """Whether a live PD proxy Deployment still has the environment of v8.23.0 or earlier."""
+    template = getattr(getattr(deployment, "spec", None), "template", None)
+    containers = getattr(getattr(template, "spec", None), "containers", None) or []
+    return any(
+        getattr(variable, "name", None) == PD_PROXY_RELEASED_ENV_MARKER
+        for container in containers
+        if getattr(container, "name", None) == PD_PROXY_CONTAINER
+        for variable in getattr(container, "env", None) or []
+    )
 
 
 def _pd_proxy_replicas(mooncake: Mapping[str, Any]) -> int:
@@ -2806,17 +2795,22 @@ class InferenceMonitor:
     ) -> bool:
         """Promote ``desired_state`` from ``deploying`` to ``running`` once every region is up.
 
-        The inference proxy serves an endpoint only while its ``desired_state``
-        is ``running``, so a deploying endpoint that never promotes is
-        unreachable even when every pod is Ready. Promotion is decided from live
-        local readiness (``local_state``, the state this pass just wrote) plus
-        explicit ``running`` observations for every *other* target region. A
-        region whose rolling update is still under way (``rollout_complete`` is
-        false here, or ``rollout_complete: false`` in its stored status) serves
-        from the previous template's pods but has not applied the change, so it
-        holds the promotion back. The
-        endpoint object may contain a stale local region_status from before this
-        pass, which is why the local region is never read back from it.
+        ``deploying`` is the endpoint-wide summary while any target region is
+        still converging; ``running`` says the last change is applied in every
+        region, and is what ``gco inference status`` and ``list`` report and
+        what a caller waits for. Serving does not wait for it: the inference
+        proxy serves a region whose own status is ``running`` under either
+        state.
+
+        Promotion is decided from live local readiness (``local_state``, the
+        state this pass just wrote) plus explicit ``running`` observations for
+        every *other* target region. A region whose rolling update is still
+        under way (``rollout_complete`` is false here, or
+        ``rollout_complete: false`` in its stored status) serves from the
+        previous template's pods but has not applied the change, so it holds the
+        promotion back. The endpoint object may contain a stale local
+        region_status from before this pass, which is why the local region is
+        never read back from it.
 
         The write is fenced on the lifecycle id and the ``deploying`` state so a
         concurrent delete or replacement cannot be resurrected. Both the classic
@@ -3424,8 +3418,8 @@ class InferenceMonitor:
 
         # Step 8: role-keyed status, then the same deploying -> running
         # promotion the classic path performs. Without it a Mooncake endpoint
-        # would sit in ``deploying`` forever and the proxy would refuse every
-        # request with "not ready in this region" despite Ready role pods.
+        # would report ``deploying`` forever despite Ready role pods (the
+        # inference proxy still serves a region whose own status is running).
         state = self._report_role_status(
             name,
             ns,
@@ -5204,8 +5198,8 @@ class InferenceMonitor:
         """Materialize the prefill-decode proxy front for a disaggregated endpoint.
 
         Disaggregated and ``both`` modes are fronted by a lightweight proxy that
-        runs the residency check and dispatches each request to the prefill and
-        decode pods. It materializes a ConfigMap, a proxy Deployment with at
+        primes a prefill pod with each request and streams the answer from a
+        decode pod. It materializes a ConfigMap, a proxy Deployment with at
         least one replica, and a Service whose selector matches only the proxy
         pods. The shared HTTPRoute attached to ``gco-system/gco-gateway`` sends
         ``/inference`` to ``gco-system/inference-proxy``; that authenticated
@@ -5268,7 +5262,13 @@ class InferenceMonitor:
             lifecycle_id,
         )
 
-        proxy_env = build_pd_proxy_config(mooncake)
+        # Read first: in the steady state the proxy exists and is converged by
+        # the merge patch below, with no create attempt. A proxy an earlier
+        # release created keeps the environment that release gave it.
+        existing = self._get_deployment(proxy_name, ns)
+        proxy_env = build_pd_proxy_config(
+            mooncake, released_layout=_carries_released_pd_proxy_env(existing)
+        )
         container_env = [client.V1EnvVar(name=k, value=v) for k, v in proxy_env.items()]
         # Deliver the admin key by Secret reference only — its value is never
         # placed on the spec or a command argument.
@@ -5318,7 +5318,7 @@ class InferenceMonitor:
         proxy_volume_name = "pd-proxy-script"
 
         container = client.V1Container(
-            name="proxy",
+            name=PD_PROXY_CONTAINER,
             image=proxy.get("image"),
             command=["python3", PD_PROXY_SCRIPT_PATH],
             ports=[client.V1ContainerPort(container_port=PD_PROXY_PORT)],
@@ -5400,9 +5400,6 @@ class InferenceMonitor:
             ),
         )
 
-        # Read first: in the steady state the proxy exists and is converged by
-        # the merge patch below, with no create attempt.
-        existing = self._get_deployment(proxy_name, ns)
         if existing is None:
             self._assert_mutation_authority()
             try:
