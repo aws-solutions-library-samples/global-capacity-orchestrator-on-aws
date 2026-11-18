@@ -27,6 +27,7 @@ from typing import Any
 
 import click
 
+from ..config import GCOConfig
 from ..output import confirm, emit_structured_document
 
 
@@ -104,6 +105,18 @@ def _list_records(directory: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _root_machine_format() -> str | None:
+    """``json``/``yaml`` when the root ``gco -o`` option asks for it, else None.
+
+    ``gco tasks`` takes no config of its own; the root command stores the
+    resolved :class:`GCOConfig` on the context, and its absence (the group
+    invoked on its own) means table output.
+    """
+    config = click.get_current_context().find_object(GCOConfig)
+    output_format = getattr(config, "output_format", None)
+    return output_format if output_format in {"json", "yaml"} else None
+
+
 def _format_state(state: str) -> str:
     """Colour-code state for terminal output. Plain text when not a TTY."""
     if not sys.stdout.isatty():
@@ -156,14 +169,16 @@ def tasks() -> None:
     "--json",
     "as_json",
     is_flag=True,
-    help="Emit raw JSON instead of the table.",
+    help="Emit raw JSON instead of the table (as gco -o json does).",
 )
 def tasks_list(limit: int, as_json: bool) -> None:
     """List recent task invocations newest-first.
 
     Shows tool, state (with orphan rewriting for dead PIDs), elapsed
     wall-clock, stacks completed, and the last stack name observed.
-    Pass ``--json`` for machine-readable output you can pipe to ``jq``.
+    Pass ``--json`` (or the root ``gco -o json`` / ``-o yaml``) for one
+    ``{"tasks": [...]}`` document you can pipe to ``jq``; it is
+    ``{"tasks": []}`` when nothing is recorded.
     """
     records = _list_records(_status_dir())[:limit] if limit > 0 else _list_records(_status_dir())
 
@@ -173,6 +188,10 @@ def tasks_list(limit: int, as_json: bool) -> None:
             output_format="json",
             rendered=json.dumps({"tasks": records}, indent=2, sort_keys=True),
         )
+        return
+    machine_format = _root_machine_format()
+    if machine_format is not None:
+        emit_structured_document({"tasks": records}, output_format=machine_format)
         return
 
     if not records:

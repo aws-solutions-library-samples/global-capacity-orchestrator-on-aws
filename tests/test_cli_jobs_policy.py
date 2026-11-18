@@ -1364,6 +1364,37 @@ class TestRemainingJobsStateMatrix:
             call("us-west-2"),
         ]
 
+    @pytest.mark.parametrize("answering", [["us-east-1", "us-west-2"], []])
+    def test_queue_status_all_regions_json_is_one_list(self, answering: list[str]) -> None:
+        from cli.main import cli
+
+        manager = MagicMock()
+
+        def status(region: str) -> dict[str, Any]:
+            if region not in answering:
+                raise RuntimeError("queue absent")
+            return {
+                "region": region,
+                "messages_available": 1,
+                "messages_in_flight": 0,
+                "messages_delayed": 0,
+                "dlq_messages": 0,
+            }
+
+        manager.get_queue_status.side_effect = status
+        aws = MagicMock()
+        aws.discover_regional_stacks.return_value = {"us-east-1": {}, "us-west-2": {}}
+        with (
+            patch("cli.commands.jobs_cmd.get_job_manager", return_value=manager),
+            patch("cli.aws_client.get_aws_client", return_value=aws),
+        ):
+            result = CliRunner().invoke(cli, ["-o", "json", "jobs", "queue-status", "-a"])
+
+        assert result.exit_code == 0, result.output
+        document = json.loads(result.stdout)
+        assert [entry["region"] for entry in document] == answering
+        assert "REGION" not in result.stdout
+
     def test_queue_status_discovery_failure_is_nonzero(self) -> None:
         aws = MagicMock()
         aws.discover_regional_stacks.side_effect = RuntimeError("discovery denied")

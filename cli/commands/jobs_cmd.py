@@ -466,11 +466,13 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
     """Show job queue status across regions.
 
     Displays the number of pending, in-flight, and failed messages
-    in the job queues.
+    in the job queues. With -o json/yaml, --all-regions prints one list of
+    the per-region statuses (empty when no region could be read).
 
     Examples:
         gco jobs queue-status --region us-east-1
         gco jobs queue-status --all-regions
+        gco -o json jobs queue-status --all-regions
     """
     formatter = get_output_formatter(config)
     job_manager = get_job_manager(config)
@@ -493,6 +495,12 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
 
             if not results:
                 formatter.print_warning("No queue status available")
+            if config.output_format != "table":
+                # One document in every machine mode: the per-region statuses,
+                # an empty list when no region answered.
+                formatter.print(results)
+                return
+            if not results:
                 return
 
             # Format as table

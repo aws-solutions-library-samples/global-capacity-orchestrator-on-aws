@@ -2029,6 +2029,12 @@ gco dag run pipeline.yaml -r us-east-1
 gco dag run pipeline.yaml --dry-run
 ```
 
+With `-o json` or `-o yaml`, `dag run` prints one document: the DAG's `name`,
+`region`, `namespace`, every step with its final `status`, `job_name`, times and
+`error`, and a top-level `status` of `succeeded` or `failed` (the command exits 1
+when a step failed). `--dry-run`, and a DAG that fails validation, print the
+`gco dag validate` document instead.
+
 #### `gco dag validate`
 
 Validate a DAG definition without running it. Checks for cycles, missing dependencies, and missing manifest files.
@@ -2041,7 +2047,12 @@ gco dag validate DAG_FILE
 
 ```bash
 gco dag validate examples/pipeline-dag.yaml
+gco -o json dag validate examples/pipeline-dag.yaml
 ```
+
+With `-o json` or `-o yaml` it prints one document with `name`, `valid`,
+`errors`, `region`, `namespace`, `steps` (name, manifest, depends_on) and, for a
+valid DAG, `execution_order`; an invalid DAG still exits 1.
 
 #### DAG File Format
 
@@ -3946,13 +3957,18 @@ gco jobs queue-status [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Filter by region |
-| `--all-regions` | | Show all regions |
+| `--all-regions` | `-a` | Show all regions |
+
+With `-o json` or `-o yaml`, `--all-regions` prints one list with each answering
+region's status document (an empty list when no region could be read); a single
+region prints its status document.
 
 **Example:**
 
 ```bash
 gco jobs queue-status --all-regions
 gco jobs queue-status -r us-east-1
+gco -o json jobs queue-status --all-regions
 ```
 
 ---
@@ -6326,6 +6342,9 @@ gco tasks list [OPTIONS]
 
 - `-n, --limit INTEGER` — Maximum tasks to show (default: 20)
 - `--json` — Emit raw JSON instead of a table
+
+`--json` and the root `gco -o json` / `-o yaml` print one `{"tasks": [...]}`
+document, `{"tasks": []}` when nothing is recorded.
 
 ```bash
 gco tasks list
