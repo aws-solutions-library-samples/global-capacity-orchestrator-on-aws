@@ -1265,7 +1265,7 @@ def capabilities_status(config: Any, region: Any, all_regions: bool) -> None:
     Examples:
         gco stacks capabilities status
         gco stacks capabilities status -r us-west-2
-        gco stacks capabilities status --all-regions --output json
+        gco -o json stacks capabilities status --all-regions
     """
     from ..eks_capabilities import capabilities_status as _capabilities_status
     from ..eks_capabilities import load_eks_capabilities_config
@@ -2011,7 +2011,7 @@ def pcs_status(config: Any, region: Any, all_regions: bool) -> None:
 
     Examples:
         gco stacks pcs status
-        gco stacks pcs status --all-regions --output json
+        gco -o json stacks pcs status --all-regions
     """
     from gco.pcs_config import managed_cluster_name
 
@@ -2259,7 +2259,7 @@ def pcs_preflight_command(config: Any, region: Any, all_regions: bool) -> None:
 
     Examples:
         gco stacks pcs preflight
-        gco stacks pcs preflight -r us-east-1 --output json
+        gco -o json stacks pcs preflight -r us-east-1
     """
     from .. import pcs_preflight
 
@@ -2472,7 +2472,7 @@ def hyperpod_status(config: Any, region: Any, all_regions: bool) -> None:
 
     Examples:
         gco stacks hyperpod status
-        gco stacks hyperpod status --all-regions --output json
+        gco -o json stacks hyperpod status --all-regions
     """
     from gco.hyperpod_config import cluster_name
 
@@ -2739,7 +2739,7 @@ def hyperpod_preflight_command(config: Any, region: Any, all_regions: bool) -> N
 
     Examples:
         gco stacks hyperpod preflight
-        gco stacks hyperpod preflight -r us-east-1 --output json
+        gco -o json stacks hyperpod preflight -r us-east-1
     """
     from .. import hyperpod_preflight
 

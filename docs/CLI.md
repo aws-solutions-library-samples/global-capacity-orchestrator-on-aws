@@ -5474,7 +5474,7 @@ gco stacks capabilities status [OPTIONS]
 
 ```bash
 gco stacks capabilities status                                      # first deployment region
-gco stacks capabilities status --all-regions --output json          # one document per region
+gco -o json stacks capabilities status --all-regions                # one document per region
 ```
 
 #### `gco stacks regions`
@@ -5631,7 +5631,7 @@ gco stacks pcs COMMAND [OPTIONS]
 
 ```bash
 gco stacks pcs status
-gco stacks pcs status --all-regions --output json
+gco -o json stacks pcs status --all-regions
 gco stacks pcs enable -y
 gco stacks pcs enable --region us-east-1 --mode existing --cluster-id pcs_0123456789abcdef -y
 gco stacks pcs preflight -r us-east-1
@@ -5672,7 +5672,7 @@ gco stacks hyperpod COMMAND [OPTIONS]
 
 ```bash
 gco stacks hyperpod status
-gco stacks hyperpod status --all-regions --output json
+gco -o json stacks hyperpod status --all-regions
 gco stacks hyperpod enable -y
 gco stacks hyperpod enable --region us-east-1 --instance-type ml.p5.48xlarge --instance-count 4 --availability-zone us-east-1b -y
 gco stacks hyperpod preflight -r us-east-1

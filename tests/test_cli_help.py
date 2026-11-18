@@ -9,12 +9,18 @@ accidentally raises at import time or fails Click's option validation
 before the help screen renders.
 """
 
+import re
+import shlex
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
 from cli.main import cli
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -523,6 +529,81 @@ class TestStacksHelpExtended:
         """Test stacks fsx disable help."""
         result = runner.invoke(cli, ["stacks", "fsx", "disable", "--help"])
         assert result.exit_code == 0
+
+
+def _parse_gco_command_line(line: str) -> click.Context:
+    """Parse one ``gco ...`` example through every group level, invoking nothing."""
+    ctx = cli.make_context("gco", shlex.split(line.split(" #", 1)[0])[1:])
+    while isinstance(ctx.command, click.Group):
+        rest = [*ctx._protected_args, *ctx.args]
+        if not rest:
+            break
+        name, command, rest = ctx.command.resolve_command(ctx, rest)
+        assert command is not None and name is not None
+        ctx = command.make_context(name, rest, parent=ctx)
+    return ctx
+
+
+def _stacks_help_examples() -> list[tuple[str, str]]:
+    from cli.commands.stacks_cmd import stacks
+
+    examples: list[tuple[str, str]] = []
+    pending: list[tuple[str, click.Command]] = [("gco stacks", stacks)]
+    while pending:
+        path, command = pending.pop()
+        for raw in (command.help or "").splitlines():
+            if raw.strip().startswith("gco "):
+                examples.append((path, raw.strip()))
+        if isinstance(command, click.Group):
+            pending.extend((f"{path} {name}", sub) for name, sub in command.commands.items())
+    return examples
+
+
+def _documented_stacks_examples() -> list[tuple[str, str]]:
+    """``gco ... stacks ...`` lines in the docs' code blocks, synopses excepted."""
+    examples: list[tuple[str, str]] = []
+    for doc in ("docs/CLI.md", "docs/EKS_CAPABILITIES.md"):
+        in_block = False
+        for number, raw in enumerate(
+            (PROJECT_ROOT / doc).read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if raw.strip().startswith("```"):
+                in_block = not in_block
+                continue
+            line = raw.strip()
+            if not in_block or not re.match(r"gco (-\S+ (\S+ )?)*stacks\b", line):
+                continue
+            # Usage synopses and shell pipelines are not single command lines.
+            if "[OPTIONS]" in line or "|" in line or "$(" in line or line.endswith("\\"):
+                continue
+            examples.append((f"{doc}:{number}", line))
+    return examples
+
+
+class TestStacksExamplesParse:
+    """Every ``gco stacks`` example in the help text and the docs is valid CLI syntax.
+
+    Root options such as ``-o/--output`` belong before ``stacks``; Click
+    rejects them after a subcommand.
+    """
+
+    def test_help_examples_are_collected(self):
+        assert len(_stacks_help_examples()) > 50
+
+    @pytest.mark.parametrize(("where", "line"), _stacks_help_examples())
+    def test_help_example_parses(self, where, line):
+        _parse_gco_command_line(line)
+
+    def test_documented_examples_are_collected(self):
+        assert len(_documented_stacks_examples()) > 50
+
+    @pytest.mark.parametrize(("where", "line"), _documented_stacks_examples())
+    def test_documented_example_parses(self, where, line):
+        _parse_gco_command_line(line)
+
+    def test_an_output_option_after_the_subcommand_is_rejected(self):
+        with pytest.raises(click.NoSuchOption):
+            _parse_gco_command_line("gco stacks capabilities status --output json")
 
 
 class TestFilesHelpExtended:
