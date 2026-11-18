@@ -2389,12 +2389,12 @@ class StackManager:
                 post-delete polling loop hanging after CloudFormation has
                 already finished) can't block the orchestrator forever.
             prepare_assets: Prepare the generated Lambda assets before a
-                command that evaluates app.py (the default). ``deploy()``
-                passes ``False``: it has just prepared them, and hashing the
-                build trees again costs seconds per stack. Freshness does not
-                depend on it: app.py revalidates every asset under shared
-                locks while it synthesizes and rebuilds one whose sources
-                changed in between.
+                command that evaluates app.py (the default). ``deploy()``,
+                ``synth()`` and ``diff()`` pass ``False``: they have just
+                prepared them, and hashing the build trees again costs seconds
+                per call. Freshness does not depend on it: app.py revalidates
+                every asset under shared locks while it synthesizes and
+                rebuilds one whose sources changed in between.
         """
         # Fail fast with an actionable message when the CDK Python toolchain
         # isn't importable (e.g. a base uvx/pip install without the [cdk]
@@ -2508,7 +2508,7 @@ class StackManager:
         if quiet:
             cmd.append("--quiet")
 
-        result = self._run_cdk(cmd, capture_output=True)
+        result = self._run_cdk(cmd, capture_output=True, prepare_assets=False)
         if result.returncode != 0:
             raise RuntimeError(f"CDK synth failed: {result.stderr}")
         return str(result.stdout)
@@ -2520,7 +2520,7 @@ class StackManager:
         if stack_name:
             cmd.append(stack_name)
 
-        result = self._run_cdk(cmd, capture_output=True)
+        result = self._run_cdk(cmd, capture_output=True, prepare_assets=False)
         # diff returns non-zero if there are differences, which is expected
         return str(result.stdout or result.stderr)
 

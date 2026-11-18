@@ -1270,6 +1270,24 @@ class TestStackManagerOperations:
         mock_prepare.assert_called_once_with()
         assert mock_popen.call_args.args[0][:3] == ["cdk", "deploy", "gco-global"]
 
+    @pytest.mark.parametrize("method", ["synth", "diff"])
+    def test_synth_and_diff_prepare_assets_once(self, method):
+        """synth()/diff() prepare the assets themselves; their CDK run must not hash them again."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="out", stderr="")
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build") as mock_prepare,
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
+            assert getattr(manager, method)("gco-global") == "out"
+
+        mock_prepare.assert_called_once_with()
+        assert mock_popen.call_args.args[0][1] == method
+
     def test_list_stacks(self):
         """Test listing CDK stacks."""
         from cli.stacks import StackManager
