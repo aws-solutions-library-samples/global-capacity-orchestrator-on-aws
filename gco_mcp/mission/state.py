@@ -13,6 +13,7 @@ duck-typed call sites.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -340,6 +341,105 @@ def _to_dynamodb_item(value: Any) -> Any:
     return value
 
 
+#: Largest session the DynamoDB backend writes, as UTF-8 JSON. DynamoDB caps
+#: an item at 400 KB and counts list and map elements with extra overhead, so
+#: the budget leaves room for that.
+DYNAMODB_SESSION_BUDGET_BYTES = 300 * 1024
+
+#: Bulky per-iteration fields the DynamoDB backend drops first, oldest
+#: iteration first: they are kept for the record, nothing in the loop reads
+#: them back from an earlier iteration.
+_BULKY_OBSERVATION_FIELDS = ("tool_results", "events", "errors")
+
+#: What an iteration keeps once even its remaining record does not fit: what
+#: the verdict cascade, the no-progress counter and the history need.
+_STUB_FIELDS = (
+    "iteration_index",
+    "started_at",
+    "ended_at",
+    "verdict",
+    "verdict_reason",
+    "checkpoint_evaluated",
+    "criteria_evaluation",
+)
+
+
+class SessionTooLargeError(ValueError):
+    """A session does not fit in one DynamoDB item even after compaction."""
+
+
+def _json_size(value: Any) -> int:
+    return len(json.dumps(value, default=str, separators=(",", ":")).encode("utf-8"))
+
+
+def _drop_bulky_fields(record: dict[str, Any]) -> None:
+    """Replace an iteration's tool output with counts, in place."""
+    dropped: dict[str, int] = {}
+    observation = record.get("observation")
+    if isinstance(observation, dict):
+        for field in _BULKY_OBSERVATION_FIELDS:
+            entries = observation.get(field)
+            if isinstance(entries, list) and entries:
+                dropped[f"observation.{field}"] = len(entries)
+                observation[field] = []
+    calls = record.get("script_call_log")
+    if isinstance(calls, list) and calls:
+        dropped["script_call_log.result_summary"] = len(calls)
+        for call in calls:
+            if isinstance(call, dict):
+                call["result_summary"] = None
+    if record.get("sampling_output"):
+        dropped["sampling_output"] = 1
+        record["sampling_output"] = ""
+    if dropped:
+        record["compacted"] = dropped
+
+
+def _stub(record: dict[str, Any]) -> dict[str, Any]:
+    stub = {field: record[field] for field in _STUB_FIELDS if field in record}
+    stub["compacted"] = {"record": 1}
+    return stub
+
+
+def fit_dynamodb_session(session: dict[str, Any]) -> dict[str, Any]:
+    """Return ``session`` bounded to :data:`DYNAMODB_SESSION_BUDGET_BYTES`.
+
+    A whole session, every iteration included, is one DynamoDB item, and an
+    item over 400 KB cannot be written. The engine saves after an
+    iteration's tool calls ran, so a session past the limit used to fail
+    every save and re-run the same tool calls on every ``mission_iterate``.
+    When a session is over the budget, a copy is compacted, oldest iteration
+    first and the newest one last: tool results, events, errors, script call
+    results and sampling text are dropped (``compacted`` records what was
+    dropped), then, if that is not enough, whole records are cut down to the
+    fields the verdict cascade and the history need. The filesystem backend
+    keeps everything. Raises :class:`SessionTooLargeError` when even that
+    does not fit, before anything is written.
+    """
+    if _json_size(session) <= DYNAMODB_SESSION_BUDGET_BYTES:
+        return session
+    fitted = copy.deepcopy(session)
+    iterations: list[dict[str, Any]] = fitted.get("iterations") or []
+    base = _json_size({**fitted, "iterations": []})
+    sizes = [_json_size(record) + 1 for record in iterations]
+    for shrink in (_drop_bulky_fields, None):
+        for index, record in enumerate(iterations):
+            if base + sum(sizes) <= DYNAMODB_SESSION_BUDGET_BYTES:
+                return fitted
+            if shrink is None:
+                iterations[index] = _stub(record)
+            else:
+                shrink(record)
+            sizes[index] = _json_size(iterations[index]) + 1
+    if base + sum(sizes) <= DYNAMODB_SESSION_BUDGET_BYTES:
+        return fitted
+    raise SessionTooLargeError(
+        f"Mission session {session.get('session_id')!r} needs {(base + sum(sizes)) // 1024} KiB "
+        f"after compaction, more than the {DYNAMODB_SESSION_BUDGET_BYTES // 1024} KiB a DynamoDB "
+        "item can hold; complete or abort it, or use the filesystem backend"
+    )
+
+
 def _from_dynamodb_item(value: Any) -> Any:
     """Recursively convert DynamoDB numbers back to plain ``int``/``float``.
 
@@ -467,7 +567,7 @@ class DynamoDBBackend:
             return None
         return cast("SessionState", item)
 
-    def save_session(self, session: SessionState) -> None:  # pragma: no cover - DynamoDB
+    def save_session(self, session: SessionState) -> None:
         """Persist the session via ``put_item`` (atomic single-item write).
 
         Defense-in-depth strip — same rationale as
@@ -475,11 +575,15 @@ class DynamoDBBackend:
         through boto3's own type-converter, which raises
         :class:`TypeError` on an :class:`ast.Expression` just like
         the JSON path; stripping here keeps both backends symmetric.
+        A session over the item budget is compacted first
+        (:func:`fit_dynamodb_session`); one that cannot fit raises
+        :class:`SessionTooLargeError` without writing.
         """
         from .validation import strip_private_fields
 
+        item = fit_dynamodb_session(strip_private_fields(session))
         table = self._get_table()
-        table.put_item(Item=_to_dynamodb_item(strip_private_fields(session)))
+        table.put_item(Item=_to_dynamodb_item(item))
 
     def list_sessions(self, filter: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Return summary dicts via the ``status-index`` GSI.
