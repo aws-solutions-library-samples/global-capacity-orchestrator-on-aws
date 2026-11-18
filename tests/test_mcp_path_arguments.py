@@ -98,7 +98,7 @@ class _Recorder:
 def cli(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
     recorder = _Recorder()
     monkeypatch.setattr(cli_runner, "_run_cli", recorder.sync)
-    for module in ("tools.images", "tools.stacks"):
+    for module in ("tools.dag", "tools.images", "tools.stacks"):
         monkeypatch.setattr(f"{module}._run_long_task", recorder.long_task)
     return recorder
 
@@ -385,3 +385,86 @@ def test_runners_pass_dot_segments_to_the_cli() -> None:
         result = asyncio.run(cli_runner._run_cli_async("inference", "invoke", "m", "-p", "a/../b"))
     assert json.loads(result) == {"ok": True}
     assert spawn.call_args.args[-1] == "a/../b"
+
+
+# ---------------------------------------------------------------------------
+# DAG files: the step manifests they name are confined too
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", ["dag_validate", "dag_run"])
+class TestDagStepManifests:
+    """Only the DAG file was confined; its steps could name any host file.
+
+    ``gco dag validate`` checks that each step manifest exists (an existence
+    oracle for host paths) and ``gco dag run`` submits it.
+    """
+
+    @staticmethod
+    def _dag(project: Path, *manifests: object) -> str:
+        steps = "".join(
+            f"  - name: s{index}\n    manifest: {m}\n" for index, m in enumerate(manifests)
+        )
+        (project / "pipeline.yaml").write_text(f"name: p\nsteps:\n{steps}", encoding="utf-8")
+        return "pipeline.yaml"
+
+    def _call_tool(self, tools: Any, tool: str, manifest_path: str) -> dict[str, Any]:
+        extra = {"region": "us-east-1"} if tool == "dag_run" else {}
+        return json.loads(_call(getattr(tools, tool), manifest_path=manifest_path, **extra))
+
+    @pytest.mark.parametrize(
+        "outside",
+        ["/etc/hosts", "../elsewhere/job.yaml", "jobs/../../elsewhere/job.yaml"],
+    )
+    def test_a_step_manifest_outside_the_project_is_refused(
+        self, tools: Any, project: Path, cli: _Recorder, tool: str, outside: str
+    ) -> None:
+        payload = self._call_tool(tools, tool, self._dag(project, "jobs/job.yaml", outside))
+        assert payload["code"] == "path_outside_project_root"
+        assert payload["parameter"] == "steps[1].manifest"
+        assert cli.calls == []
+
+    def test_confined_step_manifests_reach_the_cli(
+        self, tools: Any, project: Path, cli: _Recorder, tool: str
+    ) -> None:
+        inside = str(project / "jobs" / "job.yaml")
+        self._call_tool(tools, tool, self._dag(project, "jobs/job.yaml", inside))
+        assert len(cli.calls) == 1
+        assert "pipeline.yaml" in cli.calls[0]
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "steps: [unclosed\n",  # not YAML: the CLI reports it
+            "- just\n- a list\n",  # not a mapping
+            "steps: {name: s}\n",  # steps is not a list
+            "steps:\n  - plain-string\n  - name: s\n    manifest: 7\n",  # no string manifest
+        ],
+    )
+    def test_dag_files_without_checkable_steps_are_left_to_the_cli(
+        self, tools: Any, project: Path, cli: _Recorder, tool: str, content: str
+    ) -> None:
+        (project / "odd.yaml").write_text(content, encoding="utf-8")
+        self._call_tool(tools, tool, "odd.yaml")
+        assert len(cli.calls) == 1
+
+    def test_an_unreadable_dag_file_is_left_to_the_cli(
+        self, tools: Any, project: Path, cli: _Recorder, tool: str
+    ) -> None:
+        self._call_tool(tools, tool, "missing.yaml")
+        assert len(cli.calls) == 1
+
+    def test_an_absolute_dag_path_inside_the_project_is_read_too(
+        self, tools: Any, project: Path, cli: _Recorder, tool: str
+    ) -> None:
+        self._dag(project, "/etc/hosts")
+        payload = self._call_tool(tools, tool, str(project / "pipeline.yaml"))
+        assert payload["parameter"] == "steps[0].manifest"
+        assert cli.calls == []
+
+    def test_the_dag_file_itself_is_still_checked_first(
+        self, tools: Any, project: Path, cli: _Recorder, tool: str
+    ) -> None:
+        payload = self._call_tool(tools, tool, str(project.parent / "pipeline.yaml"))
+        assert payload["parameter"] == "manifest_path"
+        assert cli.calls == []

@@ -171,6 +171,21 @@ async def _terminate_and_reap(
             await process.wait()
 
 
+async def _cancel_heartbeat_task(task: asyncio.Task[None]) -> None:
+    """Cancel the heartbeat task and wait until it has finished.
+
+    The heartbeat's own cancellation and any error it raised are absorbed
+    (and retrieved, so asyncio does not log them). A cancellation of the task
+    that is waiting here propagates: suppressing ``CancelledError`` around
+    ``await task`` also swallowed that one, so a deploy whose caller was
+    cancelled at this point carried on as if nothing had happened.
+    """
+    task.cancel()
+    await asyncio.wait({task})
+    if not task.cancelled():
+        task.exception()
+
+
 async def _run_long_task(
     argv: Sequence[str],
     *,
@@ -313,12 +328,6 @@ async def _run_long_task(
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await coordination
 
-    async def _cancel_heartbeat_task(task: asyncio.Task[None]) -> None:
-        """Cancel one heartbeat task and await its cancellation."""
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
-
     try:
         if total_units is not None and total_units > 0:
             await _best_effort_client_call(progress, "set_total", int(total_units))
@@ -349,10 +358,14 @@ async def _run_long_task(
         await _cancel_heartbeat_task(heartbeat)
     except asyncio.CancelledError:
         try:
+            # Stop the child before waiting for the heartbeat: a second
+            # cancellation may interrupt either wait, and the child matters.
             if heartbeat is not None:
-                await _cancel_heartbeat_task(heartbeat)
+                heartbeat.cancel()
             with contextlib.suppress(Exception):
                 await _clean_process_tasks()
+            if heartbeat is not None:
+                await _cancel_heartbeat_task(heartbeat)
         finally:
             # Stamp the record even when a second cancellation interrupts the
             # grace wait, so a cancelled task never reads as still running.
@@ -368,7 +381,7 @@ async def _run_long_task(
         raise
     except Exception as exc:
         if heartbeat is not None:
-            await _cancel_heartbeat_task(heartbeat)
+            heartbeat.cancel()
         with contextlib.suppress(Exception):
             await _clean_process_tasks()
         status_writer.finish(
@@ -379,6 +392,8 @@ async def _run_long_task(
                 _DIAGNOSTIC_LINE_MAX_BYTES,
             ),
         )
+        if heartbeat is not None:
+            await _cancel_heartbeat_task(heartbeat)
         raise
 
     duration = int(time.monotonic() - started)

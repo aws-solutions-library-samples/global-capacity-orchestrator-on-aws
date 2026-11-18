@@ -57,11 +57,11 @@ if is_enabled(FLAG_MODEL_UPLOAD):
         """[gated by GCO_ENABLE_MODEL_UPLOAD] data-upload.
 
         Upload model weights from a source confined beneath
-        ``GCO_STORAGE_LOCAL_ROOT``. Relative paths are resolved beneath that
+        ``GCO_STORAGE_LOCAL_ROOT``. The upload may run for up to an hour. Relative paths are resolved beneath that
         root rather than the MCP process's working directory. The source is
-        exposed to the CLI through a private descriptor-backed snapshot;
-        descendant links, special files, hard links, and filesystem crossings
-        fail closed.
+        exposed to the CLI through a private hard-link snapshot built with
+        descriptor-relative no-follow opens; descendant links, special files,
+        hard links, and filesystem crossings fail closed.
 
         Args:
             model_name: Model name in the registry.
@@ -84,6 +84,7 @@ if is_enabled(FLAG_MODEL_UPLOAD):
                     staged.argument,
                     "--name",
                     model_name,
+                    timeout_seconds=cli_runner.TRANSFER_TIMEOUT_SECONDS,
                     pass_fds=(staged.directory_fd,),
                 )
 

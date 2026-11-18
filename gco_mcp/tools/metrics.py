@@ -395,18 +395,21 @@ async def metrics_from_shared_storage_file(
     max_bytes: int = _MAX_BYTES_DEFAULT,
     output_name: str | None = None,
 ) -> dict[str, Any]:
-    """[read-only] Read a named field from a shared-storage metrics file.
+    """[read-only] Read a named field from a metrics file on the cluster's shared file system.
 
-    Reads a small metrics file from shared storage (EFS / the cluster shared
-    bucket) through the existing read-only ``gco files`` path and surfaces a
-    named field as a metric in the canonical ``{"metrics": {...}}`` shape,
+    Reads a small metrics file from the region's shared EFS file system
+    through ``gco files download``, which copies it out through a short-lived
+    helper pod, so kubectl access to a reachable cluster endpoint is needed.
+    It does not read S3 buckets. The value is returned as a metric in the
+    canonical ``{"metrics": {...}}`` shape,
     dispatching on ``format``. Sequence-bearing formats (a list, a CSV column, a
     Hugging Face ``log_history``, a JSONL stream, a Parquet column) are reduced
     to one Numeric_Value via the aggregation mode. The metric key defaults to
     ``field`` when ``output_name`` is omitted.
 
     Args:
-        path: Shared-storage path to the metrics file.
+        path: Path of the metrics file on the shared file system (as seen
+            by a pod that mounts it, for example ``outputs/run-1/metrics.json``).
         region: AWS region of the storage.
         field: Field/column/key name to read (dot-path for document formats).
         format: One of json, csv, hf_trainer_state, jsonl, yaml, parquet,

@@ -18,7 +18,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -2741,16 +2741,27 @@ class TestDagTools:
 
     @pytest.mark.asyncio
     async def test_dag_run(self):
-        with patch("cli_runner.subprocess.run") as mock:
-            mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
-            await run_mcp.dag_run(manifest_path="dag.yaml", region="us-east-1")
-            cmd = mock.call_args[0][0]
-            assert "dag" in cmd
-            assert "run" in cmd
-            assert "dag.yaml" in cmd
-            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
-            # Default dry_run=False — flag should not be present.
-            assert "--dry-run" not in cmd
+        """A real run waits for every step, so it runs as a long task.
+
+        Through the CLI runner it was killed by the two-minute timeout after
+        its first steps were submitted.
+        """
+        long_task = AsyncMock(return_value='{"status": "ok", "task_id": "dag_run-1"}')
+        with (
+            patch("tools.dag._run_long_task", long_task),
+            patch("cli_runner.subprocess.run") as run,
+        ):
+            result = await run_mcp.dag_run(
+                manifest_path="dag.yaml", region="us-east-1", ctx=None, progress=None
+            )
+        assert json.loads(result)["task_id"] == "dag_run-1"
+        run.assert_not_called()
+        long_task.assert_awaited_once_with(
+            ["gco", "dag", "run", "dag.yaml", "-r", "us-east-1"],
+            ctx=None,
+            progress=None,
+            is_stack_op=False,
+        )
 
     @pytest.mark.asyncio
     async def test_dag_run_dry_run(self):

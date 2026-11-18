@@ -598,11 +598,14 @@ These environment variables tune the MCP server's behaviour but **do not gate an
 | Variable | Values | Default | What It Does |
 |----------|--------|---------|--------------|
 | `GCO_MCP_TOOL_SEARCH` | `off` \| `bm25` \| `regex` \| `code_mode` | `bm25` | Selects the catalog-replacement transform. `bm25` (default) replaces `list_tools()` with a BM25-ranked `search_tools` plus a small set of always-visible entry-point tools. `regex` swaps in a regex-based search. `code_mode` is experimental and exposes Code Mode meta-tools (`search` / `get_schemas` / `execute`). `off` returns the legacy full catalog. An unknown value falls back to `bm25`. |
-| `GCO_STORAGE_LOCAL_ROOT` | Directory path | — | Shared confinement root for `models_upload`, `upload_to_regional_bucket`, `populate_kv_cache`, and `sync_storage_bucket`. Relative paths resolve beneath this root; lexical traversal and symlink escapes fail closed. Short uploads additionally use a same-filesystem descriptor-backed snapshot and reject descendant symlinks, special files, and pre-existing hard links. Required when model upload or local storage sync is enabled. POSIX hosts with `/dev/fd` only for short uploads. |
+| `GCO_STORAGE_LOCAL_ROOT` | Directory path | — | Shared confinement root for `models_upload`, `upload_to_regional_bucket`, `populate_kv_cache`, and `sync_storage_bucket`. Relative paths resolve beneath this root; lexical traversal and symlink escapes fail closed. Short uploads additionally use a same-filesystem snapshot built with descriptor-relative no-follow opens and reject descendant symlinks, special files, and pre-existing hard links. Required when model upload or local storage sync is enabled. POSIX hosts only. On hosts without `/dev/fd` directory traversal (macOS) the CLI gets the snapshot's path, so the root and the directories above it must not be modifiable by other users (owned by you or root, not group- or world-writable unless sticky). |
 | `GCO_METRICS_LOCAL_ROOT` | Directory path | — | Confinement root for `metrics_from_local_file`; required when `GCO_ENABLE_LOCAL_METRICS=true`. |
 | `GCO_MCP_ROLE_ARN` | IAM role ARN | — | Least-privilege role the server assumes at startup with the ambient credentials (the regional stack's `McpServerRoleArn` output). The role applies to the default boto3 session in the server and to every process the server starts: `gco`, kubectl, and what those run (the AWS CLI, CDK). Children get it through the AWS SDKs' container credentials provider: the server serves the role's current credentials on a `127.0.0.1` endpoint that requires a random token, and sets `AWS_CONTAINER_CREDENTIALS_FULL_URI` and `AWS_CONTAINER_AUTHORIZATION_TOKEN` for the child. The child does not inherit the server's credential variables (`AWS_ACCESS_KEY_ID`, `AWS_SESSION_TOKEN`, web identity, other container credentials), and its `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` and `BOTO_CONFIG` point at private copies that keep every profile's name and settings such as `region` but no credential settings, so a profile a child selects cannot supply other credentials. The role's credentials refresh before they expire, in the server and in children, so a deploy that outlasts one role session keeps working. Code that builds its own `boto3.Session()` in the server (Mission's Bedrock sampling and embeddings, the capacity checks in Mission's environment snapshot) still uses the ambient credentials. Startup fails if the role cannot be assumed. |
 | `GCO_MCP_ROLE_SESSION_NAME` | String | `gco-mcp-server` | Session name for `GCO_MCP_ROLE_ARN`. |
 | `GCO_MCP_ROLE_DURATION_SECONDS` | Whole seconds | `3600` | Lifetime of each role session; the server assumes the role again before it ends. A value that is not a whole number stops startup. |
+| `GCO_PROJECT_ROOT` | Directory path | the checkout, else the nearest directory at or above the working directory with `cdk.json`, else the working directory | The project every `gco` child runs from. The server's in-process tools and resources (`images_*`, `images://`, the cluster context behind `gco://`, deploy progress totals) read the same `cdk.json`, so they use its project name, Regions and ECR prefix. For clients that cannot set a working directory. |
+| `GCO_MCP_AUDIT_LOG` | File path | — (stderr) | Where the server writes its audit records: one JSON object per line for each tool call (`status` is `success`, `error` or `cancelled`), resource read, startup and role assumption. Unset, they go to stderr, which MCP clients keep in their server log (stdout carries the protocol). A path appends to that file and creates it with mode `0600`. |
+| `GCO_MCP_AUDIT_LOG_LEVEL` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` | `INFO` | Lowest level written to the audit output. Records are logged at `INFO` and role-assumption failures at `ERROR`, so `WARNING` or higher keeps only those failures. An unknown name keeps `INFO`. The in-memory Mission audit replay is not affected. |
 | `GCO_TASK_STATUS_DIR` | Directory path | `~/.gco/tasks` | Private directory for bounded long-task status and log artifacts. |
 | `GCO_DISABLE_TASK_STATUS` | Boolean | `false` | Disable disk-backed long-task status/log emission when set to `1`, `true`, or `yes`. |
 | `FASTMCP_DOCKET_URL` | URL | `memory://` | Controls where FastMCP's background-task store lives. The default `memory://` keeps task state in-process for the lifetime of the server. Set to e.g. `redis://localhost:6379` to persist task state across restarts and share it with other consumers. |
@@ -614,10 +617,11 @@ These tools previously accepted broader access and are now gated or additionally
 - `upload_to_regional_bucket` now requires `GCO_ENABLE_MODEL_UPLOAD=true` and a source beneath `GCO_STORAGE_LOCAL_ROOT`.
 - `models_upload` remains gated by `GCO_ENABLE_MODEL_UPLOAD` and now also requires a source beneath `GCO_STORAGE_LOCAL_ROOT`.
 - `populate_kv_cache` used to register by default and upload any host path. It now registers only with `GCO_ENABLE_MODEL_UPLOAD=true` and requires a source beneath `GCO_STORAGE_LOCAL_ROOT`, like `upload_to_regional_bucket`, which writes the same regional bucket.
-- The short-upload tools fail closed unless they can create a private descriptor-backed, same-filesystem snapshot. Descendant symlinks, special files, and pre-existing hard links are rejected rather than followed.
+- The short-upload tools fail closed unless they can create a private same-filesystem snapshot. Descendant symlinks, special files, and pre-existing hard links are rejected rather than followed. On macOS, which cannot walk an open directory through `/dev/fd`, every upload used to fail with `No such file or directory: '/dev/fd/<n>/<name>'`; the CLI now gets the snapshot's path there, which requires a `GCO_STORAGE_LOCAL_ROOT` that other users cannot modify.
 - `delete_job` and `delete_inference` remain gated behind `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`.
-- Local path arguments must resolve inside the project root the server runs `gco` from (`GCO_PROJECT_ROOT`, else the checkout, else the server's working directory). This covers `manifest_path` (`submit_job_sqs`, `submit_job_api`, `check_job_policy`, `queue_submit`, `templates_create`, `dag_validate`, `dag_run`), `slurm_submit`'s `script_path`, `images_build`'s `context`, and the `deploy_*` tools' `outputs_file`. An absolute path anywhere on the host used to be accepted; it now returns `code: path_outside_project_root`. Move the files under the project, or point `GCO_PROJECT_ROOT` (or the client's `cwd`) at a directory that contains them. When the server runs from `/` with no checkout, every absolute path is inside that root, so set `GCO_PROJECT_ROOT` to get confinement.
+- Local path arguments must resolve inside the project root the server runs `gco` from (`GCO_PROJECT_ROOT`, else the checkout, else the server's working directory). This covers `manifest_path` (`submit_job_sqs`, `submit_job_api`, `check_job_policy`, `queue_submit`, `templates_create`, `dag_validate`, `dag_run`), `slurm_submit`'s `script_path`, `images_build`'s `context`, the `deploy_*` tools' `outputs_file`, and every step manifest a DAG file names (reported as `steps[<i>].manifest`). An absolute path anywhere on the host used to be accepted; it now returns `code: path_outside_project_root`. Move the files under the project, or point `GCO_PROJECT_ROOT` (or the client's `cwd`) at a directory that contains them. When the server runs from `/` with no checkout, every absolute path is inside that root, so set `GCO_PROJECT_ROOT` to get confinement.
 - With `GCO_MCP_ROLE_ARN` set, the role now applies to the `gco` and kubectl processes behind almost every tool; they used to run with the operator's ambient credentials. The role the regional stack creates grants only `eks:DescribeCluster`, `s3:GetObject`/`s3:ListBucket` on `<project>-*` buckets, CloudWatch metric reads and `sqs:SendMessage` to the regional job queue, so tools that call the GCO API, CloudFormation, ECR or CDK fail with `AccessDenied` under it. Add the permissions your tools need to the role, or unset `GCO_MCP_ROLE_ARN` to keep using the ambient credentials.
+- Mission `predicate` criteria are size-bounded (see [Size bounds](../docs/MISSION.md#size-bounds)): at most 4096 characters and 100 levels of nesting, `**` only with a constant exponent of at most 64, `*` on a possible list or string only with an int literal of at most 1000, `%` only as modulo on a number, f-string widths of at most 1000, and no attribute of `obs` other than its read-only methods (`obs.events` used to validate and then failed at evaluation; `key=obs.update` mutated the observation). `mission_start` and `swarm_start` reject such a predicate with `validation_error`; a session saved before the upgrade reports it as `inconclusive` with `predicate_rejected_post_load: <reason>`. Rewrite it with subscripts (`obs["events"]`) and `int()`/`float()` around the operands (`int(obs["step"]) % 10 == 0`).
 - Prompts, chat messages, and other free text containing `..` are no longer refused. A name or ID that the CLI puts into an API request path (jobs, pods, namespaces, templates, webhooks, queue jobs, and `invoke_inference`'s `api_path`) is still refused when it has a `..` segment (`code: path_traversal_segment`).
 
 If your client relied on uploads, set the model-upload gate and an absolute confinement root. If it relied on deletes, set the destructive-operations gate. A client that needs both can use:
@@ -805,7 +809,18 @@ The short upload tools (`models_upload`, `upload_to_regional_bucket`, and
 may be absolute or root-relative, but must already exist and resolve beneath
 that root; the wrapper passes the resolved absolute path to the CLI. Traversal,
 symlink escapes, special files, missing roots, and unsupported hosts fail
-closed.
+closed. Each upload, like `sync_storage_bucket`, may run for up to an hour
+before the server stops the CLI.
+
+The snapshot is a private `.gco-mcp-upload-<pid>-<random>` directory of hard
+links under the root, removed when the upload ends. On Linux the CLI reads it
+through an inherited directory descriptor (`/dev/fd/<n>/<name>`); on hosts
+without that traversal (macOS) it gets the snapshot's path, which is accepted
+only when other users cannot modify the root or any directory above it. A
+server killed mid-upload leaves its snapshot behind, and those hard links made
+every later upload of the same files fail as hard-linked; the next upload now
+removes snapshots whose process no longer exists (and, for names without a
+process ID from earlier versions, snapshots older than two hours).
 
 `sync_storage_bucket` is deliberately opt-in because it reads from or writes to
 the MCP host and upload mode writes S3. A bucket or local tree may also be
@@ -882,7 +897,7 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 |------|-------------|-----------|----------|
 | `metrics_cloudwatch_get` | Read one CloudWatch datapoint as a canonical metric | safe | — |
 | `metrics_from_job_logs` | Extract a scalar from the tail of a job's logs by JSON key or regex | safe | — |
-| `metrics_from_shared_storage_file` | Read a named field from a shared-storage metrics file (JSON, CSV, HF Trainer state, JSONL, YAML, Parquet, tfevents) | safe | — |
+| `metrics_from_shared_storage_file` | Read a named field from a metrics file on the cluster's shared EFS file system, copied out through a helper pod (JSON, CSV, HF Trainer state, JSONL, YAML, Parquet, tfevents; not S3) | safe | — |
 | `metrics_from_local_file` | Read a named field from a local metrics file confined to `GCO_METRICS_LOCAL_ROOT` | safe | `GCO_ENABLE_LOCAL_METRICS` |
 | `metrics_semantic_progress` | Score how close a Mission is to its directive against a fixed rubric (LLM-as-judge); returns `{"metrics": {"progress_score": <0.0-1.0>}}` | safe | `GCO_ENABLE_SEMANTIC_PROGRESS` |
 
@@ -935,7 +950,7 @@ A region's Slurm cluster(s), reached through the GCO API's `/api/v1/slurm/*` rou
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
 | `dag_validate` | Validate a DAG manifest without submitting | safe | — |
-| `dag_run` | Submit a DAG pipeline for execution | low-risk | — |
+| `dag_run` | Run a DAG pipeline end-to-end (long-running: progress, task status, background-task mode; `dry_run` only validates) | low-risk | — |
 
 ### NodePools
 

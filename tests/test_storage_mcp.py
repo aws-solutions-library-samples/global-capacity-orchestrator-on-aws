@@ -23,22 +23,6 @@ import cli_runner  # noqa: E402
 import local_data  # noqa: E402
 
 
-def _require_dev_fd_directory_access(root: Path) -> None:
-    """Skip only when this POSIX host cannot traverse an open directory fd."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(root, flags)
-    probe = root / ".dev-fd-probe"
-    probe.write_bytes(b"probe")
-    try:
-        try:
-            os.stat(f"/dev/fd/{descriptor}/{probe.name}", follow_symlinks=False)
-        except OSError as exc:
-            pytest.skip(f"/dev/fd directory traversal is unavailable: {exc}")
-    finally:
-        probe.unlink(missing_ok=True)
-        os.close(descriptor)
-
-
 class _FakeMCP:
     def tool(self, **_kwargs: Any):
         def decorate(function: Any) -> Any:
@@ -48,6 +32,8 @@ class _FakeMCP:
 
 
 class _RunnerModule(ModuleType):
+    TRANSFER_TIMEOUT_SECONDS = 3600
+
     def __init__(self) -> None:
         super().__init__("cli_runner")
         self.calls: list[tuple[str, ...]] = []
@@ -59,7 +45,11 @@ class _RunnerModule(ModuleType):
         self.calls.append(args)
         self.call_kwargs.append(kwargs)
         for argument in args:
-            if not argument.startswith("/dev/fd/"):
+            # The staged snapshot: /dev/fd/<n>/<name> on Linux, its path elsewhere.
+            if (
+                not argument.startswith("/dev/fd/")
+                and local_data._UPLOAD_STAGE_PREFIX not in argument
+            ):
                 continue
             metadata = os.stat(argument, follow_symlinks=False)
             self.staged_observations.append(
@@ -154,7 +144,6 @@ class TestMCPStorageTools:
         root = tmp_path / "root"
         source = root / "model.bin"
         source.parent.mkdir()
-        _require_dev_fd_directory_access(root)
         source.write_bytes(b"weights")
         source_identity = (source.stat().st_dev, source.stat().st_ino)
 
@@ -165,7 +154,7 @@ class TestMCPStorageTools:
 
         args = json.loads(result)["args"]
         assert args[0:2] == ["models", "upload-regional"]
-        assert args[2].startswith("/dev/fd/")
+        assert args[2].endswith("/model.bin")
         assert args[3:] == ["-r", "us-east-1", "--prefix", "models"]
         observation = runner.staged_observations[-1]
         assert (observation["device"], observation["inode"]) == source_identity

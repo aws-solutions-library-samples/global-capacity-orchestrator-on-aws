@@ -133,7 +133,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `dag_run` | `gco dag run` — execute a DAG manifest end-to-end. |
+| `dag_run` | `gco dag run` — execute a DAG manifest end-to-end. long-running: the CLI waits for each step, so a run goes through `_run_long_task` (progress, task status, `task_tail`, background-task mode) and returns the task status; `dry_run` returns the CLI's validation document. |
 | `dag_validate` | `gco dag validate` — statically validate a DAG manifest. |
 
 ### `deps.py`
@@ -239,7 +239,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `metrics_cloudwatch_get` | Read one [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) datapoint as a canonical metric. |
 | `metrics_from_job_logs` | Extract a scalar from the tail of a job's logs. |
 | `metrics_from_local_file` | Read a named field from a LOCAL metrics file. |
-| `metrics_from_shared_storage_file` | Read a named field from a shared-storage metrics file. |
+| `metrics_from_shared_storage_file` | Read a named field from a metrics file on the cluster's shared EFS file system (`gco files download` through a helper pod; needs kubectl access; does not read S3). |
 
 ### `mission.py`
 
@@ -430,7 +430,10 @@ arguments that are paths before it calls them:
   `context`, `outputs_file`) goes through
   `cli_runner.reject_paths_outside_project_root(...)`. The path is resolved
   against the project root the CLI runs from, symlinks included, and must stay
-  inside it (`code: path_outside_project_root`).
+  inside it (`code: path_outside_project_root`). A file that names other files
+  gets the same check for each of them: `dag_validate` and `dag_run` read the
+  DAG file and check every `steps[].manifest`, reported as
+  `parameter: steps[<i>].manifest`.
 - A name or ID the CLI puts into an API request path (job, pod and namespace
   names, template names, webhook and queue job IDs, `invoke_inference`'s
   `api_path`) goes through `cli_runner.reject_traversal_segments(...)`, which
@@ -464,6 +467,15 @@ credentials: the server's credential variables are left out, and the child
 reads the role from a container credentials endpoint on `127.0.0.1` with
 private AWS config files that carry no credentials. A new spawn site must pass
 `env=child_environment(...)` and `stdin=DEVNULL` like the existing ones.
+
+`_run_cli` and `_run_cli_async` stop the CLI after two minutes. A command that
+takes longer needs a different path: the tools that copy local data to or from
+S3 (`models_upload`, `upload_to_regional_bucket`, `populate_kv_cache`,
+`sync_storage_bucket`) pass `timeout_seconds=cli_runner.TRANSFER_TIMEOUT_SECONDS`
+(one hour), and commands that wait on cloud work (`deploy_*`, `destroy_*`,
+`bootstrap_cdk`, `images_build`, `images_push`, `dag_run`) run through
+`_run_long_task`, which has no timeout, streams progress, records task status
+for `task_status` / `task_tail`, and stops the CLI when the call is cancelled.
 
 Most tools follow this `_run_cli` shell-out pattern. A few domains — notably the
 image-registry and image-mirror tools in `images.py` — instead wrap their CLI

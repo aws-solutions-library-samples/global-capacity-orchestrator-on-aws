@@ -440,3 +440,60 @@ class TestProjectScopedNames:
         assert config.project_name == "acme"
         assert config.global_stack_name == "acme-global"
         assert config.api_gateway_stack_name == "acme-api-gateway"
+
+
+class TestSetProjectRoot:
+    """``set_project_root`` points cdk.json and project config discovery elsewhere.
+
+    The MCP server's in-process tools build this configuration in a process
+    whose working directory is not the project; without the setter they read
+    project ``gco`` and the default Regions.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        from cli import config as config_module
+
+        yield
+        config_module.set_project_root(None)
+
+    def test_cdk_json_and_project_file_come_from_the_configured_root(self, tmp_path):
+        from cli import config as config_module
+
+        project = tmp_path / "acme-checkout"
+        project.mkdir()
+        (project / "cdk.json").write_text(
+            json.dumps(
+                {
+                    "context": {
+                        "project_name": "acme",
+                        "deployment_regions": {"global": "eu-west-1", "regional": ["eu-west-1"]},
+                    }
+                }
+            )
+        )
+        (project / ".gco.yaml").write_text("default_namespace: acme-jobs\n")
+        elsewhere = tmp_path / "server-cwd"
+        elsewhere.mkdir()
+
+        with (
+            patch("cli.config.Path.cwd", return_value=elsewhere),
+            patch("cli.config.Path.home", return_value=tmp_path / "home"),
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            for name in ("GCO_PROJECT_NAME", "GCO_GLOBAL_REGION", "GCO_DEFAULT_NAMESPACE"):
+                os.environ.pop(name, None)
+            assert get_config().project_name == "gco"
+
+            config_module.set_project_root(project)
+            config = get_config()
+            assert (config.project_name, config.global_region) == ("acme", "eu-west-1")
+            assert config.default_region == "eu-west-1"
+            assert config.default_namespace == "acme-jobs"
+            assert config.global_stack_name == "acme-global"
+            assert _load_cdk_json()["regional"] == ["eu-west-1"]
+            assert _load_cdk_project_name() == "acme"
+
+            config_module.set_project_root(None)
+            assert get_config().project_name == "gco"
+            assert _load_cdk_json() == {}

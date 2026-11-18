@@ -287,3 +287,67 @@ class TestModuleStructure:
         from version import get_project_version
 
         assert get_project_version() != "unknown"
+
+
+class TestEnvVarsResourceMatchesTheCode:
+    """``config://gco/env-vars`` lists what the code reads, and only that (N46)."""
+
+    @staticmethod
+    def _listed() -> set[str]:
+        import re
+
+        content = (
+            asyncio.run(run_mcp.mcp.read_resource("config://gco/env-vars")).contents[0].content
+        )
+        rows = re.findall(r"^\| (`[A-Z][A-Z0-9_]+`(?: / `[A-Z][A-Z0-9_]+`)*) \|", content, re.M)
+        return {name for row in rows for name in re.findall(r"`([A-Z0-9_]+)`", row)}
+
+    @staticmethod
+    def _sources() -> dict[str, str]:
+        import subprocess
+
+        root = Path(__file__).resolve().parent.parent
+        names = subprocess.run(
+            ["git", "ls-files", "cli", "gco", "gco_mcp", "lambda"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        return {
+            name: (root / name).read_text(encoding="utf-8", errors="replace")
+            for name in names
+            if name.endswith(".py") and name != "gco_mcp/resources/config.py"
+        }
+
+    def test_every_listed_variable_is_read_somewhere(self):
+        """GCO_CONFIG_PATH, DLQ_URL and DYNAMODB_TABLE were listed; nothing reads them."""
+        import re
+
+        sources = self._sources()
+        unread = sorted(
+            name
+            for name in self._listed()
+            if not any(re.search(rf"\b{name}\b", text) for text in sources.values())
+        )
+        assert unread == []
+
+    def test_every_gco_variable_the_server_names_is_listed(self):
+        """GCO_PROJECT_ROOT, GCO_MISSION_STATE_BACKEND and others were missing."""
+        import re
+
+        named = {
+            name
+            for path, text in self._sources().items()
+            if path.startswith("gco_mcp/")
+            for name in re.findall(r"[\"'](GCO_[A-Z0-9_]+)[\"']", text)
+        }
+        assert sorted(named - self._listed()) == []
+        assert {"GCO_PROJECT_ROOT", "GCO_PROJECT_NAME", "GCO_DEFAULT_REGION"} <= self._listed()
+
+    def test_aws_region_is_not_described_as_the_cli_default_region(self):
+        content = (
+            asyncio.run(run_mcp.mcp.read_resource("config://gco/env-vars")).contents[0].content
+        )
+        (row,) = [line for line in content.splitlines() if line.startswith("| `AWS_REGION`")]
+        assert "not the CLI's default Region" in row

@@ -99,6 +99,7 @@ def _isolated_tool_module(
     cli_runner = _stub_module(
         "cli_runner",
         _run_cli=run_cli,
+        TRANSFER_TIMEOUT_SECONDS=3600,
         reject_paths_outside_project_root=Mock(return_value=None),
         reject_traversal_segments=Mock(return_value=None),
     )

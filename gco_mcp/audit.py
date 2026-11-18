@@ -12,8 +12,11 @@ Provides:
 - ``audit_resource_read`` — emits the same structured success/error metadata
   for every MCP resource read via centralized middleware.
 - Startup audit log entry emitted only when the server entry point starts.
+- ``configure_audit_logging`` — called by the server entry point; writes the
+  records to stderr or to ``GCO_MCP_AUDIT_LOG``.
 """
 
+import asyncio
 import contextlib
 import contextvars
 import functools
@@ -22,9 +25,11 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -48,6 +53,9 @@ from version import get_project_version
 _MCP_SERVER_VERSION = get_project_version()
 
 audit_logger = logging.getLogger("gco.mcp.audit")
+
+_AUDIT_OUTPUT_MARKER = "_gco_mcp_audit_output"
+"""Attribute set on the handler :func:`configure_audit_logging` installs."""
 
 # Patterns for sensitive argument key names (case-insensitive)
 _SENSITIVE_KEY_PATTERNS = [
@@ -333,12 +341,27 @@ def audit_resource_read(
     audit_logger.info(json.dumps(entry))
 
 
+def _interrupted_status(exc: BaseException) -> str:
+    """Return the audit status for an exception that is not an ``Exception``.
+
+    A cancelled call (the client cancelled the request or the task, or the
+    server is shutting down) raises ``asyncio.CancelledError``; Ctrl-C raises
+    ``KeyboardInterrupt``. Anything else outside ``Exception`` (``SystemExit``
+    from code that calls ``sys.exit``) is an error.
+    """
+    if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
+        return "cancelled"
+    return "error"
+
+
 def audit_logged(func: Callable[..., Any]) -> Callable[..., Any]:
     """Decorator that emits structured JSON audit entries for tool invocations.
 
     Dispatches on ``inspect.iscoroutinefunction(func)``: async tools get an
     async wrapper that ``await``s the call, sync tools keep the existing
-    sync path. Both wrappers share ``_build_audit_entry``.
+    sync path. Both wrappers share ``_build_audit_entry``. A call that is
+    cancelled or interrupted is recorded with status ``cancelled`` before
+    the exception propagates.
     """
     if inspect.iscoroutinefunction(func):
 
@@ -372,6 +395,21 @@ def audit_logged(func: Callable[..., Any]) -> Callable[..., Any]:
                             "error",
                             duration_ms,
                             str(e),
+                            None,
+                        )
+                    )
+                )
+                raise
+            except BaseException as e:
+                duration_ms = (time.time() - start) * 1000
+                audit_logger.info(
+                    json.dumps(
+                        _build_audit_entry(
+                            func.__name__,
+                            sanitized_args,
+                            _interrupted_status(e),
+                            duration_ms,
+                            str(e) or type(e).__name__,
                             None,
                         )
                     )
@@ -415,8 +453,77 @@ def audit_logged(func: Callable[..., Any]) -> Callable[..., Any]:
                 )
             )
             raise
+        except BaseException as e:
+            duration_ms = (time.time() - start) * 1000
+            audit_logger.info(
+                json.dumps(
+                    _build_audit_entry(
+                        func.__name__,
+                        sanitized_args,
+                        _interrupted_status(e),
+                        duration_ms,
+                        str(e) or type(e).__name__,
+                        None,
+                    )
+                )
+            )
+            raise
 
     return sync_wrapper
+
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+
+
+def _configured_audit_level() -> int:
+    """Return ``GCO_MCP_AUDIT_LOG_LEVEL`` as a logging level (default INFO).
+
+    An unknown name keeps INFO, so a typo cannot turn the audit trail off.
+    """
+    name = os.environ.get("GCO_MCP_AUDIT_LOG_LEVEL", "").strip().upper()
+    return logging.getLevelNamesMapping().get(name, logging.INFO)
+
+
+def _audit_output_handler() -> logging.Handler | None:
+    for handler in audit_logger.handlers:
+        if getattr(handler, _AUDIT_OUTPUT_MARKER, False):
+            return handler
+    return None
+
+
+def configure_audit_logging() -> logging.Handler:
+    """Write audit records to stderr, or append them to ``GCO_MCP_AUDIT_LOG``.
+
+    Every record is one JSON line logged at INFO (role-assumption failures at
+    ERROR) on ``gco.mcp.audit``. Python's root logger defaults to WARNING
+    and nothing in the server configured a handler, so before this the
+    records were written nowhere. stderr is safe under the stdio transport,
+    where stdout carries the protocol. A log file is created with mode 0600
+    when it does not exist. ``GCO_MCP_AUDIT_LOG_LEVEL`` filters this output
+    only: the logger itself stays at INFO so the in-memory Mission audit
+    collector keeps receiving entries. Records do not also propagate to the
+    root logger. Idempotent.
+    """
+    handler = _audit_output_handler()
+    if handler is not None:
+        return handler
+    path = os.environ.get("GCO_MCP_AUDIT_LOG", "").strip()
+    if path:
+        target = Path(path).expanduser()
+        os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
+        handler = logging.FileHandler(target, mode="a", encoding="utf-8")
+    else:
+        handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.setLevel(_configured_audit_level())
+    setattr(handler, _AUDIT_OUTPUT_MARKER, True)
+    audit_logger.addHandler(handler)
+    if audit_logger.level == logging.NOTSET or audit_logger.level > logging.INFO:
+        audit_logger.setLevel(logging.INFO)
+    audit_logger.propagate = False
+    return handler
 
 
 # =============================================================================
@@ -442,10 +549,12 @@ def _resolve_tool_search() -> str:
 
 def emit_startup_log() -> None:
     """Emit the startup audit log entry."""
+    output = _audit_output_handler()
+    level = output.level if output is not None else audit_logger.getEffectiveLevel()
     entry: dict[str, Any] = {
         "event": "mcp.server.startup",
         "version": _MCP_SERVER_VERSION,
-        "audit_log_level": logging.getLevelName(audit_logger.getEffectiveLevel()),
+        "audit_log_level": logging.getLevelName(level),
         "timestamp": datetime.now(UTC).isoformat(),
     }
     if feature_flags.all_tools_enabled():

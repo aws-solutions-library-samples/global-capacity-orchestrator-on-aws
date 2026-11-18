@@ -226,7 +226,10 @@ def test_predicate_operator_rejections() -> None:
 
 
 def test_predicate_allowed_attribute_slice_call_format_and_async_security() -> None:
-    assert isinstance(predicate.parse_predicate("obs.value"), ast.Expression)
+    assert isinstance(predicate.parse_predicate("obs.get"), ast.Expression)
+    with pytest.raises(predicate.PredicateRejected) as attribute:
+        predicate.parse_predicate("obs.value")
+    assert attribute.value.reason == "attribute_not_allowed"
     for source in ("obs[:]", "obs[1:]", "obs[:2]", "obs[::2]"):
         assert isinstance(predicate.parse_predicate(source), ast.Expression)
     assert isinstance(predicate.parse_predicate("sorted(obs, reverse=True)"), ast.Expression)
