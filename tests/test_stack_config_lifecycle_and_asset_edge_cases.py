@@ -4849,10 +4849,30 @@ def test_eks_security_group_cleanup_handles_absent_blocked_deleted_and_errors(
     ec2 = MagicMock()
     ec2.describe_security_groups.return_value = {
         "SecurityGroups": [
-            {"GroupId": "sg-blocked", "GroupName": "blocked", "VpcId": "vpc-1"},
-            {"GroupId": "sg-deleted", "GroupName": "deleted", "VpcId": "vpc-1"},
-            {"GroupId": "sg-missing", "GroupName": "missing", "VpcId": "vpc-1"},
-            {"GroupId": "sg-error", "GroupName": "error", "VpcId": "vpc-1"},
+            {
+                "GroupId": "sg-blocked",
+                "GroupName": "blocked",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            },
+            {
+                "GroupId": "sg-deleted",
+                "GroupName": "deleted",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            },
+            {
+                "GroupId": "sg-missing",
+                "GroupName": "missing",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            },
+            {
+                "GroupId": "sg-error",
+                "GroupName": "error",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            },
         ]
     }
     ec2.describe_network_interfaces.side_effect = [
@@ -5638,7 +5658,14 @@ def test_eks_security_group_cleanup_rejects_identity_and_delete_errors(
 
     ec2 = MagicMock()
     ec2.describe_security_groups.return_value = {
-        "SecurityGroups": [{"GroupId": "sg-one", "GroupName": "one", "VpcId": "vpc-other"}]
+        "SecurityGroups": [
+            {
+                "GroupId": "sg-one",
+                "GroupName": "one",
+                "VpcId": "vpc-other",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            }
+        ]
     }
     with patch("boto3.client", return_value=ec2):
         outcome = _REAL_CLEANUP_EKS_SECURITY_GROUPS(
@@ -5650,7 +5677,14 @@ def test_eks_security_group_cleanup_rejects_identity_and_delete_errors(
 
     ec2 = MagicMock()
     ec2.describe_security_groups.return_value = {
-        "SecurityGroups": [{"GroupId": "sg-one", "GroupName": "one", "VpcId": "vpc-1"}]
+        "SecurityGroups": [
+            {
+                "GroupId": "sg-one",
+                "GroupName": "one",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            }
+        ]
     }
     ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
     ec2.delete_security_group.side_effect = _client_error("AccessDeniedException")

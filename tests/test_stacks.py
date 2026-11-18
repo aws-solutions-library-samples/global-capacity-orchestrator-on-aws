@@ -4128,6 +4128,7 @@ class TestCleanupEksSecurityGroups:
                 {
                     "GroupId": "sg-12345",
                     "GroupName": "eks-cluster-sg-gco-us-east-1-123456",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
                 }
             ]
         }
@@ -4141,9 +4142,50 @@ class TestCleanupEksSecurityGroups:
             manager._cleanup_eks_security_groups("gco-us-east-1")
 
             mock_ec2.describe_security_groups.assert_called_once_with(
-                Filters=[{"Name": "group-name", "Values": ["eks-cluster-sg-gco-us-east-1-*"]}]
+                Filters=[
+                    {"Name": "group-name", "Values": ["eks-cluster-sg-gco-us-east-1-*"]},
+                    {"Name": "tag:aws:eks:cluster-name", "Values": ["gco-us-east-1"]},
+                ]
             )
             mock_ec2.delete_security_group.assert_called_once_with(GroupId="sg-12345")
+
+    def test_cleanup_leaves_other_clusters_security_groups_alone(self):
+        """gco-us-east-1's name prefix also matches the group of gco-us-east-1-dev."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_security_groups.return_value = {
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-dev",
+                    "GroupName": "eks-cluster-sg-gco-us-east-1-dev-987654",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1-dev"}],
+                },
+                {"GroupId": "sg-untagged", "GroupName": "eks-cluster-sg-gco-us-east-1-555"},
+                {
+                    "GroupId": "sg-own",
+                    "GroupName": "eks-cluster-sg-gco-us-east-1-123456",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                },
+            ]
+        }
+        mock_ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
+        with (
+            patch("boto3.client", return_value=mock_ec2),
+            patch.object(StackManager, "_find_project_root", return_value=Path(".")),
+        ):
+            outcome = StackManager(config)._cleanup_eks_security_groups("gco-us-east-1")
+
+        mock_ec2.delete_security_group.assert_called_once_with(GroupId="sg-own")
+        mock_ec2.describe_network_interfaces.assert_called_once_with(
+            Filters=[{"Name": "group-id", "Values": ["sg-own"]}]
+        )
+        assert outcome["inspected"] == 1
+        assert {"Name": "tag:aws:eks:cluster-name", "Values": ["gco-us-east-1"]} in (
+            mock_ec2.describe_security_groups.call_args.kwargs["Filters"]
+        )
 
     def test_cleanup_waits_for_enis_before_deleting_sg(self):
         """Service-managed ENIs block cleanup without being detached or deleted."""
@@ -4158,6 +4200,7 @@ class TestCleanupEksSecurityGroups:
                 {
                     "GroupId": "sg-12345",
                     "GroupName": "eks-cluster-sg-gco-us-east-1-123456",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
                 }
             ]
         }

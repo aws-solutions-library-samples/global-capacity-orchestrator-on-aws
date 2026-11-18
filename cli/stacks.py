@@ -7004,7 +7004,15 @@ class StackManager:
                             {
                                 "Name": "group-name",
                                 "Values": [f"eks-cluster-sg-{cluster_name}-*"],
-                            }
+                            },
+                            # The name prefix also matches the group of any
+                            # cluster whose name extends this one (gco-us-east-1
+                            # and gco-us-east-1-dev); EKS tags each cluster
+                            # security group with its own cluster's exact name.
+                            {
+                                "Name": "tag:aws:eks:cluster-name",
+                                "Values": [cluster_name],
+                            },
                         ]
                     )
             except ClientError as exc:
@@ -7017,6 +7025,11 @@ class StackManager:
                 raise
 
             for security_group in response.get("SecurityGroups", []):
+                if not security_group_id and not _is_eks_cluster_security_group(
+                    security_group, cluster_name
+                ):
+                    # Never delete by name alone, whatever the filter returned.
+                    continue
                 outcome["inspected"] += 1
                 group_id = str(security_group["GroupId"])
                 group_name = str(security_group.get("GroupName", ""))
@@ -7381,6 +7394,19 @@ class StackManager:
 def get_stack_manager(config: GCOConfig) -> StackManager:
     """Factory function to get a StackManager instance."""
     return StackManager(config)
+
+
+def _is_eks_cluster_security_group(security_group: Mapping[str, Any], cluster_name: str) -> bool:
+    """Whether EKS tagged ``security_group`` as the cluster security group of ``cluster_name``.
+
+    EKS sets ``aws:eks:cluster-name`` on the group it creates and restores the
+    tag when it is removed; the ``aws:`` prefix is reserved, so no user or
+    other tool can set it.
+    """
+    return any(
+        tag.get("Key") == "aws:eks:cluster-name" and tag.get("Value") == cluster_name
+        for tag in security_group.get("Tags") or []
+    )
 
 
 def _volume_pvc_name(volume: Mapping[str, Any]) -> str | None:

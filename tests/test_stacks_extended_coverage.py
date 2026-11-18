@@ -938,7 +938,11 @@ class TestEksSecurityGroupCleanup:
         ec2 = MagicMock()
         ec2.describe_security_groups.return_value = {
             "SecurityGroups": [
-                {"GroupId": "sg-123", "GroupName": "eks-cluster-sg-gco-us-east-1-abc"}
+                {
+                    "GroupId": "sg-123",
+                    "GroupName": "eks-cluster-sg-gco-us-east-1-abc",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                }
             ]
         }
         ec2.describe_network_interfaces.return_value = {
@@ -961,7 +965,13 @@ class TestEksSecurityGroupCleanup:
     ) -> None:
         ec2 = MagicMock()
         ec2.describe_security_groups.return_value = {
-            "SecurityGroups": [{"GroupId": "sg-x", "GroupName": "eks-cluster-sg-x"}]
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-x",
+                    "GroupName": "eks-cluster-sg-x",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                }
+            ]
         }
         ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
         with patch("boto3.client", return_value=ec2):
@@ -972,7 +982,13 @@ class TestEksSecurityGroupCleanup:
     def test_sg_delete_failure_logged(self, manager: Any) -> None:
         ec2 = MagicMock()
         ec2.describe_security_groups.return_value = {
-            "SecurityGroups": [{"GroupId": "sg-x", "GroupName": "eks-cluster-sg-x"}]
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-x",
+                    "GroupName": "eks-cluster-sg-x",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                }
+            ]
         }
         ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
         ec2.delete_security_group.side_effect = RuntimeError("dependency")
