@@ -2925,7 +2925,7 @@ gco inference scale my-llm --replicas 4
 
 #### `gco inference stop`
 
-Stop an inference endpoint (scales to zero, keeps configuration). Every Deployment of the endpoint scales to zero: the model Deployment and its canary, or the Mooncake roles and the prefill-decode proxy.
+Stop an inference endpoint (scales to zero, keeps configuration). Every Deployment of the endpoint scales to zero: the model Deployment and its canary, or the Mooncake roles and the prefill-decode proxy. Spec changes made while it is stopped (`update-image`, `set-topology`, `configure-store`, `canary`, `promote`, `rollback`) are kept, the endpoint stays stopped, and the changes take effect when it starts.
 
 ```bash
 gco inference stop ENDPOINT_NAME [OPTIONS]
@@ -3014,7 +3014,7 @@ gco inference delete my-llm -y
 
 #### `gco inference update-image`
 
-Update the container image for an endpoint. Triggers a rolling update across all target regions. On a Mooncake endpoint the prefill, decode and store-role pods roll onto the new image, one pod-template change per reconcile pass (a pending TLS sidecar or `mooncake.json` change lands first); the prefill-decode proxy keeps its own `mooncake.proxy.image`.
+Update the container image for an endpoint. Triggers a rolling update across all target regions; a stopped endpoint keeps the new image and rolls it out when it starts. On a Mooncake endpoint the prefill, decode and store-role pods roll onto the new image, one pod-template change per reconcile pass (a pending TLS sidecar or `mooncake.json` change lands first); the prefill-decode proxy keeps its own `mooncake.proxy.image`.
 
 ```bash
 gco inference update-image ENDPOINT_NAME [OPTIONS]

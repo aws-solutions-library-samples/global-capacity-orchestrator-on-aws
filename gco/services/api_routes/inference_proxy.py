@@ -232,8 +232,9 @@ async def _resolve_upstream(endpoint_name: str) -> tuple[str, str, str]:
     local_state = local_status.get("state") if isinstance(local_status, dict) else None
     # Readiness is decided per region. ``deploying`` is the endpoint-wide
     # summary while any target region still converges, and every spec update
-    # (scale, set-topology, configure-store, update-image) re-enters it until
-    # the monitor has observed all regions running again; a region whose own
+    # of a live endpoint (update-image, set-topology, configure-store, canary,
+    # promote, rollback) re-enters it until the monitor has observed all
+    # regions running again; a region whose own
     # status is ``running`` has Ready pods and keeps serving throughout.
     # Stopped and deleted endpoints never serve.
     if desired_state not in ("running", "deploying") or local_state != "running":

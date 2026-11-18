@@ -174,6 +174,8 @@ def scale_inference(name: str, replicas: int) -> str:
 def update_inference_image(name: str, image: str) -> str:
     """Rolling update of an inference endpoint's container image.
 
+    A stopped endpoint stays stopped and rolls the new image out when started.
+
     Args:
         name: Endpoint name.
         image: New container image.

@@ -616,6 +616,9 @@ def inference_stop(config: Any, endpoint_name: Any, yes: Any) -> None:
     """Stop an inference endpoint (scale to zero, keep config).
 
     Every Deployment of the endpoint scales to zero, its canary included.
+    Spec changes made while it is stopped (update-image, set-topology,
+    configure-store, canary, promote, rollback) are kept and take effect when
+    it starts.
 
     Examples:
         gco inference stop my-llm -y
@@ -910,6 +913,21 @@ def inference_delete(
         sys.exit(1)
 
 
+def _note_stopped_endpoint(formatter: Any, endpoint_name: str, result: dict[str, Any]) -> bool:
+    """Say that a stopped endpoint keeps a spec change until it is started.
+
+    Returns:
+        ``True`` when the endpoint is stopped and the note was printed.
+    """
+    if result.get("desired_state") != "stopped":
+        return False
+    formatter.print_info(
+        f"Endpoint '{endpoint_name}' is stopped; the change takes effect when it starts "
+        f"(gco inference start {endpoint_name})"
+    )
+    return True
+
+
 @inference.command("update-image")
 @click.argument("endpoint_name")
 @click.option("--image", "-i", required=True, help="New container image")
@@ -917,7 +935,8 @@ def inference_delete(
 def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
     """Update the container image for an inference endpoint.
 
-    Triggers a rolling update across all target regions. On a Mooncake
+    Triggers a rolling update across all target regions; a stopped endpoint
+    keeps the new image and rolls it out when it starts. On a Mooncake
     endpoint the prefill, decode and store-role pods roll onto the new image;
     the prefill-decode proxy keeps its own proxy image.
 
@@ -934,7 +953,8 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
 
         if result:
             formatter.print_success(f"Endpoint '{endpoint_name}' image updated to {image}")
-            formatter.print_info("Rolling update will be applied by inference_monitor")
+            if not _note_stopped_endpoint(formatter, endpoint_name, result):
+                formatter.print_info("Rolling update will be applied by inference_monitor")
         else:
             formatter.print_error(f"Endpoint '{endpoint_name}' not found")
             sys.exit(1)
@@ -1376,6 +1396,7 @@ def inference_canary(
         formatter.print_success(
             f"Canary started: {weight}% traffic → {image} ({replicas} replica(s))"
         )
+        _note_stopped_endpoint(formatter, endpoint_name, result)
         formatter.print_info(f"Monitor with: gco inference status {endpoint_name}")
         formatter.print_info(f"Promote with: gco inference promote {endpoint_name}")
         formatter.print_info(f"Rollback with: gco inference rollback {endpoint_name}")
@@ -1431,6 +1452,7 @@ def inference_promote(config: Any, endpoint_name: Any, yes: Any) -> None:
         if result:
             new_image = result.get("spec", {}).get("image", "unknown")
             formatter.print_success(f"Promoted: all traffic now serving {new_image}")
+            _note_stopped_endpoint(formatter, endpoint_name, result)
         else:
             formatter.print_error("Promotion failed")
             sys.exit(1)
@@ -1483,6 +1505,7 @@ def inference_rollback(config: Any, endpoint_name: Any, yes: Any) -> None:
         if result:
             primary_image = result.get("spec", {}).get("image", "unknown")
             formatter.print_success(f"Rolled back: all traffic now serving {primary_image}")
+            _note_stopped_endpoint(formatter, endpoint_name, result)
         else:
             formatter.print_error("Rollback failed")
             sys.exit(1)
@@ -1703,10 +1726,11 @@ def inference_set_topology(config: Any, endpoint_name: Any, prefill: Any, decode
             formatter.print_success(
                 f"Endpoint '{endpoint_name}' topology set to {prefill}p{decode}d"
             )
-            formatter.print_info(
-                "The inference_monitor will adjust prefill and decode "
-                "replica counts in each region."
-            )
+            if not _note_stopped_endpoint(formatter, endpoint_name, result):
+                formatter.print_info(
+                    "The inference_monitor will adjust prefill and decode "
+                    "replica counts in each region."
+                )
             if config.output_format != "table":
                 formatter.print(result)
         else:
@@ -1817,10 +1841,11 @@ def inference_configure_store(
         result = manager.configure_store(endpoint_name, store_config)
         if result:
             formatter.print_success(f"Endpoint '{endpoint_name}' store configuration updated")
-            formatter.print_info(
-                "The inference_monitor will re-render the KV-cache store "
-                "configuration in each region and roll the role pods onto it."
-            )
+            if not _note_stopped_endpoint(formatter, endpoint_name, result):
+                formatter.print_info(
+                    "The inference_monitor will re-render the KV-cache store "
+                    "configuration in each region and roll the role pods onto it."
+                )
             if config.output_format != "table":
                 formatter.print(result)
         else:
