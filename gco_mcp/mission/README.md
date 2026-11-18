@@ -143,6 +143,12 @@ A swarm is one orchestrator Mission supervising N child Missions
   scripted strategies are validated against tight AST allowlists before any
   execution, so a malformed or hostile input is rejected immediately rather
   than on iteration N.
+- **Recorded data is framed as data in sampling prompts.** Criteria evidence,
+  environment context, prior-mission memory and iteration summaries (tool
+  output) sit between `<<<UNTRUSTED DATA name>>>` and
+  `<<<END UNTRUSTED DATA name>>>` lines, with any `<<<`/`>>>` inside escaped,
+  and the prompt preamble tells the model never to follow instructions found
+  there.
 - **Pure functions take their context as arguments.** Validators, the verdict
   cascade, and the cadence resolver perform no I/O and read no clocks — the
   caller passes in the wall-clock value and any external context, which keeps

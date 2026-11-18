@@ -843,6 +843,8 @@ The block is byte-capped at 4 KB. When a section overshoots (e.g. a probe return
 
 What deliberately does **not** land in the block: spot prices and on-demand prices (large, AZ-fanout, cheap to fetch on demand from `spot_prices` once the model has picked an instance shape), capacity-block offerings (reachable through `reservation_check`), and anything timestamp-stamped to second precision (a wall-clock leak would break the byte-identical determinism property in `tests/test_mission_sampling.py`).
 
+Like every block of recorded data in the sampling prompt (criteria evidence, prior-mission memory, and the iteration summaries that carry tool output), the environment context sits between `<<<UNTRUSTED DATA environment_context>>>` and `<<<END UNTRUSTED DATA environment_context>>>` lines. Any `<<<` or `>>>` inside a block is written as a JSON escape, so data cannot close its block early, and the prompt preamble tells the model to treat framed text as information only and never follow instructions found in it.
+
 Failure semantics: every AWS probe is wrapped. A total credential failure or a missing checker returns `None` so the prompt omits the section entirely — the model just sees the same prompt shape it would have seen pre-environment-context. Per-region partial failures land as zeroed metrics rather than dropping the region, so the regions list is always honest.
 
 ## Mission Memory
