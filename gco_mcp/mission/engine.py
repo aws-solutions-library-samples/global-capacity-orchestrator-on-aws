@@ -164,8 +164,13 @@ SamplingCallable = Callable[..., Awaitable[Any]]
 #: ``_apply_observation_augmenters`` checks the shape at runtime and ignores
 #: a non-dict contribution, which the type must leave room for.
 ObservationAugmenter = Callable[[SessionState], object]
+#: ``(script, ctx, tool_dispatcher, session) -> (observation, script_call_log)``.
+#: ``session`` is the session as it stands while the iteration runs (its
+#: ``iterations`` list does not yet hold the in-progress one), so the runner
+#: can build a fresh per-iteration sandbox whose audit rows carry the right
+#: ``iteration_index``.
 SandboxRunner = Callable[
-    [str, Any, ToolDispatcher],
+    [str, Any, ToolDispatcher, SessionState],
     Awaitable[tuple[dict[str, Any], list[ToolCallRecord]]],
 ]
 
@@ -189,7 +194,8 @@ class MissionEngine:
       engine to the deterministic fallback strategy.
     * ``sandbox_runner`` — optional async callable that runs a scripted
       Strategy in the Mission sandbox. Signature ``(script, ctx,
-      tool_dispatcher) -> (observation_dict, script_call_log)``. ``None``
+      tool_dispatcher, session) -> (observation_dict, script_call_log)``,
+      where ``session`` is the session as the iteration sees it. ``None``
       means the engine refuses any scripted strategy with a clear
       error instead of silently executing operator-supplied code.
     * ``now`` — injectable clock. Defaults to a UTC clock; tests pin it
@@ -772,9 +778,10 @@ class MissionEngine:
           runs, the failure lands as one entry, and Observe_Phase
           surfaces it under ``errors``.
         * **script** — hand the script to :attr:`sandbox_runner` along
-          with ``ctx`` and the engine's own ``tool_dispatcher`` so the
+          with ``ctx``, the engine's own ``tool_dispatcher`` (so the
           sandbox can safely invoke allowlisted tools as native
-          callables. The runner returns ``(observation_dict,
+          callables) and the current session (so the sandbox's audit rows
+          carry this iteration's index). The runner returns ``(observation_dict,
           script_call_log)``. The observation is stashed on the record
           for Observe_Phase to use directly; the script_call_log is
           stored on ``record["script_call_log"]``.
@@ -922,13 +929,12 @@ class MissionEngine:
         failed Execute_Phase, which is the right behaviour even
         without per-class translation.
         """
-        del session  # accepted for symmetry with the execute path; unused
         if self.sandbox_runner is None:
             raise MissionEngineError("script_rejected")
         script = strategy["script"]
         try:
             observation_dict, script_call_log = await self.sandbox_runner(
-                script, ctx, self.tool_dispatcher
+                script, ctx, self.tool_dispatcher, session
             )
         except Exception as exc:
             # Late-resolved class lookup: importing the sandbox

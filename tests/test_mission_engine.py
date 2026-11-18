@@ -705,8 +705,11 @@ async def test_run_iteration_dispatches_script_through_sandbox_runner(
         script: str,
         ctx: Any,
         tool_dispatcher: Any,
+        session: Any,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        sandbox_calls.append({"script": script, "ctx": ctx})
+        sandbox_calls.append(
+            {"script": script, "ctx": ctx, "iterations": len(session["iterations"])}
+        )
         observation: dict[str, Any] = {
             "tool_results": [{"some": "result"}],
             "metrics": {"loss": 0.5},
@@ -844,7 +847,7 @@ async def test_run_iteration_translates_script_rejected_from_runner(
     from mission.sandbox import ScriptRejected
 
     async def fake_sandbox_runner(
-        script: str, ctx: Any, tool_dispatcher: Any
+        script: str, ctx: Any, tool_dispatcher: Any, session: Any
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise ScriptRejected("forbidden_node")
 
@@ -901,7 +904,7 @@ async def test_run_iteration_translates_sandbox_terminated_from_runner(
     from mission.sandbox import SandboxTerminated
 
     async def fake_sandbox_runner(
-        script: str, ctx: Any, tool_dispatcher: Any
+        script: str, ctx: Any, tool_dispatcher: Any, session: Any
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise SandboxTerminated(
             "MontyRuntimeError",
@@ -967,33 +970,44 @@ async def test_run_iteration_translates_sandbox_terminated_from_runner(
 
 
 # ---------------------------------------------------------------------------
-# Test 13 — make_default_sandbox_runner returns the bound MissionSandbox.run
+# Test 13 — make_default_sandbox_runner builds one MissionSandbox per run
 # ---------------------------------------------------------------------------
 
 
-def test_make_default_sandbox_runner_returns_bound_run_method() -> None:
-    """The default factory returns a callable bound to a fresh ``MissionSandbox``.
+async def test_make_default_sandbox_runner_builds_a_sandbox_per_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default factory returns a coroutine function matching ``SandboxRunner``.
 
-    The engine takes any callable matching the ``SandboxRunner``
-    protocol; the factory wraps a per-session :class:`MissionSandbox`
-    and returns its bound ``run`` method so callers do not need to
-    know about the sandbox class.
+    Each call constructs a fresh :class:`MissionSandbox` from the session
+    it is handed, with the allowlist pinned when the runner was built, so
+    callers do not need to know about the sandbox class.
     """
+    import inspect
+
     sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
-    from mission.sandbox import (
-        MissionSandbox,
-        make_default_sandbox_runner,
-    )
+    from mission import sandbox as sandbox_module
+    from mission.sandbox import make_default_sandbox_runner
 
-    session = _make_session(session_id="sess-factory")
-    runner = make_default_sandbox_runner(["fake_tool"], session)
+    built: list[tuple[list[str], str]] = []
 
-    assert callable(runner)
-    # ``__self__`` carries the sandbox instance because Python binds
-    # methods that way; checking the instance type pins the factory's
-    # contract.
-    assert isinstance(runner.__self__, MissionSandbox)  # type: ignore[attr-defined]
-    assert runner.__name__ == "run"
+    class RecordingSandbox:
+        def __init__(self, allowlist: list[str], session: dict[str, Any]) -> None:
+            built.append((list(allowlist), session["session_id"]))
+
+        async def run(self, script: str, ctx: Any, dispatcher: Any) -> tuple[dict, list]:
+            return {"script": script}, []
+
+    monkeypatch.setattr(sandbox_module, "MissionSandbox", RecordingSandbox)
+    allowlist = ["fake_tool"]
+    runner = make_default_sandbox_runner(allowlist)
+    allowlist.append("added_later")
+
+    assert inspect.iscoroutinefunction(runner)
+    for session_id in ("sess-a", "sess-b"):
+        session = _make_session(session_id=session_id)
+        assert await runner("x = 1", None, None, session) == ({"script": "x = 1"}, [])
+    assert built == [(["fake_tool"], "sess-a"), (["fake_tool"], "sess-b")]
 
 
 # ---------------------------------------------------------------------------

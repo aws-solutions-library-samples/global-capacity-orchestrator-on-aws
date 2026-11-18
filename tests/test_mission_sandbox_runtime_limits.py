@@ -11,6 +11,9 @@
 * Each stop carries the verdict reason the session terminates with:
   ``script_time_limit``, ``script_memory_limit`` or ``script_error``, never
   the session-budget reason ``max_wall_clock``.
+* The ``mission_script_call_event`` audit rows carry the index of the
+  iteration whose script made the call, across every iteration an engine
+  runs (one sandbox per iteration, not per engine).
 """
 
 from __future__ import annotations
@@ -308,7 +311,7 @@ class TestEngineReportsTheRealReason:
             backend=backend,
             tool_dispatcher=dispatcher,
             sampling_callable=None,
-            sandbox_runner=make_default_sandbox_runner(["find_examples"], session),
+            sandbox_runner=make_default_sandbox_runner(["find_examples"]),
         )
         monkeypatch.setattr(
             MissionEngine,
@@ -344,3 +347,82 @@ def test_final_report_followups_name_the_script_limit_that_fired() -> None:
     assert "GCO_MCP_CODE_MODE_MAX_MEMORY" in memory_limit[0]
     assert "sandbox_terminated_detail" in script_error[0]
     assert all("max_wall_clock_seconds" not in line for line in time_limit)
+
+
+class TestScriptCallAuditRowsCarryTheRunningIteration:
+    async def test_the_default_runner_stamps_each_run_with_its_iteration(
+        self, audit_rows: list[dict[str, Any]]
+    ) -> None:
+        from mission.sandbox import make_default_sandbox_runner
+
+        async def dispatcher(name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
+            return {"ok": True}
+
+        runner = make_default_sandbox_runner(["list_jobs"])
+        done = {"iteration_index": 0, "verdict": "continue", "verdict_reason": "in_progress"}
+        for completed in range(3):
+            session = _session([dict(done, iteration_index=i) for i in range(completed)])
+            await runner("r = await list_jobs()\n", None, dispatcher, session)
+
+        assert [row["iteration_index"] for row in audit_rows] == [0, 1, 2]
+
+    async def test_engine_iterations_emit_rows_with_their_own_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, audit_rows: list[dict[str, Any]]
+    ) -> None:
+        """Through the production runner wiring, three iterations of one engine
+        used to emit every script-call row with iteration_index 0."""
+        from mission import SCHEMA_VERSION
+        from mission._engine_factory import _build_sandbox_runner
+        from mission.engine import MissionEngine
+        from mission.state import FilesystemBackend
+
+        backend = FilesystemBackend(root=tmp_path)
+        session: dict[str, Any] = {
+            "version": SCHEMA_VERSION,
+            "session_id": "sess-audit-index",
+            "directive_text": "Audit-index fixture session.",
+            "criteria": [
+                {
+                    "criterion_id": "c1",
+                    "kind": "metric_threshold",
+                    "required": True,
+                    "metric": "loss",
+                    "op": "<",
+                    "target": -1.0,
+                }
+            ],
+            "budget": {"max_iterations": 10, "max_wall_clock_seconds": 600},
+            "tool_allowlist": ["find_examples"],
+            "checkpoint_cadence": {"kind": "every_iteration"},
+            "stagnation_threshold": 10,
+            "use_sampling": False,
+            "allow_scripted_strategies": True,
+            "status": "pending",
+            "created_at": "2025-01-01T00:00:00Z",
+            "iterations": [],
+            "no_progress_counter": 0,
+        }
+        backend.save_session(session)  # type: ignore[arg-type]
+
+        async def dispatcher(tool_name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
+            return {"ok": True}
+
+        runner = _build_sandbox_runner(session)
+        assert runner is not None
+        engine = MissionEngine(
+            backend=backend,
+            tool_dispatcher=dispatcher,
+            sampling_callable=None,
+            sandbox_runner=runner,
+        )
+        monkeypatch.setattr(
+            MissionEngine,
+            "_deterministic_strategy",
+            lambda self, sess: {"script": "r = await find_examples()\n", "rationale": "fixture"},
+        )
+
+        records = [await engine.run_iteration("sess-audit-index") for _ in range(3)]
+
+        assert [record["iteration_index"] for record in records] == [0, 1, 2]
+        assert [row["iteration_index"] for row in audit_rows] == [0, 1, 2]
+        assert {row["session_id"] for row in audit_rows} == {"sess-audit-index"}

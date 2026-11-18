@@ -1965,33 +1965,37 @@ class MissionSandbox:
 
 def make_default_sandbox_runner(
     allowlist: list[str],
-    session: Any,
 ) -> Callable[
-    [str, Any, Callable[[str, dict[str, Any], Any], Awaitable[Any]]],
+    [str, Any, Callable[[str, dict[str, Any], Any], Awaitable[Any]], Any],
     Awaitable[tuple[dict[str, Any], list[dict[str, Any]]]],
 ]:
     """Build the default ``sandbox_runner`` callable for the engine.
 
     The :class:`MissionEngine` takes a callable matching the
-    ``SandboxRunner`` protocol (``(script, ctx, tool_dispatcher) ->
-    (observation_dict, script_call_log)``); this helper wraps a fresh
-    :class:`MissionSandbox` for a given session and returns the bound
-    :meth:`MissionSandbox.run` method so the engine can drive the
-    sandbox without depending on the sandbox class itself.
+    ``SandboxRunner`` protocol (``(script, ctx, tool_dispatcher, session)
+    -> (observation_dict, script_call_log)``); this helper returns one that
+    drives :class:`MissionSandbox` so the engine does not depend on the
+    sandbox class itself.
 
-    One sandbox per session: the constructor freezes a snapshot of the
-    session's directive, criteria, budget, and prior-iteration
-    summaries into the ``mission`` namespace, so reusing a runner
-    across sessions would leak stale state. The engine's normal
-    construction path therefore calls this factory once per
-    ``mission_start`` and pins the returned callable on the engine
-    instance for the session's lifetime.
+    One sandbox per iteration: every call builds a fresh
+    :class:`MissionSandbox` from the session the engine passes in (the
+    session as it stands while the iteration runs), so the frozen
+    ``mission`` namespace and the ``iteration_index`` on the
+    ``mission_script_call_event`` audit rows describe the running
+    iteration. ``allowlist`` is pinned when the runner is built.
     """
-    sandbox = MissionSandbox(
-        allowlist=allowlist,
-        session=session,
-    )
-    return sandbox.run
+    pinned_allowlist = list(allowlist)
+
+    async def run(
+        script: str,
+        ctx: Any | None,
+        tool_dispatcher: Callable[[str, dict[str, Any], Any], Awaitable[Any]],
+        session: Any,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        sandbox = MissionSandbox(allowlist=pinned_allowlist, session=session)
+        return await sandbox.run(script, ctx, tool_dispatcher)
+
+    return run
 
 
 # ---------------------------------------------------------------------------

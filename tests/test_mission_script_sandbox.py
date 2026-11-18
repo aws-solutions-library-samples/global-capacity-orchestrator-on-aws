@@ -494,7 +494,7 @@ async def test_scripted_strategy_runs_end_to_end(
             return [{"name": "ex1"}, {"name": "ex2"}]
         return None
 
-    sandbox_runner = make_default_sandbox_runner(["find_examples"], session)
+    sandbox_runner = make_default_sandbox_runner(["find_examples"])
     engine = MissionEngine(
         backend=backend,
         tool_dispatcher=dispatcher,
@@ -697,7 +697,7 @@ async def test_scripted_strategy_terminated_by_max_duration(
         # never observes a tool call.
         return None
 
-    sandbox_runner = make_default_sandbox_runner(["find_examples"], session)
+    sandbox_runner = make_default_sandbox_runner(["find_examples"])
     engine = MissionEngine(
         backend=backend,
         tool_dispatcher=dispatcher,
