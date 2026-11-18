@@ -2055,7 +2055,9 @@ When a job event occurs (started, completed, or failed), the webhook dispatcher:
 1. Detects the job status transition
 2. Queries matching webhooks from DynamoDB based on event type and namespace
 3. Sends HTTP POST requests to all matching webhook URLs
-4. Retries failed deliveries with exponential backoff (up to 3 attempts)
+4. Retries a delivery that failed with a 5xx status, a timeout, or a connection
+   error, with exponential backoff, for at most 3 attempts in total (see
+   [Retry Behavior](#retry-behavior))
 
 Each attempt has 30 seconds to connect, send the payload, and receive the
 response status line and headers. Only the status code counts: the dispatcher
@@ -2138,10 +2140,15 @@ def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
 
 ### Retry Behavior
 
-- **5xx errors**: Retried up to 3 times with exponential backoff (5s, 10s, 20s)
-- **4xx errors**: Not retried (client error)
-- **Timeouts**: Retried up to 3 times (default timeout: 30 seconds)
-- **Connection errors**: Retried up to 3 times
+Each webhook gets at most 3 delivery attempts: the first request and up to 2
+retries.
+
+- **2xx**: Delivered; no further attempts.
+- **5xx errors, timeouts, and connection errors**: Retried after 5 seconds,
+  then after 10 seconds. A delivery whose third attempt fails is given up.
+- **Other statuses (3xx, 4xx)**: Not retried. Redirects are not followed.
+- **Timeouts**: Each attempt has 30 seconds, from connecting to receiving the
+  response status and headers.
 
 ### List Webhooks
 
