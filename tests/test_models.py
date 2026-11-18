@@ -90,10 +90,15 @@ class TestResourceUtilization:
         with pytest.raises(ValueError, match="cpu"):
             ResourceUtilization(cpu=-1.0, memory=50.0, gpu=0.0)
 
-    def test_invalid_memory_over_100(self):
-        """Test that memory over 100 raises error."""
+    def test_over_commit_above_100_is_accepted(self):
+        """Usage over allocatable (system-reserved share, GPU over-request) is legal."""
+        util = ResourceUtilization(cpu=102.0, memory=101.0, gpu=200.0)
+        assert (util.cpu, util.memory, util.gpu) == (102.0, 101.0, 200.0)
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
+    def test_non_finite_values_are_rejected(self, value):
         with pytest.raises(ValueError, match="memory"):
-            ResourceUtilization(cpu=50.0, memory=101.0, gpu=0.0)
+            ResourceUtilization(cpu=50.0, memory=value, gpu=0.0)
 
 
 class TestHealthStatus:

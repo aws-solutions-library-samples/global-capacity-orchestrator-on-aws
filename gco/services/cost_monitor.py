@@ -92,6 +92,14 @@ ADHOC_PREFIX = "adhoc"
 _MIN_WINDOW_MINUTES = 5
 _MAX_WINDOW_HOURS = 7 * 24
 
+#: How far back a scheduled pass looks for windows that were never written
+#: (the pod was down, or OpenCost or S3 failed for a whole window).
+SCHEDULED_BACKFILL_HOURS = 24
+
+#: Most reports one scheduled pass writes, so catching up after a long outage
+#: is spread over several passes (one a minute) instead of one burst.
+MAX_SCHEDULED_REPORTS_PER_PASS = 4
+
 
 class OpenCostUnavailableError(RuntimeError):
     """Raised when the OpenCost API cannot be reached or answers abnormally."""
@@ -469,6 +477,31 @@ def rows_to_parquet_bytes(rows: list[dict[str, Any]]) -> bytes:
     return sink.getvalue()
 
 
+#: Most objects one report listing reads from a single day's partition.
+_LIST_PARTITION_MAX_OBJECTS = 5_000
+
+
+def _report_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """One listed report object as the API returns it."""
+    return {
+        "key": entry["Key"],
+        "size_bytes": int(entry.get("Size", 0)),
+        "last_modified": (
+            entry["LastModified"].astimezone(UTC).isoformat() if entry.get("LastModified") else None
+        ),
+    }
+
+
+def _check_window(window_start: datetime, window_end: datetime) -> None:
+    """Reject report windows that are inverted, too long, or too short."""
+    if window_end <= window_start:
+        raise ValueError("window_end must be after window_start")
+    if window_end - window_start > timedelta(hours=_MAX_WINDOW_HOURS):
+        raise ValueError(f"report windows are capped at {_MAX_WINDOW_HOURS} hours")
+    if window_end - window_start < timedelta(minutes=_MIN_WINDOW_MINUTES):
+        raise ValueError(f"report windows must span at least {_MIN_WINDOW_MINUTES} minutes")
+
+
 def scheduled_report_key(region: str, window_start: datetime, window_end: datetime) -> str:
     """Deterministic S3 key for one scheduled report window."""
     date_partition = window_start.astimezone(UTC).strftime("%Y-%m-%d")
@@ -541,6 +574,9 @@ class CostMonitor:
         )
         self.last_scheduled_report: dict[str, Any] | None = None
         self.last_error: str | None = None
+        # Scheduled keys inside the backfill horizon known to need no write:
+        # present in S3, or a past window OpenCost had nothing for.
+        self._settled_keys: set[str] = set()
 
     # ------------------------------------------------------------------
     # Bucket identity
@@ -591,28 +627,36 @@ class CostMonitor:
         and :class:`ReportWriteError` when S3 persistence fails; callers map
         those to a failed scheduled pass or an HTTP 502/503 respectively.
         """
-        if window_end <= window_start:
-            raise ValueError("window_end must be after window_start")
-        if window_end - window_start > timedelta(hours=_MAX_WINDOW_HOURS):
-            raise ValueError(f"report windows are capped at {_MAX_WINDOW_HOURS} hours")
-        if window_end - window_start < timedelta(minutes=_MIN_WINDOW_MINUTES):
-            raise ValueError(f"report windows must span at least {_MIN_WINDOW_MINUTES} minutes")
-
+        _check_window(window_start, window_end)
         # Resolve the destination before querying OpenCost: an undiscoverable
         # bucket is a "not ready" signal and must not cost an allocation query.
         bucket = self._resolve_bucket()
-        allocations = self.opencost.get_allocation(window_start, window_end)
-        rows = allocations_to_rows(
-            allocations,
-            cluster=self.cluster,
-            window_start=window_start,
-            window_end=window_end,
-        )
+        rows = self._report_rows(window_start, window_end)
         key = (
             adhoc_report_key(self.region, window_start, window_end)
             if adhoc
             else scheduled_report_key(self.region, window_start, window_end)
         )
+        return self._write_report(bucket, key, rows, window_start, window_end, include_rows)
+
+    def _report_rows(self, window_start: datetime, window_end: datetime) -> list[dict[str, Any]]:
+        allocations = self.opencost.get_allocation(window_start, window_end)
+        return allocations_to_rows(
+            allocations,
+            cluster=self.cluster,
+            window_start=window_start,
+            window_end=window_end,
+        )
+
+    def _write_report(
+        self,
+        bucket: str,
+        key: str,
+        rows: list[dict[str, Any]],
+        window_start: datetime,
+        window_end: datetime,
+        include_rows: bool,
+    ) -> ReportResult:
         payload = rows_to_parquet_bytes(rows)
         try:
             self._s3.put_object(Bucket=bucket, Key=key, Body=payload)
@@ -629,42 +673,84 @@ class CostMonitor:
         )
 
     def run_scheduled_once(self, now: datetime | None = None) -> ReportResult | None:
-        """Write the report for the most recent completed aligned window.
+        """Write the reports for completed aligned windows that are still missing.
 
-        Skips (returns ``None``) when that window's object already exists —
-        the previous pass, or another replica during a rollout, already
-        persisted it — and when the bucket has not been published yet (the
-        monitoring stack deploys after this region; ``last_error`` records
-        the wait so ``status()`` explains the missing reports). Other failures
+        The most recent completed window comes first, then earlier windows
+        back to ``SCHEDULED_BACKFILL_HOURS``, newest first, so a window missed
+        while the pod (or OpenCost, or S3) was down is written later instead
+        of never. A window whose object already exists is skipped (an earlier
+        pass, or another replica during a rollout, wrote it), and so is an
+        earlier window OpenCost has no allocations for, such as one from
+        before the cluster existed; the most recent window is written even
+        when empty. One pass writes at most
+        ``MAX_SCHEDULED_REPORTS_PER_PASS`` reports and returns the newest it
+        wrote, or ``None``.
+
+        Skips the pass while the bucket has not been published yet (the
+        monitoring stack deploys after this region; ``last_error`` records the
+        wait so ``status()`` explains the missing reports). Other failures
         update ``last_error`` and re-raise so the caller's loop logs and
         retries on the next tick.
         """
         moment = now or datetime.now(UTC)
-        window_start, window_end = aligned_window(moment, self.report_interval_minutes)
-        key = scheduled_report_key(self.region, window_start, window_end)
+        latest_start, latest_end = aligned_window(moment, self.report_interval_minutes)
         try:
             bucket = self._resolve_bucket()
         except CostReportBucketUnavailableError as exc:
             self.last_error = str(exc)
             logger.info("Cost report bucket not published yet; skipping scheduled pass: %s", exc)
             return None
-        if self._object_exists(bucket, key):
-            logger.debug("Scheduled cost report already present: %s", key)
-            return None
-        try:
-            result = self.generate_report(window_start, window_end, adhoc=False)
-        except Exception as exc:
-            self.last_error = str(exc)
-            raise
-        self.last_scheduled_report = result.summary()
-        self.last_error = None
-        logger.info(
-            "Wrote scheduled cost report %s (%d rows, total %.4f USD)",
-            result.s3_key,
-            result.row_count,
-            result.total_cost,
-        )
-        return result
+
+        interval = latest_end - latest_start
+        horizon = max(1, int(timedelta(hours=SCHEDULED_BACKFILL_HOURS) / interval))
+        windows = [
+            (latest_start - interval * back, latest_end - interval * back)
+            for back in range(horizon)
+        ]
+        keys = [scheduled_report_key(self.region, start, end) for start, end in windows]
+        # Forget windows that have left the horizon, so the memo stays bounded.
+        self._settled_keys.intersection_update(keys)
+
+        newest: ReportResult | None = None
+        written = 0
+        for back, ((window_start, window_end), key) in enumerate(zip(windows, keys, strict=True)):
+            if written >= MAX_SCHEDULED_REPORTS_PER_PASS:
+                break
+            if key in self._settled_keys:
+                continue
+            if self._object_exists(bucket, key):
+                logger.debug("Scheduled cost report already present: %s", key)
+                self._settled_keys.add(key)
+                continue
+            try:
+                rows = self._report_rows(window_start, window_end)
+                if back > 0 and not rows:
+                    logger.info("No allocations for missed window %s; not backfilling it", key)
+                    self._settled_keys.add(key)
+                    continue
+                result = self._write_report(bucket, key, rows, window_start, window_end, False)
+            except Exception as exc:
+                self.last_error = str(exc)
+                raise
+            self._settled_keys.add(key)
+            written += 1
+            if newest is None:
+                newest = result
+            # A backfilled window is older than the one already reported:
+            # ``last_scheduled_report`` keeps describing the newest window.
+            # The ISO timestamps are all UTC, so they order as strings.
+            reported_end = (self.last_scheduled_report or {}).get("window_end", "")
+            if result.window_end > str(reported_end):
+                self.last_scheduled_report = result.summary()
+            self.last_error = None
+            logger.info(
+                "Wrote %s cost report %s (%d rows, total %.4f USD)",
+                "scheduled" if back == 0 else "missed",
+                result.s3_key,
+                result.row_count,
+                result.total_cost,
+            )
+        return newest
 
     def _object_exists(self, bucket: str, key: str) -> bool:
         try:
@@ -678,7 +764,14 @@ class CostMonitor:
     # ------------------------------------------------------------------
 
     def list_reports(self, *, adhoc: bool = False, limit: int = 50) -> list[dict[str, Any]]:
-        """List this region's most recent report objects, newest first."""
+        """List this region's most recent report objects, newest first.
+
+        Reports sit in one ``date=YYYY-MM-DD/`` partition per day. The day
+        partitions are read newest first and the listing stops once ``limit``
+        objects are in hand, so a call reads what it returns plus at most one
+        more day, however long the bucket's history (at most
+        ``_LIST_PARTITION_MAX_OBJECTS`` objects from any one day).
+        """
         prefix = (
             f"{ADHOC_PREFIX}/region={self.region}/"
             if adhoc
@@ -687,20 +780,22 @@ class CostMonitor:
         bounded_limit = min(max(int(limit), 1), 1_000)
         bucket = self._resolve_bucket()
         paginator = self._s3.get_paginator("list_objects_v2")
+
         objects: list[dict[str, Any]] = []
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for entry in page.get("Contents", []):
-                objects.append(
-                    {
-                        "key": entry["Key"],
-                        "size_bytes": int(entry.get("Size", 0)),
-                        "last_modified": (
-                            entry["LastModified"].astimezone(UTC).isoformat()
-                            if entry.get("LastModified")
-                            else None
-                        ),
-                    }
-                )
+        partitions: list[str] = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+            partitions.extend(str(entry["Prefix"]) for entry in page.get("CommonPrefixes", []))
+            objects.extend(_report_entry(entry) for entry in page.get("Contents", []))
+        # date=YYYY-MM-DD sorts chronologically as text.
+        for partition in sorted(partitions, reverse=True):
+            if len(objects) >= bounded_limit:
+                break
+            for page in paginator.paginate(
+                Bucket=bucket,
+                Prefix=partition,
+                PaginationConfig={"MaxItems": _LIST_PARTITION_MAX_OBJECTS},
+            ):
+                objects.extend(_report_entry(entry) for entry in page.get("Contents", []))
         objects.sort(key=lambda item: str(item["last_modified"] or ""), reverse=True)
         return objects[:bounded_limit]
 

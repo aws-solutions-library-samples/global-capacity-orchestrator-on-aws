@@ -2055,7 +2055,14 @@ When a job event occurs (started, completed, or failed), the webhook dispatcher:
 1. Detects the job status transition
 2. Queries matching webhooks from DynamoDB based on event type and namespace
 3. Sends HTTP POST requests to all matching webhook URLs
-4. Retries failed deliveries with exponential backoff (up to 3 attempts)
+4. Retries a delivery that failed with a 5xx status, a timeout, or a connection
+   error, with exponential backoff, for at most 3 attempts in total (see
+   [Retry Behavior](#retry-behavior))
+
+Each attempt has 30 seconds to connect, send the payload, and receive the
+response status line and headers. Only the status code counts: the dispatcher
+never reads the response body, so a receiver should not rely on the
+dispatcher reading anything it sends back.
 
 The dispatcher runs inside the health-monitor, which has two replicas for
 availability. Only one of them delivers at a time: the replicas elect a
@@ -2064,7 +2071,18 @@ deliverer through the pre-created `gco-health-monitor-webhooks` Lease in
 that wins it re-seeds its view of current job states before delivering. Each
 transition is therefore delivered at most once; during a failover (bounded by
 the 90-second lease duration) transitions may be dropped, never duplicated, so
-webhook consumers see one POST per event, not one per replica.
+webhook consumers see one POST per event, not one per replica. A deliverer
+that shuts down cleanly (a rollout or scale-down) hands the Lease back, so the
+standby takes over on its next check; after a crash the standby takes over
+once the Lease has gone unrenewed for the 90-second lease duration.
+
+The deliverer lists the Jobs once and then watches for changes from that
+point, resuming each watch request where the previous one stopped. Nothing is
+delivered until that first list succeeds; a failed list or watch is retried
+with backoff (1 second, doubling to at most 60 seconds). If the API server no
+longer holds the watch history (HTTP 410 Gone), the dispatcher lists the Jobs
+again and sends the transitions that happened in the gap, such as a Job that
+completed while the watch was down.
 
 ### Webhook Payload Format
 
@@ -2122,10 +2140,15 @@ def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
 
 ### Retry Behavior
 
-- **5xx errors**: Retried up to 3 times with exponential backoff (5s, 10s, 20s)
-- **4xx errors**: Not retried (client error)
-- **Timeouts**: Retried up to 3 times (default timeout: 30 seconds)
-- **Connection errors**: Retried up to 3 times
+Each webhook gets at most 3 delivery attempts: the first request and up to 2
+retries.
+
+- **2xx**: Delivered; no further attempts.
+- **5xx errors, timeouts, and connection errors**: Retried after 5 seconds,
+  then after 10 seconds. A delivery whose third attempt fails is given up.
+- **Other statuses (3xx, 4xx)**: Not retried. Redirects are not followed.
+- **Timeouts**: Each attempt has 30 seconds, from connecting to receiving the
+  response status and headers.
 
 ### List Webhooks
 
@@ -2174,7 +2197,7 @@ gco webhooks create -u https://example.com/webhook -e job.completed --secret my-
 
 - `job.started` - Job started running (transitioned from pending to running)
 - `job.completed` - Job completed successfully
-- `job.failed` - Job failed
+- `job.failed` - Job failed (Kubernetes set the Job's `Failed` condition, for example after `backoffLimit` pod failures; a failed pod that the Job retries does not fire it)
 
 **Response:**
 
@@ -2337,7 +2360,7 @@ Service directly or scraped by the cluster's Prometheus.
 | Endpoint | Service | Auth | Purpose |
 |----------|---------|------|---------|
 | `GET /api/v1/health` | `health-monitor` | None | `200` when the cluster is healthy, `503` otherwise. Global Accelerator health check target |
-| `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization, configured thresholds, active job count, threshold violations |
+| `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization (percent of allocatable; can exceed 100 when the cluster is over-committed), configured thresholds, active job count (Jobs in the job namespaces with a pending or running pod), threshold violations |
 | `GET /api/v1/status` | `health-monitor` | HMAC envelope | Monitor initialization, background task state, webhook dispatcher counters |
 | `GET /api/v1/status` | `manifest-processor` | HMAC envelope | Resource limits, allowed namespaces, template/webhook counts, central queue worker health |
 | `GET /api/v1/policy` | `manifest-processor` | HMAC envelope | The effective job validation policy this region enforces — per-manifest cpu/memory/gpu caps, `allowed_namespaces`, `allowed_kinds`, `allowed_api_versions`, `trusted_registries`, `trusted_dockerhub_orgs`, `require_accelerator_toleration`, `yaml_max_depth`, the eight `manifest_security_policy.block_*` flags, and each allowed namespace's live ResourceQuota / LimitRange ceilings. `503` until the processor is initialized |
@@ -2351,6 +2374,13 @@ bypass the HMAC envelope; see [Authentication](#authentication).
 The health monitor also publishes resource utilization and health status to
 CloudWatch every 30 seconds independently of these endpoints, which is how
 dashboards and alarms are fed. See the [Monitoring Guide](MONITORING.md).
+
+Each refresh reads metrics-server once and lists the nodes and pods once;
+requests that arrive while a refresh runs share it. If one of those reads
+fails, the monitor serves the last complete reading for up to 60 seconds (the
+`message` field says which read failed and how old the reading is) and then
+reports `unhealthy` with the failed read named in `message`, so a failed read
+never makes `/api/v1/health` answer `200`.
 
 > **Which `/api/v1/status` you get.** As described in
 > [API Surface at a Glance](#api-surface-at-a-glance), the ALB resolves

@@ -849,6 +849,18 @@ The health monitor compares cluster utilization against configurable thresholds 
 
 Set a threshold to `-1` to disable that check entirely. GPU thresholds are disabled by default because inference endpoints naturally saturate GPU resources and should not trigger unhealthy status.
 
+Utilization is measured against what the nodes report as allocatable, so it can
+read above 100%: CPU and memory usage include the system-reserved share that
+allocatable leaves out, and running pods can briefly hold more GPUs than the
+nodes report while a device plugin restarts. A value above 100% is compared with
+the threshold like any other. Active jobs are the Jobs in the job namespaces
+(`allowed_namespaces`) with at least one pending or running pod.
+
+If a read fails (metrics-server, the node list, or the pod list), the health
+monitor keeps judging the last complete reading for up to 60 seconds and says so
+in the status message. After that it reports the cluster unhealthy, naming the
+read that failed; a failed read is never reported as healthy.
+
 After changing thresholds, redeploy the regional stack:
 
 ```bash

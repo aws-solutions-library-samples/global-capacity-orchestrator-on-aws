@@ -16,6 +16,7 @@ Parquet contract with the Glue table is exercised, not simulated.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import ssl
 import threading
@@ -601,6 +602,113 @@ class TestCostMonitorScheduledPass:
         assert _monitor(report_interval_minutes=100_000).report_interval_minutes == 1_440
 
 
+class _FakeReportBucket:
+    """S3 HEAD/PUT over an in-memory set of keys."""
+
+    def __init__(self) -> None:
+        self.keys: list[str] = []
+        self.heads = 0
+
+    def head_object(self, Bucket: str, Key: str) -> dict:
+        self.heads += 1
+        if Key not in self.keys:
+            raise RuntimeError("404 Not Found")
+        return {"ContentLength": 4}
+
+    def put_object(self, Bucket: str, Key: str, Body: bytes) -> dict:
+        self.keys.append(Key)
+        return {}
+
+
+def _window_names(keys: list[str]) -> list[str]:
+    return [key.rsplit("allocation-", 1)[1].removesuffix(".parquet") for key in keys]
+
+
+class TestScheduledBackfill:
+    """Windows missed while the pod or OpenCost was down are written later."""
+
+    def test_a_window_missed_during_an_outage_is_written_after_it(self):
+        bucket = _FakeReportBucket()
+        monitor = _monitor(s3_client=bucket)
+        up = {"value": False}
+
+        def allocation(start, end, aggregate="namespace"):
+            if not up["value"]:
+                raise OpenCostUnavailableError("OpenCost request failed: ConnectError")
+            return {"team-a": _allocation(1.0)}
+
+        monitor.opencost.get_allocation.side_effect = allocation
+        start = datetime(2026, 11, 17, 10, 0, 30, tzinfo=UTC)
+        with patch.object(cost_monitor_module, "rows_to_parquet_bytes", return_value=b"PAR1"):
+            for minute in range(120):  # OpenCost is down from 10:00 to 11:05
+                now = start + timedelta(minutes=minute)
+                up["value"] = now >= datetime(2026, 11, 17, 11, 5, tzinfo=UTC)
+                with contextlib.suppress(OpenCostUnavailableError):
+                    monitor.run_scheduled_once(now)
+
+        assert "20261117T090000Z-20261117T100000Z" in _window_names(bucket.keys)
+        assert "20261117T100000Z-20261117T110000Z" in _window_names(bucket.keys)
+        assert len(bucket.keys) == len(set(bucket.keys))
+        assert monitor.last_error is None
+
+    def test_backfill_is_bounded_newest_first_and_capped_per_pass(self):
+        bucket = _FakeReportBucket()
+        monitor = _monitor(s3_client=bucket)
+        monitor.opencost.get_allocation.return_value = {"team-a": _allocation(1.0)}
+        now = datetime(2026, 7, 26, 10, 30, tzinfo=UTC)
+
+        with patch.object(cost_monitor_module, "rows_to_parquet_bytes", return_value=b"PAR1"):
+            newest = monitor.run_scheduled_once(now)
+            first_pass = list(bucket.keys)
+            for _ in range(20):
+                monitor.run_scheduled_once(now)
+
+        assert newest is not None and newest.window_end == "2026-07-26T10:00:00+00:00"
+        assert len(first_pass) == cost_monitor_module.MAX_SCHEDULED_REPORTS_PER_PASS
+        assert _window_names(first_pass)[:2] == [
+            "20260726T090000Z-20260726T100000Z",
+            "20260726T080000Z-20260726T090000Z",
+        ]
+        assert monitor.last_scheduled_report == newest.summary()
+        # Everything within the horizon, nothing older.
+        assert len(bucket.keys) == cost_monitor_module.SCHEDULED_BACKFILL_HOURS
+        assert _window_names(bucket.keys)[-1] == "20260725T100000Z-20260725T110000Z"
+
+    def test_settled_windows_are_not_checked_again(self):
+        bucket = _FakeReportBucket()
+        monitor = _monitor(s3_client=bucket)
+        monitor.opencost.get_allocation.return_value = {"team-a": _allocation(1.0)}
+        now = datetime(2026, 7, 26, 10, 30, tzinfo=UTC)
+        with patch.object(cost_monitor_module, "rows_to_parquet_bytes", return_value=b"PAR1"):
+            for _ in range(10):
+                monitor.run_scheduled_once(now)
+            heads = bucket.heads
+            assert monitor.run_scheduled_once(now) is None
+
+        assert bucket.heads == heads
+        # One new window an interval later: one more HEAD, and the memo stays
+        # within the horizon.
+        with patch.object(cost_monitor_module, "rows_to_parquet_bytes", return_value=b"PAR1"):
+            monitor.run_scheduled_once(now + timedelta(hours=1))
+        assert bucket.heads == heads + 1
+        assert len(monitor._settled_keys) == cost_monitor_module.SCHEDULED_BACKFILL_HOURS
+
+    def test_an_empty_missed_window_is_not_backfilled_but_the_latest_is_written(self):
+        bucket = _FakeReportBucket()
+        monitor = _monitor(s3_client=bucket)
+        monitor.opencost.get_allocation.return_value = {}  # e.g. before the cluster existed
+        now = datetime(2026, 7, 26, 10, 30, tzinfo=UTC)
+
+        with patch.object(cost_monitor_module, "rows_to_parquet_bytes", return_value=b"PAR1"):
+            result = monitor.run_scheduled_once(now)
+            monitor.run_scheduled_once(now)
+
+        assert result is not None and result.row_count == 0
+        assert _window_names(bucket.keys) == ["20260726T090000Z-20260726T100000Z"]
+        calls = monitor.opencost.get_allocation.call_count
+        assert calls == cost_monitor_module.SCHEDULED_BACKFILL_HOURS
+
+
 class TestCostMonitorListReports:
     def test_lists_newest_first_with_bounded_limit(self):
         monitor = _monitor()
@@ -639,6 +747,92 @@ class TestCostMonitorListReports:
         assert monitor.list_reports(adhoc=True) == []
         prefix = paginator.paginate.call_args.kwargs["Prefix"]
         assert prefix == f"{ADHOC_PREFIX}/region=us-east-1/"
+
+
+class _FakeListPaginator:
+    """list_objects_v2 over a key set: Prefix, Delimiter, and MaxItems as S3 applies them."""
+
+    def __init__(self, keys: list[str]) -> None:
+        self.keys = sorted(keys)
+        self.calls: list[dict[str, Any]] = []
+
+    def paginate(self, *, Bucket: str, Prefix: str, Delimiter: str | None = None, **kwargs):
+        self.calls.append({"Prefix": Prefix, "Delimiter": Delimiter, **kwargs})
+        under = [key for key in self.keys if key.startswith(Prefix)]
+        if Delimiter:
+            prefixes = sorted(
+                {
+                    Prefix + key[len(Prefix) :].split(Delimiter)[0] + Delimiter
+                    for key in under
+                    if Delimiter in key[len(Prefix) :]
+                }
+            )
+            contents = [key for key in under if Delimiter not in key[len(Prefix) :]]
+            return [
+                {
+                    "CommonPrefixes": [{"Prefix": p} for p in prefixes],
+                    "Contents": self._entries(contents),
+                }
+            ]
+        max_items = kwargs.get("PaginationConfig", {}).get("MaxItems", len(under))
+        return [{"Contents": self._entries(under[:max_items])}]
+
+    @staticmethod
+    def _entries(keys: list[str]) -> list[dict[str, Any]]:
+        entries = []
+        for key in keys:
+            day = key.split("date=")[1][:10]
+            entries.append(
+                {
+                    "Key": key,
+                    "Size": 1,
+                    "LastModified": datetime.fromisoformat(day).replace(tzinfo=UTC),
+                }
+            )
+        return entries
+
+
+class TestBoundedReportListing:
+    def test_a_short_listing_reads_only_the_newest_days(self):
+        days = [datetime(2025, 1, 1, tzinfo=UTC) + timedelta(days=offset) for offset in range(400)]
+        keys = [
+            f"{SCHEDULED_PREFIX}/region=us-east-1/date={day:%Y-%m-%d}/allocation-{hour:02d}.parquet"
+            for day in days
+            for hour in range(3)
+        ]
+        paginator = _FakeListPaginator(keys)
+        monitor = _monitor()
+        monitor._s3.get_paginator.return_value = paginator
+
+        reports = monitor.list_reports(limit=5)
+
+        assert [report["key"].split("date=")[1][:10] for report in reports] == [
+            "2026-02-04",
+            "2026-02-04",
+            "2026-02-04",
+            "2026-02-03",
+            "2026-02-03",
+        ]
+        # One delimiter listing plus the two newest days, not 400 days of objects.
+        assert [call["Prefix"].rsplit("/", 2)[-2] for call in paginator.calls[1:]] == [
+            "date=2026-02-04",
+            "date=2026-02-03",
+        ]
+        assert paginator.calls[0]["Delimiter"] == "/"
+
+    def test_a_single_day_is_read_up_to_a_cap(self):
+        keys = [
+            f"{SCHEDULED_PREFIX}/region=us-east-1/date=2026-07-26/allocation-{index:05d}.parquet"
+            for index in range(cost_monitor_module._LIST_PARTITION_MAX_OBJECTS + 10)
+        ]
+        paginator = _FakeListPaginator(keys)
+        monitor = _monitor()
+        monitor._s3.get_paginator.return_value = paginator
+
+        assert len(monitor.list_reports(limit=1_000)) == 1_000
+        assert paginator.calls[1]["PaginationConfig"] == {
+            "MaxItems": cost_monitor_module._LIST_PARTITION_MAX_OBJECTS
+        }
 
 
 class TestCostMonitorStatus:

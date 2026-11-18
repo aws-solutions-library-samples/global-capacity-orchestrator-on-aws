@@ -1652,8 +1652,13 @@ async def test_manifest_api_readiness_health_status_and_policy_edges(
     assert error.value.status_code == 503
 
 
+#: Monotonic clock for the ALB-sync elector of ``_new_health_monitor``.
+_LEASE_CLOCK = [0.0]
+
+
 def _new_health_monitor() -> Any:
     from gco.services.health_monitor import HealthMonitor
+    from gco.services.leader_lease import LeaseElector, LeaseIdentity
 
     monitor = object.__new__(HealthMonitor)
     monitor.cluster_id = "cluster"
@@ -1663,11 +1668,20 @@ def _new_health_monitor() -> Any:
     monitor._alb_sync_lease_namespace = "gco-system"
     monitor._alb_sync_lease_duration = 90
     monitor._alb_sync_holder = "pod-a"
+    monitor._alb_sync_elector = LeaseElector(
+        LeaseIdentity("lease", "gco-system", "pod-a", 90),
+        label="ALB-sync",
+        clock=lambda: _LEASE_CLOCK[0],
+    )
     monitor._alb_sync_interval = 300
     monitor._last_alb_sync = None
     monitor.core_v1 = MagicMock()
     monitor.coordination_v1 = MagicMock()
     monitor.metrics_v1beta1 = MagicMock()
+    monitor.job_namespaces = frozenset({"gco-jobs", "default"})
+    monitor._clock = lambda: _LEASE_CLOCK[0]
+    monitor._last_good_reading = None
+    monitor._refresh = None
     return monitor
 
 
@@ -1707,7 +1721,7 @@ async def test_health_monitor_loops_multiple_pending_pods_and_containers() -> No
     monitor.core_v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(
         items=[first, second]
     )
-    result = await monitor._calculate_pending_requested_resources()
+    result = monitor._calculate_pending_requested_resources([first, second])
     assert result.cpu_vcpus == pytest.approx(0.6)
     assert result.memory_gb == pytest.approx(6 * 1024 / 1024**3)
 
@@ -1758,6 +1772,11 @@ def test_health_monitor_lease_acquires_unowned_missing_or_naive_expired(
         lease_transitions=0,
     )
     monitor.coordination_v1.read_namespaced_lease.return_value = SimpleNamespace(spec=spec)
+    if renew_time is not None:
+        # A renewing holder expires only after a full lease of unchanged
+        # observations on this replica's clock.
+        assert monitor._try_acquire_alb_sync_lease() is False
+        _LEASE_CLOCK[0] += 90
     assert monitor._try_acquire_alb_sync_lease() is True
     assert spec.holder_identity == "pod-a"
 
@@ -1891,6 +1910,53 @@ async def test_health_api_background_monitor_wait_publish_failure_and_cancel_pat
 
 
 @pytest.mark.asyncio
+async def test_health_api_publishes_cloudwatch_metrics_off_the_event_loop() -> None:
+    """put_metric_data is a blocking HTTPS call; the probes share this loop."""
+    import gco.services.health_api as api
+
+    status = MagicMock()
+    status.status = "healthy"
+    status.get_threshold_violations.return_value = []
+    monitor = MagicMock()
+    monitor.get_health_status = AsyncMock(return_value=status)
+    monitor.sync_alb_registration = AsyncMock()
+    metrics = MagicMock()
+    metrics.publish_resource_utilization.side_effect = lambda **_kwargs: time.sleep(0.4)
+    metrics.publish_health_status.side_effect = lambda **_kwargs: time.sleep(0.4)
+    api.health_monitor = monitor
+    api.health_metrics = metrics
+    gaps: list[float] = []
+    published = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def heartbeat() -> None:
+        last = time.monotonic()
+        while not published.is_set():
+            await real_sleep(0.02)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    async def end_after_one_pass(_seconds: float) -> None:
+        published.set()
+        raise asyncio.CancelledError
+
+    try:
+        beating = asyncio.create_task(heartbeat())
+        await real_sleep(0.05)
+        with patch.object(api.asyncio, "sleep", side_effect=end_after_one_pass):
+            await api.background_health_monitor()
+        await beating
+    finally:
+        api.health_monitor = None
+        api.health_metrics = None
+
+    metrics.publish_resource_utilization.assert_called_once()
+    metrics.publish_health_status.assert_called_once()
+    assert max(gaps) < 0.3
+
+
+@pytest.mark.asyncio
 async def test_health_api_uncached_health_and_dispatcher_status_metrics() -> None:
     import gco.services.health_api as api
     from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization
@@ -2007,8 +2073,12 @@ def _bare_dispatcher() -> Any:
     # logs it and sleeps, and ``_watch_jobs`` spins forever — the tests below
     # only terminate because the loop reaches ``_process_job_event``.
     dispatcher._leader_lease = None
+    dispatcher._leader_elector = None
     dispatcher._standby_poll_seconds = 0
     dispatcher._is_leader = False
+    # As after a successful Job list: the watch resumes from this version.
+    dispatcher._resource_version = "1"
+    dispatcher._cache_seeded = True
     return dispatcher
 
 
@@ -2078,7 +2148,10 @@ async def test_webhook_nonstring_url_cancel_and_dispatch_cancellation() -> None:
         pinned_url=lambda attempt: "https://8.8.8.8:443/hook",
     )
     http_client = MagicMock()
-    http_client.post = AsyncMock(side_effect=asyncio.CancelledError)
+    stream = MagicMock()
+    stream.__aenter__ = AsyncMock(side_effect=asyncio.CancelledError)
+    stream.__aexit__ = AsyncMock(return_value=False)
+    http_client.stream.return_value = stream
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=http_client)
     context.__aexit__ = AsyncMock(return_value=False)
@@ -3307,14 +3380,17 @@ async def test_health_monitor_counts_multiple_pods_and_skips_unrequested_sidecar
 
     pods = [
         SimpleNamespace(
-            metadata=SimpleNamespace(namespace="gco-jobs"),
+            metadata=SimpleNamespace(namespace="gco-jobs", owner_references=None),
             status=SimpleNamespace(phase="Pending"),
             spec=SimpleNamespace(
                 containers=[container("100m", "1Ki"), SimpleNamespace(resources=None)]
             ),
         ),
         SimpleNamespace(
-            metadata=SimpleNamespace(namespace="default"),
+            metadata=SimpleNamespace(
+                namespace="default",
+                owner_references=[SimpleNamespace(kind="Job", uid="uid-job")],
+            ),
             status=SimpleNamespace(phase="Running"),
             spec=SimpleNamespace(containers=[container("200m", "2Ki")]),
         ),
@@ -3324,9 +3400,8 @@ async def test_health_monitor_counts_multiple_pods_and_skips_unrequested_sidecar
             spec=None,
         ),
     ]
-    monitor.core_v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(items=pods)
-    assert await monitor._get_pod_counts() == (1, 1)
-    requested = await monitor._calculate_pending_requested_resources()
+    assert monitor._get_pod_counts(pods) == (1, 1)
+    requested = monitor._calculate_pending_requested_resources(pods)
     assert requested.cpu_vcpus == pytest.approx(0.1)
     assert requested.memory_gb == pytest.approx(1024 / 1024**3)
 

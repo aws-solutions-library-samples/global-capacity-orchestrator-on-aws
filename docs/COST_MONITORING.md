@@ -90,6 +90,13 @@ Scheduled report object keys are **deterministic per window** (aligned to the
 report interval), so a worker restart, rollout overlap, or retry converges on
 the same object instead of double-counting a window in Athena.
 
+Each scheduled pass (once a minute) also looks back over the last 24 hours for
+completed windows that have no report yet, for example because the pod was
+down or OpenCost was unreachable for a whole window, and writes them, newest
+first and at most four per pass. A missed window OpenCost has no allocations
+for (one from before the cluster existed, say) is left out rather than written
+as an empty report; the most recent window is always written.
+
 ## Cost of cost monitoring
 
 The feature is deliberately lightweight:

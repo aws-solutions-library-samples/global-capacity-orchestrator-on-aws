@@ -264,6 +264,15 @@ class TestWebhookStore:
             store = WebhookStore()
             assert store.table_name == "gco-webhooks"
 
+    def test_dynamodb_calls_have_bounded_timeouts_and_retries(self):
+        """Delivery lookups run inside the health API; botocore's 60 s defaults do not."""
+        with patch("boto3.resource") as resource:
+            WebhookStore(table_name="t", region="us-east-1")
+        client_config = resource.call_args.kwargs["config"]
+        assert client_config.connect_timeout == 3
+        assert client_config.read_timeout == 10
+        assert client_config.retries == {"max_attempts": 3, "mode": "standard"}
+
     def test_list_webhooks_empty(self, webhook_store, mock_dynamodb):
         """Test listing webhooks when none exist."""
         mock_dynamodb.scan.return_value = {"Items": []}
@@ -292,6 +301,35 @@ class TestWebhookStore:
         assert len(result) == 1
         assert "secret" not in result[0]
         mock_dynamodb.query.assert_called_once()
+
+    def test_namespace_listing_follows_every_query_page(self, webhook_store, mock_dynamodb):
+        """A namespace past 1 MB of webhooks spans several Query pages."""
+
+        def item(webhook_id: str) -> dict:
+            return {
+                "webhook_id": webhook_id,
+                "url": f"https://example.com/{webhook_id}",
+                "events": '["job.failed"]',
+                "namespace": "team-a",
+            }
+
+        mock_dynamodb.query.side_effect = [
+            {"Items": [item("wh-1")], "LastEvaluatedKey": {"webhook_id": "wh-1"}},
+            {"Items": [item("wh-2")], "LastEvaluatedKey": {"webhook_id": "wh-2"}},
+            {"Items": [item("wh-3")]},
+        ]
+
+        result = webhook_store.get_webhooks_for_event("job.failed", namespace="team-a")
+
+        assert [webhook["id"] for webhook in result] == ["wh-1", "wh-2", "wh-3"]
+        calls = mock_dynamodb.query.call_args_list
+        assert [call.kwargs.get("ExclusiveStartKey") for call in calls] == [
+            None,
+            {"webhook_id": "wh-1"},
+            {"webhook_id": "wh-2"},
+        ]
+        assert {call.kwargs["IndexName"] for call in calls} == {"namespace-index"}
+        assert {call.kwargs["ExpressionAttributeValues"][":ns"] for call in calls} == {"team-a"}
 
     def test_get_webhook_found(self, webhook_store, mock_dynamodb):
         """Test getting an existing webhook."""

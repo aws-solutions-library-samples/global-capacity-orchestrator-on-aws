@@ -13,6 +13,18 @@ Key Features:
 - Implements retry logic with exponential backoff for failed deliveries
 - Publishes delivery metrics to CloudWatch
 
+Job watch: the dispatcher lists the watched Jobs once, then watches from the
+list's ``resourceVersion`` and resumes every later watch request from the last
+version it processed (bookmarks keep that version current while nothing
+changes). Each request carries a server-side ``timeoutSeconds`` and a client
+read timeout, so a silent connection is noticed. Nothing is delivered until a
+list has succeeded: before that the job-state cache does not describe the
+cluster and every running Job would look new. When the API server answers
+410 Gone (the version has been compacted away) the dispatcher lists again and
+runs each listed Job through the same transition rules, so a Job that finished
+in the gap still fires and Jobs deleted in the gap leave the cache. A failed
+list or watch is retried with exponential backoff.
+
 Replica model: the health-monitor runs two replicas for availability, but a
 webhook must fire once per job transition, not once per replica. When a
 ``LeaseIdentity`` is configured the dispatcher elects a single deliverer
@@ -50,7 +62,8 @@ HMAC Signature:
 Environment Variables:
     CLUSTER_NAME: Name of the EKS cluster
     REGION: AWS region of the cluster
-    WEBHOOK_TIMEOUT: HTTP timeout for webhook calls (default: 30)
+    WEBHOOK_TIMEOUT: Deadline in seconds for one delivery attempt, connection
+        through response headers (default: 30); the response body is never read
     WEBHOOK_MAX_RETRIES: Maximum total delivery attempts (default: 3)
     WEBHOOK_RETRY_DELAY: Initial retry delay in seconds (default: 5)
     WEBHOOKS_TABLE_NAME: DynamoDB table for webhooks
@@ -81,9 +94,10 @@ from kubernetes.watch import Watch
 
 from gco.k8s_objects import present
 from gco.services.leader_lease import (
+    LeaseElector,
     LeaseIdentity,
+    LeaseOutcome,
     lease_duration_from_env,
-    try_acquire_lease,
 )
 from gco.services.template_store import WebhookStore, get_webhook_store
 
@@ -102,17 +116,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Networks blocked for SSRF prevention
-BLOCKED_NETWORKS = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-]
+#: Loggers of the HTTP stack deliveries go through. httpx2 logs every request
+#: line, full URL included, at INFO, and httpcore2 traces requests at DEBUG.
+#: Webhook URLs routinely carry tokens in their path or query, so in a process
+#: that delivers webhooks neither may log below WARNING.
+HTTP_CLIENT_LOGGERS = ("httpx2", "httpcore2")
+for _http_logger in HTTP_CLIENT_LOGGERS:
+    logging.getLogger(_http_logger).setLevel(logging.WARNING)
+
+#: Namespaces whose Jobs never produce webhooks.
+_SYSTEM_NAMESPACES = frozenset({"kube-system", "kube-public", "kube-node-lease"})
+
+#: Server-side lifetime of one Job watch request (``timeoutSeconds``). The loop
+#: re-checks the deliverer Lease between requests, so this stays well under the
+#: shortest lease the election allows (60 seconds).
+WATCH_TIMEOUT_SECONDS = 30
+
+#: How much longer than ``WATCH_TIMEOUT_SECONDS`` the client waits on a silent
+#: stream before it treats the connection as dead.
+WATCH_READ_GRACE_SECONDS = 15
+
+#: Events one watch request hands to the loop; the next request resumes from
+#: the resourceVersion of the last of them.
+WATCH_BATCH_LIMIT = 10
+
+#: Backoff after a failed list or watch: doubles from the first value up to the cap.
+RETRY_BACKOFF_INITIAL_SECONDS = 1.0
+RETRY_BACKOFF_MAX_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -228,6 +258,14 @@ def _resolve_webhook_target(
         ),
         None,
     )
+
+
+def _retry_backoff_seconds(failures: int) -> float:
+    """Delay before retrying after ``failures`` consecutive failed lists or watches."""
+    # The exponent is capped well past the point where the cap applies, so a
+    # long outage never builds an integer too large to convert to a float.
+    exponent = min(max(failures - 1, 0), 16)
+    return float(min(RETRY_BACKOFF_INITIAL_SECONDS * 2**exponent, RETRY_BACKOFF_MAX_SECONDS))
 
 
 def validate_webhook_url(
@@ -347,6 +385,9 @@ class WebhookDispatcher:
 
         # Leader election (None = this process is the only deliverer)
         self._leader_lease = leader_lease
+        self._leader_elector = (
+            LeaseElector(leader_lease, label="webhook") if leader_lease is not None else None
+        )
         self._standby_poll_seconds = standby_poll_seconds
         self._is_leader = False
 
@@ -354,11 +395,24 @@ class WebhookDispatcher:
         self._job_state_cache = JobStateCache()
         self._running = False
         self._watch_task: asyncio.Task[None] | None = None
+        # Where the next watch request resumes. ``None`` means the cache must
+        # be (re)built from a list before anything is watched or delivered.
+        self._resource_version: str | None = None
+        # Whether the cache has been seeded since this replica last became the
+        # deliverer. Until then a list replaces the cache silently; afterwards
+        # (a re-list after 410 Gone) listed Jobs go through the transition rules.
+        self._cache_seeded = False
 
         # Metrics
         self._deliveries_total = 0
         self._deliveries_success = 0
         self._deliveries_failed = 0
+
+    def _is_watched_namespace(self, namespace: str | None) -> bool:
+        """Whether Jobs in ``namespace`` produce webhooks."""
+        if namespace in _SYSTEM_NAMESPACES:
+            return False
+        return not self.namespaces or namespace in self.namespaces
 
     def _compute_job_status(self, job: V1Job) -> str:
         """Compute the effective status of a Kubernetes job."""
@@ -377,8 +431,11 @@ class WebhookDispatcher:
         if (status.succeeded or 0) > 0:
             return "succeeded"
 
+        # Failed pods without the Job's Failed condition are retries within
+        # backoffLimit: the Job has started and is waiting for its next pod.
+        # Only the controller's Failed condition (above) ends it.
         if (status.failed or 0) > 0:
-            return "failed"
+            return "running"
 
         return "pending"
 
@@ -439,6 +496,35 @@ class WebhookDispatcher:
         ).hexdigest()
         return f"sha256={signature}"
 
+    async def _post_attempt(
+        self,
+        client: httpx2.AsyncClient,
+        target: _ValidatedWebhookTarget,
+        attempt: int,
+        content: str,
+        headers: dict[str, str],
+    ) -> int:
+        """POST one attempt and return its status code, all within ``self.timeout``.
+
+        httpx2's timeout bounds each connect, write and read separately, so a
+        receiver that keeps trickling bytes could hold an attempt open without
+        end; the deadline bounds the whole attempt and raises ``TimeoutError``.
+        Only the status code is used, so the response is streamed and its body
+        is never read: leaving the stream closes the connection, and no
+        receiver can make the dispatcher buffer a body of any size.
+        """
+        async with (
+            asyncio.timeout(self.timeout),
+            client.stream(
+                "POST",
+                target.pinned_url(attempt),
+                content=content,
+                headers=headers,
+                extensions={"sni_hostname": target.hostname},
+            ) as response,
+        ):
+            return response.status_code
+
     async def _deliver_webhook(
         self,
         webhook: dict[str, Any],
@@ -465,8 +551,10 @@ class WebhookDispatcher:
             if not isinstance(raw_url, str):
                 validation_error = "Webhook URL must be a string"
             else:
-                target, validation_error = _resolve_webhook_target(
-                    raw_url, self.allowed_domains or None
+                # getaddrinfo blocks; off the loop it cannot stall the probes
+                # and other deliveries that share it.
+                target, validation_error = await asyncio.to_thread(
+                    _resolve_webhook_target, raw_url, self.allowed_domains or None
                 )
             if target is None:
                 last_error = f"URL validation failed: {validation_error}"
@@ -495,24 +583,21 @@ class WebhookDispatcher:
                     while attempts < self.max_retries:
                         attempts += 1
                         try:
-                            response = await client.post(
-                                target.pinned_url(attempts),
-                                content=payload_json,
-                                headers=headers,
-                                extensions={"sni_hostname": target.hostname},
+                            status_code = await self._post_attempt(
+                                client, target, attempts, payload_json, headers
                             )
-                            last_status_code = response.status_code
-                            if 200 <= response.status_code < 300:
-                                successful_status_code = response.status_code
+                            last_status_code = status_code
+                            if 200 <= status_code < 300:
+                                successful_status_code = status_code
                                 break
 
-                            last_error = f"HTTP {response.status_code}"
-                            if response.status_code >= 500:
+                            last_error = f"HTTP {status_code}"
+                            if status_code >= 500:
                                 logger.warning(
                                     "Webhook attempt failed: webhook_id=%s %s status=%s attempt=%s",
                                     webhook_id,
                                     target.log_identity,
-                                    response.status_code,
+                                    status_code,
                                     attempts,
                                 )
                                 if attempts < self.max_retries:
@@ -520,7 +605,7 @@ class WebhookDispatcher:
                                 continue
                             break  # Caller errors are terminal and must not be replayed.
 
-                        except httpx2.TimeoutException:
+                        except httpx2.TimeoutException, TimeoutError:
                             last_error = "Request timed out"
                             logger.warning(
                                 "Webhook attempt timed out: webhook_id=%s %s attempt=%s",
@@ -607,14 +692,17 @@ class WebhookDispatcher:
         namespace = metadata.namespace
         payload = self._build_payload(event, job)
 
-        # Get webhooks subscribed to this event
+        # Get webhooks subscribed to this event. The store is a blocking
+        # (cross-region) DynamoDB client, so both reads run off the loop.
         try:
             # Get webhooks for this specific namespace
-            namespace_webhooks = self.webhook_store.get_webhooks_for_event(
-                event.value, namespace=namespace
+            namespace_webhooks = await asyncio.to_thread(
+                self.webhook_store.get_webhooks_for_event, event.value, namespace=namespace
             )
             # Get global webhooks (no namespace filter)
-            global_webhooks = self.webhook_store.get_webhooks_for_event(event.value, namespace=None)
+            global_webhooks = await asyncio.to_thread(
+                self.webhook_store.get_webhooks_for_event, event.value, namespace=None
+            )
 
             # Combine and deduplicate
             all_webhooks = {w["id"]: w for w in namespace_webhooks}
@@ -686,12 +774,7 @@ class WebhookDispatcher:
         job_name = metadata.name
         namespace = metadata.namespace
 
-        # Skip system namespaces
-        if namespace in ("kube-system", "kube-public", "kube-node-lease"):
-            return
-
-        # Skip if not in watched namespaces (if specified)
-        if self.namespaces and namespace not in self.namespaces:
+        if not self._is_watched_namespace(namespace):
             return
 
         current_status = self._compute_job_status(job)
@@ -715,101 +798,131 @@ class WebhookDispatcher:
             await self._dispatch_event(webhook_event, job)
 
     def _sync_watch_jobs(self) -> list[tuple[str, Any]]:
-        """
-        Synchronous job watcher that yields batches of events.
-        This runs in a thread executor to avoid blocking the async event loop.
-        """
-        w = Watch()
-        events = []
+        """Collect the next batch of Job events, resuming from the last resourceVersion.
 
+        Runs in a worker thread because the client is synchronous. Returns
+        once ``WATCH_BATCH_LIMIT`` events have arrived or the API server ends
+        the request after ``WATCH_TIMEOUT_SECONDS``; bookmarks only move the
+        version forward. The version advances together with the events it
+        covers, so an error mid-stream discards both and the next request
+        receives those events again. 410 Gone clears the version so the loop
+        lists again; any other error propagates to the loop's backoff.
+        """
+        resource_version = self._resource_version
+        if resource_version is None:
+            return []
+        watch = Watch()
+        events: list[tuple[str, Any]] = []
+        progress = resource_version
         try:
-            # Watch jobs with a short timeout to allow periodic returns
-            for event in w.stream(
+            for event in watch.stream(
                 self.batch_v1.list_job_for_all_namespaces,
-                timeout_seconds=30,  # Short timeout to return control periodically
+                resource_version=resource_version,
+                allow_watch_bookmarks=True,
+                timeout_seconds=WATCH_TIMEOUT_SECONDS,
+                _request_timeout=(
+                    self._k8s_timeout,
+                    WATCH_TIMEOUT_SECONDS + WATCH_READ_GRACE_SECONDS,
+                ),
             ):
                 if not self._running:
                     break
-
-                events.append((event["type"], event["object"]))
-
-                # Return batch after collecting some events or if we have any
-                if len(events) >= 10:
+                if event["type"] != "BOOKMARK":
+                    events.append((event["type"], event["object"]))
+                progress = watch.resource_version or progress
+                if len(events) >= WATCH_BATCH_LIMIT:
                     break
-
         except ApiException as e:
-            if e.status == 410:  # Gone - resource version too old
-                logger.warning("Watch expired, will restart...")
-            else:
+            if e.status != 410:
                 logger.error(f"Kubernetes API error in job watcher: {e}")
                 raise
-        except Exception as e:
-            logger.error(f"Error in sync job watcher: {e}")
-            raise
-
+            logger.warning(
+                "Job watch resourceVersion %s has expired (410 Gone); listing Jobs again",
+                progress,
+            )
+            self._resource_version = None
+            return events
+        self._resource_version = progress
         return events
 
     async def _acquire_leadership(self) -> bool:
         """Hold (or keep holding) the deliverer Lease; ``True`` means deliver.
 
         Off the event loop because the Lease read/replace is a blocking
-        Kubernetes round trip. Winning the Lease re-seeds the job-state cache:
-        the new leader must not replay transitions the old one already
+        Kubernetes round trip. Winning the Lease discards the job-state cache:
+        the watcher seeds it again from a list before it delivers anything,
+        so the new leader does not replay transitions the old one already
         delivered, and anything that happened while nobody held the Lease is
-        deliberately dropped rather than duplicated.
+        deliberately dropped rather than duplicated. That includes a win this
+        replica's own state did not see coming: if it stalled past the lease
+        duration, another replica may have held the Lease and delivered in
+        between, and the election reports that as an acquisition rather than
+        a renewal.
         """
-        if self._leader_lease is None:
+        if self._leader_elector is None:
             return True
-        held = await asyncio.to_thread(
-            try_acquire_lease,
-            self.coordination_v1,
-            self._leader_lease,
-            label="webhook",
-        )
-        if held and not self._is_leader:
+        outcome = await asyncio.to_thread(self._leader_elector.try_acquire, self.coordination_v1)
+        held = outcome.held
+        if outcome is LeaseOutcome.ACQUIRED or (held and not self._is_leader):
             logger.info(
                 "Webhook dispatcher %s became the deliverer; re-seeding job state cache",
-                self._leader_lease.holder,
+                self._leader_elector.identity.holder,
             )
-            await self._initialize_job_cache()
+            self._resource_version = None
+            self._cache_seeded = False
         elif not held and self._is_leader:
             logger.warning("Webhook dispatcher lost the deliverer Lease; standing by")
         self._is_leader = held
         return held
 
     async def _watch_jobs(self) -> None:
-        """Watch Kubernetes jobs for status changes using thread executor."""
+        """List, then watch, Jobs and deliver their transitions while this replica delivers."""
         logger.info(f"Starting job watcher for namespaces: {self.namespaces}")
 
+        failures = 0
         while self._running:
             try:
                 if not await self._acquire_leadership():
                     await asyncio.sleep(self._standby_poll_seconds)
                     continue
 
+                # Nothing is watched or delivered until a list has seeded the
+                # cache; until then every running Job would look new.
+                if self._resource_version is None and not await self._initialize_job_cache(
+                    deliver_changes=self._cache_seeded
+                ):
+                    failures += 1
+                    await asyncio.sleep(_retry_backoff_seconds(failures))
+                    continue
+
                 # Run the synchronous watch in a thread executor
                 events = await asyncio.to_thread(self._sync_watch_jobs)
+                failures = 0
+                await self._process_job_events(events)
 
-                # Process collected events. ``stop()`` flips ``_running`` from
-                # another task while this one is awaiting the watch thread, so
-                # the flag is re-read per event; mypy still sees the ``while``
-                # condition's narrowing and calls the re-check unreachable.
-                for event_type, job in events:
-                    if not self._running:
-                        break  # type: ignore[unreachable]
-
-                    try:
-                        await self._process_job_event(event_type, job)
-                    except Exception as e:
-                        logger.error(f"Error processing job event: {e}")
-
-                # Small delay between watch cycles if no events
+                # A request the server ended without events has already waited
+                # out WATCH_TIMEOUT_SECONDS; this pause only bounds the loop
+                # when a server or proxy closes watch requests at once.
                 if not events:
                     await asyncio.sleep(1)
 
             except Exception as e:
-                logger.error(f"Error in job watcher: {e}")
-                await asyncio.sleep(5)
+                failures += 1
+                delay = _retry_backoff_seconds(failures)
+                logger.error(f"Error in job watcher (retrying in {delay:.0f}s): {e}")
+                await asyncio.sleep(delay)
+
+    async def _process_job_events(self, events: list[tuple[str, Any]]) -> None:
+        """Run watch (or re-list) events through the transition rules in order."""
+        for event_type, job in events:
+            # ``stop()`` flips ``_running`` from another task while this one
+            # awaits a delivery, so the flag is re-read per event.
+            if not self._running:
+                break
+            try:
+                await self._process_job_event(event_type, job)
+            except Exception as e:
+                logger.error(f"Error processing job event: {e}")
 
     async def start(self) -> None:
         """Start the webhook dispatcher."""
@@ -821,16 +934,17 @@ class WebhookDispatcher:
         logger.info(f"Starting webhook dispatcher for cluster {self.cluster_id}")
 
         if self._leader_lease is None:
-            # Single deliverer: seed the job state cache with current jobs now.
-            # With a Lease the cache is seeded at the moment leadership is won,
-            # so a standby never fires transitions the leader already delivered.
+            # Single deliverer: seed the job state cache with current jobs now
+            # (the watcher lists again if this fails). With a Lease the cache
+            # is seeded once leadership is won, so a standby never fires
+            # transitions the leader already delivered.
             await self._initialize_job_cache()
 
         # Start the watch task
         self._watch_task = asyncio.create_task(self._watch_jobs())
 
     async def stop(self) -> None:
-        """Stop the webhook dispatcher."""
+        """Stop the webhook dispatcher and hand the deliverer Lease back."""
         logger.info("Stopping webhook dispatcher")
         self._running = False
 
@@ -840,8 +954,29 @@ class WebhookDispatcher:
                 await self._watch_task
             self._watch_task = None
 
-    async def _initialize_job_cache(self) -> None:
-        """Initialize the job state cache with current job states."""
+        if self._leader_elector is not None and self._is_leader:
+            # Released, the standby takes over on its next poll instead of
+            # waiting out the lease duration with nobody delivering. The
+            # elector serializes this behind any Lease call still running.
+            await asyncio.to_thread(self._leader_elector.release, self.coordination_v1)
+            self._is_leader = False
+            self._resource_version = None
+            self._cache_seeded = False
+
+    async def _initialize_job_cache(self, *, deliver_changes: bool = False) -> bool:
+        """List the watched Jobs, rebuild the state cache, and record where to watch from.
+
+        Returns ``False`` (and logs) when the list fails: the cache still needs
+        a list, and the watcher retries with backoff and delivers nothing
+        meanwhile. On success the next watch resumes from the list's
+        resourceVersion and Jobs that are no longer listed leave the cache.
+
+        ``deliver_changes=False`` (startup, or a Lease just won) replaces the
+        cache without firing anything, so a new deliverer does not repeat what
+        the previous one delivered. ``True`` (a re-list after the watch
+        expired) runs each listed Job through the transition rules instead,
+        so a Job that finished in the gap still fires.
+        """
         try:
             # Off the event loop: the synchronous client would otherwise stall
             # every other task for the duration of the list (and its retries).
@@ -849,21 +984,30 @@ class WebhookDispatcher:
                 self.batch_v1.list_job_for_all_namespaces,
                 _request_timeout=self._k8s_timeout,
             )
+            resource_version = present(
+                present(jobs.metadata, "job list metadata").resource_version,
+                "job list metadata.resourceVersion",
+            )
+            listed: dict[str, V1Job] = {}
             for job in jobs.items:
                 metadata = present(job.metadata, "job.metadata")
-                namespace = metadata.namespace
-                if namespace in ("kube-system", "kube-public", "kube-node-lease"):
-                    continue
-                if self.namespaces and namespace not in self.namespaces:
-                    continue
-
-                job_uid = present(metadata.uid, "job.metadata.uid")
-                status = self._compute_job_status(job)
-                self._job_state_cache.set_state(job_uid, status)
-
-            logger.info(f"Initialized job cache with {len(self._job_state_cache.job_states)} jobs")
+                if self._is_watched_namespace(metadata.namespace):
+                    listed[present(metadata.uid, "job.metadata.uid")] = job
+            states = {job_uid: self._compute_job_status(job) for job_uid, job in listed.items()}
         except Exception as e:
             logger.error(f"Failed to initialize job cache: {e}")
+            return False
+
+        if deliver_changes:
+            for job_uid in set(self._job_state_cache.job_states) - listed.keys():
+                self._job_state_cache.remove(job_uid)
+            await self._process_job_events([("ADDED", job) for job in listed.values()])
+        else:
+            self._job_state_cache.job_states = states
+        self._resource_version = resource_version
+        self._cache_seeded = True
+        logger.info(f"Initialized job cache with {len(self._job_state_cache.job_states)} jobs")
+        return True
 
     def get_metrics(self) -> dict[str, Any]:
         """Get dispatcher metrics."""
