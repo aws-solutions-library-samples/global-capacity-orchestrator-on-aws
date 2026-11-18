@@ -52,6 +52,11 @@ async def webhooks_create(
 ) -> str:
     """`gco webhooks create` — register a new webhook subscription.
 
+    The URL (which often embeds a token) and the secret reach the CLI through
+    ``$GCO_WEBHOOK_URL`` and ``$GCO_WEBHOOK_SECRET`` in the child's
+    environment, never on its command line; the audit log records the URL's
+    scheme and host only.
+
     Args:
         url: Destination URL for webhook deliveries.
         events: Event names to subscribe to — one ``--event`` per entry
@@ -63,16 +68,17 @@ async def webhooks_create(
     if not events:
         raise ValueError("events must contain at least one webhook event")
 
-    args = ["webhooks", "create", "--url", url]
+    args = ["webhooks", "create"]
     for event in events:
         args += ["--event", event]
     if namespace:
         args += ["--namespace", namespace]
     if region:
         args += ["-r", region]
+    env = {"GCO_WEBHOOK_URL": url}
     if secret:
-        args += ["--secret", secret]
-    return await asyncio.to_thread(cli_runner._run_cli, *args)
+        env["GCO_WEBHOOK_SECRET"] = secret
+    return await asyncio.to_thread(cli_runner._run_cli, *args, env=env)
 
 
 # =============================================================================

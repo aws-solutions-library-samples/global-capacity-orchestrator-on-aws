@@ -265,9 +265,13 @@ class TestUsersCli:
         result = runner.invoke(
             cli,
             ["monitoring", "users", "add", "--username", "x", "--admin-password", "a"],
+            env={"GCO_GRAFANA_USER_PASSWORD": None},
         )
         assert result.exit_code == 1
-        assert "Pass --password or --generate-password" in result.output
+        assert (
+            "Pass --password (or set $GCO_GRAFANA_USER_PASSWORD) or --generate-password"
+            in result.output
+        )
 
     def test_list_json(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(

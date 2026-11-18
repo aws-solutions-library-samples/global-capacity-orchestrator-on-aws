@@ -2680,10 +2680,11 @@ class TestWebhooksTools:
             cmd = mock.call_args[0][0]
             assert "webhooks" in cmd
             assert "create" in cmd
-            assert cmd[cmd.index("--url") : cmd.index("--url") + 2] == [
-                "--url",
-                "https://example.com/hook",
-            ]
+            # The URL travels in the child's environment, not on argv.
+            assert "--url" not in cmd
+            assert "https://example.com/hook" not in cmd
+            env = mock.call_args.kwargs["env"]
+            assert env["GCO_WEBHOOK_URL"] == "https://example.com/hook"
             # One --event flag per entry.
             assert cmd.count("--event") == 1
             assert "job.completed" in cmd
@@ -2709,10 +2710,10 @@ class TestWebhooksTools:
             assert "job.completed" in cmd
             assert "job.failed" in cmd
             assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
-            assert cmd[cmd.index("--secret") : cmd.index("--secret") + 2] == [
-                "--secret",
-                "my-secret",
-            ]
+            # The secret travels in the child's environment, not on argv.
+            assert "--secret" not in cmd
+            assert "my-secret" not in cmd
+            assert mock.call_args.kwargs["env"]["GCO_WEBHOOK_SECRET"] == "my-secret"
 
 
 class TestDagTools:

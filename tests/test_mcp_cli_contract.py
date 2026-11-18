@@ -46,7 +46,8 @@ import run_mcp
 _captured = []
 
 
-def _fake_run_cli(*args):
+def _fake_run_cli(*args, **_kwargs):
+    # Keyword options (timeout_seconds, pass_fds, env) are not argv.
     _captured.append([str(a) for a in args])
     return "{}"
 

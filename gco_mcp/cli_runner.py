@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 
@@ -172,6 +173,7 @@ def _run_cli(
     *args: str,
     timeout_seconds: int = 120,
     pass_fds: tuple[int, ...] = (),
+    env: Mapping[str, str] | None = None,
 ) -> str:
     """Run a gco CLI command and return its output.
 
@@ -188,8 +190,15 @@ def _run_cli(
     normal tools. ``pass_fds`` is reserved for verified descriptor-backed
     local-data paths and is omitted from ``subprocess.run`` when empty for
     compatibility with platforms that do not support it.
+
+    ``env`` adds variables to the child's environment on top of the
+    server's own. Tools use it for secrets that a CLI option also reads
+    from an environment variable (passwords, webhook secrets), because a
+    process's argv is visible to every local user. The values are never
+    logged; without ``env`` the child inherits the environment unchanged.
     """
     cmd = [_gco_executable(), "--output", "json", *args]
+    child_env = {**os.environ, **env} if env else None
     try:
         if pass_fds:
             result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; validated literal argv
@@ -198,6 +207,7 @@ def _run_cli(
                 text=True,
                 timeout=timeout_seconds,
                 cwd=str(PROJECT_ROOT),
+                env=child_env,
                 pass_fds=pass_fds,
                 check=False,
             )
@@ -208,6 +218,7 @@ def _run_cli(
                 text=True,
                 timeout=timeout_seconds,
                 cwd=str(PROJECT_ROOT),
+                env=child_env,
                 check=False,
             )
         output = result.stdout.strip()

@@ -4480,10 +4480,13 @@ gco monitoring open --service mlflow --region us-east-1 --via-ssm auto -y
 Manage Grafana users through the admin HTTP API, over an active
 `gco monitoring open` port-forward (default `http://localhost:3000`). Admin
 credentials are read from the `kube-prometheus-stack-grafana` Secret, or passed
-with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`.
+with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`. `users add` takes the
+new user's password from `--password` or `$GCO_GRAFANA_USER_PASSWORD` (which
+keeps it off the command line), or generates one with `--generate-password`.
 
 ```bash
 gco monitoring users add --username alice --email alice@example.com --generate-password
+GCO_GRAFANA_USER_PASSWORD='...' gco monitoring users add --username bob
 gco monitoring users list [--as-json]
 gco monitoring users remove --username alice --yes
 ```
@@ -6732,10 +6735,10 @@ gco webhooks create [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--url` | `-u` | Webhook URL (required) |
+| `--url` | `-u` | Webhook URL (required; also read from `$GCO_WEBHOOK_URL`, which keeps a URL that embeds a token off the command line) |
 | `--event` | `-e` | Event type (job.started, job.completed, job.failed), can be repeated |
 | `--namespace` | `-n` | Filter events by namespace |
-| `--secret` | `-s` | HMAC secret for signature verification |
+| `--secret` | `-s` | HMAC secret for signature verification (also read from `$GCO_WEBHOOK_SECRET`) |
 | `--region` | `-r` | Region to create in |
 
 **Example:**

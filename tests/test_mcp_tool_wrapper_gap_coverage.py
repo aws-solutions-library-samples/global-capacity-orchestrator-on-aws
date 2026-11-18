@@ -823,31 +823,10 @@ def test_monitoring_fixed_wrappers(function_name: str, expected_argv: tuple[str,
 @pytest.mark.parametrize(
     ("email", "expected_argv"),
     [
-        (
-            None,
-            (
-                "monitoring",
-                "users",
-                "add",
-                "--username",
-                "alice",
-                "--password",
-                "secret",
-            ),
-        ),
+        (None, ("monitoring", "users", "add", "--username", "alice")),
         (
             "alice@example.com",
-            (
-                "monitoring",
-                "users",
-                "add",
-                "--username",
-                "alice",
-                "--password",
-                "secret",
-                "--email",
-                "alice@example.com",
-            ),
+            ("monitoring", "users", "add", "--username", "alice", "--email", "alice@example.com"),
         ),
     ],
 )
@@ -855,12 +834,10 @@ def test_monitoring_user_add_email_branch(
     email: str | None, expected_argv: tuple[str, ...]
 ) -> None:
     with _isolated_tool_module("monitoring") as loaded:
-        _assert_cli_call(
-            loaded,
-            "monitoring_user_add",
-            ("alice", "secret"),
-            {"email": email},
-            expected_argv,
+        result = _invoke(loaded.module.monitoring_user_add, "alice", "secret", email=email)
+        assert result == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            *expected_argv, env={"GCO_GRAFANA_USER_PASSWORD": "secret"}
         )
 
 
@@ -1509,26 +1486,6 @@ def test_models_upload_reports_staging_failure_without_cli_call() -> None:
             {},
             ("analytics", "users", "add", "--username", "alice", "--email", "alice@example.com"),
         ),
-        (
-            "analytics_login_url",
-            ("alice",),
-            {},
-            ("analytics", "studio", "login", "--username", "alice"),
-        ),
-        (
-            "analytics_login_url",
-            ("alice",),
-            {"password": "secret"},
-            (
-                "analytics",
-                "studio",
-                "login",
-                "--username",
-                "alice",
-                "--password",
-                "secret",
-            ),
-        ),
     ],
 )
 def test_analytics_wrapper_matrix(
@@ -1539,6 +1496,20 @@ def test_analytics_wrapper_matrix(
 ) -> None:
     with _isolated_tool_module("analytics") as loaded:
         _assert_cli_call(loaded, function_name, args, kwargs, expected_argv)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_env"),
+    [({}, None), ({"password": "secret"}, {"GCO_STUDIO_PASSWORD": "secret"})],
+)
+def test_analytics_login_url_passes_the_password_in_the_environment(
+    kwargs: dict[str, Any], expected_env: dict[str, str] | None
+) -> None:
+    with _isolated_tool_module("analytics") as loaded:
+        assert _invoke(loaded.module.analytics_login_url, "alice", **kwargs) == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            "analytics", "studio", "login", "--username", "alice", env=expected_env
+        )
 
 
 @pytest.mark.parametrize(
@@ -1618,31 +1589,6 @@ def test_jobs_wrapper_branch_matrix(
             {"region": "us-east-1"},
             ("webhooks", "get", "alerts", "-r", "us-east-1"),
         ),
-        (
-            "webhooks_create",
-            ("https://example.test/hook", ["job.started", "job.failed"]),
-            {
-                "namespace": "training",
-                "region": "us-west-2",
-                "secret": "hmac-secret",
-            },
-            (
-                "webhooks",
-                "create",
-                "--url",
-                "https://example.test/hook",
-                "--event",
-                "job.started",
-                "--event",
-                "job.failed",
-                "--namespace",
-                "training",
-                "-r",
-                "us-west-2",
-                "--secret",
-                "hmac-secret",
-            ),
-        ),
     ],
 )
 def test_webhook_wrapper_matrix(
@@ -1653,6 +1599,35 @@ def test_webhook_wrapper_matrix(
 ) -> None:
     with _isolated_tool_module("webhooks") as loaded:
         _assert_cli_call(loaded, function_name, args, kwargs, expected_argv)
+
+
+def test_webhook_create_passes_url_and_secret_in_the_environment() -> None:
+    with _isolated_tool_module("webhooks") as loaded:
+        result = _invoke(
+            loaded.module.webhooks_create,
+            "https://example.test/hook",
+            ["job.started", "job.failed"],
+            namespace="training",
+            region="us-west-2",
+            secret="hmac-secret",
+        )
+        assert result == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            "webhooks",
+            "create",
+            "--event",
+            "job.started",
+            "--event",
+            "job.failed",
+            "--namespace",
+            "training",
+            "-r",
+            "us-west-2",
+            env={
+                "GCO_WEBHOOK_URL": "https://example.test/hook",
+                "GCO_WEBHOOK_SECRET": "hmac-secret",
+            },
+        )
 
 
 def test_webhook_create_rejects_empty_events_before_cli() -> None:

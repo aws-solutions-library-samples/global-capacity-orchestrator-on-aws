@@ -441,6 +441,14 @@ arguments that are paths before it calls them:
 Prompts, chat messages, JSON bodies, descriptions, and other free text are not
 checked.
 
+A secret never goes on the CLI's command line, which every local user can read
+through `ps`. Pass it with `cli_runner._run_cli(*args, env={...})` in a variable
+the CLI option also reads (Click's `envvar=`): `GCO_STUDIO_PASSWORD`,
+`GCO_GRAFANA_USER_PASSWORD`, `GCO_WEBHOOK_URL`, `GCO_WEBHOOK_SECRET`. The
+variables reach the child only and are never logged. `@audit_logged` redacts
+arguments whose names contain `password`, `secret`, `token` or `key`, and logs a
+`url` / `*_url` argument as its scheme and host only.
+
 Most tools follow this `_run_cli` shell-out pattern. A few domains — notably the
 image-registry and image-mirror tools in `images.py` — instead wrap their CLI
 manager/core directly via `asyncio.to_thread(...)` (e.g. `cli.images.ImageManager`,

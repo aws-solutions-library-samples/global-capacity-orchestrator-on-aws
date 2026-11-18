@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import feature_flags
 from version import get_project_version
@@ -81,6 +82,36 @@ def _is_sensitive_key(key: object) -> bool:
     return isinstance(key, str) and any(pattern.match(key) for pattern in _SENSITIVE_KEY_PATTERNS)
 
 
+# Keys that hold a URL (``url``, ``callback_url``, ...). Webhook and callback
+# URLs often carry their credential in the path or query string, so the audit
+# log keeps only the scheme and host of a string value under such a key.
+_URL_KEY_PATTERN = re.compile(r"(?:^|_)url$", re.IGNORECASE)
+
+
+def _url_origin(value: str) -> str:
+    """Return ``scheme://host[:port]`` of a URL, or ``[REDACTED]`` when it has none."""
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        return "[REDACTED]"
+    host = parts.hostname
+    if not parts.scheme or not host:
+        return "[REDACTED]"
+    if ":" in host:
+        host = f"[{host}]"  # IPv6 literal
+    return f"{parts.scheme}://{host}" + (f":{port}" if port is not None else "")
+
+
+def _sanitize_keyed(key: object, value: Any, *, depth: int, seen: set[int]) -> Any:
+    """Sanitize one mapping entry's value according to its key."""
+    if _is_sensitive_key(key):
+        return "[REDACTED]"
+    if isinstance(value, str) and isinstance(key, str) and _URL_KEY_PATTERN.search(key):
+        return _url_origin(value)
+    return _sanitize_value(value, depth=depth, seen=seen)
+
+
 def _truncate_string(value: str) -> str:
     """Bound one string leaf by encoded byte length."""
     if len(value.encode("utf-8", errors="replace")) <= _MAX_ARG_VALUE_BYTES:
@@ -130,11 +161,7 @@ def _sanitize_value(value: Any, *, depth: int, seen: set[int]) -> Any:
                 safe_key: Any = key
                 if not isinstance(key, (str, int, float, bool)) and key is not None:
                     safe_key = f"<key:{type(key).__name__}>"
-                sanitized[safe_key] = (
-                    "[REDACTED]"
-                    if _is_sensitive_key(key)
-                    else _sanitize_value(nested, depth=depth + 1, seen=seen)
-                )
+                sanitized[safe_key] = _sanitize_keyed(key, nested, depth=depth + 1, seen=seen)
             if len(value) > _MAX_CONTAINER_ITEMS:
                 sanitized["<truncated-items>"] = len(value) - _MAX_CONTAINER_ITEMS
             return sanitized
@@ -165,17 +192,16 @@ def _sanitize_value(value: Any, *, depth: int, seen: set[int]) -> Any:
 def _sanitize_arguments(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Recursively sanitize tool arguments for audit logging.
 
-    Sensitive mapping keys are redacted at every nesting depth. String leaves,
-    container depth, and container item counts are bounded. Unknown objects are
+    Sensitive mapping keys are redacted at every nesting depth, and a string
+    under a URL key keeps only its scheme and host. String leaves, container
+    depth, and container item counts are bounded. Unknown objects are
     represented by type only, keeping audit emission JSON-safe without invoking
     potentially secret-bearing ``__str__`` implementations.
     """
     sanitized: dict[str, Any] = {}
     seen: set[int] = {id(kwargs)}
     for key, value in kwargs.items():
-        sanitized[key] = (
-            "[REDACTED]" if _is_sensitive_key(key) else _sanitize_value(value, depth=0, seen=seen)
-        )
+        sanitized[key] = _sanitize_keyed(key, value, depth=0, seen=seen)
     return sanitized
 
 

@@ -28,15 +28,16 @@ async def analytics_login_url(username: str, password: str | None = None) -> str
 
     SRP-authenticates the user against Cognito and prints the presigned Studio
     URL. The password is read from ``$GCO_STUDIO_PASSWORD`` when not passed here.
+    A password passed here reaches the CLI through that variable in the
+    child's environment, never on its command line.
 
     Args:
         username: Cognito username to sign in with.
         password: Cognito password. Omit to use ``$GCO_STUDIO_PASSWORD``.
     """
     args = ["analytics", "studio", "login", "--username", username]
-    if password:
-        args += ["--password", password]
-    return await asyncio.to_thread(cli_runner._run_cli, *args)
+    env = {"GCO_STUDIO_PASSWORD": password} if password else None
+    return await asyncio.to_thread(cli_runner._run_cli, *args, env=env)
 
 
 @mcp.tool(tags={"safe", "analytics"})
