@@ -2584,9 +2584,10 @@ been running:
   subscriptions.
 - Numbers, `null` and other types fail validation.
 
-`aurora_pgvector.deletion_protection`, `helm.argocd.enabled` and
-`helm.slurm.enabled` follow the same rule; a string there always failed the
-synth, so nothing has been running on one. The toggles of the mandatory charts
+`aurora_pgvector.deletion_protection` follows the same rule; a string there
+always failed the synth, so nothing has been running on one.
+`helm.argocd.enabled` and `helm.slurm.enabled` take only JSON booleans, as
+they always did. The toggles of the mandatory charts
 (`helm.keda`, `helm.aws_load_balancer_controller`) are not read. Top-level
 keys that the CLI or the release harnesses pass as `cdk --context key=value`
 strings, such as `gco:control-plane-only` and

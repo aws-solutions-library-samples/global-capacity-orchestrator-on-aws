@@ -475,7 +475,6 @@ Errors (the synth fails):
 | A key a block does not define (a typo such as `cost_monitoring.reports.interval`) | Use a key from the allowed list in the message; `_comment*` keys stay allowed everywhere |
 | `true` or `false` where an integer belongs (`manifest_processor.replicas`, the thresholds and limits) | Write the number |
 | An `enabled` flag written as a string other than `"true"` (the flags listed above) | Write the JSON boolean `true` to keep the feature or `false` to remove it |
-| `aurora_pgvector.deletion_protection`, `helm.argocd.enabled` or `helm.slurm.enabled` as a string | Write a JSON boolean (a string always failed here) |
 | `project_name` that is not 2-31 characters of lowercase letters and digits in runs joined by single hyphens, starting with a letter (`gco-` and `a--b` were accepted and then failed at deploy) | Pick a valid name; renaming means a new deployment |
 | `global_accelerator.name` outside the CreateAccelerator rule (1-64 letters, digits, periods and hyphens, not starting or ending with a period or hyphen) | Fix the name, or leave it out for `<project_name>-accelerator` |
 | `global_accelerator.health_check_path` other than `/api/v1/health`, `/healthz`, `/readyz` or `/metrics` (a query string is allowed); every other path needs authentication, so every probe failed | Use `/api/v1/health`, the default |
