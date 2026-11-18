@@ -5155,9 +5155,13 @@ class InferenceMonitor:
             liveness_probe=_pd_proxy_health_probe(liveness=True),
         )
         sidecar = build_endpoint_tls_proxy(PD_PROXY_PORT, _tls_proxy_config_map_name(name))
-        template_annotations = _endpoint_tls_pod_annotations(
-            self._provenance_annotations(), sidecar
-        )
+        # Provenance (lifecycle, Region generation, leader epoch) lives on the
+        # Deployment's own metadata only. This Deployment is merge-patched on
+        # every pass, so a leader epoch on the pod template would roll every
+        # proxy, cutting long streams, each time leadership moves. The merge
+        # patch leaves the template annotations it does not name untouched,
+        # so a proxy an earlier release stamped keeps its own.
+        template_annotations = _endpoint_tls_pod_annotations(None, sidecar)
 
         deployment = client.V1Deployment(
             metadata=client.V1ObjectMeta(

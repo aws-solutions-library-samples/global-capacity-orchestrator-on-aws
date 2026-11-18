@@ -1635,6 +1635,101 @@ def test_sidecar_holding_a_model_no_release_rendered_has_no_released_stamp() -> 
     )
 
 
+def _merge_patch(target: Any, patch: Any) -> Any:
+    """Apply an RFC 7386 JSON merge patch, as the API server does for merge-patch+json."""
+    if not isinstance(patch, dict):
+        return patch
+    merged = dict(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = _merge_patch(merged.get(key), value)
+    return merged
+
+
+def _pd_proxy_pass(
+    monitor: InferenceMonitor, epoch: str, live: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Run one ``_create_pd_proxy`` pass as leader ``epoch``; return the body sent, wire form.
+
+    ``live`` is the existing proxy Deployment in wire form (the create then
+    answers 409 and the pass merge-patches it), or ``None`` for a first create.
+    """
+    monitor.apps_v1.reset_mock()
+    monitor._active_authority = inference_monitor.ReconcileAuthority(
+        endpoint_name="chat", lifecycle_id="life-1", region_generation="gen-1", leader_epoch=epoch
+    )
+    monitor._assert_mutation_authority = MagicMock()  # type: ignore[method-assign]
+    monitor._confirm_created_resource = MagicMock()  # type: ignore[method-assign]
+    monitor._ensure_admin_api_key_secret = MagicMock(return_value="chat-admin")  # type: ignore[method-assign]
+    monitor._ensure_pd_proxy_configmap = MagicMock()  # type: ignore[method-assign]
+    monitor._create_proxy_service = MagicMock()  # type: ignore[method-assign]
+    if live is None:
+        monitor._create_pd_proxy("chat", NAMESPACE, _pd_spec(), {"lifecycle_id": "life-1"})
+        [created] = monitor.apps_v1.create_namespaced_deployment.call_args_list
+        body: dict[str, Any] = _wire(created.args[1])
+        return body
+    monitor.apps_v1.create_namespaced_deployment.side_effect = ApiException(status=409)
+    monitor._get_deployment = MagicMock(  # type: ignore[method-assign]
+        return_value=client.V1Deployment.from_dict(live)
+    )
+    monitor._create_pd_proxy("chat", NAMESPACE, _pd_spec(), {"lifecycle_id": "life-1"})
+    [patched] = monitor.apps_v1.patch_namespaced_deployment.call_args_list
+    assert patched.kwargs["_content_type"] == "application/merge-patch+json"
+    body = _wire(patched.kwargs["body"])
+    return body
+
+
+def test_pd_proxy_pod_template_carries_no_leader_epoch(monitor: InferenceMonitor) -> None:
+    """Finding I8: provenance stays on the Deployment's own metadata."""
+    created = _pd_proxy_pass(monitor, "epoch-a", None)
+
+    assert created["metadata"]["annotations"]["gco.io/leader-epoch"] == "epoch-a"
+    template_annotations = created["spec"]["template"]["metadata"]["annotations"]
+    assert set(template_annotations) == {
+        SKIP_CONTAINERS_ANNOTATION,
+        ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION,
+    }
+
+
+def test_leader_change_does_not_change_the_pd_proxy_pod_template(
+    monitor: InferenceMonitor,
+) -> None:
+    """A new leader epoch rewrites the Deployment's metadata, never its pods."""
+    live = _pd_proxy_pass(monitor, "epoch-a", None)
+    live["metadata"]["resourceVersion"] = "9"
+
+    patch_body = _pd_proxy_pass(monitor, "epoch-b", live)
+
+    after = _merge_patch(live, patch_body)
+    assert after["spec"]["template"] == live["spec"]["template"]
+    assert after["metadata"]["annotations"]["gco.io/leader-epoch"] == "epoch-b"
+
+
+@pytest.mark.parametrize("release", ["v8.22.x", "v8.23.0"])
+def test_pd_proxy_of_an_earlier_release_is_not_rolled_by_the_upgrade(
+    monitor: InferenceMonitor, monkeypatch: pytest.MonkeyPatch, release: str
+) -> None:
+    """The proxy as v8.22.x/v8.23.0 rendered it (provenance and their digest on the
+    pod template) keeps its pod template through the new release's merge patch."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    live = _pd_proxy_pass(monitor, "epoch-old", None)
+    live["metadata"]["resourceVersion"] = "9"
+    live["spec"]["template"]["metadata"]["annotations"] = {
+        "gco.io/lifecycle-id": "life-1",
+        "gco.io/region-generation": "gen-1",
+        "gco.io/leader-epoch": "epoch-old",
+        SKIP_CONTAINERS_ANNOTATION: ENDPOINT_TLS_PROXY_CONTAINER,
+        ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: RELEASED_SIDECAR_STAMPS[release, PD_PROXY_PORT],
+        "kubectl.kubernetes.io/restartedAt": "2026-11-01T00:00:00Z",
+    }
+
+    patch_body = _pd_proxy_pass(monitor, "epoch-new", live)
+
+    assert _merge_patch(live, patch_body)["spec"]["template"] == live["spec"]["template"]
+
+
 @pytest.mark.parametrize(
     ("stamp", "kept"),
     [
