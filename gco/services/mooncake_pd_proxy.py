@@ -240,9 +240,16 @@ def _is_serving_path(path: str) -> bool:
     return path.endswith(("/completions", "/chat/completions", "/embeddings"))
 
 
+#: Fields a one-token, non-streamed priming call must not carry: vLLM refuses
+#: ``stream_options`` without ``stream`` and a minimum above ``max_tokens``.
+#: vLLM's own disaggregation proxies drop them for prefill the same way; decode
+#: still receives the caller's request with them.
+_PREFILL_DROPPED_FIELDS = ("stream_options", "min_tokens", "min_completion_tokens")
+
+
 def _prefill_body(body: dict[str, Any]) -> dict[str, Any]:
     """Body for priming prefill: one token, no stream, request remote decode."""
-    pf = dict(body)
+    pf = {key: value for key, value in body.items() if key not in _PREFILL_DROPPED_FIELDS}
     pf["stream"] = False
     pf["max_tokens"] = 1
     if "max_completion_tokens" in pf:
