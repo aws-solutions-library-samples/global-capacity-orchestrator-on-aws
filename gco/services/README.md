@@ -39,7 +39,7 @@ Runtime services and shared support modules used by the in-cluster GCO control p
 | `tls_proxy.py` | Stdlib-only TLS sidecar proxy (uvloop when present) that terminates pod-facing HTTPS, forwards over loopback, and activates rotated cert-manager leaves in place without rebinding its listener; `TLS_PROXY_KEYPAIR_WAIT_SECONDS` lets chart-pod sidecars wait for a Secret that does not exist yet. Also runs as a plain script in model pods. |
 | `tracing.py` | OpenTelemetry tracing for the four API services, exported directly to the AWS X-Ray OTLP endpoint (gzip protobuf, SigV4, no collector); inert unless `GCO_TRACING_ENABLED=true`, imports no OpenTelemetry until configured, and never raises into the service. |
 | `uvicorn_runtime.py` | Reports which event loop (uvloop) and HTTP parser (httptools) uvicorn's `auto` selection resolved, for the FastAPI services' startup log line. |
-| `webhook_dispatcher.py` | Delivers HMAC-signed job lifecycle notifications with bounded retry behavior over public-trust HTTPS; never traced, because webhook URLs carry credentials. |
+| `webhook_dispatcher.py` | Delivers HMAC-signed job lifecycle notifications with bounded retry behavior over public-trust HTTPS; never traced, because webhook URLs carry credentials, and for the same reason importing it caps the `httpx2` and `httpcore2` loggers at WARNING (`httpx2` logs every request URL at INFO). |
 
 ## API Routes
 

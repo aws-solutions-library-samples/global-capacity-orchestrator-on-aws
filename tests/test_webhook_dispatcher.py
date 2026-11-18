@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import hmac
 import ipaddress
+import logging
 import shutil
 import socket
 import ssl
@@ -920,6 +921,38 @@ class TestDeliverWebhookEdgeCases:
         assert secret not in caplog.text
         assert "wh-redacted" in caplog.text
         assert result.error == "ConnectError"
+
+    @pytest.mark.asyncio
+    async def test_the_http_client_request_log_never_carries_the_url(self, dispatcher, caplog):
+        """httpx2 logs every request line, full URL included, at INFO."""
+        webhook = {
+            "id": "wh-quiet",
+            "url": "https://hooks.example/services/T000/B000/XXXXSECRETXXXX?token=abc123",
+            "secret": None,
+        }
+        address = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.11", 443))]
+        real_client = httpx2.AsyncClient
+
+        def client_with_mock_transport(*args, **kwargs):
+            transport = httpx2.MockTransport(lambda request: httpx2.Response(503))
+            return real_client(*args, transport=transport, **kwargs)
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=address),
+            patch("gco.services.webhook_dispatcher.httpx2.AsyncClient", client_with_mock_transport),
+        ):
+            result = await dispatcher._deliver_webhook(webhook, {"event": "job.failed"})
+
+        assert result.status_code == 503
+        assert "XXXXSECRETXXXX" not in caplog.text
+        assert "abc123" not in caplog.text
+        assert not [r for r in caplog.records if r.name.split(".")[0] in {"httpx2", "httpcore2"}]
+        assert "wh-quiet" in caplog.text
+
+    def test_http_client_loggers_are_capped_at_warning(self):
+        for name in ("httpx2", "httpcore2"):
+            assert logging.getLogger(name).level == logging.WARNING, name
 
     @pytest.mark.asyncio
     async def test_pre_http_failures_are_counted_once(self, dispatcher, caplog):

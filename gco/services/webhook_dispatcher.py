@@ -115,6 +115,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+#: Loggers of the HTTP stack deliveries go through. httpx2 logs every request
+#: line, full URL included, at INFO, and httpcore2 traces requests at DEBUG.
+#: Webhook URLs routinely carry tokens in their path or query, so in a process
+#: that delivers webhooks neither may log below WARNING.
+HTTP_CLIENT_LOGGERS = ("httpx2", "httpcore2")
+for _http_logger in HTTP_CLIENT_LOGGERS:
+    logging.getLogger(_http_logger).setLevel(logging.WARNING)
+
 #: Namespaces whose Jobs never produce webhooks.
 _SYSTEM_NAMESPACES = frozenset({"kube-system", "kube-public", "kube-node-lease"})
 
