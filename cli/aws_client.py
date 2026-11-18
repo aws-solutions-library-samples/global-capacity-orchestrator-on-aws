@@ -257,6 +257,11 @@ class GCOAWSClient:
         self._session = boto3.Session()
         self._api_endpoint_cache: ApiEndpoint | None = None
         self._regional_api_cache: dict[str, ApiEndpoint] = {}
+        # When each regional endpoint was discovered. The shared
+        # ``_cache_timestamp`` belongs to the global endpoint and stack
+        # caches; a regional-only session never sets it, so keying the
+        # regional cache on it made every pinned call re-describe the stack.
+        self._regional_api_cached_at: dict[str, float] = {}
         self._regional_stacks_cache: dict[str, RegionalStack] | None = None
         self._cache_timestamp: float | None = None
         self._use_regional_api = getattr(self.config, "use_regional_api", False) is True
@@ -271,6 +276,7 @@ class GCOAWSClient:
         """Invalidate all caches."""
         self._api_endpoint_cache = None
         self._regional_api_cache = {}
+        self._regional_api_cached_at = {}
         self._regional_stacks_cache = None
         self._cache_timestamp = None
 
@@ -308,7 +314,13 @@ class GCOAWSClient:
             RegionalApiDiscoveryError: If discovery cannot run or the existing
                 stack does not publish a usable endpoint
         """
-        if not force_refresh and region in self._regional_api_cache and self._is_cache_valid():
+        cached_at = self._regional_api_cached_at.get(region)
+        if (
+            not force_refresh
+            and region in self._regional_api_cache
+            and cached_at is not None
+            and (time.time() - cached_at) < self.config.cache_ttl_seconds
+        ):
             return self._regional_api_cache[region]
 
         stack_name = f"{self.config.project_name}-regional-api-{region}"
@@ -383,6 +395,7 @@ class GCOAWSClient:
 
         endpoint = ApiEndpoint(url=api_url, region=region, api_id=api_id, is_regional=True)
         self._regional_api_cache[region] = endpoint
+        self._regional_api_cached_at[region] = time.time()
         return endpoint
 
     def get_api_endpoint(self, force_refresh: bool = False) -> ApiEndpoint:

@@ -30,7 +30,7 @@ def _cache_regional_endpoint(client: Any, region: str) -> None:
         api_id="regional",
         is_regional=True,
     )
-    client._cache_timestamp = time.time()
+    client._regional_api_cached_at[region] = time.time()
 
 
 class TestRegionalStack:
@@ -2384,7 +2384,7 @@ class TestGCOAWSClientGetRegionalApiEndpoint:
                     is_regional=True,
                 )
                 client._regional_api_cache["us-east-1"] = cached_endpoint
-                client._cache_timestamp = time.time()
+                client._regional_api_cached_at["us-east-1"] = time.time()
 
                 result = client.get_regional_api_endpoint("us-east-1")
                 assert result == cached_endpoint
@@ -3386,3 +3386,63 @@ class TestCallApiReportedErrors:
 
         assert str(error.value) == f"API request failed: {expected}"
         assert error.value.status_code == 400
+
+
+class TestRegionalApiEndpointCache:
+    """The regional endpoint cache hits within its TTL in a regional-only session."""
+
+    @staticmethod
+    def _client(ttl=300):
+        from cli.aws_client import GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config, patch("boto3.Session"):
+            mock_config.return_value = MagicMock(project_name="gco", cache_ttl_seconds=ttl)
+            client = GCOAWSClient()
+        cfn = MagicMock()
+        cfn.describe_stacks.return_value = {
+            "Stacks": [
+                {
+                    "Outputs": [
+                        {
+                            "OutputKey": "RegionalApiEndpoint",
+                            "OutputValue": "https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+                        }
+                    ]
+                }
+            ]
+        }
+        client._session.client.return_value = cfn
+        return client, cfn
+
+    def test_repeated_lookups_describe_the_stack_once(self):
+        client, cfn = self._client()
+
+        endpoints = [client.get_regional_api_endpoint("us-east-1") for _ in range(5)]
+
+        assert cfn.describe_stacks.call_count == 1
+        assert {endpoint.url for endpoint in endpoints} == {
+            "https://abc123.execute-api.us-east-1.amazonaws.com/prod"
+        }
+        # The shared timestamp of the global endpoint / stack caches is untouched.
+        assert client._cache_timestamp is None
+
+    def test_entries_expire_after_the_ttl_and_force_refresh_bypasses(self):
+        client, cfn = self._client(ttl=60)
+
+        with patch("cli.aws_client.time.time", side_effect=[1000.0, 1030.0, 1061.0, 1061.0]):
+            client.get_regional_api_endpoint("us-east-1")  # discovered at 1000
+            client.get_regional_api_endpoint("us-east-1")  # 30 s later: cached
+            client.get_regional_api_endpoint("us-east-1")  # 61 s later: expired
+        assert cfn.describe_stacks.call_count == 2
+
+        client.get_regional_api_endpoint("us-east-1", force_refresh=True)
+        assert cfn.describe_stacks.call_count == 3
+
+    def test_invalidate_clears_the_regional_entries(self):
+        client, cfn = self._client()
+        client.get_regional_api_endpoint("us-east-1")
+
+        client._invalidate_cache()
+        client.get_regional_api_endpoint("us-east-1")
+
+        assert cfn.describe_stacks.call_count == 2

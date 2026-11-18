@@ -58,6 +58,7 @@ def _aws_client() -> GCOAWSClient:
     client._session = MagicMock()
     client._api_endpoint_cache = None
     client._regional_api_cache = {}
+    client._regional_api_cached_at = {}
     client._regional_stacks_cache = None
     client._cache_timestamp = None
     client._use_regional_api = False
