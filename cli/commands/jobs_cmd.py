@@ -7,26 +7,16 @@ from typing import Any
 
 import click
 
-from gco.job_admission import SANDBOX_MODES, apply_sandbox
+from gco.job_admission import apply_sandbox
 
 from ..config import GCOConfig
 from ..jobs import JobInfo, get_job_manager, resolve_submission_identity
 from ..output import confirm, format_job_table, get_output_formatter
+from .queue_cmd import queue_submit, sandbox_option
 
 logger = logging.getLogger(__name__)
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
-
-#: ``--sandbox`` for every submit command (gco.job_admission.apply_sandbox).
-sandbox_option = click.option(
-    "--sandbox",
-    type=click.Choice(sorted(SANDBOX_MODES)),
-    help=(
-        "Run every pod in an AWS Nitro Sandbox: isolated sets runtimeClassName: "
-        "isolated-sandbox on each pod template. Needs EKS 1.36 or later; see "
-        "docs/NITRO_SANDBOXES.md"
-    ),
-)
 
 
 def _resolve_result_namespace(result: Any, fallback: str) -> str:
@@ -1689,96 +1679,7 @@ def check_policy(
         sys.exit(1)
 
 
-@jobs.command("submit-queue")
-@click.argument("manifest_path", type=click.Path(exists=True))
-@click.option("--region", "-r", required=True, help="Target region for job execution")
-@click.option("--namespace", "-n", default="gco-jobs", help="Kubernetes namespace")
-@click.option(
-    "--priority",
-    "-p",
-    type=click.IntRange(0, 100),
-    default=0,
-    help="Job priority (0-100, higher = more important)",
-)
-@click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
-@sandbox_option
-@pass_config
-def submit_job_queue(
-    config: Any,
-    manifest_path: Any,
-    region: Any,
-    namespace: Any,
-    priority: Any,
-    label: Any,
-    sandbox: Any,
-) -> None:
-    """Submit a job to the global DynamoDB queue for regional pickup.
-
-    Jobs are stored in DynamoDB and picked up by the target region's
-    manifest processor. This enables global job submission with
-    centralized tracking and status history.
-
-    This is different from submit-sqs which uses regional SQS queues.
-    The DynamoDB queue provides:
-    - Global visibility of all queued jobs
-    - Status tracking and history
-    - Priority-based scheduling
-    - Cross-region job management
-
-    Use 'gco queue list' to view queued jobs and their status.
-
-    Examples:
-        gco jobs submit-queue job.yaml --region us-east-1
-        gco jobs submit-queue job.yaml -r us-west-2 --priority 50
-        gco jobs submit-queue job.yaml -r us-east-1 -l team=ml -l project=training
-    """
-
-    from gco.services.manifest_processor import safe_load_yaml
-
-    formatter = get_output_formatter(config)
-
-    # Parse and validate labels at the CLI boundary. Silently dropping a
-    # malformed value would submit a differently labelled workload than the
-    # operator requested; values may still contain additional ``=`` bytes.
-    labels = {}
-    for lbl in label:
-        key, separator, value = lbl.partition("=")
-        if not separator or not key:
-            raise click.BadParameter(
-                "labels must use key=value with a non-empty key",
-                param_hint="--label",
-            )
-        labels[key] = value
-
-    try:
-        # Load manifest
-        with open(manifest_path, encoding="utf-8") as f:
-            manifest = safe_load_yaml(f, allow_aliases=False)
-        if sandbox:
-            apply_sandbox([manifest], sandbox)
-
-        # Submit via API
-        from ..aws_client import get_aws_client
-
-        aws_client = get_aws_client(config)
-
-        result = aws_client.call_api(
-            method="POST",
-            path="/api/v1/queue/jobs",
-            region=region,
-            body={
-                "manifest": manifest,
-                "target_region": region,
-                "namespace": namespace,
-                "priority": priority,
-                "labels": labels if labels else None,
-            },
-        )
-
-        formatter.print_success(f"Job queued for {region}")
-        formatter.print_info("Use 'gco queue list' or 'gco queue get <job_id>' to track status")
-        formatter.print(result)
-
-    except Exception as e:
-        formatter.print_error(f"Failed to queue job: {e}")
-        sys.exit(1)
+# ``gco jobs submit-queue`` is ``gco queue submit`` registered under a second
+# name: one command object, so the two cannot drift apart in options,
+# validation or routing again.
+jobs.add_command(queue_submit, name="submit-queue")

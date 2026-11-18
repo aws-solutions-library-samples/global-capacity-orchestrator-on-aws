@@ -3437,15 +3437,21 @@ gco jobs submit-queue MANIFEST_PATH [OPTIONS]
 
 Jobs are stored in DynamoDB and picked up by the target region's manifest processor. This enables global job submission with centralized tracking and status history.
 
+This is [`gco queue submit`](#gco-queue-submit) under a second name: the same
+options (including `--sandbox` and the `--max-spot-price` / `--spot-instance-type`
+gate), the same namespace rules and the same routing through the global API.
+
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Target region for job execution (required) |
-| `--namespace` | `-n` | Kubernetes namespace |
+| `--namespace` | `-n` | Namespace for a manifest that declares none (default: the configured default namespace); must match a namespace the manifest declares |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--max-spot-price` | | Spot price cap in USD/hour (requires `--spot-instance-type`); see [`gco queue submit`](#gco-queue-submit) |
+| `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (requires `--max-spot-price`) |
 
 **Example:**
 
@@ -4708,11 +4714,20 @@ gco queue submit MANIFEST_PATH [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Target region for job execution (required) |
-| `--namespace` | `-n` | Kubernetes namespace |
+| `--namespace` | `-n` | Namespace for a manifest that declares none (default: the configured default namespace, `gco-jobs`); must match a namespace the manifest declares |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
-| `--label` | `-l` | Add labels (key=value), can be repeated |
+| `--label` | `-l` | Add labels (`key=value` with a non-empty key; the value may be empty), can be repeated |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 | `--max-spot-price` | | Spot price cap in USD/hour; the job stays queued until the current spot price of `--spot-instance-type` in the target region drops to or below this value. Requires `--spot-instance-type` |
 | `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (e.g. `g5.xlarge`). Requires `--max-spot-price` |
+
+The manifest must be one `batch/v1` Job. It runs in its own `metadata.namespace`;
+`--namespace` names the namespace for a manifest that declares none, and a
+`--namespace` that contradicts the manifest fails before anything is sent (the
+queue API would answer `422`). The request goes through the global API, any of
+whose Regions can enqueue for any target Region; with `--regional-api` it uses the
+target Region's bridge. [`gco jobs submit-queue`](#gco-jobs-submit-queue) is this
+same command under a second name.
 
 With the spot price gate set, the regional queue worker re-evaluates the instance type's lowest current spot price across the region's Availability Zones on every polling pass and only dispatches once it clears the cap. `gco queue get` shows the gate and the last observed price; the job waits indefinitely until the price clears or you cancel it with `gco queue cancel`. Price-gated jobs never block other queued work. See [docs/COST_MONITORING.md](COST_MONITORING.md#spot-price-aware-scheduling).
 

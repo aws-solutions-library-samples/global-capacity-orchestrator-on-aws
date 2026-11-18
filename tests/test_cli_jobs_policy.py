@@ -385,10 +385,12 @@ class TestSubmissionContracts:
             )
 
         assert result.exit_code == 0, result.output
+        # The queue is global: without --regional-api the request goes through
+        # the global API, exactly as `gco queue submit` sends it.
         aws.call_api.assert_called_once_with(
             method="POST",
             path="/api/v1/queue/jobs",
-            region="us-east-1",
+            region=None,
             body={
                 "manifest": {
                     "apiVersion": "batch/v1",
@@ -1786,4 +1788,4 @@ class TestRemainingJobsStateMatrix:
             )
         assert result.exit_code == 1
         aws.call_api.assert_not_called()
-        assert "Failed to queue job" in formatter.print_error.call_args.args[0]
+        assert "Failed to queue job" in result.stderr
