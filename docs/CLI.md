@@ -424,7 +424,10 @@ gco analytics studio login \
 
 Run pre-flight checks before `gco stacks deploy gco-analytics`. Each
 check prints `✓`/`✗` plus a short remediation line. Exits `1` on any
-failing check.
+failing check. With `-o json` or `-o yaml` the command prints one
+document instead, also when a check fails:
+`{"passed": false, "checks": [{"name": "...", "ok": false, "remediation": "..."}]}`
+(`remediation` is empty for a passing check).
 
 Checks performed:
 
@@ -5411,6 +5414,13 @@ was created usually means it has not reached the cluster yet, so rerun the
 command. An API server this host cannot reach (a private endpoint, or a CIDR
 allowlist that leaves out your egress IP) only warns: the access entry and
 policy still apply to callers inside the network.
+
+With `-o json` or `-o yaml`, a run that exits `0` prints one document:
+`cluster`, `region`, `principal_arn`, `api_server_reachable`, `node_count`,
+`kubectl_error` and `warning`. When kubectl reached the API server,
+`kubectl_error` and `warning` are `null`; when it could not (the warning
+case above), `api_server_reachable` is `false`, `node_count` is `null`, and
+the other two carry kubectl's error and the warning text.
 
 The access entry this creates is required even when you reach a PRIVATE
 endpoint through `gco cluster tunnel` — the tunnel solves reachability,

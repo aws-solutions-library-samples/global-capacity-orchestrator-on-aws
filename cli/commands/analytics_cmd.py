@@ -644,7 +644,8 @@ def analytics_doctor(config: Any) -> None:
 
     Exits non-zero on any failing check. Each check prints ``✓``/``✗``
     plus a short remediation line so the operator knows exactly what
-    to fix.
+    to fix. With -o json or -o yaml the output is one document,
+    ``{"passed": bool, "checks": [{"name", "ok", "remediation"}, ...]}``.
     """
     from ..analytics_user_mgmt import (
         check_ssm_parameter,
@@ -655,14 +656,16 @@ def analytics_doctor(config: Any) -> None:
     from ..stacks import _find_cdk_json
 
     formatter = get_output_formatter(config)
-    any_failed = False
+    table = config.output_format == "table"
+    checks: list[dict[str, Any]] = []
 
     def _emit(name: str, ok: bool, remediation: str) -> None:
-        nonlocal any_failed
+        checks.append({"name": name, "ok": ok, "remediation": "" if ok else remediation})
+        if not table:
+            return
         if ok:
             click.echo(f"  ✓ {name}")
         else:
-            any_failed = True
             click.echo(f"  ✗ {name}")
             if remediation:
                 click.echo(f"    → {remediation}")
@@ -731,7 +734,14 @@ def analytics_doctor(config: Any) -> None:
         "; ".join(orphan_cmds) if orphan_cmds else "",
     )
 
-    if any_failed:
-        formatter.print_error("Doctor checks failed — see remediation lines above.")
+    passed = all(check["ok"] for check in checks)
+    if not table:
+        formatter.print({"passed": passed, "checks": checks})
+    if not passed:
+        formatter.print_error(
+            "Doctor checks failed — see remediation lines above."
+            if table
+            else "Doctor checks failed — see each failed check's remediation."
+        )
         sys.exit(1)
     formatter.print_success("All pre-flight checks passed.")

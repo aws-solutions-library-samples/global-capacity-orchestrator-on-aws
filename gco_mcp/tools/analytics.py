@@ -10,7 +10,12 @@ from server import mcp
 @mcp.tool(tags={"safe", "analytics"})
 @audit_logged
 async def analytics_doctor() -> str:
-    """`gco analytics doctor` — run analytics environment health checks."""
+    """`gco analytics doctor` — run analytics environment health checks.
+
+    Returns ``{"passed", "checks": [{"name", "ok", "remediation"}]}``. When
+    a check fails the CLI exits 1, and the result is the error envelope
+    with that document under ``output``.
+    """
     return await asyncio.to_thread(cli_runner._run_cli, "analytics", "doctor")
 
 

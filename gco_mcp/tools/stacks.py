@@ -100,6 +100,12 @@ def setup_cluster_access(cluster: str | None = None, region: str | None = None) 
     Updates kubeconfig, creates an EKS access entry for your IAM principal,
     and associates the cluster admin policy. Handles assumed roles automatically.
 
+    Returns ``cluster``, ``region``, ``principal_arn``,
+    ``api_server_reachable``, ``node_count``, ``kubectl_error`` and
+    ``warning``. An API server this host cannot reach is not an error:
+    ``api_server_reachable`` is false and ``warning`` says why, because the
+    access still applies from inside the cluster's network.
+
     Args:
         cluster: Cluster name (default: <project_name>-{region}).
         region: AWS region (default: first deployment region from cdk.json).
