@@ -151,6 +151,7 @@ def test_monitoring_stack_creates_no_alarm_on_workload_region_metrics() -> None:
     from gco.stacks.monitoring_stack import GCOMonitoringStack
     from tests.test_monitoring_stack import (
         MockConfigLoader,
+        _alarm_namespaces,
         create_mock_api_gateway_stack,
         create_mock_global_stack,
         create_mock_regional_stack,
@@ -171,9 +172,9 @@ def test_monitoring_stack_creates_no_alarm_on_workload_region_metrics() -> None:
     template = assertions.Template.from_stack(stack)
     alarms = template.find_resources("AWS::CloudWatch::Alarm")
     assert alarms, "the monitoring Region's own alarms remain"
-    assert (
-        not {resource["Properties"]["Namespace"] for resource in alarms.values()}
-        & _REGIONAL_NAMESPACES
-    )
+    namespaces = {
+        namespace for resource in alarms.values() for namespace in _alarm_namespaces(resource)
+    }
+    assert not namespaces & _REGIONAL_NAMESPACES
     composites = template.find_resources("AWS::CloudWatch::CompositeAlarm")
     assert [logical_id[:-8] for logical_id in composites] == ["ApiLambdaCompositeAlarm"]

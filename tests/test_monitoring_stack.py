@@ -153,6 +153,18 @@ def create_mock_regional_stack(
     return mock_regional_stack
 
 
+def _alarm_namespaces(alarm: dict) -> set[str]:
+    """Metric namespaces an alarm reads, for single-metric and metric-math alarms."""
+    properties = alarm["Properties"]
+    if "Namespace" in properties:
+        return {properties["Namespace"]}
+    return {
+        query["MetricStat"]["Metric"]["Namespace"]
+        for query in properties.get("Metrics", [])
+        if "MetricStat" in query
+    }
+
+
 class TestMonitoringStackImports:
     """Tests for monitoring stack imports."""
 
@@ -302,7 +314,9 @@ class TestMonitoringStackAlarms:
         """
         template = assertions.Template.from_stack(monitoring_stack)
         alarms = template.find_resources("AWS::CloudWatch::Alarm")
-        namespaces = {props["Properties"]["Namespace"] for props in alarms.values()}
+        namespaces = {
+            namespace for props in alarms.values() for namespace in _alarm_namespaces(props)
+        }
         assert namespaces == {"AWS/ApiGateway", "AWS/Lambda", "AWS/DynamoDB"}
 
     def test_alb_unhealthy_hosts_alarm_skipped(self, monitoring_stack):
