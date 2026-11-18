@@ -400,3 +400,78 @@ def test_a_manifest_that_is_not_one_mapping_is_refused(tmp_path, command) -> Non
     assert result.exit_code == 1
     assert "single YAML mapping" in result.stderr
     aws_client.call_api.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# `gco queue list` paging
+# ---------------------------------------------------------------------------
+
+
+def _list(args, page, output_format="table"):
+    aws_client = MagicMock()
+    aws_client.call_api.return_value = page
+    with patch("cli.aws_client.get_aws_client", return_value=aws_client):
+        result = CliRunner().invoke(queue, ["list", *args], obj=_config(output_format))
+    return result, aws_client
+
+
+_PAGE = {
+    "count": 1,
+    "jobs": [
+        {"job_id": "job-1", "job_name": "first", "target_region": "us-east-1", "status": "queued"}
+    ],
+    "next_cursor": "eyJ2ZXJzaW9uIjoxfQ",
+    "partial": False,
+}
+
+
+def test_list_prints_the_command_for_the_next_page() -> None:
+    result, aws_client = _list(["-s", "queued", "-r", "us-east-1", "--limit", "1"], _PAGE)
+
+    assert result.exit_code == 0, result.output
+    assert "Queued Jobs (1 in this page)" in result.output
+    assert (
+        "Next page: gco queue list --region us-east-1 --status queued --limit 1 "
+        "--cursor eyJ2ZXJzaW9uIjoxfQ"
+    ) in result.output
+    assert "cursor" not in aws_client.call_api.call_args.kwargs["params"]
+
+
+def test_list_sends_the_cursor_back_with_the_filters() -> None:
+    last_page = {**_PAGE, "next_cursor": None}
+
+    result, aws_client = _list(["-s", "queued", "--cursor", "eyJ2ZXJzaW9uIjoxfQ"], last_page)
+
+    assert result.exit_code == 0, result.output
+    assert aws_client.call_api.call_args.kwargs["params"] == {
+        "limit": 50,
+        "status": "queued",
+        "cursor": "eyJ2ZXJzaW9uIjoxfQ",
+    }
+    assert "Next page" not in result.output
+
+
+def test_an_empty_page_with_a_cursor_is_not_reported_as_no_jobs() -> None:
+    result, _ = _list([], {"count": 0, "jobs": [], "next_cursor": "abc", "partial": True})
+
+    assert result.exit_code == 0, result.output
+    assert "No jobs in this page" in result.output
+    assert "No jobs found" not in result.output
+    assert "--cursor abc" in result.output
+
+
+def test_json_output_keeps_next_cursor() -> None:
+    import json
+
+    result, _ = _list([], _PAGE, output_format="json")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["next_cursor"] == "eyJ2ZXJzaW9uIjoxfQ"
+
+
+@pytest.mark.parametrize("limit", ["0", "1001"])
+def test_list_limit_outside_the_api_range_is_a_usage_error(limit) -> None:
+    result, aws_client = _list(["--limit", limit], _PAGE)
+
+    assert result.exit_code == 2
+    aws_client.call_api.assert_not_called()

@@ -4747,9 +4747,13 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
 List jobs in the global queue.
 
 It shows one page of up to `--limit` jobs, in no particular order: the queue's
-scan order, which is neither newest first nor by priority. `--output json`
-includes the page's `next_cursor`; see
-[List Queued Jobs](API.md#list-queued-jobs) for reading the rest.
+scan order, which is neither newest first nor by priority. When more jobs may
+match, the table ends with the `gco queue list ... --cursor CURSOR` command that
+reads the next page, and `--output json` / `yaml` carries the page's
+`next_cursor`. Pass it back with `--cursor` and the same filters (a cursor is
+bound to the filters it was issued with). A page can hold fewer than `--limit`
+jobs, even none, and still have a next page when the queue's scan budget ended it
+early; see [List Queued Jobs](API.md#list-queued-jobs).
 
 ```bash
 gco queue list [OPTIONS]
@@ -4762,7 +4766,8 @@ gco queue list [OPTIONS]
 | `--region` | `-r` | Filter by target region |
 | `--status` | `-s` | Filter by status (queued, claimed, running, succeeded, failed, cancelled) |
 | `--namespace` | `-n` | Filter by namespace |
-| `--limit` | `-l` | Maximum results (default: 50) |
+| `--limit` | `-l` | Maximum jobs in this page, 1-1000 (default: 50) |
+| `--cursor` | | Read the page after a previous one (its `next_cursor`); use the same filters |
 
 **Example:**
 
@@ -4770,6 +4775,7 @@ gco queue list [OPTIONS]
 gco queue list
 gco queue list --region us-east-1 --status queued
 gco queue list -s running
+gco queue list -s running --cursor CURSOR_FROM_THE_PREVIOUS_PAGE
 ```
 
 #### `gco queue get`

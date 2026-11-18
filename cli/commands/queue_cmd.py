@@ -218,6 +218,20 @@ def queue_submit(
         sys.exit(1)
 
 
+def _next_page_command(
+    region: str | None, status: str | None, namespace: str | None, limit: int, cursor: str
+) -> str:
+    """The ``gco queue list`` command line that reads the page after this one."""
+    import shlex
+
+    args = ["gco", "queue", "list"]
+    for option, value in (("--region", region), ("--status", status), ("--namespace", namespace)):
+        if value:
+            args += [option, value]
+    args += ["--limit", str(limit), "--cursor", cursor]
+    return shlex.join(args)
+
+
 @queue.command("list")
 @click.option("--region", "-r", help="Filter by target region")
 @click.option(
@@ -227,15 +241,37 @@ def queue_submit(
     help="Filter by status",
 )
 @click.option("--namespace", "-n", help="Filter by namespace")
-@click.option("--limit", "-l", default=50, help="Maximum results")
+@click.option(
+    "--limit",
+    "-l",
+    default=50,
+    type=click.IntRange(1, 1000),
+    help="Maximum jobs in this page (1-1000)",
+)
+@click.option(
+    "--cursor",
+    help=(
+        "Read the page after a previous one: the cursor that page printed. "
+        "Pass the same filters; a cursor is bound to them"
+    ),
+)
 @pass_config
-def queue_list(config: Any, region: Any, status: Any, namespace: Any, limit: Any) -> None:
-    """List jobs in the global queue.
+def queue_list(
+    config: Any, region: Any, status: Any, namespace: Any, limit: Any, cursor: Any
+) -> None:
+    """List jobs in the global queue, one page at a time.
 
+    A page holds up to --limit jobs in the queue's scan order (neither
+    newest first nor by priority). When more jobs may match, the table ends
+    with the command for the next page, and JSON/YAML output carries the
+    page's next_cursor; pass it back with --cursor and the same filters.
+
+    \b
     Examples:
         gco queue list
         gco queue list --region us-east-1 --status queued
         gco queue list -s running
+        gco queue list -s running --cursor CURSOR_FROM_THE_PREVIOUS_PAGE
     """
     formatter = get_output_formatter(config)
 
@@ -252,6 +288,8 @@ def queue_list(config: Any, region: Any, status: Any, namespace: Any, limit: Any
             params["status"] = status
         if namespace:
             params["namespace"] = namespace
+        if cursor:
+            params["cursor"] = cursor
 
         # The region is a DynamoDB filter, not a transport pin. The global API
         # can serve it; forced regional mode uses the configured default bridge.
@@ -265,22 +303,28 @@ def queue_list(config: Any, region: Any, status: Any, namespace: Any, limit: Any
 
         if config.output_format == "table":
             jobs = result.get("jobs", [])
+            next_cursor = result.get("next_cursor")
             if not jobs:
-                formatter.print_info("No jobs found")
-                return
-
-            print(f"\n  Queued Jobs ({result.get('count', 0)} total)")
-            print("  " + "-" * 90)
-            print(
-                "  JOB ID                               NAME                    REGION          STATUS"
-            )
-            print("  " + "-" * 90)
-            for job in jobs:
-                job_id = job.get("job_id", "")[:36]
-                name = job.get("job_name", "")[:22]
-                target = job.get("target_region", "")[:14]
-                job_status = job.get("status", "")[:10]
-                print(f"  {job_id:<36} {name:<23} {target:<15} {job_status}")
+                # An empty page with a cursor is not the end: the scan budget
+                # ran out before it found a match.
+                formatter.print_info("No jobs in this page" if next_cursor else "No jobs found")
+            else:
+                print(f"\n  Queued Jobs ({result.get('count', len(jobs))} in this page)")
+                print("  " + "-" * 90)
+                print(
+                    "  JOB ID                               NAME                    "
+                    "REGION          STATUS"
+                )
+                print("  " + "-" * 90)
+                for job in jobs:
+                    job_id = job.get("job_id", "")[:36]
+                    name = job.get("job_name", "")[:22]
+                    target = job.get("target_region", "")[:14]
+                    job_status = job.get("status", "")[:10]
+                    print(f"  {job_id:<36} {name:<23} {target:<15} {job_status}")
+            if next_cursor:
+                next_page = _next_page_command(region, status, namespace, limit, next_cursor)
+                formatter.print_info(f"More jobs may match. Next page: {next_page}")
         else:
             formatter.print(result)
 

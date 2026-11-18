@@ -1468,6 +1468,8 @@ gco queue list --region us-east-1 --status queued
 
 # Filter by status only
 gco queue list -s running
+# Read the next page with the cursor the previous page printed
+gco queue list -s running --cursor CURSOR_FROM_THE_PREVIOUS_PAGE
 ```
 
 **Query Parameters:**
