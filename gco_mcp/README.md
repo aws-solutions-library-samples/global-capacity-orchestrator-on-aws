@@ -1063,7 +1063,7 @@ oversized status records fail closed.
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
-| `deps_scan` | Generate the monthly dependency-update report on demand (`gco deps scan`); `nodepools_only=true` runs just the accelerator-catalog / Karpenter NodePool freshness check | safe | — |
+| `deps_scan` | Generate the monthly dependency-update report on demand (`gco deps scan`); `nodepools_only=true` runs just the accelerator-catalog / Karpenter NodePool freshness check | low-risk | — |
 
 The full scan mirrors the `deps-scan` GitHub Actions workflow: it sweeps
 PyPI, npm, container registries, Helm repos, GitHub, and (when the server's
@@ -1072,7 +1072,10 @@ surfaces, returning the same Markdown report the rolling
 "[Automated] Dependency updates available" issue carries. It requires a GCO
 checkout, typically takes several minutes, and its Python surface
 pip-installs the project's extras into the server's active environment —
-exactly how CI runs it.
+exactly how CI runs it. Because that changes the server's environment, the
+tool is tagged `low-risk` rather than `safe`, so a swarm does not hand it to
+two children at once unless `allow_overlapping_mutating_tools` is set. The
+`nodepools_only` check installs nothing.
 
 ### Live State
 

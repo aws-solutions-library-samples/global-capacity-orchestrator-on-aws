@@ -140,7 +140,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `deps_scan` | `gco deps scan` — generate the monthly dependency-update report on demand; `nodepools_only=true` runs just the accelerator-catalog / NodePool freshness check. |
+| `deps_scan` | `gco deps scan` — generate the monthly dependency-update report on demand; `nodepools_only=true` runs just the accelerator-catalog / NodePool freshness check. The full scan pip-installs the project's extras into the server's environment, so the tool is tagged `low-risk`, not `safe`. |
 
 ### `docs.py`
 
