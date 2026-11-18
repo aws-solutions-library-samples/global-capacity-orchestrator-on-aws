@@ -470,7 +470,13 @@ To act on the report:
 
 1. Follow the report's **Ref** links to review changelogs for breaking changes.
 2. Update the exact version in `pyproject.toml`, the relevant `package.json`, a
-   manifest, `charts.yaml`, or the pinned `*_VERSION` env/ARG value.
+   manifest, `charts.yaml`, or the pinned `*_VERSION` env/ARG value. An image
+   pinned by tag and digest (the scanner and linter `*_IMAGE` values in
+   `security.yml` and `lint.yml`, the semgrep job container, the Floci
+   emulator) moves both halves: the new tag and that tag's manifest-list
+   digest (`skopeo inspect --raw docker://<image>:<tag> | sha256sum`). A
+   **committed digest does not match the tag** row means upstream re-pushed
+   the tag; find out what changed before refreshing the digest.
 3. Regenerate the lock that belongs to the changed graph:
    - Python: regenerate `requirements-lock.txt` with the supported container
      workflow documented below.

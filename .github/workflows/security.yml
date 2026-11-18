@@ -485,6 +485,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      # Tag and manifest-list digest, the one source for the pre-pull and the
+      # run: a re-pushed tag cannot change what this gate runs, and the
+      # monthly deps scan reports when the tag's digest moves.
+      TRUFFLEHOG_IMAGE: "trufflesecurity/trufflehog:3.96.0@sha256:aa821cf4ace8861c7d096d83818cdf7bb9719028a52d37a52eaad44086a52577"
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -493,10 +498,9 @@ jobs:
       - name: Pre-pull TruffleHog image (with retry)
         # A plain `docker run` pulls implicitly with no retry; pre-pulling
         # keeps a Docker Hub blip from failing the scan before it starts.
-        # Keep the tag in lockstep with the run step below.
         uses: ./.github/actions/docker-pull-with-retry
         with:
-          images: trufflesecurity/trufflehog:3.96.0
+          images: ${{ env.TRUFFLEHOG_IMAGE }}
       - name: Run TruffleHog
         # --exclude-detectors=lob: Lob's key-verification endpoint began
         # accepting arbitrary strings, so with --only-verified every ordinary
@@ -516,7 +520,7 @@ jobs:
           for i in $(seq 1 "${attempts}"); do
             set +e
             docker run --rm -v "$PWD":/repo \
-              trufflesecurity/trufflehog:3.96.0 \
+              "$TRUFFLEHOG_IMAGE" \
               filesystem /repo --only-verified --fail --exclude-detectors=lob \
               --json > trufflehog-report.json 2>&1
             rc=$?
@@ -549,6 +553,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      # Tag and manifest-list digest, the one source for the pre-pull and the
+      # run: a re-pushed tag cannot change what this gate runs, and the
+      # monthly deps scan reports when the tag's digest moves.
+      GITLEAKS_IMAGE: "zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -557,11 +566,11 @@ jobs:
       - name: Pre-pull Gitleaks image (with retry)
         uses: ./.github/actions/docker-pull-with-retry
         with:
-          images: zricethezav/gitleaks:v8.30.1
+          images: ${{ env.GITLEAKS_IMAGE }}
       - name: Run gitleaks
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
-            zricethezav/gitleaks:v8.30.1 \
+            "$GITLEAKS_IMAGE" \
             detect --source . --no-git \
             --config .github/config/.gitleaks.toml \
             --report-format json --report-path gitleaks-report.json
@@ -579,7 +588,10 @@ jobs:
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     container:
-      image: semgrep/semgrep:1.183.0
+      # Tag and manifest-list digest, so a re-pushed tag cannot change what this
+      # gate runs; the monthly deps scan reports when the tag's digest moves.
+      # A literal: the env context is not available to jobs.<id>.container.
+      image: semgrep/semgrep:1.183.0@sha256:2e45517a85e13a9cca14a2a00df6bb48affd66b8ebfae1b0991cd57578362fb0
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -604,6 +616,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      # Tag and manifest-list digest, the one source for the pre-pull and the
+      # run: a re-pushed tag cannot change what this gate runs, and the
+      # monthly deps scan reports when the tag's digest moves.
+      CHECKOV_IMAGE: "bridgecrew/checkov:3.2.524@sha256:ff2470bec6ba7b4c8dbd8992940ea02b250e9138bee538b4aa50d4641aecf9a7"
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -612,11 +629,11 @@ jobs:
       - name: Pre-pull Checkov image (with retry)
         uses: ./.github/actions/docker-pull-with-retry
         with:
-          images: bridgecrew/checkov:3.2.524
+          images: ${{ env.CHECKOV_IMAGE }}
       - name: Run checkov
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
-            bridgecrew/checkov:3.2.524 \
+            "$CHECKOV_IMAGE" \
             -d . --config-file .github/config/.checkov.yaml -o json > checkov-report.json
       - name: Upload checkov report
         if: always()
@@ -631,6 +648,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      # Tag and manifest-list digest, the one source for the pre-pull and the
+      # run: a re-pushed tag cannot change what this gate runs, and the
+      # monthly deps scan reports when the tag's digest moves.
+      KICS_IMAGE: "checkmarx/kics:v2.1.20@sha256:3e5a268eb8adda2e5a483c9359ddfc4cd520ab856a7076dc0b1d8784a37e2602"
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -658,11 +680,11 @@ jobs:
       - name: Pre-pull KICS image (with retry)
         uses: ./.github/actions/docker-pull-with-retry
         with:
-          images: checkmarx/kics:v2.1.20
+          images: ${{ env.KICS_IMAGE }}
       - name: Run KICS
         run: |
           docker run --rm -v "$PWD":/repo -w /repo \
-            checkmarx/kics:v2.1.20 \
+            "$KICS_IMAGE" \
             scan -p cdk.out -o . \
             --report-formats json,html \
             --output-name kics-report \

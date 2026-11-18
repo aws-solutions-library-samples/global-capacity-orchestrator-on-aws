@@ -751,6 +751,8 @@ PY
                 extract_python_string_constant AWS_CLI_IMAGE gco/services/inference_monitor.py | sed 's/@sha256:.*//'
                 grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" scripts/live_release_validation/manifests/ 2>/dev/null \
                     | sed 's/^image: //; s/@sha256:.*//'
+                grep -rhoE "[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}" .github/workflows 2>/dev/null \
+                    | grep -v '^kindest/node:' | sed 's/@sha256:.*//'
             } | sort -u | while IFS= read -r img; do
                 [ -n "$img" ] || continue
                 parsed="$(parse_image_registry "${img%%:*}")"
@@ -761,6 +763,7 @@ PY
                 grep -rhoE "image: [a-zA-Z0-9_./-]+:[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}" scripts/live_release_validation/manifests/ 2>/dev/null | sed 's/^image: //'
                 extract_crossplane_function_packages lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml function-go-templating
                 extract_kind_pins .github/workflows/integration-tests.yml | awk -F'|' '$1=="kind-node"{print $2}'
+                grep -rhoE "[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}" .github/workflows 2>/dev/null
             } | sort -u | while IFS= read -r ref; do
                 case "$ref" in *@sha256:*) echo "digest|${ref%@sha256:*}|${ref##*@sha256:}" ;; esac
             done
@@ -857,6 +860,12 @@ jobs:
       - uses: astral-sh/ruff-action@0000000000000000000000000000000000000000
         with:
           version: "0.16.5"
+  hadolint:
+    runs-on: ubuntu-latest
+    env:
+      HADOLINT_IMAGE: "hadolint/hadolint:v2.14.0-debian@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    steps:
+      - run: docker run --rm "$HADOLINT_IMAGE" --version
 YAML
     cat > "$root/.github/workflows/integration-tests.yml" <<'YAML'
 name: Integration Tests
@@ -1178,6 +1187,11 @@ findings_path() {
     # patch drift is the CI tooling check's own list-tags call, and it stays
     # out of the generic image sweep (which would list the tag a second time).
     grep -q '^skopeo inspect --retry-times 3 --raw docker://kindest/node:v1.37.0' "$CALLS"
+    # A digest-pinned workflow image: its digest is bound to its tag, and its
+    # tag rides the sweep (the free-form workflow scan never matched
+    # <namespace>/<repo>:<tag> names).
+    grep -q '^skopeo inspect --retry-times 3 --raw docker://hadolint/hadolint:v2.14.0-debian' "$CALLS"
+    grep -q '^skopeo list-tags --retry-times 3 docker://docker.io/hadolint/hadolint' "$CALLS"
     [ "$(grep -c '^skopeo list-tags --retry-times 3 docker://docker.io/kindest/node' "$CALLS")" = "1" ]
     grep -q '^helm repo add keda https://kedacore.github.io/charts --force-update' "$CALLS"
     grep -q '^helm show chart oci://registry.k8s.io/kueue/charts/kueue' "$CALLS"
@@ -1221,6 +1235,9 @@ findings_path() {
     [[ "$output" == *"  - public.ecr.aws/aws-cli/aws-cli:2.36.41: committed digest does not match the tag"* ]]
     [[ "$output" == *"  - xpkg.crossplane.io/crossplane-contrib/function-go-templating:v0.12.5: committed digest does not match the tag (lambda/kubectl-applier-simple/manifests/post-helm-crossplane.yaml)"* ]]
     [[ "$output" == *"  - kindest/node:v1.37.0: committed digest does not match the tag (.github/workflows/integration-tests.yml KIND_NODE_IMAGE)"* ]]
+    [[ "$output" == *"  - hadolint/hadolint:v2.14.0-debian: committed digest does not match the tag (.github/workflows)"* ]]
+    # ...and its tag is compared like any other image's.
+    [[ "$output" == *"  - hadolint/hadolint:v2.14.0-debian -> v3.14.0-debian"* ]]
     [[ "$output" == *"  - keda (keda): 2.20.2 -> 3.20.2"* ]]
     [[ "$output" == *"  - kueue (kueue): 0.19.2 -> 1.19.2"* ]]
     [[ "$output" == *"  - metrics-server: v0.9.0-eksbuild.7 -> v1.9.0-eksbuild.7"* ]]

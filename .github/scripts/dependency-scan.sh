@@ -592,6 +592,22 @@ if split_pinned_image_ref "$KIND_NODE_IMAGE_REF" >/dev/null; then
   check_pinned_digest "$KIND_NODE_IMAGE_REF" ".github/workflows/integration-tests.yml KIND_NODE_IMAGE" no
 fi
 
+# Every other image the workflows run (the security and lint scanners, the
+# Floci emulator) is pinned by tag AND manifest-list digest, so a re-pushed tag
+# cannot change what a gate runs with no diff here
+# (tests/test_supply_chain_integrity.py requires the shape). This pass keeps
+# each digest bound to its tag, and the tag joins the sweep: the free-form
+# scan above only recognizes bare names such as alpine:<tag>, never the
+# <namespace>/<repo>:<tag> the scanner images use. The kind node image has its
+# own pass above.
+echo "Checking workflow image digests ($WORKFLOWS_DIR)..."
+WORKFLOW_PINNED_REFS="$(grep -rhoE "[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}" \
+  "$WORKFLOWS_DIR" 2>/dev/null | grep -v '^kindest/node:' | sort -u)"
+while read -r pinned_ref; do
+  [ -z "$pinned_ref" ] && continue
+  check_pinned_digest "$pinned_ref" "$WORKFLOWS_DIR"
+done <<< "$WORKFLOW_PINNED_REFS"
+
 # One lookup per distinct image: ``python:3.14.8-slim`` and
 # ``docker.io/library/python:3.14.8-slim`` are the same Docker Hub tag, and
 # listing them separately doubled both the report row and the registry calls.

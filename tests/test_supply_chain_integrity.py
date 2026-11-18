@@ -4,6 +4,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -2472,25 +2473,196 @@ def test_dev_container_matrix_keeps_native_amd64_and_arm64_coverage() -> None:
     }
 
 
-def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
-    workflow = yaml.safe_load(_read(".github/workflows/security.yml"))
-    scanner_jobs = {
-        "security-trufflehog-secrets": "trufflesecurity/trufflehog:3.96.0",
-        "security-gitleaks-secrets": "zricethezav/gitleaks:v8.30.1",
-        "security-checkov-iac": "bridgecrew/checkov:3.2.524",
-        "security-kics-iac": "checkmarx/kics:v2.1.20",
+#: The scanners and linters the gates start with ``docker run``, by job: the
+#: job ``env`` variable that is the image's one source (the pre-pull and the
+#: run both read it) and the repository it names.
+_DOCKER_RUN_GATES: dict[tuple[str, str], tuple[str, str]] = {
+    (".github/workflows/security.yml", "security-trufflehog-secrets"): (
+        "TRUFFLEHOG_IMAGE",
+        "trufflesecurity/trufflehog",
+    ),
+    (".github/workflows/security.yml", "security-gitleaks-secrets"): (
+        "GITLEAKS_IMAGE",
+        "zricethezav/gitleaks",
+    ),
+    (".github/workflows/security.yml", "security-checkov-iac"): (
+        "CHECKOV_IMAGE",
+        "bridgecrew/checkov",
+    ),
+    (".github/workflows/security.yml", "security-kics-iac"): ("KICS_IMAGE", "checkmarx/kics"),
+    (".github/workflows/lint.yml", "lint-hadolint-dockerfile"): (
+        "HADOLINT_IMAGE",
+        "hadolint/hadolint",
+    ),
+    (".github/workflows/lint.yml", "lint-shellcheck-shell"): (
+        "SHELLCHECK_IMAGE",
+        "koalaman/shellcheck-alpine",
+    ),
+}
+_GATE_WORKFLOWS = (".github/workflows/security.yml", ".github/workflows/lint.yml")
+_PINNED_IMAGE = re.compile(r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}")
+_ENV_EXPRESSION = re.compile(r"\$\{\{\s*env\.(\w+)\s*\}\}")
+_SHELL_VARIABLE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+#: ``docker run`` options that consume the next argument.
+_DOCKER_RUN_VALUE_OPTIONS = frozenset(
+    {
+        "-e",
+        "--entrypoint",
+        "--env",
+        "--mount",
+        "--name",
+        "--network",
+        "-p",
+        "--platform",
+        "--publish",
+        "-u",
+        "--user",
+        "-v",
+        "--volume",
+        "-w",
+        "--workdir",
     }
+)
 
-    for job_name, image in scanner_jobs.items():
-        steps = workflow["jobs"][job_name]["steps"]
+
+def _expand_env_expressions(text: str, env: dict[str, str]) -> str:
+    """``text`` with each ``${{ env.X }}`` replaced; an unknown one is kept."""
+    return _ENV_EXPRESSION.sub(lambda match: str(env.get(match.group(1), match.group(0))), text)
+
+
+def _docker_run_images(script: str, env: dict[str, str]) -> list[str]:
+    """The image operand of every ``docker run`` in a run script, with a
+    ``${{ env.X }}`` expression or a whole-token ``$X`` resolved."""
+    images = []
+    script = _expand_env_expressions(script, env)
+    for line in script.replace("\\\n", " ").splitlines():
+        if "docker run" not in line or line.lstrip().startswith("#"):
+            continue
+        # Tokens are read lazily: an argument after the image may open a
+        # quote that closes on a later line (hadolint's ``-c '...'``).
+        lexer = shlex.shlex(line.split("docker run", 1)[1], posix=True)
+        lexer.whitespace_split = True
+        skip_value = False
+        for token in lexer:
+            if skip_value:
+                skip_value = False
+            elif token.startswith("-"):
+                skip_value = token in _DOCKER_RUN_VALUE_OPTIONS
+            else:
+                variable = _SHELL_VARIABLE.fullmatch(token)
+                name = variable and (variable.group(1) or variable.group(2))
+                images.append(str(env.get(name, token)) if name else token)
+                break
+    return images
+
+
+def _gate_job_images(workflow: dict, job: dict) -> list[str]:
+    """Every image a job runs: its container, services, pre-pulls and docker runs."""
+    env = {**(workflow.get("env") or {}), **(job.get("env") or {})}
+    images = []
+    container = job.get("container")
+    if container:
+        images.append(container if isinstance(container, str) else container["image"])
+    images.extend(service["image"] for service in (job.get("services") or {}).values())
+    for step in job.get("steps") or []:
+        if step.get("uses") == "./.github/actions/docker-pull-with-retry":
+            images.extend(_expand_env_expressions(step["with"]["images"], env).split())
+        images.extend(_docker_run_images(step.get("run", ""), env))
+    return images
+
+
+def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
+    """Each scanner a gate starts with ``docker run`` is pulled first through
+    the retrying action, and both steps read the image from one job ``env``
+    value, so the pre-pull cannot warm a different image than the run uses."""
+    for (path, job_id), (variable, repository) in _DOCKER_RUN_GATES.items():
+        job = yaml.safe_load(_read(path))["jobs"][job_id]
+        image = job["env"][variable]
+        assert image.startswith(f"{repository}:"), f"{job_id}: {image}"
+        steps = job["steps"]
         pull_index = next(
             index
             for index, step in enumerate(steps)
             if step.get("uses") == "./.github/actions/docker-pull-with-retry"
-            and step.get("with", {}).get("images") == image
+            and step.get("with", {}).get("images") == f"${{{{ env.{variable} }}}}"
         )
-        run_index = next(index for index, step in enumerate(steps) if image in step.get("run", ""))
-        assert pull_index < run_index, f"{job_name} must pre-pull {image} before scanning"
+        run_index = next(
+            index for index, step in enumerate(steps) if f'"${variable}"' in step.get("run", "")
+        )
+        assert pull_index < run_index, f"{job_id} must pre-pull {image} before scanning"
+        assert not any(image in step.get("run", "") for step in steps), (
+            f"{job_id}: the image must have one source, job.env.{variable}"
+        )
+
+
+def test_gate_images_are_pinned_by_tag_and_digest() -> None:
+    """Every image a security or lint job runs names its tag and manifest-list
+    digest (finding C11). A tag alone can be re-pushed upstream, which changes
+    what a gate runs, and so what it lets through, with no diff here; the
+    monthly deps scan reports when a pinned tag's digest moves. The tag stays
+    beside the digest for readers and for that scan's version sweep."""
+    found: dict[tuple[str, str], list[str]] = {}
+    for path in _GATE_WORKFLOWS:
+        workflow = yaml.safe_load(_read(path))
+        for job_id, job in workflow["jobs"].items():
+            images = _gate_job_images(workflow, job)
+            if images:
+                found[(path, job_id)] = images
+
+    # The walk sees every known gate (semgrep runs as the job container).
+    known = set(_DOCKER_RUN_GATES) | {(".github/workflows/security.yml", "security-semgrep-sast")}
+    assert known <= set(found), sorted(known - set(found))
+    unpinned = {
+        f"{path}:{job_id}": image
+        for (path, job_id), images in found.items()
+        for image in images
+        if not _PINNED_IMAGE.fullmatch(image)
+    }
+    assert not unpinned, f"pin these as <repository>:<tag>@sha256:<digest>: {unpinned}"
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ('docker run --rm -v "$PWD":/repo -w /repo "$IMAGE" scan .', ["repo/tool:1@sha256:x"]),
+        (
+            "xargs -0 -- \\\n  docker run --rm \\\n    --entrypoint /bin/x \\\n    ${IMAGE} \\\n    -c '\n",
+            ["repo/tool:1@sha256:x"],
+        ),
+        ("docker run --rm -e A=1 --name n literal/image:2 true", ["literal/image:2"]),
+        ('docker run --rm "$UNSET" true', ["$UNSET"]),
+        ("  # docker run --rm commented/out:1\necho docker", []),
+        ("docker run --rm ${{ env.IMAGE }} --version", ["repo/tool:1@sha256:x"]),
+    ],
+)
+def test_docker_run_image_parser_reads_the_image_operand(script: str, expected: list[str]) -> None:
+    """The pinning guard is only as good as its reading of ``docker run``."""
+    assert _docker_run_images(script, {"IMAGE": "repo/tool:1@sha256:x"}) == expected
+
+
+def test_gate_image_walk_reads_containers_services_and_pre_pulls() -> None:
+    workflow = {"env": {"SHARED": "shared/image:1"}}
+    job = {
+        "env": {"OWN": "own/image:2"},
+        "container": {"image": "container/image:3"},
+        "services": {"db": {"image": "service/image:4"}},
+        "steps": [
+            {
+                "uses": "./.github/actions/docker-pull-with-retry",
+                "with": {"images": "${{ env.SHARED }}\n${{ env.OWN }}\nbare/image:5\n"},
+            },
+            {"run": 'docker run --rm "$OWN" lint'},
+        ],
+    }
+    assert _gate_job_images(workflow, job) == [
+        "container/image:3",
+        "service/image:4",
+        "shared/image:1",
+        "own/image:2",
+        "bare/image:5",
+        "own/image:2",
+    ]
+    assert _gate_job_images({}, {"container": "string/container:6"}) == ["string/container:6"]
 
 
 def test_npm_audit_retries_a_registry_operational_error() -> None:

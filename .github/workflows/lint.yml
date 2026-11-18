@@ -247,6 +247,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      # Tag and manifest-list digest, the one source for the pre-pull and the
+      # run: a re-pushed tag cannot change what this gate runs, and the
+      # monthly deps scan reports when the tag's digest moves.
+      HADOLINT_IMAGE: "hadolint/hadolint:v2.14.0-debian@sha256:158cd0184dcaa18bd8ec20b61f4c1cabdf8b32a592d062f57bdcb8e4c1d312e2"
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -255,7 +260,7 @@ jobs:
       - name: Pre-pull hadolint image
         uses: ./.github/actions/docker-pull-with-retry
         with:
-          images: hadolint/hadolint:v2.14.0-debian
+          images: ${{ env.HADOLINT_IMAGE }}
       - name: Run hadolint on every Dockerfile
         # DL3008 (apt pin) and DL3013 (pip pin) are ignored to match the
         # policy inherited from the GitLab pipeline. Revisit once all base
@@ -265,7 +270,7 @@ jobs:
           # The image entrypoint is hadolint; override it so this shell loop
           # executes instead of being parsed as hadolint file arguments.
           docker run --rm --entrypoint bash -v "$PWD":/repo -w /repo \
-            hadolint/hadolint:v2.14.0-debian \
+            "$HADOLINT_IMAGE" \
             -c '
               set -euo pipefail
               FOUND=0
@@ -291,8 +296,10 @@ jobs:
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     env:
-      # Exact release tag shared by pre-pull and execution.
-      SHELLCHECK_IMAGE: "koalaman/shellcheck-alpine:v0.11.0"
+      # Tag and manifest-list digest, the one source for the pre-pull and the
+      # run: a re-pushed tag cannot change what this gate runs, and the
+      # monthly deps scan reports when the tag's digest moves.
+      SHELLCHECK_IMAGE: "koalaman/shellcheck-alpine:v0.11.0@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002"
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
