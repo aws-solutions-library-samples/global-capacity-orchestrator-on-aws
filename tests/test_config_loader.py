@@ -396,6 +396,33 @@ class TestGlobalAcceleratorValidation:
             ConfigLoader(app)
 
 
+class TestRegionOverlayNames:
+    """Per-Region overlays are keyed by real Regions; undeployed ones only warn."""
+
+    @pytest.mark.parametrize("key", ["fsx_lustre_regions", "pcs_regions", "hyperpod_regions"])
+    def test_an_unknown_region_name_fails(self, valid_context, key):
+        valid_context[key] = {"us-east1": {"enabled": True}}
+        with pytest.raises(
+            ConfigValidationError,
+            match=rf"{key}\.us-east1 is not an AWS Region known to the installed SDK",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("key", ["fsx_lustre_regions", "pcs_regions", "hyperpod_regions"])
+    def test_a_region_that_is_not_deployed_warns(self, valid_context, key):
+        valid_context[key] = {"eu-west-1": {"enabled": False}}
+        config = ConfigLoader(MockApp(valid_context))
+        assert [w for w in config.warnings if w.startswith(key)] == [
+            f"{key}.eu-west-1 has no effect: eu-west-1 is not in deployment_regions.regional, "
+            "so no regional stack reads it (expected while staging a Region before adding it)."
+        ]
+
+    def test_deployed_regions_draw_no_warning(self, valid_context):
+        valid_context["fsx_lustre_regions"] = {"us-east-1": {"enabled": True}}
+        config = ConfigLoader(MockApp(valid_context))
+        assert not [w for w in config.warnings if "fsx_lustre_regions" in w]
+
+
 class TestKubernetesVersion:
     """kubernetes_version is a quoted "<major>.<minor>" string."""
 

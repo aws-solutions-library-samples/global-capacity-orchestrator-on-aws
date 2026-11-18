@@ -901,8 +901,9 @@ class ConfigLoader:
                 "Required configuration field 'deployment_regions' must be a non-empty object"
             )
 
-        # Validate regions
+        # Validate regions, then the Region names the per-Region overlays use
         self._validate_regions()
+        self._validate_region_overlays()
 
         # Validate resource thresholds
         self._validate_resource_thresholds()
@@ -1042,6 +1043,42 @@ class ConfigLoader:
             )
         except (RuntimeError, ValueError) as exc:
             raise ConfigValidationError(str(exc)) from exc
+
+    #: Top-level blocks keyed by Region whose entries patch a feature block
+    #: for that Region only.
+    REGION_OVERLAY_KEYS: tuple[str, ...] = (
+        FSX_LUSTRE_REGIONS_CONTEXT_KEY,
+        PCS_REGIONS_KEY,
+        HYPERPOD_REGIONS_KEY,
+    )
+
+    def _validate_region_overlays(self) -> None:
+        """Check the Region names of ``fsx_lustre_regions``, ``pcs_regions`` and ``hyperpod_regions``.
+
+        An entry for a name that is not an AWS Region (a typo such as
+        ``us-east1``) fails: it can never take effect. An entry for a real
+        Region outside ``deployment_regions.regional`` only warns: no stack
+        reads it today, which is expected while a Region is being staged
+        before it is added, or in a control-plane-only deployment. Each
+        feature's validator checks the entries' contents.
+        """
+        deployed = set(self.get_regions())
+        for key in self.REGION_OVERLAY_KEYS:
+            overlays = self.app.node.try_get_context(key)
+            if not isinstance(overlays, dict):
+                continue  # absent, or malformed and reported by the feature's validator
+            for region in sorted(str(name) for name in overlays if not is_comment_key(name)):
+                if region not in self.VALID_REGIONS:
+                    raise ConfigValidationError(
+                        f"{key}.{region} is not an AWS Region known to the installed SDK; "
+                        f"{key} is keyed by Region name, such as us-east-1"
+                    )
+                if region not in deployed:
+                    self._warn(
+                        f"{key}.{region} has no effect: {region} is not in "
+                        "deployment_regions.regional, so no regional stack reads it (expected "
+                        "while staging a Region before adding it)."
+                    )
 
     def _validate_resource_thresholds(self) -> None:
         """Validate resource threshold configuration"""

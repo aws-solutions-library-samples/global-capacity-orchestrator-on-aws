@@ -2540,6 +2540,11 @@ instead of failing halfway through a deploy.
   stack builds that image itself),
   `global_accelerator.health_check_grace_period` and
   `global_accelerator.health_check_timeout`.
+- The per-Region overlays (`fsx_lustre_regions`, `pcs_regions`,
+  `hyperpod_regions`) are keyed by Region name. A name that is not an AWS
+  Region fails; a real Region that is not in `deployment_regions.regional`
+  draws a warning, because no stack reads it until the Region is added (which
+  is how a Region is staged).
 - A top-level key in GCO's `snake_case` style that GCO does not read draws a
   warning, because it is most likely a misspelt block. Keys of the CDK itself
   (`@aws-cdk/...`, `aws:cdk:...`) are not checked.
