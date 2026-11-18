@@ -558,7 +558,11 @@ def _isolated_mcp_stacks(*enabled_flags: str) -> Iterator[_LoadedMcpStacks]:
         "audit": _stub_module("audit", audit_logged=lambda function: function),
         "cli": cli_package,
         "cli.config": _stub_module("cli.config", _load_cdk_json=load_cdk_json),
-        "cli_runner": _stub_module("cli_runner", _run_cli=run_cli),
+        "cli_runner": _stub_module(
+            "cli_runner",
+            _run_cli=run_cli,
+            reject_paths_outside_project_root=Mock(return_value=None),
+        ),
         "fastmcp": fastmcp_package,
         "fastmcp.server": fastmcp_server,
         "fastmcp.server.dependencies": _stub_module(
