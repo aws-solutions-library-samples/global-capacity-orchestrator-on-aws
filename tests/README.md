@@ -687,8 +687,8 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_metric_readers_logs.py` | Tests for pulling a scalar out of a job's log lines. |
 | `test_metric_readers_observe.py` | Observe_Phase merge-contract integration test. |
 | `test_metric_readers_shape.py` | Tests for the canonical metric-result builder. |
-| `test_metric_readers_tools.py` | Success-path tests for the metric-reader MCP tool wrappers. |
-| `test_tool_metrics_coverage.py` | Validation and error-envelope coverage for the metric-reader MCP tools (`gco_mcp/tools/metrics.py`): invalid extraction and aggregation modes, bad regex, and the CloudWatch, job-log, and shared-storage failure paths. |
+| `test_metric_readers_tools.py` | Success-path tests for the metric-reader MCP tool wrappers. The job-log tests feed the reader what `_run_cli` really returns: the real `gco --output json jobs logs` output (CliRunner, job manager mocked), i.e. the `{"status": "ok", "output": "<log>"}` envelope, so JSON-key and regex extraction run over the log lines. |
+| `test_tool_metrics_coverage.py` | Validation and error-envelope coverage for the metric-reader MCP tools (`gco_mcp/tools/metrics.py`): invalid extraction and aggregation modes, bad regex, and the CloudWatch, job-log, and shared-storage failure paths; the job-log reader extracts from the log inside the CLI's JSON envelope (all three matches, `last` is the newest), treats `{"status": "ok"}` as an empty log, and reads other payload shapes as log text. |
 
 ### Additional Mission Tests
 
