@@ -334,6 +334,74 @@ def test_dynamodb_item_conversion_leaves_non_numeric_values_alone() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _PagedTable:
+    """A boto3 Table stand-in that answers ``query`` / ``scan`` in pages.
+
+    Each call returns the next page and a ``LastEvaluatedKey`` until the last
+    page; the request a caller sent is recorded so the test can check that
+    ``ExclusiveStartKey`` carried the previous page's key.
+    """
+
+    def __init__(self, pages: list[list[dict[str, Any]]]) -> None:
+        self._pages = pages
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    def _page(self, operation: str, request: dict[str, Any]) -> dict[str, Any]:
+        self.requests.append((operation, dict(request)))
+        index = int(request.get("ExclusiveStartKey", {}).get("page", 0))
+        response: dict[str, Any] = {"Items": self._pages[index]}
+        if index + 1 < len(self._pages):
+            response["LastEvaluatedKey"] = {"page": index + 1}
+        return response
+
+    def query(self, **request: Any) -> dict[str, Any]:
+        return self._page("query", request)
+
+    def scan(self, **request: Any) -> dict[str, Any]:
+        return self._page("scan", request)
+
+
+def _dynamodb_item(session_id: str, status: str = "running") -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "status": status,
+        "created_at": "2025-01-01T00:00:00+00:00",
+        "iterations": [{"iteration_index": 0}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("list_filter", "operation"),
+    [(None, "scan"), ({"status": "running"}, "query")],
+    ids=["scan", "status-index-query"],
+)
+def test_dynamodb_list_sessions_reads_every_page(
+    list_filter: dict[str, Any] | None, operation: str
+) -> None:
+    from mission.state import DynamoDBBackend
+
+    table = _PagedTable(
+        [
+            [_dynamodb_item("sess-a"), _dynamodb_item("sess-b")],
+            [_dynamodb_item("sess-c")],
+            [],  # DynamoDB may return an empty page before the last key
+            [_dynamodb_item("sess-d")],
+        ]
+    )
+    backend = DynamoDBBackend(table_name="missions")
+    backend._table = table
+
+    summaries = backend.list_sessions(list_filter)
+
+    assert [s["session_id"] for s in summaries] == ["sess-a", "sess-b", "sess-c", "sess-d"]
+    assert {s["iteration_count"] for s in summaries} == {1}
+    assert [op for op, _ in table.requests] == [operation] * 4
+    starts = [request.get("ExclusiveStartKey") for _, request in table.requests]
+    assert starts == [None, {"page": 1}, {"page": 2}, {"page": 3}]
+    if operation == "query":
+        assert all(request["IndexName"] == "status-index" for _, request in table.requests)
+
+
 def test_save_session_strips_parsed_ast_defensively(backend: FilesystemBackend) -> None:
     """``save_session`` must succeed on a session that still carries cached AST.
 
