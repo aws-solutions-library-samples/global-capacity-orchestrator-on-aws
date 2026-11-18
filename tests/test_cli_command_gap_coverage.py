@@ -1443,3 +1443,79 @@ def test_destroy_all_keep_control_plane_with_yes_skips_the_prompt(runner: CliRun
     assert "Are you sure" not in result.output
     assert "gco stacks regions remove <region>" in result.output
     assert manager.destroy_orchestrated.call_args.kwargs["keep_control_plane"] is True
+
+
+_FULL_DEPLOYMENT = [
+    "test-gco-global",
+    "test-gco-api-gateway",
+    "test-gco-us-east-1",
+    "test-gco-us-west-2",
+    "test-gco-regional-api-us-east-1",
+    "test-gco-monitoring",
+]
+
+
+def test_destroy_all_counts_only_the_stacks_it_destroyed(runner: CliRunner) -> None:
+    """A failed monitoring delete stops the teardown before anything else goes."""
+    from cli.commands.stacks_cmd import stacks
+
+    manager = MagicMock()
+    manager.list_stacks.return_value = list(_FULL_DEPLOYMENT)
+    manager.destroy_orchestrated.return_value = (False, [], ["test-gco-monitoring"])
+    with (
+        patch("cli.stacks.get_stack_manager", return_value=manager),
+        patch("time.sleep"),
+    ):
+        result = _invoke(runner, stacks, ["destroy-all", "-y"])
+
+    assert result.exit_code == 1, result.output
+    assert "Destroyed: 0/6 stacks" in result.output
+    assert "Some stacks failed to destroy: test-gco-monitoring" in result.output
+
+
+def test_destroy_all_counts_stacks_destroyed_by_earlier_attempts(runner: CliRunner) -> None:
+    from cli.commands.stacks_cmd import stacks
+
+    manager = MagicMock()
+    manager.list_stacks.return_value = list(_FULL_DEPLOYMENT)
+    manager.destroy_orchestrated.side_effect = [
+        (False, ["test-gco-monitoring", "test-gco-regional-api-us-east-1"], ["test-gco-us-east-1"]),
+        # Already gone, so the retry sees no monitoring stack to delete.
+        (False, ["test-gco-monitoring", "test-gco-us-west-2"], ["test-gco-us-east-1"]),
+        (False, [], ["test-gco-us-east-1"]),
+    ]
+    with (
+        patch("cli.stacks.get_stack_manager", return_value=manager),
+        patch("time.sleep"),
+    ):
+        result = _invoke(runner, stacks, ["destroy-all", "-y"])
+
+    assert result.exit_code == 1, result.output
+    assert "Destroyed: 3/6 stacks" in result.output
+    assert "Some stacks failed to destroy: test-gco-us-east-1" in result.output
+
+
+def test_destroy_all_keep_control_plane_reports_a_failed_monitoring_detach(
+    runner: CliRunner,
+) -> None:
+    """The monitoring stack is updated, not destroyed: its failure is not a failed delete."""
+    from cli.commands.stacks_cmd import stacks
+
+    manager = MagicMock()
+    manager.list_stacks.return_value = list(_FULL_DEPLOYMENT)
+    manager.destroy_orchestrated.return_value = (False, [], ["test-gco-monitoring"])
+    with (
+        patch("cli.stacks.get_stack_manager", return_value=manager),
+        patch("time.sleep"),
+    ):
+        result = _invoke(runner, stacks, ["destroy-all", "-y", "--keep-control-plane"])
+
+    assert result.exit_code == 1, result.output
+    # The destroy set is the bridge and the two regional stacks.
+    assert "Destroyed: 0/3 stacks" in result.output
+    assert (
+        "Could not update test-gco-monitoring to stop referencing the regional stacks"
+        in result.output
+    )
+    assert "failed to destroy" not in result.output
+    assert "stack(s) failed" not in result.output

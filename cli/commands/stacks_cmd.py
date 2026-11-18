@@ -600,6 +600,11 @@ def destroy_all_orchestrated(
                 confirm("\nAre you sure you want to destroy all stacks?", abort=True)
 
         total_stacks = len(stacks)
+        destroy_set = set(stacks)
+        # Every attempt re-runs the whole teardown and reports only what it
+        # reached before stopping, so a stack counts as destroyed when any
+        # attempt deleted it and the last one did not report it as failed.
+        destroyed: set[str] = set()
 
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
@@ -632,7 +637,7 @@ def destroy_all_orchestrated(
                 else:
                     formatter.print_error(f"  ✗ {stack_name} failed")
 
-            success, _successful, failed = manager.destroy_orchestrated(
+            success, successful, failed = manager.destroy_orchestrated(
                 force=True,
                 on_stack_start=on_start,
                 on_stack_complete=on_complete,
@@ -641,15 +646,26 @@ def destroy_all_orchestrated(
                 retain_volumes=retain_volumes,
                 keep_control_plane=keep_control_plane,
             )
+            destroyed.update(name for name in successful if name in destroy_set)
+            # With --keep-control-plane the monitoring stack is updated in
+            # place, not destroyed; when that update fails it is reported here.
+            not_updated = [name for name in failed if name not in destroy_set]
+            failed = [name for name in failed if name in destroy_set]
 
             if success:
                 break
 
             if attempt < max_attempts:
-                formatter.print_warning(f"{len(failed)} stack(s) failed: {', '.join(failed)}")
+                for name in not_updated:
+                    formatter.print_warning(
+                        f"Could not update {name} to stop referencing the regional stacks"
+                    )
+                if failed:
+                    formatter.print_warning(f"{len(failed)} stack(s) failed: {', '.join(failed)}")
 
+        destroyed.difference_update(failed)
         formatter.print_info("")
-        formatter.print_info(f"Destroyed: {total_stacks - len(failed)}/{total_stacks} stacks")
+        formatter.print_info(f"Destroyed: {len(destroyed)}/{total_stacks} stacks")
 
         if success and keep_control_plane:
             formatter.print_success(
@@ -661,7 +677,13 @@ def destroy_all_orchestrated(
         elif success:
             formatter.print_success("All stacks destroyed successfully")
         else:
-            formatter.print_error(f"Some stacks failed to destroy: {', '.join(failed)}")
+            for name in not_updated:
+                formatter.print_error(
+                    f"Could not update {name} to stop referencing the regional stacks, so "
+                    "the workload stacks still standing were not destroyed"
+                )
+            if failed:
+                formatter.print_error(f"Some stacks failed to destroy: {', '.join(failed)}")
             sys.exit(1)
 
     except Exception as e:

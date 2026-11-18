@@ -5230,6 +5230,12 @@ gco stacks destroy-all [OPTIONS]
 | `--keep-control-plane` | | Destroy only the regional API bridges and regional stacks; leave the global, API Gateway, monitoring and analytics stacks standing (scale to zero workload Regions) |
 | `--enable` | | Evaluate the same app the overridden deploy did (`NAME[,NAME...]`, repeatable). Not required for deletion — `DeleteStack` removes whatever the deployed template contains |
 
+A failed teardown is retried up to three times in all, 30 seconds apart. The
+closing `Destroyed: N/M stacks` line counts the stacks of the destroy set that
+some attempt deleted and the last attempt did not report as failed, so stacks a
+stopped teardown never reached do not count as destroyed. The command exits 1
+unless every stack is gone.
+
 ##### Keeping the control plane (`--keep-control-plane`)
 
 `--keep-control-plane` scales the deployment to zero workload Regions instead of
@@ -5243,7 +5249,10 @@ outputs. Before anything is deleted the monitoring stack
 is updated in place with `--context gco:control-plane-only=true` (the run-scoped
 equivalent of an empty `deployment_regions.regional`) so it stops referencing the
 regional stacks; CloudFormation would otherwise refuse to delete a stack whose
-exports are still consumed. The sweeps that only make sense for a full teardown
+exports are still consumed. When that update fails, the attempt deletes nothing:
+the command reports that the monitoring stack could not be updated (it is not
+part of the destroy set, so it is not listed as a failed delete) and exits 1
+once the retries are spent. The sweeps that only make sense for a full teardown
 are skipped: the image-registry preflight, the backup-vault purge, bastion IAM
 retirement, and the traffic-dial parameter purge. Per-stack sweeps (orphaned
 bastions, roles held in instance profiles, implicit and recreated log groups,
