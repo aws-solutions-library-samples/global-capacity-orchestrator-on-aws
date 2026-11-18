@@ -10,7 +10,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import boto3
 import pytest
+from botocore.stub import ANY, Stubber
 
 from tests._lambda_imports import load_lambda_module
 
@@ -40,8 +42,24 @@ def _sps_response(scores_by_region):
     }
 
 
+class _OnePage:
+    """A paginator whose single page is one call to a mocked ``describe_*``.
+
+    ``return_value``, ``side_effect`` and ``call_args`` on the method keep
+    working; following NextToken is covered with botocore's real paginators
+    in ``TestRealPaginators``.
+    """
+
+    def __init__(self, method):
+        self._method = method
+
+    def paginate(self, **kwargs):
+        yield self._method(**kwargs)
+
+
 def _fake_ec2():
     ec2 = MagicMock()
+    ec2.get_paginator.side_effect = lambda operation: _OnePage(getattr(ec2, operation))
     ec2.get_spot_placement_scores.return_value = _sps_response({"us-east-1": 7})
     ec2.describe_spot_price_history.return_value = {
         "SpotPriceHistory": [
@@ -379,6 +397,85 @@ class TestSpotPriceSummary:
             ],
         }
         assert handler._spot_price_summary(ec2, "g5.xlarge") == (1.0, 1)
+
+
+class TestRealPaginators:
+    """Both probes read every page through botocore's own paginators (L13).
+
+    Before, each made one call and dropped the NextToken, so an AZ, or a
+    Capacity Block offering, on a later page was not counted.
+    """
+
+    @pytest.fixture
+    def stubbed_ec2(self):
+        client = boto3.client(
+            "ec2",
+            region_name="us-east-1",
+            aws_access_key_id="testing",
+            aws_secret_access_key="testing",
+        )
+        with Stubber(client) as stubber:
+            yield client, stubber
+            stubber.assert_no_pending_responses()
+
+    def test_spot_price_history_reads_the_later_pages(self, handler, stubbed_ec2):
+        client, stubber = stubbed_ec2
+        params = {
+            "InstanceTypes": ["g5.xlarge"],
+            "ProductDescriptions": ["Linux/UNIX"],
+            "StartTime": ANY,
+            "EndTime": ANY,
+        }
+        stubber.add_response(
+            "describe_spot_price_history",
+            {
+                "SpotPriceHistory": [
+                    {"AvailabilityZone": "us-east-1a", "SpotPrice": "1.0"},
+                    {"AvailabilityZone": "us-east-1b", "SpotPrice": "2.0"},
+                ],
+                "NextToken": "page-2",
+            },
+            params,
+        )
+        stubber.add_response(
+            "describe_spot_price_history",
+            {"SpotPriceHistory": [{"AvailabilityZone": "us-east-1c", "SpotPrice": "6.0"}]},
+            {**params, "NextToken": "page-2"},
+        )
+
+        assert handler._spot_price_summary(client, "g5.xlarge") == (3.0, 3)
+
+    def test_capacity_block_offerings_reads_the_later_pages(self, handler, stubbed_ec2):
+        client, stubber = stubbed_ec2
+        params = {"InstanceType": "p5.48xlarge", "InstanceCount": 1, "CapacityDurationHours": 24}
+        stubber.add_response(
+            "describe_capacity_block_offerings",
+            {"CapacityBlockOfferings": [{"InstanceCount": 2}], "NextToken": "page-2"},
+            params,
+        )
+        stubber.add_response(
+            "describe_capacity_block_offerings",
+            {"CapacityBlockOfferings": [{"InstanceCount": 4}, {"InstanceCount": 1}]},
+            {**params, "NextToken": "page-2"},
+        )
+
+        assert handler._capacity_block_summary(client, "p5.48xlarge") == (3, 7)
+
+    def test_a_failure_on_a_later_page_is_absent_not_partial(self, handler, stubbed_ec2):
+        client, stubber = stubbed_ec2
+        params = {"InstanceType": "p5.48xlarge", "InstanceCount": 1, "CapacityDurationHours": 24}
+        stubber.add_response(
+            "describe_capacity_block_offerings",
+            {"CapacityBlockOfferings": [{"InstanceCount": 2}], "NextToken": "page-2"},
+            params,
+        )
+        stubber.add_client_error(
+            "describe_capacity_block_offerings",
+            service_error_code="RequestLimitExceeded",
+            expected_params={**params, "NextToken": "page-2"},
+        )
+
+        assert handler._capacity_block_summary(client, "p5.48xlarge") == (None, None)
 
 
 class TestDynamoConversions:
