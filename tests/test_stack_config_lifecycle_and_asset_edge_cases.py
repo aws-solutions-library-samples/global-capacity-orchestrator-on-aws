@@ -1547,9 +1547,11 @@ def test_synth_and_diff_without_stack_names_build_expected_commands(
     )
     assert stack_manager.synth(stack_name=None, quiet=False) == "template"
     assert stack_manager.diff(stack_name=None) == "difference"
-    assert stack_manager._run_cdk.call_args_list[0] == call(["synth"], capture_output=True)
+    assert stack_manager._run_cdk.call_args_list[0] == call(
+        ["synth"], capture_output=True, prepare_assets=False
+    )
     assert stack_manager._run_cdk.call_args_list[1] == call(
-        ["diff", "--no-color"], capture_output=True
+        ["diff", "--no-color"], capture_output=True, prepare_assets=False
     )
 
 
@@ -2140,10 +2142,174 @@ def test_windows_file_lock_retries_contention_then_acquires() -> None:
         patch.object(stacks, "_file_lock_timeout_seconds", return_value=2.0),
         patch.object(stacks.time, "monotonic", return_value=0.0),
     ):
-        stacks._acquire_file_lock(handle, exclusive=False, purpose="asset")
+        assert stacks._acquire_file_lock(handle, exclusive=False, purpose="asset") is True
 
     assert msvcrt.locking.call_count == 2
     handle.seek.assert_called_with(0)
+
+
+def test_windows_file_lock_wait_ends_when_stop_waiting_says_so() -> None:
+    import cli.stacks as stacks
+
+    handle = MagicMock()
+    handle.fileno.return_value = 8
+    msvcrt = SimpleNamespace(
+        LK_NBLCK=1,
+        LK_UNLCK=2,
+        locking=MagicMock(side_effect=BlockingIOError(errno.EAGAIN, "busy")),
+    )
+    stop_waiting = MagicMock(side_effect=[False, True])
+    with (
+        patch.object(stacks.os, "name", "nt"),
+        patch.dict(sys.modules, {"msvcrt": msvcrt}),
+        patch.object(stacks, "_file_lock_timeout_seconds", return_value=60.0),
+        patch.object(stacks.time, "monotonic", return_value=0.0),
+        patch.object(stacks.time, "sleep") as sleep,
+    ):
+        acquired = stacks._acquire_file_lock(
+            handle, exclusive=True, purpose="asset", stop_waiting=stop_waiting
+        )
+
+    assert acquired is False
+    assert msvcrt.locking.call_count == 2
+    assert stop_waiting.call_count == 2
+    sleep.assert_called_once_with(stacks._FILE_LOCK_RETRY_SECONDS)
+
+
+def test_posix_lock_wait_ends_when_stop_waiting_says_so() -> None:
+    import cli.stacks as stacks
+
+    stop_waiting = MagicMock(side_effect=[False, True])
+    with (
+        patch("fcntl.flock", side_effect=BlockingIOError(errno.EAGAIN, "busy")) as flock,
+        patch.object(stacks.time, "monotonic", return_value=0.0),
+        patch.object(stacks.time, "sleep") as sleep,
+    ):
+        acquired = stacks._acquire_posix_flock(
+            1,
+            lock_name="lock",
+            exclusive=True,
+            purpose="asset",
+            stop_waiting=stop_waiting,
+        )
+
+    assert acquired is False
+    # The first attempt, then one retry per stop_waiting answer.
+    assert flock.call_count == 3
+    assert stop_waiting.call_count == 2
+    sleep.assert_called_once_with(stacks._FILE_LOCK_RETRY_SECONDS)
+
+
+def test_try_shared_file_lock_windows_and_posix() -> None:
+    import fcntl
+
+    import cli.stacks as stacks
+
+    handle = MagicMock()
+    handle.fileno.return_value = 5
+    msvcrt = SimpleNamespace(
+        LK_NBLCK=1,
+        locking=MagicMock(
+            side_effect=[None, BlockingIOError(errno.EAGAIN, "busy"), OSError(errno.EBADF, "bad")]
+        ),
+    )
+    with patch.object(stacks.os, "name", "nt"), patch.dict(sys.modules, {"msvcrt": msvcrt}):
+        assert stacks._try_shared_file_lock(handle) is True
+        assert stacks._try_shared_file_lock(handle) is False
+        with pytest.raises(OSError, match="bad"):
+            stacks._try_shared_file_lock(handle)
+    msvcrt.locking.assert_called_with(5, 1, 1)
+    handle.seek.assert_called_with(0)
+
+    with (
+        patch.object(stacks.os, "name", "posix"),
+        patch(
+            "fcntl.flock",
+            side_effect=[None, BlockingIOError(errno.EAGAIN, "busy"), OSError(errno.EBADF, "bad")],
+        ) as flock,
+    ):
+        assert stacks._try_shared_file_lock(handle) is True
+        assert stacks._try_shared_file_lock(handle) is False
+        with pytest.raises(OSError, match="bad"):
+            stacks._try_shared_file_lock(handle)
+    flock.assert_called_with(5, fcntl.LOCK_SH | fcntl.LOCK_NB)
+
+
+def test_published_while_waiting_is_throttled_and_needs_the_shared_lock(tmp_path: Path) -> None:
+    import cli.stacks as stacks
+
+    source = tmp_path / "lambda" / "demo"
+    build = tmp_path / "lambda" / "demo-build"
+    source.mkdir(parents=True)
+    clock = iter([0.0, 1.0, 2.0, 3.0, 4.0, 6.5])
+    with (
+        patch.object(stacks, "_ASSET_PUBLISHED_RECHECK_SECONDS", 2.0),
+        patch.object(stacks.time, "monotonic", side_effect=lambda: next(clock)),
+        patch.object(stacks, "_try_shared_file_lock", side_effect=[False, True, True]) as lock,
+        patch.object(stacks, "_release_file_lock") as release,
+        patch.object(stacks, "_asset_build_is_fresh_unlocked", side_effect=[False, True]) as fresh,
+    ):
+        published = stacks._published_while_waiting(source, build, source_inputs=("handler.py",))
+        # 1.0 and 3.0 fall inside the interval; 2.0 finds a publish holding the
+        # lock; 4.0 reads a stale build; 6.5 reads the published one.
+        assert [published() for _ in range(5)] == [False, False, False, False, True]
+
+    assert lock.call_count == 3
+    assert release.call_count == 2
+    assert fresh.call_args_list == [call(source, build, source_inputs=("handler.py",))] * 2
+
+
+def test_lambda_asset_lock_yields_false_and_holds_nothing_when_the_wait_stops(
+    tmp_path: Path,
+) -> None:
+    import cli.stacks as stacks
+
+    build = tmp_path / "lambda" / "demo-build"
+    lock_key = os.path.normcase(os.path.abspath(build.with_name(f".{build.name}.lock")))
+    stop_waiting = MagicMock()
+    with (
+        patch.object(stacks, "_acquire_file_lock", return_value=False) as acquire,
+        patch.object(stacks, "_release_file_lock") as release,
+        stacks._lambda_asset_lock(build, exclusive=True, stop_waiting=stop_waiting) as locked,
+    ):
+        assert locked is False
+        assert lock_key not in stacks._thread_asset_locks()
+
+    assert acquire.call_args.kwargs == {
+        "exclusive": True,
+        "purpose": "asset",
+        "stop_waiting": stop_waiting,
+    }
+    release.assert_not_called()
+
+
+def test_prepare_lambda_asset_returns_when_another_publish_ends_the_wait(tmp_path: Path) -> None:
+    import cli.stacks as stacks
+
+    source = tmp_path / "lambda" / "source"
+    build = tmp_path / "lambda" / "source-build"
+    source.mkdir(parents=True)
+    (source / "handler.py").write_text("source", encoding="utf-8")
+    builder = MagicMock()
+
+    with (
+        patch.object(stacks, "_asset_build_is_fresh", return_value=False),
+        patch.object(stacks, "_acquire_file_lock", return_value=False) as acquire,
+        patch.object(stacks, "_recover_interrupted_asset_publish") as recover,
+    ):
+        changed = stacks._prepare_lambda_asset(
+            source,
+            build,
+            source_inputs=None,
+            display_name="demo",
+            builder=builder,
+        )
+
+    assert changed is False
+    assert acquire.call_args.kwargs["exclusive"] is True
+    assert callable(acquire.call_args.kwargs["stop_waiting"])
+    recover.assert_not_called()
+    builder.assert_not_called()
 
 
 def test_publish_staged_asset_without_previous_tree(tmp_path: Path) -> None:
@@ -2901,8 +3067,8 @@ def test_synth_and_diff_named_stack_include_optional_arguments(
     assert stack_manager.synth("gco-global", quiet=True) == "template"
     assert stack_manager.diff("gco-global") == "difference"
     assert stack_manager._run_cdk.call_args_list == [
-        call(["synth", "gco-global", "--quiet"], capture_output=True),
-        call(["diff", "--no-color", "gco-global"], capture_output=True),
+        call(["synth", "gco-global", "--quiet"], capture_output=True, prepare_assets=False),
+        call(["diff", "--no-color", "gco-global"], capture_output=True, prepare_assets=False),
     ]
 
 
@@ -4187,14 +4353,15 @@ def test_posix_file_lock_dispatches_through_native_flock() -> None:
     handle.fileno.return_value = 19
     with (
         patch.object(stacks.os, "name", "posix"),
-        patch.object(stacks, "_acquire_posix_flock") as acquire,
+        patch.object(stacks, "_acquire_posix_flock", return_value=True) as acquire,
     ):
-        stacks._acquire_file_lock(handle, exclusive=True, purpose="configuration")
+        assert stacks._acquire_file_lock(handle, exclusive=True, purpose="configuration") is True
     acquire.assert_called_once_with(
         19,
         lock_name=handle.name,
         exclusive=True,
         purpose="configuration",
+        stop_waiting=None,
     )
 
 

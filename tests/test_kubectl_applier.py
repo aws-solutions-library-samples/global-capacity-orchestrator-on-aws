@@ -533,6 +533,80 @@ class TestLegacyRemovedResources:
             "gco-api-selfsigned",
         ) in handler_module._LEGACY_REMOVED_RESOURCES
 
+    def test_inventory_targets_the_v4_alb_entry_point(self, handler_module):
+        # v0.1.0 through v4.1.0 shipped 10-ingressclass.yaml and
+        # 11-ingress.yaml with exactly these three objects (an
+        # internet-facing EKS Auto Mode ALB); v5.0.0 replaced them with the
+        # Gateway API entry point. Referrers go first, in the order the EKS
+        # Auto Mode guide removes an ALB: Ingress, IngressClass, params.
+        v4_entry_point = [
+            ("networking.k8s.io/v1", "Ingress", "gco-system", "gco-ingress"),
+            ("networking.k8s.io/v1", "IngressClass", None, "alb"),
+            ("eks.amazonaws.com/v1", "IngressClassParams", None, "alb"),
+        ]
+        inventory = list(handler_module._LEGACY_REMOVED_RESOURCES)
+        positions = [inventory.index(entry) for entry in v4_entry_point]
+        assert positions == sorted(positions)
+
+    def test_v4_alb_entry_point_sweep_deletes_cluster_scoped_objects_without_namespace(
+        self, handler_module
+    ):
+        resources: dict[tuple[str, str], MagicMock] = {}
+
+        def resources_get(*, api_version: str, kind: str) -> MagicMock:
+            return resources.setdefault((api_version, kind), MagicMock())
+
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.side_effect = resources_get
+        delete_options = MagicMock()
+        with (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=mock_dynamic),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=delete_options),
+        ):
+            result = handler_module._prune_legacy_removed_resources()
+
+        assert resources[("networking.k8s.io/v1", "Ingress")].delete.call_args_list == [
+            call(name="gco-ingress", namespace="gco-system", body=delete_options)
+        ]
+        assert resources[("networking.k8s.io/v1", "IngressClass")].delete.call_args_list == [
+            call(name="alb", body=delete_options)
+        ]
+        assert resources[("eks.amazonaws.com/v1", "IngressClassParams")].delete.call_args_list == [
+            call(name="alb", body=delete_options)
+        ]
+        assert result["pruned"][-3:] == [
+            "networking.k8s.io/v1/Ingress/gco-system/gco-ingress",
+            "networking.k8s.io/v1/IngressClass/<cluster>/alb",
+            "eks.amazonaws.com/v1/IngressClassParams/<cluster>/alb",
+        ]
+        assert result["failed"] == []
+
+    def test_ingress_class_params_sweep_without_the_auto_mode_api_is_a_noop(self, handler_module):
+        """A cluster without EKS Auto Mode's API group (kind CI) has nothing to sweep."""
+        from kubernetes.client.rest import ApiException
+
+        def resources_get(*, api_version: str, kind: str) -> MagicMock:
+            if api_version == "eks.amazonaws.com/v1":
+                raise handler_module.ResourceNotFoundError(f"no {kind} API")
+            resource = MagicMock()
+            resource.delete.side_effect = ApiException(status=404, reason="Not Found")
+            return resource
+
+        mock_dynamic = MagicMock()
+        mock_dynamic.resources.get.side_effect = resources_get
+        with (
+            patch.object(handler_module.dynamic, "DynamicClient", return_value=mock_dynamic),
+            patch.object(handler_module.client, "ApiClient", return_value=MagicMock()),
+            patch.object(handler_module.client, "V1DeleteOptions", return_value=MagicMock()),
+        ):
+            result = handler_module._prune_legacy_removed_resources()
+
+        assert result == {"pruned": [], "failed": []}
+        assert call(api_version="eks.amazonaws.com/v1", kind="IngressClassParams") in (
+            mock_dynamic.resources.get.call_args_list
+        )
+
     def test_issuer_sweep_before_cert_manager_exists_is_a_noop(self, handler_module):
         """Base pass on a fresh cluster: the cert-manager CRDs do not exist yet."""
         mock_dynamic = MagicMock()
@@ -560,14 +634,21 @@ class TestLegacyRemovedResources:
         )
 
     def test_no_legacy_entry_still_ships_as_a_manifest(self, handler_module):
+        # Compared by kind and name, not as text: the IngressClass name "alb"
+        # also occurs inside shipped names (gco-aws-alb, allow-alb-to-*).
         manifests_dir = (
             Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
         )
-        shipped = "\n".join(
-            path.read_text(encoding="utf-8") for path in sorted(manifests_dir.glob("*.yaml"))
-        )
-        for _, _, _, name in handler_module._LEGACY_REMOVED_RESOURCES:
-            assert name not in shipped, f"{name} is swept as legacy but still shipped"
+        shipped = {
+            (doc.get("kind"), (doc.get("metadata") or {}).get("name"))
+            for path in sorted(manifests_dir.glob("*.yaml"))
+            for doc in _parse_manifest_documents(path)
+        }
+        assert ("Gateway", "gco-gateway") in shipped
+        for _, kind, _, name in handler_module._LEGACY_REMOVED_RESOURCES:
+            assert (kind, name) not in shipped, (
+                f"{kind} {name} is swept as legacy but still shipped"
+            )
 
     def test_sweep_deletes_exact_resource(self, handler_module):
         mock_resource = MagicMock()
@@ -588,11 +669,13 @@ class TestLegacyRemovedResources:
         ]
         assert mock_resource.delete.call_args_list == [
             call(name=name, namespace=namespace, body=delete_options)
+            if namespace is not None
+            else call(name=name, body=delete_options)
             for _api, _kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES
         ]
         assert result == {
             "pruned": [
-                f"{api_version}/{kind}/{namespace}/{name}"
+                f"{api_version}/{kind}/{namespace or '<cluster>'}/{name}"
                 for api_version, kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES
             ],
             "failed": [],

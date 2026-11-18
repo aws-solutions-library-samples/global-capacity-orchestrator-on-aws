@@ -12,6 +12,7 @@ get_job_store), including ClientError propagation across store operations.
 """
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -63,6 +64,25 @@ class TestTemplateStore:
             store = TemplateStore(table_name="custom-table", region="eu-west-1")
             assert store.table_name == "custom-table"
             assert store.region == "eu-west-1"
+
+    def test_dynamodb_calls_have_bounded_timeouts_and_retries(self):
+        """Template routes run inside the manifest API; botocore's 60 s defaults do not."""
+        with patch("boto3.resource") as resource:
+            TemplateStore(table_name="t", region="us-east-1")
+        client_config = resource.call_args.kwargs["config"]
+        assert client_config.connect_timeout == 3
+        assert client_config.read_timeout == 10
+        assert client_config.retries == {"max_attempts": 3, "mode": "standard"}
+
+    @pytest.mark.parametrize("store_class", [TemplateStore, WebhookStore, JobStore])
+    def test_every_store_uses_the_one_bounded_config(self, store_class):
+        with patch("boto3.resource") as resource:
+            store_class(table_name="t", region="us-east-1")
+        assert resource.call_args.args == ("dynamodb",)
+        assert resource.call_args.kwargs == {
+            "region_name": "us-east-1",
+            "config": sys.modules[store_class.__module__]._DYNAMODB_CONFIG,
+        }
 
     def test_list_templates_empty(self, template_store, mock_dynamodb):
         """Test listing templates when none exist."""

@@ -400,13 +400,12 @@ rules:
     verbs: ["get", "create", "patch", "delete"]
 
   # Temporary upgrade cleanup: terminal proof gets, provenance-patches, and
-  # UID/resourceVersion-deletes historical endpoint-specific routes. List is
-  # intentionally omitted because cleanup uses deterministic names.
+  # UID/resourceVersion-deletes the inference-{name} and inference-{name}-proxy
+  # Ingresses releases up to v4.1.0 created per endpoint. List is
+  # intentionally omitted because cleanup uses deterministic names. No release
+  # created a per-endpoint HTTPRoute, so the monitor has no Gateway API grant.
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
-    verbs: ["get", "patch", "delete"]
-  - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["httproutes"]
     verbs: ["get", "patch", "delete"]
 
   # Networking resources — NetworkPolicy allow rules that let inference pods
