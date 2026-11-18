@@ -127,8 +127,7 @@ class TestMCPStorageTools:
         asyncio.run(module.list_storage_buckets("ap-south-1"))
         asyncio.run(module.files_get("us-east-1"))
         asyncio.run(module.files_get("us-east-1", "fsx"))
-        asyncio.run(module.files_access_points())
-        asyncio.run(module.files_access_points("eu-central-1"))
+        asyncio.run(module.files_access_points("fs-0123456789abcdef0", "eu-central-1"))
 
         assert ("files", "ls", "-r", "us-west-2", "/outputs") in runner.calls
         assert ("files", "list") in runner.calls
@@ -136,7 +135,13 @@ class TestMCPStorageTools:
         assert ("storage", "list") in runner.calls
         assert ("storage", "list", "--region", "ap-south-1") in runner.calls
         assert ("files", "get", "us-east-1", "-t", "fsx") in runner.calls
-        assert ("files", "access-points", "-r", "eu-central-1") in runner.calls
+        assert (
+            "files",
+            "access-points",
+            "fs-0123456789abcdef0",
+            "-r",
+            "eu-central-1",
+        ) in runner.calls
         assert not hasattr(module, "upload_to_regional_bucket")
         assert not hasattr(module, "sync_storage_bucket")
 

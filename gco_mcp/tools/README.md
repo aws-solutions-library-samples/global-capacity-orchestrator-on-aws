@@ -367,7 +367,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `files_access_points` | `gco files access-points` — list [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) access points. |
+| `files_access_points` | `gco files access-points FILE_SYSTEM_ID --region REGION` — list the access points of one [EFS](https://docs.aws.amazon.com/efs/latest/ug/whatisefs.html) file system. |
 | `files_get` | `gco files get` — get file system details for a region (EFS/FSx). |
 | `list_file_systems` | List EFS and FSx file systems. |
 | `list_storage_buckets` | List deployed GCO [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) buckets and their human-friendly aliases. |

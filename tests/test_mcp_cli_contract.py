@@ -283,6 +283,24 @@ def test_analytics_user_add_passes_the_username_as_an_option(
     assert params["generate_password"] is False
 
 
+def test_files_access_points_passes_the_file_system_id_and_required_region() -> None:
+    """``gco files access-points FILE_SYSTEM_ID --region REGION``: the tool used to
+    omit the file system ID and to make the (required) region optional."""
+    import inspect
+
+    sys.path.insert(0, str(PROJECT_ROOT / "gco_mcp"))
+    import run_mcp
+
+    argv = _argv_built_by(run_mcp.files_access_points, "fs-0123456789abcdef0", "us-east-1")
+
+    params = _parse_cli_argv(argv).params
+    assert params["file_system_id"] == "fs-0123456789abcdef0"
+    assert params["region"] == "us-east-1"
+    signature = inspect.signature(run_mcp.files_access_points)
+    assert signature.parameters["file_system_id"].default is inspect.Parameter.empty
+    assert signature.parameters["region"].default is inspect.Parameter.empty
+
+
 def test_every_mcp_tool_builds_a_valid_cli_invocation() -> None:
     from cli.main import cli
 

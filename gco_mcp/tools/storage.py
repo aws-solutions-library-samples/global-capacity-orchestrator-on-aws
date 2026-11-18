@@ -117,16 +117,18 @@ async def files_get(region: str, fs_type: str = "efs") -> str:
 
 @mcp.tool(tags={"safe", "files"})
 @audit_logged
-async def files_access_points(region: str | None = None) -> str:
-    """`gco files access-points` — list EFS access points.
+async def files_access_points(file_system_id: str, region: str) -> str:
+    """`gco files access-points` — list the access points of one EFS file system.
+
+    ``files_get`` returns the file system ID for a region.
 
     Args:
-        region: AWS region.
+        file_system_id: EFS file system ID (e.g. ``fs-0123456789abcdef0``).
+        region: AWS region the file system lives in.
     """
-    args = ["files", "access-points"]
-    if region:
-        args += ["-r", region]
-    return await asyncio.to_thread(cli_runner._run_cli, *args)
+    return await asyncio.to_thread(
+        cli_runner._run_cli, "files", "access-points", file_system_id, "-r", region
+    )
 
 
 # =============================================================================

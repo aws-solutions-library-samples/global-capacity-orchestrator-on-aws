@@ -783,7 +783,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `list_file_systems` | List EFS and FSx file systems | safe | — |
 | `list_storage_buckets` | Discover user-facing GCO S3 buckets and their stable aliases | safe | — |
 | `files_get` | Get EFS or FSx file-system details for a region | safe | — |
-| `files_access_points` | List EFS access points | safe | — |
+| `files_access_points` | List the access points of one EFS file system (`file_system_id` and `region` are required) | safe | — |
 | `upload_to_regional_bucket` | Upload a confined local file or directory to a region's shared S3 bucket | data-upload | `GCO_ENABLE_MODEL_UPLOAD` |
 | `sync_storage_bucket` | Incrementally download from or upload to a GCO S3 bucket or prefix | low-risk | `GCO_ENABLE_LOCAL_STORAGE_SYNC` |
 

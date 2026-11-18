@@ -2978,24 +2978,20 @@ class TestStorageReadOnlyTools:
             assert cmd[cmd.index("-t") : cmd.index("-t") + 2] == ["-t", "efs"]
 
     @pytest.mark.asyncio
-    async def test_files_access_points_no_args(self):
+    async def test_files_access_points_passes_file_system_and_region(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
-            await run_mcp.files_access_points()
+            await run_mcp.files_access_points(
+                file_system_id="fs-0123456789abcdef0", region="us-east-1"
+            )
             cmd = mock.call_args[0][0]
-            assert "files" in cmd
-            assert "access-points" in cmd
-            assert "-r" not in cmd
-
-    @pytest.mark.asyncio
-    async def test_files_access_points_with_region(self):
-        with patch("cli_runner.subprocess.run") as mock:
-            mock.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
-            await run_mcp.files_access_points(region="us-east-1")
-            cmd = mock.call_args[0][0]
-            assert "files" in cmd
-            assert "access-points" in cmd
-            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
+            assert cmd[cmd.index("files") :] == [
+                "files",
+                "access-points",
+                "fs-0123456789abcdef0",
+                "-r",
+                "us-east-1",
+            ]
 
 
 # =============================================================================
