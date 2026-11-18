@@ -563,7 +563,20 @@ class InferenceManager:
 
         Returns:
             Created endpoint record
+
+        Raises:
+            ValueError: For an invalid spec, for a name that is not a DNS-1035
+                label of at most 55 characters, or for a name whose derived
+                Kubernetes object names (``<name>-canary``, ``<name>-proxy``
+                and the others) would be shared with an existing endpoint, in
+                either direction.
         """
+        from gco.services.inference_store import (
+            check_endpoint_name_collisions,
+            validate_endpoint_name,
+        )
+
+        validate_endpoint_name(endpoint_name)
         if framework not in (None, "vllm", "sglang"):
             raise ValueError("framework must be 'vllm' or 'sglang'")
         if mooncake_mode is not None and framework == "sglang":
@@ -692,6 +705,14 @@ class InferenceManager:
             spec["mooncake"] = mooncake_block
 
         store = self._get_store()
+        check_endpoint_name_collisions(
+            endpoint_name,
+            (
+                existing["endpoint_name"]
+                for existing in store.list_endpoints()
+                if isinstance(existing.get("endpoint_name"), str)
+            ),
+        )
         result: dict[str, Any] = store.create_endpoint(
             endpoint_name=endpoint_name,
             spec=spec,

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,6 +32,84 @@ def _utc_now_iso() -> str:
 def _new_lifecycle_token() -> str:
     """Return a cryptographically random immutable lifecycle token."""
     return secrets.token_hex(32)
+
+
+# The suffixes the inference monitor appends to an endpoint name to name the
+# endpoint's Kubernetes objects (canary, Mooncake roles and proxy, the generated
+# admin Secret, the ConfigMaps), and the prefix KEDA gives the HPAs it creates.
+_ENDPOINT_OBJECT_SUFFIXES = (
+    "-canary",
+    "-prefill",
+    "-decode",
+    "-proxy",
+    "-admin",
+    "-mooncake",
+    "-pd-proxy",
+    "-tls-proxy",
+)
+_KEDA_HPA_PREFIX = "keda-hpa-"
+
+# Services and pod ``app`` labels carry the role names, so ``<name>-prefill``,
+# the longest of them, must fit in a 63-character DNS-1035 label.
+ENDPOINT_NAME_MAX_LENGTH = 63 - len("-prefill")
+_ENDPOINT_NAME_PATTERN = re.compile(r"[a-z](?:[-a-z0-9]*[a-z0-9])?")
+
+
+def endpoint_object_names(endpoint_name: str) -> frozenset[str]:
+    """Every Kubernetes object name the inference monitor derives from ``endpoint_name``."""
+    return frozenset(
+        {
+            endpoint_name,
+            *(endpoint_name + suffix for suffix in _ENDPOINT_OBJECT_SUFFIXES),
+            *(
+                f"{_KEDA_HPA_PREFIX}{endpoint_name}{suffix}"
+                for suffix in ("", "-prefill", "-decode")
+            ),
+        }
+    )
+
+
+def validate_endpoint_name(endpoint_name: str) -> None:
+    """Refuse a name the endpoint's Kubernetes objects cannot carry.
+
+    Raises:
+        ValueError: Unless the name is a DNS-1035 label (lowercase letters,
+            digits and ``-``, starting with a letter, ending with a letter or
+            digit) of at most :data:`ENDPOINT_NAME_MAX_LENGTH` characters.
+    """
+    if len(endpoint_name) > ENDPOINT_NAME_MAX_LENGTH or not _ENDPOINT_NAME_PATTERN.fullmatch(
+        endpoint_name
+    ):
+        raise ValueError(
+            f"Invalid endpoint name {endpoint_name!r}: use lowercase letters, digits and '-', "
+            "starting with a letter and ending with a letter or digit, at most "
+            f"{ENDPOINT_NAME_MAX_LENGTH} characters (so '<name>-prefill' fits a "
+            "63-character Kubernetes name)"
+        )
+
+
+def check_endpoint_name_collisions(endpoint_name: str, existing_names: Iterable[str]) -> None:
+    """Refuse a name whose Kubernetes objects would share a name with another endpoint's.
+
+    ``llama-canary`` beside ``llama`` would both own the Deployment
+    ``llama-canary``, and so would ``foo-proxy`` beside a Mooncake ``foo``; the
+    check runs in both directions over every derived name. An existing record
+    of the same name is left to :meth:`InferenceEndpointStore.create_endpoint`,
+    which reports it as already existing.
+
+    Raises:
+        ValueError: Naming the other endpoint and one shared object name.
+    """
+    owned = endpoint_object_names(endpoint_name)
+    for other in sorted(set(existing_names) - {endpoint_name}):
+        shared = owned & endpoint_object_names(other)
+        if shared:
+            raise ValueError(
+                f"Endpoint name {endpoint_name!r} collides with endpoint {other!r}: both would "
+                f"own the Kubernetes object {min(shared)!r}. Pick a name that is not another "
+                "endpoint's name plus one of the suffixes "
+                f"{', '.join(_ENDPOINT_OBJECT_SUFFIXES)} (or the reverse)"
+            )
 
 
 def _validate_endpoint_spec(spec: dict[str, Any]) -> None:
@@ -473,11 +553,17 @@ class InferenceEndpointStore:
             condition += " AND region_generations.#r = :expected_region_generation"
             values[":expected_region_generation"] = expected_region_generation
         if expected_deletion_generation is not None:
+            # Only this generation's own terminal acknowledgement is final. A
+            # Region removed before the delete holds a terminal acknowledgement
+            # of its removal (state "deleted", no deletion generation) and
+            # still has to acknowledge the deletion, or the purge never runs.
             condition += (
                 " AND desired_state = :deleted "
                 "AND deletion_generation = :expected_deletion_generation "
                 "AND (attribute_not_exists(region_status.#r.#state) "
-                "OR region_status.#r.#state <> :terminal_deleted)"
+                "OR region_status.#r.#state <> :terminal_deleted "
+                "OR attribute_not_exists(region_status.#r.deletion_generation) "
+                "OR region_status.#r.deletion_generation <> :expected_deletion_generation)"
             )
             names["#state"] = "state"
             values[":deleted"] = "deleted"

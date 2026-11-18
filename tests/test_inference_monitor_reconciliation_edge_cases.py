@@ -908,10 +908,35 @@ def test_regional_bucket_resolution_swallows_ssm_failure() -> None:
         ("https://service.us-west-2.amazonaws.com", "us-west-2"),
         ("model.gco-inference.svc.cluster.local", REGION),
         ("public.example.com", "unknown"),
+        # Endpoint names shaped like a region token are still in-cluster names.
+        ("my-llama-3-prefill.gco-inference.svc.cluster.local", REGION),
+        ("qa-model-1-decode.gco-inference.svc", REGION),
+        ("team-ml-bert-2-prefill", REGION),
+        ("http://mooncake-master.us-west-2.svc.cluster.local:8080/metadata", REGION),
+        # Only real AWS Region shapes count outside the cluster.
+        ("pd-test-2.example.com", "unknown"),
+        ("cache.eu-central-1.internal", "eu-central-1"),
+        ("cache.ap-northeast-3.internal", "ap-northeast-3"),
+        ("cache.us-gov-west-1.internal", "us-gov-west-1"),
+        ("cache.il-central-1.internal", "il-central-1"),
     ],
 )
 def test_region_address_classification(address: str, expected: str) -> None:
     assert _make_monitor()._region_of_address(address) == expected
+
+
+@pytest.mark.parametrize("name", ["my-llama-3", "qa-model-1", "pd-test-2", "team-ml-bert-2"])
+def test_region_shaped_endpoint_name_keeps_its_own_peers_in_region(name: str) -> None:
+    """Finding I4: the local role Services of ``my-llama-3`` are not Region ``my-llama-3``."""
+    monitor = _make_monitor()
+    spec = {"mooncake": {"mode": "disaggregated", "transfer": {"protocol": "tcp"}}}
+
+    result = monitor._resolve_regional_scope(
+        name, NAMESPACE, spec, {"metadata_server": "http://mooncake-master:8080/metadata"}
+    )
+
+    assert result.in_region is True, result.error
+    assert f"{name}-prefill.{NAMESPACE}.svc.cluster.local" in result.peer_addresses
 
 
 def test_regional_scope_collects_explicit_peers_without_region_services() -> None:

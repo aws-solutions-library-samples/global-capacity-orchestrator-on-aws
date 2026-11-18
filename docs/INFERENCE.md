@@ -192,7 +192,12 @@ proxy from the moment the upgraded proxy dials 8443 until the endpoint's first
 TLS-capable pod is Ready; the new pod needs a free GPU and a model load, so
 plan the upgrade like an image update. A later change to the sidecar program
 alone reaches running sidecars at their next restart and does not roll GPU
-pods. See [UPGRADING.md](UPGRADING.md#in-cluster-tls-and-tracing).
+pods. The digest hashes the sidecar as the API server receives it, unset
+fields omitted, so a Kubernetes client upgrade that adds model fields does not
+change it either; the stamps v8.22.x and v8.23.0 wrote (their digest followed
+the client's model schema) are recognized and left in place, so upgrading from
+either rolls no pod whose sidecar is unchanged.
+See [UPGRADING.md](UPGRADING.md#in-cluster-tls-and-tracing).
 
 ### Self-Healing
 
@@ -200,6 +205,15 @@ The inference monitor recreates missing endpoint Deployments and Services,
 reconciles images and replica counts, and reports per-region readiness or
 errors to DynamoDB. When `model_source` is set, the Deployment includes an init
 container that syncs model weights from S3 to regional EFS.
+
+One monitor pod per Region reconciles at a time, holding the
+`inference-monitor-leader` Lease (three reconcile intervals long, renewed every
+interval while a pass runs); the other replica stands by. Every Kubernetes call
+the monitor makes is bounded by `K8S_API_TIMEOUT` (default 30 seconds per
+attempt), and a pass that finishes no endpoint for ten reconcile intervals
+(150 seconds at the default 15) stops renewing the Lease, so a wedged leader
+hands over to the standby within one more Lease duration instead of holding
+leadership for as long as it hangs.
 
 Separately, the health monitor verifies that the ALB hostname stored in SSM
 matches the `gco-system/gco-gateway` Gateway status address. If cluster
@@ -346,6 +360,19 @@ For each target region, the inference monitor creates:
   [Model Endpoint TLS](#model-endpoint-tls)).
 - **Optional autoscaler** — A native HPA for CPU/memory metrics or KEDA
   ScaledObject when GPU metrics are requested.
+
+Every object is named after the endpoint: `<name>` plus `-canary`, `-prefill`,
+`-decode`, `-proxy`, `-admin`, `-mooncake`, `-pd-proxy` or `-tls-proxy`, and
+KEDA's `keda-hpa-<name>[-prefill|-decode]`. An endpoint name is therefore a
+DNS-1035 label of at most 55 characters (`<name>-prefill` must fit 63), and
+`gco inference deploy` refuses a name whose derived object names overlap
+another endpoint's, in either direction: `llama-canary` beside `llama`, or
+`foo-proxy` beside a Mooncake `foo`. The monitor also labels each object it
+creates with `gco.io/endpoint: <name>` (object metadata only, never a pod
+template) and never patches, claims or deletes an object labelled for another
+endpoint. Objects created before the label existed get it on their next
+metadata claim; until then, one of another lifecycle whose name another
+endpoint also derives is left untouched rather than cleaned up as stale.
 
 This endpoint autoscaler is separate from the shared `inference-proxy` data
 plane. Each regional stack installs the managed EKS Metrics Server add-on that
@@ -850,7 +877,7 @@ gco inference update-image my-llm -i vllm/vllm-openai:v0.32.0
 ### Stop and Start
 
 ```bash
-# Stop (removes any HPA/KEDA owner, then scales to zero)
+# Stop (removes any HPA/KEDA owner, then scales the endpoint and its canary to zero)
 gco inference stop my-llm -y
 
 # Start (restores static/HPA ownership from the saved configuration)

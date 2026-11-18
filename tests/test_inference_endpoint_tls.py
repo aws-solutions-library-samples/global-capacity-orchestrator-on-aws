@@ -60,12 +60,14 @@ from gco.services.inference_monitor import (
     PD_PROXY_CA_FILE,
     PD_PROXY_PORT,
     SKIP_CONTAINERS_ANNOTATION,
+    EndpointTLSProxy,
     InferenceMonitor,
     ReconcileFencedError,
     ResourceCleanupResult,
     _merge_skip_containers,
     _model_server_port,
     _pd_proxy_health_probe,
+    _released_tls_proxy_digests,
     _service_publishes_only_tls,
     build_endpoint_tls_proxy,
 )
@@ -1269,6 +1271,85 @@ def test_new_role_deployment_is_created_with_the_mooncake_digest(
     assert ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION in annotations
 
 
+def _role_spec(role: str, image: str) -> dict[str, Any]:
+    mooncake: dict[str, Any] = (
+        {"mode": "store", "store": {"enabled": True}}
+        if role == "single"
+        else {"mode": "disaggregated", "topology": {"prefill": 1, "decode": 1}}
+    )
+    return {"image": image, "port": 8000, "mooncake": mooncake}
+
+
+@pytest.mark.parametrize(
+    ("role", "deploy_name"),
+    [("prefill", "chat-prefill"), ("decode", "chat-decode"), ("single", "chat")],
+)
+def test_role_deployment_rolls_onto_an_updated_image(
+    monitor: InferenceMonitor, role: str, deploy_name: str
+) -> None:
+    """Finding I7: ``update-image`` reaches the prefill, decode and store role pods."""
+    new_image = "vllm/vllm-openai:v0.7.0"
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {
+            deploy_name: _role_deployment_with_sidecar(
+                deploy_name, extra_annotations={MOONCAKE_CONFIG_DIGEST_ANNOTATION: "d" * 64}
+            )
+        }
+    )
+
+    monitor._ensure_role_deployment(
+        "chat", NAMESPACE, _role_spec(role, new_image), role, config_digest="d" * 64
+    )
+
+    # Only the model container's image, at the observed resourceVersion.
+    assert _deployment_patch(monitor, deploy_name) == {
+        "metadata": {"resourceVersion": "7"},
+        "spec": {"template": {"spec": {"containers": [{"name": "inference", "image": new_image}]}}},
+    }
+
+
+def test_role_image_update_pulls_the_regional_replica(monitor: InferenceMonitor) -> None:
+    spec = _role_spec("prefill", "123456789012.dkr.ecr.us-west-2.amazonaws.com/vllm:v0.7.0")
+    regional = "123456789012.dkr.ecr.us-east-1.amazonaws.com/vllm:v0.7.0"
+    spec["region_image_uris"] = {REGION: regional}
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {"chat-prefill": _role_deployment_with_sidecar("chat-prefill")}
+    )
+
+    monitor._ensure_role_deployment("chat", NAMESPACE, spec, "prefill")
+
+    [container] = _deployment_patch(monitor, "chat-prefill")["spec"]["template"]["spec"][
+        "containers"
+    ]
+    assert container == {"name": "inference", "image": regional}
+
+
+@pytest.mark.parametrize("pending", ["sidecar", "mooncake-config"])
+def test_role_image_update_waits_for_another_template_change(
+    monitor: InferenceMonitor, pending: str
+) -> None:
+    """One pod-template change per pass: the image follows on the next pass."""
+    live = (
+        _live_deployment("chat-prefill", containers=[_model_container(8000)])
+        if pending == "sidecar"
+        else _role_deployment_with_sidecar("chat-prefill")
+    )
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name({"chat-prefill": live})
+
+    monitor._ensure_role_deployment(
+        "chat",
+        NAMESPACE,
+        _role_spec("prefill", "vllm/vllm-openai:v0.7.0"),
+        "prefill",
+        config_digest="e" * 64,
+    )
+
+    [patched] = monitor.apps_v1.patch_namespaced_deployment.call_args_list
+    template = _wire(patched.kwargs["body"])["spec"]["template"]
+    containers = template.get("spec", {}).get("containers", [])
+    assert all(container["name"] != "inference" for container in containers)
+
+
 def test_existing_canary_is_moved_onto_tls_with_its_endpoint_program(
     monitor: InferenceMonitor,
 ) -> None:
@@ -1428,6 +1509,268 @@ def test_sidecar_digest_is_stable_and_tracks_every_rendered_input() -> None:
     assert build_endpoint_tls_proxy(8000, TLS_PROXY_CONFIG_MAP).digest == base.digest
     assert build_endpoint_tls_proxy(8001, TLS_PROXY_CONFIG_MAP).digest != base.digest
     assert build_endpoint_tls_proxy(8000, "other-tls-proxy").digest != base.digest
+
+
+# ---------------------------------------------------------------------------
+# Upgrading from a release whose digest followed the client's model schema
+# ---------------------------------------------------------------------------
+
+# The sidecar image v8.22.x and v8.23.0 pinned, and the digest each stamped on
+# the pods of endpoint "chat" by model port. Every value was computed by running
+# that tag's own build_endpoint_tls_proxy under the kubernetes client it shipped
+# with (v8.22.x: 36.0.3, v8.23.0: 37.0.1). Both hashed the client's to_dict(),
+# which lists every declared field, so one sidecar carries a different stamp
+# under each client: 37.0.1 declares four more, all unset here.
+RELEASED_SIDECAR_IMAGE = (
+    "public.ecr.aws/docker/library/python:3.14.9-slim"
+    "@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8"
+)
+RELEASED_SIDECAR_STAMPS = {
+    ("v8.22.x", 8000): "ae7a2e54b218a24ab8fc74b2e0b7c82576ec46c9b84546f5af915d9ff1dff77d",
+    ("v8.22.x", 9000): "70a57d2cbcffc23380feb143485d266155dfcbfe759e2f55702d0fd0b8d177ab",
+    ("v8.23.0", 8000): "705d907bb8cb2328f6328cd10dd2e33082df223454e3ac8f5220b6e82d3d7adf",
+    ("v8.23.0", 9000): "8e68b1c479eb1f5c2578f4b8fc1838deef239522688886e9a15128ca5a5ebece",
+}
+# This release's digest of the same sidecars, computed under both clients.
+CURRENT_SIDECAR_DIGESTS = {
+    8000: "578bb585cfd2094afa825addbde0e378d16e5a64805b38218f92de711d9f5a56",
+    9000: "3660ea388b9a831f511bb883186a8328165b9e73ad4d3da7515c1b1005e610b1",
+}
+
+
+@pytest.mark.parametrize("port", sorted(CURRENT_SIDECAR_DIGESTS))
+def test_sidecar_digest_does_not_follow_the_client_model_schema(
+    monkeypatch: pytest.MonkeyPatch, port: int
+) -> None:
+    """The digest hashes the wire form, which a client adding fields leaves unchanged."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+
+    assert (
+        build_endpoint_tls_proxy(port, TLS_PROXY_CONFIG_MAP).digest
+        == (CURRENT_SIDECAR_DIGESTS[port])
+    )
+
+
+@pytest.mark.parametrize("port", sorted(CURRENT_SIDECAR_DIGESTS))
+def test_released_stamps_are_rebuilt_without_the_released_clients(
+    monkeypatch: pytest.MonkeyPatch, port: int
+) -> None:
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    sidecar = build_endpoint_tls_proxy(port, TLS_PROXY_CONFIG_MAP)
+
+    assert _released_tls_proxy_digests(sidecar.container, sidecar.volumes) == {
+        RELEASED_SIDECAR_STAMPS["v8.22.x", port],
+        RELEASED_SIDECAR_STAMPS["v8.23.0", port],
+    }
+
+
+@pytest.mark.parametrize(("release", "port"), sorted(RELEASED_SIDECAR_STAMPS))
+def test_sidecar_stamped_by_an_earlier_release_is_not_rolled(
+    monitor: InferenceMonitor, monkeypatch: pytest.MonkeyPatch, release: str, port: int
+) -> None:
+    """Upgrading from v8.22.x or v8.23.0 writes nothing to a pod whose sidecar is unchanged."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    sidecar = build_endpoint_tls_proxy(port, TLS_PROXY_CONFIG_MAP)
+    stamp = RELEASED_SIDECAR_STAMPS[release, port]
+    assert stamp != sidecar.digest
+    deployment = _live_deployment(
+        "chat",
+        containers=[_model_container(port), sidecar.container],
+        annotations={ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: stamp},
+    )
+
+    patched = monitor._converge_endpoint_tls_proxy(
+        "chat", NAMESPACE, deployment, config_map_name=TLS_PROXY_CONFIG_MAP, fallback_port=8000
+    )
+
+    assert patched is False
+    monitor.apps_v1.patch_namespaced_deployment.assert_not_called()
+
+
+@pytest.mark.parametrize("release", ["v8.22.x", "v8.23.0"])
+@pytest.mark.parametrize("change", ["model-port", "image"])
+def test_changed_sidecar_under_an_earlier_release_stamp_is_rolled(
+    monitor: InferenceMonitor, monkeypatch: pytest.MonkeyPatch, release: str, change: str
+) -> None:
+    """A released stamp matches only its own rendering: a real change still rolls."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    released = build_endpoint_tls_proxy(8000, TLS_PROXY_CONFIG_MAP)
+    model_port = 9000 if change == "model-port" else 8000
+    if change == "image":
+        monkeypatch.setenv(
+            ENDPOINT_TLS_PROXY_IMAGE_ENV,
+            "registry.example.com/mirror/python:3.14.9-slim@sha256:" + "c" * 64,
+        )
+    deployment = _live_deployment(
+        "chat",
+        containers=[_model_container(model_port), released.container],
+        annotations={ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: RELEASED_SIDECAR_STAMPS[release, 8000]},
+    )
+
+    patched = monitor._converge_endpoint_tls_proxy(
+        "chat", NAMESPACE, deployment, config_map_name=TLS_PROXY_CONFIG_MAP, fallback_port=8000
+    )
+
+    assert patched is True
+    expected = build_endpoint_tls_proxy(model_port, TLS_PROXY_CONFIG_MAP)
+    template = _deployment_patch(monitor, "chat")["spec"]["template"]
+    assert template["metadata"]["annotations"][ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION] == (
+        expected.digest
+    )
+    assert template["spec"]["containers"] == [_wire(expected.container)]
+
+
+def test_sidecar_holding_a_model_no_release_rendered_has_no_released_stamp() -> None:
+    sidecar = build_endpoint_tls_proxy(8000, TLS_PROXY_CONFIG_MAP)
+    container = client.V1Container(
+        name=ENDPOINT_TLS_PROXY_CONTAINER,
+        lifecycle=client.V1Lifecycle(
+            pre_stop=client.V1LifecycleHandler(sleep=client.V1SleepAction(seconds=5))
+        ),
+    )
+
+    assert _released_tls_proxy_digests(container, sidecar.volumes) == frozenset()
+    assert not EndpointTLSProxy(container, sidecar.volumes, "d" * 64).matches_stamp(
+        RELEASED_SIDECAR_STAMPS["v8.23.0", 8000]
+    )
+
+
+def _merge_patch(target: Any, patch: Any) -> Any:
+    """Apply an RFC 7386 JSON merge patch, as the API server does for merge-patch+json."""
+    if not isinstance(patch, dict):
+        return patch
+    merged = dict(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = _merge_patch(merged.get(key), value)
+    return merged
+
+
+def _pd_proxy_pass(
+    monitor: InferenceMonitor, epoch: str, live: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Run one ``_create_pd_proxy`` pass as leader ``epoch``; return the body sent, wire form.
+
+    ``live`` is the existing proxy Deployment in wire form (the create then
+    answers 409 and the pass merge-patches it), or ``None`` for a first create.
+    """
+    monitor.apps_v1.reset_mock()
+    monitor._active_authority = inference_monitor.ReconcileAuthority(
+        endpoint_name="chat", lifecycle_id="life-1", region_generation="gen-1", leader_epoch=epoch
+    )
+    monitor._assert_mutation_authority = MagicMock()  # type: ignore[method-assign]
+    monitor._confirm_created_resource = MagicMock()  # type: ignore[method-assign]
+    monitor._ensure_admin_api_key_secret = MagicMock(return_value="chat-admin")  # type: ignore[method-assign]
+    monitor._ensure_pd_proxy_configmap = MagicMock()  # type: ignore[method-assign]
+    monitor._create_proxy_service = MagicMock()  # type: ignore[method-assign]
+    if live is None:
+        monitor._create_pd_proxy("chat", NAMESPACE, _pd_spec(), {"lifecycle_id": "life-1"})
+        [created] = monitor.apps_v1.create_namespaced_deployment.call_args_list
+        body: dict[str, Any] = _wire(created.args[1])
+        return body
+    monitor.apps_v1.create_namespaced_deployment.side_effect = ApiException(status=409)
+    monitor._get_deployment = MagicMock(  # type: ignore[method-assign]
+        return_value=client.V1Deployment.from_dict(live)
+    )
+    monitor._create_pd_proxy("chat", NAMESPACE, _pd_spec(), {"lifecycle_id": "life-1"})
+    [patched] = monitor.apps_v1.patch_namespaced_deployment.call_args_list
+    assert patched.kwargs["_content_type"] == "application/merge-patch+json"
+    body = _wire(patched.kwargs["body"])
+    return body
+
+
+def test_pd_proxy_pod_template_carries_no_leader_epoch(monitor: InferenceMonitor) -> None:
+    """Finding I8: provenance stays on the Deployment's own metadata."""
+    created = _pd_proxy_pass(monitor, "epoch-a", None)
+
+    assert created["metadata"]["annotations"]["gco.io/leader-epoch"] == "epoch-a"
+    template_annotations = created["spec"]["template"]["metadata"]["annotations"]
+    assert set(template_annotations) == {
+        SKIP_CONTAINERS_ANNOTATION,
+        ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION,
+    }
+
+
+def test_leader_change_does_not_change_the_pd_proxy_pod_template(
+    monitor: InferenceMonitor,
+) -> None:
+    """A new leader epoch rewrites the Deployment's metadata, never its pods."""
+    live = _pd_proxy_pass(monitor, "epoch-a", None)
+    live["metadata"]["resourceVersion"] = "9"
+
+    patch_body = _pd_proxy_pass(monitor, "epoch-b", live)
+
+    after = _merge_patch(live, patch_body)
+    assert after["spec"]["template"] == live["spec"]["template"]
+    assert after["metadata"]["annotations"]["gco.io/leader-epoch"] == "epoch-b"
+
+
+@pytest.mark.parametrize("release", ["v8.22.x", "v8.23.0"])
+def test_pd_proxy_of_an_earlier_release_is_not_rolled_by_the_upgrade(
+    monitor: InferenceMonitor, monkeypatch: pytest.MonkeyPatch, release: str
+) -> None:
+    """The proxy as v8.22.x/v8.23.0 rendered it (provenance and their digest on the
+    pod template) keeps its pod template through the new release's merge patch."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    live = _pd_proxy_pass(monitor, "epoch-old", None)
+    live["metadata"]["resourceVersion"] = "9"
+    live["spec"]["template"]["metadata"]["annotations"] = {
+        "gco.io/lifecycle-id": "life-1",
+        "gco.io/region-generation": "gen-1",
+        "gco.io/leader-epoch": "epoch-old",
+        SKIP_CONTAINERS_ANNOTATION: ENDPOINT_TLS_PROXY_CONTAINER,
+        ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: RELEASED_SIDECAR_STAMPS[release, PD_PROXY_PORT],
+        "kubectl.kubernetes.io/restartedAt": "2026-11-01T00:00:00Z",
+    }
+
+    patch_body = _pd_proxy_pass(monitor, "epoch-new", live)
+
+    assert _merge_patch(live, patch_body)["spec"]["template"] == live["spec"]["template"]
+
+
+@pytest.mark.parametrize(
+    ("stamp", "kept"),
+    [
+        (RELEASED_SIDECAR_STAMPS["v8.22.x", 8000], True),
+        (RELEASED_SIDECAR_STAMPS["v8.23.0", 8000], True),
+        ("0" * 64, False),
+    ],
+    ids=["v8.22.x-stamp", "v8.23.0-stamp", "stale-stamp"],
+)
+def test_pd_proxy_merge_patch_keeps_a_released_stamp_of_the_same_sidecar(
+    monitor: InferenceMonitor, monkeypatch: pytest.MonkeyPatch, stamp: str, kept: bool
+) -> None:
+    """The PD proxy is merge-patched every pass; that patch must not restamp its pods."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    _admit_named_admin_secret(monitor)
+    sidecar = build_endpoint_tls_proxy(PD_PROXY_PORT, TLS_PROXY_CONFIG_MAP)
+    monitor.apps_v1.create_namespaced_deployment.side_effect = ApiException(status=409)
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {
+            "chat-proxy": _live_deployment(
+                "chat-proxy",
+                containers=[_model_container(PD_PROXY_PORT), sidecar.container],
+                annotations={ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: stamp},
+            )
+        }
+    )
+    monitor.core_v1.create_namespaced_service.side_effect = ApiException(status=409)
+    monitor.core_v1.read_namespaced_service.side_effect = _by_name(
+        {"chat-proxy": _live_service("chat-proxy", ports=_tls_ports())}
+    )
+
+    monitor._create_pd_proxy("chat", NAMESPACE, _pd_spec(), {"lifecycle_id": "life-1"})
+
+    [patched] = monitor.apps_v1.patch_namespaced_deployment.call_args_list
+    template = _wire(patched.kwargs["body"])["spec"]["template"]
+    assert template["metadata"]["annotations"][ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION] == (
+        stamp if kept else sidecar.digest
+    )
+    assert template["metadata"]["annotations"][SKIP_CONTAINERS_ANNOTATION] == (
+        ENDPOINT_TLS_PROXY_CONTAINER
+    )
 
 
 # ---------------------------------------------------------------------------

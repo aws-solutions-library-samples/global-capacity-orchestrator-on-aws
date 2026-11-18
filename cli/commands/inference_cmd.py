@@ -226,6 +226,12 @@ def inference_deploy(
     The endpoint is registered in DynamoDB and the inference_monitor
     in each target region creates the Kubernetes resources automatically.
 
+    ENDPOINT_NAME is a DNS-1035 label (lowercase letters, digits and '-',
+    starting with a letter) of at most 55 characters. Its Kubernetes objects
+    are named after it (NAME-canary, NAME-prefill, NAME-decode, NAME-proxy and
+    others), so a name that overlaps another endpoint's object names, such as
+    llama-canary beside llama, is refused.
+
     Examples:
         gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0
 
@@ -609,6 +615,8 @@ def inference_scale(config: Any, endpoint_name: Any, replicas: Any) -> None:
 def inference_stop(config: Any, endpoint_name: Any, yes: Any) -> None:
     """Stop an inference endpoint (scale to zero, keep config).
 
+    Every Deployment of the endpoint scales to zero, its canary included.
+
     Examples:
         gco inference stop my-llm -y
     """
@@ -909,7 +917,9 @@ def inference_delete(
 def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
     """Update the container image for an inference endpoint.
 
-    Triggers a rolling update across all target regions.
+    Triggers a rolling update across all target regions. On a Mooncake
+    endpoint the prefill, decode and store-role pods roll onto the new image;
+    the prefill-decode proxy keeps its own proxy image.
 
     Examples:
         gco inference update-image my-llm -i vllm/vllm-openai:v0.32.0

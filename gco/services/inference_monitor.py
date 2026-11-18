@@ -43,9 +43,9 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 from typing import Any, NoReturn, TypedDict
 from urllib.parse import urlsplit
@@ -66,7 +66,7 @@ from gco.models.inference_models import (
     INSTANCE_TYPE_NODE_LABEL,
     SGLANG_UNSUPPORTED_GPU_NAMES,
 )
-from gco.services.inference_store import InferenceEndpointStore
+from gco.services.inference_store import InferenceEndpointStore, endpoint_object_names
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -296,13 +296,19 @@ def _regional_shared_ssm_parameter_prefix() -> str:
     return f"/{project_name}/{REGIONAL_SHARED_SSM_PARAMETER_SUFFIX}"
 
 
-# Matches an AWS region identifier embedded in an address (host or URI), e.g.
-# ``us-east-1``, ``eu-west-2``, ``ap-southeast-1``, ``us-gov-west-1``. KV
+# Matches an AWS region identifier embedded in an external host, e.g.
+# ``us-east-1``, ``eu-west-2``, ``ap-southeast-1``, ``us-gov-west-1``: a known
+# partition prefix, a compass direction, and a number, so endpoint-like words
+# such as ``my-llama-3`` or ``pd-test-2`` are not mistaken for regions. KV
 # transfer over RoCE is intra-region, so any address a topology wires to must
 # resolve to the monitor's own region; an embedded token naming a different
-# region marks the address as out-of-region. An address that carries no token
-# (a bare in-cluster Service name) is region-local by construction.
-_REGION_TOKEN_PATTERN = re.compile(r"\b[a-z]{2}-(?:gov-)?[a-z]+-\d+\b")
+# region marks the address as out-of-region. In-cluster names (a bare Service
+# name or a ``.svc`` name) are region-local by construction and are classified
+# before any token is looked for.
+_REGION_TOKEN_PATTERN = re.compile(
+    r"\b(?:us-gov|us|eu|ap|sa|ca|me|af|il|mx|cn)-"
+    r"(?:east|west|north|south|central|northeast|southeast|northwest|southwest)-\d+\b"
+)
 
 # --- PD proxy behavior -------------------------------------------------------
 #
@@ -454,10 +460,11 @@ ENDPOINT_TLS_PROXY_DRAIN_SECONDS = MODEL_POD_TERMINATION_GRACE_SECONDS - 5
 SKIP_CONTAINERS_ANNOTATION = "eks.amazonaws.com/skip-containers"
 
 # Digest of the rendered sidecar and its volumes, stamped on the pod template.
-# Reconcile patches a Deployment in place only when the digest differs, which
-# is how endpoints created before the sidecar existed pick it up, and how an
-# image override or model-port change reaches running pods without rewriting
-# unchanged templates on every pass.
+# Reconcile patches a Deployment in place only when the stamp does not match the
+# rendered sidecar (EndpointTLSProxy.matches_stamp), which is how endpoints
+# created before the sidecar existed pick it up, and how an image override or
+# model-port change reaches running pods without rewriting unchanged templates
+# on every pass.
 ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION = "gco.io/endpoint-tls-proxy-digest"
 
 # Digest of the rendered ``mooncake.json``, stamped on every Mooncake role pod
@@ -563,9 +570,34 @@ _LIFECYCLE_ANNOTATION = "gco.io/lifecycle-id"
 _REGION_GENERATION_ANNOTATION = "gco.io/region-generation"
 _LEADER_EPOCH_ANNOTATION = "gco.io/leader-epoch"
 
+# Reconcile intervals a leader pass may go without finishing an endpoint before
+# the monitor stops renewing its Lease (150 s at the default 15 s interval).
+# Every Kubernetes call is bounded by K8S_API_TIMEOUT (30 s; urllib3 retries a
+# timed-out read up to three times), so one hung call stays within it.
+PASS_STALL_INTERVALS = 10
+
+# The endpoint an object belongs to, on the metadata of every object the
+# monitor creates (never on a pod template, where adding it would roll pods).
+# Object names are derived from endpoint names without reserved suffixes, so
+# ``llama-canary`` is both the canary of ``llama`` and the primary of an
+# endpoint named ``llama-canary``; the label tells them apart.
+ENDPOINT_NAME_LABEL = "gco.io/endpoint"
+_LABEL_VALUE_PATTERN = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
+
 
 class ReconcileFencedError(RuntimeError):
     """The caller no longer owns the endpoint or leader epoch it read."""
+
+
+class ForeignEndpointResourceError(RuntimeError):
+    """An object at one of this endpoint's names belongs to another endpoint.
+
+    Raised for an object labelled for a different endpoint, and for an
+    unlabelled one (created before the label existed) of another lifecycle
+    whose name another endpoint also derives. Such an object is never patched,
+    claimed or deleted: cleanup treats it as absent, and creating this
+    endpoint's own object under the name fails with this error.
+    """
 
 
 @dataclass(frozen=True)
@@ -1071,6 +1103,122 @@ def _reject_bootstrap_window_collision(base_port: int) -> None:
         )
 
 
+# Every field kubernetes client 37.0.1's ``to_dict()`` emits for each model the
+# sidecar renders, ``None`` when unset. GCO v8.23.0 and earlier hashed that form
+# (v8.22.x under client 36.0.3, which lacks the fields in
+# _CLIENT_37_ADDED_SIDECAR_FIELDS), so the shape of their digest followed the
+# client's model schema. Frozen here, the stamps they wrote stay recognizable
+# whatever client this monitor runs (see _released_tls_proxy_digests).
+_CLIENT_37_SIDECAR_FIELDS: dict[str, tuple[str, ...]] = {
+    model: tuple(fields.split())
+    for model, fields in {
+        "V1Container": (
+            "args command env env_from image image_pull_policy lifecycle liveness_probe name"
+            " ports readiness_probe resize_policy resources restart_policy restart_policy_rules"
+            " security_context startup_probe stdin stdin_once termination_message_path"
+            " termination_message_policy tty volume_devices volume_mounts working_dir"
+        ),
+        "V1EnvVar": "name value value_from",
+        "V1Probe": (
+            "_exec failure_threshold grpc http_get initial_delay_seconds period_seconds"
+            " success_threshold tcp_socket termination_grace_period_seconds timeout_seconds"
+        ),
+        "V1TCPSocketAction": "host port",
+        "V1ContainerPort": "container_port host_ip host_port name protocol",
+        "V1ResourceRequirements": "claims limits requests",
+        "V1SecurityContext": (
+            "allow_privilege_escalation app_armor_profile capabilities privileged proc_mount"
+            " read_only_root_filesystem run_as_group run_as_non_root run_as_user"
+            " se_linux_options seccomp_profile windows_options"
+        ),
+        "V1Capabilities": "add drop",
+        "V1SeccompProfile": "localhost_profile type",
+        "V1VolumeMount": (
+            "bind_mount_options mount_path mount_propagation name read_only recursive_read_only"
+            " sub_path sub_path_expr"
+        ),
+        "V1Volume": (
+            "aws_elastic_block_store azure_disk azure_file cephfs cinder config_map csi"
+            " downward_api empty_dir ephemeral fc flex_volume flocker gce_persistent_disk"
+            " git_repo glusterfs host_path image iscsi name nfs persistent_volume_claim"
+            " photon_persistent_disk portworx_volume projected quobyte rbd scale_io secret"
+            " storageos vsphere_volume"
+        ),
+        "V1SecretVolumeSource": "default_mode default_user items optional secret_name",
+        "V1ConfigMapVolumeSource": "default_mode default_user items name optional",
+    }.items()
+}
+
+# The fields above that client 37.0.1 added over 36.0.3.
+_CLIENT_37_ADDED_SIDECAR_FIELDS = frozenset(
+    {
+        ("V1VolumeMount", "bind_mount_options"),
+        ("V1SecretVolumeSource", "default_user"),
+        ("V1ConfigMapVolumeSource", "default_user"),
+    }
+)
+
+_CLIENT_36_SIDECAR_FIELDS: dict[str, tuple[str, ...]] = {
+    model: tuple(name for name in fields if (model, name) not in _CLIENT_37_ADDED_SIDECAR_FIELDS)
+    for model, fields in _CLIENT_37_SIDECAR_FIELDS.items()
+}
+
+
+@cache
+def _wire_serializer() -> client.ApiClient:
+    """A client used only for its serializer; it never sends a request."""
+    return client.ApiClient()
+
+
+def _sidecar_digest(rendered: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(rendered, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _released_to_dict(value: Any, fields: Mapping[str, tuple[str, ...]]) -> Any:
+    """``value`` as a client's ``to_dict()`` rendered it, with ``fields`` per model.
+
+    Raises:
+        KeyError: For a model ``fields`` does not describe.
+    """
+    if isinstance(value, list | tuple):
+        return [_released_to_dict(item, fields) for item in value]
+    if isinstance(value, dict):
+        return {key: _released_to_dict(item, fields) for key, item in value.items()}
+    if value is None or isinstance(value, str | int | float):
+        return value
+    return {
+        name: _released_to_dict(getattr(value, name, None), fields)
+        for name in fields[type(value).__name__]
+    }
+
+
+def _released_tls_proxy_digests(
+    container: client.V1Container, volumes: tuple[client.V1Volume, ...]
+) -> frozenset[str]:
+    """The digests GCO v8.22.x and v8.23.0 stamped for this same sidecar.
+
+    Those releases hashed the client's ``to_dict()``, which lists every field
+    the client declares, so one sidecar hashed differently under client 36.0.3
+    (v8.22.x) and 37.0.1 (v8.23.0). Both forms are rebuilt from the frozen
+    field lists; a sidecar holding a model those releases never rendered has no
+    released digest.
+    """
+    digests = set()
+    for fields in (_CLIENT_36_SIDECAR_FIELDS, _CLIENT_37_SIDECAR_FIELDS):
+        try:
+            rendered = {
+                "container": _released_to_dict(container, fields),
+                "volumes": _released_to_dict(volumes, fields),
+                "termination_grace_period_seconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
+            }
+        except KeyError:
+            return frozenset()
+        digests.add(_sidecar_digest(rendered))
+    return frozenset(digests)
+
+
 @dataclass(frozen=True)
 class EndpointTLSProxy:
     """The TLS sidecar a managed model pod carries, with its volumes and digest."""
@@ -1078,6 +1226,17 @@ class EndpointTLSProxy:
     container: client.V1Container
     volumes: tuple[client.V1Volume, ...]
     digest: str
+
+    def matches_stamp(self, stamp: str | None) -> bool:
+        """Whether a pod template stamped ``stamp`` already runs this sidecar.
+
+        True for :attr:`digest`, and for the digest GCO v8.22.x or v8.23.0
+        stamped for the same rendering: their digest followed the kubernetes
+        client's model schema, and restamping would roll the pod for nothing.
+        """
+        return stamp == self.digest or stamp in _released_tls_proxy_digests(
+            self.container, self.volumes
+        )
 
 
 def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> EndpointTLSProxy:
@@ -1097,7 +1256,9 @@ def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> Endpoi
     The digest covers everything rendered here plus the pod grace period, so a
     changed image, upstream port, or sidecar shape is detected on existing
     Deployments; the program's source is deliberately excluded (see
-    :meth:`InferenceMonitor._ensure_tls_proxy_configmap`).
+    :meth:`InferenceMonitor._ensure_tls_proxy_configmap`). It hashes the wire
+    form, the JSON the API server receives with unset fields omitted, so a
+    kubernetes client that declares new fields renders the same digest.
     """
     container = client.V1Container(
         name=ENDPOINT_TLS_PROXY_CONTAINER,
@@ -1180,15 +1341,22 @@ def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> Endpoi
             ),
         ),
     )
-    rendered = {
-        "container": container.to_dict(),
-        "volumes": [volume.to_dict() for volume in volumes],
-        "termination_grace_period_seconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
-    }
-    digest = hashlib.sha256(
-        json.dumps(rendered, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    serializer = _wire_serializer()
+    digest = _sidecar_digest(
+        {
+            "container": serializer.sanitize_for_serialization(container),
+            "volumes": serializer.sanitize_for_serialization(list(volumes)),
+            "terminationGracePeriodSeconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
+        }
+    )
     return EndpointTLSProxy(container=container, volumes=volumes, digest=digest)
+
+
+def _pod_template_annotations(deployment: Any) -> dict[str, str]:
+    """A copy of a live Deployment's pod-template annotations (empty when it has none)."""
+    template = getattr(getattr(deployment, "spec", None), "template", None)
+    annotations = getattr(getattr(template, "metadata", None), "annotations", None)
+    return dict(annotations) if isinstance(annotations, dict) else {}
 
 
 def _endpoint_tls_pod_annotations(
@@ -1358,6 +1526,15 @@ class InferenceMonitor:
         self._leader_epoch: str | None = None
         self._leadership_lost = threading.Event()
         self._active_authority: ReconcileAuthority | None = None
+        # Every endpoint record's name in the current pass's snapshot, used to
+        # tell whether an unlabelled object's name is another endpoint's too.
+        self._endpoint_names: frozenset[str] = frozenset()
+
+        # A leader pass that finishes no endpoint for this long is wedged (a
+        # call that never returns, say). The renewal thread then stops renewing
+        # the Lease, so it expires and a standby takes over instead of this
+        # process holding leadership for as long as the pass hangs.
+        self._pass_stall_seconds = PASS_STALL_INTERVALS * max(1.0, float(reconcile_interval))
 
         # Metrics
         self._reconcile_count = 0
@@ -1368,6 +1545,8 @@ class InferenceMonitor:
         # visible; initialised at construction so the gauge exists before the
         # first iteration and grows if the loop never starts.
         self._last_loop_completed_at = time.monotonic()
+        # Last progress of the running leader pass (see _pass_stall_seconds).
+        self._pass_progress_at = self._last_loop_completed_at
 
     # ------------------------------------------------------------------
     # Reconciliation loop
@@ -1442,7 +1621,9 @@ class InferenceMonitor:
         now = datetime.now(UTC)
         lease_duration = self.reconcile_interval * 3
         try:
-            lease = coordination_v1.read_namespaced_lease(lease_name, self.namespace)
+            lease = coordination_v1.read_namespaced_lease(
+                lease_name, self.namespace, _request_timeout=self._k8s_timeout
+            )
             spec = present(lease.spec, "lease.spec")
             current_holder = spec.holder_identity
             expired = self._lease_is_expired(lease, now)
@@ -1473,7 +1654,9 @@ class InferenceMonitor:
             spec.renew_time = now
             spec.lease_duration_seconds = lease_duration
             self._stamp_lease_epoch(lease, epoch)
-            coordination_v1.replace_namespaced_lease(lease_name, self.namespace, lease)
+            coordination_v1.replace_namespaced_lease(
+                lease_name, self.namespace, lease, _request_timeout=self._k8s_timeout
+            )
             self._lease_name = lease_name
             self._lease_holder = holder
             self._leadership_lost.clear()
@@ -1496,7 +1679,9 @@ class InferenceMonitor:
                     ),
                 )
                 try:
-                    coordination_v1.create_namespaced_lease(self.namespace, lease)
+                    coordination_v1.create_namespaced_lease(
+                        self.namespace, lease, _request_timeout=self._k8s_timeout
+                    )
                 except ApiException:
                     return False
                 self._leader_epoch = epoch
@@ -1523,7 +1708,9 @@ class InferenceMonitor:
         coordination_v1 = client.CoordinationV1Api()
         now = datetime.now(UTC)
         try:
-            lease = coordination_v1.read_namespaced_lease(lease_name, self.namespace)
+            lease = coordination_v1.read_namespaced_lease(
+                lease_name, self.namespace, _request_timeout=self._k8s_timeout
+            )
             spec = present(lease.spec, "lease.spec")
             if (
                 spec.holder_identity != holder
@@ -1532,15 +1719,37 @@ class InferenceMonitor:
             ):
                 return False
             spec.renew_time = now
-            coordination_v1.replace_namespaced_lease(lease_name, self.namespace, lease)
+            coordination_v1.replace_namespaced_lease(
+                lease_name, self.namespace, lease, _request_timeout=self._k8s_timeout
+            )
             return True
         except Exception:
             logger.warning("Leader Lease renewal failed", exc_info=True)
             return False
 
+    def _mark_pass_progress(self) -> None:
+        """Record that the running leader pass is still making progress."""
+        self._pass_progress_at = time.monotonic()
+
     def _lease_renewal_loop(self, stop_event: threading.Event) -> None:
+        """Renew the Lease each interval while the pass progresses.
+
+        Once the pass has made no progress for ``_pass_stall_seconds`` the
+        loop stops renewing and marks leadership lost: the Lease expires and a
+        standby takes over, and a pass that later resumes is fenced at its next
+        mutation.
+        """
         interval = max(1.0, float(self.reconcile_interval))
         while not stop_event.wait(interval):
+            stalled_for = time.monotonic() - self._pass_progress_at
+            if stalled_for > self._pass_stall_seconds:
+                logger.error(
+                    "Reconcile pass made no progress for %.0fs; no longer renewing the "
+                    "leader Lease so a standby can take over",
+                    stalled_for,
+                )
+                self._leadership_lost.set()
+                return
             if not self._renew_current_lease():
                 self._leadership_lost.set()
                 return
@@ -1548,6 +1757,7 @@ class InferenceMonitor:
     @contextlib.contextmanager
     def _renewing_leadership(self) -> Iterator[None]:
         """Renew the Lease outside the asyncio loop while one pass is running."""
+        self._mark_pass_progress()
         stop_event = threading.Event()
         renewal = threading.Thread(
             target=self._lease_renewal_loop,
@@ -1571,7 +1781,9 @@ class InferenceMonitor:
             return
         coordination_v1 = client.CoordinationV1Api()
         try:
-            lease = coordination_v1.read_namespaced_lease(self._lease_name, self.namespace)
+            lease = coordination_v1.read_namespaced_lease(
+                self._lease_name, self.namespace, _request_timeout=self._k8s_timeout
+            )
         except Exception as error:
             self._leadership_lost.set()
             raise ReconcileFencedError("leader Lease could not be verified") from error
@@ -1728,6 +1940,25 @@ class InferenceMonitor:
         labels = cls._object_labels(resource)
         return labels.get("project") == "gco" and labels.get("gco.io/type") == "inference"
 
+    def _name_derived_by_another_endpoint(self, resource_name: str, endpoint_name: str) -> bool:
+        """Whether another endpoint record also derives ``resource_name`` from its name."""
+        return any(
+            other != endpoint_name and resource_name in endpoint_object_names(other)
+            for other in getattr(self, "_endpoint_names", ())
+        )
+
+    def _owned_labels(self, labels: Mapping[str, str]) -> dict[str, str]:
+        """``labels`` plus :data:`ENDPOINT_NAME_LABEL` for the endpoint being reconciled.
+
+        For object metadata only, never a pod template: an existing
+        Deployment's pods would roll if its template gained the label.
+        """
+        owned = dict(labels)
+        authority = getattr(self, "_active_authority", None)
+        if authority is not None and _LABEL_VALUE_PATTERN.fullmatch(authority.endpoint_name):
+            owned[ENDPOINT_NAME_LABEL] = authority.endpoint_name
+        return owned
+
     def _handoff_stale_resource(
         self,
         resource: Any,
@@ -1784,6 +2015,24 @@ class InferenceMonitor:
             # Production reconciliation always has a Lease and real metadata.
             return resource
         observed_lifecycle = annotations.get(_LIFECYCLE_ANNOTATION)
+        owner = self._object_labels(resource).get(ENDPOINT_NAME_LABEL)
+        if owner is not None and owner != authority.endpoint_name:
+            raise ForeignEndpointResourceError(
+                f"{kind} {resource_name} belongs to endpoint {owner}, not {authority.endpoint_name}"
+            )
+        if (
+            owner is None
+            and observed_lifecycle != authority.lifecycle_id
+            and self._name_derived_by_another_endpoint(resource_name, authority.endpoint_name)
+        ):
+            # Created before the label existed by another lifecycle: a stale
+            # incarnation of this endpoint, or the object of the other endpoint
+            # that derives the same name. Only the label could tell, so it is
+            # neither claimed nor handed off.
+            raise ForeignEndpointResourceError(
+                f"{kind} {resource_name} has no {ENDPOINT_NAME_LABEL} label and another "
+                "endpoint derives the same name; it is left untouched"
+            )
         if observed_lifecycle is None and not self._has_monitor_provenance(resource):
             raise ReconcileFencedError(f"{kind} {resource_name} has ambiguous legacy ownership")
         if observed_lifecycle not in (None, authority.lifecycle_id):
@@ -1817,15 +2066,18 @@ class InferenceMonitor:
         self._assert_current_leadership()
         merged = dict(annotations)
         merged.update(expected)
+        claim: dict[str, Any] = {"resourceVersion": resource_version, "annotations": merged}
+        # Object metadata only: a Deployment's pod template is untouched. The
+        # generated admin Secret keeps its exact ownership labels (its
+        # lifecycle annotation identifies it; no other endpoint derives it).
+        if (
+            owner is None
+            and kind != "secret"
+            and _LABEL_VALUE_PATTERN.fullmatch(authority.endpoint_name)
+        ):
+            claim["labels"] = {ENDPOINT_NAME_LABEL: authority.endpoint_name}
         try:
-            patch_metadata(
-                body={
-                    "metadata": {
-                        "resourceVersion": resource_version,
-                        "annotations": merged,
-                    }
-                }
-            )
+            patch_metadata(body={"metadata": claim})
         except Exception as error:
             raise ReconcileFencedError(
                 f"{kind} {resource_name} changed during authority claim"
@@ -1932,6 +2184,9 @@ class InferenceMonitor:
         except Exception as e:
             logger.error("Failed to list endpoints from DynamoDB: %s", e)
             return actions
+        self._endpoint_names = frozenset(
+            name for endpoint in endpoints if isinstance(name := endpoint.get("endpoint_name"), str)
+        )
 
         # Records written before lifecycle fencing are upgraded from their
         # DynamoDB snapshot before any Kubernetes mutation. The update is
@@ -1959,6 +2214,7 @@ class InferenceMonitor:
 
         for endpoint in endpoints:
             name = endpoint.get("endpoint_name", "unknown")
+            self._mark_pass_progress()
             try:
                 action = await self._reconcile_endpoint(endpoint)
                 if action:
@@ -1992,6 +2248,7 @@ class InferenceMonitor:
         for endpoint in endpoints:
             if endpoint.get("desired_state") != "deleted":
                 continue
+            self._mark_pass_progress()
             ep_name = endpoint.get("endpoint_name")
             if not isinstance(ep_name, str):
                 continue
@@ -2530,7 +2787,9 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=cm_name,
                 namespace=ns,
-                labels={"app": name, "project": "gco", "gco.io/type": "inference"},
+                labels=self._owned_labels(
+                    {"app": name, "project": "gco", "gco.io/type": "inference"}
+                ),
                 annotations=self._provenance_annotations(),
             ),
             data={"mooncake.json": json.dumps(cfg, sort_keys=True)},
@@ -2606,6 +2865,10 @@ class InferenceMonitor:
         manually stopped zero target is seeded to the role minimum before its
         autoscaler is reapplied. Static roles always converge to topology.
 
+        An existing role whose model container runs another image than the
+        spec's (``gco inference update-image``) is patched onto it with the
+        same compare-and-swap the classic Deployment uses.
+
         Args:
             config_digest: Digest of the ``mooncake.json`` the role must run
                 with (see :func:`mooncake_config_digest`). A new Deployment is
@@ -2631,10 +2894,30 @@ class InferenceMonitor:
             config_map_name=_tls_proxy_config_map_name(name),
             fallback_port=spec.get("port", 8000),
         )
-        # One compare-and-swap per pass: the sidecar patch above already moved
-        # the resourceVersion, so a config digest change waits for the next pass.
-        if config_digest is not None and not sidecar_patched:
-            self._converge_mooncake_config_digest(deploy_name, ns, deployment, config_digest)
+        # One pod-template change per pass: the sidecar patch above already
+        # moved the resourceVersion, so a config digest change waits for the
+        # next pass, and an image change waits for both.
+        template_patched = sidecar_patched
+        if config_digest is not None and not template_patched:
+            template_patched = self._converge_mooncake_config_digest(
+                deploy_name, ns, deployment, config_digest
+            )
+        current_image = self._get_deployment_image(deployment)
+        desired_image = self._resolve_image_for_region(spec) if spec.get("image") else ""
+        if (
+            not template_patched
+            and current_image
+            and desired_image
+            and current_image != desired_image
+        ):
+            logger.info(
+                "Updating role deployment %s/%s image: %s → %s",
+                ns,
+                deploy_name,
+                current_image,
+                desired_image,
+            )
+            self._update_deployment_image(deploy_name, ns, desired_image)
 
         autoscaling = mooncake.get("autoscaling") or {}
         role_autoscaling = autoscaling.get(role)
@@ -3040,7 +3323,12 @@ class InferenceMonitor:
         spec: dict[str, Any] | None = None,
         endpoint: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Remove every possible autoscaler owner before scaling all roles to zero."""
+        """Remove every possible autoscaler owner before scaling all roles to zero.
+
+        The roles are the Mooncake role Deployments and PD proxy, or a classic
+        endpoint's Deployment and its ``{name}-canary``; another endpoint's
+        Deployment at one of those names is left alone.
+        """
         mooncake_endpoint = isinstance(spec, dict) and isinstance(spec.get("mooncake"), dict)
         self._unready_since.pop(name, None)
         self._master_deferral_since.pop(name, None)
@@ -3058,9 +3346,13 @@ class InferenceMonitor:
             ),
             namespace,
         )
-        deployment_names = (*role_names, f"{name}-proxy") if mooncake_endpoint else (name,)
+        # A classic endpoint's canary serves the same model on its own GPU
+        # replicas, so a stop scales it too and counts it in the totals.
+        deployment_names = (
+            (*role_names, f"{name}-proxy") if mooncake_endpoint else (name, f"{name}-canary")
+        )
         deployments = {
-            deployment_name: self._get_deployment(deployment_name, namespace)
+            deployment_name: self._get_owned_deployment(deployment_name, namespace)
             for deployment_name in deployment_names
         }
         ready_replicas = sum(
@@ -3144,6 +3436,13 @@ class InferenceMonitor:
 
     def _deployment_exists(self, name: str, namespace: str) -> bool:
         return self._get_deployment(name, namespace) is not None
+
+    def _get_owned_deployment(self, name: str, namespace: str) -> V1Deployment | None:
+        """:meth:`_get_deployment`, reading another endpoint's Deployment as absent."""
+        try:
+            return self._get_deployment(name, namespace)
+        except ForeignEndpointResourceError:
+            return None
 
     def _get_deployment(self, name: str, namespace: str) -> V1Deployment | None:
         try:
@@ -3332,9 +3631,11 @@ class InferenceMonitor:
     def _region_of_address(self, address: str) -> str:
         """Return the address's explicit AWS region or safe local classification.
 
-        AWS region tokens embedded in the host are authoritative. Bare Service
-        names and Kubernetes ``.svc`` names are local by construction. Any
-        other host without a region token is external and ambiguous, so it is
+        Bare Service names and Kubernetes ``.svc`` names are local by
+        construction, whatever words the endpoint or namespace name contains
+        (``my-llama-3-prefill.gco-inference.svc.cluster.local`` is this
+        cluster's). For any other host an embedded AWS region token is
+        authoritative; a host without one is external and ambiguous, so it is
         classified as ``"unknown"`` and rejected by regional-scope checks.
         """
         candidate = (address or "").strip()
@@ -3349,11 +3650,11 @@ class InferenceMonitor:
         if not host:
             return "unknown"
 
+        if "." not in host or host.endswith((".svc", ".svc.cluster.local")):
+            return self.region
         match = _REGION_TOKEN_PATTERN.search(host)
         if match:
             return match.group(0)
-        if "." not in host or host.endswith((".svc", ".svc.cluster.local")):
-            return self.region
         return "unknown"
 
     def _resolve_regional_scope(
@@ -4373,7 +4674,7 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=deploy_name,
                 namespace=namespace,
-                labels=dict(labels),
+                labels=self._owned_labels(labels),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1DeploymentSpec(
@@ -4903,12 +5204,19 @@ class InferenceMonitor:
             liveness_probe=_pd_proxy_health_probe(liveness=True),
         )
         sidecar = build_endpoint_tls_proxy(PD_PROXY_PORT, _tls_proxy_config_map_name(name))
+        # Provenance (lifecycle, Region generation, leader epoch) lives on the
+        # Deployment's own metadata only. This Deployment is merge-patched on
+        # every pass, so a leader epoch on the pod template would roll every
+        # proxy, cutting long streams, each time leadership moves. The merge
+        # patch leaves the template annotations it does not name untouched,
+        # so a proxy an earlier release stamped keeps its own.
+        template_annotations = _endpoint_tls_pod_annotations(None, sidecar)
 
         deployment = client.V1Deployment(
             metadata=client.V1ObjectMeta(
                 name=proxy_name,
                 namespace=ns,
-                labels=dict(labels),
+                labels=self._owned_labels(labels),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1DeploymentSpec(
@@ -4916,10 +5224,7 @@ class InferenceMonitor:
                 selector=client.V1LabelSelector(match_labels={"app": proxy_name}),
                 template=client.V1PodTemplateSpec(
                     metadata=client.V1ObjectMeta(
-                        labels=dict(labels),
-                        annotations=_endpoint_tls_pod_annotations(
-                            self._provenance_annotations(), sidecar
-                        ),
+                        labels=dict(labels), annotations=template_annotations
                     ),
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
@@ -4988,6 +5293,16 @@ class InferenceMonitor:
                 ) from error
             _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
             present(deployment.metadata, "deployment.metadata").resource_version = resource_version
+            live_stamp = _pod_template_annotations(existing).get(
+                ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION
+            )
+            if live_stamp is not None and sidecar.matches_stamp(live_stamp):
+                # Keep the stamp an earlier release wrote for this same sidecar:
+                # rewriting it would change the pod template and roll the proxy.
+                template_annotations[ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION] = live_stamp
+                present(deployment.spec, "deployment.spec").template.metadata = client.V1ObjectMeta(
+                    labels=dict(labels), annotations=template_annotations
+                )
             self._assert_mutation_authority()
             # A JSON merge patch replaces the containers and volumes lists
             # wholesale (a strategic merge would key them by name and merge each
@@ -5085,12 +5400,14 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=deploy_name,
                 namespace=ns,
-                labels={
-                    "app": deploy_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": role,
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": deploy_name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                        "gco.io/role": role,
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
@@ -5143,12 +5460,14 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=cm_name,
                 namespace=ns,
-                labels={
-                    "app": f"{name}-proxy",
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": PD_PROXY_ROLE_LABEL,
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": f"{name}-proxy",
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                        "gco.io/role": PD_PROXY_ROLE_LABEL,
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             data={PD_PROXY_SCRIPT_FILENAME: script},
@@ -5230,7 +5549,9 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=cm_name,
                 namespace=ns,
-                labels={"app": name, "project": "gco", "gco.io/type": "inference"},
+                labels=self._owned_labels(
+                    {"app": name, "project": "gco", "gco.io/type": "inference"}
+                ),
                 annotations=self._provenance_annotations(),
             ),
             data={ENDPOINT_TLS_PROXY_SCRIPT_FILENAME: script},
@@ -5309,13 +5630,15 @@ class InferenceMonitor:
 
         Deployments created before the sidecar existed (or rendered with a
         different sidecar image or upstream port) are patched when the live pod
-        template lacks the sidecar or carries a different
-        ``ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION``. A strategic merge adds the
-        sidecar container and its volumes by name, merges the annotations, and
-        leaves the model container untouched: its image, port, and probes stay
-        exactly as reconciled. The observed resourceVersion makes the patch a
-        compare-and-swap; the resulting rollout replaces pods like any other
-        template change.
+        template lacks the sidecar or carries an
+        ``ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION`` that does not match it (see
+        :meth:`EndpointTLSProxy.matches_stamp`: the stamp an earlier release
+        wrote for the same sidecar matches, and is left in place). A strategic
+        merge adds the sidecar container and its volumes by name, merges the
+        annotations, and leaves the model container untouched: its image, port,
+        and probes stay exactly as reconciled. The observed resourceVersion
+        makes the patch a compare-and-swap; the resulting rollout replaces pods
+        like any other template change.
 
         Args:
             deploy_name: The Deployment to converge.
@@ -5344,7 +5667,9 @@ class InferenceMonitor:
             getattr(container, "name", None) == ENDPOINT_TLS_PROXY_CONTAINER
             for container in containers
         )
-        if has_sidecar and annotations.get(ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION) == sidecar.digest:
+        if has_sidecar and sidecar.matches_stamp(
+            annotations.get(ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION)
+        ):
             return False
 
         _metadata, _annotations, _uid, resource_version = self._object_metadata(deployment)
@@ -5442,12 +5767,14 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=proxy_name,
                 namespace=namespace,
-                labels={
-                    "app": proxy_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": PD_PROXY_ROLE_LABEL,
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": proxy_name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                        "gco.io/role": PD_PROXY_ROLE_LABEL,
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
@@ -5501,11 +5828,13 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=name,
                 namespace=namespace,
-                labels={
-                    "app": name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
@@ -5707,7 +6036,10 @@ class InferenceMonitor:
                 fallback_port=canary_spec.get("port", 8000),
             )
             current_image = self._get_deployment_image(deployment)
-            current_replicas = deployment.spec.replicas or 1
+            # A stopped endpoint's canary sits at 0 replicas; only an unset
+            # count means Kubernetes' default of 1.
+            live_replicas = deployment.spec.replicas
+            current_replicas = 1 if live_replicas is None else live_replicas
             ready_replicas = present(deployment.status, "deployment.status").ready_replicas or 0
             if current_image != canary_image:
                 self._update_deployment_image(canary_name, namespace, canary_image)
@@ -5733,9 +6065,14 @@ class InferenceMonitor:
         }
 
     def _cleanup_canary(self, name: str, namespace: str) -> None:
-        """Remove only canary objects carrying this reconciliation authority."""
+        """Remove only canary objects carrying this reconciliation authority.
+
+        An object at the canary's name that belongs to another endpoint (one
+        named ``{name}-canary``, say) is not this endpoint's canary and is left
+        alone.
+        """
         canary_name = f"{name}-canary"
-        deployment = self._get_deployment(canary_name, namespace)
+        deployment = self._get_owned_deployment(canary_name, namespace)
         if deployment is not None:
             self._assert_mutation_authority()
             try:
@@ -5753,6 +6090,8 @@ class InferenceMonitor:
                     logger.error("Failed to delete canary deployment %s: %s", canary_name, error)
         try:
             service = self._authorize_existing_service(canary_name, namespace)
+        except ForeignEndpointResourceError:
+            pass
         except ApiException as error:
             if error.status != 404:
                 logger.error("Failed to read canary service %s: %s", canary_name, error)
@@ -5840,8 +6179,14 @@ class InferenceMonitor:
         pending: list[str],
         errors: list[str],
         observed_resource: Any | None = None,
+        foreign: set[str] | None = None,
     ) -> bool:
-        """Read-authorize-delete one exact UID/resourceVersion, then re-observe."""
+        """Read-authorize-delete one exact UID/resourceVersion, then re-observe.
+
+        An object that belongs to another endpoint (see
+        :class:`ForeignEndpointResourceError`) is neither deleted nor waited
+        for: it counts as absent, and its ``kind/name`` is added to ``foreign``.
+        """
         resource_id = f"{kind}/{resource_name}"
         if observed_resource is not None:
             observed = observed_resource
@@ -5857,17 +6202,23 @@ class InferenceMonitor:
                 errors.append(self._cleanup_error("read", kind, resource_name, error))
                 return False
 
-        observed = self._authorize_resource(
-            observed,
-            kind=kind,
-            resource_name=resource_name,
-            patch_metadata=patch_metadata,
-            read_resource=read_call,
-            delete_resource=delete_call,
-            allow_region_mismatch=bool(
-                self._active_authority and self._active_authority.region_removed
-            ),
-        )
+        try:
+            observed = self._authorize_resource(
+                observed,
+                kind=kind,
+                resource_name=resource_name,
+                patch_metadata=patch_metadata,
+                read_resource=read_call,
+                delete_resource=delete_call,
+                allow_region_mismatch=bool(
+                    self._active_authority and self._active_authority.region_removed
+                ),
+            )
+        except ForeignEndpointResourceError as error:
+            logger.info("Left %s alone during cleanup: %s", resource_id, error)
+            if foreign is not None:
+                foreign.add(resource_id)
+            return False
         _metadata, _annotations, observed_uid, _resource_version = self._object_metadata(observed)
         self._assert_mutation_authority()
         try:
@@ -6271,6 +6622,9 @@ class InferenceMonitor:
         pending = list(autoscaler_cleanup.pending)
         errors = list(autoscaler_cleanup.errors)
         resources_found = autoscaler_cleanup.resources_found
+        # Parents at this endpoint's names that belong to another endpoint;
+        # their pods and endpoint slices are that endpoint's too.
+        foreign: set[str] = set()
 
         for deployment_name in inventory.deployments:
             resources_found |= self._delete_and_confirm(
@@ -6296,6 +6650,7 @@ class InferenceMonitor:
                 ),
                 pending=pending,
                 errors=errors,
+                foreign=foreign,
             )
 
         for service_name in inventory.services:
@@ -6322,6 +6677,7 @@ class InferenceMonitor:
                 ),
                 pending=pending,
                 errors=errors,
+                foreign=foreign,
             )
 
         for config_map_name in inventory.config_maps:
@@ -6415,7 +6771,19 @@ class InferenceMonitor:
         resources_found |= self._observe_generated_children(
             name,
             namespace,
-            inventory,
+            replace(
+                inventory,
+                deployments=tuple(
+                    deployment_name
+                    for deployment_name in inventory.deployments
+                    if f"deployment/{deployment_name}" not in foreign
+                ),
+                services=tuple(
+                    service_name
+                    for service_name in inventory.services
+                    if f"service/{service_name}" not in foreign
+                ),
+            ),
             pending,
             errors,
         )
@@ -6641,11 +7009,13 @@ class InferenceMonitor:
             "metadata": {
                 "name": name,
                 "namespace": namespace,
-                "labels": {
-                    "app": name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
+                "labels": self._owned_labels(
+                    {
+                        "app": name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                    }
+                ),
                 "annotations": self._provenance_annotations() or {},
             },
             "spec": {
@@ -6785,11 +7155,13 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=hpa_name,
                 namespace=namespace,
-                labels={
-                    "app": hpa_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": hpa_name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V2HorizontalPodAutoscalerSpec(
@@ -6807,7 +7179,9 @@ class InferenceMonitor:
         autoscaling_v2 = client.AutoscalingV2Api()
         self._assert_mutation_authority()
         try:
-            autoscaling_v2.create_namespaced_horizontal_pod_autoscaler(namespace, hpa)
+            autoscaling_v2.create_namespaced_horizontal_pod_autoscaler(
+                namespace, hpa, _request_timeout=self._k8s_timeout
+            )
             self._confirm_created_resource(
                 kind="hpa",
                 resource_name=hpa_name,
@@ -6880,6 +7254,7 @@ class InferenceMonitor:
             hpa = autoscaling_v2.read_namespaced_horizontal_pod_autoscaler(
                 hpa_name,
                 namespace,
+                _request_timeout=self._k8s_timeout,
             )
         except ApiException as error:
             if error.status == 404:

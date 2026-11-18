@@ -2803,7 +2803,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 
 **Arguments:**
 
-- `ENDPOINT_NAME` - Unique name for the endpoint
+- `ENDPOINT_NAME` - Unique name for the endpoint: a DNS-1035 label (lowercase letters, digits and `-`, starting with a letter) of at most 55 characters. A name whose Kubernetes object names would overlap another endpoint's (`llama-canary` beside `llama`, `foo-proxy` beside `foo`) is refused; see [What Gets Created](INFERENCE.md#what-gets-created)
 
 **Options:**
 
@@ -2925,7 +2925,7 @@ gco inference scale my-llm --replicas 4
 
 #### `gco inference stop`
 
-Stop an inference endpoint (scales to zero, keeps configuration).
+Stop an inference endpoint (scales to zero, keeps configuration). Every Deployment of the endpoint scales to zero: the model Deployment and its canary, or the Mooncake roles and the prefill-decode proxy.
 
 ```bash
 gco inference stop ENDPOINT_NAME [OPTIONS]
@@ -3014,7 +3014,7 @@ gco inference delete my-llm -y
 
 #### `gco inference update-image`
 
-Update the container image for an endpoint. Triggers a rolling update across all target regions.
+Update the container image for an endpoint. Triggers a rolling update across all target regions. On a Mooncake endpoint the prefill, decode and store-role pods roll onto the new image, one pod-template change per reconcile pass (a pending TLS sidecar or `mooncake.json` change lands first); the prefill-decode proxy keeps its own `mooncake.proxy.image`.
 
 ```bash
 gco inference update-image ENDPOINT_NAME [OPTIONS]
