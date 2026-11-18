@@ -351,12 +351,20 @@ class WebhookStore:
         """
         try:
             if namespace:
-                response = self._table.query(
-                    IndexName="namespace-index",
-                    KeyConditionExpression="namespace = :ns",
-                    ExpressionAttributeValues={":ns": namespace},
-                )
+                query: dict[str, Any] = {
+                    "IndexName": "namespace-index",
+                    "KeyConditionExpression": "namespace = :ns",
+                    "ExpressionAttributeValues": {":ns": namespace},
+                }
+                response = self._table.query(**query)
                 items = response.get("Items", [])
+                # A Query page stops at 1 MB; delivery lookups and the list
+                # API must see every webhook in the namespace.
+                while "LastEvaluatedKey" in response:
+                    response = self._table.query(
+                        **query, ExclusiveStartKey=response["LastEvaluatedKey"]
+                    )
+                    items.extend(response.get("Items", []))
             else:
                 response = self._table.scan()
                 items = response.get("Items", [])

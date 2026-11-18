@@ -302,6 +302,35 @@ class TestWebhookStore:
         assert "secret" not in result[0]
         mock_dynamodb.query.assert_called_once()
 
+    def test_namespace_listing_follows_every_query_page(self, webhook_store, mock_dynamodb):
+        """A namespace past 1 MB of webhooks spans several Query pages."""
+
+        def item(webhook_id: str) -> dict:
+            return {
+                "webhook_id": webhook_id,
+                "url": f"https://example.com/{webhook_id}",
+                "events": '["job.failed"]',
+                "namespace": "team-a",
+            }
+
+        mock_dynamodb.query.side_effect = [
+            {"Items": [item("wh-1")], "LastEvaluatedKey": {"webhook_id": "wh-1"}},
+            {"Items": [item("wh-2")], "LastEvaluatedKey": {"webhook_id": "wh-2"}},
+            {"Items": [item("wh-3")]},
+        ]
+
+        result = webhook_store.get_webhooks_for_event("job.failed", namespace="team-a")
+
+        assert [webhook["id"] for webhook in result] == ["wh-1", "wh-2", "wh-3"]
+        calls = mock_dynamodb.query.call_args_list
+        assert [call.kwargs.get("ExclusiveStartKey") for call in calls] == [
+            None,
+            {"webhook_id": "wh-1"},
+            {"webhook_id": "wh-2"},
+        ]
+        assert {call.kwargs["IndexName"] for call in calls} == {"namespace-index"}
+        assert {call.kwargs["ExpressionAttributeValues"][":ns"] for call in calls} == {"team-a"}
+
     def test_get_webhook_found(self, webhook_store, mock_dynamodb):
         """Test getting an existing webhook."""
         mock_dynamodb.get_item.return_value = {
