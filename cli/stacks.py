@@ -2669,7 +2669,18 @@ class StackManager:
         # failure by mistaking a stale terminal state for a fresh success.
         if stack_name and not all_stacks and not success:
             cfn_status = self._get_stack_status(stack_name)
-            if cfn_status is not None and cfn_status.endswith("_IN_PROGRESS"):
+            if cfn_status == "REVIEW_IN_PROGRESS":
+                # A change set was created for a new stack and never executed,
+                # so CloudFormation is running nothing and the stack stays in
+                # this state until it is deleted. Waiting for it to settle
+                # would only burn the settle timeout. The next deploy's
+                # stuck-stack pre-check deletes the review stack.
+                print(
+                    f"  cdk exited non-zero and {stack_name} is REVIEW_IN_PROGRESS in "
+                    "CloudFormation: its change set was never executed. Treating as a "
+                    "failed deploy."
+                )
+            elif cfn_status is not None and cfn_status.endswith("_IN_PROGRESS"):
                 # CloudFormation is still mid-operation — observing that is
                 # itself proof it ran an operation for this attempt. Wait for it
                 # to settle and accept a terminal COMPLETE as a genuine success.
@@ -3364,7 +3375,14 @@ class StackManager:
         timeout: float | None = None,
         stack_identifier: str | None = None,
     ) -> str | None:
-        """Poll CloudFormation until a stack settles, retrying transient unknown reads."""
+        """Poll CloudFormation until a stack settles, retrying transient unknown reads.
+
+        Every ``*_IN_PROGRESS`` status counts as unsettled, REVIEW_IN_PROGRESS
+        included: right after ExecuteChangeSet a new stack can still read
+        REVIEW_IN_PROGRESS before CREATE_IN_PROGRESS. A caller that has not just
+        executed a change set must not wait on REVIEW_IN_PROGRESS, which never
+        settles on its own (see the reconciliation in :meth:`deploy`).
+        """
         import time
 
         if timeout is None:

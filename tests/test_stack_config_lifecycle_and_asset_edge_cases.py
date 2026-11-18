@@ -3107,6 +3107,27 @@ def test_deploy_reconciles_cdk_and_cloudformation_outcomes(
         stack_manager._diagnose_deploy_failure.assert_called_once_with("gco-global")
 
 
+def test_deploy_does_not_wait_for_a_review_in_progress_stack_to_settle(
+    stack_manager: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """REVIEW_IN_PROGRESS is a change set nobody executed: it never settles."""
+    import cli.stacks as stacks
+
+    _ready_deploy_manager(stack_manager)
+    stack_manager._run_cdk.return_value = SimpleNamespace(returncode=1)
+    stack_manager._get_stack_status.return_value = "REVIEW_IN_PROGRESS"
+
+    with patch.object(stacks, "_detect_container_runtime", return_value="docker"):
+        assert stack_manager.deploy(stack_name="gco-global") is False
+
+    stack_manager._wait_for_stack_settle.assert_not_called()
+    stack_manager._diagnose_deploy_failure.assert_called_once_with("gco-global")
+    output = capsys.readouterr().out
+    assert "gco-global is REVIEW_IN_PROGRESS" in output
+    assert "change set was never executed. Treating as a failed deploy." in output
+
+
 def test_deploy_timeout_and_cancellation_are_reconciled_separately(
     stack_manager: Any,
 ) -> None:
