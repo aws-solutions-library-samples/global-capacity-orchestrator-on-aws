@@ -74,6 +74,7 @@ structured audit event, so a run is fully reconstructable from its audit trail.
 |--------|-------------|
 | [`types.py`](types.py) | Shared `TypedDict` domain types (session state, iteration and phase records, verdict labels) so the engine, validators, and tool wrappers agree on one shape that round-trips through JSON. |
 | [`state.py`](state.py) | The `MissionStateBackend` persistence protocol plus concrete backends (filesystem, [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html)) for loading, saving, listing, and deleting session records. |
+| [`deployment.py`](deployment.py) | Resolves the project name and global Region of Mission's global-stack resources (the DynamoDB state table, mission memory, their SSM parameters): a caller's value, the CLI's configuration, `GCO_PROJECT_NAME` / `GCO_GLOBAL_REGION`, then cdk.json in the project root. |
 
 ### Verdict and Cadence
 

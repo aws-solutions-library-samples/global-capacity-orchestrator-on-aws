@@ -71,6 +71,28 @@ def _check_feature_flag() -> None:
         raise SystemExit(2)
 
 
+def configure_mission_deployment() -> None:
+    """Point Mission's global-stack resources at this CLI's project and global Region.
+
+    The state table, the mission-memory index and their SSM parameters are
+    named after cdk.json ``project_name`` and live in the global Region.
+    Mission resolves both through ``mission.deployment``; this passes the
+    CLI's merged configuration (cdk.json, config file, ``GCO_*`` variables)
+    so ``gco mission`` and ``gco swarm`` reach the same deployment as every
+    other command. A group invoked without the root ``gco`` group (tests)
+    has no configuration object and keeps Mission's own resolution.
+    """
+    from ..config import GCOConfig
+
+    context = click.get_current_context(silent=True)
+    config = context.find_object(GCOConfig) if context is not None else None
+    if config is None:
+        return
+    from mission import deployment
+
+    deployment.configure(project_name=config.project_name, global_region=config.global_region)
+
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -182,6 +204,7 @@ def mission_cmd() -> None:
     and exits with code 2.
     """
     _check_feature_flag()
+    configure_mission_deployment()
 
 
 # ---------------------------------------------------------------------------

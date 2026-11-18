@@ -1064,6 +1064,8 @@ Two persistence backends:
 
 Switch via `GCO_MISSION_STATE_BACKEND=dynamodb`. Unrecognised values fall back to filesystem with a one-line warning, matching the `GCO_MCP_TOOL_SEARCH` precedent.
 
+The DynamoDB state table, the mission-memory table and their SSM name parameters (`/<project>/missions-table-name`, `/<project>/mission-memory-*`) belong to the global stack, so Mission looks them up with the deployment's project name in the global Region. The project name is, highest precedence first: the CLI's configuration (cdk.json `project_name`, the config file, `GCO_PROJECT_NAME`) for `gco mission` and `gco swarm`; `GCO_PROJECT_NAME`; cdk.json `project_name` in the project root (the MCP server uses the root its `gco` commands run from, `GCO_PROJECT_ROOT` included); then `gco`. The Region is, in the same order, the CLI's `global_region`, `GCO_GLOBAL_REGION`, cdk.json `deployment_regions.global`, then the AWS SDK's default Region. Mission memory reads `DYNAMODB_REGION` and `GLOBAL_REGION` first and `AWS_REGION` last, as before. Mission used to take `GCO_PROJECT_NAME` (default `gco`) and the caller's default Region, which missed the tables of a project with another name, or in a global Region other than the caller's default.
+
 ## CLI Reference
 
 All `gco mission` subcommands require `GCO_ENABLE_MISSION=true`. Without the flag, the group exits with code 2 and prints the hint to stderr.

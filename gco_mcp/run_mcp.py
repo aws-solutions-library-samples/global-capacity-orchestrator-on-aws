@@ -79,6 +79,14 @@ from version import get_project_version  # noqa: E402
 # Re-export the project version for tests that check run_mcp._PROJECT_VERSION
 _PROJECT_VERSION = get_project_version()
 
+# Mission's global-stack resources (state table, memory index) are named after
+# cdk.json's project and live in its global Region. Read that cdk.json from the
+# root every gco child runs from, not from the server's working directory.
+import cli_runner as _cli_runner  # noqa: E402
+from mission import deployment as _mission_deployment  # noqa: E402
+
+_mission_deployment.configure(project_root=_cli_runner.PROJECT_ROOT)
+
 # --- Register all tools and resources ---
 
 from resources import register_all_resources  # noqa: E402

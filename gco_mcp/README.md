@@ -1328,6 +1328,7 @@ gco_mcp/
 │   ├── checkpoints.py       — Checkpoint cadence resolver
 │   ├── criteria_scaffold.py — Bedrock-driven criteria generation from directives
 │   ├── decide.py            — Pure deterministic verdict cascade
+│   ├── deployment.py        — Project name + global Region for the state table and memory
 │   ├── engine.py            — Five-phase iteration loop driver (MissionEngine)
 │   ├── final_report.py      — Final_Report builder (deterministic + sampled overlay)
 │   ├── predicate.py         — Restricted AST evaluator for predicate criteria

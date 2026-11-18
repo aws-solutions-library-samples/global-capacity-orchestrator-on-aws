@@ -21,7 +21,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
-from . import SCHEMA_VERSION
+from . import SCHEMA_VERSION, deployment
 from .types import SessionState
 
 logger = logging.getLogger(__name__)
@@ -381,10 +381,14 @@ class DynamoDBBackend:
     needs it (not at construction time). This matches the precedent
     pattern in ``cli/models.py`` and lets unit tests construct a
     ``DynamoDBBackend()`` on a host without AWS credentials without
-    triggering an SSM call. ``project_name`` is read from the
-    ``GCO_PROJECT_NAME`` environment variable, defaulting to ``"gco"``
-    so a fresh checkout (or CI run without the env var set) lines up
-    with the default project name in ``cli/config.py``.
+    triggering an SSM call. The project name and the Region of the SSM
+    lookup and of the table are the global stack's: ``project_name`` and
+    ``region`` when given, else :mod:`mission.deployment` (the CLI's
+    configuration, ``GCO_PROJECT_NAME`` / ``GCO_GLOBAL_REGION``, then
+    cdk.json ``project_name`` and ``deployment_regions.global``). They used
+    to come from ``GCO_PROJECT_NAME`` (default ``"gco"``) and the caller's
+    default Region, which missed the table of any other project, or of a
+    global Region other than the caller's default.
 
     The SSM lookup goes through :func:`gco.services.aws_ssm.get_ssm_parameter`,
     the shared helper that consolidates the pattern previously duplicated
@@ -395,41 +399,51 @@ class DynamoDBBackend:
     still letting every backend share one implementation.
     """
 
-    def __init__(self, table_name: str | None = None) -> None:
+    def __init__(
+        self,
+        table_name: str | None = None,
+        *,
+        project_name: str | None = None,
+        region: str | None = None,
+    ) -> None:
         self._table_name: str | None = table_name
+        self._project_name = project_name
+        self._region = region
         self._table: Any = None  # boto3 Table resource, lazily constructed
 
     # ------------------------------------------------------------------ #
     # internals
     # ------------------------------------------------------------------ #
 
-    def _resolve_table_name(self) -> str:  # pragma: no cover - boto3 / SSM
+    def _resolve_table_name(self) -> str:
         """Return the cached table name, fetching from SSM on first call.
 
-        Reads ``GCO_PROJECT_NAME`` (default ``"gco"``) to build the SSM
-        parameter path ``/{project_name}/missions-table-name``. The
-        value is cached on the instance so subsequent method calls do
-        not re-hit SSM.
+        Reads ``/{project_name}/missions-table-name`` in the global
+        Region. The value is cached on the instance so subsequent method
+        calls do not re-hit SSM.
         """
         if self._table_name is not None:
             return self._table_name
 
         from gco.services.aws_ssm import get_ssm_parameter
 
-        project_name = os.environ.get("GCO_PROJECT_NAME", "gco")
-        param_name = f"/{project_name}/missions-table-name"
-
-        self._table_name = get_ssm_parameter(param_name)
+        param_name = f"/{deployment.project_name(self._project_name)}/missions-table-name"
+        self._table_name = get_ssm_parameter(
+            param_name, region=deployment.global_region(self._region)
+        )
         return self._table_name
 
-    def _get_table(self) -> Any:  # pragma: no cover - boto3 resource
+    def _get_table(self) -> Any:
         """Return the cached ``boto3`` Table resource, building it lazily."""
         if self._table is not None:
             return self._table
 
         import boto3
 
-        self._table = boto3.resource("dynamodb").Table(self._resolve_table_name())
+        region = deployment.global_region(self._region)
+        self._table = boto3.resource("dynamodb", region_name=region).Table(
+            self._resolve_table_name()
+        )
         return self._table
 
     # ------------------------------------------------------------------ #
@@ -562,7 +576,7 @@ def get_backend() -> MissionStateBackend:
 
     raw = os.environ.get("GCO_MISSION_STATE_BACKEND", "filesystem").strip().lower()
     if raw == "dynamodb":
-        _BACKEND_INSTANCE = DynamoDBBackend()  # pragma: no cover - boto3 path
+        _BACKEND_INSTANCE = DynamoDBBackend()
     elif raw == "filesystem":
         _BACKEND_INSTANCE = FilesystemBackend()
     else:
