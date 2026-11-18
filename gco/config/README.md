@@ -30,10 +30,11 @@ tls_policy = config.get_backend_tls_config()
 ## Validation Model
 
 Invalid operator input fails during synthesis through `ConfigValidationError`.
-Validation includes project naming, supported regions, numeric bounds, feature
-sub-block types, and security-sensitive lifecycle relationships such as TLS
-root overlap and trust-cache timing. Secrets and credentials do not belong in
-CDK context.
+Validation runs for every context, including one without `project_name`, which
+then takes its default `gco`. It includes project naming, supported regions,
+numeric bounds, feature sub-block types, and security-sensitive lifecycle
+relationships such as TLS root overlap and trust-cache timing. Secrets and
+credentials do not belong in CDK context.
 
 ## Source Files
 

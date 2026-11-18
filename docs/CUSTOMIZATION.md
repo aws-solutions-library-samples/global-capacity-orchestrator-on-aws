@@ -332,6 +332,10 @@ letters, digits, or hyphens (e.g. `gco`, `gco-staging`, `acme`, `team-b-prod`).
 Uppercase, underscores, dots, a leading digit, or a leading/trailing hyphen are
 rejected up front with a clear error rather than failing mid-deploy.
 
+Leaving `project_name` out of `cdk.json` selects the default `gco`; the rest of
+the file is validated the same way either way. An explicit value, including an
+empty string, must match the pattern.
+
 ### Backward compatibility
 
 The default `project_name` is `gco`, and every derived name renders

@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_regional_diagram_keeps_helm_convergence_topology(tmp_path: Path, monkeypatch) -> None:
     """Asset stubs must not erase deployable Lambda/Step Functions resources."""
     monkeypatch.chdir(ROOT)
-    app = cdk.App(outdir=str(tmp_path / "cdk.out"))
+    app = cdk.App(outdir=str(tmp_path / "cdk.out"), context=generate._BASE_CONTEXT)
     config = ConfigLoader(app)
     with generate._mocked_regional_assets():
         stack_names = generate._build_regional(app, config)
@@ -53,7 +53,7 @@ def test_full_architecture_keeps_every_stack_bridge_and_helm_topology(
     monkeypatch.chdir(ROOT)
     app = cdk.App(
         outdir=str(tmp_path / "cdk.out"),
-        context=generate._ANALYTICS_CONTEXT,
+        context={**generate._BASE_CONTEXT, **generate._ANALYTICS_CONTEXT},
     )
     config = ConfigLoader(app)
     project = config.get_project_name()
@@ -112,7 +112,7 @@ def _explicit_dependencies(stack: cdk.Stack) -> set[str]:
 def test_build_global_constructs_only_the_global_stack(tmp_path: Path, monkeypatch) -> None:
     """The global diagram holds exactly the global stack, in the global region."""
     monkeypatch.chdir(ROOT)
-    app = cdk.App(outdir=str(tmp_path / "cdk.out"))
+    app = cdk.App(outdir=str(tmp_path / "cdk.out"), context=generate._BASE_CONTEXT)
     config = ConfigLoader(app)
     project = config.get_project_name()
     regions = config.get_deployment_regions()
@@ -135,7 +135,7 @@ def test_build_api_gateway_constructs_only_the_api_gateway_stack(
 ) -> None:
     """The API Gateway diagram holds one stack, placed in the api_gateway region."""
     monkeypatch.chdir(ROOT)
-    app = cdk.App(outdir=str(tmp_path / "cdk.out"))
+    app = cdk.App(outdir=str(tmp_path / "cdk.out"), context=generate._BASE_CONTEXT)
     config = ConfigLoader(app)
     project = config.get_project_name()
     regions = config.get_deployment_regions()
@@ -155,7 +155,7 @@ def test_build_regional_api_borrows_the_regional_vpc_but_includes_only_the_bridg
 ) -> None:
     """regional-api instantiates the regional stack for its VPC yet scopes --include to the bridge."""
     monkeypatch.chdir(ROOT)
-    app = cdk.App(outdir=str(tmp_path / "cdk.out"))
+    app = cdk.App(outdir=str(tmp_path / "cdk.out"), context=generate._BASE_CONTEXT)
     config = ConfigLoader(app)
     project = config.get_project_name()
     region = config.get_deployment_regions()["regional"][0]
@@ -182,7 +182,7 @@ def test_build_monitoring_builds_the_full_topology_without_optional_analytics(
 ) -> None:
     """With analytics off (the default) the full build skips analytics; monitoring scopes to itself."""
     monkeypatch.chdir(ROOT)
-    app = cdk.App(outdir=str(tmp_path / "cdk.out"))
+    app = cdk.App(outdir=str(tmp_path / "cdk.out"), context=generate._BASE_CONTEXT)
     config = ConfigLoader(app)
     assert config.get_analytics_enabled() is False
     project = config.get_project_name()
@@ -221,7 +221,10 @@ def test_build_monitoring_builds_the_full_topology_without_optional_analytics(
 def test_build_analytics_constructs_only_the_analytics_stack(tmp_path: Path, monkeypatch) -> None:
     """The analytics diagram holds one stack, co-located with the API Gateway region."""
     monkeypatch.chdir(ROOT)
-    app = cdk.App(outdir=str(tmp_path / "cdk.out"), context=generate._ANALYTICS_CONTEXT)
+    app = cdk.App(
+        outdir=str(tmp_path / "cdk.out"),
+        context={**generate._BASE_CONTEXT, **generate._ANALYTICS_CONTEXT},
+    )
     config = ConfigLoader(app)
     assert config.get_analytics_enabled() is True
     project = config.get_project_name()

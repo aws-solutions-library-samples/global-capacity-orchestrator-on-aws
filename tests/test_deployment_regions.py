@@ -91,9 +91,10 @@ class TestDeploymentRegionsRequired:
 class TestDeploymentRegionsDefaults:
     """Tests for deployment_regions default values."""
 
-    def test_empty_deployment_regions_uses_defaults(self):
-        """Test that empty deployment_regions dict uses default values."""
-        app = MockApp({})  # Empty context skips validation
+    def test_omitted_deployment_region_keys_use_defaults(self, base_context):
+        """Keys left out of deployment_regions take their default values."""
+        base_context["deployment_regions"] = {"global": "us-east-2"}
+        app = MockApp(base_context)
         config = ConfigLoader(app)
 
         regions = config.get_deployment_regions()
@@ -102,9 +103,10 @@ class TestDeploymentRegionsDefaults:
         assert regions["monitoring"] == "us-east-2"
         assert regions["regional"] == ["us-east-1"]
 
-    def test_partial_deployment_regions_fills_defaults(self):
+    def test_partial_deployment_regions_fills_defaults(self, base_context):
         """Test that partial deployment_regions fills in defaults."""
-        app = MockApp({})
+        base_context["deployment_regions"] = {"regional": ["us-east-1"]}
+        app = MockApp(base_context)
         config = ConfigLoader(app)
 
         # Manually set partial config

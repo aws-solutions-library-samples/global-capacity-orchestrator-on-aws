@@ -319,16 +319,16 @@ class ConfigLoader:
         self._validate_configuration()
 
     def _validate_configuration(self) -> None:
-        """Validate the entire configuration"""
-        # Check if we have any context at all (might be running outside CDK)
-        project_name = self.app.node.try_get_context("project_name")
-        if project_name is None:
-            # Running outside CDK context, skip validation
-            return
+        """Validate the entire configuration.
 
+        Validation always runs. ``project_name`` is optional and defaults to
+        ``gco`` (see :meth:`get_project_name`); an explicit value must match
+        :attr:`PROJECT_NAME_PATTERN`. An absent ``project_name`` used to skip
+        every check below, so a cdk.json without it synthesized whatever the
+        other blocks said.
+        """
         # Validate required fields exist
         required_fields = [
-            "project_name",
             "kubernetes_version",
             "resource_thresholds",
         ]
@@ -425,6 +425,10 @@ class ConfigLoader:
         message up front.
         """
         project_name = self.app.node.try_get_context("project_name")
+        if project_name is None:
+            # Absent (or JSON null, which CDK normalizes to absent): the
+            # documented default ``gco`` applies.
+            return
         if not isinstance(project_name, str) or not self.PROJECT_NAME_PATTERN.match(project_name):
             raise ConfigValidationError(
                 f"Invalid project_name {project_name!r}. It must match "
