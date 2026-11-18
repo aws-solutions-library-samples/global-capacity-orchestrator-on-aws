@@ -1057,6 +1057,8 @@ Sessions move through these statuses:
 - `terminated` — terminal. The verdict cascade emitted `terminate`, or the operator called `mission abort` without `--pause`.
 - `failed` — terminal. A phase raised an unhandled exception. The session JSON carries the failed phase's `error_message`.
 
+An abort, pause or `mission complete` (or `swarm abort`) can land while an iteration is still running its tool calls. The iteration then finishes and its record is added to the session, but the session keeps the status, verdict and end time the operator set: it is not put back to `running`, and an iteration that would have completed the mission does not write a Final_Report. The next `mission iterate` reports `session_terminal` (or `session_paused`), and a swarm's child drivers and orchestrator stop at their next check.
+
 Two persistence backends:
 
 - **`filesystem`** (default). One JSON file per session under `~/.gco/missions/`. Atomic writes via `tempfile + fsync + os.replace`. POSIX permissions tightened to `0o700` on the directory and `0o600` on each file because session JSON contains operator directives, observations, and tool-call results that should not be readable by other local users.

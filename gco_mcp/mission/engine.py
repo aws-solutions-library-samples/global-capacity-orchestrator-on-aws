@@ -321,7 +321,7 @@ class MissionEngine:
                 # the original phase exception — the operator's first
                 # need is to see what actually went wrong, not what
                 # went wrong while reporting what went wrong.
-                self.backend.save_session(session)
+                self._save_iteration(session, record)
             raise
 
         # Stamp the verdict on the iteration record before append; the
@@ -334,11 +334,11 @@ class MissionEngine:
         session["iterations"].append(record)
 
         self._update_session_post_iteration(session, record)
-        self.backend.save_session(session)
+        saved = self._save_iteration(session, record)
 
-        if verdict in TERMINAL_VERDICTS:
+        if verdict in TERMINAL_VERDICTS and saved is session:
             await self._finalise_terminal_session(session, record, verdict, reason)
-            self.backend.save_session(session)
+            self._save_iteration(session, record)
 
         # One verdict event per iteration regardless of terminal vs
         # in-progress, so audit consumers see a uniform stream.
@@ -351,6 +351,31 @@ class MissionEngine:
         )
 
         return record
+
+    def _save_iteration(self, session: SessionState, record: IterationRecord) -> SessionState:
+        """Save the session this iteration ran on, unless it was stopped meanwhile.
+
+        ``mission_abort``, ``mission_complete`` and ``swarm_abort`` write the
+        session while an iteration may be running. Saving this iteration's
+        copy, loaded before its tool calls, used to undo them: the session
+        went back to ``running`` and the next ``mission_iterate`` carried on.
+        When the stored session has meanwhile turned terminal or paused, it
+        is kept as stored (status, verdict, end time) and only this
+        iteration's record, and the no-progress counter it advanced, are
+        added to it. Returns the session that was saved.
+        """
+        stored: SessionState | None = self.backend.load_session(session["session_id"])
+        if stored is None or (
+            stored["status"] not in TERMINAL_STATES and stored["status"] != "paused"
+        ):
+            self.backend.save_session(session)
+            return session
+        index = record["iteration_index"]
+        if all(item.get("iteration_index") != index for item in stored["iterations"]):
+            stored["iterations"].append(record)
+        stored["no_progress_counter"] = session.get("no_progress_counter", 0)
+        self.backend.save_session(stored)
+        return stored
 
     # ------------------------------------------------------------------ #
     # Iteration record bootstrap
