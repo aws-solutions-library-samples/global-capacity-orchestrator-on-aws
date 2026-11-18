@@ -45,7 +45,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
-from gco.unauthenticated_paths import UNAUTHENTICATED_PATHS
+# Re-exported: callers and tests import the set from this module.
+from gco.unauthenticated_paths import UNAUTHENTICATED_PATHS as UNAUTHENTICATED_PATHS
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-09-28T07:34:51Z
