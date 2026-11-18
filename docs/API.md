@@ -2182,7 +2182,7 @@ gco webhooks create -u https://example.com/webhook -e job.completed --secret my-
 
 - `job.started` - Job started running (transitioned from pending to running)
 - `job.completed` - Job completed successfully
-- `job.failed` - Job failed
+- `job.failed` - Job failed (Kubernetes set the Job's `Failed` condition, for example after `backoffLimit` pod failures; a failed pod that the Job retries does not fire it)
 
 **Response:**
 

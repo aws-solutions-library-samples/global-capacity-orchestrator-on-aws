@@ -30,6 +30,7 @@ import httpx2
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from kubernetes.client.models import V1Job
 
 from gco.services.template_store import WebhookStore
 from gco.services.webhook_dispatcher import (
@@ -672,13 +673,60 @@ class TestComputeJobStatusFallbacks:
         job.status.failed = 0
         assert dispatcher._compute_job_status(job) == "succeeded"
 
-    def test_failed_without_conditions(self, dispatcher):
-        """Test failed status via status.failed when no conditions."""
-        job = MagicMock()
-        job.status.conditions = []
-        job.status.active = 0
-        job.status.succeeded = 0
-        job.status.failed = 3
+    def test_failed_pods_without_a_failed_condition_are_a_retry(self, dispatcher):
+        """Failed pods alone are retries within backoffLimit, not a failed Job."""
+        job = V1Job.from_dict(
+            {
+                "metadata": {"name": "train", "namespace": "gco-jobs", "uid": "u"},
+                "status": {"active": 0, "failed": 3, "startTime": "2026-01-01T00:00:00Z"},
+            }
+        )
+        assert dispatcher._compute_job_status(job) == "running"
+
+    @pytest.mark.asyncio
+    async def test_a_job_that_retries_then_succeeds_fires_started_and_completed_only(
+        self, dispatcher
+    ):
+        """Pod retries never fire job.failed for a Job that goes on to succeed."""
+
+        def job(status: dict) -> V1Job:
+            return V1Job.from_dict(
+                {
+                    "metadata": {"name": "train", "namespace": "gco-jobs", "uid": "u"},
+                    "status": status,
+                }
+            )
+
+        complete = [{"type": "Complete", "status": "True"}]
+        sequence = [
+            ("ADDED", job({})),
+            ("MODIFIED", job({"active": 1})),
+            ("MODIFIED", job({"active": 0, "failed": 1})),  # backoff before pod 2
+            ("MODIFIED", job({"active": 1, "failed": 1})),
+            ("MODIFIED", job({"succeeded": 1, "failed": 1, "conditions": complete})),
+        ]
+        fired = []
+
+        async def record(event, _job):
+            fired.append(event.value)
+            return []
+
+        dispatcher._dispatch_event = record
+        for event_type, update in sequence:
+            await dispatcher._process_job_event(event_type, update)
+
+        assert fired == ["job.started", "job.completed"]
+
+    def test_the_failed_condition_still_means_failed(self, dispatcher):
+        job = V1Job.from_dict(
+            {
+                "metadata": {"name": "train", "namespace": "gco-jobs", "uid": "u"},
+                "status": {
+                    "failed": 4,
+                    "conditions": [{"type": "Failed", "status": "True"}],
+                },
+            }
+        )
         assert dispatcher._compute_job_status(job) == "failed"
 
     def test_conditions_none(self, dispatcher):

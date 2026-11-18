@@ -434,8 +434,11 @@ class WebhookDispatcher:
         if (status.succeeded or 0) > 0:
             return "succeeded"
 
+        # Failed pods without the Job's Failed condition are retries within
+        # backoffLimit: the Job has started and is waiting for its next pod.
+        # Only the controller's Failed condition (above) ends it.
         if (status.failed or 0) > 0:
-            return "failed"
+            return "running"
 
         return "pending"
 
