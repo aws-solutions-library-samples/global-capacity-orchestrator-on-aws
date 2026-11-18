@@ -2803,7 +2803,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 
 **Arguments:**
 
-- `ENDPOINT_NAME` - Unique name for the endpoint
+- `ENDPOINT_NAME` - Unique name for the endpoint: a DNS-1035 label (lowercase letters, digits and `-`, starting with a letter) of at most 55 characters. A name whose Kubernetes object names would overlap another endpoint's (`llama-canary` beside `llama`, `foo-proxy` beside `foo`) is refused; see [What Gets Created](INFERENCE.md#what-gets-created)
 
 **Options:**
 

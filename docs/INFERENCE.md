@@ -352,6 +352,19 @@ For each target region, the inference monitor creates:
 - **Optional autoscaler** — A native HPA for CPU/memory metrics or KEDA
   ScaledObject when GPU metrics are requested.
 
+Every object is named after the endpoint: `<name>` plus `-canary`, `-prefill`,
+`-decode`, `-proxy`, `-admin`, `-mooncake`, `-pd-proxy` or `-tls-proxy`, and
+KEDA's `keda-hpa-<name>[-prefill|-decode]`. An endpoint name is therefore a
+DNS-1035 label of at most 55 characters (`<name>-prefill` must fit 63), and
+`gco inference deploy` refuses a name whose derived object names overlap
+another endpoint's, in either direction: `llama-canary` beside `llama`, or
+`foo-proxy` beside a Mooncake `foo`. The monitor also labels each object it
+creates with `gco.io/endpoint: <name>` (object metadata only, never a pod
+template) and never patches, claims or deletes an object labelled for another
+endpoint. Objects created before the label existed get it on their next
+metadata claim; until then, one of another lifecycle whose name another
+endpoint also derives is left untouched rather than cleaned up as stale.
+
 This endpoint autoscaler is separate from the shared `inference-proxy` data
 plane. Each regional stack installs the managed EKS Metrics Server add-on that
 feeds per-container resource metrics to the proxy's `autoscaling/v2` HPA. The

@@ -226,6 +226,12 @@ def inference_deploy(
     The endpoint is registered in DynamoDB and the inference_monitor
     in each target region creates the Kubernetes resources automatically.
 
+    ENDPOINT_NAME is a DNS-1035 label (lowercase letters, digits and '-',
+    starting with a letter) of at most 55 characters. Its Kubernetes objects
+    are named after it (NAME-canary, NAME-prefill, NAME-decode, NAME-proxy and
+    others), so a name that overlaps another endpoint's object names, such as
+    llama-canary beside llama, is refused.
+
     Examples:
         gco inference deploy my-llm -i vllm/vllm-openai:v0.32.0
 

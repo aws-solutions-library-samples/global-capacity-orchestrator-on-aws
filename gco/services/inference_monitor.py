@@ -43,7 +43,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import cache, partial
 from pathlib import Path
@@ -66,7 +66,7 @@ from gco.models.inference_models import (
     INSTANCE_TYPE_NODE_LABEL,
     SGLANG_UNSUPPORTED_GPU_NAMES,
 )
-from gco.services.inference_store import InferenceEndpointStore
+from gco.services.inference_store import InferenceEndpointStore, endpoint_object_names
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -564,9 +564,28 @@ _LIFECYCLE_ANNOTATION = "gco.io/lifecycle-id"
 _REGION_GENERATION_ANNOTATION = "gco.io/region-generation"
 _LEADER_EPOCH_ANNOTATION = "gco.io/leader-epoch"
 
+# The endpoint an object belongs to, on the metadata of every object the
+# monitor creates (never on a pod template, where adding it would roll pods).
+# Object names are derived from endpoint names without reserved suffixes, so
+# ``llama-canary`` is both the canary of ``llama`` and the primary of an
+# endpoint named ``llama-canary``; the label tells them apart.
+ENDPOINT_NAME_LABEL = "gco.io/endpoint"
+_LABEL_VALUE_PATTERN = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
+
 
 class ReconcileFencedError(RuntimeError):
     """The caller no longer owns the endpoint or leader epoch it read."""
+
+
+class ForeignEndpointResourceError(RuntimeError):
+    """An object at one of this endpoint's names belongs to another endpoint.
+
+    Raised for an object labelled for a different endpoint, and for an
+    unlabelled one (created before the label existed) of another lifecycle
+    whose name another endpoint also derives. Such an object is never patched,
+    claimed or deleted: cleanup treats it as absent, and creating this
+    endpoint's own object under the name fails with this error.
+    """
 
 
 @dataclass(frozen=True)
@@ -1495,6 +1514,9 @@ class InferenceMonitor:
         self._leader_epoch: str | None = None
         self._leadership_lost = threading.Event()
         self._active_authority: ReconcileAuthority | None = None
+        # Every endpoint record's name in the current pass's snapshot, used to
+        # tell whether an unlabelled object's name is another endpoint's too.
+        self._endpoint_names: frozenset[str] = frozenset()
 
         # Metrics
         self._reconcile_count = 0
@@ -1865,6 +1887,25 @@ class InferenceMonitor:
         labels = cls._object_labels(resource)
         return labels.get("project") == "gco" and labels.get("gco.io/type") == "inference"
 
+    def _name_derived_by_another_endpoint(self, resource_name: str, endpoint_name: str) -> bool:
+        """Whether another endpoint record also derives ``resource_name`` from its name."""
+        return any(
+            other != endpoint_name and resource_name in endpoint_object_names(other)
+            for other in getattr(self, "_endpoint_names", ())
+        )
+
+    def _owned_labels(self, labels: Mapping[str, str]) -> dict[str, str]:
+        """``labels`` plus :data:`ENDPOINT_NAME_LABEL` for the endpoint being reconciled.
+
+        For object metadata only, never a pod template: an existing
+        Deployment's pods would roll if its template gained the label.
+        """
+        owned = dict(labels)
+        authority = getattr(self, "_active_authority", None)
+        if authority is not None and _LABEL_VALUE_PATTERN.fullmatch(authority.endpoint_name):
+            owned[ENDPOINT_NAME_LABEL] = authority.endpoint_name
+        return owned
+
     def _handoff_stale_resource(
         self,
         resource: Any,
@@ -1921,6 +1962,24 @@ class InferenceMonitor:
             # Production reconciliation always has a Lease and real metadata.
             return resource
         observed_lifecycle = annotations.get(_LIFECYCLE_ANNOTATION)
+        owner = self._object_labels(resource).get(ENDPOINT_NAME_LABEL)
+        if owner is not None and owner != authority.endpoint_name:
+            raise ForeignEndpointResourceError(
+                f"{kind} {resource_name} belongs to endpoint {owner}, not {authority.endpoint_name}"
+            )
+        if (
+            owner is None
+            and observed_lifecycle != authority.lifecycle_id
+            and self._name_derived_by_another_endpoint(resource_name, authority.endpoint_name)
+        ):
+            # Created before the label existed by another lifecycle: a stale
+            # incarnation of this endpoint, or the object of the other endpoint
+            # that derives the same name. Only the label could tell, so it is
+            # neither claimed nor handed off.
+            raise ForeignEndpointResourceError(
+                f"{kind} {resource_name} has no {ENDPOINT_NAME_LABEL} label and another "
+                "endpoint derives the same name; it is left untouched"
+            )
         if observed_lifecycle is None and not self._has_monitor_provenance(resource):
             raise ReconcileFencedError(f"{kind} {resource_name} has ambiguous legacy ownership")
         if observed_lifecycle not in (None, authority.lifecycle_id):
@@ -1954,15 +2013,18 @@ class InferenceMonitor:
         self._assert_current_leadership()
         merged = dict(annotations)
         merged.update(expected)
+        claim: dict[str, Any] = {"resourceVersion": resource_version, "annotations": merged}
+        # Object metadata only: a Deployment's pod template is untouched. The
+        # generated admin Secret keeps its exact ownership labels (its
+        # lifecycle annotation identifies it; no other endpoint derives it).
+        if (
+            owner is None
+            and kind != "secret"
+            and _LABEL_VALUE_PATTERN.fullmatch(authority.endpoint_name)
+        ):
+            claim["labels"] = {ENDPOINT_NAME_LABEL: authority.endpoint_name}
         try:
-            patch_metadata(
-                body={
-                    "metadata": {
-                        "resourceVersion": resource_version,
-                        "annotations": merged,
-                    }
-                }
-            )
+            patch_metadata(body={"metadata": claim})
         except Exception as error:
             raise ReconcileFencedError(
                 f"{kind} {resource_name} changed during authority claim"
@@ -2069,6 +2131,9 @@ class InferenceMonitor:
         except Exception as e:
             logger.error("Failed to list endpoints from DynamoDB: %s", e)
             return actions
+        self._endpoint_names = frozenset(
+            name for endpoint in endpoints if isinstance(name := endpoint.get("endpoint_name"), str)
+        )
 
         # Records written before lifecycle fencing are upgraded from their
         # DynamoDB snapshot before any Kubernetes mutation. The update is
@@ -2667,7 +2732,9 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=cm_name,
                 namespace=ns,
-                labels={"app": name, "project": "gco", "gco.io/type": "inference"},
+                labels=self._owned_labels(
+                    {"app": name, "project": "gco", "gco.io/type": "inference"}
+                ),
                 annotations=self._provenance_annotations(),
             ),
             data={"mooncake.json": json.dumps(cfg, sort_keys=True)},
@@ -4510,7 +4577,7 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=deploy_name,
                 namespace=namespace,
-                labels=dict(labels),
+                labels=self._owned_labels(labels),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1DeploymentSpec(
@@ -5048,7 +5115,7 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=proxy_name,
                 namespace=ns,
-                labels=dict(labels),
+                labels=self._owned_labels(labels),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1DeploymentSpec(
@@ -5232,12 +5299,14 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=deploy_name,
                 namespace=ns,
-                labels={
-                    "app": deploy_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": role,
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": deploy_name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                        "gco.io/role": role,
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
@@ -5290,12 +5359,14 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=cm_name,
                 namespace=ns,
-                labels={
-                    "app": f"{name}-proxy",
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": PD_PROXY_ROLE_LABEL,
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": f"{name}-proxy",
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                        "gco.io/role": PD_PROXY_ROLE_LABEL,
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             data={PD_PROXY_SCRIPT_FILENAME: script},
@@ -5377,7 +5448,9 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=cm_name,
                 namespace=ns,
-                labels={"app": name, "project": "gco", "gco.io/type": "inference"},
+                labels=self._owned_labels(
+                    {"app": name, "project": "gco", "gco.io/type": "inference"}
+                ),
                 annotations=self._provenance_annotations(),
             ),
             data={ENDPOINT_TLS_PROXY_SCRIPT_FILENAME: script},
@@ -5593,12 +5666,14 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=proxy_name,
                 namespace=namespace,
-                labels={
-                    "app": proxy_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                    "gco.io/role": PD_PROXY_ROLE_LABEL,
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": proxy_name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                        "gco.io/role": PD_PROXY_ROLE_LABEL,
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
@@ -5652,11 +5727,13 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=name,
                 namespace=namespace,
-                labels={
-                    "app": name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V1ServiceSpec(
@@ -5884,9 +5961,17 @@ class InferenceMonitor:
         }
 
     def _cleanup_canary(self, name: str, namespace: str) -> None:
-        """Remove only canary objects carrying this reconciliation authority."""
+        """Remove only canary objects carrying this reconciliation authority.
+
+        An object at the canary's name that belongs to another endpoint (one
+        named ``{name}-canary``, say) is not this endpoint's canary and is left
+        alone.
+        """
         canary_name = f"{name}-canary"
-        deployment = self._get_deployment(canary_name, namespace)
+        try:
+            deployment = self._get_deployment(canary_name, namespace)
+        except ForeignEndpointResourceError:
+            deployment = None
         if deployment is not None:
             self._assert_mutation_authority()
             try:
@@ -5904,6 +5989,8 @@ class InferenceMonitor:
                     logger.error("Failed to delete canary deployment %s: %s", canary_name, error)
         try:
             service = self._authorize_existing_service(canary_name, namespace)
+        except ForeignEndpointResourceError:
+            pass
         except ApiException as error:
             if error.status != 404:
                 logger.error("Failed to read canary service %s: %s", canary_name, error)
@@ -5991,8 +6078,14 @@ class InferenceMonitor:
         pending: list[str],
         errors: list[str],
         observed_resource: Any | None = None,
+        foreign: set[str] | None = None,
     ) -> bool:
-        """Read-authorize-delete one exact UID/resourceVersion, then re-observe."""
+        """Read-authorize-delete one exact UID/resourceVersion, then re-observe.
+
+        An object that belongs to another endpoint (see
+        :class:`ForeignEndpointResourceError`) is neither deleted nor waited
+        for: it counts as absent, and its ``kind/name`` is added to ``foreign``.
+        """
         resource_id = f"{kind}/{resource_name}"
         if observed_resource is not None:
             observed = observed_resource
@@ -6008,17 +6101,23 @@ class InferenceMonitor:
                 errors.append(self._cleanup_error("read", kind, resource_name, error))
                 return False
 
-        observed = self._authorize_resource(
-            observed,
-            kind=kind,
-            resource_name=resource_name,
-            patch_metadata=patch_metadata,
-            read_resource=read_call,
-            delete_resource=delete_call,
-            allow_region_mismatch=bool(
-                self._active_authority and self._active_authority.region_removed
-            ),
-        )
+        try:
+            observed = self._authorize_resource(
+                observed,
+                kind=kind,
+                resource_name=resource_name,
+                patch_metadata=patch_metadata,
+                read_resource=read_call,
+                delete_resource=delete_call,
+                allow_region_mismatch=bool(
+                    self._active_authority and self._active_authority.region_removed
+                ),
+            )
+        except ForeignEndpointResourceError as error:
+            logger.info("Left %s alone during cleanup: %s", resource_id, error)
+            if foreign is not None:
+                foreign.add(resource_id)
+            return False
         _metadata, _annotations, observed_uid, _resource_version = self._object_metadata(observed)
         self._assert_mutation_authority()
         try:
@@ -6422,6 +6521,9 @@ class InferenceMonitor:
         pending = list(autoscaler_cleanup.pending)
         errors = list(autoscaler_cleanup.errors)
         resources_found = autoscaler_cleanup.resources_found
+        # Parents at this endpoint's names that belong to another endpoint;
+        # their pods and endpoint slices are that endpoint's too.
+        foreign: set[str] = set()
 
         for deployment_name in inventory.deployments:
             resources_found |= self._delete_and_confirm(
@@ -6447,6 +6549,7 @@ class InferenceMonitor:
                 ),
                 pending=pending,
                 errors=errors,
+                foreign=foreign,
             )
 
         for service_name in inventory.services:
@@ -6473,6 +6576,7 @@ class InferenceMonitor:
                 ),
                 pending=pending,
                 errors=errors,
+                foreign=foreign,
             )
 
         for config_map_name in inventory.config_maps:
@@ -6566,7 +6670,19 @@ class InferenceMonitor:
         resources_found |= self._observe_generated_children(
             name,
             namespace,
-            inventory,
+            replace(
+                inventory,
+                deployments=tuple(
+                    deployment_name
+                    for deployment_name in inventory.deployments
+                    if f"deployment/{deployment_name}" not in foreign
+                ),
+                services=tuple(
+                    service_name
+                    for service_name in inventory.services
+                    if f"service/{service_name}" not in foreign
+                ),
+            ),
             pending,
             errors,
         )
@@ -6792,11 +6908,13 @@ class InferenceMonitor:
             "metadata": {
                 "name": name,
                 "namespace": namespace,
-                "labels": {
-                    "app": name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
+                "labels": self._owned_labels(
+                    {
+                        "app": name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                    }
+                ),
                 "annotations": self._provenance_annotations() or {},
             },
             "spec": {
@@ -6936,11 +7054,13 @@ class InferenceMonitor:
             metadata=client.V1ObjectMeta(
                 name=hpa_name,
                 namespace=namespace,
-                labels={
-                    "app": hpa_name,
-                    "project": "gco",
-                    "gco.io/type": "inference",
-                },
+                labels=self._owned_labels(
+                    {
+                        "app": hpa_name,
+                        "project": "gco",
+                        "gco.io/type": "inference",
+                    }
+                ),
                 annotations=self._provenance_annotations(),
             ),
             spec=client.V2HorizontalPodAutoscalerSpec(
