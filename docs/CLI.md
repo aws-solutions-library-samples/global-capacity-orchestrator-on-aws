@@ -7017,6 +7017,15 @@ gco capacity status
 aws sts get-caller-identity
 ```
 
+**"Regional stack discovery could not read stack 'gco-REGION' in REGION"**
+
+The CLI could not read a regional stack in one of the `cdk.json` regions, so it
+does not claim the stack is absent. The message names the AWS error
+(`Throttling`, `AccessDenied`, an expired session, a network failure). Fix that
+and rerun; only CloudFormation's "does not exist" answer is reported as a missing
+stack. The same message from the account-wide scan (no `cdk.json` regions) means
+no stack was found and some regions could not be read.
+
 **"Endpoint request timed out"**
 
 - Wait 1-2 minutes after deployment for ALB targets to become healthy

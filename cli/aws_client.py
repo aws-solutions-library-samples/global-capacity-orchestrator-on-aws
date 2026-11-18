@@ -80,6 +80,10 @@ class RegionalApiDiscoveryError(RuntimeError):
     """Regional endpoint discovery failed without confirming stack absence."""
 
 
+class RegionalStackDiscoveryError(RuntimeError):
+    """A regional stack could not be read, so its absence is not confirmed."""
+
+
 def _cloudformation_stack_missing(exc: ClientError) -> bool:
     """Return whether CloudFormation authoritatively reports an absent stack."""
     error = exc.response.get("Error", {})
@@ -87,6 +91,19 @@ def _cloudformation_stack_missing(exc: ClientError) -> bool:
         error.get("Code") == "ValidationError"
         and "does not exist" in str(error.get("Message", "")).lower()
     )
+
+
+def _client_error_summary(exc: ClientError) -> str:
+    """``AWS error <Code>: <message>`` with the code and message made safe to print."""
+    error = exc.response.get("Error", {})
+    raw_error_code = error.get("Code")
+    error_code = (
+        raw_error_code
+        if isinstance(raw_error_code, str)
+        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", raw_error_code)
+        else "ClientError"
+    )
+    return f"AWS error {error_code}: {_safe_aws_error_message(error)}"
 
 
 def _aws_credential_context(session: Any) -> str:
@@ -303,19 +320,10 @@ class GCOAWSClient:
         except ClientError as exc:
             if _cloudformation_stack_missing(exc):
                 return None
-            error = exc.response.get("Error", {})
-            raw_error_code = error.get("Code")
-            error_code = (
-                raw_error_code
-                if isinstance(raw_error_code, str)
-                and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", raw_error_code)
-                else "ClientError"
-            )
-            error_message = _safe_aws_error_message(error)
             raise RegionalApiDiscoveryError(
                 f"Regional API endpoint discovery could not run for stack '{stack_name}' "
                 f"in {region}. Credential context: {credential_context}. "
-                f"AWS error {error_code}: {error_message}"
+                f"{_client_error_summary(exc)}"
             ) from exc
         except Exception as exc:
             failure_type = re.sub(r"[^A-Za-z0-9_.-]", "", type(exc).__name__)[:128]
@@ -433,13 +441,20 @@ class GCOAWSClient:
 
         Returns:
             Dictionary mapping region to RegionalStack
+
+        Raises:
+            RegionalStackDiscoveryError: If a configured region cannot be
+                read, or the all-regions scan finds no stack and could not
+                read some regions
         """
         if not force_refresh and self._regional_stacks_cache and self._is_cache_valid():
             return self._regional_stacks_cache
 
         regional_stacks: dict[str, RegionalStack] = {}
 
-        # Try configured regions first (fast path)
+        # Try configured regions first (fast path). These are the deployment's
+        # declared regions, so a region that cannot be read is an error here,
+        # never reported as "no stack".
         configured_regions = self._get_configured_regions()
         if configured_regions:
             for region in configured_regions:
@@ -455,12 +470,27 @@ class GCOAWSClient:
             regions_response = ec2.describe_regions()
             all_regions = [r["RegionName"] for r in regions_response["Regions"]]
 
+            # An account-wide scan meets regions an organization policy denies;
+            # those are skipped (and named) when another region has a stack,
+            # and only an empty scan with failures is an error.
+            failures: list[RegionalStackDiscoveryError] = []
             for region in all_regions:
                 if region in configured_regions:
                     continue  # Already checked
-                stack = self._probe_regional_stack(region)
+                try:
+                    stack = self._probe_regional_stack(region)
+                except RegionalStackDiscoveryError as exc:
+                    failures.append(exc)
+                    continue
                 if stack:
                     regional_stacks[region] = stack
+            if failures and not regional_stacks:
+                raise RegionalStackDiscoveryError(
+                    f"No regional stack was found, and {len(failures)} region(s) could not "
+                    f"be read, so absence is not confirmed. First failure: {failures[0]}"
+                )
+            for failure in failures:
+                logger.warning("Skipped a region the stack scan could not read: %s", failure)
 
         self._regional_stacks_cache = regional_stacks
         self._cache_timestamp = time.time()
@@ -478,37 +508,56 @@ class GCOAWSClient:
     def _probe_regional_stack(self, region: str) -> RegionalStack | None:
         """Probe a single region for a GCO regional stack.
 
+        ``None`` means CloudFormation confirmed the stack does not exist.
+        Throttling, access denied, missing credentials, transport errors and
+        malformed answers raise instead, so a region that could not be read
+        is never reported as a region without a stack.
+
         Args:
             region: AWS region to check
 
         Returns:
-            RegionalStack if found, None otherwise
+            RegionalStack if found, None when CloudFormation reports it absent
+
+        Raises:
+            RegionalStackDiscoveryError: If the stack could not be read
         """
+        stack_name = f"{self.config.regional_stack_prefix}-{region}"
+        failure = f"Regional stack discovery could not read stack '{stack_name}' in {region}"
         try:
             cfn = self._session.client("cloudformation", region_name=region)
-            stack_name = f"{self.config.regional_stack_prefix}-{region}"
-
-            try:
-                response = cfn.describe_stacks(StackName=stack_name)
-                stack = response["Stacks"][0]
-
-                outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
-
-                return RegionalStack(
-                    region=region,
-                    stack_name=stack_name,
-                    cluster_name=outputs.get("ClusterName", f"{self.config.project_name}-{region}"),
-                    status=stack["StackStatus"],
-                    efs_file_system_id=outputs.get("EfsFileSystemId"),
-                    fsx_file_system_id=outputs.get("FsxFileSystemId"),
-                    created_time=stack.get("CreationTime"),
-                )
-            except cfn.exceptions.ClientError:
+            response = cfn.describe_stacks(StackName=stack_name)
+        except ClientError as exc:
+            if _cloudformation_stack_missing(exc):
                 return None
+            raise RegionalStackDiscoveryError(
+                f"{failure}. Credential context: {_aws_credential_context(self._session)}. "
+                f"{_client_error_summary(exc)}"
+            ) from exc
+        except Exception as exc:
+            failure_type = re.sub(r"[^A-Za-z0-9_.-]", "", type(exc).__name__)[:128]
+            raise RegionalStackDiscoveryError(
+                f"{failure}: {failure_type or 'UnexpectedError'}: {exc}"
+            ) from exc
 
-        except Exception as e:
-            logger.debug("Failed to get regional stack info for %s: %s", region, e)
-            return None
+        try:
+            stack = response["Stacks"][0]
+            outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
+            status = stack["StackStatus"]
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise RegionalStackDiscoveryError(
+                f"{failure}: CloudFormation returned no usable stack record"
+            ) from exc
+
+        return RegionalStack(
+            region=region,
+            stack_name=stack_name,
+            cluster_name=outputs.get("ClusterName", f"{self.config.project_name}-{region}"),
+            status=status,
+            efs_file_system_id=outputs.get("EfsFileSystemId"),
+            fsx_file_system_id=outputs.get("FsxFileSystemId"),
+            created_time=stack.get("CreationTime"),
+        )
 
     def get_regional_stack(self, region: str) -> RegionalStack | None:
         """Get information about a specific regional stack."""

@@ -2654,51 +2654,140 @@ class TestGCOAWSClientDiscoverRegionalStacksFallback:
 
 
 class TestGCOAWSClientProbeRegionalStack:
-    """Tests for _probe_regional_stack covering lines 277-278."""
+    """``_probe_regional_stack``: only a confirmed absence is ``None``."""
 
-    def test_probe_regional_stack_client_error(self):
-        """Test _probe_regional_stack returns None on ClientError (line 277)."""
+    @staticmethod
+    def _client(cfn=None, client_error=None):
+        from cli.aws_client import GCOAWSClient
+
+        with (
+            patch("cli.aws_client.get_config") as mock_config,
+            patch("boto3.Session") as mock_session,
+        ):
+            mock_config.return_value = MagicMock(
+                regional_stack_prefix="gco", project_name="gco", cache_ttl_seconds=300
+            )
+            if client_error is not None:
+                mock_session.return_value.client.side_effect = client_error
+            else:
+                mock_session.return_value.client.return_value = cfn
+            mock_session.return_value.profile_name = None
+            return GCOAWSClient()
+
+    @staticmethod
+    def _cfn_raising(code, message):
         from botocore.exceptions import ClientError
 
-        from cli.aws_client import GCOAWSClient
+        cfn = MagicMock()
+        cfn.describe_stacks.side_effect = ClientError(
+            {"Error": {"Code": code, "Message": message}}, "DescribeStacks"
+        )
+        return cfn
 
-        with patch("cli.aws_client.get_config") as mock_config:
-            mock_config.return_value = MagicMock(
-                regional_stack_prefix="gco",
-                project_name="gco",
-                cache_ttl_seconds=300,
-            )
+    def test_probe_regional_stack_absent_stack_is_none(self):
+        cfn = self._cfn_raising("ValidationError", "Stack with id gco-us-east-1 does not exist")
 
-            with patch("boto3.Session") as mock_session:
-                mock_cfn = MagicMock()
-                mock_cfn.exceptions.ClientError = ClientError
-                mock_cfn.describe_stacks.side_effect = ClientError(
-                    {"Error": {"Code": "ValidationError", "Message": "Stack not found"}},
-                    "DescribeStacks",
-                )
-                mock_session.return_value.client.return_value = mock_cfn
+        assert self._client(cfn)._probe_regional_stack("us-east-1") is None
 
-                client = GCOAWSClient()
-                result = client._probe_regional_stack("us-east-1")
-                assert result is None
+    @pytest.mark.parametrize(
+        ("code", "message"),
+        [
+            ("Throttling", "Rate exceeded"),
+            ("AccessDenied", "User is not authorized to perform cloudformation:DescribeStacks"),
+            ("ValidationError", "1 validation error detected"),
+        ],
+    )
+    def test_probe_regional_stack_other_client_errors_raise(self, code, message):
+        from cli.aws_client import RegionalStackDiscoveryError
 
-    def test_probe_regional_stack_generic_exception(self):
-        """Test _probe_regional_stack returns None on generic exception (line 278)."""
-        from cli.aws_client import GCOAWSClient
+        client = self._client(self._cfn_raising(code, message))
 
-        with patch("cli.aws_client.get_config") as mock_config:
-            mock_config.return_value = MagicMock(
-                regional_stack_prefix="gco",
-                project_name="gco",
-                cache_ttl_seconds=300,
-            )
+        with pytest.raises(RegionalStackDiscoveryError) as error:
+            client._probe_regional_stack("us-east-1")
 
-            with patch("boto3.Session") as mock_session:
-                mock_session.return_value.client.side_effect = RuntimeError("Connection error")
+        text = str(error.value)
+        assert "could not read stack 'gco-us-east-1' in us-east-1" in text
+        assert f"AWS error {code}: {message}" in text
 
-                client = GCOAWSClient()
-                result = client._probe_regional_stack("us-east-1")
-                assert result is None
+    def test_probe_regional_stack_generic_exception_raises(self):
+        from cli.aws_client import RegionalStackDiscoveryError
+
+        client = self._client(client_error=RuntimeError("Connection error"))
+
+        with pytest.raises(RegionalStackDiscoveryError, match="RuntimeError: Connection error"):
+            client._probe_regional_stack("us-east-1")
+
+    def test_probe_regional_stack_unprintable_exception_type_is_named_generically(self):
+        from cli.aws_client import RegionalStackDiscoveryError
+
+        odd = type("<>", (Exception,), {})
+        client = self._client(client_error=odd("odd"))
+
+        with pytest.raises(RegionalStackDiscoveryError, match="UnexpectedError: odd"):
+            client._probe_regional_stack("us-east-1")
+
+    @pytest.mark.parametrize("response", [{}, {"Stacks": []}, {"Stacks": [{"Outputs": []}]}])
+    def test_probe_regional_stack_malformed_answer_raises(self, response):
+        from cli.aws_client import RegionalStackDiscoveryError
+
+        cfn = MagicMock()
+        cfn.describe_stacks.return_value = response
+
+        with pytest.raises(RegionalStackDiscoveryError, match="no usable stack record"):
+            self._client(cfn)._probe_regional_stack("us-east-1")
+
+    def test_discover_surfaces_a_configured_region_that_cannot_be_read(self):
+        from cli.aws_client import RegionalStackDiscoveryError
+
+        client = self._client(self._cfn_raising("Throttling", "Rate exceeded"))
+
+        with (
+            patch.object(client, "_get_configured_regions", return_value=["us-east-1"]),
+            pytest.raises(RegionalStackDiscoveryError, match="Throttling"),
+        ):
+            client.discover_regional_stacks()
+        assert client._regional_stacks_cache is None
+
+    def test_scan_skips_unreadable_regions_when_another_has_a_stack(self, caplog):
+        from cli.aws_client import RegionalStack, RegionalStackDiscoveryError
+
+        client = self._client(MagicMock())
+        client._session.client.return_value.describe_regions.return_value = {
+            "Regions": [{"RegionName": "us-east-1"}, {"RegionName": "eu-west-1"}]
+        }
+        found = RegionalStack("eu-west-1", "gco-eu-west-1", "gco-eu-west-1", "CREATE_COMPLETE")
+
+        def probe(region):
+            if region == "us-east-1":
+                raise RegionalStackDiscoveryError("us-east-1 denied by policy")
+            return found
+
+        with (
+            patch.object(client, "_get_configured_regions", return_value=[]),
+            patch.object(client, "_probe_regional_stack", side_effect=probe),
+        ):
+            assert client.discover_regional_stacks() == {"eu-west-1": found}
+        assert "us-east-1 denied by policy" in caplog.text
+
+    def test_scan_with_no_stack_and_unreadable_regions_raises(self):
+        from cli.aws_client import RegionalStackDiscoveryError
+
+        client = self._client(MagicMock())
+        client._session.client.return_value.describe_regions.return_value = {
+            "Regions": [{"RegionName": "us-east-1"}, {"RegionName": "eu-west-1"}]
+        }
+
+        def probe(region):
+            if region == "us-east-1":
+                raise RegionalStackDiscoveryError("us-east-1 throttled")
+            return None
+
+        with (
+            patch.object(client, "_get_configured_regions", return_value=[]),
+            patch.object(client, "_probe_regional_stack", side_effect=probe),
+            pytest.raises(RegionalStackDiscoveryError, match=r"1 region\(s\) could not be read"),
+        ):
+            client.discover_regional_stacks()
 
 
 class TestGCOAWSClientCallApiErrorPaths:
