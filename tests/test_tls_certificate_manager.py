@@ -2147,6 +2147,104 @@ def test_create_reports_rotated_regions_and_default_physical_id() -> None:
     delete_region.assert_not_called()
 
 
+def test_a_failed_region_does_not_stop_the_others(caplog) -> None:
+    """Every Region is renewed and published before one combined error (L14).
+
+    Before, the first failing Region raised out of the loop: the Regions after
+    it were not renewed and no expiry metric was published for any Region.
+    """
+    handler = load_lambda_module("tls-certificate-manager")
+    config = replace(_manager_config(handler), regions=("us-west-2", "eu-west-1", "ap-south-1"))
+    state = {"current": {}, "retired_regions": ["ca-central-1"]}
+    expiry = _NOW + timedelta(days=30)
+    denied = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "denied"}}, "ImportCertificate"
+    )
+
+    def ensure_certificate(_config, _state, region):
+        if region == "eu-west-1":
+            raise denied
+        return f"arn:{region}", expiry, region == "ap-south-1"
+
+    with (
+        patch.object(handler.ManagerConfig, "from_event", return_value=config),
+        patch.object(handler, "_ensure_root", return_value=(state, False)),
+        patch.object(handler, "_ensure_certificate", side_effect=ensure_certificate) as ensure,
+        patch.object(handler, "_validate_root_record", return_value=(MagicMock(), MagicMock())),
+        patch.object(handler, "_certificate_not_after", return_value=expiry),
+        patch.object(handler, "_publish_expiry_metrics") as metrics,
+        patch.object(handler, "_retry_retired_region_cleanup") as retired_cleanup,
+        caplog.at_level(logging.ERROR),
+        pytest.raises(
+            RuntimeError,
+            match=r"failed in 1 of 3 region\(s\): eu-west-1: .*AccessDeniedException",
+        ) as exc_info,
+    ):
+        handler.lambda_handler({"Action": "Rotate"}, None)
+
+    assert [call.args[2] for call in ensure.call_args_list] == [
+        "us-west-2",
+        "eu-west-1",
+        "ap-south-1",
+    ]
+    # The Regions that succeeded are published, without the heartbeat.
+    metrics.assert_called_once_with(
+        config, {"us-west-2": expiry, "ap-south-1": expiry}, expiry, reconciled=False
+    )
+    # Retired-Region cleanup waits for a run, or a rollback, that succeeds.
+    retired_cleanup.assert_not_called()
+    assert exc_info.value.__cause__ is denied
+    assert "Could not reconcile the backend leaf certificate in eu-west-1" in caplog.text
+
+
+def test_every_failed_region_is_named_in_one_error() -> None:
+    handler = load_lambda_module("tls-certificate-manager")
+    config = replace(_manager_config(handler), regions=("us-west-2", "eu-west-1"))
+    expiry = _NOW + timedelta(days=30)
+
+    def ensure_certificate(_config, _state, region):
+        raise RuntimeError(f"{region} broke")
+
+    with (
+        patch.object(handler, "_ensure_root", return_value=({"current": {}}, False)),
+        patch.object(handler, "_ensure_certificate", side_effect=ensure_certificate),
+        patch.object(handler, "_validate_root_record", return_value=(MagicMock(), MagicMock())),
+        patch.object(handler, "_certificate_not_after", return_value=expiry),
+        patch.object(handler, "_publish_expiry_metrics") as metrics,
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        handler._reconcile(config)
+
+    assert str(exc_info.value) == (
+        "Backend TLS reconciliation failed in 2 of 2 region(s): "
+        "us-west-2: us-west-2 broke; eu-west-1: eu-west-1 broke"
+    )
+    metrics.assert_called_once_with(config, {}, expiry, reconciled=False)
+
+
+def test_a_partial_run_publishes_expiries_without_the_heartbeat() -> None:
+    handler = load_lambda_module("tls-certificate-manager")
+    config = _manager_config(handler)
+    cloudwatch = MagicMock()
+    with (
+        patch.object(handler, "_now", return_value=_NOW),
+        patch.object(handler.boto3, "client", return_value=cloudwatch),
+    ):
+        handler._publish_expiry_metrics(
+            config,
+            {"us-west-2": _NOW + timedelta(days=30)},
+            _NOW + timedelta(days=3_650),
+            reconciled=False,
+        )
+    metric_data = cloudwatch.put_metric_data.call_args.kwargs["MetricData"]
+    assert [metric["MetricName"] for metric in metric_data] == [
+        "RootCertificateDaysToExpiry",
+        "LeafCertificateDaysToExpiry",
+    ]
+    assert metric_data[1]["Dimensions"][1] == {"Name": "Region", "Value": "us-west-2"}
+    assert metric_data[1]["Value"] == 30.0
+
+
 def test_unsupported_request_type_is_rejected_after_config_validation() -> None:
     """Unknown lifecycle events fail loudly instead of reconciling silently."""
     handler = load_lambda_module("tls-certificate-manager")
