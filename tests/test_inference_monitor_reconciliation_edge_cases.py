@@ -707,6 +707,7 @@ async def test_classic_running_does_not_promote_malformed_remote_status() -> Non
 
 def test_mooncake_configmap_propagates_nonconflict_create_error() -> None:
     monitor = _make_monitor()
+    monitor.core_v1.read_namespaced_config_map.side_effect = ApiException(status=404)
     monitor.core_v1.create_namespaced_config_map.side_effect = ApiException(status=500)
     with pytest.raises(ApiException):
         monitor._ensure_mooncake_configmap("ep", NAMESPACE, {"protocol": "rdma"})
@@ -965,6 +966,8 @@ def test_regional_scope_collects_explicit_peers_without_region_services() -> Non
 @pytest.mark.parametrize("failing_api", ["service", "statefulset"])
 def test_shared_master_propagates_nonconflict_create_failure(failing_api: str) -> None:
     monitor = _make_monitor()
+    monitor.core_v1.read_namespaced_service.side_effect = ApiException(status=404)
+    monitor.apps_v1.read_namespaced_stateful_set.side_effect = ApiException(status=404)
     if failing_api == "service":
         monitor.core_v1.create_namespaced_service.side_effect = ApiException(status=500)
     else:
@@ -1006,6 +1009,7 @@ def test_master_gate_clears_ready_clock_and_reports_timeout() -> None:
 
 def test_network_policy_invalid_bootstrap_port_falls_back_to_default() -> None:
     monitor = _make_monitor()
+    monitor.networking_v1.read_namespaced_network_policy.side_effect = ApiException(status=404)
     monitor.networking_v1.create_namespaced_network_policy.return_value = None
 
     monitor._ensure_intra_namespace_network_policies(
@@ -1138,6 +1142,8 @@ def test_service_and_proxy_materializers_propagate_nonconflict_create_errors(
     method_name: str,
 ) -> None:
     monitor = _make_monitor()
+    monitor.core_v1.read_namespaced_config_map.side_effect = ApiException(status=404)
+    monitor.core_v1.read_namespaced_service.side_effect = ApiException(status=404)
     if method_name == "_ensure_pd_proxy_configmap":
         monitor.core_v1.create_namespaced_config_map.side_effect = ApiException(status=500)
         args = ("ep", NAMESPACE)
@@ -1385,6 +1391,7 @@ def test_hpa_metric_and_keda_trigger_builders_handle_multiple_and_unknown_metric
 def test_scaled_object_and_hpa_create_propagate_nonconflict_errors() -> None:
     monitor = _make_monitor()
     custom = MagicMock()
+    custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
     custom.create_namespaced_custom_object.side_effect = ApiException(status=500)
     with (
         patch("gco.services.inference_monitor.client.CustomObjectsApi", return_value=custom),
@@ -1393,6 +1400,7 @@ def test_scaled_object_and_hpa_create_propagate_nonconflict_errors() -> None:
         monitor._apply_scaled_object("ep", NAMESPACE, "ep", 1, 3, [{"type": "gpu"}])
 
     hpa_api = MagicMock()
+    hpa_api.read_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(status=404)
     hpa_api.create_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(status=500)
     with (
         patch("gco.services.inference_monitor.client.AutoscalingV2Api", return_value=hpa_api),
@@ -1850,6 +1858,7 @@ def test_proxy_deployment_propagates_nonconflict_create_failure() -> None:
     monitor = _make_monitor()
     monitor._ensure_admin_api_key_secret = MagicMock(return_value="ep-admin")  # type: ignore[method-assign]
     monitor._ensure_pd_proxy_configmap = MagicMock()  # type: ignore[method-assign]
+    monitor.apps_v1.read_namespaced_deployment.side_effect = ApiException(status=404)
     monitor.apps_v1.create_namespaced_deployment.side_effect = ApiException(status=500)
 
     with pytest.raises(ApiException) as caught:

@@ -432,6 +432,7 @@ def test_role_pods_are_fronted_by_the_sidecar(
 
 def test_pd_proxy_pod_is_fronted_by_the_sidecar(monitor: InferenceMonitor) -> None:
     _admit_named_admin_secret(monitor)
+    monitor.apps_v1.read_namespaced_deployment.side_effect = ApiException(status=404)
 
     monitor._create_pd_proxy("chat", NAMESPACE, _pd_spec(), {"lifecycle_id": "life-1"})
 
@@ -450,6 +451,7 @@ def test_pd_router_binds_loopback_and_trusts_only_the_projected_ca(
     monitor: InferenceMonitor,
 ) -> None:
     _admit_named_admin_secret(monitor)
+    monitor.apps_v1.read_namespaced_deployment.side_effect = ApiException(status=404)
 
     monitor._create_pd_proxy("chat", "team-a", _pd_spec(), {"lifecycle_id": "life-1"})
 
@@ -707,6 +709,8 @@ def test_every_endpoint_service_publishes_only_the_tls_port(
     create: Callable[[InferenceMonitor], None],
     service_name: str,
 ) -> None:
+    # The monitor reads before it creates: the Service does not exist yet.
+    monitor.core_v1.read_namespaced_service.side_effect = ApiException(status=404)
     create(monitor)
 
     [created] = monitor.core_v1.create_namespaced_service.call_args_list
@@ -1655,8 +1659,8 @@ def _pd_proxy_pass(
 ) -> dict[str, Any]:
     """Run one ``_create_pd_proxy`` pass as leader ``epoch``; return the body sent, wire form.
 
-    ``live`` is the existing proxy Deployment in wire form (the create then
-    answers 409 and the pass merge-patches it), or ``None`` for a first create.
+    ``live`` is the existing proxy Deployment in wire form (the pass reads it
+    and merge-patches it), or ``None`` for a first create.
     """
     monitor.apps_v1.reset_mock()
     monitor._active_authority = inference_monitor.ReconcileAuthority(
@@ -1668,15 +1672,16 @@ def _pd_proxy_pass(
     monitor._ensure_pd_proxy_configmap = MagicMock()  # type: ignore[method-assign]
     monitor._create_proxy_service = MagicMock()  # type: ignore[method-assign]
     if live is None:
+        monitor._get_deployment = MagicMock(return_value=None)  # type: ignore[method-assign]
         monitor._create_pd_proxy("chat", NAMESPACE, _pd_spec(), {"lifecycle_id": "life-1"})
         [created] = monitor.apps_v1.create_namespaced_deployment.call_args_list
         body: dict[str, Any] = _wire(created.args[1])
         return body
-    monitor.apps_v1.create_namespaced_deployment.side_effect = ApiException(status=409)
     monitor._get_deployment = MagicMock(  # type: ignore[method-assign]
         return_value=client.V1Deployment.from_dict(live)
     )
     monitor._create_pd_proxy("chat", NAMESPACE, _pd_spec(), {"lifecycle_id": "life-1"})
+    monitor.apps_v1.create_namespaced_deployment.assert_not_called()
     [patched] = monitor.apps_v1.patch_namespaced_deployment.call_args_list
     assert patched.kwargs["_content_type"] == "application/merge-patch+json"
     body = _wire(patched.kwargs["body"])

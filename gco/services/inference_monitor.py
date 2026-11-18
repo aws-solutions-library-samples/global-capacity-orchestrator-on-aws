@@ -69,6 +69,7 @@ from gco.models.inference_models import (
     SGLANG_UNSUPPORTED_GPU_NAMES,
 )
 from gco.services.inference_store import InferenceEndpointStore, endpoint_object_names
+from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -1540,13 +1541,17 @@ class InferenceMonitor:
                 logger.error("Failed to load Kubernetes configuration: %s", e)
                 raise
 
-        self.apps_v1 = client.AppsV1Api()
-        self.core_v1 = client.CoreV1Api()
-        self.networking_v1 = client.NetworkingV1Api()
-        self.discovery_v1 = client.DiscoveryV1Api()
-
-        # Timeout for Kubernetes API calls (seconds)
-        self._k8s_timeout = int(os.environ.get("K8S_API_TIMEOUT", "30"))
+        # Every typed API shares this process's one bounded client. A typed
+        # API class built without one creates its own ApiClient, a new
+        # connection pool and so a new TLS handshake with the API server, on
+        # every call. The typed classes themselves are thin wrappers, built
+        # where they are used.
+        self._k8s_timeout = k8s_api_timeout_from_env()
+        self.api_client = BoundedApiClient(default_request_timeout=self._k8s_timeout)
+        self.apps_v1 = client.AppsV1Api(self.api_client)
+        self.core_v1 = client.CoreV1Api(self.api_client)
+        self.networking_v1 = client.NetworkingV1Api(self.api_client)
+        self.discovery_v1 = client.DiscoveryV1Api(self.api_client)
 
         # Health watchdog: tracks when each endpoint first became unready.
         # Inference traffic enters through the shared ``gco-system/gco-gateway``
@@ -1666,7 +1671,7 @@ class InferenceMonitor:
 
     def _try_acquire_lease(self, lease_name: str, holder: str) -> bool:
         """Acquire/renew a Lease and establish one stable acquisition epoch."""
-        coordination_v1 = client.CoordinationV1Api()
+        coordination_v1 = client.CoordinationV1Api(self.api_client)
         now = datetime.now(UTC)
         lease_duration = self.reconcile_interval * 3
         try:
@@ -1754,7 +1759,7 @@ class InferenceMonitor:
         epoch = self._leader_epoch
         if not (lease_name and holder and epoch):
             return False
-        coordination_v1 = client.CoordinationV1Api()
+        coordination_v1 = client.CoordinationV1Api(self.api_client)
         now = datetime.now(UTC)
         try:
             lease = coordination_v1.read_namespaced_lease(
@@ -1828,7 +1833,7 @@ class InferenceMonitor:
         # Direct method-level unit tests do not enter start(); production does.
         if self._lease_name is None or self._lease_holder is None or self._leader_epoch is None:
             return
-        coordination_v1 = client.CoordinationV1Api()
+        coordination_v1 = client.CoordinationV1Api(self.api_client)
         try:
             lease = coordination_v1.read_namespaced_lease(
                 self._lease_name, self.namespace, _request_timeout=self._k8s_timeout
@@ -2167,6 +2172,28 @@ class InferenceMonitor:
         self._assert_current_leadership()
         if not self._strong_authority_matches(authority):
             raise ReconcileFencedError("endpoint authority changed before Kubernetes mutation")
+
+    def _read_or_create(self, read: Callable[[], Any], create: Callable[[], object]) -> Any | None:
+        """Return the live object, or create it and return ``None``.
+
+        In the steady state the object exists and this costs one read, without
+        the Lease and DynamoDB reads that authorize a mutation. A missing object
+        is created under :meth:`_assert_mutation_authority`; a create that loses
+        a race to another writer (409) returns the object that writer created.
+        """
+        try:
+            return read()
+        except ApiException as error:
+            if error.status != 404:
+                raise
+        self._assert_mutation_authority()
+        try:
+            create()
+        except ApiException as error:
+            if error.status != 409:
+                raise
+            return read()
+        return None
 
     def _confirm_created_resource(
         self,
@@ -2884,61 +2911,54 @@ class InferenceMonitor:
             ),
             data={"mooncake.json": json.dumps(cfg, sort_keys=True)},
         )
-        self._assert_mutation_authority()
-        try:
+        read_config_map = partial(
+            self.core_v1.read_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+        delete_config_map = partial(
+            self.core_v1.delete_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             self.core_v1.create_namespaced_config_map(
                 ns, config_map, _request_timeout=self._k8s_timeout
             )
             self._confirm_created_resource(
                 kind="configmap",
                 resource_name=cm_name,
-                read_resource=partial(
-                    self.core_v1.read_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    self.core_v1.delete_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_config_map,
+                delete_resource=delete_config_map,
             )
+
+        existing = self._read_or_create(read_config_map, create)
+        if existing is None:
             logger.info("Created mooncake config map %s/%s", ns, cm_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self.core_v1.read_namespaced_config_map(
-                cm_name, ns, _request_timeout=self._k8s_timeout
-            )
-            existing = self._authorize_resource(
-                existing,
-                kind="configmap",
-                resource_name=cm_name,
-                patch_metadata=partial(
-                    self.core_v1.patch_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_resource=lambda: self.core_v1.read_namespaced_config_map(
-                    cm_name, ns, _request_timeout=self._k8s_timeout
-                ),
-                delete_resource=partial(
-                    self.core_v1.delete_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            present(config_map.metadata, "config_map.metadata").resource_version = resource_version
-            self._assert_mutation_authority()
-            self.core_v1.patch_namespaced_config_map(
-                cm_name, ns, config_map, _request_timeout=self._k8s_timeout
-            )
-            logger.info("Updated mooncake config map %s/%s", ns, cm_name)
+            return
+        existing = self._authorize_resource(
+            existing,
+            kind="configmap",
+            resource_name=cm_name,
+            patch_metadata=partial(
+                self.core_v1.patch_namespaced_config_map,
+                cm_name,
+                ns,
+                _request_timeout=self._k8s_timeout,
+            ),
+            read_resource=read_config_map,
+            delete_resource=delete_config_map,
+        )
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
+        present(config_map.metadata, "config_map.metadata").resource_version = resource_version
+        self._assert_mutation_authority()
+        self.core_v1.patch_namespaced_config_map(
+            cm_name, ns, config_map, _request_timeout=self._k8s_timeout
+        )
+        logger.info("Updated mooncake config map %s/%s", ns, cm_name)
 
     def _ensure_role_deployment(
         self,
@@ -3874,8 +3894,9 @@ class InferenceMonitor:
         headless Service that fronts its RPC and metadata ports. This method
         uses create-if-absent semantics, so any number of calls within a region
         converge on exactly one StatefulSet with a single replica and one
-        Service. An already-existing master is left untouched — a conflicting
-        create is treated as success and never overwrites the running master.
+        Service. Each object is read first; an existing master is left
+        untouched, and a create that loses a race to another writer (409) is
+        treated as success, so the running master is never overwritten.
 
         The StatefulSet runs the master daemon with its built-in HTTP metadata
         server, exposing RPC on :data:`MOONCAKE_MASTER_RPC_PORT` and the
@@ -4026,29 +4047,40 @@ class InferenceMonitor:
             ),
         )
 
-        # Create-if-absent: a 409 means the shared master already exists, which
-        # is the steady state. Leave it untouched and treat it as success.
-        self._assert_mutation_authority()
-        try:
-            self.core_v1.create_namespaced_service(ns, service, _request_timeout=self._k8s_timeout)
+        # Create-if-absent: an existing shared master is the steady state and
+        # is left untouched.
+        created_service = self._read_or_create(
+            partial(
+                self.core_v1.read_namespaced_service,
+                MOONCAKE_MASTER_SERVICE,
+                ns,
+                _request_timeout=self._k8s_timeout,
+            ),
+            partial(
+                self.core_v1.create_namespaced_service,
+                ns,
+                service,
+                _request_timeout=self._k8s_timeout,
+            ),
+        )
+        if created_service is None:
             logger.info("Created shared mooncake master service in %s", ns)
-        except ApiException as e:
-            if e.status == 409:
-                logger.info("Shared mooncake master service already exists in %s", ns)
-            else:
-                raise
-
-        self._assert_mutation_authority()
-        try:
-            self.apps_v1.create_namespaced_stateful_set(
-                ns, stateful_set, _request_timeout=self._k8s_timeout
-            )
+        created_stateful_set = self._read_or_create(
+            partial(
+                self.apps_v1.read_namespaced_stateful_set,
+                MOONCAKE_MASTER_SERVICE,
+                ns,
+                _request_timeout=self._k8s_timeout,
+            ),
+            partial(
+                self.apps_v1.create_namespaced_stateful_set,
+                ns,
+                stateful_set,
+                _request_timeout=self._k8s_timeout,
+            ),
+        )
+        if created_stateful_set is None:
             logger.info("Created shared mooncake master statefulset in %s", ns)
-        except ApiException as e:
-            if e.status == 409:
-                logger.info("Shared mooncake master statefulset already exists in %s", ns)
-            else:
-                raise
 
     def _mooncake_master_ready_replicas(self, ns: str) -> int:
         """Return the shared master's Ready replica count, 0 when absent.
@@ -4204,10 +4236,10 @@ class InferenceMonitor:
           ``mooncake.transfer.bootstrap_base_port`` (default
           :data:`MOONCAKE_BOOTSTRAP_BASE_PORT`).
 
-        Each rule is created independently; an already-present rule (409) is the
-        steady state and counts as success. No other policy is ever read,
-        modified, or deleted, so the namespace's isolation holds regardless of
-        outcome.
+        Each rule is read and, when absent, created independently; a present
+        rule (or one another writer creates first, a 409) is the steady state
+        and counts as success. No other policy is ever read, modified, or
+        deleted, so the namespace's isolation holds regardless of outcome.
 
         Args:
             ns: The inference namespace the rules apply to.
@@ -4342,17 +4374,23 @@ class InferenceMonitor:
         ]
 
         for rule_name, policy in policies:
-            self._assert_mutation_authority()
             try:
-                self.networking_v1.create_namespaced_network_policy(
-                    ns, policy, _request_timeout=self._k8s_timeout
+                # An existing policy is the steady state and is left untouched.
+                existing = self._read_or_create(
+                    partial(
+                        self.networking_v1.read_namespaced_network_policy,
+                        rule_name,
+                        ns,
+                        _request_timeout=self._k8s_timeout,
+                    ),
+                    partial(
+                        self.networking_v1.create_namespaced_network_policy,
+                        ns,
+                        policy,
+                        _request_timeout=self._k8s_timeout,
+                    ),
                 )
-                logger.info("Applied network policy %s in %s", rule_name, ns)
             except ApiException as e:
-                if e.status == 409:
-                    # Already present — the steady state. Leave it untouched.
-                    logger.info("Network policy %s already present in %s", rule_name, ns)
-                    continue
                 logger.error(
                     "Could not apply network policy %s in %s: %s",
                     rule_name,
@@ -4360,6 +4398,8 @@ class InferenceMonitor:
                     e,
                 )
                 raise NetworkPolicyApplyError(rule_name, e.reason or str(e)) from e
+            if existing is None:
+                logger.info("Applied network policy %s in %s", rule_name, ns)
 
     def _create_deployment(
         self,
@@ -5360,36 +5400,41 @@ class InferenceMonitor:
             ),
         )
 
-        self._assert_mutation_authority()
-        try:
-            self.apps_v1.create_namespaced_deployment(
-                ns, deployment, _request_timeout=self._k8s_timeout
-            )
-            self._confirm_created_resource(
-                kind="deployment",
-                resource_name=proxy_name,
-                read_resource=partial(
-                    self.apps_v1.read_namespaced_deployment,
-                    proxy_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    self.apps_v1.delete_namespaced_deployment,
-                    proxy_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            logger.info("Created proxy deployment %s/%s", ns, proxy_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self._get_deployment(proxy_name, ns)
-            if existing is None:
-                raise ReconcileFencedError(
-                    "proxy deployment disappeared during reconciliation"
-                ) from error
+        # Read first: in the steady state the proxy exists and is converged by
+        # the merge patch below, with no create attempt.
+        existing = self._get_deployment(proxy_name, ns)
+        if existing is None:
+            self._assert_mutation_authority()
+            try:
+                self.apps_v1.create_namespaced_deployment(
+                    ns, deployment, _request_timeout=self._k8s_timeout
+                )
+                self._confirm_created_resource(
+                    kind="deployment",
+                    resource_name=proxy_name,
+                    read_resource=partial(
+                        self.apps_v1.read_namespaced_deployment,
+                        proxy_name,
+                        ns,
+                        _request_timeout=self._k8s_timeout,
+                    ),
+                    delete_resource=partial(
+                        self.apps_v1.delete_namespaced_deployment,
+                        proxy_name,
+                        ns,
+                        _request_timeout=self._k8s_timeout,
+                    ),
+                )
+                logger.info("Created proxy deployment %s/%s", ns, proxy_name)
+            except ApiException as error:
+                if error.status != 409:
+                    raise
+                existing = self._get_deployment(proxy_name, ns)
+                if existing is None:
+                    raise ReconcileFencedError(
+                        "proxy deployment disappeared during reconciliation"
+                    ) from error
+        if existing is not None:
             _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
             present(deployment.metadata, "deployment.metadata").resource_version = resource_version
             live_stamp = _pod_template_annotations(existing).get(
@@ -5419,10 +5464,14 @@ class InferenceMonitor:
 
         self._create_proxy_service(proxy_name, ns)
 
-    def _authorize_existing_service(self, name: str, namespace: str) -> Any:
-        service = self.core_v1.read_namespaced_service(
-            name, namespace, _request_timeout=self._k8s_timeout
-        )
+    def _authorize_existing_service(
+        self, name: str, namespace: str, service: Any | None = None
+    ) -> Any:
+        """Authorize the live Service ``name``, read here unless ``service`` is given."""
+        if service is None:
+            service = self.core_v1.read_namespaced_service(
+                name, namespace, _request_timeout=self._k8s_timeout
+            )
         return self._authorize_resource(
             service,
             kind="service",
@@ -5515,18 +5564,19 @@ class InferenceMonitor:
                 type="ClusterIP",
             ),
         )
-        self._assert_mutation_authority()
-        try:
+        read_service = partial(
+            self.core_v1.read_namespaced_service,
+            deploy_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             self.core_v1.create_namespaced_service(ns, service, _request_timeout=self._k8s_timeout)
             self._confirm_created_resource(
                 kind="service",
                 resource_name=deploy_name,
-                read_resource=partial(
-                    self.core_v1.read_namespaced_service,
-                    deploy_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_service,
                 delete_resource=partial(
                     self.core_v1.delete_namespaced_service,
                     deploy_name,
@@ -5534,13 +5584,14 @@ class InferenceMonitor:
                     _request_timeout=self._k8s_timeout,
                 ),
             )
+
+        existing = self._read_or_create(read_service, create)
+        if existing is None:
             logger.info("Created role service %s/%s", ns, deploy_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self._authorize_existing_service(deploy_name, ns)
-            self._converge_service_ports(deploy_name, ns, existing)
-            logger.info("Role service %s/%s already exists", ns, deploy_name)
+            return
+        existing = self._authorize_existing_service(deploy_name, ns, existing)
+        self._converge_service_ports(deploy_name, ns, existing)
+        logger.info("Role service %s/%s already exists", ns, deploy_name)
 
     def _ensure_pd_proxy_configmap(self, name: str, ns: str) -> None:
         """Publish the PD proxy program to the pod as a ConfigMap.
@@ -5548,7 +5599,7 @@ class InferenceMonitor:
         The proxy program (``mooncake_pd_proxy.py``) ships in this image
         alongside the monitor; its source is read here and mounted into the
         ``{name}-proxy`` pod, which runs it with ``python3`` from
-        ``PD_PROXY_SCRIPT_PATH``. The ConfigMap is patched on conflict so the
+        ``PD_PROXY_SCRIPT_PATH``. An existing ConfigMap is patched so the
         program tracks the running monitor build.
         """
         script = (Path(__file__).resolve().parent / PD_PROXY_SCRIPT_FILENAME).read_text(
@@ -5571,59 +5622,52 @@ class InferenceMonitor:
             ),
             data={PD_PROXY_SCRIPT_FILENAME: script},
         )
-        self._assert_mutation_authority()
-        try:
+        read_config_map = partial(
+            self.core_v1.read_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+        delete_config_map = partial(
+            self.core_v1.delete_namespaced_config_map,
+            cm_name,
+            ns,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             self.core_v1.create_namespaced_config_map(ns, body, _request_timeout=self._k8s_timeout)
             self._confirm_created_resource(
                 kind="configmap",
                 resource_name=cm_name,
-                read_resource=partial(
-                    self.core_v1.read_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    self.core_v1.delete_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_config_map,
+                delete_resource=delete_config_map,
             )
+
+        existing = self._read_or_create(read_config_map, create)
+        if existing is None:
             logger.info("Created PD proxy ConfigMap %s/%s", ns, cm_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self.core_v1.read_namespaced_config_map(
-                cm_name, ns, _request_timeout=self._k8s_timeout
-            )
-            existing = self._authorize_resource(
-                existing,
-                kind="configmap",
-                resource_name=cm_name,
-                patch_metadata=partial(
-                    self.core_v1.patch_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_resource=lambda: self.core_v1.read_namespaced_config_map(
-                    cm_name, ns, _request_timeout=self._k8s_timeout
-                ),
-                delete_resource=partial(
-                    self.core_v1.delete_namespaced_config_map,
-                    cm_name,
-                    ns,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            present(body.metadata, "config_map.metadata").resource_version = resource_version
-            self._assert_mutation_authority()
-            self.core_v1.patch_namespaced_config_map(
-                cm_name, ns, body, _request_timeout=self._k8s_timeout
-            )
-            logger.info("Updated PD proxy ConfigMap %s/%s", ns, cm_name)
+            return
+        existing = self._authorize_resource(
+            existing,
+            kind="configmap",
+            resource_name=cm_name,
+            patch_metadata=partial(
+                self.core_v1.patch_namespaced_config_map,
+                cm_name,
+                ns,
+                _request_timeout=self._k8s_timeout,
+            ),
+            read_resource=read_config_map,
+            delete_resource=delete_config_map,
+        )
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
+        present(body.metadata, "config_map.metadata").resource_version = resource_version
+        self._assert_mutation_authority()
+        self.core_v1.patch_namespaced_config_map(
+            cm_name, ns, body, _request_timeout=self._k8s_timeout
+        )
+        logger.info("Updated PD proxy ConfigMap %s/%s", ns, cm_name)
 
     def _ensure_tls_proxy_configmap(self, name: str, ns: str) -> None:
         """Publish the TLS sidecar program for every pod of one endpoint.
@@ -5885,20 +5929,21 @@ class InferenceMonitor:
             ),
         )
 
-        self._assert_mutation_authority()
-        try:
+        read_service = partial(
+            self.core_v1.read_namespaced_service,
+            proxy_name,
+            namespace,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             self.core_v1.create_namespaced_service(
                 namespace, service, _request_timeout=self._k8s_timeout
             )
             self._confirm_created_resource(
                 kind="service",
                 resource_name=proxy_name,
-                read_resource=partial(
-                    self.core_v1.read_namespaced_service,
-                    proxy_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_service,
                 delete_resource=partial(
                     self.core_v1.delete_namespaced_service,
                     proxy_name,
@@ -5906,13 +5951,14 @@ class InferenceMonitor:
                     _request_timeout=self._k8s_timeout,
                 ),
             )
+
+        existing = self._read_or_create(read_service, create)
+        if existing is None:
             logger.info("Created proxy service %s/%s", namespace, proxy_name)
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = self._authorize_existing_service(proxy_name, namespace)
-            self._converge_service_ports(proxy_name, namespace, existing)
-            logger.info("Proxy service %s/%s already exists", namespace, proxy_name)
+            return
+        existing = self._authorize_existing_service(proxy_name, namespace, existing)
+        self._converge_service_ports(proxy_name, namespace, existing)
+        logger.info("Proxy service %s/%s already exists", namespace, proxy_name)
 
     def _create_service(self, name: str, namespace: str, spec: dict[str, Any]) -> None:
         """Create the internal ClusterIP Service for an inference endpoint.
@@ -6373,7 +6419,7 @@ class InferenceMonitor:
         pending: list[str] = []
         errors: list[str] = []
         resources_found = False
-        custom_objects = client.CustomObjectsApi()
+        custom_objects = client.CustomObjectsApi(self.api_client)
         for autoscaler_name in names:
             resources_found |= self._delete_and_confirm(
                 kind="scaledobject",
@@ -6423,7 +6469,7 @@ class InferenceMonitor:
         pending: list[str] = []
         errors: list[str] = []
         resources_found = False
-        autoscaling_v2 = client.AutoscalingV2Api()
+        autoscaling_v2 = client.AutoscalingV2Api(self.api_client)
         for autoscaler_name in names:
             resources_found |= self._delete_and_confirm(
                 kind="hpa",
@@ -6834,7 +6880,7 @@ class InferenceMonitor:
                 errors=errors,
             )
 
-        custom_objects = client.CustomObjectsApi()
+        custom_objects = client.CustomObjectsApi(self.api_client)
         for route_name in inventory.legacy_http_routes:
             resources_found |= self._delete_and_confirm(
                 kind="httproute",
@@ -7128,39 +7174,39 @@ class InferenceMonitor:
             },
         }
 
-        custom = client.CustomObjectsApi()
-        self._assert_mutation_authority()
-        try:
+        custom = client.CustomObjectsApi(self.api_client)
+        scaled_object: dict[str, Any] = {
+            "group": KEDA_API_GROUP,
+            "version": KEDA_API_VERSION,
+            "namespace": namespace,
+            "plural": KEDA_SCALEDOBJECT_PLURAL,
+        }
+        read_scaled_object = partial(
+            custom.get_namespaced_custom_object,
+            name=name,
+            **scaled_object,
+            _request_timeout=self._k8s_timeout,
+        )
+        delete_scaled_object = partial(
+            custom.delete_namespaced_custom_object,
+            name=name,
+            **scaled_object,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             custom.create_namespaced_custom_object(
-                group=KEDA_API_GROUP,
-                version=KEDA_API_VERSION,
-                namespace=namespace,
-                plural=KEDA_SCALEDOBJECT_PLURAL,
-                body=body,
-                _request_timeout=self._k8s_timeout,
+                body=body, **scaled_object, _request_timeout=self._k8s_timeout
             )
             self._confirm_created_resource(
                 kind="scaledobject",
                 resource_name=name,
-                read_resource=partial(
-                    custom.get_namespaced_custom_object,
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    custom.delete_namespaced_custom_object,
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_scaled_object,
+                delete_resource=delete_scaled_object,
             )
+
+        existing = self._read_or_create(read_scaled_object, create)
+        if existing is None:
             logger.info(
                 "Created KEDA ScaledObject %s targeting %s (min=%d, max=%d)",
                 name,
@@ -7168,61 +7214,27 @@ class InferenceMonitor:
                 min_replicas,
                 max_replicas,
             )
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = custom.get_namespaced_custom_object(
-                group=KEDA_API_GROUP,
-                version=KEDA_API_VERSION,
-                namespace=namespace,
-                plural=KEDA_SCALEDOBJECT_PLURAL,
+            return
+        existing = self._authorize_resource(
+            existing,
+            kind="scaledobject",
+            resource_name=name,
+            patch_metadata=partial(
+                custom.patch_namespaced_custom_object,
                 name=name,
+                **scaled_object,
                 _request_timeout=self._k8s_timeout,
-            )
-            existing = self._authorize_resource(
-                existing,
-                kind="scaledobject",
-                resource_name=name,
-                patch_metadata=partial(
-                    custom.patch_namespaced_custom_object,
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_resource=lambda: custom.get_namespaced_custom_object(
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    custom.delete_namespaced_custom_object,
-                    group=KEDA_API_GROUP,
-                    version=KEDA_API_VERSION,
-                    namespace=namespace,
-                    plural=KEDA_SCALEDOBJECT_PLURAL,
-                    name=name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            body["metadata"]["resourceVersion"] = resource_version
-            self._assert_mutation_authority()
-            custom.patch_namespaced_custom_object(
-                group=KEDA_API_GROUP,
-                version=KEDA_API_VERSION,
-                namespace=namespace,
-                plural=KEDA_SCALEDOBJECT_PLURAL,
-                name=name,
-                body=body,
-                _request_timeout=self._k8s_timeout,
-            )
-            logger.info("Updated KEDA ScaledObject %s", name)
+            ),
+            read_resource=read_scaled_object,
+            delete_resource=delete_scaled_object,
+        )
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
+        body["metadata"]["resourceVersion"] = resource_version
+        self._assert_mutation_authority()
+        custom.patch_namespaced_custom_object(
+            name=name, body=body, **scaled_object, _request_timeout=self._k8s_timeout
+        )
+        logger.info("Updated KEDA ScaledObject %s", name)
 
     def _apply_hpa(
         self,
@@ -7278,28 +7290,33 @@ class InferenceMonitor:
             ),
         )
 
-        autoscaling_v2 = client.AutoscalingV2Api()
-        self._assert_mutation_authority()
-        try:
+        autoscaling_v2 = client.AutoscalingV2Api(self.api_client)
+        read_hpa = partial(
+            autoscaling_v2.read_namespaced_horizontal_pod_autoscaler,
+            hpa_name,
+            namespace,
+            _request_timeout=self._k8s_timeout,
+        )
+        delete_hpa = partial(
+            autoscaling_v2.delete_namespaced_horizontal_pod_autoscaler,
+            hpa_name,
+            namespace,
+            _request_timeout=self._k8s_timeout,
+        )
+
+        def create() -> None:
             autoscaling_v2.create_namespaced_horizontal_pod_autoscaler(
                 namespace, hpa, _request_timeout=self._k8s_timeout
             )
             self._confirm_created_resource(
                 kind="hpa",
                 resource_name=hpa_name,
-                read_resource=partial(
-                    autoscaling_v2.read_namespaced_horizontal_pod_autoscaler,
-                    hpa_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                delete_resource=partial(
-                    autoscaling_v2.delete_namespaced_horizontal_pod_autoscaler,
-                    hpa_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
+                read_resource=read_hpa,
+                delete_resource=delete_hpa,
             )
+
+        existing = self._read_or_create(read_hpa, create)
+        if existing is None:
             logger.info(
                 "Created HPA %s targeting %s (min=%d, max=%d)",
                 hpa_name,
@@ -7307,42 +7324,30 @@ class InferenceMonitor:
                 min_replicas,
                 max_replicas,
             )
-        except ApiException as error:
-            if error.status != 409:
-                raise
-            existing = autoscaling_v2.read_namespaced_horizontal_pod_autoscaler(
-                hpa_name, namespace, _request_timeout=self._k8s_timeout
-            )
-            existing = self._authorize_resource(
-                existing,
-                kind="hpa",
-                resource_name=hpa_name,
-                patch_metadata=partial(
-                    autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler,
-                    hpa_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_resource=lambda: autoscaling_v2.read_namespaced_horizontal_pod_autoscaler(
-                    hpa_name, namespace, _request_timeout=self._k8s_timeout
-                ),
-                delete_resource=partial(
-                    autoscaling_v2.delete_namespaced_horizontal_pod_autoscaler,
-                    hpa_name,
-                    namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
-            )
-            _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
-            present(hpa.metadata, "hpa.metadata").resource_version = resource_version
-            self._assert_mutation_authority()
-            autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler(
+            return
+        existing = self._authorize_resource(
+            existing,
+            kind="hpa",
+            resource_name=hpa_name,
+            patch_metadata=partial(
+                autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler,
                 hpa_name,
                 namespace,
-                hpa,
                 _request_timeout=self._k8s_timeout,
-            )
-            logger.info("Updated HPA %s", hpa_name)
+            ),
+            read_resource=read_hpa,
+            delete_resource=delete_hpa,
+        )
+        _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
+        present(hpa.metadata, "hpa.metadata").resource_version = resource_version
+        self._assert_mutation_authority()
+        autoscaling_v2.patch_namespaced_horizontal_pod_autoscaler(
+            hpa_name,
+            namespace,
+            hpa,
+            _request_timeout=self._k8s_timeout,
+        )
+        logger.info("Updated HPA %s", hpa_name)
 
     def _verify_hpa_owner(
         self,
@@ -7351,7 +7356,7 @@ class InferenceMonitor:
         target_name: str,
     ) -> ResourceCleanupResult:
         """Verify that the exact native/KEDA HPA owns the expected Deployment."""
-        autoscaling_v2 = client.AutoscalingV2Api()
+        autoscaling_v2 = client.AutoscalingV2Api(self.api_client)
         try:
             hpa = autoscaling_v2.read_namespaced_horizontal_pod_autoscaler(
                 hpa_name,

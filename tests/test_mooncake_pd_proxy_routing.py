@@ -23,6 +23,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubernetes.client.rest import ApiException
 
 
 def _make_monitor(region: str = "us-east-1"):
@@ -46,6 +47,12 @@ def _make_monitor(region: str = "us-east-1"):
         monitor.apps_v1 = mock_apps.return_value
         monitor.core_v1 = mock_core.return_value
         monitor.networking_v1 = mock_net.return_value
+        # An empty namespace: the monitor reads before it creates, so every
+        # object these checks expect it to create must first read as absent.
+        absent = ApiException(status=404, reason="Not Found")
+        monitor.apps_v1.read_namespaced_deployment.side_effect = absent
+        monitor.core_v1.read_namespaced_service.side_effect = absent
+        monitor.core_v1.read_namespaced_config_map.side_effect = absent
         return monitor
 
 

@@ -65,6 +65,13 @@ def _make_monitor(region: str = "us-east-1"):
         monitor.apps_v1 = mock_apps.return_value
         monitor.core_v1 = mock_core.return_value
         monitor.networking_v1 = mock_net.return_value
+        # An empty namespace: the monitor reads before it creates, so every
+        # object these checks expect it to create first reads as absent.
+        absent = ApiException(status=404, reason="Not Found")
+        monitor.apps_v1.read_namespaced_deployment.side_effect = absent
+        monitor.core_v1.read_namespaced_service.side_effect = absent
+        monitor.core_v1.read_namespaced_config_map.side_effect = absent
+        monitor.networking_v1.read_namespaced_network_policy.side_effect = absent
         return monitor
 
 
@@ -179,12 +186,15 @@ def test_existing_proxy_deployment_is_reconciled_after_stop(monitor):
     monitor.core_v1.read_namespaced_secret.return_value = _secret_with_key(
         value_b64=base64.b64encode(b"byo-key").decode()
     )
-    monitor.apps_v1.create_namespaced_deployment.side_effect = ApiException(status=409)
+    # The stopped proxy Deployment exists, so it is read and patched, not created.
+    monitor.apps_v1.read_namespaced_deployment.side_effect = None
+    monitor.apps_v1.read_namespaced_deployment.return_value = MagicMock()
 
     monitor._create_pd_proxy(
         "endpoint", "gco-inference", _proxy_spec("endpoint-admin"), _endpoint_record()
     )
 
+    monitor.apps_v1.create_namespaced_deployment.assert_not_called()
     monitor.apps_v1.patch_namespaced_deployment.assert_called_once()
     args = monitor.apps_v1.patch_namespaced_deployment.call_args.args
     assert args[:2] == ("endpoint-proxy", "gco-inference")
@@ -461,8 +471,23 @@ def test_admin_key_injected_only_by_secret_reference(monitor):
 
 
 def _deny_policy_untouched(monitor) -> None:
-    """Assert no existing NetworkPolicy was read, modified, or deleted."""
-    monitor.networking_v1.read_namespaced_network_policy.assert_not_called()
+    """Assert only the monitor's own allow rules were read, and no policy was changed."""
+    from gco.services.inference_monitor import (
+        NETWORK_POLICY_INFERENCE_INTERNAL,
+        NETWORK_POLICY_POD_TO_MASTER,
+        NETWORK_POLICY_POD_TO_METADATA,
+        NETWORK_POLICY_RDMA_BOOTSTRAP,
+    )
+
+    read_names = {
+        call.args[0] for call in monitor.networking_v1.read_namespaced_network_policy.call_args_list
+    }
+    assert read_names <= {
+        NETWORK_POLICY_INFERENCE_INTERNAL,
+        NETWORK_POLICY_POD_TO_MASTER,
+        NETWORK_POLICY_POD_TO_METADATA,
+        NETWORK_POLICY_RDMA_BOOTSTRAP,
+    }
     monitor.networking_v1.patch_namespaced_network_policy.assert_not_called()
     monitor.networking_v1.replace_namespaced_network_policy.assert_not_called()
     monitor.networking_v1.delete_namespaced_network_policy.assert_not_called()
@@ -518,14 +543,35 @@ def test_later_allow_rule_failure_names_that_rule(monitor):
 def test_existing_allow_rules_are_left_in_place(monitor):
     """Allow rules already present are the steady state and raise nothing.
 
-    Each widening rule that comes back as already-existing (``409``) is left
-    untouched, the call succeeds, and no deny policy is read or mutated.
+    Each widening rule that reads back as present is left untouched without a
+    create attempt, the call succeeds, and no deny policy is read or mutated.
     """
-    monitor.networking_v1.create_namespaced_network_policy.side_effect = ApiException(status=409)
+    monitor.networking_v1.read_namespaced_network_policy.side_effect = None
+    monitor.networking_v1.read_namespaced_network_policy.return_value = MagicMock()
 
     # Already-present widening rules are accepted without error.
     monitor._ensure_intra_namespace_network_policies("gco-inference", {})
 
+    monitor.networking_v1.create_namespaced_network_policy.assert_not_called()
+    assert monitor.networking_v1.read_namespaced_network_policy.call_count == 4
+    _deny_policy_untouched(monitor)
+
+
+def test_an_allow_rule_created_concurrently_is_left_in_place(monitor):
+    """A rule another writer creates between the read and the create (409) is kept."""
+    existing = MagicMock()
+    monitor.networking_v1.read_namespaced_network_policy.side_effect = [
+        ApiException(status=404),
+        existing,
+        existing,
+        existing,
+        existing,
+    ]
+    monitor.networking_v1.create_namespaced_network_policy.side_effect = ApiException(status=409)
+
+    monitor._ensure_intra_namespace_network_policies("gco-inference", {})
+
+    monitor.networking_v1.create_namespaced_network_policy.assert_called_once()
     _deny_policy_untouched(monitor)
 
 
