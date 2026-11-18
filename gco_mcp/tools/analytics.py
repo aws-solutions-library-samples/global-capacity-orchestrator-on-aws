@@ -83,7 +83,14 @@ async def analytics_user_add(username: str, email: str) -> str:
         email: Email address for the new user.
     """
     return await asyncio.to_thread(
-        cli_runner._run_cli, "analytics", "users", "add", username, "--email", email
+        cli_runner._run_cli,
+        "analytics",
+        "users",
+        "add",
+        "--username",
+        username,
+        "--email",
+        email,
     )
 
 

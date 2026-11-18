@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 import click
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -262,6 +263,24 @@ def test_templates_create_passes_the_manifest_and_name_where_the_cli_expects_the
     assert params["name"] == "gpu-template"
     assert params["region"] == "us-east-1"
     assert params["description"] == "GPU training template"
+
+
+def test_analytics_user_add_passes_the_username_as_an_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``gco analytics users add --username NAME``: the tool used to pass the
+    username positionally, which the command rejects."""
+    monkeypatch.delenv("GCO_STUDIO_PASSWORD", raising=False)
+    sys.path.insert(0, str(PROJECT_ROOT / "gco_mcp"))
+    import run_mcp
+
+    argv = _argv_built_by(run_mcp.analytics_user_add, "alice", "alice@example.com")
+
+    params = _parse_cli_argv(argv).params
+    assert params["username"] == "alice"
+    assert params["email"] == "alice@example.com"
+    assert params["password"] is None
+    assert params["generate_password"] is False
 
 
 def test_every_mcp_tool_builds_a_valid_cli_invocation() -> None:

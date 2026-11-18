@@ -2924,7 +2924,10 @@ class TestAnalyticsTools:
             assert "analytics" in cmd
             assert "users" in cmd
             assert "add" in cmd
-            assert "alice" in cmd
+            assert cmd[cmd.index("--username") : cmd.index("--username") + 2] == [
+                "--username",
+                "alice",
+            ]
             assert cmd[cmd.index("--email") : cmd.index("--email") + 2] == [
                 "--email",
                 "alice@example.com",

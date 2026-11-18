@@ -1540,7 +1540,7 @@ def test_models_upload_reports_staging_failure_without_cli_call() -> None:
             "analytics_user_add",
             ("alice", "alice@example.com"),
             {},
-            ("analytics", "users", "add", "alice", "--email", "alice@example.com"),
+            ("analytics", "users", "add", "--username", "alice", "--email", "alice@example.com"),
         ),
         (
             "analytics_login_url",
