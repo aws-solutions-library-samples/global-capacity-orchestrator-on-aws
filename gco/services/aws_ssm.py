@@ -1,8 +1,7 @@
 """
 SSM Parameter Store helpers shared across ``cli/``, ``gco_mcp/`` and ``gco/services/``.
 
-Four free functions cover every shape callers in the tree currently
-reach for:
+Three free functions cover every shape callers in the tree reach for:
 
 * :func:`get_ssm_parameter` — fetch a value, propagate errors verbatim.
   Use when the parameter is required and a missing parameter is a hard
@@ -19,28 +18,21 @@ reach for:
   exists, or ``(False, str(exc))`` on any error including
   ``ParameterNotFound``. Use for diagnostics-style "is this thing here?"
   checks where a transport error is treated the same as absent.
-* :func:`put_ssm_parameter` — write a parameter. Errors propagate
-  verbatim. Use for the rare cases (e.g. ALB hostname drift correction
-  in ``gco/services/health_monitor.py``) where the CLI / monitor needs
-  to write back to SSM.
 
 Architectural rationale. ``gco_mcp/`` is forbidden from importing ``cli/``
 directly (the runtime tool surface shells out via subprocess instead),
 but ``gco_mcp/`` already imports ``gco/services/...`` for shared service
-helpers. Putting these helpers under ``gco/services/`` lets every
-concrete callsite — the CLI's :class:`cli.models.ModelManager`, the
-analytics helpers in :mod:`cli.analytics_user_mgmt`, the
-``HealthMonitor`` in :mod:`gco.services.health_monitor`, and the
-:class:`mcp.mission.state.DynamoDBBackend` — share one implementation
-without re-introducing the ``mcp -> cli`` import edge.
+helpers. Putting these helpers under ``gco/services/`` lets the CLI
+(:class:`cli.models.ModelManager`, :mod:`cli.storage`,
+:mod:`cli.vector_store`, and the analytics checks in
+:mod:`cli.analytics_user_mgmt`), the inference monitor's bucket lookup in
+:mod:`gco.services.inference_monitor`, and
+:class:`gco_mcp.mission.state.DynamoDBBackend` share one implementation
+without re-introducing the ``gco_mcp -> cli`` import edge.
 
 Each function lazy-imports ``boto3`` so the helper module's import
 surface stays free of SDK dependencies; tests that don't exercise SSM
 can monkeypatch ``boto3.client`` without dragging the whole CLI in.
-The same lazy-import pattern is already used in
-:func:`cli.analytics_user_mgmt.check_ssm_parameter` and the
-:class:`mcp.mission.state.DynamoDBBackend` — this module just
-consolidates it.
 """
 
 from __future__ import annotations
@@ -51,7 +43,6 @@ __all__ = [
     "check_ssm_parameter",
     "get_ssm_parameter",
     "get_ssm_parameter_optional",
-    "put_ssm_parameter",
 ]
 
 
@@ -101,11 +92,8 @@ def get_ssm_parameter_optional(name: str, *, region: str | None = None) -> str |
     """Fetch an SSM parameter value or return ``None`` if absent.
 
     Distinguishes the ``ParameterNotFound`` case (returns ``None``)
-    from every other error (re-raised verbatim). This matches the
-    pattern :class:`gco.services.health_monitor.HealthMonitor` reaches
-    for when it has to read-then-maybe-write a drift-tracker
-    parameter — a missing value is not an error, but a permission
-    denied or a throttle is.
+    from every other error (re-raised verbatim): a missing value is not
+    an error, but a permission denied or a throttle is.
 
     Args:
         name: Fully-qualified parameter name.
@@ -159,42 +147,3 @@ def check_ssm_parameter(name: str, *, region: str | None = None) -> tuple[bool, 
     except (ClientError, BotoCoreError) as exc:
         return False, str(exc)
     return True, ""
-
-
-def put_ssm_parameter(
-    name: str,
-    value: str,
-    *,
-    region: str | None = None,
-    parameter_type: str = "String",
-    overwrite: bool = True,
-) -> None:
-    """Write or overwrite an SSM parameter. Errors propagate verbatim.
-
-    Args:
-        name: Fully-qualified parameter name.
-        value: New string value to store.
-        region: Optional AWS region.
-        parameter_type: SSM parameter type — ``"String"`` (default),
-            ``"StringList"``, or ``"SecureString"``.
-        overwrite: When ``True`` (default), passes ``Overwrite=True``
-            to ``ssm:PutParameter`` so an existing parameter is
-            replaced. When ``False``, the call fails with
-            ``ParameterAlreadyExists`` if the name is taken.
-
-    Raises:
-        botocore.exceptions.ClientError: For SSM-side errors (insufficient
-            permission, parameter type mismatch, etc.).
-        botocore.exceptions.BotoCoreError: For transport / credential
-            failures.
-
-    The helper does not catch any exception — callers that need to
-    classify failures (e.g. retry on throttle) match on the
-    underlying ``Code`` field themselves.
-    """
-    _ssm_client(region).put_parameter(
-        Name=name,
-        Value=value,
-        Type=parameter_type,
-        Overwrite=overwrite,
-    )

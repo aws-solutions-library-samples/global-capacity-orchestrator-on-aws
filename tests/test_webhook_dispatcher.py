@@ -36,7 +36,6 @@ from kubernetes.client.models import V1Job
 
 from gco.services.template_store import WebhookStore
 from gco.services.webhook_dispatcher import (
-    BLOCKED_NETWORKS,
     JobStateCache,
     WebhookDeliveryResult,
     WebhookDispatcher,
@@ -2010,10 +2009,22 @@ class TestMainFunction:
 _non_https_schemes = st.sampled_from(["http", "ftp", "gopher", "file", "ssh", "telnet", "ws"])
 
 # Blocked IPv4 networks
-_blocked_ipv4_networks = [n for n in BLOCKED_NETWORKS if n.version == 4]
+# Private, loopback, link-local, and unique-local networks the SSRF guard
+# (``_globally_routable_unicast``) must reject; test data, not the guard's list.
+_NON_PUBLIC_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+_blocked_ipv4_networks = [n for n in _NON_PUBLIC_NETWORKS if n.version == 4]
 
 # Blocked IPv6 networks
-_blocked_ipv6_networks = [n for n in BLOCKED_NETWORKS if n.version == 6]
+_blocked_ipv6_networks = [n for n in _NON_PUBLIC_NETWORKS if n.version == 6]
 
 
 def _ip_from_network(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> st.SearchStrategy:

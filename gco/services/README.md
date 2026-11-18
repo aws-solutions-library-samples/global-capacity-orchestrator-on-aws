@@ -9,7 +9,7 @@ Runtime services and shared support modules used by the in-cluster GCO control p
 | `__init__.py` | Package marker for the service modules; runtime entry points import concrete modules directly. |
 | `api_shared.py` | Shared Pydantic response models, pagination helpers, and API error utilities. |
 | `auth_middleware.py` | Validates short-lived HMAC request envelopes, including timestamp, nonce, method, target, and body digest; a signature or digest header that is not 64 lowercase hex characters is a 403 before any comparison. |
-| `aws_ssm.py` | Shared required/optional read, existence-check, and write helpers for SSM Parameter Store. |
+| `aws_ssm.py` | Shared required/optional read and existence-check helpers for SSM Parameter Store. |
 | `central_queue_worker.py` | Lease-fenced worker that claims global queue records and adopts or creates deterministic Kubernetes Jobs. |
 | `cost_api.py` | Internal FastAPI surface and scheduled reporting loop for the cost-monitor Deployment; traced as `cost-monitor`, and its lifespan stops the scheduled reporter and flushes spans at shutdown. |
 | `cost_monitor.py` | Queries OpenCost over verified HTTPS (`opencost-tls` Service, internal CA) through a new `httpx2` client per call (internal CA looked up per call, so a rotated CA needs no restart), normalizes report windows, and writes deterministic Parquet reports. |
