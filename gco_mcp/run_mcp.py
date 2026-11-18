@@ -70,6 +70,7 @@ from audit import (  # noqa: E402, F401
     _sanitize_arguments,
     audit_logged,
     audit_logger,
+    configure_audit_logging,
     emit_startup_log,
 )
 from iam import assume_mcp_role  # noqa: E402
@@ -688,6 +689,7 @@ _PUBLIC_EXPORTS = [
     "cluster_health",
     "cluster_tunnel_command",
     "config_get",
+    "configure_audit_logging",
     "configure_mooncake_store",
     "cost_allocation_activate",
     "cost_allocation_status",
@@ -898,9 +900,12 @@ def _initialize_runtime() -> None:
     """Perform external startup effects exactly once per process invocation.
 
     Importing ``run_mcp`` is now safe for documentation tooling and tests: it
-    does not emit a startup audit record or mutate the ambient boto3 session by
-    assuming a role. Those effects happen only when the server is actually run.
+    does not attach the audit output handler, emit a startup audit record or
+    mutate the ambient boto3 session by assuming a role. Those effects happen
+    only when the server is actually run. The handler comes first so the
+    startup and role-assumption records are written.
     """
+    configure_audit_logging()
     emit_startup_log()
     assume_mcp_role()
 

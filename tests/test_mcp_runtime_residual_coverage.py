@@ -320,16 +320,19 @@ def test_role_assumption_logs_and_reraises_missing_boto3(
 
 
 def test_run_mcp_main_orders_runtime_initialization_before_server_run() -> None:
-    """The executable entrypoint performs audit and IAM setup before serving."""
+    """The executable entrypoint attaches audit output, then audits and assumes the role."""
     calls: list[str] = []
     with (
+        patch.object(
+            run_mcp, "configure_audit_logging", side_effect=lambda: calls.append("output")
+        ),
         patch.object(run_mcp, "emit_startup_log", side_effect=lambda: calls.append("audit")),
         patch.object(run_mcp, "assume_mcp_role", side_effect=lambda: calls.append("iam")),
         patch.object(run_mcp.mcp, "run", side_effect=lambda: calls.append("serve")),
     ):
         run_mcp.main()
 
-    assert calls == ["audit", "iam", "serve"]
+    assert calls == ["output", "audit", "iam", "serve"]
 
 
 def test_package_first_run_mcp_import_aliases_legacy_name_and_repairs_sys_path() -> None:

@@ -1009,3 +1009,206 @@ class TestStartupLogNewFields:
         entry = _last_startup_entry(caplog)
         assert entry["all_tools_enabled"] is True
         assert entry["enabled_flags"] == sorted(audit.feature_flags.ALL_FLAGS)
+
+
+# =============================================================================
+# Audit output and interrupted calls
+# =============================================================================
+
+
+@pytest.fixture
+def restored_audit_logger(monkeypatch):
+    """Undo ``configure_audit_logging``'s logger changes after the test."""
+    logger = logging.getLogger("gco.mcp.audit")
+    handlers, level, propagate = list(logger.handlers), logger.level, logger.propagate
+    for name in ("GCO_MCP_AUDIT_LOG", "GCO_MCP_AUDIT_LOG_LEVEL"):
+        monkeypatch.delenv(name, raising=False)
+    yield logger
+    for handler in logger.handlers:
+        if handler not in handlers:
+            handler.close()
+    logger.handlers[:] = handlers
+    logger.setLevel(level)
+    logger.propagate = propagate
+
+
+class TestAuditOutput:
+    """The server entry point writes audit records somewhere by default."""
+
+    def test_startup_and_role_records_reach_stderr_on_the_real_entry_path(self):
+        """``_initialize_runtime`` in a fresh interpreter writes JSON lines to stderr.
+
+        Before ``configure_audit_logging`` existed the audit logger had no
+        handler and inherited the root logger's WARNING level, so this
+        printed nothing.
+        """
+        import os
+        import subprocess
+
+        project_root = Path(__file__).resolve().parent.parent
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"GCO_MCP_ROLE_ARN", "GCO_MCP_AUDIT_LOG", "GCO_MCP_AUDIT_LOG_LEVEL"}
+        }
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.path.insert(0, 'gco_mcp'); import run_mcp; "
+                "run_mcp._initialize_runtime()",
+            ],
+            cwd=project_root,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=True,
+        )
+        assert completed.stdout == ""
+        # Only JSON lines are audit records; a library warning may also print.
+        records = [json.loads(line) for line in completed.stderr.splitlines() if line[:1] == "{"]
+        assert [record["event"] for record in records] == ["mcp.server.startup"]
+        assert records[0]["audit_log_level"] == "INFO"
+
+    def test_records_go_to_stderr_and_not_to_the_root_logger(
+        self, restored_audit_logger, capsys, caplog
+    ):
+        handler = audit.configure_audit_logging()
+        assert isinstance(handler, logging.StreamHandler)
+        assert restored_audit_logger.level == logging.INFO
+        assert restored_audit_logger.propagate is False
+        with caplog.at_level(logging.INFO):
+            audit.emit_startup_log()
+        entry = json.loads(capsys.readouterr().err)
+        assert entry["event"] == "mcp.server.startup"
+        assert entry["audit_log_level"] == "INFO"
+        assert not [r for r in caplog.records if r.name == "gco.mcp.audit"]
+
+    def test_configuring_twice_keeps_one_output_handler(self, restored_audit_logger):
+        first = audit.configure_audit_logging()
+        assert audit.configure_audit_logging() is first
+        marked = [
+            h
+            for h in restored_audit_logger.handlers
+            if getattr(h, audit._AUDIT_OUTPUT_MARKER, False)
+        ]
+        assert marked == [first]
+
+    def test_log_file_is_created_private_and_appended(
+        self, restored_audit_logger, monkeypatch, tmp_path
+    ):
+        target = tmp_path / "audit.jsonl"
+        monkeypatch.setenv("GCO_MCP_AUDIT_LOG", str(target))
+        handler = audit.configure_audit_logging()
+        assert isinstance(handler, logging.FileHandler)
+        assert target.stat().st_mode & 0o777 == 0o600
+        audit.emit_startup_log()
+        audit.audit_resource_read("docs://gco/index", status="success", duration_ms=1.0)
+        handler.flush()
+        events = [json.loads(line)["event"] for line in target.read_text().splitlines()]
+        assert events == ["mcp.server.startup", "mcp.resource.read"]
+
+    def test_existing_log_file_keeps_its_records(
+        self, restored_audit_logger, monkeypatch, tmp_path
+    ):
+        target = tmp_path / "audit.jsonl"
+        target.write_text('{"event": "earlier"}\n')
+        target.chmod(0o640)
+        monkeypatch.setenv("GCO_MCP_AUDIT_LOG", str(target))
+        handler = audit.configure_audit_logging()
+        audit.emit_startup_log()
+        handler.flush()
+        lines = target.read_text().splitlines()
+        assert json.loads(lines[0]) == {"event": "earlier"}
+        assert json.loads(lines[1])["event"] == "mcp.server.startup"
+        assert target.stat().st_mode & 0o777 == 0o640
+
+    def test_level_filters_the_output_but_not_the_logger(
+        self, restored_audit_logger, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("GCO_MCP_AUDIT_LOG_LEVEL", " warning ")
+        collector = _AuditLogCapture()
+        restored_audit_logger.addHandler(collector)
+        audit.configure_audit_logging()
+        audit.emit_startup_log()
+        assert capsys.readouterr().err == ""
+        # The logger stays at INFO, so another handler (the Mission audit
+        # collector) still receives the record the output handler drops.
+        assert restored_audit_logger.level == logging.INFO
+        (startup,) = [json.loads(r.getMessage()) for r in collector.records]
+        assert startup["audit_log_level"] == "WARNING"
+
+    def test_unknown_level_name_keeps_info(self, restored_audit_logger, monkeypatch):
+        monkeypatch.setenv("GCO_MCP_AUDIT_LOG_LEVEL", "verbose")
+        assert audit.configure_audit_logging().level == logging.INFO
+
+    def test_a_finer_logger_level_is_kept(self, restored_audit_logger):
+        restored_audit_logger.setLevel(logging.DEBUG)
+        audit.configure_audit_logging()
+        assert restored_audit_logger.level == logging.DEBUG
+
+
+class TestInterruptedCallsAreAudited:
+    """Cancelled and interrupted calls write a record before propagating."""
+
+    def test_cancelled_async_tool_records_cancelled(self, caplog):
+        started = asyncio.Event()
+
+        @run_mcp.audit_logged
+        async def slow_destroy(stack: str = "gco-global") -> str:
+            started.set()
+            await asyncio.sleep(3600)
+            return "unreachable"
+
+        async def scenario() -> None:
+            task = asyncio.create_task(slow_destroy(stack="gco-global"))
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            asyncio.run(scenario())
+
+        entry = _last_invocation_entry(caplog)
+        assert entry["tool"] == "slow_destroy"
+        assert entry["status"] == "cancelled"
+        assert entry["error"] == "CancelledError"
+        assert entry["arguments"] == {"stack": "gco-global"}
+
+    def test_interrupted_sync_tool_records_cancelled(self, caplog):
+        @run_mcp.audit_logged
+        def interrupted() -> str:
+            raise KeyboardInterrupt
+
+        with (
+            caplog.at_level(logging.INFO, logger="gco.mcp.audit"),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            interrupted()
+
+        entry = _last_invocation_entry(caplog)
+        assert (entry["status"], entry["error"]) == ("cancelled", "KeyboardInterrupt")
+
+    def test_system_exit_records_error(self, caplog):
+        @run_mcp.audit_logged
+        def exits() -> str:
+            raise SystemExit(3)
+
+        @run_mcp.audit_logged
+        async def exits_async() -> str:
+            raise SystemExit("bye")
+
+        with caplog.at_level(logging.INFO, logger="gco.mcp.audit"):
+            with pytest.raises(SystemExit):
+                exits()
+            with pytest.raises(SystemExit):
+                asyncio.run(exits_async())
+
+        entries = [e for e in _audit_entries(caplog) if e.get("event") == "mcp.tool.invocation"]
+        assert [(e["tool"], e["status"], e["error"]) for e in entries[-2:]] == [
+            ("exits", "error", "3"),
+            ("exits_async", "error", "bye"),
+        ]
