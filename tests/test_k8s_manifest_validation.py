@@ -927,6 +927,48 @@ class TestConstants:
         assert loc.endswith(".json")
         assert "datreeio/CRDs-catalog" in loc
 
+    def test_crd_catalog_is_read_at_one_pinned_commit(self) -> None:
+        """Schemas come from one catalog commit, so upstream changes reach the
+        gate only when CRD_CATALOG_COMMIT moves (finding C12: the catalog was
+        read from ``main``). The deps scan reads the constant as a plain string
+        literal to report when main moves past it."""
+        assert re.fullmatch(r"[0-9a-f]{40}", validator.CRD_CATALOG_COMMIT)
+        expected = (
+            f"https://raw.githubusercontent.com/{validator.CRD_CATALOG_REPOSITORY}/"
+            f"{validator.CRD_CATALOG_COMMIT}/"
+            "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+        )
+        assert expected == validator.CRD_CATALOG_SCHEMA_LOCATION
+        source = (PROJECT_ROOT / ".github/scripts/validate_k8s_manifests.py").read_text(
+            encoding="utf-8"
+        )
+        assert f'\nCRD_CATALOG_COMMIT = "{validator.CRD_CATALOG_COMMIT}"\n' in source
+        assert "CRDs-catalog/main/" not in source
+
+    def test_schema_pass_hands_kubeconform_the_pinned_catalog(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[list[str]] = []
+
+        class _Done:
+            returncode = 0
+            stdout = '{"resources": [], "summary": {}}'
+
+        def fake_run(cmd, **_kwargs):
+            seen.append(list(cmd))
+            return _Done()
+
+        monkeypatch.setattr(validator.subprocess, "run", fake_run)
+        validator.run_kubeconform(tmp_path, kubernetes_version="1.37.0")
+
+        (cmd,) = seen
+        locations = [cmd[index + 1] for index, arg in enumerate(cmd) if arg == "-schema-location"]
+        assert locations == [
+            validator.DEFAULT_SCHEMA_LOCATION,
+            validator.CRD_CATALOG_SCHEMA_LOCATION,
+        ]
+        assert f"/{validator.CRD_CATALOG_COMMIT}/" in locations[1]
+
 
 # ── -kubernetes-version follows cdk.json (offline) ────────────────────────────
 #

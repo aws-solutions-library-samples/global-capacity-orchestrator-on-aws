@@ -36,7 +36,8 @@ Kubernetes, and is resolved at the cluster's minor (`-kubernetes-version
 than kubeconform's floating `master` default, so a field the deployed API
 server does not know yet fails here. CRDs this repo depends on (Karpenter `NodePool`, the AWS Load
 Balancer Controller Gateway API configuration CRDs, Kueue, KEDA) are resolved
-via the community datreeio/CRDs-catalog as a second `-schema-location`. Two CRDs used in
+via the community datreeio/CRDs-catalog, read at the commit `CRD_CATALOG_COMMIT`
+pins, as a second `-schema-location`. Two CRDs used in
 `examples/` aren't in that catalog yet (KubeRay's `RayCluster`, Volcano's
 `Job`) — those are validated for YAML-shape only (via the structural check)
 and explicitly `-skip`ped in the schema pass so kubeconform doesn't report a
@@ -200,8 +201,17 @@ def kubernetes_schema_version(cdk_json: Path = CDK_JSON_PATH) -> str:
 # KEDA, and hundreds of other CRDs — see https://github.com/datreeio/CRDs-catalog.
 # kubeconform tries -schema-location entries in order and stops at the first
 # match, so this is consulted only when a Kind isn't a built-in K8s resource.
+#
+# The catalog is read at one commit of its main branch, never at main itself,
+# so a schema upstream adds, tightens or drops changes this gate's verdict
+# only when the pin moves. Its last release is v0.0.12 (2023-07), older than
+# schemas this repository needs, so a main commit is the pin. The monthly
+# dependency scan (CI tooling) reports when main moves past it; to move it, set
+# CRD_CATALOG_COMMIT to main's head and run this script.
+CRD_CATALOG_REPOSITORY = "datreeio/CRDs-catalog"
+CRD_CATALOG_COMMIT = "784ec895547a36e548e6810b41f27baade3a0890"
 CRD_CATALOG_SCHEMA_LOCATION = (
-    "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/"
+    f"https://raw.githubusercontent.com/{CRD_CATALOG_REPOSITORY}/{CRD_CATALOG_COMMIT}/"
     "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
 )
 

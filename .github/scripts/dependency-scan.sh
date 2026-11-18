@@ -56,8 +56,10 @@
 #     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
 #     KUBECTL_VERSION), kubeconform (KUBECONFORM_VERSION), Calico
 #     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), kind + its
-#     node image, and the Crossplane function-go-templating package
-#     post-helm-crossplane.yaml installs — public endpoints, no AWS creds
+#     node image, the Crossplane function-go-templating package
+#     post-helm-crossplane.yaml installs, and the datreeio/CRDs-catalog
+#     commit validate_k8s_manifests.py reads CRD schemas at (against the
+#     catalog's main head) — public endpoints, no AWS creds
 #   - Version consistency: ruff (pyproject / pre-commit / lint workflow),
 #     Python and Node runtime pins, npm packageManager + CDK CLI pins, every
 #     owned npm graph's lockfile/Dependabot coverage, duplicated *_VERSION
@@ -2308,6 +2310,23 @@ if [ -n "$KIND_NODE_PIN" ]; then
   fi
 else
   mark_scan_incomplete "Could not parse the kind node-image pin from integration-tests.yml."
+fi
+
+# datreeio/CRDs-catalog — validate_k8s_manifests.py reads CRD schemas at one
+# commit of the catalog's main branch (CRD_CATALOG_COMMIT), so an upstream
+# schema change reaches integration:k8s:manifest-schema only when the pin
+# moves. The catalog has published no release since 2023, so drift is main
+# having moved past the pin: set the constant to main's head and re-run the
+# validator.
+CRD_CATALOG_PIN="$(extract_python_string_constant CRD_CATALOG_COMMIT .github/scripts/validate_k8s_manifests.py)"
+if ! [[ "$CRD_CATALOG_PIN" =~ ^[0-9a-f]{40}$ ]]; then
+  mark_scan_incomplete "Could not parse CRD_CATALOG_COMMIT from .github/scripts/validate_k8s_manifests.py."
+elif ! crd_catalog_head="$(github_api_get "https://api.github.com/repos/datreeio/CRDs-catalog/commits/main" \
+    | jq -r '.sha // empty' 2>/dev/null)" || ! [[ "$crd_catalog_head" =~ ^[0-9a-f]{40}$ ]]; then
+  mark_scan_incomplete "GitHub commit lookup failed for datreeio/CRDs-catalog main$(github_api_failure_hint)."
+elif [ "$CRD_CATALOG_PIN" != "$crd_catalog_head" ]; then
+  echo "  - datreeio/CRDs-catalog (CRD_CATALOG_COMMIT): ${CRD_CATALOG_PIN:0:12} -> ${crd_catalog_head:0:12}"
+  echo "datreeio/CRDs-catalog (CRD_CATALOG_COMMIT)|${CRD_CATALOG_PIN:0:12}|${crd_catalog_head:0:12}|https://github.com/datreeio/CRDs-catalog/compare/${CRD_CATALOG_PIN}...${crd_catalog_head}" >> "$CI_TOOLING_RESULTS"
 fi
 
 CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
