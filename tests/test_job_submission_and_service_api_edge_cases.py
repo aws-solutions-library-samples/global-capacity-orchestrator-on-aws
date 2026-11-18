@@ -3182,7 +3182,7 @@ def test_cli_cloudwatch_logs_preserve_non_object_and_non_string_envelopes() -> N
     assert output.endswith('42\n["list"]\n{"log":42}\nclean')
 
 
-def test_cli_sqs_labels_create_metadata_without_namespace_override() -> None:
+def test_cli_sqs_labels_and_the_default_namespace_fill_missing_metadata() -> None:
     manager = _manager()
     manager._aws_client.get_regional_stack.return_value = SimpleNamespace(stack_name="stack")
     cloudformation = MagicMock()
@@ -3199,7 +3199,7 @@ def test_cli_sqs_labels_create_metadata_without_namespace_override() -> None:
     manifests = [{"apiVersion": "v1", "kind": "ConfigMap", "data": {"key": "value"}}]
     with patch("boto3.client", side_effect=client):
         result = manager.submit_job_sqs(manifests, "us-east-1", labels={"team": "training"})
-    assert manifests[0]["metadata"] == {"labels": {"team": "training"}}
+    assert manifests[0]["metadata"] == {"namespace": "gco-jobs", "labels": {"team": "training"}}
     assert result["namespace"] == "gco-jobs"
     envelope = json.loads(sqs.send_message.call_args.kwargs["MessageBody"])
     assert envelope["namespace"] == "gco-jobs"

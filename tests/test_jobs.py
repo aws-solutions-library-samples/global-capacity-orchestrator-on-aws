@@ -2493,3 +2493,54 @@ class TestJobsListPagination:
             result = CliRunner().invoke(cli, ["jobs", "list", "-r", "us-east-1", "--limit", "0"])
         assert result.exit_code == 2
         assert "--limit" in result.output
+
+
+class TestSubmitJobSqsNamespace:
+    """``submit_job_sqs`` applies the same namespace fallback as ``submit_job``."""
+
+    @staticmethod
+    def _submit(manifests, default_namespace="team-a", namespace=None):
+        import json
+        from types import SimpleNamespace
+
+        from cli.jobs import JobManager
+
+        manager = object.__new__(JobManager)
+        manager.config = SimpleNamespace(default_namespace=default_namespace)
+        manager._aws_client = MagicMock()
+        manager._aws_client.get_regional_stack.return_value = SimpleNamespace(stack_name="s")
+        fake_boto = MagicMock()
+        fake_boto.client.return_value.describe_stacks.return_value = {
+            "Stacks": [{"Outputs": [{"OutputKey": "JobQueueUrl", "OutputValue": "https://q"}]}]
+        }
+        fake_boto.client.return_value.send_message.return_value = {"MessageId": "m"}
+        with patch.dict("sys.modules", {"boto3": fake_boto}):
+            result = manager.submit_job_sqs(manifests, region="us-east-1", namespace=namespace)
+        body = json.loads(
+            fake_boto.client.return_value.send_message.call_args.kwargs["MessageBody"]
+        )
+        return result, body
+
+    def test_configured_default_namespace_fills_a_manifest_without_one(self):
+        manifests = [{"kind": "Job", "metadata": {"name": "a"}}]
+
+        result, body = self._submit(manifests)
+
+        assert body["manifests"][0]["metadata"]["namespace"] == "team-a"
+        assert body["namespace"] == result["namespace"] == "team-a"
+
+    def test_a_declared_namespace_wins_over_the_default(self):
+        manifests = [{"kind": "Job", "metadata": {"name": "a", "namespace": "ml-jobs"}}]
+
+        result, body = self._submit(manifests)
+
+        assert body["manifests"][0]["metadata"]["namespace"] == "ml-jobs"
+        assert body["namespace"] == result["namespace"] == "ml-jobs"
+
+    def test_an_explicit_namespace_is_the_fallback_over_the_config(self):
+        manifests = [{"kind": "Job"}]
+
+        result, body = self._submit(manifests, namespace="research")
+
+        assert body["manifests"][0]["metadata"] == {"namespace": "research"}
+        assert result["namespace"] == "research"

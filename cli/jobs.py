@@ -1358,10 +1358,11 @@ class JobManager:
             manifests: Path to manifest file/directory or list of manifest dicts
             region: Target region for job submission (required)
             namespace: Fallback namespace for manifests that don't declare
-                their own. When set, each manifest's ``metadata.namespace`` is
-                filled in only if missing — existing values are preserved so
-                users who've declared a target namespace in the manifest can
-                rely on it reaching the queue processor untouched. Server-side
+                their own (default: ``config.default_namespace``). Each
+                manifest's ``metadata.namespace`` is filled in only if
+                missing — existing values are preserved so users who've
+                declared a target namespace in the manifest can rely on it
+                reaching the queue processor untouched. Server-side
                 validation enforces the allowlist.
             labels: Additional labels to add to manifests
             priority: Job priority (higher = more important)
@@ -1376,13 +1377,15 @@ class JobManager:
         # Load manifests if path provided
         manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
 
-        # Apply namespace as a fallback only — preserve any namespace the
-        # manifest declared itself.
-        if namespace:
-            for manifest in manifest_list:
-                if "metadata" not in manifest:
-                    manifest["metadata"] = {}
-                manifest["metadata"].setdefault("namespace", namespace)
+        # Apply the explicit or configured namespace as a fallback only —
+        # preserve any namespace the manifest declared itself. The same rule
+        # as submit_job: without it a manifest that names no namespace ran in
+        # the consumer's hard-coded gco-jobs, ignoring GCO_DEFAULT_NAMESPACE.
+        effective_namespace = namespace or self.config.default_namespace
+        for manifest in manifest_list:
+            if "metadata" not in manifest:
+                manifest["metadata"] = {}
+            manifest["metadata"].setdefault("namespace", effective_namespace)
 
         # Apply additional labels
         if labels:
@@ -1414,8 +1417,10 @@ class JobManager:
 
         # Build the envelope through the shared protocol module, which the
         # in-cluster consumer and the CI end-to-end test also import, so the
-        # producer cannot drift from the reader.
-        message = build_job_message(manifest_list, namespace=namespace, priority=priority)
+        # producer cannot drift from the reader. Its informational namespace
+        # is the first manifest's, now always set, so it names where the job
+        # actually runs.
+        message = build_job_message(manifest_list, priority=priority)
 
         # Send to SQS
         sqs = boto3.client("sqs", region_name=region)

@@ -3383,7 +3383,7 @@ gco jobs submit-sqs MANIFEST_PATH [OPTIONS]
 | `--region` | `-r` | Target region for SQS queue |
 | `--auto-region` | | Auto-select optimal region based on capacity (ignored with `--region`) |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
-| `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
+| `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (default: the configured default namespace, `GCO_DEFAULT_NAMESPACE`; manifest `metadata.namespace` takes precedence) |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 
