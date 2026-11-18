@@ -44,15 +44,18 @@ from click import Abort
 
 
 @pytest.fixture
-def stacks_module() -> Any:
-    """Reload cli.stacks so the runtime cache starts fresh."""
-    import importlib
+def stacks_module(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Return cli.stacks with its container-runtime cache reset for the test.
 
+    The module is not reloaded: a reload builds a new ``StackManager`` class,
+    and tests/conftest.py's no-op stubs for the destroy-cleanup sweeps and the
+    stuck-stack pre-check are patched onto the class that existed before it.
+    """
     import cli.stacks as stacks_mod
 
-    importlib.reload(stacks_mod)
-    yield stacks_mod
-    importlib.reload(stacks_mod)
+    monkeypatch.setattr(stacks_mod, "_container_runtime_cache", None)
+    monkeypatch.setattr(stacks_mod, "_container_runtime_checked", False)
+    return stacks_mod
 
 
 @pytest.fixture
@@ -64,6 +67,28 @@ def manager(stacks_module: Any) -> Any:
     config.api_gateway_region = "us-east-2"
     config.regions = ["us-east-2"]
     return stacks_module.StackManager(config)
+
+
+def test_conftest_aws_stubs_cover_this_modules_managers(manager: Any) -> None:
+    """The fixtures must not hand tests a StackManager the conftest stubs miss.
+
+    tests/conftest.py no-ops every destroy-cleanup sweep and the stuck-stack
+    pre-check by patching cli.stacks.StackManager; a manager built from any
+    other class object, such as one a module reload created, would run them
+    against AWS.
+    """
+    import cli.stacks as stacks
+
+    assert type(manager) is stacks.StackManager
+    for helper in (
+        "_check_and_fix_stuck_stack",
+        "_cleanup_cluster_volumes",
+        "_cleanup_eks_security_groups",
+        "_cleanup_implicit_log_groups",
+        "_stop_backup_vault_jobs",
+    ):
+        assert isinstance(getattr(stacks.StackManager, helper), MagicMock), helper
+    assert manager._cleanup_cluster_volumes() == {"deleted": [], "surviving": [], "errors": []}
 
 
 # ---------------------------------------------------------------------------

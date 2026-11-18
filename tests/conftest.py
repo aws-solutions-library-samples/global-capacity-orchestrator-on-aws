@@ -382,7 +382,9 @@ _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
     "test_cleanup_orphaned_bastions_default_strict_and_empty_inputs": frozenset(
         {"cleanup_orphaned_bastions"}
     ),
-    "TestCleanupBackupVault": frozenset({"_cleanup_backup_vault"}),
+    # The vault sweep stops the vault's unfinished backup jobs first, through
+    # the same mocked Backup client.
+    "TestCleanupBackupVault": frozenset({"_cleanup_backup_vault", "_stop_backup_vault_jobs"}),
     "TestStopBackupVaultJobs": frozenset({"_stop_backup_vault_jobs"}),
     "TestEksSecurityGroupCleanup": frozenset({"_cleanup_eks_security_groups"}),
     "TestCleanupEksSecurityGroups": frozenset({"_cleanup_eks_security_groups"}),
