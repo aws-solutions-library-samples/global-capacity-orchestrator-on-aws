@@ -382,6 +382,13 @@ _DESTROY_CLEANUP_STUBS: dict[str, object] = {
     # orchestration test that names a live regional stack would destroy that
     # cluster's Prometheus/Grafana data — the most destructive helper here.
     "_cleanup_cluster_volumes": {"deleted": [], "surviving": [], "errors": []},
+    # The ECR replication guard (cli/ecr_replication.py) reads the global
+    # stack's template and the registry on every deploy that reaches the
+    # global stack and before its destroy, and rewrites the registry's
+    # replication configuration after it.
+    "_ecr_replication_deploy_preflight": None,
+    "_ecr_replication_destroy_preflight": None,
+    "_remove_gco_replication_rules": 0,
 }
 # Owner -> the helpers it exercises for real. An owner is a test class name,
 # a module-level test function name, or a test module name (its file stem);
@@ -412,6 +419,13 @@ _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
     "TestTrafficDialParameterCleanup": frozenset({"_cleanup_traffic_dial_parameters"}),
     "TestAddonParameterCleanup": frozenset({"_cleanup_addon_parameters"}),
     "TestClusterVolumeCleanup": frozenset({"_cleanup_cluster_volumes"}),
+    "test_ecr_replication": frozenset(
+        {
+            "_ecr_replication_deploy_preflight",
+            "_ecr_replication_destroy_preflight",
+            "_remove_gco_replication_rules",
+        }
+    ),
     # Floci layer: drives the real method against the local emulator, so the
     # no-op stub would defeat the entire point of the module.
     "TestClusterVolumeSweepOverTheWire": frozenset({"_cleanup_cluster_volumes"}),

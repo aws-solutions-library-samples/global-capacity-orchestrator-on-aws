@@ -1,6 +1,6 @@
 # Regional API Proxy
 
-Proxies IAM-authenticated requests from each always-deployed regional API bridge to the regional internal [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) through a [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) function in the workload VPC. The centralized aggregator always uses this path. In the commercial `aws` partition, same-account callers may opt in with `api_gateway.regional_api_enabled=true`; in other AWS partitions this is the required supported workload ingress and same-account direct access is enabled automatically because [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) is omitted.
+Proxies IAM-authenticated requests from each always-deployed regional API bridge to the regional internal [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) through a [Lambda](https://docs.aws.amazon.com/lambda/latest/dg/welcome.html) function in the workload VPC. The centralized aggregator always uses this path, and so do region-pinned calls by other principals of the account whose IAM policy allows `execute-api:Invoke` on the bridge; in AWS partitions other than `aws` this is the required supported workload ingress because [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) is omitted.
 
 ## Table of Contents
 

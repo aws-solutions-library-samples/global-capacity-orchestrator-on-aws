@@ -22,6 +22,7 @@ The `gco` command-line interface for managing GCO infrastructure, jobs, inferenc
 | `models.py` | Model weight upload, listing, and [S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) URI management |
 | `storage.py` | Human-friendly GCO S3 bucket discovery and incremental download/upload sync |
 | `stacks.py` | [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) stack deployment, destruction, and status |
+| `ecr_replication.py` | Guard around the global stack's ECR replication configuration: refuses deploys and destroys that would delete or overwrite replication rules GCO did not create, and removes only GCO's rule after the global stack is destroyed |
 | `status.py` | Fleet-wide status document assembly: independent section gathers, findings, degradation model |
 | `costs.py` | Cost tracking via AWS [Cost Explorer](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) |
 | `dag.py` | DAG pipeline execution with dependency ordering |

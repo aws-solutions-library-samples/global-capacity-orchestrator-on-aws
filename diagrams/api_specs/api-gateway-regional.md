@@ -6,7 +6,7 @@
 
 Direct regional API for gco in us-east-1
 
-One IAM-authenticated REST API per deployment region, fronting that region's internal ALB through VPC Lambdas. Its first job is to be the aggregator's path into the region: the resource policy always admits the cross-region aggregator's execution role for the aggregate routes. Direct calls by other principals of the deploying account are an explicit opt-in (`api_gateway.regional_api_enabled`) in the commercial `aws` partition and the required ingress in partitions without Global Accelerator. The routes are the same control-plane and inference catch-alls as the global API, with the additional `HEAD` and `OPTIONS` methods on `/api/v1/{proxy+}`.
+One IAM-authenticated REST API per deployment region, fronting that region's internal ALB through VPC Lambdas. Its first job is to be the aggregator's path into the region: the resource policy names only the cross-region aggregator's execution role, for the aggregate routes. Region-pinned calls by other principals of the deploying account use it too, authorized by their own identity-based `execute-api:Invoke` permission; it is the required ingress in partitions without Global Accelerator. The routes are the same control-plane and inference catch-alls as the global API, with the additional `HEAD` and `OPTIONS` methods on `/api/v1/{proxy+}`.
 
 - **Machine-readable document:** [`docs/openapi/api-gateway-regional.json`](https://github.com/aws-solutions-library-samples/global-capacity-orchestrator-on-aws/blob/main/docs/openapi/api-gateway-regional.json) — the document `scripts/generate_api_gateway_openapi.py` reads out of the synthesized CDK stack; this sheet is rendered from it
 - **Interactive console (Swagger UI):** <https://aws-solutions-library-samples.github.io/global-capacity-orchestrator-on-aws/swagger/api-gateway-regional/>
@@ -49,29 +49,6 @@ Statements deployed on the REST API (`${AWS::AccountId}` is the deploying accoun
       "execute-api:/*/GET/api/v1/policy",
       "execute-api:/*/GET/api/v1/status"
     ]
-  }
-]
-```
-
-Added when `api_gateway.regional_api_enabled` is true (and always outside the `aws` partition), admitting the deploying account's other principals:
-
-```json
-[
-  {
-    "Action": "execute-api:Invoke",
-    "Condition": {
-      "ArnNotEquals": {
-        "aws:PrincipalArn": "arn:aws:iam::${AWS::AccountId}:role/gco-cross-region-aggregator"
-      },
-      "StringEquals": {
-        "aws:PrincipalAccount": "${AWS::AccountId}"
-      }
-    },
-    "Effect": "Allow",
-    "Principal": {
-      "AWS": "*"
-    },
-    "Resource": "execute-api:/*"
   }
 ]
 ```

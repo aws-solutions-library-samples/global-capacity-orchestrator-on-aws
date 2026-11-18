@@ -1151,22 +1151,19 @@ class GCOApiGatewayGlobalStack(Stack):
             cloud_watch_role_removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # Add resource policy to restrict to account
-        api.add_to_resource_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                principals=[iam.AnyPrincipal()],
-                actions=["execute-api:Invoke"],
-                resources=["execute-api:/*"],
-                conditions={"StringEquals": {"aws:PrincipalAccount": self.account}},
-            )
-        )
-
-        # Allow Cognito-authorized requests on /studio/* paths. The Cognito
-        # authorizer on the method handles authentication; the resource
-        # policy just needs to not block the request before it reaches the
-        # authorizer. Cognito tokens don't carry aws:PrincipalAccount so
-        # the account-scoped statement above would reject them.
+        # The resource policy grants nothing to IAM callers. For an
+        # IAM-authorized method and a caller in this account, API Gateway
+        # allows the request when the caller's identity-based policy allows
+        # execute-api:Invoke and nothing denies it, so identity policies
+        # decide who in the account may call. Callers in other accounts are
+        # refused on those methods because no statement admits them there.
+        #
+        # Requests to the Cognito-authorized /studio/login route and the
+        # unauthenticated /studio/callback page carry no IAM identity, and
+        # API Gateway requires an explicit resource-policy Allow for them.
+        # This statement provides it for GET /studio/* only; the Cognito
+        # authorizer (login) and the static landing page (callback) decide
+        # what the request gets.
         api.add_to_resource_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,

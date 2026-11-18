@@ -693,14 +693,8 @@ def build_document(
     api: ApiDescription,
     *,
     conditions: dict[Route, str] | None = None,
-    direct_access_template: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One OpenAPI document for the API a template deploys.
-
-    ``direct_access_template`` is the same API synthesized with
-    ``api_gateway.regional_api_enabled``; the resource-policy statements it adds
-    are reported separately so the opt-in is visible without a second document.
-    """
+    """One OpenAPI document for the API a template deploys."""
     _api_id, api_properties = rest_api(template)
     # Deploy-time references (the API id, the user pool ARN) say nothing about
     # the contract, so only the settings that describe behaviour are kept.
@@ -815,18 +809,6 @@ def build_document(
     rules = waf_rules(template)
     if rules:
         document["x-gco-waf"] = rules
-    if direct_access_template is not None:
-        _, direct_properties = rest_api(direct_access_template)
-        baseline = resource_policy(api_properties)
-        document["x-gco-resource-policy-direct-access"] = [
-            statement
-            for statement in resource_policy(direct_properties)
-            if statement not in baseline
-        ]
-        if routes_of(direct_access_template).keys() != routes_of(template).keys():
-            raise ApiGatewayDocumentError(
-                "regional_api_enabled changed the route set; document it as a condition"
-            )
     if conditions:
         document["x-gco-conditions"] = [CONDITIONS[key] for key in sorted(set(conditions.values()))]
     return document
@@ -974,32 +956,6 @@ def synthesize(project_root: Path) -> dict[str, dict[str, Any]]:
             )
         }
 
-        # The bridge's resource policy is the one thing ``regional_api_enabled``
-        # changes; a second app carries that context so the document can show
-        # the statements the opt-in adds.
-        direct_app = cdk.App(
-            context=cdk_context(project_root, api_gateway={"regional_api_enabled": True})
-        )
-        direct_config = ConfigLoader(direct_app)
-        direct_network = cdk.Stack(direct_app, "variant-network", env=regional_env)
-        direct_vpc = ec2.Vpc(direct_network, "Vpc", max_azs=2, nat_gateways=1)
-        direct = GCORegionalApiGatewayStack(
-            direct_app,
-            f"{project}-regional-api-{region}",
-            config=direct_config,
-            region=region,
-            vpc=direct_vpc,
-            auth_secret_arn=(
-                f"arn:aws:secretsmanager:{region}:{PLACEHOLDER_ACCOUNT}"
-                f":secret:{project}-api-gateway-auth"
-            ),
-            aggregator_role_arn=(
-                f"arn:aws:iam::{PLACEHOLDER_ACCOUNT}:role/"
-                f"{cross_region_aggregator_role_name(project)}"
-            ),
-            env=regional_env,
-        )
-        templates["regional-direct-access"] = dict(assertions.Template.from_stack(direct).to_json())
     templates["_config"] = {
         "project": project,
         "regions": regions,
@@ -1046,11 +1002,11 @@ def describe(templates: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         description=(
             "One IAM-authenticated REST API per deployment region, fronting that region's "
             "internal ALB through VPC Lambdas. Its first job is to be the aggregator's path "
-            "into the region: the resource policy always admits the cross-region "
-            "aggregator's execution role for the aggregate routes. Direct calls by other "
-            "principals of the deploying account are an explicit opt-in "
-            "(`api_gateway.regional_api_enabled`) in the commercial `aws` partition and "
-            "the required ingress in partitions without Global Accelerator. The routes are "
+            "into the region: the resource policy names only the cross-region aggregator's "
+            "execution role, for the aggregate routes. Region-pinned calls by other "
+            "principals of the deploying account use it too, authorized by their own "
+            "identity-based `execute-api:Invoke` permission; it is the required ingress in "
+            "partitions without Global Accelerator. The routes are "
             "the same control-plane and inference catch-alls as the global API, with the "
             "additional `HEAD` and `OPTIONS` methods on `/api/v1/{proxy+}`."
         ),
@@ -1063,7 +1019,6 @@ def describe(templates: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         synthesized_with={
             "partition": str(config["partition"]),
             "region": region,
-            "regionalApiEnabled": False,
         },
     )
     conditions = conditional_routes(
@@ -1071,11 +1026,7 @@ def describe(templates: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     )
     return {
         global_api.name: build_document(templates["full"], global_api, conditions=conditions),
-        regional_api.name: build_document(
-            templates["regional"],
-            regional_api,
-            direct_access_template=templates["regional-direct-access"],
-        ),
+        regional_api.name: build_document(templates["regional"], regional_api),
     }
 
 

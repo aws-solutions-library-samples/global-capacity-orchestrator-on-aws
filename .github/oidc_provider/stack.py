@@ -13,6 +13,14 @@ GCO CDK stacks. Deploy it independently in any AWS account:
 The IAM policy attached to the role is loaded from ``policy.json`` in this
 directory. Edit that file to grant additional permissions for your CI needs.
 
+OIDC Provider:
+    An account has at most one IAM OIDC provider per issuer URL, and roles
+    of other repositories may trust it. The provider this stack creates is
+    retained when the stack is deleted. When the account already has a
+    GitHub provider, pass its ARN as ``existing_provider_arn`` (context
+    ``github_oidc_provider_arn``) and the stack trusts it without creating
+    or ever deleting one.
+
 Trust Policy:
     The role's trust policy restricts assumption to GitHub Actions workflows
     running in a specific repository (and optionally a specific branch).
@@ -33,7 +41,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from aws_cdk import CfnOutput, Stack
+from aws_cdk import CfnOutput, RemovalPolicy, Stack
 from aws_cdk import aws_iam as iam
 from constructs import Construct
 
@@ -41,6 +49,9 @@ GITHUB_OIDC_ISSUER = "token.actions.githubusercontent.com"
 GITHUB_OIDC_AUDIENCE = "sts.amazonaws.com"
 GITHUB_OIDC_THUMBPRINT = "6938fd4d98bab03faadb97b34396831e3780aea1"
 GITHUB_OIDC_BACKUP_THUMBPRINT = "1c58a3a8518e8759bf075b76b750d4f2df264fcd"
+_PROVIDER_ARN_RE = re.compile(
+    rf"^arn:aws(?:-[a-z]+)*:iam::\d{{12}}:oidc-provider/{re.escape(GITHUB_OIDC_ISSUER)}$"
+)
 _IMMUTABLE_SUBJECT_PREFIX_RE = re.compile(
     r"^repo:(?P<owner>[^/@:]+)@[1-9]\d*/(?P<repo>[^/@:]+)@[1-9]\d*$"
 )
@@ -81,6 +92,17 @@ def _validated_subject_prefix(github_repo: str, configured: str | None) -> str:
     return configured
 
 
+def _validated_provider_arn(configured: str) -> str:
+    """Return an existing GitHub OIDC provider ARN, or raise ``ValueError``."""
+    if not isinstance(configured, str) or _PROVIDER_ARN_RE.fullmatch(configured) is None:
+        raise ValueError(
+            "github_oidc_provider_arn must be the ARN of the account's "
+            f"{GITHUB_OIDC_ISSUER} OIDC provider "
+            f"(arn:aws:iam::123456789012:oidc-provider/{GITHUB_OIDC_ISSUER})"
+        )
+    return configured
+
+
 class GCOGitHubOIDCStack(Stack):
     """Standalone stack that creates a GitHub OIDC provider and CI role.
 
@@ -93,6 +115,10 @@ class GCOGitHubOIDCStack(Stack):
         github_branch: Exact branch restriction. Defaults to ``"main"``.
             Set this to the repository's actual default branch when it differs;
             use ``"*"`` only as an explicit opt-in to any branch or tag.
+        existing_provider_arn: ARN of a GitHub OIDC provider that already
+            exists in the account. When set, the stack trusts that provider
+            and creates none; otherwise it creates one and retains it on
+            delete.
     """
 
     def __init__(
@@ -103,6 +129,7 @@ class GCOGitHubOIDCStack(Stack):
         github_repo: str = "aws-solutions-library-samples/global-capacity-orchestrator-on-aws",
         github_subject_prefix: str | None = None,
         github_branch: str = "main",
+        existing_provider_arn: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -110,13 +137,27 @@ class GCOGitHubOIDCStack(Stack):
         # ---------------------------------------------------------------------
         # OIDC Provider
         # ---------------------------------------------------------------------
-        provider = iam.OpenIdConnectProvider(
-            self,
-            "GitHubOIDCProvider",
-            url=f"https://{GITHUB_OIDC_ISSUER}",
-            client_ids=[GITHUB_OIDC_AUDIENCE],
-            thumbprints=[GITHUB_OIDC_THUMBPRINT, GITHUB_OIDC_BACKUP_THUMBPRINT],
-        )
+        # One provider per issuer URL per account, possibly trusted by other
+        # repositories' roles: import an existing one, or create one that a
+        # stack delete leaves in place. Keep the construct id: the provider a
+        # stack created before it was retained is deleted if this resource is
+        # removed or replaced.
+        provider: iam.IOpenIdConnectProvider
+        if existing_provider_arn is not None:
+            provider = iam.OpenIdConnectProvider.from_open_id_connect_provider_arn(
+                self,
+                "GitHubOIDCProvider",
+                _validated_provider_arn(existing_provider_arn),
+            )
+        else:
+            provider = iam.OpenIdConnectProvider(
+                self,
+                "GitHubOIDCProvider",
+                url=f"https://{GITHUB_OIDC_ISSUER}",
+                client_ids=[GITHUB_OIDC_AUDIENCE],
+                thumbprints=[GITHUB_OIDC_THUMBPRINT, GITHUB_OIDC_BACKUP_THUMBPRINT],
+                removal_policy=RemovalPolicy.RETAIN,
+            )
 
         # ---------------------------------------------------------------------
         # Trust policy — restrict to the specified GitHub repo (and branch)

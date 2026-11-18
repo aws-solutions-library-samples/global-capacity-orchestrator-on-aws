@@ -237,40 +237,11 @@ class TestRegionalApiGatewayStack:
         rest_apis = template.find_resources("AWS::ApiGateway::RestApi")
         assert len(rest_apis) == 1
         statements = next(iter(rest_apis.values()))["Properties"]["Policy"]["Statement"]
-        broad_statement = next(
-            statement
-            for statement in statements
-            if (
-                statement.get("Principal") == "*"
-                or statement.get("Principal", {}).get("AWS") == "*"
-            )
-            and statement.get("Resource") == "execute-api:/*"
-        )
-        assert broad_statement["Condition"]["ArnNotEquals"] == {
-            "aws:PrincipalArn": aggregator_role_arn
-        }
-        assert "aws:PrincipalAccount" in broad_statement["Condition"]["StringEquals"]
-
-        # Evaluate the union of resource-policy Allows that apply to the
-        # aggregator. The broad same-account statement is intentionally
-        # inapplicable because its PrincipalArn condition excludes this role.
-        applicable_resources: set[str] = set()
-        for statement in statements:
-            if statement.get("Effect") != "Allow":
-                continue
-            principal = statement.get("Principal")
-            applies = isinstance(principal, dict) and principal.get("AWS") == aggregator_role_arn
-            if principal == "*" or (isinstance(principal, dict) and principal.get("AWS") == "*"):
-                excluded = (
-                    statement.get("Condition", {}).get("ArnNotEquals", {}).get("aws:PrincipalArn")
-                )
-                applies = excluded != aggregator_role_arn
-            if not applies:
-                continue
-            statement_resources = statement["Resource"]
-            if isinstance(statement_resources, str):
-                statement_resources = [statement_resources]
-            applicable_resources.update(statement_resources)
+        (statement,) = statements
+        assert statement["Effect"] == "Allow"
+        assert statement["Principal"] == {"AWS": aggregator_role_arn}
+        assert "Condition" not in statement
+        applicable_resources = set(statement["Resource"])
 
         expected_resources = {
             f"execute-api:/*/{method}/{path}" for method, path in AGGREGATOR_REGIONAL_API_ROUTES
@@ -280,6 +251,45 @@ class TestRegionalApiGatewayStack:
         assert "execute-api:/*/POST/api/v1/manifests" not in applicable_resources
         assert "execute-api:/*/DELETE/api/v1/status" not in applicable_resources
         assert all("/inference/" not in resource for resource in applicable_resources)
+
+    @pytest.mark.parametrize("regional_api_enabled", [True, False])
+    @pytest.mark.parametrize("global_accelerator", [True, False])
+    def test_resource_policy_never_admits_the_whole_account(
+        self, app, mock_config, vpc, regional_api_enabled, global_accelerator
+    ):
+        """No statement admits every principal of the account, in any mode.
+
+        For an IAM-authorized method and a same-account caller, API Gateway
+        allows the request when either the caller's identity policy or the
+        resource policy allows it. A resource-policy Allow for the whole
+        account therefore let principals with no execute-api:Invoke permission
+        call the bridge. ``regional_api_enabled`` and partitions without Global
+        Accelerator used to add exactly that statement.
+        """
+        from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
+
+        mock_config.get_api_gateway_config.return_value = {
+            **mock_config.get_api_gateway_config.return_value,
+            "regional_api_enabled": regional_api_enabled,
+        }
+        mock_config.supports_global_accelerator.return_value = global_accelerator
+        aggregator_role_arn = "arn:aws:iam::123456789012:role/gco-test-aggregator"
+        stack = GCORegionalApiGatewayStack(
+            app,
+            "TestRegionalApiNoAccountWideAllow",
+            config=mock_config,
+            region="us-east-1",
+            vpc=vpc,
+            auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID
+            aggregator_role_arn=aggregator_role_arn,
+            env=cdk.Environment(region="us-east-1"),
+        )
+        template = assertions.Template.from_stack(stack)
+        (rest_api,) = template.find_resources("AWS::ApiGateway::RestApi").values()
+        statements = rest_api["Properties"]["Policy"]["Statement"]
+        assert [statement["Principal"] for statement in statements] == [
+            {"AWS": aggregator_role_arn}
+        ]
 
     def test_regional_api_gateway_has_lambda(self, app, mock_config, vpc):
         """Test that the regional API gateway has a VPC Lambda."""

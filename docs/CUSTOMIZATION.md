@@ -115,7 +115,7 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [Image Build Failures](#image-build-failures)
   - [Manifest Application Failures](#manifest-application-failures)
 - [Regional API Gateway (Aggregation Bridge and Direct Regional Access)](#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
-  - [Enable Direct Regional Access in the aws Partition](#enable-direct-regional-access-in-the-aws-partition)
+  - [Who May Call a Bridge](#who-may-call-a-bridge)
   - [How It Works](#how-it-works-1)
   - [Using Regional APIs](#using-regional-apis)
   - [Security Considerations](#security-considerations)
@@ -140,8 +140,8 @@ GCO deploys multiple stacks to configurable AWS Regions. Every configured Region
 |-------|---------------|---------|
 | `gco-global` | us-east-2 | Partition-wide state and SSM coordination; [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) in commercial `aws` only |
 | `gco-api-gateway` | us-east-2 | Edge-optimized workload + aggregate API in `aws`; regional aggregate-only API elsewhere |
-| `gco-regional-api-{region}` | workload Region | Aggregator bridge; optional direct access in `aws`, required workload ingress elsewhere |
-| `gco-monitoring` | us-east-2 | Cross-region CloudWatch dashboards and alarms |
+| `gco-regional-api-{region}` | workload Region | Aggregator bridge and region-pinned access; required workload ingress outside `aws` |
+| `gco-monitoring` | us-east-2 | Cross-region CloudWatch dashboard and the control-plane alarms (each regional stack has its own) |
 | `gco-analytics` | API Gateway region | Optional SageMaker Studio and [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html) environment |
 | `gco-{region}` | (configurable) | Regional EKS clusters, internal ALBs, and workload infrastructure |
 
@@ -282,16 +282,21 @@ two produce disjoint resource names and tear down independently
 > project-scoped and coexists cleanly, but the ECR image-replication
 > configuration created by the global stack is a per-account, per-region
 > **singleton**: AWS allows only one `AWS::ECR::ReplicationConfiguration` per
-> registry per region. So if two deployments place their **global** stack in the
-> same region and both leave image replication on (`images.replication.enabled`,
-> the default), the second stack fails to create it
-> (`...ReplicationConfiguration...already exists`). Resolution: set
-> `images.replication.enabled: false` on all but one same-region deployment (the
-> others still get their own project-scoped `<project>/*` ECR repos — they just
-> don't own that region's cross-region replication), **or** give each deployment
-> a different global region. Deployments in different regions never conflict:
-> each region has its own replication configuration with a project-scoped
-> `<project>/` filter.
+> registry per region, and that resource owns every rule in it. Its create fails
+> when the registry already has a rule, and an update writes GCO's rule over all
+> of them. So `gco stacks deploy` refuses, with instructions, to deploy a global
+> stack that would create the configuration over replication rules GCO did not
+> create (another deployment's or your own), or change GCO's rule while such
+> rules exist. Resolution: set `images.replication.enabled: false` on all but
+> one same-region deployment (the others still get their own project-scoped
+> `<project>/*` ECR repos — they just don't own that region's cross-region
+> replication, and you can add a `<project>/` rule to the registry yourself),
+> **or** give each deployment a different global region. Deployments in
+> different regions never conflict: each region has its own replication
+> configuration with a project-scoped `<project>/` filter. The configuration is
+> retained when the global stack is deleted; `gco stacks destroy` and
+> `destroy-all` then remove only this project's rule and keep every other rule.
+> A plain `cdk deploy` skips these checks.
 
 ### What `project_name` scopes
 
@@ -2853,39 +2858,26 @@ See `examples/trainium-job.yaml` and `examples/inferentia-job.yaml` for complete
 
 A regional API bridge is always deployed in every workload region. The
 centralized aggregator is not VPC-attached and uses these reachable API Gateway
-endpoints to fan out to each region. In the commercial `aws` partition,
-`api_gateway.regional_api_enabled` controls whether other IAM-authorized
-principals in the deployment account may invoke a bridge directly. In every
-other AWS partition, Global Accelerator is omitted and same-account direct
-regional access is enabled automatically as the supported workload ingress.
+endpoints to fan out to each region. Region-pinned CLI commands and SDK calls
+invoke a bridge directly, and in every AWS partition other than `aws`, where
+Global Accelerator is omitted, the bridges are the supported workload ingress.
 
-### Enable Direct Regional Access in the `aws` Partition
+### Who May Call a Bridge
 
-Edit `cdk.json` to admit direct same-account callers to every regional bridge.
-Outside `aws`, no opt-in is needed and this setting cannot disable the required
-regional ingress:
-
-```json
-{
-  "context": {
-    "api_gateway": {
-      "regional_api_enabled": true
-    }
-  }
-}
-```
-
-Then redeploy:
-
-```bash
-gco stacks deploy-all -y
-```
+The bridge's resource policy names only the aggregator role. Every other
+caller in the deployment account is authorized by its own identity-based
+policy, which must allow `execute-api:Invoke` on the bridge (see
+[CLI.md → Regional API Mode](CLI.md#regional-api-mode) and
+[docs/iam-policies](iam-policies/README.md)); callers in other accounts are
+refused. `api_gateway.regional_api_enabled` no longer changes this: it used to
+add a statement admitting every principal of the account, including principals
+with no `execute-api:Invoke` permission.
 
 ### How It Works
 
 Each bridge uses an IAM-authorized API Gateway and a Lambda in the workload
-VPC. The global aggregator reaches it over AWS-managed TLS with [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html); an
-opted-in user follows the same first hop:
+VPC. The global aggregator reaches it over AWS-managed TLS with [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html); a
+direct caller follows the same first hop:
 
 ```text
 Aggregator or authorized direct user

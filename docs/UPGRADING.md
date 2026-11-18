@@ -28,6 +28,9 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Tenant write fence and MLflow over HTTPS](#tenant-write-fence-and-mlflow-over-https)
   - [vLLM endpoints deployed with MODEL](#vllm-endpoints-deployed-with-model)
   - [Stricter cdk.json validation](#stricter-cdkjson-validation)
+  - [API calls need an IAM permission](#api-calls-need-an-iam-permission)
+  - [Workload alarms move to their Regions](#workload-alarms-move-to-their-regions)
+  - [ECR replication rules of your own are kept](#ecr-replication-rules-of-your-own-are-kept)
 
 ## How an upgrade works
 
@@ -517,3 +520,58 @@ Command changes that go with it:
   throughput from an earlier run no longer carries over.
 - The committed `cdk.json` is stored exactly as the CLI writes it, so the
   first `gco stacks ... enable` changes only the keys it touches.
+### API calls need an IAM permission
+Earlier releases put a statement in the global API's resource policy that
+admitted every principal of the deployment account, and the regional bridges
+had the same statement when `api_gateway.regional_api_enabled` was `true` (and
+always outside the `aws` partition). For a caller in the same account, API
+Gateway allows a request that either the caller's identity policy or the
+resource policy allows, so any role or user in the account could call every
+IAM-authorized route without an `execute-api:Invoke` permission of its own.
+- **BREAKING: callers without `execute-api:Invoke` are refused (403).** After
+  the redeploy, a caller in the account needs an identity-based policy that
+  allows `execute-api:Invoke` on the route. Administrator credentials already
+  have it. Before redeploying, grant it to every other role or user that calls
+  the global API or a regional bridge (CI pipelines, notebooks outside the
+  analytics stack, scripts); see
+  [CLI.md → Regional API Mode](CLI.md#regional-api-mode) for a policy that
+  covers the CLI and [docs/iam-policies](iam-policies/README.md) for narrower
+  ones.
+- **`api_gateway.regional_api_enabled` no longer has an effect.** Region-pinned
+  calls reach the bridges with the permission above whatever its value.
+- **The analytics `/studio/*` pages keep working.** Their requests carry no IAM
+  identity, so the resource policy still admits `GET /studio/*`; the Cognito
+  authorizer decides who signs in.
+### Workload alarms move to their Regions
+Earlier releases created every workload Region's SQS, EKS node and
+manifest-processor alarms in the monitoring stack. CloudWatch evaluates an
+alarm only against metrics in its own Region, so in any Region other than the
+monitoring Region those alarms never left `OK`.
+- **The alarms are recreated in each regional stack.** A redeploy adds them,
+  with the same metrics and thresholds, to every `<project>-<region>` stack and
+  then deletes the old copies from `<project>-monitoring`. Their names change
+  (CloudFormation generates them from the new stack), so update anything that
+  looks an alarm up by name.
+- **Each Region gets its own alert topic.** The new alarms notify an SNS topic
+  in the same Region, exported as the regional stack's `RegionalAlertTopicArn`
+  output. **Subscribe your on-call channel to it in every Region**; the
+  monitoring stack's `AlertTopicArn` keeps the API Gateway, Lambda and
+  DynamoDB alarms only.
+### ECR replication rules of your own are kept
+The global stack's `AWS::ECR::ReplicationConfiguration` is the registry's whole
+replication configuration in the global Region. Earlier releases did not retain
+it, so changing GCO's rule rewrote every rule in the registry and deleting the
+stack, or turning `images.replication` off, deleted all of them.
+- **The configuration is retained from this release on.** The first redeploy
+  only marks it retained (`DeletionPolicy` and `UpdateReplacePolicy`); it does
+  not touch the registry.
+- **BREAKING: `gco stacks deploy` and `destroy` can refuse.** When the registry
+  has replication rules this deployment did not create, a deploy that would
+  create GCO's configuration, change GCO's rule, or remove a configuration an
+  earlier release deployed is refused with instructions, and so is destroying
+  a global stack an earlier release deployed. Redeploy with this release first;
+  to keep rules of your own, set `images.replication.enabled` to `false` and
+  manage the registry's replication yourself. A plain `cdk deploy` skips the
+  check.
+- **Destroy removes only GCO's rule.** After the global stack is deleted, the
+  CLI removes this project's `<project>/` rule and keeps every other rule.

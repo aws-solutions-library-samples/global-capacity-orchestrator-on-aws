@@ -5234,7 +5234,7 @@ def test_global_vector_ingest_synthesis_completes_notification_wiring() -> None:
     assert template.find_resources("Custom::S3BucketNotifications")
 
 
-def test_monitoring_composite_alarm_loops_across_three_regions() -> None:
+def test_monitoring_stack_has_no_regional_composite_alarms_for_three_regions() -> None:
     import aws_cdk as cdk
     from aws_cdk import assertions
 
@@ -5259,7 +5259,9 @@ def test_monitoring_composite_alarm_loops_across_three_regions() -> None:
         env=cdk.Environment(account="123456789012", region="us-east-2"),
     )
     template = assertions.Template.from_stack(stack)
-    assert len(template.find_resources("AWS::CloudWatch::CompositeAlarm")) == 3
+    # Each Region's composite alarm lives in its regional stack
+    # (gco/stacks/regional_alarms.py); without an API stack none is left here.
+    assert template.find_resources("AWS::CloudWatch::CompositeAlarm") == {}
 
 
 # ---------------------------------------------------------------------------

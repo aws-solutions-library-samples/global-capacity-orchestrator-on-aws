@@ -355,7 +355,7 @@ The generated reference architecture shows the commercial `aws` workload path. O
 3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), and [`cpu-general-pool`](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml).
 4. **Workloads and platform services** run across [namespaces](./lambda/kubectl-applier-simple/manifests/00-namespaces.yaml): `gco-system` ([Health Monitor](./gco/services/health_monitor.py), [Manifest Processor](./gco/services/manifest_processor.py), [Queue Processor](./gco/services/queue_processor.py), [Inference Monitor](./gco/services/inference_monitor.py), [Inference Proxy](./gco/services/inference_api.py), and the [Cost Monitor](./gco/services/cost_monitor.py) when cost monitoring is on, as it is by default) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
 5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) [pgvector](https://github.com/pgvector/pgvector), and [KMS](https://aws.amazon.com/kms/)-encrypted [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) shared buckets: the Region's own regional-shared bucket, plus the cluster-shared and model-weights buckets the global stack owns.
-6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB. Direct same-account access is optional through `regional_api_enabled` in `aws` and enabled automatically as the required workload ingress elsewhere.
+6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB. Region-pinned commands use it too, and it is the required workload ingress outside `aws`; every caller needs `execute-api:Invoke` in its own IAM policy.
 7. The bridge's **[regional API proxy Lambda](./lambda/regional-api-proxy/)** runs in the VPC's private subnets and forwards each authenticated call to the internal ALB.
 8. **Regional AWS services** complete the stack: [Amazon SQS](https://aws.amazon.com/sqs/) for job ingestion, the shared [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) tables, which live in the global Region, and [Amazon CloudWatch](https://docs.aws.amazon.com/cloudwatch/) [metrics](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/working_with_metrics.html) and [logs](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html).
 
@@ -413,10 +413,11 @@ User → Regional API Gateway (AWS TLS + SigV4) → VPC Lambda (HMAC)
   → pod TLS proxy (re-encrypted HTTPS) → AuthenticationMiddleware (pod loopback)
 ```
 
-Every Region's API bridge is required for aggregator fan-out. [Direct regional
-access](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
-is optional for same-account callers in `aws` and enabled automatically as the
-supported workload ingress in other partitions.
+Every Region's API bridge is required for aggregator fan-out, and
+[region-pinned calls](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
+use it directly. Neither API's resource policy admits the account as a whole:
+a caller needs an IAM policy of its own that allows `execute-api:Invoke`
+([examples](docs/iam-policies/README.md)).
 
 </details>
 
@@ -483,7 +484,7 @@ Everything GCO does, grouped by area; expand one for the details and its guide.
 - **Spot price-aware scheduling**: central-queue jobs can set a max spot price per instance type and dispatch only when the market clears it
 - **MLflow experiment tracking** (on by default with observability): an in-cluster [MLflow](https://mlflow.org/) tracking server per region — run artifacts to S3 via a prefix-scoped IAM role, metadata on EBS, reached with `gco monitoring open --service mlflow` — see [MONITORING.md](docs/MONITORING.md#mlflow-experiment-tracking)
 - **Auto-bootstrap**: CDK bootstrap runs automatically for new regions during deploy
-- **Multi-region monitoring**: the `gco-monitoring` stack's cross-region CloudWatch dashboards, alarms, and SNS alerts, complemented by per-cluster Prometheus/Grafana [cluster observability](./docs/MONITORING.md)
+- **Multi-region monitoring**: the `gco-monitoring` stack's cross-region CloudWatch dashboard, CloudWatch alarms with SNS alerts in every Region that has them, complemented by per-cluster Prometheus/Grafana [cluster observability](./docs/MONITORING.md)
 - **Distributed tracing** (on by default, 5% sampled): the four API services export OpenTelemetry spans straight to [AWS X-Ray](https://docs.aws.amazon.com/xray/latest/devguide/aws-xray.html) with no collector, searchable in CloudWatch Transaction Search, and every service log line carries the matching trace id — see [Distributed tracing](docs/MONITORING.md#distributed-tracing)
 - **GitOps with Argo CD** (off by default): a self-managed [Argo CD](https://argo-cd.readthedocs.io/en/stable/) per regional cluster, installed from the upstream chart in namespaced mode and fenced to the job namespaces by a `gco-tenants` `AppProject` and matching RBAC; point it at a repository path per cluster from `cdk.json`, let the repo server autoscale, and open the UI over the private endpoint with `gco gitops open` — see [GitOps with Argo CD](docs/GITOPS.md)
 - **Crossplane** (off by default): a self-managed [Crossplane](https://docs.crossplane.io/) v2 and the Crossview dashboard, whose namespaced composite resources compose tenant workloads in the job namespaces only (`gco crossplane open`) — see [Crossplane](docs/CROSSPLANE.md)

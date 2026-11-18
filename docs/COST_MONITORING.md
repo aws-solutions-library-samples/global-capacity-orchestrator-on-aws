@@ -319,9 +319,9 @@ Ad-hoc reports land under `adhoc/` — deliberately outside the scheduled
 prefix the Athena table reads, so a user-requested window that overlaps
 scheduled windows can never double-count in aggregations.
 
-`--region` pins the call to that region's API bridge (in the commercial
-partition direct bridge access requires `api_gateway.regional_api_enabled=true`;
-in other partitions it is always available). Without `--region` the request
+`--region` pins the call to that region's API bridge (your credentials need
+`execute-api:Invoke` on it; see [CLI.md → Regional API Mode](CLI.md#regional-api-mode)).
+Without `--region` the request
 rides the global API to the nearest healthy region, and the response names
 the region that answered. Endpoint details and response shapes:
 [API.md — Cost Reporting](API.md#cost-reporting).

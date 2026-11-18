@@ -38,7 +38,11 @@ GCO ships **three** complementary observability surfaces:
   and SNS surface. It answers "is the platform up, are alarms firing, what does
   the fleet look like across regions" using AWS-native metrics (Global
   Accelerator, API Gateway, Lambda, SQS, DynamoDB, Container Insights node/GPU
-  aggregates). This stack is unaffected by the `cluster_observability` toggle.
+  aggregates). Alarms must sit in the Region of their metrics, so each
+  workload Region's queue, node and manifest alarms are created by that
+  Region's stack with its own SNS topic (`RegionalAlertTopicArn` output); see
+  [MAINTENANCE.md → Monitoring and alerting](MAINTENANCE.md#monitoring-and-alerting).
+  This stack is unaffected by the `cluster_observability` toggle.
 - **Cluster observability (this feature)** — per-cluster Prometheus/Grafana at a
   cardinality CloudWatch does not surface: per-GPU DCGM series, scheduler queue
   depth, KEDA scaler lag, per-pod GCO service RED metrics.
