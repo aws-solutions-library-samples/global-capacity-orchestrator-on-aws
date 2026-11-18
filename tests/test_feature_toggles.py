@@ -145,6 +145,17 @@ class TestGenericFeatureConfig:
             b'    "items": [\n      1,\n      2\n    ]\n  }\n}\n'
         )
 
+    def test_the_committed_cdk_json_is_in_the_shared_format(self):
+        """The committed file is byte for byte what the CLI writes.
+
+        Otherwise the first ``gco stacks ... enable`` rewrites every line of
+        the file (inline arrays, blank lines) instead of the keys it changes.
+        """
+        from cli.stacks import serialize_cdk_json
+
+        raw = (Path(__file__).resolve().parents[1] / "cdk.json").read_bytes()
+        assert raw == serialize_cdk_json(json.loads(raw))
+
     def test_update_feature_config_keeps_utf8_and_ends_with_newline(self, tmp_path: Path):
         """A toggle writes the shared format: no \\uXXXX churn, one trailing newline."""
         from cli.stacks import _update_feature_config, serialize_cdk_json
