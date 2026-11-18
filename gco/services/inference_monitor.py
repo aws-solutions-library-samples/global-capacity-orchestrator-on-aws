@@ -642,7 +642,6 @@ class EndpointResourceInventory:
     scaled_objects: tuple[str, ...]
     config_maps: tuple[str, ...]
     legacy_ingresses: tuple[str, ...]
-    legacy_http_routes: tuple[str, ...]
     generated_admin_secret: str
 
 
@@ -6419,7 +6418,6 @@ class InferenceMonitor:
                 _tls_proxy_config_map_name(name),
             ),
             legacy_ingresses=_legacy_ingress_names(name),
-            legacy_http_routes=(name, f"{name}-canary", f"{name}-proxy"),
             generated_admin_secret=f"{name}-admin",
         )
 
@@ -6993,42 +6991,6 @@ class InferenceMonitor:
                     self.networking_v1.patch_namespaced_ingress,
                     ingress_name,
                     namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                pending=pending,
-                errors=errors,
-            )
-
-        custom_objects = client.CustomObjectsApi(self.api_client)
-        for route_name in inventory.legacy_http_routes:
-            resources_found |= self._delete_and_confirm(
-                kind="httproute",
-                resource_name=route_name,
-                delete_call=partial(
-                    custom_objects.delete_namespaced_custom_object,
-                    group="gateway.networking.k8s.io",
-                    version="v1",
-                    namespace=namespace,
-                    plural="httproutes",
-                    name=route_name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_call=partial(
-                    custom_objects.get_namespaced_custom_object,
-                    group="gateway.networking.k8s.io",
-                    version="v1",
-                    namespace=namespace,
-                    plural="httproutes",
-                    name=route_name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                patch_metadata=partial(
-                    custom_objects.patch_namespaced_custom_object,
-                    group="gateway.networking.k8s.io",
-                    version="v1",
-                    namespace=namespace,
-                    plural="httproutes",
-                    name=route_name,
                     _request_timeout=self._k8s_timeout,
                 ),
                 pending=pending,

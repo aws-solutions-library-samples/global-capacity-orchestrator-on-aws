@@ -868,7 +868,7 @@ class TestDeleteResourcesExtended:
             result = monitor._delete_resources("ep", "ns")
 
         assert result.complete is False
-        assert len(result.errors) == 22
+        assert len(result.errors) == 19
         assert "delete scaledobject ep failed (status 500)" in result.errors
         assert "delete hpa ep failed (status 500)" in result.errors
         assert "delete hpa keda-hpa-ep failed (status 500)" in result.errors
