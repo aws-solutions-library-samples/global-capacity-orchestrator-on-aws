@@ -39,7 +39,11 @@ from fastapi.responses import JSONResponse
 from gco.models import HealthStatus
 from gco.services import tracing
 from gco.services.auth_middleware import AuthenticationMiddleware
-from gco.services.health_monitor import HealthMonitor, create_health_monitor_from_env
+from gco.services.health_monitor import (
+    HealthMonitor,
+    create_health_monitor_from_env,
+    thresholds_from_env,
+)
 from gco.services.metrics_publisher import HealthMonitorMetrics
 from gco.services.structured_logging import configure_structured_logging
 from gco.services.webhook_dispatcher import (
@@ -316,9 +320,13 @@ async def get_metrics() -> dict[str, Any]:
             ),
         }
 
+    except HTTPException:
+        # "Not initialized" stays a 503; it is not an internal error.
+        raise
     except Exception as e:
-        logger.error(f"Failed to get metrics: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get metrics: {e!s}") from e
+        # Logged in full; the caller gets no internals.
+        logger.error(f"Failed to get metrics: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get metrics") from e
 
 
 @app.get("/api/v1/status")
@@ -331,6 +339,9 @@ async def get_status() -> dict[str, Any]:
     webhook_metrics = None
     if webhook_dispatcher:
         webhook_metrics = webhook_dispatcher.get_metrics()
+
+    # The thresholds the monitor applies (one source with their defaults).
+    thresholds = health_monitor.thresholds if health_monitor else thresholds_from_env()
 
     service_status = {
         "service": "GCO Health Monitor API",
@@ -358,9 +369,9 @@ async def get_status() -> dict[str, Any]:
         "environment": {
             "cluster_name": os.getenv("CLUSTER_NAME", "unknown"),
             "region": os.getenv("REGION", "unknown"),
-            "cpu_threshold": os.getenv("CPU_THRESHOLD", "80"),
-            "memory_threshold": os.getenv("MEMORY_THRESHOLD", "85"),
-            "gpu_threshold": os.getenv("GPU_THRESHOLD", "90"),
+            "cpu_threshold": str(thresholds.cpu_threshold),
+            "memory_threshold": str(thresholds.memory_threshold),
+            "gpu_threshold": str(thresholds.gpu_threshold),
         },
     }
 

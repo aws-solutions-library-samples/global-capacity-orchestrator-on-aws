@@ -188,7 +188,7 @@ class TestAFailedReadIsNeverHealthy:
         status = await monitor.get_health_status()
 
         assert status.status == "unhealthy"
-        assert status.message == "Health check error: listing pods failed: read timed out"
+        assert status.message == "Health check error: listing pods failed"
 
     @pytest.mark.asyncio
     async def test_a_failed_node_list_without_a_previous_reading_is_unhealthy(self):
@@ -227,15 +227,13 @@ class TestAFailedReadIsNeverHealthy:
 
         assert stale.status == "healthy"
         assert stale.resource_utilization == good.resource_utilization
-        assert stale.message == (
-            "Using the reading from 30s ago (listing pods failed: read timed out)"
-        )
+        assert stale.message == "Using the reading from 30s ago (listing pods failed)"
 
         clock.now += hm.LAST_GOOD_READING_MAX_AGE_SECONDS - 30 + 1
         expired = await monitor.get_health_status()
 
         assert expired.status == "unhealthy"
-        assert expired.message == "Health check error: listing pods failed: read timed out"
+        assert expired.message == "Health check error: listing pods failed"
 
     @pytest.mark.asyncio
     async def test_a_stale_reading_keeps_its_threshold_violations(self):
@@ -251,7 +249,7 @@ class TestAFailedReadIsNeverHealthy:
         assert status.status == "unhealthy"
         assert status.message == (
             "Threshold violations: CPU: 90.0% > 80%; Using the reading from 10s ago "
-            "(listing nodes failed: read timed out)"
+            "(listing nodes failed)"
         )
 
     @pytest.mark.asyncio
@@ -281,7 +279,7 @@ class TestAFailedReadIsNeverHealthy:
             status = await monitor.get_health_status()
 
         assert status.status == "unhealthy"
-        assert status.message == "Health check error: Active jobs count cannot be negative"
+        assert status.message == "Health check error: the health status could not be computed"
 
 
 class TestOverCommitIsALegalReading:

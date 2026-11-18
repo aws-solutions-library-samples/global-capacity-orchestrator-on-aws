@@ -87,11 +87,21 @@ ClusterReading = tuple[ResourceUtilization, int, int, RequestedResources]
 
 
 class ClusterReadError(RuntimeError):
-    """A read the health status depends on failed; the message names it."""
+    """A read the health status depends on failed.
+
+    ``str()`` names the read only ("listing pods failed"): it ends up in the
+    health status, which ``/api/v1/health`` returns without authentication.
+    ``detail`` adds the underlying error for the log.
+    """
 
     def __init__(self, what: str, cause: Exception) -> None:
-        super().__init__(f"{what} failed: {cause}")
+        super().__init__(f"{what} failed")
         self.what = what
+        self.cause = cause
+
+    @property
+    def detail(self) -> str:
+        return f"{self} ({type(self.cause).__name__}: {self.cause})"
 
 
 async def _read[T](what: str, read: Awaitable[T]) -> T:
@@ -445,23 +455,27 @@ class HealthMonitor:
         try:
             reading = await self.get_cluster_metrics()
         except Exception as e:
+            # The status message (served without authentication) names the
+            # failed read; the error itself goes to the log only.
+            reason = str(e) if isinstance(e, ClusterReadError) else "reading the cluster failed"
+            detail = e.detail if isinstance(e, ClusterReadError) else f"{type(e).__name__}: {e}"
             now = self._clock()
             last_good = self._last_good_reading
             if last_good is None or now - last_good[0] > LAST_GOOD_READING_MAX_AGE_SECONDS:
-                logger.error(f"Error getting health status: {e}")
-                return self._unhealthy(f"Health check error: {e}")
+                logger.error(f"Error getting health status: {detail}")
+                return self._unhealthy(f"Health check error: {reason}")
             age = now - last_good[0]
-            logger.warning(f"Cluster read failed; using the reading from {age:.0f}s ago: {e}")
+            logger.warning(f"Cluster read failed; using the reading from {age:.0f}s ago: {detail}")
             reading = last_good[1]
-            stale_note = f"Using the reading from {age:.0f}s ago ({e})"
+            stale_note = f"Using the reading from {age:.0f}s ago ({reason})"
         else:
             self._last_good_reading = (self._clock(), reading)
 
         try:
             return self._evaluate(*reading, stale_note=stale_note)
         except Exception as e:
-            logger.error(f"Error getting health status: {e}")
-            return self._unhealthy(f"Health check error: {e}")
+            logger.error(f"Error getting health status: {type(e).__name__}: {e}")
+            return self._unhealthy("Health check error: the health status could not be computed")
 
     def _unhealthy(self, message: str) -> HealthStatus:
         return HealthStatus(
@@ -694,14 +708,13 @@ class HealthMonitor:
             logger.warning("Gateway ALB sync check failed (non-fatal): %s", exc)
 
 
-def create_health_monitor_from_env() -> HealthMonitor:
-    """
-    Create HealthMonitor instance from environment variables
-    """
-    cluster_id = os.getenv("CLUSTER_NAME", "unknown-cluster")
-    region = os.getenv("REGION", "unknown-region")
+def thresholds_from_env() -> ResourceThresholds:
+    """The thresholds the health monitor applies, from its environment.
 
-    # Load thresholds from environment (defaults match cdk.json)
+    The one place their defaults live: ``/api/v1/status`` reports these same
+    values. The manifest sets every variable from ``cdk.json``; the defaults
+    apply only to a run without them.
+    """
     cpu_threshold = int(os.getenv("CPU_THRESHOLD", "80"))
     memory_threshold = int(os.getenv("MEMORY_THRESHOLD", "80"))
     gpu_threshold = int(os.getenv("GPU_THRESHOLD", "60"))
@@ -710,7 +723,7 @@ def create_health_monitor_from_env() -> HealthMonitor:
     pending_requested_memory_gb = int(os.getenv("PENDING_REQUESTED_MEMORY_GB", "200"))
     pending_requested_gpus = int(os.getenv("PENDING_REQUESTED_GPUS", "8"))
 
-    thresholds = ResourceThresholds(
+    return ResourceThresholds(
         cpu_threshold=cpu_threshold,
         memory_threshold=memory_threshold,
         gpu_threshold=gpu_threshold,
@@ -720,7 +733,15 @@ def create_health_monitor_from_env() -> HealthMonitor:
         pending_requested_gpus=pending_requested_gpus,
     )
 
-    return HealthMonitor(cluster_id, region, thresholds)
+
+def create_health_monitor_from_env() -> HealthMonitor:
+    """
+    Create HealthMonitor instance from environment variables
+    """
+    cluster_id = os.getenv("CLUSTER_NAME", "unknown-cluster")
+    region = os.getenv("REGION", "unknown-region")
+
+    return HealthMonitor(cluster_id, region, thresholds_from_env())
 
 
 async def main() -> None:

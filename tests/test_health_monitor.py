@@ -540,8 +540,9 @@ class TestGpuCalculation:
         """A failed read fails the whole reading; it is never turned into zeros."""
         health_monitor._get_node_metrics = AsyncMock(return_value={"items": []})
         health_monitor.core_v1.list_node.side_effect = Exception("API error")
-        with pytest.raises(ClusterReadError, match="listing nodes failed: API error"):
+        with pytest.raises(ClusterReadError, match=r"^listing nodes failed$") as raised:
             await health_monitor.get_cluster_metrics()
+        assert str(raised.value.cause) == "API error"
 
 
 class TestClusterMetrics:
@@ -581,8 +582,9 @@ class TestClusterMetrics:
         health_monitor._get_node_metrics = AsyncMock(side_effect=Exception("API error"))
 
         # Should re-raise so get_health_status returns "unhealthy"
-        with pytest.raises(Exception, match="API error"):
+        with pytest.raises(ClusterReadError, match="metrics-server failed") as raised:
             await health_monitor.get_cluster_metrics()
+        assert str(raised.value.cause) == "API error"
 
 
 class TestCpuParsingEdgeCases:
@@ -666,8 +668,9 @@ class TestActiveJobsEdgeCases:
         """A failed read fails the whole reading; it is never turned into zeros."""
         health_monitor._get_node_metrics = AsyncMock(return_value={"items": []})
         health_monitor.core_v1.list_pod_for_all_namespaces.side_effect = Exception("API error")
-        with pytest.raises(ClusterReadError, match="listing pods failed: API error"):
+        with pytest.raises(ClusterReadError, match=r"^listing pods failed$") as raised:
             await health_monitor.get_cluster_metrics()
+        assert str(raised.value.cause) == "API error"
 
 
 class TestHealthStatusEdgeCases:
