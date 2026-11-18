@@ -398,6 +398,31 @@ class TestGlobalAcceleratorValidation:
             ConfigLoader(app)
 
 
+class TestGlobalAcceleratorName:
+    """global_accelerator.name follows the CreateAccelerator naming rule."""
+
+    @pytest.mark.parametrize("name", ["gco-accelerator", "A", "team.b-accelerator", "x" * 64])
+    def test_valid_names_are_accepted(self, valid_context, name):
+        valid_context["global_accelerator"]["name"] = name
+        assert ConfigLoader(MockApp(valid_context)).get_global_accelerator_config()["name"] == name
+
+    @pytest.mark.parametrize(
+        "name", ["", "-gco", "gco-", ".gco", "gco.", "gco accelerator", "gco_x", "x" * 65, 5]
+    )
+    def test_invalid_names_fail_at_synth(self, valid_context, name):
+        valid_context["global_accelerator"]["name"] = name
+        with pytest.raises(
+            ConfigValidationError, match=r"global_accelerator\.name must be 1-64 letters"
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_the_default_name_follows_the_project(self, valid_context):
+        del valid_context["global_accelerator"]["name"]
+        valid_context["project_name"] = "team-b"
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_global_accelerator_config()["name"] == "team-b-accelerator"
+
+
 class TestTrafficDialValidation:
     """Tests for the global_accelerator.traffic_dial sub-block."""
 

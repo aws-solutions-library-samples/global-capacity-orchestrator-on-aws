@@ -941,12 +941,20 @@ class ConfigLoader:
 
     #: Allowed ``project_name`` format (#139). ``project_name`` is the
     #: deployment's unique prefix and flows into S3 bucket names, the Cognito
-    #: hosted-UI domain prefix, SSM parameter paths, IAM role names, and
-    #: CloudFormation export names. The tightest of those constraints is S3 /
-    #: Cognito naming (lowercase letters, digits, hyphens; must start with a
-    #: letter), so require: a leading lowercase letter followed by 1–30
-    #: lowercase letters, digits, or hyphens (total length 2–31).
-    PROJECT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
+    #: hosted-UI domain prefix, ECR repository namespaces (``<project>/...``),
+    #: SSM parameter paths, IAM role names, CloudFormation stack and export
+    #: names, and the Global Accelerator name. Together they require a leading
+    #: lowercase letter, then lowercase letters and digits in runs joined by
+    #: single hyphens (ECR rejects a repository path segment that ends in a
+    #: hyphen or holds two in a row, and Cognito a prefix that ends in one),
+    #: 2-31 characters in all.
+    PROJECT_NAME_PATTERN = re.compile(r"^(?=.{2,31}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+
+    #: Global Accelerator names: at most 64 alphanumerics, periods and
+    #: hyphens, neither first nor last a period or hyphen (CreateAccelerator).
+    GLOBAL_ACCELERATOR_NAME_PATTERN = re.compile(
+        r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,62}[A-Za-z0-9])?$"
+    )
 
     def _validate_project_name(self) -> None:
         """Validate ``project_name`` format so misconfigurations fail at synth.
@@ -964,11 +972,14 @@ class ConfigLoader:
             # Absent (or JSON null, which CDK normalizes to absent): the
             # documented default ``gco`` applies.
             return
-        if not isinstance(project_name, str) or not self.PROJECT_NAME_PATTERN.match(project_name):
+        if not isinstance(project_name, str) or not self.PROJECT_NAME_PATTERN.fullmatch(
+            project_name
+        ):
             raise ConfigValidationError(
                 f"Invalid project_name {project_name!r}. It must match "
-                f"{self.PROJECT_NAME_PATTERN.pattern} (start with a lowercase letter, then "
-                "2–31 total characters of lowercase letters, digits, or hyphens). "
+                f"{self.PROJECT_NAME_PATTERN.pattern} (2-31 characters: a lowercase letter, "
+                "then lowercase letters and digits, with single hyphens between them and "
+                "none at the end). "
                 "project_name is the deployment prefix for S3 buckets, the Cognito "
                 "domain, SSM paths, and CloudFormation exports, so it must be a valid "
                 "lowercase DNS-style label."
@@ -1090,6 +1101,13 @@ class ConfigLoader:
             raise ConfigValidationError(
                 "global_accelerator.health_check_threshold must be an integer between "
                 f"1 and 10, got {threshold!r}"
+            )
+
+        name = ga_config["name"]
+        if not isinstance(name, str) or not self.GLOBAL_ACCELERATOR_NAME_PATTERN.fullmatch(name):
+            raise ConfigValidationError(
+                "global_accelerator.name must be 1-64 letters, digits, periods or hyphens, "
+                f"not starting or ending with a period or hyphen, got {name!r}"
             )
 
         path = ga_config["health_check_path"]

@@ -310,7 +310,7 @@ Changing `project_name` re-scopes all of the following (shown for
 | WAF WebACL + log groups | `acme-api-gateway-waf`, `/aws/apigateway/acme-global`, `aws-waf-logs-acme-api-gateway` |
 | CloudFormation exports | `acme-global-api-endpoint`, `acme-auth-secret-arn`, `acme-waf-webacl-arn`, … |
 | ECR image namespace | repos under `acme/*` (e.g. `acme/dockerhub/…`), ECR replication filter `acme/`, `gco images` / mirror namespace |
-| Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`) |
+| Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`; a set name must be 1–64 letters, digits, periods or hyphens, not starting or ending with a period or hyphen) |
 | API Gateway names | REST API `acme-global-api`, Studio Cognito authorizer `acme-studio-cognito-authorizer`, request validator `acme-studio-request-validator` |
 | [Valkey](https://valkey.io/) cache (opt-in) | ElastiCache serverless cache `acme-<region>` |
 | Analytics (opt-in) | Studio bucket `acme-analytics-studioonlybucket…` (CloudFormation-generated), SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
@@ -322,18 +322,24 @@ separate Kubernetes API servers and never collide across deployments.
 
 ### `project_name` format
 
-Because the value flows into S3 bucket names and the Cognito domain prefix
-(both lowercase-only, length-limited), it is validated at synth time and must
-match:
+Because the value flows into S3 bucket names, the Cognito domain prefix and
+the ECR repository namespace (all lowercase-only, length-limited), it is
+validated at synth time and must match:
 
 ```text
-^[a-z][a-z0-9-]{1,30}$
+^(?=.{2,31}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$
 ```
 
-That is: start with a lowercase letter, then 2–31 total characters of lowercase
-letters, digits, or hyphens (e.g. `gco`, `gco-staging`, `acme`, `team-b-prod`).
-Uppercase, underscores, dots, a leading digit, or a leading/trailing hyphen are
-rejected up front with a clear error rather than failing mid-deploy.
+That is: 2–31 characters, starting with a lowercase letter, then lowercase
+letters and digits with single hyphens between them (e.g. `gco`, `gco-staging`,
+`acme`, `team-b-prod`). Uppercase, underscores, dots, a leading digit, a
+trailing hyphen, or two hyphens in a row are rejected up front with a clear
+error rather than failing mid-deploy. Earlier releases accepted a trailing
+hyphen and two hyphens in a row, but ECR refuses them in a repository path
+(`gco-/...`, `a--b/...`): the global stack's `<project_name>/` image
+replication rule, which exists whenever a workload Region differs from the
+global Region, failed to deploy, and so did `gco images` and the Volcano image
+mirror.
 
 Leaving `project_name` out of `cdk.json` selects the default `gco`; the rest of
 the file is validated the same way either way. An explicit value, including an

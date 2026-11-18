@@ -99,7 +99,19 @@ def stack_manager(tmp_path: Path) -> Any:
 @pytest.mark.parametrize(
     "project_name",
     # None is absent (CDK normalizes JSON null), which selects the default.
-    ["", "GC0", "a", "1project", "project_name", "project.name"],
+    [
+        "",
+        "GC0",
+        "a",
+        "1project",
+        "project_name",
+        "project.name",
+        # ECR refuses these in the <project_name>/ repository path.
+        "gco-",
+        "a--b",
+        "team-b-",
+        "x" * 32,
+    ],
 )
 def test_project_name_validation_rejects_non_dns_prefixes(
     config_loader: Any,
@@ -110,6 +122,14 @@ def test_project_name_validation_rejects_non_dns_prefixes(
     config_loader.app = _ContextApp({"project_name": project_name})
     with pytest.raises(ConfigValidationError, match="Invalid project_name"):
         config_loader._validate_project_name()
+
+
+@pytest.mark.parametrize(
+    "project_name", ["gco", "ab", "gco-staging", "team-b-prod", "a1-b2", "x" * 31]
+)
+def test_project_name_validation_accepts_dns_labels(config_loader: Any, project_name: str) -> None:
+    config_loader.app = _ContextApp({"project_name": project_name})
+    config_loader._validate_project_name()
 
 
 def _valid_backend_tls() -> dict[str, int]:

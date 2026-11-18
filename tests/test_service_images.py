@@ -93,6 +93,13 @@ class TestDiscovery:
         with pytest.raises(ValueError, match=r"is not a valid image name"):
             discover_service_dockerfiles(tree)
 
+    @pytest.mark.parametrize("name", ["trailing-", "double--hyphen", "x" * 64])
+    def test_names_ecr_would_refuse_fail_loudly(self, tree: Path, name: str) -> None:
+        """ECR rejects a repository path segment ending in a hyphen or holding two."""
+        _write(tree / "dockerfiles" / f"Dockerfile.{name}")
+        with pytest.raises(ValueError, match=r"is not a valid image name"):
+            discover_service_dockerfiles(tree)
+
     def test_builds_cover_the_three_families_with_their_contexts(self, tree: Path) -> None:
         assert discover_image_builds(tree) == [
             ImageBuild("alpha-service", "dockerfiles/Dockerfile.alpha-service", "."),
