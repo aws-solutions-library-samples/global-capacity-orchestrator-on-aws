@@ -15,6 +15,7 @@ from typing import Any
 
 import cli_runner
 from cli_runner import PROJECT_ROOT  # runtime-resolved checkout root (uvx-safe)
+from iam import child_environment
 from server import mcp
 
 from resources._eks import eks_context_for_region, is_valid_region
@@ -101,6 +102,7 @@ def _k8s_live_resource_for_region(region: str, namespace: str, kind: str, name: 
             capture_output=True,
             text=True,
             timeout=_KUBECTL_TIMEOUT_SECONDS,
+            env=child_environment(),
         )
     except FileNotFoundError:
         return json.dumps({"error": "kubectl not found"})

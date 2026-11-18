@@ -3,8 +3,9 @@ Extended unit coverage for the MCP server modules.
 
 Targets the uncovered branches in:
 
-* ``gco_mcp/iam.py`` — role assumption with ``GCO_MCP_ROLE_ARN`` set,
-  failure paths, and the no-op path when the env var is unset.
+* ``gco_mcp/iam.py`` — the STS failure path and the no-op path when
+  ``GCO_MCP_ROLE_ARN`` is unset (the role itself, its refresh and the
+  credentials children get: tests/test_mcp_role_credentials.py).
 * ``gco_mcp/resources/tasks.py`` — task-id validation, the ``get_task``
   accessor, the docket fallback chain, and the ``_coerce_to_dict``
   helper.
@@ -86,42 +87,6 @@ class TestIam:
         # patch boto3 because we never expect the helper to reach it.
         assert assume_mcp_role() is None
 
-    def test_assumes_role_and_installs_default_session(self, monkeypatch: Any) -> None:
-        monkeypatch.setenv("GCO_MCP_ROLE_ARN", "arn:aws:iam::123:role/mcp")
-        monkeypatch.setenv("GCO_MCP_ROLE_SESSION_NAME", "test-session")
-        monkeypatch.setenv("GCO_MCP_ROLE_DURATION_SECONDS", "900")
-
-        sts = MagicMock()
-        sts.assume_role.return_value = {
-            "Credentials": {
-                "AccessKeyId": "AKIA",
-                "SecretAccessKey": "SECRET",
-                "SessionToken": "TOKEN",
-                "Expiration": MagicMock(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
-            }
-        }
-
-        ambient_session = MagicMock()
-        ambient_session.client.return_value = sts
-
-        with patch.dict("sys.modules", {"boto3": MagicMock()}):
-            import boto3  # noqa: F401
-
-            with (
-                patch("boto3.Session", return_value=ambient_session),
-                patch("boto3.setup_default_session") as setup_default,
-            ):
-                from iam import assume_mcp_role
-
-                assume_mcp_role()
-
-        sts.assume_role.assert_called_once()
-        kwargs = sts.assume_role.call_args.kwargs
-        assert kwargs["RoleArn"] == "arn:aws:iam::123:role/mcp"
-        assert kwargs["RoleSessionName"] == "test-session"
-        assert kwargs["DurationSeconds"] == 900
-        setup_default.assert_called_once()
-
     def test_assume_role_failure_propagates(self, monkeypatch: Any) -> None:
         monkeypatch.setenv("GCO_MCP_ROLE_ARN", "arn:aws:iam::123:role/mcp")
 
@@ -138,35 +103,6 @@ class TestIam:
 
                 with pytest.raises(RuntimeError, match="denied"):
                     assume_mcp_role()
-
-    def test_assume_role_handles_non_isoformat_expiration(self, monkeypatch: Any) -> None:
-        """Expiration without an ``isoformat`` attr falls back to ``str(...)``."""
-        monkeypatch.setenv("GCO_MCP_ROLE_ARN", "arn:aws:iam::123:role/mcp")
-
-        # Expiration is a plain string here so the ``hasattr(..., "isoformat")``
-        # check returns False and the str(...) branch is taken.
-        sts = MagicMock()
-        sts.assume_role.return_value = {
-            "Credentials": {
-                "AccessKeyId": "AKIA",
-                "SecretAccessKey": "SECRET",
-                "SessionToken": "TOKEN",
-                "Expiration": "raw-string",
-            }
-        }
-        ambient_session = MagicMock()
-        ambient_session.client.return_value = sts
-
-        with patch.dict("sys.modules", {"boto3": MagicMock()}):
-            import boto3  # noqa: F401
-
-            with (
-                patch("boto3.Session", return_value=ambient_session),
-                patch("boto3.setup_default_session"),
-            ):
-                from iam import assume_mcp_role
-
-                assume_mcp_role()  # must not raise
 
 
 # ---------------------------------------------------------------------------

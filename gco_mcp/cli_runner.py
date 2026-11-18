@@ -18,6 +18,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from iam import child_environment
+
 
 def _resolve_project_root() -> Path:
     """Resolve the directory every ``gco`` subprocess runs from.
@@ -234,7 +236,7 @@ def _run_cli(
     logged; without ``env`` the child inherits the environment unchanged.
     """
     cmd = [_gco_executable(), "--output", "json", *args]
-    child_env = {**os.environ, **env} if env else None
+    child_env = child_environment(env)
     try:
         if pass_fds:
             result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; validated literal argv
@@ -310,6 +312,7 @@ async def _run_cli_async(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(PROJECT_ROOT),
+            env=child_environment(),
         )
     except FileNotFoundError:
         return json.dumps(

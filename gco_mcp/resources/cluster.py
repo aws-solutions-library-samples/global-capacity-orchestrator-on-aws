@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 import cli_runner
+from iam import child_environment
 
 from resources._eks import eks_context_for_region, is_valid_region
 
@@ -56,6 +57,7 @@ def _pending_pods(region: str) -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=_KUBECTL_TIMEOUT_SECONDS,
+            env=child_environment(),
         )
     except FileNotFoundError:
         return {"error": "kubectl not found"}
