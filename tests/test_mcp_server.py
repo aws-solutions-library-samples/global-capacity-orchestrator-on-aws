@@ -555,6 +555,9 @@ class TestToolRegistration:
                     "set_opencode_default_model",
                 }
             )
+        # Read-only Run:ai capacity registers under GCO_ENABLE_RUNAI_CAPACITY.
+        if "runai_capacity" in names:
+            expected.add("runai_capacity")
         # The six swarm_* tools register together under GCO_ENABLE_SWARM.
         if "swarm_start" in names:
             expected.update(

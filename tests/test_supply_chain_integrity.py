@@ -3030,7 +3030,7 @@ def test_pip_audit_is_pinned_and_audits_the_lock_once() -> None:
         if line.strip() and not line.lstrip().startswith("#")
     ]
     assert requirements
-    assert all(re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*==\S+$", line) for line in requirements)
+    assert all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*==\S+", line) for line in requirements)
 
 
 def test_cve_scan_job_installs_nothing_trivy_does_not_need() -> None:

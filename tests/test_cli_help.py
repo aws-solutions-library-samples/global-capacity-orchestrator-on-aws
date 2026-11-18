@@ -571,7 +571,7 @@ def _documented_stacks_examples() -> list[tuple[str, str]]:
                 in_block = not in_block
                 continue
             line = raw.strip()
-            if not in_block or not re.match(r"gco (-\S+ (\S+ )?)*stacks\b", line):
+            if not in_block or not re.search(r"^gco (-\S+ (\S+ )?)*stacks\b", line):
                 continue
             # Usage synopses and shell pipelines are not single command lines.
             if "[OPTIONS]" in line or "|" in line or "$(" in line or line.endswith("\\"):

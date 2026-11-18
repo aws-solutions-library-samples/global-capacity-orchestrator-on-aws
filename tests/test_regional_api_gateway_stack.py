@@ -804,7 +804,11 @@ class TestRegionalApiProxyHandler:
         proxy_utils_module._cache_timestamp = 0.0
 
     def test_lambda_handler_connection_error(self, handler_module, proxy_utils_module):
-        """Test handling of connection errors."""
+        """A refused connection is a 503.
+
+        The backend pool runs with retries=False, so urllib3 raises the
+        connection failure itself (NewConnectionError), never MaxRetryError.
+        """
         import urllib3
 
         # Reset cache
@@ -815,8 +819,9 @@ class TestRegionalApiProxyHandler:
             mock_secrets.get_secret_value.return_value = {"SecretString": '{"token": "test-token"}'}
 
             with patch.object(proxy_utils_module, "_http") as mock_http:
-                mock_http.request.side_effect = urllib3.exceptions.MaxRetryError(
-                    None, "https://test", "Connection refused"
+                mock_http.request.side_effect = urllib3.exceptions.NewConnectionError(
+                    MagicMock(),
+                    "Failed to establish a new connection: [Errno 111] Connection refused",
                 )
 
                 with patch.dict(
