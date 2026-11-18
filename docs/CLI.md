@@ -2793,6 +2793,8 @@ See [Inference Guide](INFERENCE.md) for architecture details and workflows.
 
 </details>
 
+With `--output json` or `--output yaml`, the commands that change an endpoint (`scale`, `stop`, `start`, `delete`, `update-image`, `canary`, `promote`, `rollback`, `add-region`, `remove-region`, `set-topology`, `configure-store`) print the updated endpoint record, the same document `gco inference status` returns. Declining a confirmation prompt aborts the command with exit status 1.
+
 #### `gco inference deploy`
 
 Deploy an inference endpoint to one or more regions.

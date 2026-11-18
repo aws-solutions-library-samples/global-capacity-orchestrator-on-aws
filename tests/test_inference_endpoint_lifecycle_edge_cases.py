@@ -1270,8 +1270,8 @@ def test_cli_canary_mutation_can_be_cancelled(command: str) -> None:
 
     result = _invoke_cli(["inference", command, "ep"], manager=manager, input_text="n\n")
 
-    assert result.exit_code == 0, result.output
-    assert "Cancelled" in result.output
+    assert result.exit_code == 1, result.output
+    assert "Aborted" in result.output
     getattr(manager, f"{command}_canary").assert_not_called()
 
 

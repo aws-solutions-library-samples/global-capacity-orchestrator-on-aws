@@ -2414,8 +2414,9 @@ class TestInferenceCanaryTransitions:
                 input="n\n",
             )
 
-        assert result.exit_code == 0
-        assert "Cancelled" in result.output
+        # Declining aborts like every other confirmation: a failure exit.
+        assert result.exit_code == 1
+        assert "Aborted" in result.output
         getattr(mock_mgr, manager_method).assert_not_called()
 
     @pytest.mark.parametrize(
@@ -2960,3 +2961,77 @@ class TestModelNamedOnlyByEnv:
         from cli.commands.inference_cmd import _model_named_only_by_env
 
         assert _model_named_only_by_env(spec, _REQUESTED) is expected
+
+
+# =============================================================================
+# Machine-readable results of the mutation commands (finding CM6)
+# =============================================================================
+
+_CANARY_ENDPOINT = {
+    "endpoint_name": "ep",
+    "desired_state": "running",
+    "spec": {"image": "img:v1", "canary": {"image": "img:v2", "weight": 10, "replicas": 1}},
+}
+
+#: (arguments after ``inference``, the manager method that returns the record)
+_MUTATIONS = [
+    (["scale", "ep", "--replicas", "3"], "scale"),
+    (["stop", "ep", "-y"], "stop"),
+    (["start", "ep"], "start"),
+    (["delete", "ep", "-y"], "delete"),
+    (["update-image", "ep", "-i", "img:v2"], "update_image"),
+    (["canary", "ep", "-i", "img:v2"], "canary_deploy"),
+    (["promote", "ep", "-y"], "promote_canary"),
+    (["rollback", "ep", "-y"], "rollback_canary"),
+]
+
+
+class TestMutationResults:
+    @pytest.mark.parametrize("output", ["json", "yaml"])
+    @pytest.mark.parametrize(("args", "method"), _MUTATIONS, ids=[a[0] for a, _m in _MUTATIONS])
+    def test_machine_output_is_the_updated_record(self, runner, args, method, output):
+        record = {"endpoint_name": "ep", "desired_state": "running", "spec": {"image": "img:v2"}}
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = _CANARY_ENDPOINT
+        getattr(mgr, method).return_value = record
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["-o", output, "inference", *args])
+        assert result.exit_code == 0, result.output
+        loads = json.loads if output == "json" else yaml.safe_load
+        assert loads(result.output) == record
+
+    @pytest.mark.parametrize(("args", "method"), _MUTATIONS, ids=[a[0] for a, _m in _MUTATIONS])
+    def test_table_output_prints_no_record(self, runner, args, method):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = _CANARY_ENDPOINT
+        getattr(mgr, method).return_value = {"endpoint_name": "ep", "spec": {"image": "img:v2"}}
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["inference", *args])
+        assert result.exit_code == 0, result.output
+        assert "endpoint_name" not in result.output
+
+    @pytest.mark.parametrize(
+        ("command", "method"), [("promote", "promote_canary"), ("rollback", "rollback_canary")]
+    )
+    def test_a_declined_confirmation_aborts_with_a_failure(self, runner, command, method):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = _CANARY_ENDPOINT
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["inference", command, "ep"], input="n\n")
+        assert result.exit_code == 1, result.output
+        assert "Aborted" in result.output
+        assert "Cancelled" not in result.output
+        assert "Failed to" not in result.output
+        getattr(mgr, method).assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("command", "method"), [("promote", "promote_canary"), ("rollback", "rollback_canary")]
+    )
+    def test_an_accepted_confirmation_proceeds(self, runner, command, method):
+        mgr = MagicMock()
+        mgr.get_endpoint.return_value = _CANARY_ENDPOINT
+        getattr(mgr, method).return_value = {"spec": {"image": "img:v2"}}
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["inference", command, "ep"], input="y\n")
+        assert result.exit_code == 0, result.output
+        getattr(mgr, method).assert_called_once_with("ep")

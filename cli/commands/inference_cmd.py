@@ -599,6 +599,7 @@ def inference_scale(config: Any, endpoint_name: Any, replicas: Any) -> None:
 
         if result:
             formatter.print_success(f"Endpoint '{endpoint_name}' scaled to {replicas} replicas")
+            _print_record(config, formatter, result)
         else:
             formatter.print_error(f"Endpoint '{endpoint_name}' not found")
             sys.exit(1)
@@ -636,6 +637,7 @@ def inference_stop(config: Any, endpoint_name: Any, yes: Any) -> None:
 
         if result:
             formatter.print_success(f"Endpoint '{endpoint_name}' marked for stop")
+            _print_record(config, formatter, result)
         else:
             formatter.print_error(f"Endpoint '{endpoint_name}' not found")
             sys.exit(1)
@@ -664,6 +666,7 @@ def inference_start(config: Any, endpoint_name: Any) -> None:
 
         if result:
             formatter.print_success(f"Endpoint '{endpoint_name}' marked for start")
+            _print_record(config, formatter, result)
         else:
             formatter.print_error(
                 f"Endpoint '{endpoint_name}' is not a stopped endpoint. If it was deleted "
@@ -903,6 +906,7 @@ def inference_delete(
                 f"Endpoint '{endpoint_name}' marked for deletion. "
                 "The inference_monitor will clean up resources in each region."
             )
+            _print_record(config, formatter, result)
         else:
             suffix = " or ownership/lifecycle condition failed" if owner_condition else ""
             formatter.print_error(f"Endpoint '{endpoint_name}' not found{suffix}")
@@ -911,6 +915,12 @@ def inference_delete(
     except Exception as e:
         formatter.print_error(f"Failed to delete endpoint: {e}")
         sys.exit(1)
+
+
+def _print_record(config: Any, formatter: Any, record: dict[str, Any]) -> None:
+    """In JSON or YAML mode, print the endpoint record a mutation returned."""
+    if config.output_format != "table":
+        formatter.print(record)
 
 
 def _note_stopped_endpoint(formatter: Any, endpoint_name: str, result: dict[str, Any]) -> bool:
@@ -955,6 +965,7 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
             formatter.print_success(f"Endpoint '{endpoint_name}' image updated to {image}")
             if not _note_stopped_endpoint(formatter, endpoint_name, result):
                 formatter.print_info("Rolling update will be applied by inference_monitor")
+            _print_record(config, formatter, result)
         else:
             formatter.print_error(f"Endpoint '{endpoint_name}' not found")
             sys.exit(1)
@@ -1400,6 +1411,7 @@ def inference_canary(
         formatter.print_info(f"Monitor with: gco inference status {endpoint_name}")
         formatter.print_info(f"Promote with: gco inference promote {endpoint_name}")
         formatter.print_info(f"Rollback with: gco inference rollback {endpoint_name}")
+        _print_record(config, formatter, result)
 
     except ValueError as e:
         formatter.print_error(str(e))
@@ -1444,19 +1456,20 @@ def inference_promote(config: Any, endpoint_name: Any, yes: Any) -> None:
             interactive_echo(f"  Current primary: {current_image}")
             interactive_echo(f"  Canary image:    {canary.get('image', 'unknown')}")
             interactive_echo(f"  Canary weight:   {canary.get('weight', 0)}%")
-            if not confirm("  Promote canary to primary?"):
-                formatter.print_info("Cancelled")
-                return
+            confirm("  Promote canary to primary?", abort=True)
 
         result = manager.promote_canary(endpoint_name)
         if result:
             new_image = result.get("spec", {}).get("image", "unknown")
             formatter.print_success(f"Promoted: all traffic now serving {new_image}")
             _note_stopped_endpoint(formatter, endpoint_name, result)
+            _print_record(config, formatter, result)
         else:
             formatter.print_error("Promotion failed")
             sys.exit(1)
 
+    except click.Abort:
+        raise
     except ValueError as e:
         formatter.print_error(str(e))
         sys.exit(1)
@@ -1497,19 +1510,20 @@ def inference_rollback(config: Any, endpoint_name: Any, yes: Any) -> None:
         if not yes:
             interactive_echo(f"  Canary image:  {canary.get('image', 'unknown')}")
             interactive_echo(f"  Canary weight: {canary.get('weight', 0)}%")
-            if not confirm("  Remove canary and restore full traffic to primary?"):
-                formatter.print_info("Cancelled")
-                return
+            confirm("  Remove canary and restore full traffic to primary?", abort=True)
 
         result = manager.rollback_canary(endpoint_name)
         if result:
             primary_image = result.get("spec", {}).get("image", "unknown")
             formatter.print_success(f"Rolled back: all traffic now serving {primary_image}")
             _note_stopped_endpoint(formatter, endpoint_name, result)
+            _print_record(config, formatter, result)
         else:
             formatter.print_error("Rollback failed")
             sys.exit(1)
 
+    except click.Abort:
+        raise
     except ValueError as e:
         formatter.print_error(str(e))
         sys.exit(1)
