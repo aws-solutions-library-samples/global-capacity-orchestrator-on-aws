@@ -37,6 +37,17 @@ class TestDefaults:
         assert cfg["enabled_regions"] == []
         assert cfg["spot_score_target_capacities"] == [1, 10, 50]
 
+    def test_the_shipped_file_turns_it_on(self):
+        """The docs' "on" is the committed cdk.json; leaving the key out means off."""
+        import json
+        from pathlib import Path
+
+        context = json.loads(
+            (Path(__file__).resolve().parents[1] / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        assert context["historical"]["enabled"] is True
+        assert ConfigLoader(cdk.App(context=context)).get_capacity_history_enabled() is True
+
     def test_default_target_capacities_are_the_supported_set(self, valid_cdk_context):
         # The default selects every supported capacity, and each one resolves
         # to a statically declared metric field. If the supported set in
