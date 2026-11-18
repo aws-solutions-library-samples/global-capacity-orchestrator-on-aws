@@ -1148,12 +1148,8 @@ def test_cli_deploy_parses_multiple_values_and_warns_for_omitted_regions() -> No
             "B=two=parts",
             "-l",
             "team=ml",
-            "-l",
-            "invalid-label",
             "--node-selector",
             "zone=a",
-            "--node-selector",
-            "invalid-selector",
             "--autoscale-metric",
             "cpu:65",
             "--autoscale-metric",
@@ -1270,8 +1266,8 @@ def test_cli_canary_mutation_can_be_cancelled(command: str) -> None:
 
     result = _invoke_cli(["inference", command, "ep"], manager=manager, input_text="n\n")
 
-    assert result.exit_code == 0, result.output
-    assert "Cancelled" in result.output
+    assert result.exit_code == 1, result.output
+    assert "Aborted" in result.output
     getattr(manager, f"{command}_canary").assert_not_called()
 
 
@@ -1545,7 +1541,8 @@ def test_cli_deploy_json_output_prints_result() -> None:
     assert '"endpoint_name": "ep"' in result.output
 
 
-def test_cli_deploy_invalid_env_value_does_not_block_following_entries() -> None:
+def test_cli_deploy_refuses_an_env_value_that_is_not_key_value() -> None:
+    """A malformed -e is a usage error, not silently dropped (finding CM7)."""
     manager = MagicMock()
     manager.deploy.return_value = {
         "endpoint_name": "ep",
@@ -1568,8 +1565,9 @@ def test_cli_deploy_invalid_env_value_does_not_block_following_entries() -> None
         manager=manager,
     )
 
-    assert result.exit_code == 0, result.output
-    assert manager.deploy.call_args.kwargs["env"] == {"VALID": "value"}
+    assert result.exit_code == 2, result.output
+    assert "'invalid' is not KEY=VALUE" in result.output
+    manager.deploy.assert_not_called()
 
 
 @pytest.mark.parametrize(

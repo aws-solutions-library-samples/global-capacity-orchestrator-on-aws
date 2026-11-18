@@ -215,7 +215,17 @@ the monitor makes is bounded by `K8S_API_TIMEOUT` (default 30 seconds per
 attempt), and a pass that finishes no endpoint for ten reconcile intervals
 (150 seconds at the default 15) stops renewing the Lease, so a wedged leader
 hands over to the standby within one more Lease duration instead of holding
-leadership for as long as it hangs.
+leadership for as long as it hangs. When the leader pod is stopped (a rollout
+or a node drain sends SIGTERM), a pass in progress finishes the endpoint it is
+reconciling and starts no other, and the monitor then releases the Lease, so
+the standby takes over on its next attempt (within one reconcile interval)
+instead of waiting for the Lease to expire. The monitor's liveness probe fails
+once its loop has shown no progress (a finished iteration, leader or standby,
+or a step of a running pass) for the stall deadline plus one Lease duration
+(195 seconds at the default interval), so the kubelet restarts a wedged
+leader after the standby has taken over; a healthy standby stays live. The
+monitor exports both numbers as the `seconds_since_last_progress` and
+`liveness_window_seconds` gauges.
 
 Separately, the health monitor verifies that the ALB hostname stored in SSM
 matches the `gco-system/gco-gateway` Gateway status address. If cluster
@@ -374,7 +384,9 @@ creates with `gco.io/endpoint: <name>` (object metadata only, never a pod
 template) and never patches, claims or deletes an object labelled for another
 endpoint. Objects created before the label existed get it on their next
 metadata claim; until then, one of another lifecycle whose name another
-endpoint also derives is left untouched rather than cleaned up as stale.
+endpoint also derives is left untouched rather than cleaned up as stale. The
+[tenant write fence](ARCHITECTURE.md#tenant-write-fence) lets only the monitor
+set, change or remove the label on the objects it manages.
 
 This endpoint autoscaler is separate from the shared `inference-proxy` data
 plane. Each regional stack installs the managed EKS Metrics Server add-on that
@@ -799,7 +811,7 @@ Each role pod (prefill, decode, or the single store instance) reaches the KV cac
 - The monitor renders a per-endpoint `mooncake.json` into a ConfigMap and mounts it at `/etc/mooncake/mooncake.json`, pointing the connector at it through the `MOONCAKE_CONFIG_PATH` environment variable. That file carries the metadata-server address, the transport (`rdma`/`tcp`) and device, and — when the store is enabled — the `mooncake-master` address plus (when the cold tier is on) the cold-tier S3 URI.
 - vLLM is launched with a `--kv-transfer-config` selecting the right connector for the role: `MooncakeConnector` for `disaggregated` (RDMA transfer of freshly computed KV from prefill to decode), `MooncakeStoreConnector` for `store` (read/write of the shared, hash-keyed prefix cache), and a `MultiConnector` chaining both for `both`.
 - Prefill and decode share freshly computed KV directly over RDMA/RoCE on the EFA fabric (intra-region only). The shared store additionally lets any instance reuse a previously cached prefix, and the optional cold tier extends that cache to S3 for warm starts.
-- The PD proxy checks whether a prompt's KV blocks already reside in the store before dispatching to a prefill pod, so a cache hit skips recomputation.
+- The PD proxy does not consult the store itself: it sends every request to a prefill pod first and then streams the answer from a decode pod, and the connectors on those pods reuse whatever KV the store already holds.
 
 No client-side wiring is needed to read the cache — workloads simply serve from the role pods, which the connectors back automatically. Clients invoke the endpoint exactly as any other GCO endpoint (see [Invoking Endpoints](#invoking-endpoints)): requests reach the nearest region through Global Accelerator and are routed to the PD proxy at `/inference/{name}/v1/...`.
 
@@ -863,9 +875,9 @@ gco inference deploy my-llm \
 | `gpu` | GPU utilization percentage | `gpu:60` (scale at 60% GPU) | KEDA + CloudWatch |
 | `gpu_memory` | GPU memory utilization percentage | `gpu_memory:80` | KEDA + CloudWatch |
 
-The `--autoscale-metric` flag is repeatable — you can combine multiple metrics. The format is `type:target` where `target` is the utilization percentage threshold. If no target is specified, it defaults to 70%.
+The `--autoscale-metric` flag is repeatable — you can combine multiple metrics. The format is `type:target`, where `type` is `cpu`, `memory`, `gpu` or `gpu_memory` and `target` is the utilization percentage threshold as a whole number (`cpu:70`, not `cpu:70%`). If no target is specified, it defaults to 70%.
 
-The HPA respects `--min-replicas` (default: 1) and `--max-replicas` (default: 10) bounds. The `--replicas` flag sets the initial replica count before the HPA takes over. On every path—existing or recreated Deployment, CPU↔KEDA handoff, disable, stop, and start—the monitor removes and read-confirms obsolete owners before applying the next owner or a static count. Autoscaled readiness is truthful against the minimum serving floor while status reports the live HPA-owned desired count; during disable handoff it continues reporting that observed target until static ownership actually takes control.
+The HPA respects `--min-replicas` (default: 1) and `--max-replicas` (default: 10) bounds. They bound autoscaling only, so `gco inference deploy` refuses them without an `--autoscale-metric`; use `--replicas` for a fixed replica count. The `--replicas` flag sets the initial replica count before the HPA takes over. On every path—existing or recreated Deployment, CPU↔KEDA handoff, disable, stop, and start—the monitor removes and read-confirms obsolete owners before applying the next owner or a static count. Autoscaled readiness is truthful against the minimum serving floor while status reports the live HPA-owned desired count; during disable handoff it continues reporting that observed target until static ownership actually takes control.
 
 **GPU autoscaling.** GPU utilization cannot be read by a native HPA (Kubernetes Resource metrics are limited to CPU and memory). When any `--autoscale-metric gpu:...` (or `gpu_memory:...`) is requested, the endpoint is materialized as a KEDA `ScaledObject` with an `aws-cloudwatch` trigger that reads the `ContainerInsights` per-pod GPU metric (`pod_gpu_utilization` / `pod_gpu_memory_utilization`) for the Deployment. CPU/memory targets supplied alongside a GPU metric ride on the same `ScaledObject` as native KEDA triggers. KEDA is a mandatory cluster component, and the KEDA operator's IAM role is granted read-only CloudWatch access (`GetMetricData`, `GetMetricStatistics`, `ListMetrics`) for this purpose.
 
@@ -907,7 +919,7 @@ See [Adding or Removing a Region on an Endpoint](#adding-or-removing-a-region-on
 gco inference delete my-llm -y
 ```
 
-The first delete request creates an immutable deletion generation and snapshots the endpoint lifecycle's append-only historical cleanup-region set; repeated requests are idempotent for that generation. Adding or removing a Region also rotates that Region's membership generation, so a terminal acknowledgement from an earlier remove→re-add cycle can never suppress current cleanup. Every authoritative region writes fresh generation-scoped `deleting` and then `deleted` acknowledgements only after two complete absence observations. Terminal proof includes Deployments, ReplicaSets, Pods, Services, Endpoints, EndpointSlices, native and `keda-hpa-*` HPAs, KEDA ScaledObjects, ConfigMaps, the lifecycle-owned generated Secret, the `inference-<name>` and `inference-<name>-proxy` Ingresses that releases up to v4.1.0 created for an endpoint, and legacy HTTPRoute objects. DynamoDB purge requires the full current-generation quorum and is conditioned on lifecycle, generation, and the verified snapshot, so late writers cannot recreate a purged record.
+The first delete request creates an immutable deletion generation and snapshots the endpoint lifecycle's append-only historical cleanup-region set; repeated requests are idempotent for that generation. Adding or removing a Region also rotates that Region's membership generation, so a terminal acknowledgement from an earlier remove→re-add cycle can never suppress current cleanup. Every authoritative region writes fresh generation-scoped `deleting` and then `deleted` acknowledgements only after two complete absence observations. Terminal proof includes Deployments, ReplicaSets, Pods, Services, Endpoints, EndpointSlices, native and `keda-hpa-*` HPAs, KEDA ScaledObjects, ConfigMaps, the lifecycle-owned generated Secret, and the `inference-<name>` and `inference-<name>-proxy` Ingresses that releases up to v4.1.0 created for an endpoint (no release created a per-endpoint HTTPRoute). DynamoDB purge requires the full current-generation quorum and is conditioned on lifecycle, generation, and the verified snapshot, so late writers cannot recreate a purged record.
 
 If deletion remains in `deleting`, do not remove the DynamoDB record or retry with a new endpoint of the same name. Inspect the named endpoint resources plus ReplicaSets, Pods, Endpoints, and EndpointSlices in `gco-inference`; a retained child or Kubernetes finalizer intentionally blocks purge. Remove a finalizer only after verifying the object's owner references and endpoint lifecycle, then let the monitor obtain two fresh absent observations. A conventional `{name}-admin` Secret with missing or mismatched lifecycle provenance is an ownership collision: repair its provenance only from authoritative records or rename/preserve it as an external Secret; never force-delete it by name alone.
 
@@ -1298,7 +1310,7 @@ kubectl logs -n gco-inference deployment/my-llm -c endpoint-tls-proxy
 | `stopped` | Scaled to zero, configuration preserved |
 | `deleted` | Marked for deletion, inference_monitor cleaning up resources |
 
-The endpoint-wide state is a summary: `deploying` lasts until every target region reports `running`, and every spec change on a live endpoint through `update-image`, `set-topology`, `configure-store`, `canary`, `promote` or `rollback` re-enters it until the monitor has observed all regions running again (`scale` changes only the replica count and leaves the state alone; a stopped endpoint stays stopped). During a rolling update a classic endpoint's region keeps serving from pods of the previous template and stays `running`, with `rollout_complete: false` in its status until pods of the current template meet the readiness floor (the configured replicas, or the autoscaling minimum); the endpoint leaves `deploying` only once no region reports that flag. A canary counts only pods of its current template, so traffic is sampled onto a new canary image only once that image is Ready. Classic and Mooncake (disaggregated/store) endpoints promote the same way. Readiness for traffic is decided per region: the inference proxy forwards requests in a region as soon as that region's own status is `running`, even while the endpoint-wide state is still `deploying`, and answers `HTTP 503: Inference endpoint is not ready in this region` while the local region is `creating`/`updating` or the endpoint is `stopped`/`deleted`.
+The endpoint-wide state is a summary: `deploying` lasts until every target region reports `running`, and every spec change on a live endpoint through `update-image`, `set-topology`, `configure-store`, `canary`, `promote` or `rollback` re-enters it until the monitor has observed all regions running again (`scale` changes only the replica count and leaves the state alone; a stopped endpoint stays stopped). During a rolling update a region keeps serving from pods of the previous template and stays `running`, with `rollout_complete: false` in its status until pods of the current template meet the readiness floor (the configured replicas, or the autoscaling minimum) in every Deployment: a classic endpoint's, or each Mooncake role's and the PD proxy's; the endpoint leaves `deploying` only once no region reports that flag. A canary counts only pods of its current template, so traffic is sampled onto a new canary image only once that image is Ready. Classic and Mooncake (disaggregated/store) endpoints promote the same way. Readiness for traffic is decided per region: the inference proxy forwards requests in a region as soon as that region's own status is `running`, even while the endpoint-wide state is still `deploying`, and answers `HTTP 503: Inference endpoint is not ready in this region` while the local region is `creating`/`updating` or the endpoint is `stopped`/`deleted`.
 
 `gco -o json inference status <name>` exposes the per-region detail the table hides. Mooncake endpoints add a `roles` map (prefill/decode ready and desired counts); split endpoints (`disaggregated`, `both`) also add a `proxy` entry with the same counts for the prefill-decode proxy, and report `running` only once the proxy has its configured replicas Ready, because requests reach the roles only through it. When the store is enabled, a `store` sub-status carries the master's readiness and address. When the cold tier is requested, `store.cold_tier` reports whether it is active (`enabled`, `s3_uri`); `enabled: false` with an `error` means the region's bucket could not be resolved and the hot-path store is serving without its S3 tier.
 

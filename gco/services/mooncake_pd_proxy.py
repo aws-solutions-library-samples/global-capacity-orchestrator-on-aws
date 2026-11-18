@@ -17,14 +17,13 @@ CA), and hostname verification stays on.
 
 Per request on the public ``/v1/*`` serving paths it:
 
-1. Treats the prompt as not resident in the shared store. The residency check is
-   non-blocking and bounded by ``PD_PROXY_RESIDENCY_TIMEOUT_SECONDS``; a miss or a
-   check that does not finish in time is sent straight to prefill, so a slow or
-   unreachable store never holds the request.
-2. Primes a prefill pod with the request at ``max_tokens=1`` and
+1. Primes a prefill pod with the request at ``max_tokens=1`` and
    ``kv_transfer_params={"do_remote_decode": true}`` so prefill computes and
-   exports the prompt KV through the MooncakeConnector.
-3. Sends the original request to a decode pod, relaying any ``kv_transfer_params``
+   exports the prompt KV through the MooncakeConnector. The proxy never looks
+   the prompt up in the shared store itself, so the store is never on the
+   request's path; reuse of a cached prefix is left to the role pods'
+   connectors.
+2. Sends the original request to a decode pod, relaying any ``kv_transfer_params``
    the prefill step returned (with ``do_remote_prefill=true``) so decode pulls the
    KV instead of recomputing, and streams the decode response back to the client.
 
@@ -92,7 +91,6 @@ PORT = int(os.environ.get("PD_PROXY_PORT", "8000"))
 PREFILL_URL = os.environ.get("PD_PROXY_PREFILL_URL", "").rstrip("/")
 DECODE_URL = os.environ.get("PD_PROXY_DECODE_URL", "").rstrip("/")
 CA_FILE = os.environ.get("PD_PROXY_CA_FILE", "").strip()
-RESIDENCY_TIMEOUT = float(os.environ.get("PD_PROXY_RESIDENCY_TIMEOUT_SECONDS", "2"))
 NO_DECODE_STATUS = int(os.environ.get("PD_PROXY_NO_DECODE_BACKEND_STATUS", "503"))
 NO_DECODE_MESSAGE = os.environ.get(
     "PD_PROXY_NO_DECODE_BACKEND_MESSAGE", "no available decode backend"
@@ -483,8 +481,8 @@ async def _dispatch(full_path: str, request: Request) -> Any:
     if not _is_serving_path(path):
         return await _stream_decode("POST", target, decoded, request_headers)
 
-    # Residency check: non-blocking, treated as a miss so the prompt always goes
-    # to prefill first (the store is never on the request's critical path).
+    # Every serving request goes to prefill first; the proxy never consults the
+    # store, so the store is never on the request's critical path.
     prefill_kv_params = await _prime_prefill(path, decoded)
     return await _stream_decode(
         "POST",

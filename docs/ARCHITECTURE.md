@@ -616,7 +616,10 @@ applier and cluster administrators included:
   recreating it unlabelled therefore cannot change what the pods run. Only the
   monitor sets, changes or removes its provenance annotations
   (`gco.io/lifecycle-id`, `gco.io/region-generation`, `gco.io/leader-epoch`), so
-  it cannot be made to adopt an object it never created.
+  it cannot be made to adopt an object it never created, and the
+  `gco.io/endpoint` label on the objects it manages, so none of them can be
+  relabelled for another endpoint, which the monitor would then neither repair
+  nor delete with its own endpoint.
 - Only cert-manager's controller may create or update
   `gco-inference/gco-inference-tls`. Nobody can plant that Secret, with a
   `ca.crt` every PD proxy would trust, before cert-manager first issues it.

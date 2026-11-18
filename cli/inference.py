@@ -72,8 +72,6 @@ MOONCAKE_TRANSFER_PROTOCOLS: frozenset[str] = frozenset({"rdma", "tcp"})
 #: KV-store offload tiers for spilling cache beyond GPU memory.
 MOONCAKE_OFFLOAD_TIERS: frozenset[str] = frozenset({"cpu", "disk", "none"})
 
-#: PD proxy request-scheduling strategies supported today.
-MOONCAKE_PROXY_SCHEDULING: frozenset[str] = frozenset({"round_robin"})
 
 #: Inclusive bounds for per-role replica counts in an XpYd topology.
 MOONCAKE_TOPOLOGY_MIN: int = 1
@@ -132,7 +130,8 @@ class MooncakeTransferConfig(TypedDict, total=False):
 class MooncakeProxyConfig(TypedDict, total=False):
     """PD proxy configuration. ``admin_api_key_secret`` names the Kubernetes
     Secret holding the proxy admin key; the key value is never carried on the
-    endpoint spec."""
+    endpoint spec. ``scheduling`` is accepted from specs earlier releases wrote
+    and has no effect: the role Services spread requests across Ready pods."""
 
     image: str
     scheduling: Literal["round_robin"]
@@ -1065,18 +1064,15 @@ class InferenceManager:
         # Region appeared earlier in cleanup history. This invalidates a prior
         # terminal removal acknowledgement before resources can be recreated.
         region_generations[region] = secrets.token_hex(32)
-        try:
-            result = store.update_target_regions(
-                endpoint_name,
-                regions,
-                cleanup_regions,
-                region_generations,
-                expected_lifecycle_id=lifecycle_id,
-                expected_updated_at=updated_at,
-            )
-        except Exception as e:
-            logger.error("Failed to add region: %s", e)
-            return None
+        # A failed write propagates: None means only that the endpoint was not found.
+        result = store.update_target_regions(
+            endpoint_name,
+            regions,
+            cleanup_regions,
+            region_generations,
+            expected_lifecycle_id=lifecycle_id,
+            expected_updated_at=updated_at,
+        )
         if result is None:
             self._raise_write_conflict(endpoint_name, "added to a Region")
         return result
@@ -1111,18 +1107,15 @@ class InferenceManager:
         # The cleanup pass must acknowledge this removal, not any earlier
         # remove/re-add cycle for the same Region.
         region_generations[region] = secrets.token_hex(32)
-        try:
-            result = store.update_target_regions(
-                endpoint_name,
-                regions,
-                cleanup_regions,
-                region_generations,
-                expected_lifecycle_id=lifecycle_id,
-                expected_updated_at=updated_at,
-            )
-        except Exception as e:
-            logger.error("Failed to remove region: %s", e)
-            return None
+        # A failed write propagates: None means only that the endpoint was not found.
+        result = store.update_target_regions(
+            endpoint_name,
+            regions,
+            cleanup_regions,
+            region_generations,
+            expected_lifecycle_id=lifecycle_id,
+            expected_updated_at=updated_at,
+        )
         if result is None:
             self._raise_write_conflict(endpoint_name, "removed from a Region")
         return result

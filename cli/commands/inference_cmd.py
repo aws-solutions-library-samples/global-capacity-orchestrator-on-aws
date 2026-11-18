@@ -25,6 +25,54 @@ def inference(config: Any) -> None:
     """Manage multi-region inference endpoints."""
 
 
+#: Metric types --autoscale-metric accepts: cpu and memory scale through the
+#: native HPA, gpu and gpu_memory on CloudWatch GPU utilization through KEDA.
+_AUTOSCALE_METRIC_TYPES = ("cpu", "memory", "gpu", "gpu_memory")
+_DEFAULT_AUTOSCALE_TARGET = 70
+_DEFAULT_MIN_REPLICAS = 1
+_DEFAULT_MAX_REPLICAS = 10
+
+
+def _key_value_options(
+    ctx: click.Context, param: click.Parameter, values: tuple[str, ...]
+) -> dict[str, str]:
+    """Parse a repeatable KEY=VALUE option, refusing a value without '=' or a key."""
+    pairs: dict[str, str] = {}
+    for value in values:
+        key, separator, item = value.partition("=")
+        if not separator or not key:
+            raise click.BadParameter(f"{value!r} is not KEY=VALUE", ctx=ctx, param=param)
+        pairs[key] = item
+    return pairs
+
+
+def _autoscale_metrics(
+    ctx: click.Context, param: click.Parameter, values: tuple[str, ...]
+) -> list[dict[str, Any]]:
+    """Parse repeatable --autoscale-metric TYPE[:TARGET] values into {type, target} entries."""
+    metrics: list[dict[str, Any]] = []
+    for value in values:
+        metric_type, separator, target = value.partition(":")
+        if metric_type not in _AUTOSCALE_METRIC_TYPES:
+            raise click.BadParameter(
+                f"{value!r}: TYPE must be one of {', '.join(_AUTOSCALE_METRIC_TYPES)}",
+                ctx=ctx,
+                param=param,
+            )
+        if not separator:
+            metrics.append({"type": metric_type, "target": _DEFAULT_AUTOSCALE_TARGET})
+            continue
+        if not (target.isascii() and target.isdigit()) or int(target) < 1:
+            raise click.BadParameter(
+                f"{value!r}: TARGET must be a whole-number utilization percentage of at "
+                f"least 1, for example {metric_type}:{_DEFAULT_AUTOSCALE_TARGET}",
+                ctx=ctx,
+                param=param,
+            )
+        metrics.append({"type": metric_type, "target": int(target)})
+    return metrics
+
+
 @inference.command("deploy")
 @click.argument("endpoint_name")
 @click.option(
@@ -73,17 +121,44 @@ def inference(config: Any) -> None:
     "/models/<endpoint name> in each region by an init container.",
 )
 @click.option("--health-path", default="/health", help="Health check path (default: /health)")
-@click.option("--env", "-e", multiple=True, help="Environment variable (KEY=VALUE). Repeatable")
+@click.option(
+    "--env",
+    "-e",
+    multiple=True,
+    callback=_key_value_options,
+    help="Environment variable (KEY=VALUE). Repeatable",
+)
 @click.option("--namespace", "-n", default="gco-inference", help="Kubernetes namespace")
-@click.option("--label", "-l", multiple=True, help="Label (key=value). Repeatable")
-@click.option("--min-replicas", type=int, default=None, help="Autoscaling: minimum replicas")
-@click.option("--max-replicas", type=int, default=None, help="Autoscaling: maximum replicas")
+@click.option(
+    "--label",
+    "-l",
+    multiple=True,
+    callback=_key_value_options,
+    help="Label (key=value). Repeatable",
+)
+@click.option(
+    "--min-replicas",
+    type=click.IntRange(min=1),
+    default=None,
+    help=f"Autoscaling: minimum replicas (default: {_DEFAULT_MIN_REPLICAS}). "
+    "Requires --autoscale-metric.",
+)
+@click.option(
+    "--max-replicas",
+    type=click.IntRange(min=1),
+    default=None,
+    help=f"Autoscaling: maximum replicas (default: {_DEFAULT_MAX_REPLICAS}). "
+    "Requires --autoscale-metric.",
+)
 @click.option(
     "--autoscale-metric",
     multiple=True,
-    help="Autoscaling metric (cpu:70, memory:80, gpu:60). Repeatable. Enables "
-    "autoscaling. CPU/memory scale via the native HPA; gpu (and gpu_memory) "
-    "scale on CloudWatch GPU utilization via KEDA.",
+    callback=_autoscale_metrics,
+    help="Autoscaling metric as TYPE[:TARGET] (cpu:70, memory:80, gpu:60). "
+    "Repeatable. Enables autoscaling. TYPE is cpu, memory, gpu or gpu_memory; "
+    f"TARGET is a whole-number utilization percentage (default: {_DEFAULT_AUTOSCALE_TARGET}). "
+    "CPU/memory scale via the native HPA; gpu (and gpu_memory) scale on "
+    "CloudWatch GPU utilization via KEDA.",
 )
 @click.option(
     "--capacity-type",
@@ -112,6 +187,7 @@ def inference(config: Any) -> None:
 @click.option(
     "--node-selector",
     multiple=True,
+    callback=_key_value_options,
     help="Node selector (key=value). Repeatable. E.g. --node-selector eks.amazonaws.com/instance-family=inf2",
 )
 @click.option(
@@ -254,41 +330,34 @@ def inference_deploy(
 
     formatter = get_output_formatter(config)
 
-    # Parse env vars and labels
-    env_dict = {}
-    for e_var in env:
-        if "=" in e_var:
-            k, v = e_var.split("=", 1)
-            env_dict[k] = v
+    # -e, -l and --node-selector arrive as KEY=VALUE maps, and each
+    # --autoscale-metric as a {type, target} entry (see their callbacks).
+    env_dict, labels_dict, node_selector_dict = env, label, node_selector
 
-    labels_dict = {}
-    for lbl in label:
-        if "=" in lbl:
-            k, v = lbl.split("=", 1)
-            labels_dict[k] = v
-
-    node_selector_dict = {}
-    for ns in node_selector:
-        if "=" in ns:
-            k, v = ns.split("=", 1)
-            node_selector_dict[k] = v
-
-    # Build autoscaling config
+    # Replica bounds only bound autoscaling, which a metric enables; on their
+    # own they would be dropped, so they are refused instead.
     autoscaling_config = None
     if autoscale_metric:
-        metrics = []
-        for m in autoscale_metric:
-            if ":" in m:
-                mtype, mtarget = m.split(":", 1)
-                metrics.append({"type": mtype, "target": int(mtarget)})
-            else:
-                metrics.append({"type": m, "target": 70})
+        min_bound = _DEFAULT_MIN_REPLICAS if min_replicas is None else min_replicas
+        max_bound = _DEFAULT_MAX_REPLICAS if max_replicas is None else max_replicas
+        if max_bound < min_bound:
+            default_note = ", the default" if max_replicas is None else ""
+            raise click.UsageError(
+                f"--max-replicas ({max_bound}{default_note}) must be at least "
+                f"--min-replicas ({min_bound})"
+            )
         autoscaling_config = {
             "enabled": True,
-            "min_replicas": min_replicas or 1,
-            "max_replicas": max_replicas or 10,
-            "metrics": metrics,
+            "min_replicas": min_bound,
+            "max_replicas": max_bound,
+            "metrics": autoscale_metric,
         }
+    elif min_replicas is not None or max_replicas is not None:
+        raise click.UsageError(
+            "--min-replicas and --max-replicas bound autoscaling, which --autoscale-metric "
+            "enables (for example --autoscale-metric cpu:70); for a fixed replica count "
+            "use --replicas"
+        )
 
     # Transfer overrides are meaningful only when a Mooncake block is being
     # authored. With no override, the monitor resolves the default RDMA intent
@@ -403,14 +472,14 @@ def inference_deploy(
             model_path=model_path,
             model_source=model_source,
             health_check_path=health_path,
-            env=env_dict if env_dict else None,
+            env=env_dict or None,
             namespace=namespace,
-            labels=labels_dict if labels_dict else None,
+            labels=labels_dict or None,
             autoscaling=autoscaling_config,
             capacity_type=capacity_type,
             extra_args=list(extra_args) if extra_args else None,
             accelerator=accelerator,
-            node_selector=node_selector_dict if node_selector_dict else None,
+            node_selector=node_selector_dict or None,
             rewrite_image=not no_rewrite_image,
             mooncake_mode=mooncake_mode,
             prefill_replicas=prefill_replicas,
@@ -599,6 +668,7 @@ def inference_scale(config: Any, endpoint_name: Any, replicas: Any) -> None:
 
         if result:
             formatter.print_success(f"Endpoint '{endpoint_name}' scaled to {replicas} replicas")
+            _print_record(config, formatter, result)
         else:
             formatter.print_error(f"Endpoint '{endpoint_name}' not found")
             sys.exit(1)
@@ -636,6 +706,7 @@ def inference_stop(config: Any, endpoint_name: Any, yes: Any) -> None:
 
         if result:
             formatter.print_success(f"Endpoint '{endpoint_name}' marked for stop")
+            _print_record(config, formatter, result)
         else:
             formatter.print_error(f"Endpoint '{endpoint_name}' not found")
             sys.exit(1)
@@ -664,6 +735,7 @@ def inference_start(config: Any, endpoint_name: Any) -> None:
 
         if result:
             formatter.print_success(f"Endpoint '{endpoint_name}' marked for start")
+            _print_record(config, formatter, result)
         else:
             formatter.print_error(
                 f"Endpoint '{endpoint_name}' is not a stopped endpoint. If it was deleted "
@@ -903,6 +975,7 @@ def inference_delete(
                 f"Endpoint '{endpoint_name}' marked for deletion. "
                 "The inference_monitor will clean up resources in each region."
             )
+            _print_record(config, formatter, result)
         else:
             suffix = " or ownership/lifecycle condition failed" if owner_condition else ""
             formatter.print_error(f"Endpoint '{endpoint_name}' not found{suffix}")
@@ -911,6 +984,12 @@ def inference_delete(
     except Exception as e:
         formatter.print_error(f"Failed to delete endpoint: {e}")
         sys.exit(1)
+
+
+def _print_record(config: Any, formatter: Any, record: dict[str, Any]) -> None:
+    """In JSON or YAML mode, print the endpoint record a mutation returned."""
+    if config.output_format != "table":
+        formatter.print(record)
 
 
 def _note_stopped_endpoint(formatter: Any, endpoint_name: str, result: dict[str, Any]) -> bool:
@@ -955,6 +1034,7 @@ def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
             formatter.print_success(f"Endpoint '{endpoint_name}' image updated to {image}")
             if not _note_stopped_endpoint(formatter, endpoint_name, result):
                 formatter.print_info("Rolling update will be applied by inference_monitor")
+            _print_record(config, formatter, result)
         else:
             formatter.print_error(f"Endpoint '{endpoint_name}' not found")
             sys.exit(1)
@@ -1400,6 +1480,7 @@ def inference_canary(
         formatter.print_info(f"Monitor with: gco inference status {endpoint_name}")
         formatter.print_info(f"Promote with: gco inference promote {endpoint_name}")
         formatter.print_info(f"Rollback with: gco inference rollback {endpoint_name}")
+        _print_record(config, formatter, result)
 
     except ValueError as e:
         formatter.print_error(str(e))
@@ -1444,19 +1525,20 @@ def inference_promote(config: Any, endpoint_name: Any, yes: Any) -> None:
             interactive_echo(f"  Current primary: {current_image}")
             interactive_echo(f"  Canary image:    {canary.get('image', 'unknown')}")
             interactive_echo(f"  Canary weight:   {canary.get('weight', 0)}%")
-            if not confirm("  Promote canary to primary?"):
-                formatter.print_info("Cancelled")
-                return
+            confirm("  Promote canary to primary?", abort=True)
 
         result = manager.promote_canary(endpoint_name)
         if result:
             new_image = result.get("spec", {}).get("image", "unknown")
             formatter.print_success(f"Promoted: all traffic now serving {new_image}")
             _note_stopped_endpoint(formatter, endpoint_name, result)
+            _print_record(config, formatter, result)
         else:
             formatter.print_error("Promotion failed")
             sys.exit(1)
 
+    except click.Abort:
+        raise
     except ValueError as e:
         formatter.print_error(str(e))
         sys.exit(1)
@@ -1497,19 +1579,20 @@ def inference_rollback(config: Any, endpoint_name: Any, yes: Any) -> None:
         if not yes:
             interactive_echo(f"  Canary image:  {canary.get('image', 'unknown')}")
             interactive_echo(f"  Canary weight: {canary.get('weight', 0)}%")
-            if not confirm("  Remove canary and restore full traffic to primary?"):
-                formatter.print_info("Cancelled")
-                return
+            confirm("  Remove canary and restore full traffic to primary?", abort=True)
 
         result = manager.rollback_canary(endpoint_name)
         if result:
             primary_image = result.get("spec", {}).get("image", "unknown")
             formatter.print_success(f"Rolled back: all traffic now serving {primary_image}")
             _note_stopped_endpoint(formatter, endpoint_name, result)
+            _print_record(config, formatter, result)
         else:
             formatter.print_error("Rollback failed")
             sys.exit(1)
 
+    except click.Abort:
+        raise
     except ValueError as e:
         formatter.print_error(str(e))
         sys.exit(1)
@@ -1793,7 +1876,8 @@ def inference_configure_store(
     Merges the given settings into the endpoint's existing KV-cache store
     configuration and re-triggers reconciliation so each region's monitor picks
     up the change. Enabling the cold tier also enables the shared store it
-    extends. Use 'gco inference populate-kv' to pre-warm the cold tier.
+    extends. At least one setting is required; without one nothing is changed.
+    Use 'gco inference populate-kv' to pre-warm the cold tier.
 
     Examples:
         gco inference configure-store my-llm --cold-tier
@@ -1802,6 +1886,17 @@ def inference_configure_store(
     from ..inference import get_inference_manager
 
     formatter = get_output_formatter(config)
+
+    # With no setting to change, write nothing: merging no flags onto the
+    # current block and writing it back would redeploy the endpoint.
+    settings = (enabled, cold_tier, offload, global_segment_size, local_buffer_size)
+    if all(setting is None for setting in settings):
+        formatter.print_error(
+            "No store settings given. Pass --cold-tier, --offload, "
+            "--global-segment-size, --local-buffer-size, or --enable-store; "
+            "nothing was changed."
+        )
+        sys.exit(1)
 
     try:
         manager = get_inference_manager(config)
@@ -1830,13 +1925,6 @@ def inference_configure_store(
             store_config["global_segment_size"] = global_segment_size
         if local_buffer_size is not None:
             store_config["local_buffer_size"] = local_buffer_size
-
-        if not store_config:
-            formatter.print_error(
-                "No store settings given. Pass --cold-tier, --offload, "
-                "--global-segment-size, --local-buffer-size, or --enable-store."
-            )
-            sys.exit(1)
 
         result = manager.configure_store(endpoint_name, store_config)
         if result:

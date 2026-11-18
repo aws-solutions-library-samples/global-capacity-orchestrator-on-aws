@@ -317,6 +317,48 @@ def test_deleting_an_endpoint_leaves_the_other_endpoints_objects_and_completes()
     monitor.core_v1.delete_namespaced_config_map.assert_not_called()
 
 
+def test_cleanup_reads_no_http_route_because_no_release_created_one() -> None:
+    """Finding I22: the only HTTPRoute any release created is gco-system/gco-routes.
+
+    Endpoint cleanup read three per-endpoint HTTPRoute names no release ever
+    created, every pass, before an endpoint could be acknowledged deleted.
+    """
+    monitor = _monitor(_record("llama", deleting=True))
+    monitor.discovery_v1 = MagicMock()
+    _serve(monitor)
+    not_found = ApiException(status=404)
+    monitor.core_v1.read_namespaced_secret.side_effect = not_found
+    monitor.core_v1.read_namespaced_config_map.side_effect = not_found
+    monitor.networking_v1.read_namespaced_ingress.side_effect = not_found
+    for listing in (
+        monitor.apps_v1.list_namespaced_replica_set,
+        monitor.core_v1.list_namespaced_pod,
+        monitor.core_v1.list_namespaced_endpoints,
+        monitor.discovery_v1.list_namespaced_endpoint_slice,
+    ):
+        listing.return_value = MagicMock(items=[])
+    hpa = MagicMock()
+    hpa.read_namespaced_horizontal_pod_autoscaler.side_effect = not_found
+    custom = MagicMock()
+    custom.get_namespaced_custom_object.side_effect = not_found
+
+    with (
+        patch("gco.services.inference_monitor.client.AutoscalingV2Api", return_value=hpa),
+        patch("gco.services.inference_monitor.client.CustomObjectsApi", return_value=custom),
+    ):
+        result = monitor._delete_resources("llama", NAMESPACE, expected_lifecycle_id="life-llama")
+
+    assert result.complete is True, result
+    plurals = {
+        call.kwargs.get("plural")
+        for call in (
+            *custom.get_namespaced_custom_object.call_args_list,
+            *custom.delete_namespaced_custom_object.call_args_list,
+        )
+    }
+    assert plurals == {"scaledobjects"}
+
+
 # ---------------------------------------------------------------------------
 # Ingresses older releases created are removed with the endpoint (finding I5)
 # ---------------------------------------------------------------------------
@@ -505,7 +547,6 @@ def test_derived_names_are_exactly_the_monitor_inventory() -> None:
         *inventory.horizontal_pod_autoscalers,
         *inventory.scaled_objects,
         *inventory.config_maps,
-        *inventory.legacy_http_routes,
         inventory.generated_admin_secret,
     }
 

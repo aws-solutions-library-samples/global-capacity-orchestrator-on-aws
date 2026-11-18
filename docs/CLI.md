@@ -2793,6 +2793,8 @@ See [Inference Guide](INFERENCE.md) for architecture details and workflows.
 
 </details>
 
+With `--output json` or `--output yaml`, the commands that change an endpoint (`scale`, `stop`, `start`, `delete`, `update-image`, `canary`, `promote`, `rollback`, `add-region`, `remove-region`, `set-topology`, `configure-store`) print the updated endpoint record, the same document `gco inference status` returns. Declining a confirmation prompt aborts the command with exit status 1.
+
 #### `gco inference deploy`
 
 Deploy an inference endpoint to one or more regions.
@@ -2819,15 +2821,15 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--model-path` | | Mount the inference namespace's EFS volume (`efs-claim`) at `/models` without syncing anything; `--model-source` mounts it too. The volume is separate from the `gco-shared-storage` volume jobs use in `gco-jobs` |
 | `--model-source` | | S3 URI for model weights (auto-synced via init container) |
 | `--health-path` | | Health check endpoint path (default: /health) |
-| `--env` | `-e` | Environment variable (KEY=VALUE), repeatable |
+| `--env` | `-e` | Environment variable (KEY=VALUE), repeatable. A value without `=` or without a key is refused |
 | `--namespace` | `-n` | Kubernetes namespace (default: gco-inference) |
-| `--label` | `-l` | Label (key=value), repeatable |
-| `--min-replicas` | | Autoscaling: minimum replicas |
-| `--max-replicas` | | Autoscaling: maximum replicas |
-| `--autoscale-metric` | | Autoscaling metric (e.g. `cpu:70`, `memory:80`, `gpu:60`), repeatable. CPU/memory use the native HPA; gpu/gpu_memory scale via [KEDA](https://keda.sh/) + CloudWatch. |
+| `--label` | `-l` | Label (key=value), repeatable. A value without `=` or without a key is refused |
+| `--min-replicas` | | Autoscaling: minimum replicas, at least 1 (default: 1). Requires `--autoscale-metric` |
+| `--max-replicas` | | Autoscaling: maximum replicas, at least the minimum (default: 10). Requires `--autoscale-metric` |
+| `--autoscale-metric` | | Autoscaling metric as `TYPE[:TARGET]` (e.g. `cpu:70`, `memory:80`, `gpu:60`), repeatable; enables autoscaling. `TYPE` is `cpu`, `memory`, `gpu` or `gpu_memory`; `TARGET` is a whole-number utilization percentage (default: 70). CPU/memory use the native HPA; gpu/gpu_memory scale via [KEDA](https://keda.sh/) + CloudWatch. |
 | `--capacity-type` | | Pin the pods to one node capacity type: `spot`, `on-demand` or `hyperpod` (all hard pins, no fallback; `hyperpod` selects the Region's [SageMaker HyperPod](HYPERPOD.md) nodes). Unset by default: no selector is added, so a node Karpenter launches for the pod is Spot when Spot is available and On-Demand otherwise ([Karpenter NodePool capacity type](https://karpenter.sh/docs/concepts/nodepools/)), and the pod can land on any existing node with room. See [INFERENCE.md](INFERENCE.md#spot-instances-for-inference) |
 | `--accelerator` | | Accelerator type: `nvidia` for GPU instances (default), `neuron` for [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/)/Inferentia |
-| `--node-selector` | | Node selector (key=value), repeatable. E.g. `eks.amazonaws.com/instance-family=inf2` |
+| `--node-selector` | | Node selector (key=value), repeatable. E.g. `eks.amazonaws.com/instance-family=inf2`. A value without `=` or without a key is refused |
 | `--extra-args` | | One container argument per value, repeatable (e.g. `--extra-args=--max-model-len --extra-args 4096`). For vLLM the renderer adds `--model $(MODEL)` when `-e MODEL=...` is set, unless these arguments already name the model (`--model`, a positional model tag, or `--config`) |
 | `--mooncake-mode` | | Mooncake serving mode: `disaggregated` (prefill/decode split), `store` (shared KV-cache), or `both` |
 | `--prefill-replicas` | | Number of prefill replicas (default: 1). Used with `--mooncake-mode disaggregated\|both` |
@@ -3236,7 +3238,7 @@ gco inference set-topology my-llm --prefill 3 --decode 6
 
 #### `gco inference configure-store`
 
-Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. Settings merge onto the endpoint's existing store block and re-trigger reconciliation, so changing one field leaves the others intact. The monitor re-renders the endpoint's `mooncake.json` and rolls its role pods onto it (the connectors read the file at start-up), so expect one rolling restart per change.
+Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. Settings merge onto the endpoint's existing store block and re-trigger reconciliation, so changing one field leaves the others intact. The monitor re-renders the endpoint's `mooncake.json` and rolls its role pods onto it (the connectors read the file at start-up), so expect one rolling restart per change. At least one option is required: without one the command changes nothing and exits with status 1.
 
 ```bash
 gco inference configure-store ENDPOINT_NAME [OPTIONS]

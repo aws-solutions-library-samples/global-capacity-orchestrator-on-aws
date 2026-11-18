@@ -12,8 +12,11 @@ against the code that has to keep the promise:
   budget, so the four numbers are checked together.
 * **Loop staleness.** The inference monitor has no request path, so its
   probes hit the Prometheus endpoint; a loop that is wedged rather than
-  crashed only shows in the exported ``seconds_since_last_pass`` gauge. The
-  gauge exists from construction and resets on every completed iteration.
+  crashed only shows in the exported ``seconds_since_last_pass`` and
+  ``seconds_since_last_progress`` gauges. They exist from construction and
+  reset on every completed iteration, and the liveness probe the manifest
+  runs fails once progress is older than the exported
+  ``liveness_window_seconds`` (the stall deadline plus one Lease duration).
 * **Observable fast path.** The service images ship uvloop and httptools for
   uvicorn's ``auto`` selection. Each entrypoint keeps the ``auto`` defaults
   (so a checkout without the wheels still runs) and logs the implementations
@@ -23,8 +26,13 @@ against the code that has to keep the promise:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
+import subprocess
+import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -166,7 +174,7 @@ def test_manifest_drain_budget_fits_the_pod_grace_period(filename, app, module):
         )
 
 
-def _monitor():
+def _monitor(reconcile_interval: int = 5):
     from gco.services.inference_monitor import InferenceMonitor
 
     with (
@@ -181,7 +189,7 @@ def _monitor():
             region="us-east-1",
             store=MagicMock(),
             namespace="gco-inference",
-            reconcile_interval=5,
+            reconcile_interval=reconcile_interval,
         )
 
 
@@ -204,12 +212,12 @@ def test_inference_monitor_resets_loop_staleness_after_each_iteration():
     monitor._try_acquire_lease = MagicMock(return_value=False)
     clock = iter([250.0, 251.0])
 
-    async def stop_after_first_sleep(_interval):
+    async def stop_after_first_pause():
         monitor._running = False
 
     with (
         patch("gco.services.inference_monitor.time") as fake_time,
-        patch("gco.services.inference_monitor.asyncio.sleep", side_effect=stop_after_first_sleep),
+        patch.object(monitor, "_pause_between_passes", side_effect=stop_after_first_pause),
     ):
         fake_time.monotonic.side_effect = lambda: next(clock)
         monitor._last_loop_completed_at = 100.0
@@ -217,3 +225,110 @@ def test_inference_monitor_resets_loop_staleness_after_each_iteration():
         # start() stamped 250.0 after the standby iteration; the scrape at
         # 251.0 sees one second of staleness instead of 151.
         assert monitor.get_metrics()["seconds_since_last_pass"] == pytest.approx(1.0)
+
+
+def _monitor_container(probe: str | None = None) -> dict:
+    pod = _deployment("32-inference-monitor.yaml")["spec"]["template"]["spec"]
+    return next(c for c in pod["containers"] if c["name"] == "inference-monitor")
+
+
+def _manifest_reconcile_interval() -> int:
+    return int(_env(_monitor_container())["RECONCILE_INTERVAL_SECONDS"] or "")
+
+
+@contextlib.contextmanager
+def _metrics_served(monitor) -> Iterator[int]:
+    """Serve ``monitor``'s gauges as the deployed monitor does; yield the port."""
+    import prometheus_client
+
+    from gco.services.service_metrics import start_metrics_server
+
+    started = []
+    real_start = prometheus_client.start_http_server
+
+    def start(*args, **kwargs):
+        started.append(real_start(*args, **kwargs))
+        return started[-1]
+
+    with patch("prometheus_client.start_http_server", side_effect=start):
+        start_metrics_server(0, "inference-monitor", monitor.get_metrics, host="127.0.0.1")
+    [(server, thread)] = started
+    try:
+        yield server.server_port
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _liveness_exit_code(port: int) -> int:
+    """Run the manifest's liveness command against the listener on ``port``."""
+    command = _monitor_container()["livenessProbe"]["exec"]["command"]
+    source = command[-1].replace("('127.0.0.1',9090)", f"('127.0.0.1',{port})")
+    assert source != command[-1], "the probe no longer dials 127.0.0.1:9090"
+    assert command[0] == "python"
+    completed = subprocess.run(
+        [sys.executable, *command[1:-1], source], capture_output=True, timeout=30, check=False
+    )
+    return completed.returncode
+
+
+def test_inference_monitor_liveness_window_is_the_stall_deadline_plus_one_lease():
+    """Finding I19: the window the probe enforces derives from the code's constants."""
+    from gco.services.inference_monitor import LEASE_DURATION_INTERVALS, PASS_STALL_INTERVALS
+
+    interval = _manifest_reconcile_interval()
+    monitor = _monitor(reconcile_interval=interval)
+
+    window = monitor.get_metrics()["liveness_window_seconds"]
+
+    assert window == (PASS_STALL_INTERVALS + LEASE_DURATION_INTERVALS) * interval == 195
+    assert window > monitor._pass_stall_seconds
+
+
+@pytest.mark.parametrize(
+    ("since_iteration", "since_pass_step", "live"),
+    [
+        (5.0, 10_000.0, True),
+        (400.0, 5.0, True),
+        (194.0, 194.0, True),
+        (200.0, 200.0, False),
+    ],
+    ids=["standby", "long-pass-still-progressing", "inside-window", "wedged"],
+)
+def test_inference_monitor_liveness_probe_fails_only_once_progress_stops(
+    since_iteration: float, since_pass_step: float, live: bool
+):
+    """Finding I19: liveness follows loop progress, so a standby never fails it."""
+    monitor = _monitor(reconcile_interval=_manifest_reconcile_interval())
+    now = time.monotonic()
+    monitor._last_loop_completed_at = now - since_iteration
+    monitor._pass_progress_at = now - since_pass_step
+
+    with _metrics_served(monitor) as port:
+        exit_code = _liveness_exit_code(port)
+
+    assert (exit_code == 0) is live
+
+
+def test_inference_monitor_liveness_probe_fails_without_the_progress_gauges():
+    monitor = _monitor(reconcile_interval=_manifest_reconcile_interval())
+
+    with (
+        patch.object(monitor, "get_metrics", return_value={"running": True}),
+        _metrics_served(monitor) as port,
+    ):
+        exit_code = _liveness_exit_code(port)
+
+    assert exit_code != 0
+
+
+def test_inference_monitor_progress_gauge_counts_from_the_latest_pass_step():
+    with patch("gco.services.inference_monitor.time") as fake_time:
+        fake_time.monotonic.side_effect = [1000.0, 1100.0]
+        monitor = _monitor()
+        monitor._pass_progress_at = 1090.0
+        metrics = monitor.get_metrics()
+
+    assert metrics["seconds_since_last_pass"] == pytest.approx(100.0)
+    assert metrics["seconds_since_last_progress"] == pytest.approx(10.0)

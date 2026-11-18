@@ -223,3 +223,114 @@ async def test_promotion_waits_for_another_region_still_rolling_out() -> None:
     await _reconcile_primary(store, deployment, endpoint)
 
     store.update_desired_state.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Mooncake roles (finding I21)
+# ---------------------------------------------------------------------------
+
+SPLIT = {"mode": "disaggregated", "topology": {"prefill": 1, "decode": 2}}
+
+
+def _rolled_out(name: str, image: str, replicas: int) -> client.V1Deployment:
+    return _wire_deployment(
+        name, image, spec_replicas=replicas, replicas=replicas, updated=replicas, ready=replicas
+    )
+
+
+def _split_deployments(**overrides: client.V1Deployment) -> dict[str, client.V1Deployment]:
+    """A split endpoint's role and proxy Deployments, rolled out unless overridden."""
+    deployments = {
+        "ep-prefill": _rolled_out("ep-prefill", "img:v2", 1),
+        "ep-decode": _rolled_out("ep-decode", "img:v2", 2),
+        "ep-proxy": _rolled_out("ep-proxy", "img:v1", 1),
+    }
+    deployments.update(overrides)
+    return deployments
+
+
+def _report(
+    mooncake: dict[str, Any], deployments: dict[str, client.V1Deployment]
+) -> tuple[Any, MagicMock]:
+    store = MagicMock()
+    monitor = _make_monitor(store)
+    with patch.object(monitor, "_get_deployment", side_effect=lambda n, _ns: deployments.get(n)):
+        report = monitor._report_role_status("ep", NAMESPACE, mooncake, {}, _endpoint())
+    return report, store
+
+
+@pytest.mark.parametrize(
+    "rolling",
+    [
+        {
+            "ep-decode": _wire_deployment(
+                "ep-decode", "img:v2", spec_replicas=2, replicas=3, updated=1, ready=2
+            )
+        },
+        {
+            "ep-prefill": _wire_deployment(
+                "ep-prefill",
+                "img:v2",
+                spec_replicas=1,
+                generation=3,
+                observed=2,
+                replicas=1,
+                updated=1,
+                ready=1,
+            )
+        },
+        {
+            "ep-proxy": _wire_deployment(
+                "ep-proxy", "img:v2", spec_replicas=1, replicas=2, updated=1, ready=1
+            )
+        },
+    ],
+    ids=["decode-half-rolled", "prefill-unobserved", "proxy-surged"],
+)
+def test_a_role_still_rolling_out_serves_but_is_not_rolled_out(
+    rolling: dict[str, client.V1Deployment],
+) -> None:
+    """After update-image the old role pods keep serving; the update is not applied yet."""
+    report, store = _report(SPLIT, _split_deployments(**rolling))
+
+    assert (report.state, report.rollout_complete) == ("running", False)
+    status = store.update_region_status.call_args
+    assert status.args[2] == "running"
+    assert status.kwargs["extra"]["rollout_complete"] is False
+
+
+def test_rolled_out_roles_report_the_rollout_complete() -> None:
+    report, store = _report(SPLIT, _split_deployments())
+
+    assert (report.state, report.rollout_complete) == ("running", True)
+    assert "rollout_complete" not in store.update_region_status.call_args.kwargs["extra"]
+
+
+@pytest.mark.parametrize(
+    ("deployment", "rollout_complete"),
+    [
+        (_wire_deployment("ep", "img:v2", spec_replicas=1, replicas=2, updated=1, ready=1), False),
+        (_rolled_out("ep", "img:v2", 1), True),
+    ],
+    ids=["rolling", "rolled-out"],
+)
+def test_a_store_endpoint_counts_its_current_template(
+    deployment: client.V1Deployment, rollout_complete: bool
+) -> None:
+    report, store = _report({"mode": "store"}, {"ep": deployment})
+
+    assert (report.state, report.rollout_complete) == ("running", rollout_complete)
+    extra = store.update_region_status.call_args.kwargs["extra"]
+    assert extra == ({"rollout_complete": False} if not rollout_complete else None)
+
+
+def test_a_creating_region_carries_no_rollout_flag() -> None:
+    """The flag qualifies a serving region only; a creating one is not promoted anyway."""
+    unready = _wire_deployment(
+        "ep-decode", "img:v2", spec_replicas=2, replicas=2, updated=2, ready=1
+    )
+
+    report, store = _report(SPLIT, _split_deployments(**{"ep-decode": unready}))
+
+    assert (report.state, report.rollout_complete) == ("creating", False)
+    assert "rollout_complete" not in store.update_region_status.call_args.kwargs["extra"]

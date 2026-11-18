@@ -49,7 +49,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import cache, partial
 from pathlib import Path
-from typing import Any, NoReturn, TypedDict
+from typing import Any, NamedTuple, NoReturn, TypedDict
 from urllib.parse import urlsplit
 
 from kubernetes import client, config
@@ -70,6 +70,7 @@ from gco.models.inference_models import (
 )
 from gco.services.inference_store import InferenceEndpointStore, endpoint_object_names
 from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
+from gco.services.leader_lease import LEASE_REQUEST_TIMEOUT
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -315,54 +316,29 @@ _REGION_TOKEN_PATTERN = re.compile(
 
 # --- PD proxy behavior -------------------------------------------------------
 #
-# The prefill-decode proxy that fronts a disaggregated endpoint checks whether a
-# prompt's KV blocks already live in the shared store before it sends the prompt
-# to a prefill pod. That check is bounded: it is given this many seconds, and a
-# miss or a check that does not finish in time is treated as "not resident" so
-# the prompt goes to prefill without the request waiting any longer. Holding the
-# bound here keeps the proxy responsive even when the store is slow or
-# unreachable.
-PD_PROXY_RESIDENCY_TIMEOUT_SECONDS = 2
-
-# Default strategy for spreading requests across the backends of a single role.
-PD_PROXY_DEFAULT_SCHEDULING = "round_robin"
-
-# Where a residency miss or timed-out lookup is sent. The prompt always goes to
-# a prefill pod in that case; the proxy never stalls the request on the store.
-PD_PROXY_RESIDENCY_MISS_TARGET = "prefill"
-
-# The residency lookup never blocks the request: a slow or failed store check
-# falls through to prefill rather than holding the client.
-PD_PROXY_RESIDENCY_BLOCKING = "false"
-
-# Decode-phase requests only ever reach decode pods that report Ready; pods that
-# are still starting are skipped.
-PD_PROXY_DECODE_ROUTING_READY_ONLY = "ready_only"
-
-# When no decode pod reports Ready, the proxy refuses the request outright
-# instead of streaming a partial generation. The refusal carries a stable
-# status and message so clients can distinguish "no backend yet" from a model
-# error.
-PD_PROXY_NO_DECODE_BACKEND_ACTION_REJECT = "reject"
+# When the prefill-decode proxy that fronts a disaggregated endpoint cannot hand
+# a request to a decode pod, it refuses the request instead of streaming a
+# partial generation. The refusal carries a stable status and message so
+# clients can distinguish "no backend yet" from a model error. These are the
+# settings the proxy program (gco/services/mooncake_pd_proxy.py) reads besides
+# its listen address, role Service URLs, CA bundle and admin key;
+# ``build_pd_proxy_config`` renders them.
 PD_PROXY_NO_DECODE_BACKEND_STATUS = "503"
 PD_PROXY_NO_DECODE_BACKEND_MESSAGE = "no available decode backend"
-
-# Environment variable names the proxy container reads to pick up the behavior
-# above. Surfacing them here keeps the proxy's runtime contract in one place;
-# the reconcile path attaches the values produced by ``build_pd_proxy_config``.
-PD_PROXY_RESIDENCY_TIMEOUT_ENV = "PD_PROXY_RESIDENCY_TIMEOUT_SECONDS"
-PD_PROXY_RESIDENCY_BLOCKING_ENV = "PD_PROXY_RESIDENCY_CHECK_BLOCKING"
-PD_PROXY_RESIDENCY_MISS_TARGET_ENV = "PD_PROXY_RESIDENCY_MISS_TARGET"
-PD_PROXY_DECODE_ROUTING_ENV = "PD_PROXY_DECODE_ROUTING"
-PD_PROXY_NO_DECODE_BACKEND_ACTION_ENV = "PD_PROXY_NO_DECODE_BACKEND_ACTION"
 PD_PROXY_NO_DECODE_BACKEND_STATUS_ENV = "PD_PROXY_NO_DECODE_BACKEND_STATUS"
 PD_PROXY_NO_DECODE_BACKEND_MESSAGE_ENV = "PD_PROXY_NO_DECODE_BACKEND_MESSAGE"
-PD_PROXY_SCHEDULING_ENV = "PD_PROXY_SCHEDULING"
-PD_PROXY_STORE_ADDRESS_ENV = "PD_PROXY_STORE_ADDRESS"
+
+# The first setting releases up to v8.23.0 gave every PD proxy, and one the
+# program never acted on. A live proxy that carries it keeps that release's
+# environment (see ``build_pd_proxy_config``).
+PD_PROXY_RELEASED_ENV_MARKER = "PD_PROXY_RESIDENCY_TIMEOUT_SECONDS"
 
 # Marker label carried by proxy pods so a Service can select the proxy alone,
 # distinct from the prefill/decode role pods (which carry their own role marker).
 PD_PROXY_ROLE_LABEL = "proxy"
+
+# Name of the container that runs the proxy program in each proxy pod.
+PD_PROXY_CONTAINER = "proxy"
 
 # TCP port the proxy container listens on for authenticated serving requests.
 PD_PROXY_PORT = 8000
@@ -579,6 +555,14 @@ _LEADER_EPOCH_ANNOTATION = "gco.io/leader-epoch"
 # timed-out read up to three times), so one hung call stays within it.
 PASS_STALL_INTERVALS = 10
 
+# Reconcile intervals the leader Lease lasts without a renewal (45 s at the
+# default 15 s interval).
+LEASE_DURATION_INTERVALS = 3
+
+# How long a leader pass pauses between two endpoints so the event loop can run
+# the SIGTERM handler (see InferenceMonitor._stop_requested_at_safe_point).
+_SAFE_POINT_PAUSE_SECONDS = 0.001
+
 # The endpoint an object belongs to, on the metadata of every object the
 # monitor creates (never on a pod template, where adding it would roll pods).
 # Object names are derived from endpoint names without reserved suffixes, so
@@ -615,6 +599,18 @@ class ForeignEndpointResourceError(RuntimeError):
     """
 
 
+class RoleStatusReport(NamedTuple):
+    """The region status :meth:`InferenceMonitor._report_role_status` wrote.
+
+    ``rollout_complete`` is false while a role (or the PD proxy) still has
+    fewer Ready pods of its current template than its floor: the region may
+    serve from the previous template's pods, but the change is not applied.
+    """
+
+    state: str
+    rollout_complete: bool
+
+
 @dataclass(frozen=True)
 class ReconcileAuthority:
     """Immutable authority carried by one endpoint reconciliation pass."""
@@ -646,7 +642,6 @@ class EndpointResourceInventory:
     scaled_objects: tuple[str, ...]
     config_maps: tuple[str, ...]
     legacy_ingresses: tuple[str, ...]
-    legacy_http_routes: tuple[str, ...]
     generated_admin_secret: str
 
 
@@ -988,52 +983,66 @@ def apply_efa_scheduling(mooncake: dict[str, Any], pod_spec: client.V1PodSpec) -
         container.resources.limits.setdefault(EFA_RESOURCE_NAME, "1")
 
 
-def build_pd_proxy_config(mooncake: dict[str, Any]) -> dict[str, str]:
-    """Return the environment the prefill-decode proxy runs with.
+def build_pd_proxy_config(
+    mooncake: Mapping[str, Any], *, released_layout: bool = False
+) -> dict[str, str]:
+    """Return the settings the prefill-decode proxy runs with.
 
-    The proxy fronts a disaggregated endpoint and decides, per request, whether
-    to consult the shared store and which backends to dispatch to. Its behavior
-    is fixed by the values returned here so every disaggregated endpoint front
-    behaves identically:
+    A proxy gets the settings its program (``gco/services/mooncake_pd_proxy.py``)
+    reads: the stable status and message it answers with, instead of streaming
+    any partial output, when it cannot reach a decode backend. The rest of its
+    environment (listen address, role Service URLs, CA bundle, admin key) is
+    added by :meth:`InferenceMonitor._create_pd_proxy`.
 
-    - It looks up whether the prompt's KV blocks already reside in the store
-      before sending the prompt to prefill, and that lookup is bounded to
-      ``PD_PROXY_RESIDENCY_TIMEOUT_SECONDS`` seconds.
-    - A miss, or a lookup that does not finish in time, is treated as "not
-      resident": the prompt is sent to a prefill pod and the request is never
-      held waiting on the store.
-    - Decode-phase requests are routed only to decode pods reporting Ready, so a
-      pod that is still starting is skipped.
-    - When no decode pod reports Ready, the proxy refuses the request with a
-      stable status and message rather than streaming any partial output.
-
-    The residency bound is held constant rather than read from the spec so the
-    responsiveness guarantee cannot be weakened per endpoint. The store address
-    points at the shared in-region master, and the same-role dispatch strategy
-    falls back to round-robin when the spec names none.
+    Releases up to v8.23.0 also rendered seven settings the program never acted
+    on: a bounded, non-blocking store residency lookup it never made (three
+    settings), Ready-only decode routing, a reject action for an unreachable
+    decode backend, a same-role scheduling strategy, and the store address. The
+    role Services already route only to Ready pods and kube-proxy spreads
+    requests across them. With ``released_layout`` the result is that
+    environment exactly: names, values and order. A proxy those releases
+    created keeps it, because dropping a variable changes the pod template, and
+    the Deployment would then restart every proxy pod and cut the streams they
+    serve.
 
     Args:
-        mooncake: The ``spec["mooncake"]`` block; its optional ``proxy`` section
-            supplies the same-role scheduling strategy.
+        mooncake: The ``spec["mooncake"]`` block; the released layout reads the
+            scheduling strategy of its optional ``proxy`` section.
+        released_layout: Render the environment of releases up to v8.23.0.
 
     Returns:
         A mapping of environment variable name to value, ready to attach to the
         proxy container.
     """
+    if not released_layout:
+        return {
+            PD_PROXY_NO_DECODE_BACKEND_STATUS_ENV: PD_PROXY_NO_DECODE_BACKEND_STATUS,
+            PD_PROXY_NO_DECODE_BACKEND_MESSAGE_ENV: PD_PROXY_NO_DECODE_BACKEND_MESSAGE,
+        }
     proxy = mooncake.get("proxy", {}) or {}
-    scheduling = proxy.get("scheduling") or PD_PROXY_DEFAULT_SCHEDULING
-    store_address = f"{MOONCAKE_MASTER_SERVICE}:{MOONCAKE_MASTER_RPC_PORT}"
     return {
-        PD_PROXY_RESIDENCY_TIMEOUT_ENV: str(PD_PROXY_RESIDENCY_TIMEOUT_SECONDS),
-        PD_PROXY_RESIDENCY_BLOCKING_ENV: PD_PROXY_RESIDENCY_BLOCKING,
-        PD_PROXY_RESIDENCY_MISS_TARGET_ENV: PD_PROXY_RESIDENCY_MISS_TARGET,
-        PD_PROXY_DECODE_ROUTING_ENV: PD_PROXY_DECODE_ROUTING_READY_ONLY,
-        PD_PROXY_NO_DECODE_BACKEND_ACTION_ENV: PD_PROXY_NO_DECODE_BACKEND_ACTION_REJECT,
+        PD_PROXY_RELEASED_ENV_MARKER: "2",
+        "PD_PROXY_RESIDENCY_CHECK_BLOCKING": "false",
+        "PD_PROXY_RESIDENCY_MISS_TARGET": "prefill",
+        "PD_PROXY_DECODE_ROUTING": "ready_only",
+        "PD_PROXY_NO_DECODE_BACKEND_ACTION": "reject",
         PD_PROXY_NO_DECODE_BACKEND_STATUS_ENV: PD_PROXY_NO_DECODE_BACKEND_STATUS,
         PD_PROXY_NO_DECODE_BACKEND_MESSAGE_ENV: PD_PROXY_NO_DECODE_BACKEND_MESSAGE,
-        PD_PROXY_SCHEDULING_ENV: scheduling,
-        PD_PROXY_STORE_ADDRESS_ENV: store_address,
+        "PD_PROXY_SCHEDULING": proxy.get("scheduling") or "round_robin",
+        "PD_PROXY_STORE_ADDRESS": f"{MOONCAKE_MASTER_SERVICE}:{MOONCAKE_MASTER_RPC_PORT}",
     }
+
+
+def _carries_released_pd_proxy_env(deployment: Any) -> bool:
+    """Whether a live PD proxy Deployment still has the environment of v8.23.0 or earlier."""
+    template = getattr(getattr(deployment, "spec", None), "template", None)
+    containers = getattr(getattr(template, "spec", None), "containers", None) or []
+    return any(
+        getattr(variable, "name", None) == PD_PROXY_RELEASED_ENV_MARKER
+        for container in containers
+        if getattr(container, "name", None) == PD_PROXY_CONTAINER
+        for variable in getattr(container, "env", None) or []
+    )
 
 
 def _pd_proxy_replicas(mooncake: Mapping[str, Any]) -> int:
@@ -1589,18 +1598,31 @@ class InferenceMonitor:
         # the Lease, so it expires and a standby takes over instead of this
         # process holding leadership for as long as the pass hangs.
         self._pass_stall_seconds = PASS_STALL_INTERVALS * max(1.0, float(reconcile_interval))
+        # A process whose loop has shown no progress (a finished iteration,
+        # leader or standby, or a step of a running pass) for longer than this
+        # is wedged, and its liveness probe fails. It is the stall deadline
+        # plus one Lease duration, so a wedged leader's standby has taken over
+        # before the kubelet restarts it (195 s at the default 15 s interval).
+        self._liveness_window_seconds = self._pass_stall_seconds + (
+            LEASE_DURATION_INTERVALS * max(1.0, float(reconcile_interval))
+        )
 
         # Metrics
         self._reconcile_count = 0
         self._errors_count = 0
         # Monotonic stamp of the last completed loop iteration (leader pass or
-        # standby lease check). Exported as seconds_since_last_pass so a loop
-        # that is wedged — not crashed, which the probes would catch — is
-        # visible; initialised at construction so the gauge exists before the
-        # first iteration and grows if the loop never starts.
+        # standby lease check). Exported as seconds_since_last_pass, and with
+        # the last pass step as seconds_since_last_progress, which the liveness
+        # probe reads, so a loop that is wedged rather than crashed restarts;
+        # initialised at construction so the gauges exist before the first
+        # iteration and grow if the loop never starts.
         self._last_loop_completed_at = time.monotonic()
         # Last progress of the running leader pass (see _pass_stall_seconds).
         self._pass_progress_at = self._last_loop_completed_at
+
+        # Set by stop(): the running pass starts no further endpoint and the
+        # pause between passes ends at once. start() makes a fresh one.
+        self._stopping = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Reconciliation loop
@@ -1612,6 +1634,7 @@ class InferenceMonitor:
             logger.warning("Inference monitor already running")
             return
         self._running = True
+        self._stopping = asyncio.Event()
         logger.info(
             "Starting inference monitor for %s in %s (interval=%ds)",
             self.cluster_id,
@@ -1624,24 +1647,47 @@ class InferenceMonitor:
         self._lease_name = lease_name
         self._lease_holder = pod_name
 
-        while self._running:
-            try:
-                if self._try_acquire_lease(lease_name, pod_name):
-                    with self._renewing_leadership():
-                        await self.reconcile()
-                else:
-                    logger.debug("Not the leader, waiting...")
-            except ReconcileFencedError as error:
-                logger.warning("Reconciliation stopped after authority loss: %s", error)
-            except Exception as error:
-                logger.error("Reconciliation error: %s", error, exc_info=True)
-                self._errors_count += 1
-            self._last_loop_completed_at = time.monotonic()
-            try:
-                await asyncio.sleep(self.reconcile_interval)
-            except Exception as error:
-                logger.error("Sleep interrupted: %s", error)
-                break
+        try:
+            while self._running:
+                try:
+                    if self._try_acquire_lease(lease_name, pod_name):
+                        with self._renewing_leadership():
+                            await self.reconcile()
+                    else:
+                        logger.debug("Not the leader, waiting...")
+                except ReconcileFencedError as error:
+                    logger.warning("Reconciliation stopped after authority loss: %s", error)
+                except Exception as error:
+                    logger.error("Reconciliation error: %s", error, exc_info=True)
+                    self._errors_count += 1
+                self._last_loop_completed_at = time.monotonic()
+                try:
+                    await self._pause_between_passes()
+                except Exception as error:
+                    logger.error("Sleep interrupted: %s", error)
+                    break
+        finally:
+            # No pass is running any more: hand the Lease over now instead of
+            # leaving the standby to wait for it to expire.
+            self._release_lease()
+
+    async def _pause_between_passes(self) -> None:
+        """Wait one reconcile interval, or only until stop() is called."""
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stopping.wait(), timeout=self.reconcile_interval)
+
+    async def _stop_requested_at_safe_point(self) -> bool:
+        """Let the event loop run, then report whether stop() has been called.
+
+        A pass makes its Kubernetes and DynamoDB calls synchronously, so the
+        SIGTERM handler, which the event loop runs as a callback, can run only
+        where the pass yields: here, between two endpoints. The pause is above
+        zero so the loop handles a signal that arrived during the previous
+        endpoint before the pass resumes; once it has, the pass starts no
+        further endpoint.
+        """
+        await asyncio.sleep(_SAFE_POINT_PAUSE_SECONDS)
+        return self._stopping.is_set()
 
     @staticmethod
     def _lease_annotations(lease: Any) -> dict[str, str]:
@@ -1657,7 +1703,7 @@ class InferenceMonitor:
             renew_time = renew_time.replace(tzinfo=UTC)
         duration = getattr(lease.spec, "lease_duration_seconds", None)
         if not isinstance(duration, int) or isinstance(duration, bool) or duration <= 0:
-            duration = self.reconcile_interval * 3
+            duration = self.reconcile_interval * LEASE_DURATION_INTERVALS
         return bool((now - renew_time).total_seconds() >= int(duration))
 
     def _stamp_lease_epoch(self, lease: Any, epoch: str) -> None:
@@ -1673,7 +1719,7 @@ class InferenceMonitor:
         """Acquire/renew a Lease and establish one stable acquisition epoch."""
         coordination_v1 = client.CoordinationV1Api(self.api_client)
         now = datetime.now(UTC)
-        lease_duration = self.reconcile_interval * 3
+        lease_duration = self.reconcile_interval * LEASE_DURATION_INTERVALS
         try:
             lease = coordination_v1.read_namespaced_lease(
                 lease_name, self.namespace, _request_timeout=self._k8s_timeout
@@ -1849,10 +1895,52 @@ class InferenceMonitor:
             self._leadership_lost.set()
             raise ReconcileFencedError("leader Lease holder or epoch changed")
 
+    def _release_lease(self) -> None:
+        """Give up the leader Lease this process holds, so the standby takes over at once.
+
+        Called with no pass running. Only the holder and epoch this process
+        owns are released, by clearing the holder in a compare-and-swap replace
+        of the Lease as read (as client-go's ``ReleaseOnCancel`` and
+        :meth:`gco.services.leader_lease.LeaseElector.release` do). A Lease
+        another replica holds is left alone, and any failure only means the
+        Lease expires on its own. No mutation follows a release: leadership
+        counts as lost until the next acquisition.
+        """
+        lease_name, holder, epoch = self._lease_name, self._lease_holder, self._leader_epoch
+        if not (lease_name and holder and epoch):
+            return
+        self._leadership_lost.set()
+        self._leader_epoch = None
+        coordination_v1 = client.CoordinationV1Api(self.api_client)
+        try:
+            lease = coordination_v1.read_namespaced_lease(
+                lease_name, self.namespace, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
+            spec = present(lease.spec, "lease.spec")
+            if (
+                spec.holder_identity != holder
+                or self._lease_annotations(lease).get(_LEADER_EPOCH_ANNOTATION) != epoch
+            ):
+                return
+            spec.holder_identity = None
+            spec.renew_time = datetime.now(UTC)
+            coordination_v1.replace_namespaced_lease(
+                lease_name, self.namespace, lease, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
+        except Exception as error:
+            logger.warning("Could not release the leader Lease (it will expire): %s", error)
+            return
+        logger.info("Released leader Lease %s held by %s", lease_name, holder)
+
     def stop(self) -> None:
-        """Stop the reconciliation loop and prevent additional mutations."""
+        """Stop the reconciliation loop and prevent additional mutations.
+
+        A running pass starts no further endpoint, the pause between passes
+        ends, and start() then releases the leader Lease and returns.
+        """
         self._running = False
         self._leadership_lost.set()
+        self._stopping.set()
         logger.info("Inference monitor stopped")
 
     @staticmethod
@@ -2305,6 +2393,9 @@ class InferenceMonitor:
 
         for endpoint in endpoints:
             name = endpoint.get("endpoint_name", "unknown")
+            if await self._stop_requested_at_safe_point():
+                logger.info("Shutting down: pass ends before endpoint %s", name)
+                return actions
             self._mark_pass_progress()
             try:
                 action = await self._reconcile_endpoint(endpoint)
@@ -2339,6 +2430,9 @@ class InferenceMonitor:
         for endpoint in endpoints:
             if endpoint.get("desired_state") != "deleted":
                 continue
+            if await self._stop_requested_at_safe_point():
+                logger.info("Shutting down: pass ends before the remaining purges")
+                return actions
             self._mark_pass_progress()
             ep_name = endpoint.get("endpoint_name")
             if not isinstance(ep_name, str):
@@ -2806,17 +2900,22 @@ class InferenceMonitor:
     ) -> bool:
         """Promote ``desired_state`` from ``deploying`` to ``running`` once every region is up.
 
-        The inference proxy serves an endpoint only while its ``desired_state``
-        is ``running``, so a deploying endpoint that never promotes is
-        unreachable even when every pod is Ready. Promotion is decided from live
-        local readiness (``local_state``, the state this pass just wrote) plus
-        explicit ``running`` observations for every *other* target region. A
-        region whose rolling update is still under way (``rollout_complete`` is
-        false here, or ``rollout_complete: false`` in its stored status) serves
-        from the previous template's pods but has not applied the change, so it
-        holds the promotion back. The
-        endpoint object may contain a stale local region_status from before this
-        pass, which is why the local region is never read back from it.
+        ``deploying`` is the endpoint-wide summary while any target region is
+        still converging; ``running`` says the last change is applied in every
+        region, and is what ``gco inference status`` and ``list`` report and
+        what a caller waits for. Serving does not wait for it: the inference
+        proxy serves a region whose own status is ``running`` under either
+        state.
+
+        Promotion is decided from live local readiness (``local_state``, the
+        state this pass just wrote) plus explicit ``running`` observations for
+        every *other* target region. A region whose rolling update is still
+        under way (``rollout_complete`` is false here, or
+        ``rollout_complete: false`` in its stored status) serves from the
+        previous template's pods but has not applied the change, so it holds the
+        promotion back. The endpoint object may contain a stale local
+        region_status from before this pass, which is why the local region is
+        never read back from it.
 
         The write is fenced on the lifecycle id and the ``deploying`` state so a
         concurrent delete or replacement cannot be resurrected. Both the classic
@@ -3070,7 +3169,7 @@ class InferenceMonitor:
         endpoint: dict[str, Any] | None = None,
         *,
         cold_tier_error: str | None = None,
-    ) -> str:
+    ) -> RoleStatusReport:
         """Write the role-keyed region status for a Mooncake endpoint.
 
         For split topologies the status carries a ``roles`` map of observed and
@@ -3088,14 +3187,22 @@ class InferenceMonitor:
         ``gco inference status`` shows that the hot-path store is serving
         without its S3 tier instead of hiding the downgrade.
 
+        Readiness counts every Ready pod, so a region keeps serving from the
+        previous template's pods through a rolling update (after
+        ``update-image`` or a ``configure-store`` roll). Whether the update is
+        done counts only pods of each Deployment's current template, as for a
+        classic endpoint: until they meet the floor, a running region reports
+        ``rollout_complete: false`` and the endpoint is not promoted.
+
         Args:
             cold_tier_error: Why the cold tier was dropped this pass, or
                 ``None`` when it resolved (or was not requested).
 
         Returns:
-            The reported endpoint state: ``"running"`` once every desired role
-            replica (and, when applicable, the proxy's configured replicas and
-            the master) is Ready, otherwise ``"creating"``.
+            The reported state, ``"running"`` once every desired role replica
+            (and, when applicable, the proxy's configured replicas and the
+            master) is Ready, otherwise ``"creating"``, and whether pods of the
+            current templates meet the same floors.
         """
         mode = mooncake.get("mode")
         roles = self._desired_roles(mode)
@@ -3103,6 +3210,7 @@ class InferenceMonitor:
         total_ready = 0
         total_desired = 0
         all_ready = True
+        rollout_complete = True
 
         if mode in ("disaggregated", "both"):
             roles_block: dict[str, Any] = {}
@@ -3110,34 +3218,37 @@ class InferenceMonitor:
                 if role not in roles:
                     continue
                 configured_floor = self._replica_count_for_role(mooncake, role)
-                ready, desired = self._deployment_replicas(
-                    self._get_deployment(f"{name}-{role}", ns), configured_floor
-                )
+                role_deployment = self._get_deployment(f"{name}-{role}", ns)
+                ready, desired = self._deployment_replicas(role_deployment, configured_floor)
                 roles_block[role] = {"ready": ready, "desired": desired}
                 total_ready += ready
                 total_desired += desired
                 if ready < configured_floor:
                     all_ready = False
+                if _rolled_out_ready_replicas(role_deployment) < configured_floor:
+                    rollout_complete = False
             extra["roles"] = roles_block
             # Requests reach a split endpoint only through its prefill-decode
             # proxy, so Ready roles alone do not make it serve.
             proxy_floor = _pd_proxy_replicas(mooncake)
-            proxy_ready, proxy_desired = self._deployment_replicas(
-                self._get_deployment(f"{name}-proxy", ns), proxy_floor
-            )
+            proxy_deployment = self._get_deployment(f"{name}-proxy", ns)
+            proxy_ready, proxy_desired = self._deployment_replicas(proxy_deployment, proxy_floor)
             extra["proxy"] = {"ready": proxy_ready, "desired": proxy_desired}
             if proxy_ready < proxy_floor:
                 all_ready = False
+            if _rolled_out_ready_replicas(proxy_deployment) < proxy_floor:
+                rollout_complete = False
         else:
             # Store mode runs a single kv_both Deployment under the endpoint name.
             configured_floor = self._replica_count_for_role(mooncake, "single")
-            ready, desired = self._deployment_replicas(
-                self._get_deployment(name, ns), configured_floor
-            )
+            single_deployment = self._get_deployment(name, ns)
+            ready, desired = self._deployment_replicas(single_deployment, configured_floor)
             total_ready += ready
             total_desired += desired
             if ready < configured_floor:
                 all_ready = False
+            if _rolled_out_ready_replicas(single_deployment) < configured_floor:
+                rollout_complete = False
 
         store = mooncake.get("store") or {}
         if store.get("enabled"):
@@ -3160,6 +3271,8 @@ class InferenceMonitor:
                 all_ready = False
 
         state = "running" if all_ready and total_desired > 0 else "creating"
+        if state == "running" and not rollout_complete:
+            extra["rollout_complete"] = False
         status_conditions = self._status_write_conditions(endpoint or {})
         self.store.update_region_status(
             name,
@@ -3170,7 +3283,7 @@ class InferenceMonitor:
             extra=extra or None,
             **status_conditions,
         )
-        return state
+        return RoleStatusReport(state, rollout_complete)
 
     async def _reconcile_mooncake(
         self,
@@ -3424,9 +3537,9 @@ class InferenceMonitor:
 
         # Step 8: role-keyed status, then the same deploying -> running
         # promotion the classic path performs. Without it a Mooncake endpoint
-        # would sit in ``deploying`` forever and the proxy would refuse every
-        # request with "not ready in this region" despite Ready role pods.
-        state = self._report_role_status(
+        # would report ``deploying`` forever despite Ready role pods (the
+        # inference proxy still serves a region whose own status is running).
+        report = self._report_role_status(
             name,
             ns,
             mooncake,
@@ -3434,8 +3547,10 @@ class InferenceMonitor:
             endpoint,
             cold_tier_error=services.error if services.cold_tier_unresolved else None,
         )
-        self._promote_deploying_endpoint(name, endpoint, state)
-        return {"action": "reconcile_mooncake", "endpoint": name, "state": state}
+        self._promote_deploying_endpoint(
+            name, endpoint, report.state, rollout_complete=report.rollout_complete
+        )
+        return {"action": "reconcile_mooncake", "endpoint": name, "state": report.state}
 
     def _reconcile_stopped(
         self,
@@ -5204,8 +5319,8 @@ class InferenceMonitor:
         """Materialize the prefill-decode proxy front for a disaggregated endpoint.
 
         Disaggregated and ``both`` modes are fronted by a lightweight proxy that
-        runs the residency check and dispatches each request to the prefill and
-        decode pods. It materializes a ConfigMap, a proxy Deployment with at
+        primes a prefill pod with each request and streams the answer from a
+        decode pod. It materializes a ConfigMap, a proxy Deployment with at
         least one replica, and a Service whose selector matches only the proxy
         pods. The shared HTTPRoute attached to ``gco-system/gco-gateway`` sends
         ``/inference`` to ``gco-system/inference-proxy``; that authenticated
@@ -5268,7 +5383,13 @@ class InferenceMonitor:
             lifecycle_id,
         )
 
-        proxy_env = build_pd_proxy_config(mooncake)
+        # Read first: in the steady state the proxy exists and is converged by
+        # the merge patch below, with no create attempt. A proxy an earlier
+        # release created keeps the environment that release gave it.
+        existing = self._get_deployment(proxy_name, ns)
+        proxy_env = build_pd_proxy_config(
+            mooncake, released_layout=_carries_released_pd_proxy_env(existing)
+        )
         container_env = [client.V1EnvVar(name=k, value=v) for k, v in proxy_env.items()]
         # Deliver the admin key by Secret reference only — its value is never
         # placed on the spec or a command argument.
@@ -5318,7 +5439,7 @@ class InferenceMonitor:
         proxy_volume_name = "pd-proxy-script"
 
         container = client.V1Container(
-            name="proxy",
+            name=PD_PROXY_CONTAINER,
             image=proxy.get("image"),
             command=["python3", PD_PROXY_SCRIPT_PATH],
             ports=[client.V1ContainerPort(container_port=PD_PROXY_PORT)],
@@ -5400,9 +5521,6 @@ class InferenceMonitor:
             ),
         )
 
-        # Read first: in the steady state the proxy exists and is converged by
-        # the merge patch below, with no create attempt.
-        existing = self._get_deployment(proxy_name, ns)
         if existing is None:
             self._assert_mutation_authority()
             try:
@@ -6300,7 +6418,6 @@ class InferenceMonitor:
                 _tls_proxy_config_map_name(name),
             ),
             legacy_ingresses=_legacy_ingress_names(name),
-            legacy_http_routes=(name, f"{name}-canary", f"{name}-proxy"),
             generated_admin_secret=f"{name}-admin",
         )
 
@@ -6874,42 +6991,6 @@ class InferenceMonitor:
                     self.networking_v1.patch_namespaced_ingress,
                     ingress_name,
                     namespace,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                pending=pending,
-                errors=errors,
-            )
-
-        custom_objects = client.CustomObjectsApi(self.api_client)
-        for route_name in inventory.legacy_http_routes:
-            resources_found |= self._delete_and_confirm(
-                kind="httproute",
-                resource_name=route_name,
-                delete_call=partial(
-                    custom_objects.delete_namespaced_custom_object,
-                    group="gateway.networking.k8s.io",
-                    version="v1",
-                    namespace=namespace,
-                    plural="httproutes",
-                    name=route_name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                read_call=partial(
-                    custom_objects.get_namespaced_custom_object,
-                    group="gateway.networking.k8s.io",
-                    version="v1",
-                    namespace=namespace,
-                    plural="httproutes",
-                    name=route_name,
-                    _request_timeout=self._k8s_timeout,
-                ),
-                patch_metadata=partial(
-                    custom_objects.patch_namespaced_custom_object,
-                    group="gateway.networking.k8s.io",
-                    version="v1",
-                    namespace=namespace,
-                    plural="httproutes",
-                    name=route_name,
                     _request_timeout=self._k8s_timeout,
                 ),
                 pending=pending,
@@ -7559,13 +7640,25 @@ class InferenceMonitor:
     # ------------------------------------------------------------------
 
     def get_metrics(self) -> dict[str, Any]:
+        """The monitor's counters, exported as gauges at every scrape.
+
+        ``seconds_since_last_progress`` counts from the later of the last
+        finished loop iteration and the last step of a running pass, so a
+        standby (whose iterations keep finishing) and a long pass that keeps
+        progressing both stay below ``liveness_window_seconds``; the liveness
+        probe in ``32-inference-monitor.yaml`` fails once it is above.
+        """
+        now = time.monotonic()
         return {
             "cluster_id": self.cluster_id,
             "region": self.region,
             "running": self._running,
             "reconcile_count": self._reconcile_count,
             "errors_count": self._errors_count,
-            "seconds_since_last_pass": time.monotonic() - self._last_loop_completed_at,
+            "seconds_since_last_pass": now - self._last_loop_completed_at,
+            "seconds_since_last_progress": now
+            - max(self._last_loop_completed_at, self._pass_progress_at),
+            "liveness_window_seconds": self._liveness_window_seconds,
         }
 
 
@@ -7614,9 +7707,10 @@ async def main() -> None:
     # container, and PID 1 receives no kernel-default signal handling — so
     # without an explicit handler SIGTERM was silently ignored, every pod
     # rotation burned the full terminationGracePeriodSeconds, and the kubelet
-    # SIGKILLed the monitor mid-reconcile (exit 137). The handler flips the
-    # same stop flag the reconcile loop already honors, so shutdown waits for
-    # the in-flight cycle and exits 0 within one reconcile interval.
+    # SIGKILLed the monitor mid-reconcile (exit 137). The handler stops the
+    # monitor: a pass in progress finishes the endpoint it is reconciling and
+    # starts no other, the monitor releases its leader Lease so the standby
+    # takes over on its next attempt, and the process exits 0.
     shutdown_requested = asyncio.Event()
     loop = asyncio.get_running_loop()
 
