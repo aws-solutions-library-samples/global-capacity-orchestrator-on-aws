@@ -310,9 +310,25 @@ def _no_real_mission_memory():
     if _GCO_MCP_PATH not in sys.path:
         sys.path.insert(0, _GCO_MCP_PATH)
     from mission import _engine_factory as _factory
+    from mission import deployment as _deployment
 
-    with patch.object(_factory, "_build_memory_store", return_value=None):
-        yield
+    # ``gco mission`` / ``gco swarm`` store the CLI's project and global
+    # Region process-wide (mission.deployment.configure); a CLI test must
+    # not leave them behind for the next test in the same worker.
+    saved = (
+        _deployment._configured_project_name,
+        _deployment._configured_global_region,
+        _deployment._configured_project_root,
+    )
+    try:
+        with patch.object(_factory, "_build_memory_store", return_value=None):
+            yield
+    finally:
+        (
+            _deployment._configured_project_name,
+            _deployment._configured_global_region,
+            _deployment._configured_project_root,
+        ) = saved
 
 
 # ============================================================================

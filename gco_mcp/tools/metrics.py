@@ -177,6 +177,34 @@ async def metrics_cloudwatch_get(
 # =============================================================================
 
 
+def _job_log_text(raw: str, job_name: str) -> str:
+    """Return the log text inside ``gco --output json jobs logs`` output.
+
+    ``gco jobs logs`` prints the log as plain text, which the CLI's root
+    output group wraps as ``{"status": "ok", "output": "<log>"}`` in JSON
+    mode (``{"status": "ok"}`` for an empty log). Splitting that document
+    instead of the log hid every JSON-key match and left one line for regex
+    matching. An ``{"error": ...}`` payload is a retrieval failure; text that
+    is not such a document is used as-is.
+    """
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return raw
+    if isinstance(payload, dict) and "error" in payload:
+        message = str(payload["error"])
+        kind = "unknown_job" if "not found" in message.lower() else "unreachable"
+        raise MetricReaderError(
+            ErrorCode.LOG_RETRIEVAL_FAILED,
+            {"kind": kind, "job_name": job_name, "message": message},
+        )
+    if isinstance(payload, dict) and payload.get("status") == "ok":
+        output = payload.get("output", "")
+        if isinstance(output, str):
+            return output
+    return raw
+
+
 @mcp.tool(tags={"safe", "metrics"})
 @audit_logged
 async def metrics_from_job_logs(
@@ -272,21 +300,7 @@ async def metrics_from_job_logs(
             str(clamped),
         )
 
-        # Translate an ``{"error": ...}`` CLI payload into a retrieval failure
-        # . Plain log text is not JSON and is used as-is.
-        try:
-            payload = json.loads(raw)
-        except ValueError:
-            payload = None
-        if isinstance(payload, dict) and "error" in payload:
-            message = str(payload["error"])
-            kind = "unknown_job" if "not found" in message.lower() else "unreachable"
-            raise MetricReaderError(
-                ErrorCode.LOG_RETRIEVAL_FAILED,
-                {"kind": kind, "job_name": job_name, "message": message},
-            )
-
-        lines = raw.splitlines()
+        lines = _job_log_text(raw, job_name).splitlines()
 
         if pattern is not None:
             candidates: list[object] = list(logs.extract_by_regex(lines, pattern))

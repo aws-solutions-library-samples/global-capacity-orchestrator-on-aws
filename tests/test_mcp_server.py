@@ -2888,7 +2888,10 @@ class TestAnalyticsTools:
 
     @pytest.mark.asyncio
     async def test_analytics_login_url(self):
-        with patch("cli_runner.subprocess.run") as mock:
+        with (
+            patch("cli_runner.subprocess.run") as mock,
+            patch.dict(os.environ, {"GCO_STUDIO_PASSWORD": "from-the-server-env"}),
+        ):
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.analytics_login_url(username="alice")
             cmd = mock.call_args[0][0]

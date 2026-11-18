@@ -24,6 +24,7 @@ from typing import Any
 import cli_runner
 from audit import _try_get_task_id
 from fastmcp.exceptions import ToolError
+from iam import child_environment
 
 from tools._task_status import TaskStatusWriter, is_valid_task_id, make_task_id
 
@@ -324,9 +325,11 @@ async def _run_long_task(
 
         process = await asyncio.create_subprocess_exec(
             *spawn_argv,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cli_runner.PROJECT_ROOT),
+            env=child_environment(),
         )
         status_writer.set_pid(process.pid)
 

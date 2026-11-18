@@ -1503,8 +1503,10 @@ def test_analytics_wrapper_matrix(
     [({}, None), ({"password": "secret"}, {"GCO_STUDIO_PASSWORD": "secret"})],
 )
 def test_analytics_login_url_passes_the_password_in_the_environment(
-    kwargs: dict[str, Any], expected_env: dict[str, str] | None
+    kwargs: dict[str, Any], expected_env: dict[str, str] | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Without a password argument the child inherits the server's variable.
+    monkeypatch.setenv("GCO_STUDIO_PASSWORD", "from-the-server-env")
     with _isolated_tool_module("analytics") as loaded:
         assert _invoke(loaded.module.analytics_login_url, "alice", **kwargs) == CLI_RESULT
         loaded.run_cli.assert_called_once_with(

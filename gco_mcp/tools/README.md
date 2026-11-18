@@ -449,6 +449,22 @@ variables reach the child only and are never logged. `@audit_logged` redacts
 arguments whose names contain `password`, `secret`, `token` or `key`, and logs a
 `url` / `*_url` argument as its scheme and host only.
 
+Every child process (the `gco` runners, `_run_long_task`, and the kubectl calls
+behind the `gco://` resources) gets `/dev/null` as stdin. Under the stdio
+transport the server's own stdin is the client's message stream, so an
+inherited one would let a CLI prompt read the client's messages. A prompt now
+reads end-of-file and the CLI exits at once (`Aborted!`). A tool must not rely
+on a prompt: pass `-y` or an environment variable instead, or refuse before
+calling the CLI, as `analytics_login_url` does without a password.
+
+Every child process also gets its environment from `iam.child_environment(env)`:
+the server's own environment plus a tool's `env`, unless `GCO_MCP_ROLE_ARN` is
+set. Then the child gets the MCP role instead of the server's ambient
+credentials: the server's credential variables are left out, and the child
+reads the role from a container credentials endpoint on `127.0.0.1` with
+private AWS config files that carry no credentials. A new spawn site must pass
+`env=child_environment(...)` and `stdin=DEVNULL` like the existing ones.
+
 Most tools follow this `_run_cli` shell-out pattern. A few domains — notably the
 image-registry and image-mirror tools in `images.py` — instead wrap their CLI
 manager/core directly via `asyncio.to_thread(...)` (e.g. `cli.images.ImageManager`,

@@ -95,7 +95,12 @@ def test_analytics_login_password_goes_through_the_environment(recorder: _Record
     assert recorder.env == {"GCO_STUDIO_PASSWORD": "Pa55/word"}
 
 
-def test_analytics_login_without_password_adds_nothing(recorder: _Recorder) -> None:
+def test_analytics_login_without_password_adds_nothing(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The child inherits the server's GCO_STUDIO_PASSWORD; without either the
+    # tool refuses before running the CLI (tests/test_mcp_child_stdin.py).
+    monkeypatch.setenv("GCO_STUDIO_PASSWORD", "from-the-server-env")
     asyncio.run(run_mcp.analytics_login_url(username="alice"))
     assert recorder.args == ("analytics", "studio", "login", "--username", "alice")
     assert recorder.env is None

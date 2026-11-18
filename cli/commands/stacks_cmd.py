@@ -853,6 +853,11 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
     (a private endpoint, a CIDR allowlist) is a warning: the access still
     applies from inside the network.
 
+    With -o json or -o yaml a successful run prints one document with
+    cluster, region, principal_arn, api_server_reachable, node_count,
+    kubectl_error and warning. When kubectl reached the API server,
+    kubectl_error and warning are null; when it could not, node_count is.
+
     Examples:
         gco stacks access
         gco stacks access -r us-west-2
@@ -864,6 +869,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
     from ..config import _load_cdk_json
 
     formatter = get_output_formatter(config)
+    table = config.output_format == "table"
 
     # Determine region. An explicitly empty workload list (a control-plane-only
     # deployment) has no cluster to reach, so say so instead of guessing.
@@ -1072,11 +1078,22 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
             check=False,
         )
         stderr = (result.stderr or "").strip()
+        document: dict[str, Any] = {
+            "cluster": cluster,
+            "region": region,
+            "principal_arn": principal_arn,
+            "api_server_reachable": result.returncode == 0,
+            "node_count": None,
+            "kubectl_error": None,
+            "warning": None,
+        }
         if result.returncode == 0:
             node_count = len(
                 [line for line in result.stdout.strip().split("\n")[1:] if line.strip()]
             )
-            print(result.stdout)
+            document["node_count"] = node_count
+            if table:
+                print(result.stdout)
             formatter.print_info(f"Access configured successfully. {node_count} node(s) ready.")
         elif _kubectl_could_not_connect(stderr):
             # Reachability is a property of this host's network path, not of
@@ -1085,7 +1102,7 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
             if private_endpoint_only:
                 # Don't double-warn — we already explained this above. Just
                 # restate the fix so the operator doesn't have to scroll up.
-                formatter.print_warning(
+                warning = (
                     "kubectl could not reach the API server, as expected for a "
                     "private-only cluster from outside the VPC. The IAM access entry "
                     "and admin policy association above did succeed, so kubectl will "
@@ -1096,13 +1113,16 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                 # When the laptop's egress IP isn't in the CIDR allowlist, AWS
                 # returns the API server endpoint but kubectl times out at the
                 # TLS handshake.
-                formatter.print_warning(
+                warning = (
                     "kubectl could not reach the API server. If the cluster's "
                     "endpoint_access is restricted to a CIDR allowlist, confirm "
                     "your egress IP is covered, or set endpoint_access to "
                     '"PUBLIC_AND_PRIVATE" in cdk.json and run: gco stacks deploy '
                     f"{config.project_name}-{region} -y"
                 )
+            formatter.print_warning(warning)
+            document["kubectl_error"] = stderr
+            document["warning"] = warning
         else:
             # The API server answered (Unauthorized, Forbidden) or kubectl
             # could not even build a request (a broken credential plugin).
@@ -1116,6 +1136,8 @@ def setup_access(config: Any, cluster: Any, region: Any) -> None:
                 "doctor' if it still fails."
             )
             sys.exit(1)
+        if not table:
+            formatter.print(document)
 
     except subprocess.CalledProcessError as e:
         formatter.print_error(f"Command failed: {e.stderr or e.stdout or str(e)}")
