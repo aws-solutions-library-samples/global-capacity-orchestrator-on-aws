@@ -41,6 +41,53 @@ def _resolve_result_job_name(result: Any) -> str | None:
     return job_name
 
 
+#: ``submit`` / ``submit-direct --wait`` exit status when the job ran and
+#: finished with status ``failed``. Distinct from 1 (not submitted, or the wait
+#: could not read the job) so a script can tell "do not resubmit, it ran" from
+#: "nothing ran"; 2 stays Click's usage error.
+EXIT_JOB_FAILED = 3
+#: ``--wait`` exit status when the job had not finished by ``--timeout``. The
+#: job keeps running; only the wait gave up.
+EXIT_WAIT_TIMEOUT = 4
+
+
+def _wait_for_submitted_job(
+    formatter: Any,
+    job_manager: Any,
+    *,
+    job_name: str,
+    namespace: str,
+    region: str | None,
+    timeout: int,
+) -> None:
+    """Wait for a submitted job and exit non-zero unless it succeeded.
+
+    The submission already succeeded when this runs, so a failure here is
+    reported as what it is (the job failed, the wait timed out, the status
+    read failed) rather than as a failed submission. The exit status
+    contract is spelled out in the ``submit`` / ``submit-direct`` help.
+    """
+    formatter.print_info(f"Waiting for job {job_name} to complete...")
+    try:
+        final_job = job_manager.wait_for_job(
+            job_name=job_name,
+            namespace=namespace,
+            region=region,
+            timeout_seconds=timeout,
+        )
+    except TimeoutError as e:
+        formatter.print_error(f"Job {job_name} was submitted but is not finished: {e}")
+        sys.exit(EXIT_WAIT_TIMEOUT)
+    except Exception as e:
+        formatter.print_error(f"Job {job_name} was submitted, but waiting for it failed: {e}")
+        sys.exit(1)
+
+    if str(final_job.status).lower() == "failed":
+        formatter.print_error(f"Job {job_name} finished with status: {final_job.status}")
+        sys.exit(EXIT_JOB_FAILED)
+    formatter.print_success(f"Job completed with status: {final_job.status}")
+
+
 @click.group()
 @pass_config
 def jobs(config: Any) -> None:
@@ -67,7 +114,12 @@ def jobs(config: Any) -> None:
 )
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @sandbox_option
-@click.option("--wait", "-w", is_flag=True, help="Wait for job completion")
+@click.option(
+    "--wait",
+    "-w",
+    is_flag=True,
+    help="Wait for job completion; exits 3 if the job fails, 4 on --timeout",
+)
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
 def submit_job(
@@ -85,6 +137,14 @@ def submit_job(
     """Submit a job to GCO.
 
     MANIFEST_PATH can be a YAML file or directory containing YAML files.
+
+    \b
+    Exit status:
+      0  submitted; with --wait, the job succeeded
+      1  not submitted, or --wait could not read the job's status
+      2  invalid options or arguments
+      3  --wait: the job finished with status failed
+      4  --wait: the job had not finished when --timeout expired
     """
     formatter = get_output_formatter(config)
     job_manager = get_job_manager(config)
@@ -113,6 +173,7 @@ def submit_job(
             sandbox=sandbox,
         )
 
+    wait_target: tuple[str, str] | None = None
     try:
         result = job_manager.submit_job(
             manifests=manifest_path,
@@ -151,18 +212,21 @@ def submit_job(
                 resolved_ns = _resolve_result_namespace(
                     result, fallback=namespace or config.default_namespace
                 )
-                formatter.print_info(f"Waiting for job {job_name} to complete...")
-                final_job = job_manager.wait_for_job(
-                    job_name=job_name,
-                    namespace=resolved_ns,
-                    region=target_region,
-                    timeout_seconds=timeout,
-                )
-                formatter.print_success(f"Job completed with status: {final_job.status}")
+                wait_target = (job_name, resolved_ns)
 
     except Exception as e:
         formatter.print_error(f"Failed to submit job: {e}")
         sys.exit(1)
+
+    if wait_target is not None:
+        _wait_for_submitted_job(
+            formatter,
+            job_manager,
+            job_name=wait_target[0],
+            namespace=wait_target[1],
+            region=target_region,
+            timeout=timeout,
+        )
 
 
 @jobs.command("submit-direct")
@@ -176,7 +240,12 @@ def submit_job(
 @click.option("--dry-run", is_flag=True, help="Validate without applying")
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @sandbox_option
-@click.option("--wait", "-w", is_flag=True, help="Wait for job completion")
+@click.option(
+    "--wait",
+    "-w",
+    is_flag=True,
+    help="Wait for job completion; exits 3 if the job fails, 4 on --timeout",
+)
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
 def submit_job_direct(
@@ -211,6 +280,14 @@ def submit_job_direct(
     Examples:
         gco jobs submit-direct job.yaml --region us-east-1
         gco jobs submit-direct job.yaml -r us-west-2 -n gco-jobs --wait
+
+    \b
+    Exit status:
+      0  submitted; with --wait, the job succeeded
+      1  not submitted, or --wait could not read the job's status
+      2  invalid options or arguments
+      3  --wait: the job finished with status failed
+      4  --wait: the job had not finished when --timeout expired
     """
     formatter = get_output_formatter(config)
     job_manager = get_job_manager(config)
@@ -228,6 +305,7 @@ def submit_job_direct(
             )
         labels[key] = value
 
+    wait_target: tuple[str, str] | None = None
     try:
         formatter.print_info(f"Submitting directly to cluster in {region} via kubectl...")
 
@@ -260,18 +338,21 @@ def submit_job_direct(
                 resolved_ns = _resolve_result_namespace(
                     result, fallback=namespace or config.default_namespace
                 )
-                formatter.print_info(f"Waiting for job {job_name} to complete...")
-                final_job = job_manager.wait_for_job(
-                    job_name=job_name,
-                    namespace=resolved_ns,
-                    region=region,
-                    timeout_seconds=timeout,
-                )
-                formatter.print_success(f"Job completed with status: {final_job.status}")
+                wait_target = (job_name, resolved_ns)
 
     except Exception as e:
         formatter.print_error(f"Failed to submit job directly: {e}")
         sys.exit(1)
+
+    if wait_target is not None:
+        _wait_for_submitted_job(
+            formatter,
+            job_manager,
+            job_name=wait_target[0],
+            namespace=wait_target[1],
+            region=region,
+            timeout=timeout,
+        )
 
 
 @jobs.command("submit-sqs")

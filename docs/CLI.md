@@ -3335,8 +3335,18 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
-| `--wait` | `-w` | Wait for job completion |
+| `--wait` | `-w` | Wait for job completion (exit status below) |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
+
+**Exit status:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | Submitted; with `--wait`, the job succeeded |
+| `1` | Not submitted, or `--wait` could not read the job's status (the job may still exist) |
+| `2` | Invalid options or arguments |
+| `3` | `--wait`: the job ran and finished with status `failed` |
+| `4` | `--wait`: the job had not finished when `--timeout` expired; it keeps running |
 
 **Example:**
 
@@ -3404,7 +3414,7 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--dry-run` | | Validate without applying |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
-| `--wait` | `-w` | Wait for job completion |
+| `--wait` | `-w` | Wait for job completion (same exit status as [`gco jobs submit`](#gco-jobs-submit)) |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
 `submit-direct` skips GCO's server-side admission, so `--sandbox` runs the

@@ -69,6 +69,122 @@ def _readable(region: str) -> RegionPolicy:
     return RegionPolicy(region=region, status=FETCH_OK, policy=MagicMock())
 
 
+_WAIT_SUBMITTERS = [
+    ("submit", [], "submit_job"),
+    ("submit-direct", ["--region", "us-east-1"], "submit_job_direct"),
+]
+
+
+class TestSubmitWaitExitStatus:
+    """``--wait`` turns the job's outcome into the documented exit status."""
+
+    @staticmethod
+    def _manager(submit_method: str) -> MagicMock:
+        manager = MagicMock()
+        getattr(manager, submit_method).return_value = {
+            "job_name": "trainer",
+            "namespace": "gco-jobs",
+        }
+        return manager
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_failed_job_exits_3(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        manager = self._manager(submit_method)
+        manager.wait_for_job.return_value = SimpleNamespace(status="failed")
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait"], manager
+        )
+
+        assert result.exit_code == 3, result.output
+        formatter.print_error.assert_called_once_with("Job trainer finished with status: failed")
+        assert call("Job completed with status: failed") not in formatter.print_success.mock_calls
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_succeeded_job_exits_0(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        manager = self._manager(submit_method)
+        manager.wait_for_job.return_value = SimpleNamespace(status="succeeded")
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait"], manager
+        )
+
+        assert result.exit_code == 0, result.output
+        formatter.print_success.assert_called_with("Job completed with status: succeeded")
+        formatter.print_error.assert_not_called()
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_wait_timeout_exits_4_without_claiming_the_submit_failed(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        manager = self._manager(submit_method)
+        manager.wait_for_job.side_effect = TimeoutError("did not complete within 5 seconds")
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait", "--timeout", "5"], manager
+        )
+
+        assert result.exit_code == 4, result.output
+        message = formatter.print_error.call_args.args[0]
+        assert message.startswith("Job trainer was submitted but is not finished")
+        assert "Failed to submit" not in message
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_unreadable_status_while_waiting_exits_1(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        manager = self._manager(submit_method)
+        manager.wait_for_job.side_effect = ValueError("Job trainer not found in namespace gco-jobs")
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait"], manager
+        )
+
+        assert result.exit_code == 1, result.output
+        assert formatter.print_error.call_args.args[0] == (
+            "Job trainer was submitted, but waiting for it failed: "
+            "Job trainer not found in namespace gco-jobs"
+        )
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_json_mode_keeps_the_submission_document_and_exits_3(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        """The real formatter: stdout holds the submission, stderr the verdict."""
+        from cli.main import cli
+
+        manager = self._manager(submit_method)
+        manager.wait_for_job.return_value = SimpleNamespace(status="failed")
+        with patch("cli.commands.jobs_cmd.get_job_manager", return_value=manager):
+            result = CliRunner().invoke(
+                cli, ["-o", "json", "jobs", subcommand, manifest_path, *extra, "--wait"]
+            )
+
+        assert result.exit_code == 3
+        assert json.loads(result.stdout) == {"job_name": "trainer", "namespace": "gco-jobs"}
+        assert "finished with status: failed" in result.stderr
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_help_documents_the_exit_status(
+        self, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        from cli.main import cli
+
+        result = CliRunner().invoke(cli, ["jobs", subcommand, "--help"])
+
+        assert result.exit_code == 0
+        assert "Exit status:" in result.output
+        for line in (
+            "3  --wait: the job finished with status failed",
+            "4  --wait: the job had not finished when --timeout expired",
+        ):
+            assert line in result.output
+
+
 class TestSubmissionContracts:
     def test_submit_surfaces_mapping_warnings_and_waits_with_namespace_fallback(
         self, manifest_path: str
