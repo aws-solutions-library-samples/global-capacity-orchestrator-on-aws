@@ -296,13 +296,19 @@ def _regional_shared_ssm_parameter_prefix() -> str:
     return f"/{project_name}/{REGIONAL_SHARED_SSM_PARAMETER_SUFFIX}"
 
 
-# Matches an AWS region identifier embedded in an address (host or URI), e.g.
-# ``us-east-1``, ``eu-west-2``, ``ap-southeast-1``, ``us-gov-west-1``. KV
+# Matches an AWS region identifier embedded in an external host, e.g.
+# ``us-east-1``, ``eu-west-2``, ``ap-southeast-1``, ``us-gov-west-1``: a known
+# partition prefix, a compass direction, and a number, so endpoint-like words
+# such as ``my-llama-3`` or ``pd-test-2`` are not mistaken for regions. KV
 # transfer over RoCE is intra-region, so any address a topology wires to must
 # resolve to the monitor's own region; an embedded token naming a different
-# region marks the address as out-of-region. An address that carries no token
-# (a bare in-cluster Service name) is region-local by construction.
-_REGION_TOKEN_PATTERN = re.compile(r"\b[a-z]{2}-(?:gov-)?[a-z]+-\d+\b")
+# region marks the address as out-of-region. In-cluster names (a bare Service
+# name or a ``.svc`` name) are region-local by construction and are classified
+# before any token is looked for.
+_REGION_TOKEN_PATTERN = re.compile(
+    r"\b(?:us-gov|us|eu|ap|sa|ca|me|af|il|mx|cn)-"
+    r"(?:east|west|north|south|central|northeast|southeast|northwest|southwest)-\d+\b"
+)
 
 # --- PD proxy behavior -------------------------------------------------------
 #
@@ -3536,9 +3542,11 @@ class InferenceMonitor:
     def _region_of_address(self, address: str) -> str:
         """Return the address's explicit AWS region or safe local classification.
 
-        AWS region tokens embedded in the host are authoritative. Bare Service
-        names and Kubernetes ``.svc`` names are local by construction. Any
-        other host without a region token is external and ambiguous, so it is
+        Bare Service names and Kubernetes ``.svc`` names are local by
+        construction, whatever words the endpoint or namespace name contains
+        (``my-llama-3-prefill.gco-inference.svc.cluster.local`` is this
+        cluster's). For any other host an embedded AWS region token is
+        authoritative; a host without one is external and ambiguous, so it is
         classified as ``"unknown"`` and rejected by regional-scope checks.
         """
         candidate = (address or "").strip()
@@ -3553,11 +3561,11 @@ class InferenceMonitor:
         if not host:
             return "unknown"
 
+        if "." not in host or host.endswith((".svc", ".svc.cluster.local")):
+            return self.region
         match = _REGION_TOKEN_PATTERN.search(host)
         if match:
             return match.group(0)
-        if "." not in host or host.endswith((".svc", ".svc.cluster.local")):
-            return self.region
         return "unknown"
 
     def _resolve_regional_scope(
