@@ -1084,27 +1084,8 @@ def test_images_destructive_cleanup_scope_and_prune_warning_branches() -> None:
 
 
 # ---------------------------------------------------------------------------
-# inference.py — parse guards, store flags, disaggregated deploy/delete gate
+# inference.py — store flags, disaggregated deploy, gated delete
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("not-json", False),
-        ("[]", False),
-        ('{"spec":[]}', False),
-        ('{"spec":{"mooncake":[]}}', False),
-        ('{"spec":{"mooncake":{"mode":"store"}}}', False),
-        ('{"spec":{"mooncake":{"mode":"disaggregated"}}}', True),
-        ('{"spec":{"mooncake":{"mode":"both"}}}', True),
-    ],
-)
-def test_inference_disaggregated_status_parse_guards(raw: str, expected: bool) -> None:
-    with _isolated_tool_module("inference") as loaded:
-        loaded.run_cli.return_value = raw
-        assert loaded.module._endpoint_is_disaggregated("endpoint-a") is expected
-        loaded.run_cli.assert_called_once_with("inference", "status", "endpoint-a")
 
 
 def test_inference_configure_store_requires_a_setting() -> None:
@@ -1236,28 +1217,10 @@ def test_inference_disaggregated_deploy_matrix(
         )
 
 
-def test_inference_delete_refuses_disaggregated_when_flag_changes_off() -> None:
+def test_inference_delete_runs_the_cli_delete_directly() -> None:
+    """Registration is the only gate: no status lookup, no second flag check."""
     with _isolated_tool_module("inference", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
         loaded.module.is_enabled = Mock(return_value=False)
-        loaded.module._endpoint_is_disaggregated = Mock(return_value=True)
-        loaded.module._ctx_warning = AsyncMock()
-        result = asyncio.run(loaded.module.delete_inference("split"))
-        expected_message = (
-            "Refusing to delete disaggregated endpoint 'split': destructive operations "
-            "are disabled. Set GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true to allow this deletion."
-        )
-        assert result == json.dumps(
-            {"error": expected_message, "destructive_operations_disabled": True}
-        )
-        loaded.module._ctx_warning.assert_awaited_once_with(expected_message)
-        loaded.run_cli.assert_not_called()
-
-
-@pytest.mark.parametrize(("flag_enabled", "disaggregated"), [(True, True), (False, False)])
-def test_inference_delete_allowed_paths(flag_enabled: bool, disaggregated: bool) -> None:
-    with _isolated_tool_module("inference", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
-        loaded.module.is_enabled = Mock(return_value=flag_enabled)
-        loaded.module._endpoint_is_disaggregated = Mock(return_value=disaggregated)
         loaded.module._ctx_warning = AsyncMock()
         _assert_cli_call(
             loaded,
@@ -1266,13 +1229,10 @@ def test_inference_delete_allowed_paths(flag_enabled: bool, disaggregated: bool)
             {},
             ("inference", "delete", "endpoint-a", "-y"),
         )
+        loaded.module.is_enabled.assert_not_called()
         loaded.module._ctx_warning.assert_awaited_once_with(
             "Deleting inference endpoint 'endpoint-a' — this cannot be undone."
         )
-        if flag_enabled:
-            loaded.module._endpoint_is_disaggregated.assert_not_called()
-        else:
-            loaded.module._endpoint_is_disaggregated.assert_called_once_with("endpoint-a")
 
 
 # ---------------------------------------------------------------------------

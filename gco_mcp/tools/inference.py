@@ -29,38 +29,6 @@ async def _ctx_warning(message: str) -> None:
         await ctx.warning(message)
 
 
-#: Serving modes that split an endpoint into separate prefill and decode roles.
-#: These endpoints carry extra Kubernetes resources (per-role Deployments, a
-#: proxy, and a shared store dependency), so removing one is held behind the
-#: destructive-operations flag.
-_DISAGGREGATED_MODES = frozenset({"disaggregated", "both"})
-
-
-def _endpoint_is_disaggregated(name: str) -> bool:
-    """Return True when the named endpoint runs a split prefill/decode topology.
-
-    Reads the endpoint's persisted spec (read-only) and inspects its
-    ``mooncake`` block. A ``mode`` of ``disaggregated`` or ``both`` runs
-    separate prefill and decode roles. Anything else — a plain
-    single-Deployment endpoint, an endpoint without a ``mooncake`` block, or a
-    lookup that cannot be parsed — is treated as not disaggregated.
-    """
-    raw = cli_runner._run_cli("inference", "status", name)
-    try:
-        data = json.loads(raw)
-    except TypeError, ValueError:
-        return False
-    if not isinstance(data, dict):
-        return False
-    spec = data.get("spec")
-    if not isinstance(spec, dict):
-        return False
-    mooncake = spec.get("mooncake")
-    if not isinstance(mooncake, dict):
-        return False
-    return mooncake.get("mode") in _DISAGGREGATED_MODES
-
-
 @mcp.tool(tags={"low-risk", "inference"})
 @audit_logged
 def deploy_inference(
@@ -441,24 +409,12 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
 
         Delete an inference endpoint. Cannot be undone — the endpoint, its
         DynamoDB record, and the underlying Kubernetes resources are removed.
-
-        Deleting a disaggregated (split prefill/decode) endpoint is refused at
-        invocation when GCO_ENABLE_DESTRUCTIVE_OPERATIONS is not enabled: the
-        request is rejected and no endpoint resource is removed.
+        A disaggregated (split prefill/decode) endpoint is deleted the same
+        way, including its per-role Deployments and proxy.
 
         Args:
             name: Endpoint name.
         """
-        if not is_enabled(FLAG_DESTRUCTIVE_OPERATIONS) and await asyncio.to_thread(
-            _endpoint_is_disaggregated, name
-        ):
-            message = (
-                f"Refusing to delete disaggregated endpoint {name!r}: destructive "
-                "operations are disabled. Set GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true "
-                "to allow this deletion."
-            )
-            await _ctx_warning(message)
-            return json.dumps({"error": message, "destructive_operations_disabled": True})
         await _ctx_warning(f"Deleting inference endpoint {name!r} — this cannot be undone.")
         return await asyncio.to_thread(cli_runner._run_cli, "inference", "delete", name, "-y")
 
