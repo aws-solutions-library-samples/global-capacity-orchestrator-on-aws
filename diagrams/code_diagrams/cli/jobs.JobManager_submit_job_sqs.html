@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-10T17:41:25Z">
-        <meta name="gco-source-commit" content="c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe">
-        <meta name="gco-flow-digest" content="55572d7b88e824ef">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="e60cd25affedfe0c">
         <title>gco jobs submit-sqs — SQS-backed submission path</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,71 +208,68 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op75=>operation: "\n        Submit a job to a regional SQS queue for processing.\n\n        This is the recommended way to submit jobs as it:\n        - Decouples submission from processing\n        - Enables KEDA-based autoscaling\n        - Provides better fault tolerance\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            region: Target region for job submission (required)\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the queue processor untouched. Server-side\n                validation enforces the allowlist.\n            labels: Additional labels to add to manifests\n            priority: Job priority (higher = more important)\n            sandbox: Run every pod in an AWS Nitro Sandbox of this mode\n                (``gco.job_admission.SANDBOX_MODES``)\n\n        Returns:\n            Submission result dictionary with message_id and queue info\n        "
-op77=>operation: import boto3
-op79=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
-cond82=>condition: if namespace
-cond87=>condition: for manifest in manifest_list
-cond92=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-sub102=>subroutine: manifest['metadata'].setdefault('namespace', namespace)
-cond110=>condition: if labels
-cond115=>condition: for manifest in manifest_list
-cond120=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-cond131=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
-sub141=>subroutine: manifest['metadata']['labels'].update(labels)
-cond149=>operation: apply_sandbox(manifest_list, sandbox) if  sandbox
-op159=>operation: stack = self._aws_client.get_regional_stack(region)
-cond162=>operation: raise ValueError(f'No GCO stack found in region {region}') if  not stack
-op172=>operation: cfn = boto3.client('cloudformation', region_name=region)
-op174=>operation: response = cfn.describe_stacks(StackName=stack.stack_name)
-op176=>operation: outputs = {o['OutputKey']: o['OutputValue'] for o in response['Stacks'][0].get('Outputs', [])}
-op178=>operation: queue_url = outputs.get('JobQueueUrl')
-cond181=>operation: raise ValueError(f'Job queue not found in stack {stack.stack_name}') if  not queue_url
-op191=>operation: message = build_job_message(manifest_list, namespace=namespace, priority=priority)
-op193=>operation: sqs = boto3.client('sqs', region_name=region)
-op195=>operation: response = sqs.send_message(QueueUrl=queue_url, MessageBody=message.json(), MessageAttributes=message.attributes)
-op197=>operation: job_name = None
-cond200=>condition: for manifest in manifest_list
-cond205=>condition: if manifest.get('kind') == 'Job'
-op209=>operation: job_name = manifest.get('metadata', {}).get('name')
-sub211=>subroutine: break
-io221=>inputoutput: output: {'status': 'queued', 'method': 'sqs', 'message_id': response['MessageId'], 'job_id': message.job_id, 'job_name': job_name, 'queue_url': queue_url, 'region': region, 'namespace': message.namespace, 'priority': priority}
-e219=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op715=>operation: "\n        Submit a job to a regional SQS queue for processing.\n\n        This is the recommended way to submit jobs as it:\n        - Decouples submission from processing\n        - Enables KEDA-based autoscaling\n        - Provides better fault tolerance\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            region: Target region for job submission (required)\n            namespace: Fallback namespace for manifests that don't declare\n                their own (default: ``config.default_namespace``). Each\n                manifest's ``metadata.namespace`` is filled in only if\n                missing — existing values are preserved so users who've\n                declared a target namespace in the manifest can rely on it\n                reaching the queue processor untouched. Server-side\n                validation enforces the allowlist.\n            labels: Additional labels to add to manifests\n            priority: Job priority (higher = more important)\n            sandbox: Run every pod in an AWS Nitro Sandbox of this mode\n                (``gco.job_admission.SANDBOX_MODES``)\n\n        Returns:\n            Submission result dictionary with message_id and queue info\n        "
+op717=>operation: import boto3
+op719=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
+op721=>operation: effective_namespace = namespace or self.config.default_namespace
+cond724=>condition: for manifest in manifest_list
+cond729=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+sub739=>subroutine: manifest['metadata'].setdefault('namespace', effective_namespace)
+cond744=>condition: if labels
+cond749=>condition: for manifest in manifest_list
+cond754=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
+sub764=>subroutine: manifest['metadata']['labels'].update(labels)
+cond772=>operation: apply_sandbox(manifest_list, sandbox) if  sandbox
+op782=>operation: stack = self._aws_client.get_regional_stack(region)
+cond785=>operation: raise ValueError(f'No GCO stack found in region {region}') if  not stack
+op795=>operation: cfn = boto3.client('cloudformation', region_name=region)
+op797=>operation: response = cfn.describe_stacks(StackName=stack.stack_name)
+op799=>operation: outputs = {o['OutputKey']: o['OutputValue'] for o in response['Stacks'][0].get('Outputs', [])}
+op801=>operation: queue_url = outputs.get('JobQueueUrl')
+cond804=>operation: raise ValueError(f'Job queue not found in stack {stack.stack_name}') if  not queue_url
+op814=>operation: message = build_job_message(manifest_list, priority=priority)
+op816=>operation: sqs = boto3.client('sqs', region_name=region)
+op818=>operation: response = sqs.send_message(QueueUrl=queue_url, MessageBody=message.json(), MessageAttributes=message.attributes)
+op820=>operation: job_name = None
+cond823=>condition: for manifest in manifest_list
+cond828=>condition: if manifest.get('kind') == 'Job'
+op832=>operation: job_name = manifest.get('metadata', {}).get('name')
+sub834=>subroutine: break
+io844=>inputoutput: output: {'status': 'queued', 'method': 'sqs', 'message_id': response['MessageId'], 'job_id': message.job_id, 'job_name': job_name, 'queue_url': queue_url, 'region': region, 'namespace': message.namespace, 'priority': priority}
+e842=>end: end function return
 
-op75->op77
-op77->op79
-op79->cond82
-cond82(yes)->cond87
-cond87(yes)->cond92
-cond92->sub102
-sub102(left)->cond87
-cond87(no)->cond110
-cond110(yes)->cond115
-cond115(yes)->cond120
-cond120->cond131
-cond131->sub141
-sub141(left)->cond115
-cond115(no)->cond149
-cond149->op159
-op159->cond162
-cond162->op172
-op172->op174
-op174->op176
-op176->op178
-op178->cond181
-cond181->op191
-op191->op193
-op193->op195
-op195->op197
-op197->cond200
-cond200(yes)->cond205
-cond205(yes)->op209
-op209->sub211
-cond205(no)->cond200
-cond200(no)->io221
-io221->e219
-cond110(no)->cond149
-cond82(no)->cond110
+op715->op717
+op717->op719
+op719->op721
+op721->cond724
+cond724(yes)->cond729
+cond729->sub739
+sub739(left)->cond724
+cond724(no)->cond744
+cond744(yes)->cond749
+cond749(yes)->cond754
+cond754->sub764
+sub764(left)->cond749
+cond749(no)->cond772
+cond772->op782
+op782->cond785
+cond785->op795
+op795->op797
+op797->op799
+op799->op801
+op801->cond804
+cond804->op814
+op814->op816
+op816->op818
+op818->op820
+op820->cond823
+cond823(yes)->cond828
+cond828(yes)->op832
+op832->sub834
+cond828(no)->cond823
+cond823(no)->io844
+io844->e842
+cond744(no)->cond772
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -282,17 +279,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-10T17:41:25Z -->
-        <!-- Generated from Git commit: c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-10T17:41:25Z">2026-11-10T17:41:25Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>55572d7b88e824ef</code>
+            Flow content SHA-256: <code>e60cd25affedfe0c</code>
           </p>
           <div id="canvas"></div>
         </div>

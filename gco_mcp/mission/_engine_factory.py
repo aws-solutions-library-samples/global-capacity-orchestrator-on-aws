@@ -39,8 +39,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-18T02:11:36Z
-# Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512
+# Generated at (UTC): 2026-11-18T16:59:04Z
+# Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f
 # Flowchart(s) generated from this file:
 #   * ``build_engine_dependencies`` -> ``diagrams/code_diagrams/gco_mcp/mission/_engine_factory.build_engine_dependencies.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/mission/_engine_factory.build_engine_dependencies.png``)

@@ -1,9 +1,9 @@
 # GCO Code Flowcharts
 
-<!-- Generated at (UTC): 2026-11-16T21:53:25Z -->
-<!-- Generated from Git commit: e87c6c2875ea52716c5fb87a7843816a863f6298 -->
-*Generated at (UTC): `2026-11-16T21:53:25Z`.*
-*Generated from Git commit: `e87c6c2875ea52716c5fb87a7843816a863f6298`.*
+<!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+<!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
+*Generated at (UTC): `2026-11-18T16:59:04Z`.*
+*Generated from Git commit: `3d3ba1381c5c16d0c44942f3b542591f571c3f1f`.*
 
 This directory holds auto-generated control-flow diagrams for the
 Python source files listed below. Each target produces an interactive

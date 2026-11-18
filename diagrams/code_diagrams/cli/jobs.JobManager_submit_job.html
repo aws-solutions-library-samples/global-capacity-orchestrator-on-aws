@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-10T17:41:25Z">
-        <meta name="gco-source-commit" content="c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe">
-        <meta name="gco-flow-digest" content="6a22ba7019cb880c">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="dd540148649d8460">
         <title>gco jobs submit — direct kubectl apply path</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,35 +208,35 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n            sandbox: Run every pod in an AWS Nitro Sandbox of this mode\n                (``gco.job_admission.SANDBOX_MODES``)\n\n        Returns:\n            Submission result dictionary\n        "
-op4=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
-op6=>operation: effective_namespace = namespace or self.config.default_namespace
-cond9=>condition: for manifest in manifest_list
-cond14=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
-sub24=>subroutine: manifest['metadata'].setdefault('namespace', effective_namespace)
-cond29=>condition: if labels
-cond34=>condition: for manifest in manifest_list
-cond39=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
-sub49=>subroutine: manifest['metadata']['labels'].update(labels)
-cond57=>operation: apply_sandbox(manifest_list, sandbox) if  sandbox
-io70=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=effective_namespace, target_region=target_region, dry_run=dry_run)
-e68=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op642=>operation: "\n        Submit a job to GCO.\n\n        Args:\n            manifests: Path to manifest file/directory or list of manifest dicts\n            namespace: Fallback namespace for manifests that don't declare\n                their own. When set, each manifest's ``metadata.namespace`` is\n                filled in only if missing — existing values are preserved so\n                users who've declared a target namespace in the manifest can\n                rely on it reaching the server untouched. Server-side\n                validation enforces the allowlist.\n            target_region: Force job to specific region\n            dry_run: Validate without applying\n            labels: Additional labels to add to manifests\n            sandbox: Run every pod in an AWS Nitro Sandbox of this mode\n                (``gco.job_admission.SANDBOX_MODES``)\n\n        Returns:\n            Submission result dictionary\n        "
+op644=>operation: manifest_list = self.load_manifests(manifests) if isinstance(manifests, str) else manifests
+op646=>operation: effective_namespace = namespace or self.config.default_namespace
+cond649=>condition: for manifest in manifest_list
+cond654=>operation: manifest['metadata'] = {} if  'metadata' not in manifest
+sub664=>subroutine: manifest['metadata'].setdefault('namespace', effective_namespace)
+cond669=>condition: if labels
+cond674=>condition: for manifest in manifest_list
+cond679=>operation: manifest['metadata']['labels'] = {} if  'labels' not in manifest['metadata']
+sub689=>subroutine: manifest['metadata']['labels'].update(labels)
+cond697=>operation: apply_sandbox(manifest_list, sandbox) if  sandbox
+io710=>inputoutput: output: self._aws_client.submit_manifests(manifests=manifest_list, namespace=effective_namespace, target_region=target_region, dry_run=dry_run)
+e708=>end: end function return
 
-op2->op4
-op4->op6
-op6->cond9
-cond9(yes)->cond14
-cond14->sub24
-sub24(left)->cond9
-cond9(no)->cond29
-cond29(yes)->cond34
-cond34(yes)->cond39
-cond39->sub49
-sub49(left)->cond34
-cond34(no)->cond57
-cond57->io70
-io70->e68
-cond29(no)->cond57
+op642->op644
+op644->op646
+op646->cond649
+cond649(yes)->cond654
+cond654->sub664
+sub664(left)->cond649
+cond649(no)->cond669
+cond669(yes)->cond674
+cond674(yes)->cond679
+cond679->sub689
+sub689(left)->cond674
+cond674(no)->cond697
+cond697->io710
+io710->e708
+cond669(no)->cond697
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -246,17 +246,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-10T17:41:25Z -->
-        <!-- Generated from Git commit: c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-10T17:41:25Z">2026-11-10T17:41:25Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>c28a7ab0b2402b6d105000cdbe3b272e4bd6ecbe</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>6a22ba7019cb880c</code>
+            Flow content SHA-256: <code>dd540148649d8460</code>
           </p>
           <div id="canvas"></div>
         </div>

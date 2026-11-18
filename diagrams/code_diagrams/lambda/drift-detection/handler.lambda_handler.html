@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-01T14:42:56Z">
-        <meta name="gco-source-commit" content="89b000378ed5a912a38c06f4feab2b029936ebcc">
-        <meta name="gco-flow-digest" content="cf65a517c84cf72f">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="3228dbfc3ed80901">
         <title>CloudFormation Drift Detection Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,66 +208,74 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op453=>operation: 'Run CloudFormation drift detection and publish SNS alerts on drift.\n\n    Args:\n        event: EventBridge scheduled event (payload unused)\n        context: Lambda context\n\n    Returns:\n        Dict with drift detection results for logging/debugging\n    '
-op455=>operation: stack_name = os.environ.get('STACK_NAME')
-op457=>operation: sns_topic_arn = os.environ.get('SNS_TOPIC_ARN')
-op459=>operation: region = os.environ.get('REGION') or os.environ.get('AWS_REGION')
-cond462=>operation: raise ValueError('STACK_NAME environment variable is required') if  not stack_name
-cond473=>operation: raise ValueError('SNS_TOPIC_ARN environment variable is required') if  not sns_topic_arn
-op483=>operation: poll_interval = int(os.environ.get('POLL_INTERVAL_SECONDS', str(DEFAULT_POLL_INTERVAL_SECONDS)))
-op485=>operation: poll_max_attempts = int(os.environ.get('POLL_MAX_ATTEMPTS', str(DEFAULT_POLL_MAX_ATTEMPTS)))
-sub487=>subroutine: logger.info('Starting drift detection for stack=%s region=%s', stack_name, region)
-op489=>operation: cfn = boto3.client('cloudformation', region_name=region)
-op491=>operation: sns = boto3.client('sns', region_name=region)
-op493=>operation: detection_id = cfn.detect_stack_drift(StackName=stack_name)['StackDriftDetectionId']
-sub495=>subroutine: logger.info('Drift detection initiated: detection_id=%s', detection_id)
-op497=>operation: status_response = _poll_detection_status(cfn, detection_id, poll_interval, poll_max_attempts)
-op499=>operation: detection_status = status_response.get('DetectionStatus')
-op501=>operation: stack_drift_status = status_response.get('StackDriftStatus')
-sub503=>subroutine: logger.info('Drift detection finished: detection_status=%s stack_drift_status=%s', detection_status, stack_drift_status)
-cond506=>condition: if detection_status == 'DETECTION_FAILED'
-op510=>operation: reason = status_response.get('DetectionStatusReason', 'Unknown detection failure')
-sub512=>subroutine: _publish_alert(sns, sns_topic_arn, subject=f'[GCO] Drift detection FAILED for {stack_name}', message={'stack_name': stack_name, 'region': region, 'detection_status': detection_status, 'reason': reason})
-io517=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': None, 'drift_published': True}
-e515=>end: end function return
-cond524=>condition: if stack_drift_status == 'IN_SYNC'
-sub528=>subroutine: logger.info('Stack %s is IN_SYNC — no alert published', stack_name)
-io533=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': stack_drift_status, 'drift_published': False}
-e531=>end: end function return
-op539=>operation: drifted_resources = _list_drifted_resources(cfn, stack_name)
-sub541=>subroutine: _publish_alert(sns, sns_topic_arn, subject=f'[GCO] Drift detected in stack {stack_name}', message={'stack_name': stack_name, 'region': region, 'stack_drift_status': stack_drift_status, 'drifted_resource_count': len(drifted_resources), 'drifted_resources': drifted_resources})
-io546=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': stack_drift_status, 'drifted_resource_count': len(drifted_resources), 'drift_published': True}
-e544=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op373=>operation: 'Run CloudFormation drift detection and publish SNS alerts on drift.\n\n    Args:\n        event: EventBridge scheduled event (payload unused)\n        context: Lambda context\n\n    Returns:\n        Dict with drift detection results for logging/debugging\n    '
+op375=>operation: stack_name = os.environ.get('STACK_NAME')
+op377=>operation: sns_topic_arn = os.environ.get('SNS_TOPIC_ARN')
+op379=>operation: region = os.environ.get('REGION') or os.environ.get('AWS_REGION')
+cond382=>operation: raise ValueError('STACK_NAME environment variable is required') if  not stack_name
+cond393=>operation: raise ValueError('SNS_TOPIC_ARN environment variable is required') if  not sns_topic_arn
+op403=>operation: poll_interval = int(os.environ.get('POLL_INTERVAL_SECONDS', str(DEFAULT_POLL_INTERVAL_SECONDS)))
+op405=>operation: poll_max_attempts = int(os.environ.get('POLL_MAX_ATTEMPTS', str(DEFAULT_POLL_MAX_ATTEMPTS)))
+sub407=>subroutine: logger.info('Starting drift detection for stack=%s region=%s', stack_name, region)
+op409=>operation: cfn = boto3.client('cloudformation', region_name=region)
+op411=>operation: sns = boto3.client('sns', region_name=region)
+op413=>operation: detection_id = cfn.detect_stack_drift(StackName=stack_name)['StackDriftDetectionId']
+sub415=>subroutine: logger.info('Drift detection initiated: detection_id=%s', detection_id)
+op417=>operation: status_response = _poll_detection_status(cfn, detection_id, poll_interval, poll_max_attempts)
+op419=>operation: detection_status = status_response.get('DetectionStatus')
+op421=>operation: stack_drift_status = status_response.get('StackDriftStatus')
+sub423=>subroutine: logger.info('Drift detection polling ended: detection_status=%s stack_drift_status=%s', detection_status, stack_drift_status)
+cond426=>condition: if detection_status == 'DETECTION_FAILED'
+op430=>operation: reason = status_response.get('DetectionStatusReason', 'Unknown detection failure')
+sub432=>subroutine: _publish_alert(sns, sns_topic_arn, subject=f'[GCO] Drift detection FAILED for {stack_name}', message={'stack_name': stack_name, 'region': region, 'detection_status': detection_status, 'reason': reason})
+io437=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': None, 'drift_published': True}
+e435=>end: end function return
+cond444=>condition: if detection_status not in TERMINAL_DETECTION_STATUSES
+sub448=>subroutine: _publish_alert(sns, sns_topic_arn, subject=f'[GCO] Drift detection did not finish for {stack_name}', message={'stack_name': stack_name, 'region': region, 'detection_id': detection_id, 'detection_status': detection_status, 'waited_seconds': poll_interval * poll_max_attempts})
+io453=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': None, 'drift_published': True}
+e451=>end: end function return
+cond460=>condition: if stack_drift_status != 'DRIFTED'
+sub464=>subroutine: logger.info('Stack %s is %s — no alert published', stack_name, stack_drift_status)
+io469=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': stack_drift_status, 'drift_published': False}
+e467=>end: end function return
+op475=>operation: drifted_resources, not_checked_resources = _list_resource_drifts(cfn, stack_name)
+sub477=>subroutine: _publish_alert(sns, sns_topic_arn, subject=f'[GCO] Drift detected in stack {stack_name}', message={'stack_name': stack_name, 'region': region, 'stack_drift_status': stack_drift_status, 'drifted_resource_count': len(drifted_resources), 'drifted_resources': drifted_resources, 'not_checked_resource_count': len(not_checked_resources), 'not_checked_resources': not_checked_resources})
+io482=>inputoutput: output: {'stack_name': stack_name, 'detection_status': detection_status, 'stack_drift_status': stack_drift_status, 'drifted_resource_count': len(drifted_resources), 'not_checked_resource_count': len(not_checked_resources), 'drift_published': True}
+e480=>end: end function return
 
-op453->op455
-op455->op457
-op457->op459
-op459->cond462
-cond462->cond473
-cond473->op483
-op483->op485
-op485->sub487
-sub487->op489
-op489->op491
-op491->op493
-op493->sub495
-sub495->op497
-op497->op499
-op499->op501
-op501->sub503
-sub503->cond506
-cond506(yes)->op510
-op510->sub512
-sub512->io517
-io517->e515
-cond506(no)->cond524
-cond524(yes)->sub528
-sub528->io533
-io533->e531
-cond524(no)->op539
-op539->sub541
-sub541->io546
-io546->e544
+op373->op375
+op375->op377
+op377->op379
+op379->cond382
+cond382->cond393
+cond393->op403
+op403->op405
+op405->sub407
+sub407->op409
+op409->op411
+op411->op413
+op413->sub415
+sub415->op417
+op417->op419
+op419->op421
+op421->sub423
+sub423->cond426
+cond426(yes)->op430
+op430->sub432
+sub432->io437
+io437->e435
+cond426(no)->cond444
+cond444(yes)->sub448
+sub448->io453
+io453->e451
+cond444(no)->cond460
+cond460(yes)->sub464
+sub464->io469
+io469->e467
+cond460(no)->op475
+op475->sub477
+sub477->io482
+io482->e480
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -277,17 +285,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-01T14:42:56Z -->
-        <!-- Generated from Git commit: 89b000378ed5a912a38c06f4feab2b029936ebcc -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-01T14:42:56Z">2026-09-01T14:42:56Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>89b000378ed5a912a38c06f4feab2b029936ebcc</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>cf65a517c84cf72f</code>
+            Flow content SHA-256: <code>3228dbfc3ed80901</code>
           </p>
           <div id="canvas"></div>
         </div>

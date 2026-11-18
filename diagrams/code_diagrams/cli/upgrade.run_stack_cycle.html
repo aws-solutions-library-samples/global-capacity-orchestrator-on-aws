@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-29T11:35:23Z">
-        <meta name="gco-source-commit" content="a081fbf678ca3f3fa3f7edb74687de923efe6657">
-        <meta name="gco-flow-digest" content="e3b56fbdd3dc9d34">
+        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
+        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
+        <meta name="gco-flow-digest" content="784555bc0cdebbb1">
         <title>gco upgrade stack cycle (asset gate, retried teardown, control-plane update + regional recreate)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,74 +208,74 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1240=>operation: "Scale the workload tier to zero, then deploy-all from the new release.\n\n    The checkout's deployable sources are checked first\n    (:meth:`cli.stacks.StackManager.ensure_asset_sources_readable`): the\n    redeploy refuses owner-only sources, so a checkout it could not deploy —\n    for example one whose files the upgrade's own ``git checkout`` wrote under\n    a restrictive umask — must stop the upgrade before the teardown, not\n    after it. The teardown's monitoring detach would catch it too, but only\n    when the monitoring stack is deployed.\n\n    The teardown uses the same retry loop as ``gco stacks destroy-all``: a\n    failed attempt clears the orphaned network interfaces that typically block\n    VPC deletion, waits, and tries again. The redeploy is a single\n    ``deploy_orchestrated`` pass — global and API Gateway stacks update in\n    place, regional stacks and their bridges are recreated, monitoring is\n    updated back to the full topology.\n\n    Raises:\n        cli.stacks.AssetPermissionError: before any stack is touched, when a\n            deployable source is owner-only.\n    "
-op1242=>operation: import time
-op1244=>operation: wait = sleep or time.sleep
-op1246=>operation: result = StackCycleResult()
-sub1248=>subroutine: manager.ensure_asset_sources_readable()
-sub1250=>subroutine: log('Phase 1/2: scaling the workload tier to zero (control plane stays)...')
-op1252=>operation: ok = False
-op1254=>operation: failed: list[str] = []
-cond1257=>condition: for attempt in range(1, max_attempts + 1)
-op1261=>operation: result.teardown_attempts = attempt
-cond1264=>condition: if attempt > 1
-sub1268=>subroutine: log('Clearing orphaned network interfaces that can block VPC deletion...')
-sub1270=>subroutine: manager.cleanup_orphaned_network_interfaces()
-sub1272=>subroutine: log(f'Teardown attempt {attempt}/{max_attempts} in {retry_wait_seconds:.0f}s...')
-sub1274=>subroutine: wait(retry_wait_seconds)
-op1279=>operation: ok, destroyed, failed = manager.destroy_orchestrated(force=True, keep_control_plane=True, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
-cond1282=>condition: for stack in destroyed
-cond1287=>operation: result.destroyed.append(stack) if  stack not in result.destroyed
-cond1300=>operation: break if  ok
-cond1313=>condition: if not ok
-op1317=>operation: result.failed = list(failed)
-op1319=>operation: result.phase_failed = 'teardown'
-io1324=>inputoutput: output: result
-e1322=>end: end function return
-sub1330=>subroutine: log('Phase 2/2: updating the control plane in place and recreating the regional stacks...')
-op1332=>operation: ok, deployed, failed = manager.deploy_orchestrated(require_approval=False, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
-op1334=>operation: result.deployed = list(deployed)
-cond1337=>condition: if not ok
-op1341=>operation: result.failed = list(failed)
-op1343=>operation: result.phase_failed = 'deploy'
-io1351=>inputoutput: output: result
-e1349=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op6108=>operation: "Scale the workload tier to zero, then deploy-all from the new release.\n\n    The checkout's deployable sources are checked first\n    (:meth:`cli.stacks.StackManager.ensure_asset_sources_readable`): the\n    redeploy refuses owner-only sources, so a checkout it could not deploy —\n    for example one whose files the upgrade's own ``git checkout`` wrote under\n    a restrictive umask — must stop the upgrade before the teardown, not\n    after it. The teardown's monitoring detach would catch it too, but only\n    when the monitoring stack is deployed.\n\n    The teardown uses the same retry loop as ``gco stacks destroy-all``: a\n    failed attempt clears the orphaned network interfaces that typically block\n    VPC deletion, waits, and tries again. The redeploy is a single\n    ``deploy_orchestrated`` pass — global, API Gateway and analytics stacks\n    update in place, regional stacks and their bridges are recreated,\n    monitoring is updated back to the full topology.\n\n    Raises:\n        cli.stacks.AssetPermissionError: before any stack is touched, when a\n            deployable source is owner-only.\n    "
+op6110=>operation: import time
+op6112=>operation: wait = sleep or time.sleep
+op6114=>operation: result = StackCycleResult()
+sub6116=>subroutine: manager.ensure_asset_sources_readable()
+sub6118=>subroutine: log('Phase 1/2: scaling the workload tier to zero (control plane stays)...')
+op6120=>operation: ok = False
+op6122=>operation: failed: list[str] = []
+cond6125=>condition: for attempt in range(1, max_attempts + 1)
+op6129=>operation: result.teardown_attempts = attempt
+cond6132=>condition: if attempt > 1
+sub6136=>subroutine: log('Clearing orphaned network interfaces that can block VPC deletion...')
+sub6138=>subroutine: manager.cleanup_orphaned_network_interfaces(keep_control_plane=True)
+sub6140=>subroutine: log(f'Teardown attempt {attempt}/{max_attempts} in {retry_wait_seconds:.0f}s...')
+sub6142=>subroutine: wait(retry_wait_seconds)
+op6147=>operation: ok, destroyed, failed = manager.destroy_orchestrated(force=True, keep_control_plane=True, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
+cond6150=>condition: for stack in destroyed
+cond6155=>operation: result.destroyed.append(stack) if  stack not in result.destroyed
+cond6168=>operation: break if  ok
+cond6181=>condition: if not ok
+op6185=>operation: result.failed = list(failed)
+op6187=>operation: result.phase_failed = 'teardown'
+io6192=>inputoutput: output: result
+e6190=>end: end function return
+sub6198=>subroutine: log('Phase 2/2: updating the control plane in place and recreating the regional stacks...')
+op6200=>operation: ok, deployed, failed = manager.deploy_orchestrated(require_approval=False, parallel=parallel, max_workers=max_workers, on_stack_start=on_stack_start, on_stack_complete=on_stack_complete)
+op6202=>operation: result.deployed = list(deployed)
+cond6205=>condition: if not ok
+op6209=>operation: result.failed = list(failed)
+op6211=>operation: result.phase_failed = 'deploy'
+io6219=>inputoutput: output: result
+e6217=>end: end function return
 
-op1240->op1242
-op1242->op1244
-op1244->op1246
-op1246->sub1248
-sub1248->sub1250
-sub1250->op1252
-op1252->op1254
-op1254->cond1257
-cond1257(yes)->op1261
-op1261->cond1264
-cond1264(yes)->sub1268
-sub1268->sub1270
-sub1270->sub1272
-sub1272->sub1274
-sub1274->op1279
-op1279->cond1282
-cond1282(yes)->cond1287
-cond1287->cond1282
-cond1282(no)->cond1300
-cond1300->cond1257
-cond1264(no)->op1279
-cond1257(no)->cond1313
-cond1313(yes)->op1317
-op1317->op1319
-op1319->io1324
-io1324->e1322
-cond1313(no)->sub1330
-sub1330->op1332
-op1332->op1334
-op1334->cond1337
-cond1337(yes)->op1341
-op1341->op1343
-op1343->io1351
-io1351->e1349
-cond1337(no)->io1351
+op6108->op6110
+op6110->op6112
+op6112->op6114
+op6114->sub6116
+sub6116->sub6118
+sub6118->op6120
+op6120->op6122
+op6122->cond6125
+cond6125(yes)->op6129
+op6129->cond6132
+cond6132(yes)->sub6136
+sub6136->sub6138
+sub6138->sub6140
+sub6140->sub6142
+sub6142->op6147
+op6147->cond6150
+cond6150(yes)->cond6155
+cond6155->cond6150
+cond6150(no)->cond6168
+cond6168->cond6125
+cond6132(no)->op6147
+cond6125(no)->cond6181
+cond6181(yes)->op6185
+op6185->op6187
+op6187->io6192
+io6192->e6190
+cond6181(no)->sub6198
+sub6198->op6200
+op6200->op6202
+op6202->cond6205
+cond6205(yes)->op6209
+op6209->op6211
+op6211->io6219
+io6219->e6217
+cond6205(no)->io6219
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -285,17 +285,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-29T11:35:23Z -->
-        <!-- Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657 -->
+        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
+        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-29T11:35:23Z">2026-09-29T11:35:23Z</time>
+            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>a081fbf678ca3f3fa3f7edb74687de923efe6657</code>
+            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>e3b56fbdd3dc9d34</code>
+            Flow content SHA-256: <code>784555bc0cdebbb1</code>
           </p>
           <div id="canvas"></div>
         </div>
