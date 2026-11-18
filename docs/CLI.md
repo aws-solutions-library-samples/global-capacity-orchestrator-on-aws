@@ -2833,7 +2833,7 @@ gco inference deploy ENDPOINT_NAME [OPTIONS]
 | `--gpu-type` | | Preferred instance type (e.g. g5.xlarge), rendered as a preferred node affinity on `node.kubernetes.io/instance-type`. A hint, not a requirement: Karpenter launches another type when it can't get this one |
 | `--port` | | Container port (default: 8000; SGLang's documented default is 30000). 8443 is reserved for the pod's TLS sidecar, which is the only port the endpoint's Service publishes ([Model Endpoint TLS](INFERENCE.md#model-endpoint-tls)) |
 | `--model-path` | | Mount the inference namespace's EFS volume (`efs-claim`) at `/models` without syncing anything; `--model-source` mounts it too. The volume is separate from the `gco-shared-storage` volume jobs use in `gco-jobs` |
-| `--model-source` | | S3 URI for model weights (auto-synced via init container) |
+| `--model-source` | | S3 URI for model weights in the GCO model bucket (`$(gco models uri <name>)`), synced to `/models/<endpoint name>` by an init container that runs as the namespace's `gco-service-account`, whose role can read the model bucket and no other bucket outside the two shared buckets |
 | `--health-path` | | Health check endpoint path (default: /health) |
 | `--env` | `-e` | Environment variable (KEY=VALUE), repeatable. A value without `=` or without a key is refused |
 | `--namespace` | `-n` | Kubernetes namespace (default: gco-inference) |

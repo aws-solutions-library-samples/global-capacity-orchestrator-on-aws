@@ -293,7 +293,7 @@ When you deploy an endpoint with `--model-source`, the inference_monitor adds an
 2. Uses `aws s3 sync` to copy the weights from S3 to `/models/<endpoint name>` on the inference namespace's EFS volume (the `efs-claim` PVC in `gco-inference`)
 3. Shares that volume with the inference container, mounted at `/models`, so `-e MODEL=/models/<endpoint name>` (or the server's own model flag) points at the weights
 
-This happens automatically in every target region, so model weights are always local to the cluster. The inference volume is separate from the `gco-shared-storage` volume that jobs mount in `gco-jobs` (each PVC gets its own EFS access point), so weights a job writes there aren't visible to an endpoint. `--model-path` mounts the same `/models` volume without syncing anything.
+This happens automatically in every target region, so model weights are always local to the cluster. The init container runs as `gco-service-account`, whose role reads the model bucket and the two shared buckets ([Cluster Shared Bucket](CLUSTER_SHARED_BUCKET.md), [Regional Shared Bucket](REGIONAL_SHARED_BUCKET.md)) and no other bucket, so upload weights with `gco models upload` rather than pointing `--model-source` at a bucket of your own (or grant that role read access to it). The inference volume is separate from the `gco-shared-storage` volume that jobs mount in `gco-jobs` (each PVC gets its own EFS access point), so weights a job writes there aren't visible to an endpoint. `--model-path` mounts the same `/models` volume without syncing anything.
 
 ## Deploying Inference Endpoints
 

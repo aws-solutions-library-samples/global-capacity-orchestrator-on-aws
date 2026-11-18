@@ -87,6 +87,7 @@ import yaml
 from aws_cdk import (
     Acknowledgment,
     Annotations,
+    CfnElement,
     CfnJson,
     CfnOutput,
     CfnTag,
@@ -753,6 +754,22 @@ _TRACING_EXPORT_NAG_REASON = (
     "statement is write-only and carries no other action."
 )
 
+
+def _s3_bucket_kms_conditions(*, region: str, bucket_arn: str, url_suffix: str) -> dict[str, Any]:
+    """KMS conditions confining a ``Resource: *`` key grant to S3's use for one bucket.
+
+    For a bucket whose key ARN this stack cannot see (it lives in another
+    stack): ``kms:ViaService`` admits only requests S3 makes in the bucket's
+    region, and ``kms:EncryptionContext:aws:s3:arn`` only those for this
+    bucket. S3 sends the bucket ARN as the context when the bucket uses an
+    S3 Bucket Key and the object ARN when it does not, so both forms match.
+    """
+    return {
+        "StringEquals": {"kms:ViaService": f"s3.{region}.{url_suffix}"},
+        "StringLike": {"kms:EncryptionContext:aws:s3:arn": [bucket_arn, f"{bucket_arn}/*"]},
+    }
+
+
 #: DynamoDB actions the inference monitor's role holds on the inference
 #: endpoints table: the API calls behind the ``InferenceEndpointStore`` methods
 #: ``gco/services/inference_monitor.py`` invokes (``list_endpoints`` scans,
@@ -1149,6 +1166,7 @@ class GCORegionalStack(Stack):
         # replacements in the KubectlApplyManifests CustomResource).
         self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
         self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
+        self._grant_model_bucket_read_to_job_role()
 
         # MLflow artifact storage: a dedicated OIDC-only IRSA role for the
         # tracking server's service account, scoped to the mlflow-artifacts/
@@ -3000,11 +3018,16 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
+                        "The workload role has three Resource:* statements. "
                         "cloudwatch:PutMetricData does not support resource-level "
-                        "scoping and requires Resource:*. The statement is "
-                        "constrained by a StringEquals condition to exactly one "
-                        "configured workload metric namespace, matching the "
-                        "namespace-conditioned metrics grants on the platform roles."
+                        "scoping; it is constrained by a StringEquals condition to "
+                        "exactly one configured workload metric namespace, matching "
+                        "the namespace-conditioned metrics grants on the platform "
+                        "roles. The two KMS statements cover the cluster-shared and "
+                        "model weights buckets, whose keys live in the global stack "
+                        "and are not exported: each is limited by kms:ViaService to "
+                        "S3 in the bucket's region and by kms:EncryptionContext:aws:s3:arn "
+                        "to that one bucket."
                     ),
                     "appliesTo": ["Resource::*"],
                 }
@@ -3050,34 +3073,12 @@ class GCORegionalStack(Stack):
                 )
             )
 
-        # Add S3 permissions for model weights bucket (used by inference init containers)
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "s3:GetObject",
-                    "s3:ListBucket",
-                ],
-                resources=[
-                    f"arn:{self.partition}:s3:::{project_name}-*",
-                    f"arn:{self.partition}:s3:::{project_name}-*/*",
-                ],
-            )
-        )
-
-        # KMS decrypt for model weights bucket (S3-scoped)
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["kms:Decrypt", "kms:GenerateDataKey"],
-                resources=[f"arn:{self.partition}:kms:*:{self.account}:key/*"],
-                conditions={
-                    "StringLike": {
-                        "kms:ViaService": f"s3.*.{self.url_suffix}",
-                    }
-                },
-            )
-        )
+        # S3 access is granted per bucket, never by name prefix: the model
+        # weights bucket (read, _grant_model_bucket_read_to_job_role), the
+        # cluster-shared bucket and this region's regional-shared bucket (read
+        # and write). Those are the buckets docs/ and examples/ point jobs and
+        # model pods at; every other <project>-* bucket (access logs, cost
+        # reports, the analytics Studio bucket) is out of the pods' reach.
 
         # Create KEDA operator IAM role for SQS access
         self._create_keda_operator_role()
@@ -3501,12 +3502,14 @@ class GCORegionalStack(Stack):
            to ``<shared.arn>`` and ``<shared.arn>/*`` — the literal ARN
            resolved from SSM (the bucket's name is CloudFormation-generated,
            so no prefix pattern is involved).
-        2. KMS ``Decrypt`` / ``GenerateDataKey`` scoped by the
-           ``kms:ViaService=s3.<shared.region>.<AWS::URLSuffix>`` condition —
+        2. KMS ``Decrypt`` / ``GenerateDataKey`` scoped by two conditions —
+           ``kms:ViaService=s3.<shared.region>.<AWS::URLSuffix>`` and
+           ``kms:EncryptionContext:aws:s3:arn`` naming the bucket (the context
+           S3 sends with a bucket key) or one of its objects (without one).
            ``resources=["*"]`` because the KMS key ARN is not known to this
            stack (it lives in the global region and is referenced indirectly
-           through the S3 service). The condition is what actually restricts
-           the grant to the cluster-shared bucket's key.
+           through the S3 service); the conditions restrict the grant to S3's
+           use of the cluster-shared bucket's key for this bucket alone.
 
         Runs unconditionally — the grant is
         present on every regional cluster whether or not analytics is
@@ -3533,11 +3536,9 @@ class GCORegionalStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["kms:Decrypt", "kms:GenerateDataKey"],
                 resources=["*"],
-                conditions={
-                    "StringEquals": {
-                        "kms:ViaService": f"s3.{shared.region}.{self.url_suffix}",
-                    }
-                },
+                conditions=_s3_bucket_kms_conditions(
+                    region=shared.region, bucket_arn=shared.arn, url_suffix=self.url_suffix
+                ),
             )
         )
 
@@ -3545,7 +3546,7 @@ class GCORegionalStack(Stack):
         # uses ``/*`` for object keys within the single resolved shared bucket.
         # KMS uses ``Resource::*`` because the global key ARN is not exported to
         # this stack; ``kms:ViaService`` confines its use to S3 in the bucket's
-        # region, while the S3 statements separately scope accessible objects.
+        # region and the encryption context to this bucket.
         acknowledge_nag_findings(
             self.service_account_role,
             [
@@ -3556,12 +3557,95 @@ class GCORegionalStack(Stack):
                         "an <arn>/* object-key suffix on the single shared bucket resolved "
                         "from SSM, and KMS Resource::* because the global key ARN is not "
                         "exported. KMS use is constrained by kms:ViaService to S3 in the "
-                        "bucket's region, and S3 access is separately limited to the "
-                        "allowed bucket ARNs."
+                        "bucket's region and by kms:EncryptionContext:aws:s3:arn to this "
+                        "bucket, and S3 access is separately limited to the bucket ARNs."
                     ),
                     "appliesTo": [
                         "Resource::*",
                         "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",
+                    ],
+                },
+            ],
+        )
+
+    def _grant_model_bucket_read_to_job_role(self) -> None:
+        """Let job and model pods read the model weights bucket, and only that bucket.
+
+        ``gco inference deploy --model-source`` adds a ``model-sync`` init
+        container that runs ``aws s3 sync`` from the model registry as the
+        pod's ``gco-service-account``. The bucket lives in ``GCOGlobalStack``
+        under a CloudFormation-generated name published at
+        ``/<project>/model-bucket-name`` in the global region, so it is read
+        back through the shared ``AwsCustomResource`` role like the
+        cluster-shared bucket's identity.
+
+        Two statements, read-only: ``s3:GetObject`` / ``s3:ListBucket`` on the
+        bucket and its objects, and ``kms:Decrypt`` through S3 in the global
+        region for this bucket's encryption context (its key is not exported).
+        """
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        project_name = self.config.get_project_name()
+        global_region = self.config.get_global_region()
+        parameter_name = f"/{project_name}/model-bucket-name"
+        reader = cr.AwsCustomResource(
+            self,
+            "ReadModelBucketName",
+            on_create=cr.AwsSdkCall(
+                service="SSM",
+                action="getParameter",
+                parameters={"Name": parameter_name},
+                region=global_region,
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{project_name}-model-bucket-name-{self.deployment_region}"
+                ),
+            ),
+            on_update=cr.AwsSdkCall(
+                service="SSM",
+                action="getParameter",
+                parameters={"Name": parameter_name},
+                region=global_region,
+            ),
+            role=self.aws_custom_resource_role,
+        )
+        reader.node.add_dependency(self.aws_custom_resource_role)
+        bucket_arn = f"arn:{self.partition}:s3:::{reader.get_response_field('Parameter.Value')}"
+
+        self.service_account_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:GetObject", "s3:ListBucket"],
+                resources=[bucket_arn, f"{bucket_arn}/*"],
+            )
+        )
+        self.service_account_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["kms:Decrypt"],
+                resources=["*"],
+                conditions=_s3_bucket_kms_conditions(
+                    region=global_region, bucket_arn=bucket_arn, url_suffix=self.url_suffix
+                ),
+            )
+        )
+
+        reader_id = self.get_logical_id(
+            cast(CfnElement, reader.node.find_child("Resource").node.default_child)
+        )
+        acknowledge_nag_findings(
+            self.service_account_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The model weights read grant needs an <arn>/* object-key "
+                        "suffix on the single model bucket resolved from SSM; its KMS "
+                        "Resource::* is limited by kms:ViaService and the bucket's "
+                        "encryption context (the global key ARN is not exported)."
+                    ),
+                    "appliesTo": [
+                        "Resource::*",
+                        f"Resource::arn:<AWS::Partition>:s3:::<{reader_id}.Parameter.Value>/*",
                     ],
                 },
             ],

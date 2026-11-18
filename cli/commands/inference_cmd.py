@@ -117,8 +117,9 @@ def _autoscale_metrics(
 )
 @click.option(
     "--model-source",
-    help="S3 URI for model weights (e.g. $(gco models uri llama3)), synced to "
-    "/models/<endpoint name> in each region by an init container.",
+    help="S3 URI for model weights in the GCO model bucket (e.g. $(gco models uri "
+    "llama3)), synced to /models/<endpoint name> in each region by an init container. "
+    "Pods can read no other bucket outside the two shared buckets.",
 )
 @click.option("--health-path", default="/health", help="Health check path (default: /health)")
 @click.option(
