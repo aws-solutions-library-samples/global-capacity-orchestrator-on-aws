@@ -1,11 +1,11 @@
 """
 Extended tests for gco/services/health_monitor.HealthMonitor.
 
-Covers the async internals that test_health_monitor.py doesn't reach:
-_get_pod_counts (active vs pending across namespaces, with graceful
-degradation when the Kubernetes API throws) and
+Covers the internals that test_health_monitor.py doesn't reach:
+_get_pod_counts (active Jobs vs pending pods across namespaces),
 _calculate_pending_requested_resources which sums CPU/memory/GPU
-requests from pending pods. Uses the same shared kubernetes-config
+requests from pending pods, and that a failed node or pod list fails the
+whole reading (ClusterReadError) instead of reading as zero. Uses the same shared kubernetes-config
 mocking pattern as the base health monitor suite.
 """
 
@@ -16,7 +16,7 @@ import pytest
 from kubernetes import config as k8s_config
 
 from gco.models import RequestedResources, ResourceThresholds, ResourceUtilization
-from gco.services.health_monitor import HealthMonitor
+from gco.services.health_monitor import ClusterReadError, HealthMonitor
 
 
 @pytest.fixture
@@ -48,39 +48,33 @@ def health_monitor(mock_k8s_config, thresholds):
 class TestPodCountsMethod:
     """Tests for _get_pod_counts method."""
 
-    @pytest.mark.asyncio
-    async def test_get_pod_counts_success(self, health_monitor):
-        """Test getting pod counts successfully."""
+    def test_get_pod_counts_success(self, health_monitor):
+        """Active Jobs in the job namespaces, and pending pods outside kube-system."""
+        health_monitor.job_namespaces = frozenset({"default"})
         mock_pod1 = MagicMock()
         mock_pod1.metadata.namespace = "default"
+        mock_pod1.metadata.owner_references = [MagicMock(kind="Job", uid="uid-1")]
         mock_pod1.status.phase = "Running"
-
         mock_pod2 = MagicMock()
-        mock_pod2.metadata.namespace = "gco-jobs"
+        mock_pod2.metadata.namespace = "default"
+        mock_pod2.metadata.owner_references = []
         mock_pod2.status.phase = "Pending"
-
         mock_pod3 = MagicMock()
         mock_pod3.metadata.namespace = "kube-system"
         mock_pod3.status.phase = "Running"
 
-        health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [
-            mock_pod1,
-            mock_pod2,
-            mock_pod3,
-        ]
+        active, pending = health_monitor._get_pod_counts([mock_pod1, mock_pod2, mock_pod3])
 
-        active, pending = await health_monitor._get_pod_counts()
         assert active == 1
         assert pending == 1
 
     @pytest.mark.asyncio
     async def test_get_pod_counts_error(self, health_monitor):
-        """Test pod counts handles errors gracefully."""
+        """A failed read fails the whole reading; it is never turned into zeros."""
+        health_monitor._get_node_metrics = AsyncMock(return_value={"items": []})
         health_monitor.core_v1.list_pod_for_all_namespaces.side_effect = Exception("API error")
-
-        active, pending = await health_monitor._get_pod_counts()
-        assert active == 0
-        assert pending == 0
+        with pytest.raises(ClusterReadError, match="listing pods failed: API error"):
+            await health_monitor.get_cluster_metrics()
 
 
 class TestPendingResourcesMethod:
@@ -104,7 +98,9 @@ class TestPendingResourcesMethod:
 
         health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [mock_pod]
 
-        result = await health_monitor._calculate_pending_requested_resources()
+        result = health_monitor._calculate_pending_requested_resources(
+            health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items
+        )
 
         assert result.cpu_vcpus == 0.5
         assert result.memory_gb == 1.0
@@ -127,7 +123,9 @@ class TestPendingResourcesMethod:
 
         health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [mock_pod]
 
-        result = await health_monitor._calculate_pending_requested_resources()
+        result = health_monitor._calculate_pending_requested_resources(
+            health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items
+        )
 
         assert result.cpu_vcpus == 1.0
 
@@ -148,7 +146,9 @@ class TestPendingResourcesMethod:
 
         health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [mock_pod]
 
-        result = await health_monitor._calculate_pending_requested_resources()
+        result = health_monitor._calculate_pending_requested_resources(
+            health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items
+        )
 
         assert result.cpu_vcpus == 2.0
 
@@ -166,7 +166,9 @@ class TestPendingResourcesMethod:
 
         health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [mock_pod]
 
-        result = await health_monitor._calculate_pending_requested_resources()
+        result = health_monitor._calculate_pending_requested_resources(
+            health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items
+        )
 
         assert result.cpu_vcpus == 0.0
         assert result.memory_gb == 0.0
@@ -185,21 +187,20 @@ class TestPendingResourcesMethod:
 
         health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [mock_pod]
 
-        result = await health_monitor._calculate_pending_requested_resources()
+        result = health_monitor._calculate_pending_requested_resources(
+            health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items
+        )
 
         assert result.cpu_vcpus == 0.0
         assert result.memory_gb == 0.0
 
     @pytest.mark.asyncio
     async def test_calculate_pending_resources_error(self, health_monitor):
-        """Test pending resources handles errors gracefully."""
+        """A failed read fails the whole reading; it is never turned into zeros."""
+        health_monitor._get_node_metrics = AsyncMock(return_value={"items": []})
         health_monitor.core_v1.list_pod_for_all_namespaces.side_effect = Exception("API error")
-
-        result = await health_monitor._calculate_pending_requested_resources()
-
-        assert result.cpu_vcpus == 0.0
-        assert result.memory_gb == 0.0
-        assert result.gpus == 0
+        with pytest.raises(ClusterReadError, match="listing pods failed: API error"):
+            await health_monitor.get_cluster_metrics()
 
 
 class TestKubeConfigLoadingFailure:
@@ -228,23 +229,25 @@ class TestKubeConfigLoadingFailure:
 class TestCpuCalculationErrors:
     """Additional tests for CPU calculation edge cases."""
 
-    def test_calculate_cpu_error_handling(self, health_monitor):
-        """Test CPU calculation handles errors gracefully."""
+    @pytest.mark.asyncio
+    async def test_calculate_cpu_error_handling(self, health_monitor):
+        """A failed read fails the whole reading; it is never turned into zeros."""
+        health_monitor._get_node_metrics = AsyncMock(return_value={"items": []})
         health_monitor.core_v1.list_node.side_effect = Exception("API error")
-
-        result = health_monitor._calculate_cpu_utilization({"items": []})
-        assert result == 0.0
+        with pytest.raises(ClusterReadError, match="listing nodes failed: API error"):
+            await health_monitor.get_cluster_metrics()
 
 
 class TestMemoryCalculationErrors:
     """Additional tests for memory calculation edge cases."""
 
-    def test_calculate_memory_error_handling(self, health_monitor):
-        """Test memory calculation handles errors gracefully."""
+    @pytest.mark.asyncio
+    async def test_calculate_memory_error_handling(self, health_monitor):
+        """A failed read fails the whole reading; it is never turned into zeros."""
+        health_monitor._get_node_metrics = AsyncMock(return_value={"items": []})
         health_monitor.core_v1.list_node.side_effect = Exception("API error")
-
-        result = health_monitor._calculate_memory_utilization({"items": []})
-        assert result == 0.0
+        with pytest.raises(ClusterReadError, match="listing nodes failed: API error"):
+            await health_monitor.get_cluster_metrics()
 
 
 class TestAllViolationsMessage:
@@ -279,42 +282,6 @@ class TestAllViolationsMessage:
         assert "Pending GPUs" in status.message
 
 
-class TestGetActiveJobsCount:
-    """Tests for _get_active_jobs_count method."""
-
-    @pytest.mark.asyncio
-    async def test_get_active_jobs_count_success(self, health_monitor):
-        """Test getting active jobs count successfully."""
-        mock_pod1 = MagicMock()
-        mock_pod1.metadata.namespace = "default"
-        mock_pod1.status.phase = "Running"
-
-        mock_pod2 = MagicMock()
-        mock_pod2.metadata.namespace = "gco-jobs"
-        mock_pod2.status.phase = "Running"
-
-        mock_pod3 = MagicMock()
-        mock_pod3.metadata.namespace = "kube-system"
-        mock_pod3.status.phase = "Running"
-
-        health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [
-            mock_pod1,
-            mock_pod2,
-            mock_pod3,
-        ]
-
-        count = await health_monitor._get_active_jobs_count()
-        assert count == 2  # Excludes kube-system
-
-    @pytest.mark.asyncio
-    async def test_get_active_jobs_count_error(self, health_monitor):
-        """Test active jobs count handles errors gracefully."""
-        health_monitor.core_v1.list_pod_for_all_namespaces.side_effect = Exception("API error")
-
-        count = await health_monitor._get_active_jobs_count()
-        assert count == 0
-
-
 class TestGpuUtilization:
     """Tests for _calculate_gpu_utilization method."""
 
@@ -335,7 +302,10 @@ class TestGpuUtilization:
         mock_pod.spec.containers = [mock_container]
         health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [mock_pod]
 
-        result = await health_monitor._calculate_gpu_utilization()
+        result = health_monitor._calculate_gpu_utilization(
+            health_monitor.core_v1.list_node.return_value.items,
+            health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items,
+        )
         assert result == 50.0  # 2/4 = 50%
 
     @pytest.mark.asyncio
@@ -347,16 +317,19 @@ class TestGpuUtilization:
 
         health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = []
 
-        result = await health_monitor._calculate_gpu_utilization()
+        result = health_monitor._calculate_gpu_utilization(
+            health_monitor.core_v1.list_node.return_value.items,
+            health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items,
+        )
         assert result == 0.0
 
     @pytest.mark.asyncio
     async def test_calculate_gpu_utilization_error(self, health_monitor):
-        """Test GPU utilization handles errors gracefully."""
-        health_monitor.core_v1.list_pod_for_all_namespaces.side_effect = Exception("API error")
-
-        result = await health_monitor._calculate_gpu_utilization()
-        assert result == 0.0
+        """A failed read fails the whole reading; it is never turned into zeros."""
+        health_monitor._get_node_metrics = AsyncMock(return_value={"items": []})
+        health_monitor.core_v1.list_node.side_effect = Exception("API error")
+        with pytest.raises(ClusterReadError, match="listing nodes failed: API error"):
+            await health_monitor.get_cluster_metrics()
 
 
 class TestNodeMetricsCache:
@@ -431,7 +404,9 @@ class TestUtilizationQuantities:
         # 2507348u is 2.507348 cores of 4: 62.6837 %, not the 63 % that
         # rounding each node's usage up to whole millicores would report.
         metrics = {"items": [{"usage": {"cpu": "2507348u"}}]}
-        assert health_monitor._calculate_cpu_utilization(metrics) == pytest.approx(62.6837)
+        assert health_monitor._calculate_cpu_utilization(
+            metrics, health_monitor.core_v1.list_node.return_value.items
+        ) == pytest.approx(62.6837)
 
     @pytest.mark.asyncio
     async def test_pending_requests_take_numeric_quantities(self, health_monitor):
@@ -443,7 +418,9 @@ class TestUtilizationQuantities:
         pod.spec.containers = [container]
         health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items = [pod]
 
-        requested = await health_monitor._calculate_pending_requested_resources()
+        requested = health_monitor._calculate_pending_requested_resources(
+            health_monitor.core_v1.list_pod_for_all_namespaces.return_value.items
+        )
 
         assert (requested.cpu_vcpus, requested.memory_gb, requested.gpus) == (0.5, 1.0, 1)
 
@@ -467,7 +444,9 @@ class TestCpuUtilizationEdgeCases:
             ]
         }
 
-        result = health_monitor._calculate_cpu_utilization(node_metrics)
+        result = health_monitor._calculate_cpu_utilization(
+            node_metrics, health_monitor.core_v1.list_node.return_value.items
+        )
         assert result == 50.0  # 2000/4000 = 50%
 
     def test_calculate_cpu_with_microcores_usage(self, health_monitor):
@@ -486,7 +465,9 @@ class TestCpuUtilizationEdgeCases:
             ]
         }
 
-        result = health_monitor._calculate_cpu_utilization(node_metrics)
+        result = health_monitor._calculate_cpu_utilization(
+            node_metrics, health_monitor.core_v1.list_node.return_value.items
+        )
         assert result == 50.0  # 2000/4000 = 50%
 
     def test_calculate_cpu_with_whole_cores_usage(self, health_monitor):
@@ -505,7 +486,9 @@ class TestCpuUtilizationEdgeCases:
             ]
         }
 
-        result = health_monitor._calculate_cpu_utilization(node_metrics)
+        result = health_monitor._calculate_cpu_utilization(
+            node_metrics, health_monitor.core_v1.list_node.return_value.items
+        )
         assert result == 50.0  # 2000/4000 = 50%
 
 

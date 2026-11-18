@@ -25,6 +25,8 @@ Usage:
 import asyncio
 import logging
 import os
+import time
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -73,6 +75,39 @@ _ALB_SYNC_SSM_CONFIG = Config(
 )
 
 
+#: Namespaces whose pods never count toward pending pods or active Jobs.
+_SYSTEM_NAMESPACES = frozenset({"kube-system", "kube-public", "kube-node-lease"})
+
+#: How long the last complete reading stands in when a read fails. After this
+#: the cluster is reported unhealthy, naming the failed read.
+LAST_GOOD_READING_MAX_AGE_SECONDS = 60.0
+
+#: One complete reading: (utilization, active_jobs, pending_pods, pending_requested).
+ClusterReading = tuple[ResourceUtilization, int, int, RequestedResources]
+
+
+class ClusterReadError(RuntimeError):
+    """A read the health status depends on failed; the message names it."""
+
+    def __init__(self, what: str, cause: Exception) -> None:
+        super().__init__(f"{what} failed: {cause}")
+        self.what = what
+
+
+async def _read[T](what: str, read: Awaitable[T]) -> T:
+    """Await ``read``, turning any failure into a :class:`ClusterReadError` named ``what``."""
+    try:
+        return await read
+    except Exception as exc:
+        raise ClusterReadError(what, exc) from exc
+
+
+def _job_namespaces_from_env() -> frozenset[str]:
+    """The job namespaces, as the manifest processor's ``ALLOWED_NAMESPACES`` lists them."""
+    raw = os.environ.get("ALLOWED_NAMESPACES", "gco-jobs,default")
+    return frozenset(ns.strip() for ns in raw.split(",") if ns.strip())
+
+
 class HealthMonitor:
     """
     Monitors Kubernetes cluster resource utilization and determines health status
@@ -89,10 +124,22 @@ class HealthMonitor:
     cluster reads are doing.
     """
 
-    def __init__(self, cluster_id: str, region: str, thresholds: ResourceThresholds):
+    def __init__(
+        self,
+        cluster_id: str,
+        region: str,
+        thresholds: ResourceThresholds,
+        *,
+        job_namespaces: Iterable[str] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.cluster_id = cluster_id
         self.region = region
         self.thresholds = thresholds
+        # Where active Jobs are counted (ALLOWED_NAMESPACES by default).
+        self.job_namespaces = (
+            frozenset(job_namespaces) if job_namespaces is not None else _job_namespaces_from_env()
+        )
 
         # Initialize Kubernetes clients
         try:
@@ -120,6 +167,12 @@ class HealthMonitor:
         self._last_metrics_time: datetime | None = None
         self._cached_metrics: dict[str, Any] | None = None
         self._cache_duration = 30  # seconds
+
+        # The last complete reading and when it was taken (on ``clock``), and
+        # the refresh in flight that concurrent callers share.
+        self._clock = clock
+        self._last_good_reading: tuple[float, ClusterReading] | None = None
+        self._refresh: asyncio.Task[HealthStatus] | None = None
 
         # ALB hostname sync. Every replica keeps serving health endpoints, but
         # only the holder of this Kubernetes Lease may perform the mutating SSM
@@ -157,46 +210,51 @@ class HealthMonitor:
         )
 
     async def get_cluster_metrics(self) -> tuple[ResourceUtilization, int, int, RequestedResources]:
+        """Take one complete reading of the cluster.
+
+        One metrics-server read (cached for ``_cache_duration`` seconds), one
+        node list, and one pod list; every figure is computed from those.
+        Returns ``(utilization, active_jobs, pending_pods, pending_requested)``.
+
+        Raises:
+            ClusterReadError: naming the read that failed. A failed read is
+                never turned into zeros, which would look like an idle,
+                healthy cluster.
         """
-        Get current cluster resource utilization metrics
-        Returns: (ResourceUtilization, active_jobs_count, pending_pods_count, pending_requested_resources)
-        """
+        node_metrics = await _read(
+            "reading node metrics from metrics-server", self._get_node_metrics()
+        )
+        node_list = await _read(
+            "listing nodes",
+            asyncio.to_thread(self.core_v1.list_node, _request_timeout=self._k8s_timeout),
+        )
+        pod_list = await _read(
+            "listing pods",
+            asyncio.to_thread(
+                self.core_v1.list_pod_for_all_namespaces, _request_timeout=self._k8s_timeout
+            ),
+        )
         try:
-            # Get node metrics from metrics server
-            node_metrics = await self._get_node_metrics()
-
-            # Get pod metrics for active jobs count and pending pods
-            active_jobs, pending_pods = await self._get_pod_counts()
-
-            # Calculate cluster-wide utilization (each helper lists the nodes)
-            cpu_utilization = await asyncio.to_thread(self._calculate_cpu_utilization, node_metrics)
-            memory_utilization = await asyncio.to_thread(
-                self._calculate_memory_utilization, node_metrics
-            )
-            gpu_utilization = await self._calculate_gpu_utilization()
-
-            # Calculate resources requested by pending pods
-            pending_requested = await self._calculate_pending_requested_resources()
-
+            nodes = list(node_list.items)
+            pods = list(pod_list.items)
             resource_utilization = ResourceUtilization(
-                cpu=cpu_utilization, memory=memory_utilization, gpu=gpu_utilization
+                cpu=self._calculate_cpu_utilization(node_metrics, nodes),
+                memory=self._calculate_memory_utilization(node_metrics, nodes),
+                gpu=self._calculate_gpu_utilization(nodes, pods),
             )
+            active_jobs, pending_pods = self._get_pod_counts(pods)
+            pending_requested = self._calculate_pending_requested_resources(pods)
+        except Exception as exc:
+            raise ClusterReadError("reading node and pod resources", exc) from exc
 
-            logger.info(
-                f"Cluster metrics - CPU: {cpu_utilization:.1f}%, "
-                f"Memory: {memory_utilization:.1f}%, GPU: {gpu_utilization:.1f}%, "
-                f"Active Jobs: {active_jobs}, Pending Pods: {pending_pods}, "
-                f"Pending Requested CPU: {pending_requested.cpu_vcpus:.1f} vCPUs, "
-                f"Pending Requested Memory: {pending_requested.memory_gb:.1f} GB"
-            )
-
-            return resource_utilization, active_jobs, pending_pods, pending_requested
-
-        except Exception as e:
-            logger.error(f"Failed to get cluster metrics: {e}")
-            # Re-raise so get_health_status returns "unhealthy" instead of
-            # silently reporting 0% utilization (which looks healthy to GA).
-            raise
+        logger.info(
+            f"Cluster metrics - CPU: {resource_utilization.cpu:.1f}%, "
+            f"Memory: {resource_utilization.memory:.1f}%, GPU: {resource_utilization.gpu:.1f}%, "
+            f"Active Jobs: {active_jobs}, Pending Pods: {pending_pods}, "
+            f"Pending Requested CPU: {pending_requested.cpu_vcpus:.1f} vCPUs, "
+            f"Pending Requested Memory: {pending_requested.memory_gb:.1f} GB"
+        )
+        return resource_utilization, active_jobs, pending_pods, pending_requested
 
     async def _get_node_metrics(self) -> dict[str, Any]:
         """Get node metrics from Kubernetes metrics server"""
@@ -236,343 +294,302 @@ class HealthMonitor:
             # Invalidate cache so stale data isn't used on next call
             self._cached_metrics = None
             self._last_metrics_time = None
-            # Re-raise so get_cluster_metrics propagates the failure
-            # to get_health_status, which returns "unhealthy"
+            # Re-raise so the reading fails and the health status says why.
             raise
 
-    def _calculate_cpu_utilization(self, node_metrics: dict[str, Any]) -> float:
-        """Calculate cluster-wide CPU utilization percentage"""
-        total_cpu_usage = 0.0
+    def _calculate_cpu_utilization(self, node_metrics: dict[str, Any], nodes: list[Any]) -> float:
+        """Cluster-wide CPU usage as a percentage of allocatable CPU.
+
+        Can exceed 100: usage includes system-reserved CPU that allocatable
+        leaves out. ``0.0`` when there are no nodes.
+        """
         total_cpu_capacity = 0.0
+        for node in nodes:
+            allocatable = present(node.status, "node.status").allocatable or {}
+            total_cpu_capacity += parse_cpu_millicores(allocatable.get("cpu"))
 
-        try:
-            # Get node list for capacity information
-            nodes = self.core_v1.list_node(_request_timeout=self._k8s_timeout)
-            node_capacities = {}
+        total_cpu_usage = 0.0
+        for item in node_metrics.get("items", []):
+            # Exact, unrounded: metrics-server reports usage in nano- or
+            # microcores, and rounding each node up would bias the sum.
+            total_cpu_usage += float(parse_quantity(item["usage"]["cpu"]) * 1000)
 
-            for node in nodes.items:
-                node_name = present(node.metadata, "node.metadata").name
-                allocatable = present(node.status, "node.status").allocatable or {}
-                cpu_capacity_millicores = parse_cpu_millicores(allocatable.get("cpu"))
-                node_capacities[node_name] = cpu_capacity_millicores
-                total_cpu_capacity += cpu_capacity_millicores
-
-            # Calculate usage from metrics
-            for item in node_metrics.get("items", []):
-                # Exact, unrounded: metrics-server reports usage in nano- or
-                # microcores, and rounding each node up would bias the sum.
-                cpu_usage_cores = parse_quantity(item["usage"]["cpu"])
-                total_cpu_usage += float(cpu_usage_cores * 1000)
-
-            if total_cpu_capacity > 0:
-                return (total_cpu_usage / total_cpu_capacity) * 100
-
-        except Exception as e:
-            logger.error(f"Error calculating CPU utilization: {e}")
-
+        if total_cpu_capacity > 0:
+            return (total_cpu_usage / total_cpu_capacity) * 100
         return 0.0
 
-    def _calculate_memory_utilization(self, node_metrics: dict[str, Any]) -> float:
-        """Calculate cluster-wide memory utilization percentage"""
-        total_memory_usage = 0
+    def _calculate_memory_utilization(
+        self, node_metrics: dict[str, Any], nodes: list[Any]
+    ) -> float:
+        """Cluster-wide memory usage as a percentage of allocatable memory.
+
+        Can exceed 100 for the same reason as CPU. ``0.0`` when there are no nodes.
+        """
         total_memory_capacity = 0
+        for node in nodes:
+            allocatable = present(node.status, "node.status").allocatable or {}
+            total_memory_capacity += self._parse_memory_string(allocatable.get("memory", "0"))
 
-        try:
-            # Get node list for capacity information
-            nodes = self.core_v1.list_node(_request_timeout=self._k8s_timeout)
+        total_memory_usage = 0
+        for item in node_metrics.get("items", []):
+            total_memory_usage += self._parse_memory_string(item["usage"]["memory"])
 
-            for node in nodes.items:
-                allocatable = present(node.status, "node.status").allocatable or {}
-                memory_capacity = allocatable.get("memory", "0")
-                # Convert memory capacity to bytes
-                memory_capacity_bytes = self._parse_memory_string(memory_capacity)
-                total_memory_capacity += memory_capacity_bytes
-
-            # Calculate usage from metrics
-            for item in node_metrics.get("items", []):
-                memory_usage = item["usage"]["memory"]
-                memory_usage_bytes = self._parse_memory_string(memory_usage)
-                total_memory_usage += memory_usage_bytes
-
-            if total_memory_capacity > 0:
-                return (total_memory_usage / total_memory_capacity) * 100
-
-        except Exception as e:
-            logger.error(f"Error calculating memory utilization: {e}")
-
+        if total_memory_capacity > 0:
+            return (total_memory_usage / total_memory_capacity) * 100
         return 0.0
 
     def _parse_memory_string(self, memory_str: object) -> int:
         """A memory quantity in bytes (any form the API server accepts); empty is 0."""
         return parse_memory_bytes(memory_str)
 
-    async def _calculate_gpu_utilization(self) -> float:
-        """Calculate cluster-wide GPU utilization percentage"""
-        try:
-            # Get pods with GPU requests
-            pods = await asyncio.to_thread(
-                self.core_v1.list_pod_for_all_namespaces,
-                _request_timeout=self._k8s_timeout,
-            )
+    def _calculate_gpu_utilization(self, nodes: list[Any], pods: list[Any]) -> float:
+        """GPUs requested by running pods as a percentage of allocatable GPUs.
 
-            total_gpu_requested = 0
-            total_gpu_capacity = 0
+        Can exceed 100, for example while a device plugin restarts and nodes
+        briefly report fewer allocatable GPUs than running pods hold. ``0.0``
+        when no node has GPUs.
+        """
+        total_gpu_capacity = 0
+        for node in nodes:
+            allocatable = present(node.status, "node.status").allocatable or {}
+            total_gpu_capacity += parse_gpu_count(allocatable.get("nvidia.com/gpu"))
 
-            # Get node GPU capacity
-            nodes = await asyncio.to_thread(
-                self.core_v1.list_node, _request_timeout=self._k8s_timeout
-            )
-            for node in nodes.items:
-                allocatable = present(node.status, "node.status").allocatable or {}
-                total_gpu_capacity += parse_gpu_count(allocatable.get("nvidia.com/gpu"))
-
-            # Calculate GPU requests from running pods
-            for pod in pods.items:
-                if present(pod.status, "pod.status").phase == "Running":
-                    for container in present(pod.spec, "pod.spec").containers:
-                        if container.resources and container.resources.requests:
-                            total_gpu_requested += parse_gpu_count(
-                                container.resources.requests.get("nvidia.com/gpu")
-                            )
-
-            if total_gpu_capacity > 0:
-                return (total_gpu_requested / total_gpu_capacity) * 100
-
-        except Exception as e:
-            logger.error(f"Error calculating GPU utilization: {e}")
-
-        return 0.0
-
-    async def _get_active_jobs_count(self) -> int:
-        """Get count of active jobs in the cluster"""
-        try:
-            # Count running pods (excluding system pods)
-            pods = await asyncio.to_thread(
-                self.core_v1.list_pod_for_all_namespaces,
-                _request_timeout=self._k8s_timeout,
-            )
-            active_jobs = 0
-
-            for pod in pods.items:
-                # Skip system namespaces
-                namespace = present(pod.metadata, "pod.metadata").namespace
-                if namespace in ["kube-system", "kube-public", "kube-node-lease"]:
-                    continue
-                # Count running pods as active jobs
-                if present(pod.status, "pod.status").phase == "Running":
-                    active_jobs += 1
-
-            return active_jobs
-
-        except Exception as e:
-            logger.error(f"Error getting active jobs count: {e}")
-            return 0
-
-    async def _get_pod_counts(self) -> tuple[int, int]:
-        """Get count of active jobs and pending pods in the cluster"""
-        try:
-            pods = await asyncio.to_thread(
-                self.core_v1.list_pod_for_all_namespaces,
-                _request_timeout=self._k8s_timeout,
-            )
-            active_jobs = 0
-            pending_pods = 0
-
-            for pod in pods.items:
-                # Skip system namespaces
-                namespace = present(pod.metadata, "pod.metadata").namespace
-                if namespace in ["kube-system", "kube-public", "kube-node-lease"]:
-                    continue
-                phase = present(pod.status, "pod.status").phase
-                if phase == "Running":
-                    active_jobs += 1
-                elif phase == "Pending":
-                    pending_pods += 1
-
-            return active_jobs, pending_pods
-
-        except Exception as e:
-            logger.error(f"Error getting pod counts: {e}")
-            return 0, 0
-
-    async def _calculate_pending_requested_resources(self) -> RequestedResources:
-        """Calculate total resources requested by pending pods"""
-        try:
-            pods = await asyncio.to_thread(
-                self.core_v1.list_pod_for_all_namespaces,
-                _request_timeout=self._k8s_timeout,
-            )
-            total_cpu_millicores = 0.0
-            total_memory_bytes = 0
-            total_gpus = 0
-
-            for pod in pods.items:
-                # Skip system namespaces
-                namespace = present(pod.metadata, "pod.metadata").namespace
-                if namespace in ["kube-system", "kube-public", "kube-node-lease"]:
-                    continue
-                # Only count pending pods
-                if present(pod.status, "pod.status").phase != "Pending":
-                    continue
+        total_gpu_requested = 0
+        for pod in pods:
+            if present(pod.status, "pod.status").phase == "Running":
                 for container in present(pod.spec, "pod.spec").containers:
                     if container.resources and container.resources.requests:
-                        # CPU
-                        total_cpu_millicores += parse_cpu_millicores(
-                            container.resources.requests.get("cpu")
-                        )
-
-                        # Memory
-                        memory_request = container.resources.requests.get("memory", "0")
-                        total_memory_bytes += self._parse_memory_string(memory_request)
-
-                        # GPUs
-                        total_gpus += parse_gpu_count(
+                        total_gpu_requested += parse_gpu_count(
                             container.resources.requests.get("nvidia.com/gpu")
                         )
 
-            # Convert to vCPUs and GB
-            cpu_vcpus = total_cpu_millicores / 1000
-            memory_gb = total_memory_bytes / (1024 * 1024 * 1024)
+        if total_gpu_capacity > 0:
+            return (total_gpu_requested / total_gpu_capacity) * 100
+        return 0.0
 
-            return RequestedResources(cpu_vcpus=cpu_vcpus, memory_gb=memory_gb, gpus=total_gpus)
+    def _get_pod_counts(self, pods: list[Any]) -> tuple[int, int]:
+        """``(active_jobs, pending_pods)`` from one pod list.
 
-        except Exception as e:
-            logger.error(f"Error calculating pending requested resources: {e}")
-            return RequestedResources(cpu_vcpus=0.0, memory_gb=0.0, gpus=0)
+        ``active_jobs`` counts Jobs, not pods: the distinct Jobs in the job
+        namespaces (``ALLOWED_NAMESPACES``) that own at least one pending or
+        running pod, which is what a Job's own ``status.active`` tracks.
+        ``pending_pods`` counts every pending pod outside the system
+        namespaces.
+        """
+        active_job_uids: set[str] = set()
+        pending_pods = 0
+
+        for pod in pods:
+            metadata = present(pod.metadata, "pod.metadata")
+            if metadata.namespace in _SYSTEM_NAMESPACES:
+                continue
+            phase = present(pod.status, "pod.status").phase
+            if phase == "Pending":
+                pending_pods += 1
+            if phase in ("Pending", "Running") and metadata.namespace in self.job_namespaces:
+                for owner in metadata.owner_references or []:
+                    if owner.kind == "Job":
+                        active_job_uids.add(owner.uid)
+
+        return len(active_job_uids), pending_pods
+
+    def _calculate_pending_requested_resources(self, pods: list[Any]) -> RequestedResources:
+        """Total resources requested by pending pods outside the system namespaces."""
+        total_cpu_millicores = 0.0
+        total_memory_bytes = 0
+        total_gpus = 0
+
+        for pod in pods:
+            if present(pod.metadata, "pod.metadata").namespace in _SYSTEM_NAMESPACES:
+                continue
+            # Only count pending pods
+            if present(pod.status, "pod.status").phase != "Pending":
+                continue
+            for container in present(pod.spec, "pod.spec").containers:
+                if container.resources and container.resources.requests:
+                    requests = container.resources.requests
+                    total_cpu_millicores += parse_cpu_millicores(requests.get("cpu"))
+                    total_memory_bytes += self._parse_memory_string(requests.get("memory", "0"))
+                    total_gpus += parse_gpu_count(requests.get("nvidia.com/gpu"))
+
+        # Convert to vCPUs and GB
+        cpu_vcpus = total_cpu_millicores / 1000
+        memory_gb = total_memory_bytes / (1024 * 1024 * 1024)
+
+        return RequestedResources(cpu_vcpus=cpu_vcpus, memory_gb=memory_gb, gpus=total_gpus)
 
     async def get_health_status(self) -> HealthStatus:
+        """Get current health status of the cluster.
+
+        Single-flight: a caller that arrives while a refresh runs (the
+        background loop and an API request, say) shares that refresh instead
+        of starting its own set of reads. A cancelled caller does not cancel
+        the shared refresh.
         """
-        Get current health status of the cluster
+        refresh = self._refresh
+        if refresh is None or refresh.done():
+            refresh = asyncio.create_task(self._refresh_health_status())
+            self._refresh = refresh
+        return await asyncio.shield(refresh)
+
+    async def _refresh_health_status(self) -> HealthStatus:
+        """Read the cluster and judge it against the thresholds.
+
+        When a read fails, the last complete reading stands in for up to
+        ``LAST_GOOD_READING_MAX_AGE_SECONDS`` (the message says which read
+        failed and how old the reading is). After that the cluster is
+        reported unhealthy, with the failed read named in the message: a
+        failed read is never reported as healthy.
         """
+        stale_note: str | None = None
         try:
-            # Get current metrics
-            (
-                resource_utilization,
-                active_jobs,
-                pending_pods,
-                pending_requested,
-            ) = await self.get_cluster_metrics()
+            reading = await self.get_cluster_metrics()
+        except Exception as e:
+            now = self._clock()
+            last_good = self._last_good_reading
+            if last_good is None or now - last_good[0] > LAST_GOOD_READING_MAX_AGE_SECONDS:
+                logger.error(f"Error getting health status: {e}")
+                return self._unhealthy(f"Health check error: {e}")
+            age = now - last_good[0]
+            logger.warning(f"Cluster read failed; using the reading from {age:.0f}s ago: {e}")
+            reading = last_good[1]
+            stale_note = f"Using the reading from {age:.0f}s ago ({e})"
+        else:
+            self._last_good_reading = (self._clock(), reading)
 
-            # Determine health status based on thresholds
-            # A threshold of -1 means that check is disabled
-            is_healthy = True
-            if not self.thresholds.is_disabled("cpu_threshold"):
-                is_healthy = (
-                    is_healthy and resource_utilization.cpu <= self.thresholds.cpu_threshold
-                )
-            if not self.thresholds.is_disabled("memory_threshold"):
-                is_healthy = (
-                    is_healthy and resource_utilization.memory <= self.thresholds.memory_threshold
-                )
-            if not self.thresholds.is_disabled("gpu_threshold"):
-                is_healthy = (
-                    is_healthy and resource_utilization.gpu <= self.thresholds.gpu_threshold
-                )
-            if not self.thresholds.is_disabled("pending_pods_threshold"):
-                is_healthy = is_healthy and pending_pods <= self.thresholds.pending_pods_threshold
-            if not self.thresholds.is_disabled("pending_requested_cpu_vcpus"):
-                is_healthy = (
-                    is_healthy
-                    and pending_requested.cpu_vcpus <= self.thresholds.pending_requested_cpu_vcpus
-                )
-            if not self.thresholds.is_disabled("pending_requested_memory_gb"):
-                is_healthy = (
-                    is_healthy
-                    and pending_requested.memory_gb <= self.thresholds.pending_requested_memory_gb
-                )
-            if not self.thresholds.is_disabled("pending_requested_gpus"):
-                is_healthy = (
-                    is_healthy and pending_requested.gpus <= self.thresholds.pending_requested_gpus
-                )
-
-            status: Literal["healthy", "unhealthy"] = "healthy" if is_healthy else "unhealthy"
-
-            # Generate status message
-            message = None
-            if not is_healthy:
-                violations = []
-                if (
-                    not self.thresholds.is_disabled("cpu_threshold")
-                    and resource_utilization.cpu > self.thresholds.cpu_threshold
-                ):
-                    violations.append(
-                        f"CPU: {resource_utilization.cpu:.1f}% > {self.thresholds.cpu_threshold}%"
-                    )
-                if (
-                    not self.thresholds.is_disabled("memory_threshold")
-                    and resource_utilization.memory > self.thresholds.memory_threshold
-                ):
-                    violations.append(
-                        f"Memory: {resource_utilization.memory:.1f}% > {self.thresholds.memory_threshold}%"
-                    )
-                if (
-                    not self.thresholds.is_disabled("gpu_threshold")
-                    and resource_utilization.gpu > self.thresholds.gpu_threshold
-                ):
-                    violations.append(
-                        f"GPU: {resource_utilization.gpu:.1f}% > {self.thresholds.gpu_threshold}%"
-                    )
-                if (
-                    not self.thresholds.is_disabled("pending_pods_threshold")
-                    and pending_pods > self.thresholds.pending_pods_threshold
-                ):
-                    violations.append(
-                        f"Pending Pods: {pending_pods} > {self.thresholds.pending_pods_threshold}"
-                    )
-                if (
-                    not self.thresholds.is_disabled("pending_requested_cpu_vcpus")
-                    and pending_requested.cpu_vcpus > self.thresholds.pending_requested_cpu_vcpus
-                ):
-                    violations.append(
-                        f"Pending CPU: {pending_requested.cpu_vcpus:.1f} vCPUs > {self.thresholds.pending_requested_cpu_vcpus} vCPUs"
-                    )
-                if (
-                    not self.thresholds.is_disabled("pending_requested_memory_gb")
-                    and pending_requested.memory_gb > self.thresholds.pending_requested_memory_gb
-                ):
-                    violations.append(
-                        f"Pending Memory: {pending_requested.memory_gb:.1f} GB > {self.thresholds.pending_requested_memory_gb} GB"
-                    )
-                if (
-                    not self.thresholds.is_disabled("pending_requested_gpus")
-                    and pending_requested.gpus > self.thresholds.pending_requested_gpus
-                ):
-                    violations.append(
-                        f"Pending GPUs: {pending_requested.gpus} > {self.thresholds.pending_requested_gpus}"
-                    )
-                message = f"Threshold violations: {', '.join(violations)}"
-
-            health_status = HealthStatus(
-                cluster_id=self.cluster_id,
-                region=self.region,
-                timestamp=datetime.now(UTC),
-                status=status,
-                resource_utilization=resource_utilization,
-                thresholds=self.thresholds,
-                active_jobs=active_jobs,
-                pending_pods=pending_pods,
-                pending_requested=pending_requested,
-                message=message,
-            )
-
-            logger.info(f"Health status: {status} - {message or 'All thresholds within limits'}")
-            return health_status
-
+        try:
+            return self._evaluate(*reading, stale_note=stale_note)
         except Exception as e:
             logger.error(f"Error getting health status: {e}")
-            # Return unhealthy status on error
-            return HealthStatus(
-                cluster_id=self.cluster_id,
-                region=self.region,
-                timestamp=datetime.now(UTC),
-                status="unhealthy",
-                resource_utilization=ResourceUtilization(cpu=0.0, memory=0.0, gpu=0.0),
-                thresholds=self.thresholds,
-                active_jobs=0,
-                pending_pods=0,
-                pending_requested=RequestedResources(cpu_vcpus=0.0, memory_gb=0.0, gpus=0),
-                message=f"Health check error: {e!s}",
+            return self._unhealthy(f"Health check error: {e}")
+
+    def _unhealthy(self, message: str) -> HealthStatus:
+        return HealthStatus(
+            cluster_id=self.cluster_id,
+            region=self.region,
+            timestamp=datetime.now(UTC),
+            status="unhealthy",
+            resource_utilization=ResourceUtilization(cpu=0.0, memory=0.0, gpu=0.0),
+            thresholds=self.thresholds,
+            active_jobs=0,
+            pending_pods=0,
+            pending_requested=RequestedResources(cpu_vcpus=0.0, memory_gb=0.0, gpus=0),
+            message=message,
+        )
+
+    def _evaluate(
+        self,
+        resource_utilization: ResourceUtilization,
+        active_jobs: int,
+        pending_pods: int,
+        pending_requested: RequestedResources,
+        *,
+        stale_note: str | None = None,
+    ) -> HealthStatus:
+        """Judge one reading against the thresholds (-1 disables a check)."""
+        # Determine health status based on thresholds
+        # A threshold of -1 means that check is disabled
+        is_healthy = True
+        if not self.thresholds.is_disabled("cpu_threshold"):
+            is_healthy = is_healthy and resource_utilization.cpu <= self.thresholds.cpu_threshold
+        if not self.thresholds.is_disabled("memory_threshold"):
+            is_healthy = (
+                is_healthy and resource_utilization.memory <= self.thresholds.memory_threshold
             )
+        if not self.thresholds.is_disabled("gpu_threshold"):
+            is_healthy = is_healthy and resource_utilization.gpu <= self.thresholds.gpu_threshold
+        if not self.thresholds.is_disabled("pending_pods_threshold"):
+            is_healthy = is_healthy and pending_pods <= self.thresholds.pending_pods_threshold
+        if not self.thresholds.is_disabled("pending_requested_cpu_vcpus"):
+            is_healthy = (
+                is_healthy
+                and pending_requested.cpu_vcpus <= self.thresholds.pending_requested_cpu_vcpus
+            )
+        if not self.thresholds.is_disabled("pending_requested_memory_gb"):
+            is_healthy = (
+                is_healthy
+                and pending_requested.memory_gb <= self.thresholds.pending_requested_memory_gb
+            )
+        if not self.thresholds.is_disabled("pending_requested_gpus"):
+            is_healthy = (
+                is_healthy and pending_requested.gpus <= self.thresholds.pending_requested_gpus
+            )
+
+        status: Literal["healthy", "unhealthy"] = "healthy" if is_healthy else "unhealthy"
+
+        # Generate status message
+        message = None
+        if not is_healthy:
+            violations = []
+            if (
+                not self.thresholds.is_disabled("cpu_threshold")
+                and resource_utilization.cpu > self.thresholds.cpu_threshold
+            ):
+                violations.append(
+                    f"CPU: {resource_utilization.cpu:.1f}% > {self.thresholds.cpu_threshold}%"
+                )
+            if (
+                not self.thresholds.is_disabled("memory_threshold")
+                and resource_utilization.memory > self.thresholds.memory_threshold
+            ):
+                violations.append(
+                    f"Memory: {resource_utilization.memory:.1f}% > {self.thresholds.memory_threshold}%"
+                )
+            if (
+                not self.thresholds.is_disabled("gpu_threshold")
+                and resource_utilization.gpu > self.thresholds.gpu_threshold
+            ):
+                violations.append(
+                    f"GPU: {resource_utilization.gpu:.1f}% > {self.thresholds.gpu_threshold}%"
+                )
+            if (
+                not self.thresholds.is_disabled("pending_pods_threshold")
+                and pending_pods > self.thresholds.pending_pods_threshold
+            ):
+                violations.append(
+                    f"Pending Pods: {pending_pods} > {self.thresholds.pending_pods_threshold}"
+                )
+            if (
+                not self.thresholds.is_disabled("pending_requested_cpu_vcpus")
+                and pending_requested.cpu_vcpus > self.thresholds.pending_requested_cpu_vcpus
+            ):
+                violations.append(
+                    f"Pending CPU: {pending_requested.cpu_vcpus:.1f} vCPUs > {self.thresholds.pending_requested_cpu_vcpus} vCPUs"
+                )
+            if (
+                not self.thresholds.is_disabled("pending_requested_memory_gb")
+                and pending_requested.memory_gb > self.thresholds.pending_requested_memory_gb
+            ):
+                violations.append(
+                    f"Pending Memory: {pending_requested.memory_gb:.1f} GB > {self.thresholds.pending_requested_memory_gb} GB"
+                )
+            if (
+                not self.thresholds.is_disabled("pending_requested_gpus")
+                and pending_requested.gpus > self.thresholds.pending_requested_gpus
+            ):
+                violations.append(
+                    f"Pending GPUs: {pending_requested.gpus} > {self.thresholds.pending_requested_gpus}"
+                )
+            message = f"Threshold violations: {', '.join(violations)}"
+
+        if stale_note is not None:
+            message = f"{message}; {stale_note}" if message else stale_note
+
+        health_status = HealthStatus(
+            cluster_id=self.cluster_id,
+            region=self.region,
+            timestamp=datetime.now(UTC),
+            status=status,
+            resource_utilization=resource_utilization,
+            thresholds=self.thresholds,
+            active_jobs=active_jobs,
+            pending_pods=pending_pods,
+            pending_requested=pending_requested,
+            message=message,
+        )
+
+        logger.info(f"Health status: {status} - {message or 'All thresholds within limits'}")
+        return health_status
 
     def _try_acquire_alb_sync_lease(self) -> bool:
         """Acquire or renew the single-writer Lease for ALB self-healing.

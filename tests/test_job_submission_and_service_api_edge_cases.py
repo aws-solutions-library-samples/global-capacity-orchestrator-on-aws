@@ -1678,6 +1678,10 @@ def _new_health_monitor() -> Any:
     monitor.core_v1 = MagicMock()
     monitor.coordination_v1 = MagicMock()
     monitor.metrics_v1beta1 = MagicMock()
+    monitor.job_namespaces = frozenset({"gco-jobs", "default"})
+    monitor._clock = lambda: _LEASE_CLOCK[0]
+    monitor._last_good_reading = None
+    monitor._refresh = None
     return monitor
 
 
@@ -1717,7 +1721,7 @@ async def test_health_monitor_loops_multiple_pending_pods_and_containers() -> No
     monitor.core_v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(
         items=[first, second]
     )
-    result = await monitor._calculate_pending_requested_resources()
+    result = monitor._calculate_pending_requested_resources([first, second])
     assert result.cpu_vcpus == pytest.approx(0.6)
     assert result.memory_gb == pytest.approx(6 * 1024 / 1024**3)
 
@@ -3376,14 +3380,17 @@ async def test_health_monitor_counts_multiple_pods_and_skips_unrequested_sidecar
 
     pods = [
         SimpleNamespace(
-            metadata=SimpleNamespace(namespace="gco-jobs"),
+            metadata=SimpleNamespace(namespace="gco-jobs", owner_references=None),
             status=SimpleNamespace(phase="Pending"),
             spec=SimpleNamespace(
                 containers=[container("100m", "1Ki"), SimpleNamespace(resources=None)]
             ),
         ),
         SimpleNamespace(
-            metadata=SimpleNamespace(namespace="default"),
+            metadata=SimpleNamespace(
+                namespace="default",
+                owner_references=[SimpleNamespace(kind="Job", uid="uid-job")],
+            ),
             status=SimpleNamespace(phase="Running"),
             spec=SimpleNamespace(containers=[container("200m", "2Ki")]),
         ),
@@ -3393,9 +3400,8 @@ async def test_health_monitor_counts_multiple_pods_and_skips_unrequested_sidecar
             spec=None,
         ),
     ]
-    monitor.core_v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(items=pods)
-    assert await monitor._get_pod_counts() == (1, 1)
-    requested = await monitor._calculate_pending_requested_resources()
+    assert monitor._get_pod_counts(pods) == (1, 1)
+    requested = monitor._calculate_pending_requested_resources(pods)
     assert requested.cpu_vcpus == pytest.approx(0.1)
     assert requested.memory_gb == pytest.approx(1024 / 1024**3)
 

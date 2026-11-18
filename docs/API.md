@@ -2350,7 +2350,7 @@ Service directly or scraped by the cluster's Prometheus.
 | Endpoint | Service | Auth | Purpose |
 |----------|---------|------|---------|
 | `GET /api/v1/health` | `health-monitor` | None | `200` when the cluster is healthy, `503` otherwise. Global Accelerator health check target |
-| `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization, configured thresholds, active job count, threshold violations |
+| `GET /api/v1/metrics` | `health-monitor` | HMAC envelope | CPU / memory / GPU utilization (percent of allocatable; can exceed 100 when the cluster is over-committed), configured thresholds, active job count (Jobs in the job namespaces with a pending or running pod), threshold violations |
 | `GET /api/v1/status` | `health-monitor` | HMAC envelope | Monitor initialization, background task state, webhook dispatcher counters |
 | `GET /api/v1/status` | `manifest-processor` | HMAC envelope | Resource limits, allowed namespaces, template/webhook counts, central queue worker health |
 | `GET /api/v1/policy` | `manifest-processor` | HMAC envelope | The effective job validation policy this region enforces — per-manifest cpu/memory/gpu caps, `allowed_namespaces`, `allowed_kinds`, `allowed_api_versions`, `trusted_registries`, `trusted_dockerhub_orgs`, `require_accelerator_toleration`, `yaml_max_depth`, the eight `manifest_security_policy.block_*` flags, and each allowed namespace's live ResourceQuota / LimitRange ceilings. `503` until the processor is initialized |
@@ -2364,6 +2364,13 @@ bypass the HMAC envelope; see [Authentication](#authentication).
 The health monitor also publishes resource utilization and health status to
 CloudWatch every 30 seconds independently of these endpoints, which is how
 dashboards and alarms are fed. See the [Monitoring Guide](MONITORING.md).
+
+Each refresh reads metrics-server once and lists the nodes and pods once;
+requests that arrive while a refresh runs share it. If one of those reads
+fails, the monitor serves the last complete reading for up to 60 seconds (the
+`message` field says which read failed and how old the reading is) and then
+reports `unhealthy` with the failed read named in `message`, so a failed read
+never makes `/api/v1/health` answer `200`.
 
 > **Which `/api/v1/status` you get.** As described in
 > [API Surface at a Glance](#api-surface-at-a-glance), the ALB resolves
