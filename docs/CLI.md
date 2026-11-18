@@ -5088,6 +5088,14 @@ sends one), it terminates that process group, and every one a `--parallel` run
 started, before it exits with status 143. CloudFormation still completes or
 rolls back the stack operation that was already in progress.
 
+Every command here that edits cdk.json (the feature toggles such as
+`gco stacks fsx enable`, and the managed-config commands `gco stacks regions`
+and `gco stacks bedrock`) rewrites the whole file in one format: two-space
+indentation, keys in their existing order, non-ASCII text such as the
+comments' em dashes kept as UTF-8 rather than `\uXXXX` escapes, and one
+trailing newline. Code that writes cdk.json the same way can use
+`cli.stacks.serialize_cdk_json`.
+
 #### `gco stacks list`
 
 List all GCO stacks.

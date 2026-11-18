@@ -972,6 +972,21 @@ def _atomic_write_bytes(target: Path, content: bytes, *, mode: int | None = None
         temporary.unlink(missing_ok=True)
 
 
+def serialize_cdk_json(document: Mapping[str, Any]) -> bytes:
+    """Return the exact bytes the CLI stores for a cdk.json document.
+
+    Two-space indentation in insertion order keeps the ``_comment_*`` keys
+    and their placement; ``ensure_ascii=False`` keeps non-ASCII text, such as
+    the comments' em dashes and arrows, as UTF-8 rather than ``\\uXXXX``
+    escapes; the file ends with one newline. The feature toggles in this
+    module and the managed-configuration engine in ``cli/managed_config.py``
+    both write through it, so an edit changes only the keys it touches. Other
+    code that rewrites cdk.json imports it as
+    ``from cli.stacks import serialize_cdk_json``.
+    """
+    return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
 class ConfigMutationLockError(RuntimeError):
     """The shared cdk.json transaction lock could not be acquired."""
 
@@ -7690,10 +7705,9 @@ def _update_feature_config(
                 if value is not None or key == "enabled":
                     cdk_config["context"][feature_key][key] = value
 
-        serialized = json.dumps(cdk_config, indent=2).encode("utf-8")
         _atomic_write_bytes(
             cdk_json_path,
-            serialized,
+            serialize_cdk_json(cdk_config),
             mode=stat.S_IMODE(cdk_json_path.stat().st_mode),
         )
 

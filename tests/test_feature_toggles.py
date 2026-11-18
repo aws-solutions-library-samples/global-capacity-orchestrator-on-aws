@@ -134,6 +134,35 @@ class TestGenericFeatureConfig:
         ):
             _update_feature_config("my_feature", {"enabled": True}, {"enabled": False})
 
+    def test_serialize_cdk_json_is_the_shared_on_disk_format(self):
+        from cli.stacks import serialize_cdk_json
+
+        document = {"context": {"_comment_x": "a \u2014 b", "items": [1, 2]}}
+
+        assert serialize_cdk_json(document) == (
+            b'{\n  "context": {\n    "_comment_x": "a \xe2\x80\x94 b",\n'
+            b'    "items": [\n      1,\n      2\n    ]\n  }\n}\n'
+        )
+
+    def test_update_feature_config_keeps_utf8_and_ends_with_newline(self, tmp_path: Path):
+        """A toggle writes the shared format: no \\uXXXX churn, one trailing newline."""
+        from cli.stacks import _update_feature_config, serialize_cdk_json
+
+        comment = "Valkey cache \u2014 see docs/CUSTOMIZATION.md \u2192 R\u00e9gions"
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(
+            json.dumps({"context": {"_comment_valkey": comment, "valkey": {"enabled": False}}}),
+            encoding="utf-8",
+        )
+        with patch("cli.stacks._find_cdk_json", return_value=cdk_path):
+            _update_feature_config("valkey", {"enabled": True}, {"enabled": False})
+
+        raw = cdk_path.read_bytes()
+        assert raw == serialize_cdk_json(json.loads(raw))
+        assert comment.encode("utf-8") in raw
+        assert b"\\u2014" not in raw
+        assert raw.endswith(b"}\n")
+
     def test_update_feature_config_skips_none_values(self):
         from cli.stacks import _update_feature_config
 

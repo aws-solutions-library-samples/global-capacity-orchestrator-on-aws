@@ -273,11 +273,16 @@ class TestEngineWriteMechanics:
             "us-west-2",
         ]
 
-    def test_no_trailing_newline_stays_that_way(self, tmp_path: Path):
+    def test_writes_the_shared_cdk_json_format(self, tmp_path: Path):
+        """The engine and the feature toggles store one format, newline included."""
+        from cli.stacks import serialize_cdk_json
+
         path = tmp_path / "cdk.json"
         path.write_text(json.dumps(BASE_CONFIG, indent=2), encoding="utf-8")
         add_deployment_region("us-west-2", config_path=path)
-        assert not path.read_text(encoding="utf-8").endswith("\n")
+        raw = path.read_bytes()
+        assert raw == serialize_cdk_json(json.loads(raw))
+        assert raw.endswith(b"}\n")
 
     def test_non_ascii_comments_survive_as_utf8(self, tmp_path: Path):
         """Changing one Region must not rewrite documentation into \\uXXXX escapes.

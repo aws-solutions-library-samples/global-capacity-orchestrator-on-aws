@@ -17,15 +17,17 @@ every mutation flows through one engine that guarantees:
 - **Idempotency**: re-adding a present value or removing an absent one is a
   reported no-op — no bytes are written, no timestamps churn.
 - **Atomicity**: writes go through the same tmp-file + ``os.replace`` dance
-  as the feature toggles in ``cli/stacks.py``, preserving file mode and the
-  original trailing-newline state, so a crash can never leave a torn file.
+  as the feature toggles in ``cli/stacks.py``, preserving the file mode, so a
+  crash can never leave a torn file.
 - **Auditability**: every mutation attempt logs a structured line on the
   ``gco.cli.managed_config`` logger; MCP exposure adds ``@audit_logged`` on
   top of that.
 
 Comment keys (``_comment_*``) and key order in ``cdk.json`` are preserved
-because the engine round-trips the whole document with ``json.load`` /
-``json.dumps(indent=2)`` exactly like the existing feature-toggle writers.
+because the engine round-trips the whole document through ``json.load`` and
+:func:`cli.stacks.serialize_cdk_json`, the serializer the feature-toggle
+writers use too: two-space indentation, non-ASCII text kept as UTF-8, and one
+trailing newline.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from .stacks import (
     ConfigMutationLockError,
     _atomic_write_bytes,
     _find_cdk_json,
+    serialize_cdk_json,
 )
 from .stacks import (
     _config_mutation_lock as _shared_config_mutation_lock,
@@ -368,8 +371,8 @@ def _config_mutation_lock(path: Path) -> Iterator[None]:
         raise ManagedConfigError(str(exc)) from exc
 
 
-def _load_document(path: Path) -> tuple[dict[str, Any], bytes]:
-    """Parse the target document, keeping raw bytes for faithful re-encoding."""
+def _load_document(path: Path) -> dict[str, Any]:
+    """Parse the target document."""
     raw = path.read_bytes()
     try:
         document = json.loads(raw.decode("utf-8"))
@@ -380,24 +383,20 @@ def _load_document(path: Path) -> tuple[dict[str, Any], bytes]:
             f"{path} does not look like a GCO cdk.json (missing a 'context' object); "
             "refusing to edit it"
         )
-    return document, raw
+    return document
 
 
-def _write_document(path: Path, document: dict[str, Any], original_raw: bytes) -> None:
-    """Serialize like the existing feature-toggle writers, atomically.
+def _write_document(path: Path, document: dict[str, Any]) -> None:
+    """Serialize with the feature toggles' shared serializer, atomically.
 
-    ``json.dumps(indent=2)`` with insertion order preserves ``_comment_*``
-    keys and their placement. ``ensure_ascii=False`` keeps the em dashes and
-    other non-ASCII characters inside those comments as UTF-8 rather than
-    rewriting them to ``\\uXXXX`` escapes — without it, adding one Region
-    rewrites every documented block in the file and buries the real change in
-    hundreds of lines of encoding churn. The original trailing-newline state is
-    kept so diffs stay minimal regardless of how the file was last formatted.
+    :func:`cli.stacks.serialize_cdk_json` keeps insertion order, so
+    ``_comment_*`` keys stay in place, and keeps the em dashes and other
+    non-ASCII characters inside those comments as UTF-8 rather than rewriting
+    them to ``\\uXXXX`` escapes. Without that, adding one Region would rewrite
+    every documented block in the file and bury the real change in hundreds of
+    lines of encoding churn.
     """
-    serialized = json.dumps(document, indent=2, ensure_ascii=False).encode("utf-8")
-    if original_raw.endswith(b"\n"):
-        serialized += b"\n"
-    _atomic_write_bytes(path, serialized, mode=stat.S_IMODE(path.stat().st_mode))
+    _atomic_write_bytes(path, serialize_cdk_json(document), mode=stat.S_IMODE(path.stat().st_mode))
 
 
 def _current_values(document: dict[str, Any], key: ManagedListKey) -> tuple[str, ...]:
@@ -429,7 +428,7 @@ def _apply(
     """Shared add/remove core: resolve, lock, load, validate, and write."""
     path = _resolve_config_path(config_path)
     with _config_mutation_lock(path):
-        document, raw = _load_document(path)
+        document = _load_document(path)
         old = _current_values(document, key)
 
         if action == "add":
@@ -469,7 +468,7 @@ def _apply(
         # the file by an unrelated edit.
         container = document["context"].setdefault(key.container, {})
         container[key.leaf] = list(candidate)
-        _write_document(path, document, raw)
+        _write_document(path, document)
 
         report = ChangeReport(key.key_id, action, value, True, old, candidate, path)
         logger.info(
@@ -554,7 +553,7 @@ def managed_scalar_set(
     """Set a managed scalar; validated, atomic, and a no-op when unchanged."""
     path = _resolve_config_path(config_path)
     with _config_mutation_lock(path):
-        document, raw = _load_document(path)
+        document = _load_document(path)
         old = _current_scalar(document, key)
 
         try:
@@ -586,7 +585,7 @@ def managed_scalar_set(
         if container is None:  # pragma: no cover - materialize guarantees an object
             raise ManagedConfigError(f"unable to materialize {key.key_id}")
         container[key.leaf] = value
-        _write_document(path, document, raw)
+        _write_document(path, document)
 
         report = ChangeReport(key.key_id, "set", value, True, old, value, path)
         logger.info(
@@ -614,7 +613,7 @@ def get_deployment_regions_status(*, config_path: Path | str | None = None) -> d
     ``partition_error`` carries the validator message.
     """
     path = _resolve_config_path(config_path)
-    document, _ = _load_document(path)
+    document = _load_document(path)
     container_key = REGIONAL_DEPLOYMENT_REGIONS.container
     container = document["context"].get(container_key)
     if container is None:
@@ -666,7 +665,7 @@ def set_deployment_region_role(
 def get_bedrock_model_status(*, config_path: Path | str | None = None) -> dict[str, Any]:
     """Return every managed Bedrock model/reasoning default and its path."""
     path = _resolve_config_path(config_path)
-    document, _ = _load_document(path)
+    document = _load_document(path)
     return {
         "config_path": str(path),
         "mission_default_model_id": _current_scalar(document, MISSION_DEFAULT_MODEL),
