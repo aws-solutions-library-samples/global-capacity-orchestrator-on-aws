@@ -69,6 +69,12 @@ the quota and the largest directories, when the package is over the quota, and
 prints a warning above 90% of it. `kubernetes` is most of the package, so a
 `kubernetes` bump in `requirements.txt` is the change to watch.
 
+The CLI stops a pip or npm install for these builds after 10 minutes, because
+the install holds the lock that other deploys and synths wait on; set
+`GCO_ASSET_BUILD_TIMEOUT_SECONDS` to allow longer. A failed or stopped install
+reports the end of the installer's error output, where pip and npm print the
+error.
+
 The inference streaming proxy has a separate production npm graph. CI and CDK staging install it from its committed lockfile with lifecycle scripts disabled:
 
 ```bash

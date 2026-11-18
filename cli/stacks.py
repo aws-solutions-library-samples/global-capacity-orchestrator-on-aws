@@ -137,6 +137,14 @@ _FILE_LOCK_RETRY_SECONDS = 0.05
 # session's session-long shared locks, indefinite).
 _ASSET_LOCK_TIMEOUT_SECONDS_DEFAULT = 900.0
 _CONFIG_LOCK_TIMEOUT_SECONDS_DEFAULT = 900.0
+# 10 minutes for one pip or npm install of a Lambda asset: well above a cold
+# install, and below the asset-lock wait above. The install runs under the
+# exclusive asset lock, so without a bound a hung download would block every
+# other deploy, synth and pytest session behind it.
+_ASSET_BUILD_TIMEOUT_SECONDS_DEFAULT = 600.0
+#: How much of a failed install's stderr an error quotes: the end, where pip
+#: and npm print the error after any warnings.
+_ASSET_BUILD_STDERR_TAIL_CHARS = 2000
 _FileLockPurpose = Literal["asset", "configuration"]
 _CDK_ASSET_CONSUMER_MAX_ATTEMPTS = 3
 _CLOUDFORMATION_DELETE_TIMEOUT_SECONDS = 7200.0
@@ -572,7 +580,11 @@ def _file_lock_timeout_seconds(purpose: _FileLockPurpose) -> float:
     else:
         env_name = "GCO_CONFIG_LOCK_TIMEOUT_SECONDS"
         default = _CONFIG_LOCK_TIMEOUT_SECONDS_DEFAULT
+    return _env_timeout_seconds(env_name, default)
 
+
+def _env_timeout_seconds(env_name: str, default: float) -> float:
+    """Return the positive, finite seconds ``env_name`` sets, else ``default``."""
     raw = os.environ.get(env_name, "")
     try:
         value = float(raw)
@@ -581,6 +593,13 @@ def _file_lock_timeout_seconds(purpose: _FileLockPurpose) -> float:
     if not math.isfinite(value) or value <= 0:
         return default
     return value
+
+
+def _asset_build_timeout_seconds() -> float:
+    """Return how long one pip or npm install of a Lambda asset may run."""
+    return _env_timeout_seconds(
+        "GCO_ASSET_BUILD_TIMEOUT_SECONDS", _ASSET_BUILD_TIMEOUT_SECONDS_DEFAULT
+    )
 
 
 def _warn_file_lock_contended(
@@ -948,6 +967,35 @@ def _check_lambda_zip_size(root: Path, *, display_name: str, remedy: str) -> Non
     if total > limit:
         raise RuntimeError(f"{measurement} Lambda rejects a larger package: {remedy}.")
     print(f"  Warning: {measurement}")
+
+
+def _stderr_tail(stderr: str | bytes | None) -> str:
+    """Return the end of an install's stderr, where pip and npm print the error.
+
+    ``subprocess.TimeoutExpired`` carries the partial output as bytes even
+    when the command ran with ``text=True``.
+    """
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    text = (stderr or "").strip()
+    if len(text) > _ASSET_BUILD_STDERR_TAIL_CHARS:
+        return "..." + text[-_ASSET_BUILD_STDERR_TAIL_CHARS:]
+    return text
+
+
+def _asset_build_timed_out(
+    what: str, timeout: float, exc: subprocess.TimeoutExpired
+) -> RuntimeError:
+    """Describe an install ``subprocess.run`` stopped after ``timeout`` seconds."""
+    message = (
+        f"{what} did not finish within {timeout:.0f}s and was stopped. Check that it can "
+        "reach its package registry and retry, or raise GCO_ASSET_BUILD_TIMEOUT_SECONDS "
+        "to wait longer."
+    )
+    tail = _stderr_tail(exc.stderr)
+    if tail:
+        message += f" Last output:\n{tail}"
+    return RuntimeError(message)
 
 
 def _atomic_copy_file(source: Path, target: Path) -> None:
@@ -1897,29 +1945,36 @@ class StackManager:
             shutil.copy2(source_dir / "handler.py", staging_dir / "handler.py")
             shutil.copy2(requirements, staging_dir / "requirements.txt")
             shutil.copytree(source_dir / "manifests", staging_dir / "manifests")
-            result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - static pip arguments and project-owned paths
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    "-r",
-                    str(requirements),
-                    "-t",
-                    str(staging_dir),
-                    "--upgrade",
-                    "--platform",
-                    "manylinux2014_x86_64",
-                    "--only-binary=:all:",
-                    "--quiet",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            timeout = _asset_build_timeout_seconds()
+            try:
+                result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - static pip arguments and project-owned paths
+                    [
+                        sys.executable,
+                        "-m",
+                        "pip",
+                        "install",
+                        "-r",
+                        str(requirements),
+                        "-t",
+                        str(staging_dir),
+                        "--upgrade",
+                        "--platform",
+                        "manylinux2014_x86_64",
+                        "--only-binary=:all:",
+                        "--quiet",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise _asset_build_timed_out(
+                    "pip install of the kubectl-applier-simple Lambda dependencies", timeout, exc
+                ) from exc
             if result.returncode != 0:
                 raise RuntimeError(
-                    "kubectl Lambda dependency installation failed: " + result.stderr[:200]
+                    "kubectl Lambda dependency installation failed: " + _stderr_tail(result.stderr)
                 )
             _check_lambda_zip_size(
                 staging_dir,
@@ -2021,24 +2076,31 @@ class StackManager:
 
             for name in package_files:
                 shutil.copy2(source_dir / name, staging_dir / name)
-            result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - resolved npm path, static arguments, and project-owned cwd
-                [
-                    npm,
-                    "ci",
-                    "--omit=dev",
-                    "--ignore-scripts",
-                    "--no-audit",
-                    "--no-fund",
-                ],
-                cwd=staging_dir,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            timeout = _asset_build_timeout_seconds()
+            try:
+                result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - resolved npm path, static arguments, and project-owned cwd
+                    [
+                        npm,
+                        "ci",
+                        "--omit=dev",
+                        "--ignore-scripts",
+                        "--no-audit",
+                        "--no-fund",
+                    ],
+                    cwd=staging_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise _asset_build_timed_out(
+                    "npm ci for the inference streaming Lambda", timeout, exc
+                ) from exc
             if result.returncode != 0:
                 raise RuntimeError(
                     "Failed to install pinned inference streaming Lambda dependencies: "
-                    + result.stderr[:500]
+                    + _stderr_tail(result.stderr)
                 )
 
         _prepare_lambda_asset(

@@ -2460,6 +2460,157 @@ def test_lambda_zip_size_counts_what_cdk_assets_zips(tmp_path: Path) -> None:
     assert largest == [("kubernetes", 6 * _MIB), ("botocore", 2 * _MIB)]
 
 
+def _run_kubectl_builder(stack_manager: Any, tmp_path: Path, run: Any) -> MagicMock:
+    """Run the kubectl builder with ``run`` standing in for its pip subprocess."""
+    import cli.stacks as stacks
+
+    source, _build = stacks._KUBECTL_CDK_ASSET.paths(tmp_path)
+    (source / "manifests").mkdir(parents=True)
+    (source / "handler.py").write_text("handler", encoding="utf-8")
+    (source / "requirements.txt").write_text("kubernetes==37.0.1", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    def prepare(*_args: Any, builder: Any, **_kwargs: Any) -> bool:
+        builder(staging)
+        return True
+
+    mock_run = MagicMock(side_effect=run)
+    with (
+        patch.object(stacks, "_prepare_lambda_asset", side_effect=prepare),
+        patch.object(stacks.subprocess, "run", mock_run),
+    ):
+        stack_manager._build_kubectl_lambda()
+    return mock_run
+
+
+def test_kubectl_builder_stops_a_pip_install_that_does_not_finish(
+    stack_manager: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GCO_ASSET_BUILD_TIMEOUT_SECONDS", raising=False)
+    calls: list[Any] = []
+
+    def hang(command: list[str], **kwargs: Any) -> Any:
+        calls.append(kwargs.get("timeout"))
+        # TimeoutExpired carries bytes whatever text= was.
+        raise subprocess.TimeoutExpired(
+            command, kwargs["timeout"], stderr=b"WARNING: Retrying after connection broken\n"
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        _run_kubectl_builder(stack_manager, tmp_path, hang)
+
+    assert calls == [600.0]
+    message = str(raised.value)
+    assert "pip install of the kubectl-applier-simple Lambda dependencies" in message
+    assert "did not finish within 600s" in message
+    assert "GCO_ASSET_BUILD_TIMEOUT_SECONDS" in message
+    assert message.endswith("Last output:\nWARNING: Retrying after connection broken")
+    assert isinstance(raised.value.__cause__, subprocess.TimeoutExpired)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("42", 42.0), ("0", 600.0), ("-5", 600.0), ("nan", 600.0), ("soon", 600.0)],
+)
+def test_asset_build_timeout_is_tunable(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    expected: float,
+) -> None:
+    import cli.stacks as stacks
+
+    monkeypatch.setenv("GCO_ASSET_BUILD_TIMEOUT_SECONDS", raw)
+    assert stacks._asset_build_timeout_seconds() == expected
+
+
+def test_kubectl_builder_reports_the_end_of_pip_stderr(
+    stack_manager: Any,
+    tmp_path: Path,
+) -> None:
+    error = "ERROR: No matching distribution found for kubernetes==99.0.0"
+    stderr = "WARNING: the index is slow\n" * 200 + error + "\n"
+
+    def fail(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stderr=stderr)
+
+    with pytest.raises(RuntimeError) as raised:
+        _run_kubectl_builder(stack_manager, tmp_path, fail)
+
+    message = str(raised.value)
+    assert message.startswith("kubectl Lambda dependency installation failed: ...")
+    assert message.endswith(error)
+    assert len(message) < 2100
+
+
+def test_inference_builder_bounds_npm_ci_and_reports_its_last_output(
+    stack_manager: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cli.stacks as stacks
+
+    monkeypatch.setenv("GCO_ASSET_BUILD_TIMEOUT_SECONDS", "120")
+    source, _build = stacks._INFERENCE_STREAMING_CDK_ASSET.paths(tmp_path)
+    source.mkdir(parents=True)
+    for name in stacks._INFERENCE_STREAMING_CDK_ASSET.source_inputs or ():
+        (source / name).write_text("{}", encoding="utf-8")
+    (source / "package.json").write_text(
+        json.dumps({"packageManager": "npm@10.9.2"}), encoding="utf-8"
+    )
+    staging = tmp_path / "node-staging"
+    staging.mkdir()
+
+    def run_builder(*_args: Any, builder: Any, **_kwargs: Any) -> bool:
+        builder(staging)
+        return True
+
+    version = SimpleNamespace(returncode=0, stdout="10.9.2\n", stderr="")
+    timeouts: list[Any] = []
+
+    def npm(results: list[Any]) -> Any:
+        def run(command: list[str], **kwargs: Any) -> Any:
+            if command[1:2] == ["ci"]:
+                timeouts.append(kwargs.get("timeout"))
+            result = results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        return run
+
+    hung = subprocess.TimeoutExpired(["npm", "ci"], 120.0)
+    error = "npm error code E404\nnpm error 404 Not Found - GET https://registry/x"
+    failed = SimpleNamespace(returncode=1, stdout="", stderr="npm warn old\n" * 300 + error)
+    with (
+        patch.object(stacks, "_prepare_lambda_asset", side_effect=run_builder),
+        patch.object(stacks.shutil, "which", return_value="/usr/bin/npm"),
+    ):
+        with (
+            patch.object(stacks.subprocess, "run", side_effect=npm([version, hung])),
+            pytest.raises(RuntimeError) as timed_out,
+        ):
+            stack_manager._build_inference_streaming_proxy_lambda()
+        with (
+            patch.object(stacks.subprocess, "run", side_effect=npm([version, failed])),
+            pytest.raises(RuntimeError) as install_failed,
+        ):
+            stack_manager._build_inference_streaming_proxy_lambda()
+
+    assert timeouts == [120.0, 120.0]
+    assert "npm ci for the inference streaming Lambda did not finish within 120s" in str(
+        timed_out.value
+    )
+    # No partial output was captured, so none is quoted.
+    assert "Last output" not in str(timed_out.value)
+    assert str(install_failed.value).endswith(error)
+    assert "Failed to install pinned inference streaming Lambda dependencies: ..." in str(
+        install_failed.value
+    )
+
+
 def test_build_kubectl_lambda_is_silent_well_under_the_limit(
     stack_manager: Any,
     tmp_path: Path,
