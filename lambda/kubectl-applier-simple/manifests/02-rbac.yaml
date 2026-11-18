@@ -48,7 +48,7 @@ metadata:
     app: inference-monitor
     project: gco
   annotations:
-    eks.amazonaws.com/role-arn: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+    eks.amazonaws.com/role-arn: "{{INFERENCE_MONITOR_ROLE_ARN}}"
 automountServiceAccountToken: false
 ---
 apiVersion: v1

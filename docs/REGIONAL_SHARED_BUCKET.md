@@ -152,7 +152,8 @@ aws ssm get-parameter --name /gco/regional-shared-bucket/region --region us-east
 ```
 
 Pods do **not** need these parameters — the job-pod role carries no
-`ssm:GetParameter` grant. Pods read the ConfigMap instead.
+`ssm:GetParameter` grant. Pods read the ConfigMap instead. The `/name`
+read is granted to the inference monitor's own role only.
 
 ## ConfigMap schema
 
@@ -267,8 +268,8 @@ object itself defaults it to `false`.
 ### Regional job-pod role — unconditional RW
 
 Every `GCORegionalStack` attaches an inline IAM policy to the regional
-job-pod role (the role used by `gco-service-account` in `gco-jobs`,
-`gco-system`, and `gco-inference`) via
+job-pod role (the role used by `gco-service-account` in `gco-jobs` and
+`gco-inference`) via
 `_grant_regional_shared_bucket_to_service_account`. The policy has two
 statements, both **always present** — the grant runs unconditionally as
 part of provisioning the always-on bucket:

@@ -753,6 +753,20 @@ _TRACING_EXPORT_NAG_REASON = (
     "statement is write-only and carries no other action."
 )
 
+#: DynamoDB actions the inference monitor's role holds on the inference
+#: endpoints table: the API calls behind the ``InferenceEndpointStore`` methods
+#: ``gco/services/inference_monitor.py`` invokes (``list_endpoints`` scans,
+#: ``get_endpoint`` reads, the lifecycle/state/status writers are conditional
+#: updates and ``delete_endpoint`` is the final conditional delete). Endpoint
+#: creation is the CLI's (operator credentials), so there is no PutItem.
+#: tests/test_inference_monitor_role.py pins this tuple to those call sites.
+INFERENCE_MONITOR_TABLE_ACTIONS = (
+    "dynamodb:DeleteItem",
+    "dynamodb:GetItem",
+    "dynamodb:Scan",
+    "dynamodb:UpdateItem",
+)
+
 #: Namespaces whose pods GCO instruments itself (the traced API services in
 #: gco-system) or must never mutate (model pods in gco-inference).
 #: Application Signals auto-monitor in the CloudWatch Observability add-on
@@ -2640,17 +2654,30 @@ class GCORegionalStack(Stack):
         processor role. Job and inference workload service accounts must never
         receive queue-table mutation privileges; only the platform API/worker
         identity can claim, fence, or transition centralized queue records.
+
+        The inference monitor has its own role for the same reason: it writes
+        the inference endpoints table, and every job and model pod runs as
+        ``gco-service-account``, so a shared role would let any of them
+        rewrite endpoint desired state.
         """
+        # User job and model pods: gco-service-account exists only in these
+        # two namespaces (01-serviceaccounts.yaml).
         self.service_account_role = GCORegionalStack._create_irsa_role(
             self,
             "ServiceAccountRole",
             oidc_provider_arn=self.oidc_provider.open_id_connect_provider_arn,
             oidc_issuer_url=self.cluster.cluster_open_id_connect_issuer_url,
-            service_account_names=[
-                "gco-service-account",
-                "gco-inference-monitor-sa",
-            ],
-            namespaces=["gco-system", "gco-jobs", "gco-inference"],
+            service_account_names=["gco-service-account"],
+            namespaces=["gco-jobs", "gco-inference"],
+        )
+
+        self.inference_monitor_role = GCORegionalStack._create_irsa_role(
+            self,
+            "InferenceMonitorRole",
+            oidc_provider_arn=self.oidc_provider.open_id_connect_provider_arn,
+            oidc_issuer_url=self.cluster.cluster_open_id_connect_issuer_url,
+            service_account_names=["gco-inference-monitor-sa"],
+            namespaces=["gco-system"],
         )
 
         self.manifest_processor_role = GCORegionalStack._create_irsa_role(
@@ -2914,23 +2941,15 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # The inference monitor still owns desired-state reconciliation, but
-        # this shared role intentionally has no jobs-table ARN.
-        self.service_account_role.add_to_policy(
+        # The inference monitor reconciles endpoint desired state. These are
+        # exactly the calls its InferenceEndpointStore methods make (scan the
+        # table, read one record, conditional updates and the final delete);
+        # creation belongs to the CLI, and the table has no secondary index.
+        self.inference_monitor_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=[
-                    "dynamodb:GetItem",
-                    "dynamodb:PutItem",
-                    "dynamodb:UpdateItem",
-                    "dynamodb:DeleteItem",
-                    "dynamodb:Query",
-                    "dynamodb:Scan",
-                ],
-                resources=[
-                    f"{manifest_table_prefix}-inference-endpoints",
-                    f"{manifest_table_prefix}-inference-endpoints/index/*",
-                ],
+                actions=list(INFERENCE_MONITOR_TABLE_ACTIONS),
+                resources=[f"{manifest_table_prefix}-inference-endpoints"],
             )
         )
         acknowledge_nag_findings(
@@ -3301,17 +3320,16 @@ class GCORegionalStack(Stack):
         )
         self._pod_identity_associations.append(inference_proxy_assoc)
 
-        # Inference monitor — reconciles endpoints with the shared platform
-        # role (its IRSA subject is already in that role's trust policy).
-        # Every other platform Deployment gets both credential paths; this one
-        # had only the IRSA annotation.
+        # Inference monitor — reconciles endpoints with its own role (endpoint
+        # table writes and the cold-tier bucket lookup), which no job or model
+        # pod can assume.
         inference_monitor_assoc = eks_l1.CfnPodIdentityAssociation(
             self,
             "PodIdentity-inference-monitor",
             cluster_name=self.cluster.cluster_name,
             namespace="gco-system",
             service_account="gco-inference-monitor-sa",
-            role_arn=self.service_account_role.role_arn,
+            role_arn=self.inference_monitor_role.role_arn,
         )
         self._pod_identity_associations.append(inference_monitor_assoc)
 
@@ -3475,8 +3493,8 @@ class GCORegionalStack(Stack):
         """Attach RW + KMS permissions on ``Cluster_Shared_Bucket`` to the job-pod role.
 
         Two ``iam.PolicyStatement``s are added to ``self.service_account_role``
-        (the EKS Pod Identity role used by every pod in ``gco-jobs``,
-        ``gco-system``, and ``gco-inference``):
+        (the role ``gco-service-account`` assumes in ``gco-jobs`` and
+        ``gco-inference``, through IRSA or EKS Pod Identity):
 
         1. S3 object + bucket-level actions (``GetObject``, ``PutObject``,
            ``DeleteObject``, ``ListBucket``, ``GetBucketLocation``) scoped
@@ -3965,11 +3983,11 @@ class GCORegionalStack(Stack):
         )
 
     def _grant_regional_shared_bucket_to_service_account(self) -> None:
-        """Attach RW + KMS + discovery permissions on the regional bucket to the pod role.
+        """Attach RW + KMS on the regional bucket to the pod role, discovery to the monitor.
 
-        Three ``iam.PolicyStatement``s are added to ``self.service_account_role``
-        (the EKS Pod Identity role used by every pod in ``gco-jobs``,
-        ``gco-system``, and ``gco-inference``):
+        Two ``iam.PolicyStatement``s are added to ``self.service_account_role``
+        (the role ``gco-service-account`` assumes in ``gco-jobs`` and
+        ``gco-inference``):
 
         1. S3 object + bucket-level actions (``GetObject``, ``PutObject``,
            ``DeleteObject``, ``ListBucket``, ``GetBucketLocation``) scoped to
@@ -3978,22 +3996,25 @@ class GCORegionalStack(Stack):
         2. KMS ``Decrypt`` / ``Encrypt`` / ``GenerateDataKey`` /
            ``DescribeKey`` scoped to the literal ``regional_shared_kms_key``
            ARN — and to no other key.
-        3. ``ssm:GetParameter`` on the literal ARN of the bucket's ``/name``
-           discovery parameter. The inference monitor runs under this role and
-           resolves the Mooncake cold-tier bucket from that parameter at
-           reconcile time (``_resolve_regional_shared_bucket``); without the
-           grant every cold-tier endpoint reads ``AccessDenied`` and the tier
-           is dropped.
+
+        One more goes to ``self.inference_monitor_role``: ``ssm:GetParameter``
+        on the literal ARN of the bucket's ``/name`` discovery parameter. The
+        monitor resolves the Mooncake cold-tier bucket from that parameter at
+        reconcile time (``_resolve_regional_shared_bucket``); without the grant
+        every cold-tier endpoint reads ``AccessDenied`` and the tier is
+        dropped. Pods read the bucket's name from the
+        ``gco-regional-shared-bucket`` ConfigMap instead, so the pod role has
+        no SSM grant.
 
         Because all three resources are local constructs in this stack, each
-        ARN is a concrete reference rather than a wildcard, so the role gains
+        ARN is a concrete reference rather than a wildcard, so the roles gain
         access to precisely this bucket, this key, and this parameter. The grant
         runs unconditionally as part of provisioning the always-on regional
         bucket.
         """
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        self.service_account_role.add_to_policy(
+        self.inference_monitor_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParameter"],
@@ -4313,6 +4334,7 @@ class GCORegionalStack(Stack):
             "{{REGION}}": self.deployment_region,
             "{{AUTH_SECRET_ARN}}": self.auth_secret_arn,
             "{{SERVICE_ACCOUNT_ROLE_ARN}}": self.service_account_role.role_arn,
+            "{{INFERENCE_MONITOR_ROLE_ARN}}": self.inference_monitor_role.role_arn,
             "{{MANIFEST_PROCESSOR_ROLE_ARN}}": self.manifest_processor_role.role_arn,
             "{{INFERENCE_PROXY_ROLE_ARN}}": self.inference_proxy_role.role_arn,
             "{{HEALTH_MONITOR_ROLE_ARN}}": self.health_monitor_role.role_arn,
@@ -4881,6 +4903,10 @@ class GCORegionalStack(Stack):
                 converge_trigger.node.add_dependency(access_entry)
         for assoc in self._pod_identity_associations:
             converge_trigger.node.add_dependency(assoc)
+        # The base pass rolls the inference monitor onto its own role; the
+        # role's policy (a separate resource the ARN token does not order)
+        # must exist before the new pods first reconcile.
+        converge_trigger.node.add_dependency(self.inference_monitor_role)
 
         # Deletion must run in the opposite safety order: synchronous Helm
         # teardown first (quiescing endpoint writers and removing Gateway

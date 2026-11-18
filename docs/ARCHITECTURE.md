@@ -213,10 +213,10 @@ rendered as spec sheets and as the interaction diagram in
 
 - `gco-health-monitor-sa`: Read-only cluster health plus narrowly named self-healing resources
 - `gco-manifest-processor-sa`: Job-namespace Kubernetes writes and control-plane table access
-- `gco-inference-monitor-sa`: Inference-namespace reconciliation permissions
+- `gco-inference-monitor-sa`: Inference-namespace reconciliation permissions, and its own IAM role: read, update and delete on the inference endpoints table (no create; the CLI creates endpoints) and the regional bucket's `/name` discovery parameter for the Mooncake cold tier
 - `gco-inference-proxy-sa`: Exact AWS secret/endpoint-read access and no Kubernetes RBAC binding
 - `gco-cost-monitor-sa`: Cost report bucket write access only; no Kubernetes RBAC binding
-- `gco-service-account`: General job and inference workload identity
+- `gco-service-account`: General job and inference workload identity in `gco-jobs` and `gco-inference`. Its role has no access to the jobs or inference endpoints tables, so a submitted pod cannot rewrite queue or endpoint state
 
 ### 5. Lambda Layer
 
