@@ -99,6 +99,8 @@ _VALUES = {
     "create_reservation.tenancy": "default",
     "deploy_disaggregated_inference.mooncake_mode": "disaggregated",
     "deploy_inference.framework": "vllm",
+    # ``inference deploy -e`` takes KEY=VALUE entries.
+    "env_vars": ["MODEL=example-model"],
     "files_get.fs_type": "efs",
     "find_training_plans.target": "training-job",
     "list_training_plans.status": "Active",
