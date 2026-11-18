@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import boto3
 import requests
@@ -80,6 +80,10 @@ class RegionalApiDiscoveryError(RuntimeError):
     """Regional endpoint discovery failed without confirming stack absence."""
 
 
+class RegionalStackDiscoveryError(RuntimeError):
+    """A regional stack could not be read, so its absence is not confirmed."""
+
+
 def _cloudformation_stack_missing(exc: ClientError) -> bool:
     """Return whether CloudFormation authoritatively reports an absent stack."""
     error = exc.response.get("Error", {})
@@ -87,6 +91,19 @@ def _cloudformation_stack_missing(exc: ClientError) -> bool:
         error.get("Code") == "ValidationError"
         and "does not exist" in str(error.get("Message", "")).lower()
     )
+
+
+def _client_error_summary(exc: ClientError) -> str:
+    """``AWS error <Code>: <message>`` with the code and message made safe to print."""
+    error = exc.response.get("Error", {})
+    raw_error_code = error.get("Code")
+    error_code = (
+        raw_error_code
+        if isinstance(raw_error_code, str)
+        and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", raw_error_code)
+        else "ClientError"
+    )
+    return f"AWS error {error_code}: {_safe_aws_error_message(error)}"
 
 
 def _aws_credential_context(session: Any) -> str:
@@ -167,6 +184,25 @@ def _validate_max_attempts(max_attempts: int | None) -> None:
         raise ValueError("max_attempts must be a positive integer")
 
 
+def _with_reported_errors(message: Any, body: Any) -> Any:
+    """Append a failed response's ``errors`` list to *message*.
+
+    Routes that run a manifest submission (``POST
+    /api/v1/jobs/from-template/{name}``, the job retry) answer 400 with
+    ``{"success": false, "errors": [...]}`` and no ``error``/``detail`` key,
+    so without this the caller saw only "400 Bad Request". When the body has
+    its own message the errors follow it; otherwise they are the message.
+    """
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if not isinstance(errors, list):
+        return message
+    details = "; ".join(str(error) for error in errors if str(error).strip())
+    if not details:
+        return message
+    has_own_message = any(key in body for key in ("error", "message", "detail"))
+    return f"{message}: {details}" if has_own_message else details
+
+
 def _decode_log_payload(payload: Any) -> str:
     """Return log text, decoding bytes and exact Python bytes-literal envelopes."""
     if isinstance(payload, str):
@@ -221,6 +257,11 @@ class GCOAWSClient:
         self._session = boto3.Session()
         self._api_endpoint_cache: ApiEndpoint | None = None
         self._regional_api_cache: dict[str, ApiEndpoint] = {}
+        # When each regional endpoint was discovered. The shared
+        # ``_cache_timestamp`` belongs to the global endpoint and stack
+        # caches; a regional-only session never sets it, so keying the
+        # regional cache on it made every pinned call re-describe the stack.
+        self._regional_api_cached_at: dict[str, float] = {}
         self._regional_stacks_cache: dict[str, RegionalStack] | None = None
         self._cache_timestamp: float | None = None
         self._use_regional_api = getattr(self.config, "use_regional_api", False) is True
@@ -235,6 +276,7 @@ class GCOAWSClient:
         """Invalidate all caches."""
         self._api_endpoint_cache = None
         self._regional_api_cache = {}
+        self._regional_api_cached_at = {}
         self._regional_stacks_cache = None
         self._cache_timestamp = None
 
@@ -272,7 +314,13 @@ class GCOAWSClient:
             RegionalApiDiscoveryError: If discovery cannot run or the existing
                 stack does not publish a usable endpoint
         """
-        if not force_refresh and region in self._regional_api_cache and self._is_cache_valid():
+        cached_at = self._regional_api_cached_at.get(region)
+        if (
+            not force_refresh
+            and region in self._regional_api_cache
+            and cached_at is not None
+            and (time.time() - cached_at) < self.config.cache_ttl_seconds
+        ):
             return self._regional_api_cache[region]
 
         stack_name = f"{self.config.project_name}-regional-api-{region}"
@@ -284,19 +332,10 @@ class GCOAWSClient:
         except ClientError as exc:
             if _cloudformation_stack_missing(exc):
                 return None
-            error = exc.response.get("Error", {})
-            raw_error_code = error.get("Code")
-            error_code = (
-                raw_error_code
-                if isinstance(raw_error_code, str)
-                and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", raw_error_code)
-                else "ClientError"
-            )
-            error_message = _safe_aws_error_message(error)
             raise RegionalApiDiscoveryError(
                 f"Regional API endpoint discovery could not run for stack '{stack_name}' "
                 f"in {region}. Credential context: {credential_context}. "
-                f"AWS error {error_code}: {error_message}"
+                f"{_client_error_summary(exc)}"
             ) from exc
         except Exception as exc:
             failure_type = re.sub(r"[^A-Za-z0-9_.-]", "", type(exc).__name__)[:128]
@@ -356,6 +395,7 @@ class GCOAWSClient:
 
         endpoint = ApiEndpoint(url=api_url, region=region, api_id=api_id, is_regional=True)
         self._regional_api_cache[region] = endpoint
+        self._regional_api_cached_at[region] = time.time()
         return endpoint
 
     def get_api_endpoint(self, force_refresh: bool = False) -> ApiEndpoint:
@@ -414,13 +454,20 @@ class GCOAWSClient:
 
         Returns:
             Dictionary mapping region to RegionalStack
+
+        Raises:
+            RegionalStackDiscoveryError: If a configured region cannot be
+                read, or the all-regions scan finds no stack and could not
+                read some regions
         """
         if not force_refresh and self._regional_stacks_cache and self._is_cache_valid():
             return self._regional_stacks_cache
 
         regional_stacks: dict[str, RegionalStack] = {}
 
-        # Try configured regions first (fast path)
+        # Try configured regions first (fast path). These are the deployment's
+        # declared regions, so a region that cannot be read is an error here,
+        # never reported as "no stack".
         configured_regions = self._get_configured_regions()
         if configured_regions:
             for region in configured_regions:
@@ -436,12 +483,27 @@ class GCOAWSClient:
             regions_response = ec2.describe_regions()
             all_regions = [r["RegionName"] for r in regions_response["Regions"]]
 
+            # An account-wide scan meets regions an organization policy denies;
+            # those are skipped (and named) when another region has a stack,
+            # and only an empty scan with failures is an error.
+            failures: list[RegionalStackDiscoveryError] = []
             for region in all_regions:
                 if region in configured_regions:
                     continue  # Already checked
-                stack = self._probe_regional_stack(region)
+                try:
+                    stack = self._probe_regional_stack(region)
+                except RegionalStackDiscoveryError as exc:
+                    failures.append(exc)
+                    continue
                 if stack:
                     regional_stacks[region] = stack
+            if failures and not regional_stacks:
+                raise RegionalStackDiscoveryError(
+                    f"No regional stack was found, and {len(failures)} region(s) could not "
+                    f"be read, so absence is not confirmed. First failure: {failures[0]}"
+                )
+            for failure in failures:
+                logger.warning("Skipped a region the stack scan could not read: %s", failure)
 
         self._regional_stacks_cache = regional_stacks
         self._cache_timestamp = time.time()
@@ -459,37 +521,56 @@ class GCOAWSClient:
     def _probe_regional_stack(self, region: str) -> RegionalStack | None:
         """Probe a single region for a GCO regional stack.
 
+        ``None`` means CloudFormation confirmed the stack does not exist.
+        Throttling, access denied, missing credentials, transport errors and
+        malformed answers raise instead, so a region that could not be read
+        is never reported as a region without a stack.
+
         Args:
             region: AWS region to check
 
         Returns:
-            RegionalStack if found, None otherwise
+            RegionalStack if found, None when CloudFormation reports it absent
+
+        Raises:
+            RegionalStackDiscoveryError: If the stack could not be read
         """
+        stack_name = f"{self.config.regional_stack_prefix}-{region}"
+        failure = f"Regional stack discovery could not read stack '{stack_name}' in {region}"
         try:
             cfn = self._session.client("cloudformation", region_name=region)
-            stack_name = f"{self.config.regional_stack_prefix}-{region}"
-
-            try:
-                response = cfn.describe_stacks(StackName=stack_name)
-                stack = response["Stacks"][0]
-
-                outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
-
-                return RegionalStack(
-                    region=region,
-                    stack_name=stack_name,
-                    cluster_name=outputs.get("ClusterName", f"{self.config.project_name}-{region}"),
-                    status=stack["StackStatus"],
-                    efs_file_system_id=outputs.get("EfsFileSystemId"),
-                    fsx_file_system_id=outputs.get("FsxFileSystemId"),
-                    created_time=stack.get("CreationTime"),
-                )
-            except cfn.exceptions.ClientError:
+            response = cfn.describe_stacks(StackName=stack_name)
+        except ClientError as exc:
+            if _cloudformation_stack_missing(exc):
                 return None
+            raise RegionalStackDiscoveryError(
+                f"{failure}. Credential context: {_aws_credential_context(self._session)}. "
+                f"{_client_error_summary(exc)}"
+            ) from exc
+        except Exception as exc:
+            failure_type = re.sub(r"[^A-Za-z0-9_.-]", "", type(exc).__name__)[:128]
+            raise RegionalStackDiscoveryError(
+                f"{failure}: {failure_type or 'UnexpectedError'}: {exc}"
+            ) from exc
 
-        except Exception as e:
-            logger.debug("Failed to get regional stack info for %s: %s", region, e)
-            return None
+        try:
+            stack = response["Stacks"][0]
+            outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
+            status = stack["StackStatus"]
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise RegionalStackDiscoveryError(
+                f"{failure}: CloudFormation returned no usable stack record"
+            ) from exc
+
+        return RegionalStack(
+            region=region,
+            stack_name=stack_name,
+            cluster_name=outputs.get("ClusterName", f"{self.config.project_name}-{region}"),
+            status=status,
+            efs_file_system_id=outputs.get("EfsFileSystemId"),
+            fsx_file_system_id=outputs.get("FsxFileSystemId"),
+            created_time=stack.get("CreationTime"),
+        )
 
     def get_regional_stack(self, region: str) -> RegionalStack | None:
         """Get information about a specific regional stack."""
@@ -558,6 +639,7 @@ class GCOAWSClient:
                     error_msg = error_data["message"]
                 elif "detail" in error_data:
                     error_msg = error_data["detail"]
+                error_msg = _with_reported_errors(error_msg, error_data)
             except json.JSONDecodeError, KeyError:
                 error_msg = response.text or error_msg
             raise APIRequestError(response.status_code, str(error_msg))
@@ -807,14 +889,18 @@ class GCOAWSClient:
         region: str | None = None,
         namespace: str | None = None,
         status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """
-        Get jobs from GCO clusters.
+        Get one page of jobs from GCO clusters.
 
         Args:
             region: Specific region to query (None for all regions)
             namespace: Filter by namespace
             status: Filter by status (running, completed, failed)
+            limit: Page size (the API accepts 1-1000; its default is 50)
+            offset: Number of jobs to skip, for the following pages
 
         Returns:
             The ``GET /api/v1/jobs`` envelope: the Job objects under
@@ -822,13 +908,17 @@ class GCOAWSClient:
             ``limit``, ``offset``, ``has_more``) and the answering
             cluster's ``cluster_id`` / ``region``.
         """
-        params = []
+        params: dict[str, str] = {}
         if namespace:
-            params.append(f"namespace={namespace}")
+            params["namespace"] = namespace
         if status:
-            params.append(f"status={status}")
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = str(limit)
+        if offset:
+            params["offset"] = str(offset)
 
-        query_string = f"?{'&'.join(params)}" if params else ""
+        query_string = f"?{urlencode(params, quote_via=quote)}" if params else ""
 
         response = self.make_authenticated_request(
             method="GET", path=f"/api/v1/jobs{query_string}", target_region=region
@@ -861,7 +951,12 @@ class GCOAWSClient:
         return result
 
     def get_job_logs(
-        self, job_name: str, namespace: str, region: str | None = None, tail_lines: int = 100
+        self,
+        job_name: str,
+        namespace: str,
+        region: str | None = None,
+        tail_lines: int = 100,
+        container: str | None = None,
     ) -> str:
         """
         Get logs from a job.
@@ -871,13 +966,18 @@ class GCOAWSClient:
             namespace: Namespace of the job
             region: Region where the job is running
             tail_lines: Number of lines to return from the end
+            container: Container to read (multi-container pods); the API
+                reads the pod's first container when omitted
 
         Returns:
             Log content as string
         """
+        query = f"tail={tail_lines}"
+        if container:
+            query += f"&container={quote(container, safe='')}"
         response = self.make_authenticated_request(
             method="GET",
-            path=f"/api/v1/jobs/{namespace}/{job_name}/logs?tail={tail_lines}",
+            path=f"/api/v1/jobs/{namespace}/{job_name}/logs?{query}",
             target_region=region,
         )
 

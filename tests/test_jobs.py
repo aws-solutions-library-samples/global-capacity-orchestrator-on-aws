@@ -17,6 +17,13 @@ import pytest
 import yaml
 
 
+def _trainjob_404():
+    """What call_api raises when the manifests endpoint finds no TrainJob."""
+    from cli.aws_client import APIRequestError
+
+    return APIRequestError(404, "Resource not found")
+
+
 class TestJobInfo:
     """Tests for JobInfo dataclass."""
 
@@ -380,7 +387,7 @@ class TestJobManagerOperations:
                 mock_aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
                     response=MagicMock(status_code=404)
                 )
-                mock_aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
+                mock_aws_client.call_api.side_effect = _trainjob_404()
                 mock_aws.return_value = mock_aws_client
 
                 manager = JobManager()
@@ -571,7 +578,7 @@ class TestJobManagerListJobs:
         result = manager.list_jobs(region="eu-west-1")
         assert result == []
         manager._aws_client.get_jobs.assert_called_with(
-            region="eu-west-1", namespace=None, status=None
+            region="eu-west-1", namespace=None, status=None, limit=1000, offset=0
         )
 
     def test_list_jobs_all_regions(self):
@@ -636,7 +643,7 @@ class TestJobManagerGetJob:
         manager._aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
             response=MagicMock(status_code=404)
         )
-        manager._aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
+        manager._aws_client.call_api.side_effect = _trainjob_404()
 
         result = manager.get_job("nonexistent", "default", "us-east-1")
         assert result is None
@@ -1465,19 +1472,46 @@ class TestJobManagerQueryJobsInRegion:
         assert len(result) == 1
         assert result[0].name == "job1"
 
-    def test_query_jobs_in_region_error(self):
-        """Test querying jobs when API returns error."""
+    def test_query_jobs_in_region_error_propagates(self):
+        """A failed regional read raises instead of reading as "no jobs"."""
+        from unittest.mock import MagicMock
+
+        import pytest
+
+        from cli.jobs import JobManager
+
+        manager = JobManager()
+        manager._aws_client = MagicMock()
+        manager._aws_client.get_jobs.side_effect = RuntimeError("403 Forbidden")
+
+        with pytest.raises(RuntimeError, match="403 Forbidden"):
+            manager._query_jobs_in_region("us-east-1", None, None)
+        with pytest.raises(RuntimeError, match="403 Forbidden"):
+            manager.list_jobs(region="us-east-1")
+
+    def test_list_jobs_all_regions_skips_a_failed_region(self):
+        """The fan-out keeps the regions that answered and skips the one that failed."""
         from unittest.mock import MagicMock
 
         from cli.jobs import JobManager
 
         manager = JobManager()
         manager._aws_client = MagicMock()
-        manager._aws_client.get_jobs.side_effect = Exception("API error")
+        manager._aws_client.discover_regional_stacks.return_value = {
+            "us-east-1": object(),
+            "us-west-2": object(),
+        }
 
-        result = manager._query_jobs_in_region("us-east-1", None, None)
+        def get_jobs(region=None, namespace=None, status=None, limit=None, offset=0):
+            if region == "us-east-1":
+                raise RuntimeError("403 Forbidden")
+            return {"jobs": [{"metadata": {"name": "j", "namespace": "gco-jobs"}, "status": {}}]}
 
-        assert result == []
+        manager._aws_client.get_jobs.side_effect = get_jobs
+
+        jobs = manager.list_jobs(all_regions=True)
+
+        assert [(job.name, job.region) for job in jobs] == [("j", "us-west-2")]
 
     def test_query_jobs_in_region_envelope_without_jobs_key(self):
         """An envelope that carries no ``jobs`` key (an empty page) yields no jobs."""
@@ -1593,7 +1627,7 @@ class TestJobManagerWaitExtended:
             mock_client.get_job_details.side_effect = requests.exceptions.HTTPError(
                 response=MagicMock(status_code=404)
             )
-            mock_client.call_api.side_effect = RuntimeError("API request failed: not found")
+            mock_client.call_api.side_effect = _trainjob_404()
 
             manager = JobManager()
 
@@ -1816,7 +1850,7 @@ class TestJobManagerListJobsAllRegions:
         }
 
         # First region succeeds, second fails
-        def get_jobs_side_effect(region, namespace, status):
+        def get_jobs_side_effect(region, namespace, status, limit=None, offset=0):
             if region == "us-east-1":
                 return {
                     "jobs": [
@@ -2135,7 +2169,7 @@ class TestTrainJobLifecycleFallbacks:
     def test_get_job_returns_none_when_trainjob_also_missing(self):
         manager = self._manager()
         manager._aws_client.get_job_details.side_effect = self._http_404()
-        manager._aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
+        manager._aws_client.call_api.side_effect = _trainjob_404()
 
         assert manager.get_job("nope", "gco-jobs", "us-east-1") is None
 
@@ -2253,6 +2287,27 @@ class TestTrainJobLifecycleFallbacks:
         assert kwargs["job_name"] == "train-demo-node-0"
         assert kwargs["pod_name"] == "train-demo-node-0-0-fghij"
 
+    def test_logs_container_reaches_the_api_and_the_trainjob_pod(self):
+        manager = self._manager()
+        manager._aws_client.get_job_logs.return_value = "sidecar output"
+
+        assert (
+            manager.get_job_logs("train-demo", "gco-jobs", "us-east-1", container="sidecar")
+            == "sidecar output"
+        )
+        assert manager._aws_client.get_job_logs.call_args.kwargs["container"] == "sidecar"
+
+        manager._aws_client.get_job_logs.side_effect = RuntimeError(
+            "Job 'train-demo' not found in namespace 'gco-jobs'"
+        )
+        manager._aws_client.get_job_pods.return_value = self._rank_pods()
+        manager._aws_client.get_pod_logs.return_value = {"logs": "rank0 sidecar"}
+
+        logs = manager.get_job_logs("train-demo", "gco-jobs", "us-east-1", container="sidecar")
+
+        assert logs == "rank0 sidecar"
+        assert manager._aws_client.get_pod_logs.call_args.kwargs["container"] == "sidecar"
+
     def test_logs_node_flag_selects_the_matching_rank_pod(self):
         manager = self._manager()
         manager._aws_client.get_job_logs.side_effect = RuntimeError(
@@ -2302,3 +2357,253 @@ class TestTrainJobLifecycleFallbacks:
 
         assert logs == "[CloudWatch Logs]"
         mock_cw.assert_called_once()
+
+
+class TestJobsListRegionErrors:
+    """``gco jobs list --region`` reports a failed read instead of "No results"."""
+
+    @pytest.mark.parametrize("output_args", [[], ["-o", "json"], ["-o", "yaml"]])
+    def test_failed_regional_read_exits_nonzero_in_every_output_mode(self, output_args):
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        client = MagicMock()
+        client.get_jobs.side_effect = RuntimeError("403 Forbidden")
+        with patch("cli.jobs.get_aws_client", return_value=client):
+            result = CliRunner().invoke(cli, [*output_args, "jobs", "list", "-r", "us-east-1"])
+
+        assert result.exit_code == 1
+        assert "403 Forbidden" in result.stderr
+        assert "No results" not in result.output
+        # Nothing reaches stdout, so a pipeline never mistakes the failure
+        # for an empty listing.
+        assert result.stdout.strip() == ""
+
+
+class TestJobsListPagination:
+    """``list_jobs`` follows ``GET /api/v1/jobs`` pages up to the limit."""
+
+    @staticmethod
+    def _paged_client(total):
+        """A client serving *total* jobs in pages, recording each request."""
+        calls = []
+
+        def get_jobs(region=None, namespace=None, status=None, limit=None, offset=0):
+            calls.append({"limit": limit, "offset": offset})
+            size = min(limit or 50, 1000)
+            names = range(offset, min(offset + size, total))
+            return {
+                "jobs": [
+                    {"metadata": {"name": f"j{i}", "namespace": "gco-jobs"}, "status": {}}
+                    for i in names
+                ],
+                "total": total,
+                "has_more": offset + size < total,
+            }
+
+        client = MagicMock()
+        client.get_jobs.side_effect = get_jobs
+        return client, calls
+
+    def _manager(self, client):
+        from cli.jobs import JobManager
+
+        manager = JobManager()
+        manager._aws_client = client
+        return manager
+
+    def test_small_limit_requests_only_that_many(self):
+        client, calls = self._paged_client(120)
+
+        jobs = self._manager(client).list_jobs(region="us-east-1", limit=5)
+
+        assert [job.name for job in jobs] == ["j0", "j1", "j2", "j3", "j4"]
+        assert calls == [{"limit": 5, "offset": 0}]
+
+    def test_large_limit_follows_pages_of_at_most_1000(self):
+        client, calls = self._paged_client(5000)
+
+        jobs = self._manager(client).list_jobs(region="us-east-1", limit=2500)
+
+        assert len(jobs) == 2500
+        assert jobs[-1].name == "j2499"
+        assert calls == [
+            {"limit": 1000, "offset": 0},
+            {"limit": 1000, "offset": 1000},
+            {"limit": 500, "offset": 2000},
+        ]
+
+    def test_stops_when_the_api_has_no_more(self):
+        client, calls = self._paged_client(1200)
+
+        jobs = self._manager(client).list_jobs(region="us-east-1", limit=5000)
+
+        assert len(jobs) == 1200
+        assert calls == [{"limit": 1000, "offset": 0}, {"limit": 1000, "offset": 1000}]
+
+    def test_no_limit_reads_every_page(self):
+        client, calls = self._paged_client(2001)
+
+        jobs = self._manager(client).list_jobs(region="us-east-1")
+
+        assert len(jobs) == 2001
+        assert [call["offset"] for call in calls] == [0, 1000, 2000]
+
+    def test_empty_page_or_offset_past_total_stops_a_misbehaving_server(self):
+        client = MagicMock()
+        # A server that ignores ``offset`` keeps answering has_more=True.
+        client.get_jobs.return_value = {
+            "jobs": [{"metadata": {"name": "same", "namespace": "gco-jobs"}, "status": {}}],
+            "total": 2,
+            "has_more": True,
+        }
+        assert len(self._manager(client).list_jobs(region="us-east-1")) == 2
+
+        client.get_jobs.return_value = {"jobs": [], "has_more": True}
+        assert self._manager(client).list_jobs(region="us-east-1") == []
+        assert client.get_jobs.call_count == 3
+
+    def test_get_jobs_sends_limit_offset_and_encoded_filters(self):
+        from cli.aws_client import GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config, patch("boto3.Session"):
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+            client = GCOAWSClient()
+        response = MagicMock()
+        response.json.return_value = {"jobs": []}
+        client.make_authenticated_request = MagicMock(return_value=response)
+
+        client.get_jobs("us-east-1", namespace="ml jobs", status="running", limit=5, offset=10)
+        path = client.make_authenticated_request.call_args.kwargs["path"]
+        assert path == "/api/v1/jobs?namespace=ml%20jobs&status=running&limit=5&offset=10"
+
+        client.get_jobs("us-east-1")
+        assert client.make_authenticated_request.call_args.kwargs["path"] == "/api/v1/jobs"
+
+    def test_cli_limit_is_honoured_and_validated(self):
+        import json
+
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        client, calls = self._paged_client(120)
+        with patch("cli.jobs.get_aws_client", return_value=client):
+            result = CliRunner().invoke(
+                cli, ["-o", "json", "jobs", "list", "-r", "us-east-1", "--limit", "70"]
+            )
+            assert result.exit_code == 0, result.output
+            assert len(json.loads(result.stdout)) == 70
+            assert calls == [{"limit": 70, "offset": 0}]
+
+            result = CliRunner().invoke(cli, ["jobs", "list", "-r", "us-east-1", "--limit", "0"])
+        assert result.exit_code == 2
+        assert "--limit" in result.output
+
+
+class TestSubmitJobSqsNamespace:
+    """``submit_job_sqs`` applies the same namespace fallback as ``submit_job``."""
+
+    @staticmethod
+    def _submit(manifests, default_namespace="team-a", namespace=None):
+        import json
+        from types import SimpleNamespace
+
+        from cli.jobs import JobManager
+
+        manager = object.__new__(JobManager)
+        manager.config = SimpleNamespace(default_namespace=default_namespace)
+        manager._aws_client = MagicMock()
+        manager._aws_client.get_regional_stack.return_value = SimpleNamespace(stack_name="s")
+        fake_boto = MagicMock()
+        fake_boto.client.return_value.describe_stacks.return_value = {
+            "Stacks": [{"Outputs": [{"OutputKey": "JobQueueUrl", "OutputValue": "https://q"}]}]
+        }
+        fake_boto.client.return_value.send_message.return_value = {"MessageId": "m"}
+        with patch.dict("sys.modules", {"boto3": fake_boto}):
+            result = manager.submit_job_sqs(manifests, region="us-east-1", namespace=namespace)
+        body = json.loads(
+            fake_boto.client.return_value.send_message.call_args.kwargs["MessageBody"]
+        )
+        return result, body
+
+    def test_configured_default_namespace_fills_a_manifest_without_one(self):
+        manifests = [{"kind": "Job", "metadata": {"name": "a"}}]
+
+        result, body = self._submit(manifests)
+
+        assert body["manifests"][0]["metadata"]["namespace"] == "team-a"
+        assert body["namespace"] == result["namespace"] == "team-a"
+
+    def test_a_declared_namespace_wins_over_the_default(self):
+        manifests = [{"kind": "Job", "metadata": {"name": "a", "namespace": "ml-jobs"}}]
+
+        result, body = self._submit(manifests)
+
+        assert body["manifests"][0]["metadata"]["namespace"] == "ml-jobs"
+        assert body["namespace"] == result["namespace"] == "ml-jobs"
+
+    def test_an_explicit_namespace_is_the_fallback_over_the_config(self):
+        manifests = [{"kind": "Job"}]
+
+        result, body = self._submit(manifests, namespace="research")
+
+        assert body["manifests"][0]["metadata"] == {"namespace": "research"}
+        assert result["namespace"] == "research"
+
+
+class TestGetJobTrainJobLookupErrors:
+    """A failed TrainJob lookup is an error, not "not found"."""
+
+    @staticmethod
+    def _manager(trainjob_error):
+        import requests
+
+        from cli.jobs import JobManager
+
+        manager = JobManager()
+        manager._aws_client = MagicMock()
+        manager._aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
+            response=MagicMock(status_code=404)
+        )
+        manager._aws_client.call_api.side_effect = trainjob_error
+        return manager
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    def test_server_errors_propagate(self, status):
+        from cli.aws_client import APIRequestError
+
+        manager = self._manager(APIRequestError(status, "Service Unavailable"))
+
+        with pytest.raises(APIRequestError) as error:
+            manager.get_job("train", "gco-jobs", "us-east-1")
+        assert error.value.status_code == status
+
+    def test_an_unreachable_bridge_propagates(self):
+        manager = self._manager(RuntimeError("Regional API endpoint is not deployed in us-east-1"))
+
+        with pytest.raises(RuntimeError, match="not deployed"):
+            manager.get_job("train", "gco-jobs", "us-east-1")
+
+    @pytest.mark.parametrize("status", [403, 404])
+    def test_definitive_answers_mean_not_found(self, status):
+        from cli.aws_client import APIRequestError
+
+        manager = self._manager(APIRequestError(status, "no TrainJob"))
+
+        assert manager.get_job("train", "gco-jobs", "us-east-1") is None
+
+    def test_cli_reports_the_failure_instead_of_not_found(self):
+        from click.testing import CliRunner
+
+        from cli.aws_client import APIRequestError
+        from cli.main import cli
+
+        manager = self._manager(APIRequestError(503, "Service Unavailable"))
+        with patch("cli.commands.jobs_cmd.get_job_manager", return_value=manager):
+            result = CliRunner().invoke(cli, ["jobs", "get", "train", "-r", "us-east-1"])
+
+        assert result.exit_code == 1
+        assert "Failed to get job: API request failed: Service Unavailable" in result.stderr
+        assert "not found" not in result.stderr

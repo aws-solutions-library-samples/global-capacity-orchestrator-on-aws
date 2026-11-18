@@ -86,7 +86,9 @@ async def queue_submit(
         manifest_path: Path to the job manifest YAML, relative to the project
             root (an absolute path must also be inside it).
         region: Target region for job execution.
-        namespace: Kubernetes namespace (defaults to ``gco-jobs`` server-side).
+        namespace: Namespace for a manifest that declares none (defaults to
+            the configured default namespace, ``gco-jobs``); must match a
+            namespace the manifest declares.
         priority: Job priority (0-100, higher = more important).
         labels: Optional ``key=value`` labels to attach to the queued job.
     """

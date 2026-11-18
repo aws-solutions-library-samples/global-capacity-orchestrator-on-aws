@@ -2029,6 +2029,12 @@ gco dag run pipeline.yaml -r us-east-1
 gco dag run pipeline.yaml --dry-run
 ```
 
+With `-o json` or `-o yaml`, `dag run` prints one document: the DAG's `name`,
+`region`, `namespace`, every step with its final `status`, `job_name`, times and
+`error`, and a top-level `status` of `succeeded` or `failed` (the command exits 1
+when a step failed). `--dry-run`, and a DAG that fails validation, print the
+`gco dag validate` document instead.
+
 #### `gco dag validate`
 
 Validate a DAG definition without running it. Checks for cycles, missing dependencies, and missing manifest files.
@@ -2041,7 +2047,12 @@ gco dag validate DAG_FILE
 
 ```bash
 gco dag validate examples/pipeline-dag.yaml
+gco -o json dag validate examples/pipeline-dag.yaml
 ```
+
+With `-o json` or `-o yaml` it prints one document with `name`, `valid`,
+`errors`, `region`, `namespace`, `steps` (name, manifest, depends_on) and, for a
+valid DAG, `execution_order`; an invalid DAG still exits 1.
 
 #### DAG File Format
 
@@ -3335,8 +3346,18 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--check-policy` | | Check the manifests against the target region's deployed policy first and report anything that would be rejected (advisory; submission continues) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
-| `--wait` | `-w` | Wait for job completion |
+| `--wait` | `-w` | Wait for job completion (exit status below) |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
+
+**Exit status:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | Submitted; with `--wait`, the job succeeded |
+| `1` | Not submitted, or `--wait` could not read the job's status (the job may still exist) |
+| `2` | Invalid options or arguments |
+| `3` | `--wait`: the job ran and finished with status `failed` |
+| `4` | `--wait`: the job had not finished when `--timeout` expired; it keeps running |
 
 **Example:**
 
@@ -3362,7 +3383,7 @@ gco jobs submit-sqs MANIFEST_PATH [OPTIONS]
 | `--region` | `-r` | Target region for SQS queue |
 | `--auto-region` | | Auto-select optimal region based on capacity (ignored with `--region`) |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
-| `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (manifest `metadata.namespace` takes precedence) |
+| `--namespace` | `-n` | Fallback namespace for manifests that don't declare their own (default: the configured default namespace, `GCO_DEFAULT_NAMESPACE`; manifest `metadata.namespace` takes precedence) |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 
@@ -3404,7 +3425,7 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--dry-run` | | Validate without applying |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
-| `--wait` | `-w` | Wait for job completion |
+| `--wait` | `-w` | Wait for job completion (same exit status as [`gco jobs submit`](#gco-jobs-submit)) |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
 `submit-direct` skips GCO's server-side admission, so `--sandbox` runs the
@@ -3427,15 +3448,21 @@ gco jobs submit-queue MANIFEST_PATH [OPTIONS]
 
 Jobs are stored in DynamoDB and picked up by the target region's manifest processor. This enables global job submission with centralized tracking and status history.
 
+This is [`gco queue submit`](#gco-queue-submit) under a second name: the same
+options (including `--sandbox` and the `--max-spot-price` / `--spot-instance-type`
+gate), the same namespace rules and the same routing through the global API.
+
 **Options:**
 
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Target region for job execution (required) |
-| `--namespace` | `-n` | Kubernetes namespace |
+| `--namespace` | `-n` | Namespace for a manifest that declares none (default: the configured default namespace); must match a namespace the manifest declares |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
 | `--label` | `-l` | Add labels (key=value), can be repeated |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
+| `--max-spot-price` | | Spot price cap in USD/hour (requires `--spot-instance-type`); see [`gco queue submit`](#gco-queue-submit) |
+| `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (requires `--max-spot-price`) |
 
 **Example:**
 
@@ -3463,7 +3490,11 @@ gco jobs list [OPTIONS]
 | `--all-regions` | `-a` | Query all regions via global API |
 | `--namespace` | `-n` | Filter by namespace |
 | `--status` | `-s` | Filter by status |
-| `--limit` | `-l` | Maximum results (default: 50) |
+| `--limit` | `-l` | Maximum jobs to return (default: 50, at least 1). With `--region` the CLI reads as many API pages (up to 1000 jobs each) as that takes, newest first |
+
+With `--region`, a read that fails (an HTTP error from the regional API, a Region
+without the regional API bridge, missing credentials) prints the error on stderr and
+exits 1 in every output mode; it is never reported as an empty job list.
 
 **Example:**
 
@@ -3556,11 +3587,19 @@ gco jobs logs JOB_NAME [OPTIONS]
 | `--namespace` | `-n` | Job namespace |
 | `--tail` | `-t` | Number of lines to show (default: 100) |
 | `--since` | `-s` | Hours to look back in CloudWatch (default: 24) |
-| `--container` | `-c` | Container name (for multi-container pods) |
+| `--container` | `-c` | Container to read in a multi-container pod (default: the pod's first container) |
 | `--node` | | Node rank to fetch for a distributed TrainJob (default: 0) |
 
 Kubeflow TrainJobs are resolved automatically: logs come from the
 rank-`--node` pod of the training job (rank 0 by default).
+
+When the pod is gone (completed and cleaned up) or still pending, the command
+falls back to CloudWatch Logs (`/aws/containerinsights/<cluster>/application`,
+written by the CloudWatch Observability add-on) and prints the newest `--tail`
+lines of the last `--since` hours, oldest first. It reads only the streams of
+this job's pods in `--namespace` (for a TrainJob, the rank-`--node` pod), and only
+the `--container` stream when that option is given; a job named `train` never
+picks up `pretrain` or `train-v2` logs.
 
 **Example:**
 
@@ -3918,13 +3957,18 @@ gco jobs queue-status [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Filter by region |
-| `--all-regions` | | Show all regions |
+| `--all-regions` | `-a` | Show all regions |
+
+With `-o json` or `-o yaml`, `--all-regions` prints one list with each answering
+region's status document (an empty list when no region could be read); a single
+region prints its status document.
 
 **Example:**
 
 ```bash
 gco jobs queue-status --all-regions
 gco jobs queue-status -r us-east-1
+gco -o json jobs queue-status --all-regions
 ```
 
 ---
@@ -4686,11 +4730,20 @@ gco queue submit MANIFEST_PATH [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Target region for job execution (required) |
-| `--namespace` | `-n` | Kubernetes namespace |
+| `--namespace` | `-n` | Namespace for a manifest that declares none (default: the configured default namespace, `gco-jobs`); must match a namespace the manifest declares |
 | `--priority` | `-p` | Job priority (0-100, higher = more important) |
-| `--label` | `-l` | Add labels (key=value), can be repeated |
+| `--label` | `-l` | Add labels (`key=value` with a non-empty key; the value may be empty), can be repeated |
+| `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
 | `--max-spot-price` | | Spot price cap in USD/hour; the job stays queued until the current spot price of `--spot-instance-type` in the target region drops to or below this value. Requires `--spot-instance-type` |
 | `--spot-instance-type` | | EC2 instance type whose spot price gates dispatch (e.g. `g5.xlarge`). Requires `--max-spot-price` |
+
+The manifest must be one `batch/v1` Job. It runs in its own `metadata.namespace`;
+`--namespace` names the namespace for a manifest that declares none, and a
+`--namespace` that contradicts the manifest fails before anything is sent (the
+queue API would answer `422`). The request goes through the global API, any of
+whose Regions can enqueue for any target Region; with `--regional-api` it uses the
+target Region's bridge. [`gco jobs submit-queue`](#gco-jobs-submit-queue) is this
+same command under a second name.
 
 With the spot price gate set, the regional queue worker re-evaluates the instance type's lowest current spot price across the region's Availability Zones on every polling pass and only dispatches once it clears the cap. `gco queue get` shows the gate and the last observed price; the job waits indefinitely until the price clears or you cancel it with `gco queue cancel`. Price-gated jobs never block other queued work. See [docs/COST_MONITORING.md](COST_MONITORING.md#spot-price-aware-scheduling).
 
@@ -4710,9 +4763,13 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
 List jobs in the global queue.
 
 It shows one page of up to `--limit` jobs, in no particular order: the queue's
-scan order, which is neither newest first nor by priority. `--output json`
-includes the page's `next_cursor`; see
-[List Queued Jobs](API.md#list-queued-jobs) for reading the rest.
+scan order, which is neither newest first nor by priority. When more jobs may
+match, the table ends with the `gco queue list ... --cursor CURSOR` command that
+reads the next page, and `--output json` / `yaml` carries the page's
+`next_cursor`. Pass it back with `--cursor` and the same filters (a cursor is
+bound to the filters it was issued with). A page can hold fewer than `--limit`
+jobs, even none, and still have a next page when the queue's scan budget ended it
+early; see [List Queued Jobs](API.md#list-queued-jobs).
 
 ```bash
 gco queue list [OPTIONS]
@@ -4725,7 +4782,8 @@ gco queue list [OPTIONS]
 | `--region` | `-r` | Filter by target region |
 | `--status` | `-s` | Filter by status (queued, claimed, running, succeeded, failed, cancelled) |
 | `--namespace` | `-n` | Filter by namespace |
-| `--limit` | `-l` | Maximum results (default: 50) |
+| `--limit` | `-l` | Maximum jobs in this page, 1-1000 (default: 50) |
+| `--cursor` | | Read the page after a previous one (its `next_cursor`); use the same filters |
 
 **Example:**
 
@@ -4733,6 +4791,7 @@ gco queue list [OPTIONS]
 gco queue list
 gco queue list --region us-east-1 --status queued
 gco queue list -s running
+gco queue list -s running --cursor CURSOR_FROM_THE_PREVIOUS_PAGE
 ```
 
 #### `gco queue get`
@@ -6284,6 +6343,9 @@ gco tasks list [OPTIONS]
 - `-n, --limit INTEGER` — Maximum tasks to show (default: 20)
 - `--json` — Emit raw JSON instead of a table
 
+`--json` and the root `gco -o json` / `-o yaml` print one `{"tasks": [...]}`
+document, `{"tasks": []}` when nothing is recorded.
+
 ```bash
 gco tasks list
 gco tasks list -n 5
@@ -6463,6 +6525,10 @@ gco templates run TEMPLATE_NAME [OPTIONS]
 | `--region` | `-r` | Target region (required) |
 | `--namespace` | | Kubernetes namespace |
 | `--param` | `-p` | Parameter override (key=value), can be repeated |
+
+When the rendered manifest is rejected (an untrusted registry, a namespace
+outside the allowlist, a resource cap), the API answers `400` and the command
+prints each validation error and exits 1.
 
 **Example:**
 
@@ -6950,6 +7016,15 @@ gco capacity status
 # Ensure AWS credentials are configured
 aws sts get-caller-identity
 ```
+
+**"Regional stack discovery could not read stack 'gco-REGION' in REGION"**
+
+The CLI could not read a regional stack in one of the `cdk.json` regions, so it
+does not claim the stack is absent. The message names the AWS error
+(`Throttling`, `AccessDenied`, an expired session, a network failure). Fix that
+and rerun; only CloudFormation's "does not exist" answer is reported as a missing
+stack. The same message from the account-wide scan (no `cdk.json` regions) means
+no stack was found and some regions could not be read.
 
 **"Endpoint request timed out"**
 

@@ -849,31 +849,32 @@ class TestTemplatesCommands:
             call_kwargs = mock_aws.call_api.call_args.kwargs
             assert call_kwargs["body"]["parameters"] == {"image": "custom:v1", "gpus": "8"}
 
-    def test_templates_run_failure(self):
-        """Test templates run when job creation fails."""
+    def test_templates_run_failure_reports_the_validation_errors(self):
+        """A rejected manifest (HTTP 400 with ``errors``) exits 1 and names each error."""
+        from cli.aws_client import GCOAWSClient
         from cli.main import cli
 
-        runner = CliRunner()
-
-        with patch("cli.aws_client.get_aws_client") as mock_client:
-            mock_aws = MagicMock()
-            mock_aws.call_api.return_value = {"success": False, "errors": ["Validation failed"]}
-            mock_client.return_value = mock_aws
-
-            result = runner.invoke(
+        response = MagicMock(ok=False, status_code=400, reason="Bad Request")
+        response.json.return_value = {
+            "success": False,
+            "template": "gpu-template",
+            "errors": ["Image registry not trusted: example.com/x", "Namespace not allowed"],
+        }
+        with (
+            patch.object(GCOAWSClient, "__init__", lambda self, *a, **k: None),
+            patch.object(GCOAWSClient, "make_authenticated_request", return_value=response),
+        ):
+            result = CliRunner().invoke(
                 cli,
-                [
-                    "templates",
-                    "run",
-                    "gpu-template",
-                    "--name",
-                    "my-job",
-                    "--region",
-                    "us-east-1",
-                ],
+                ["templates", "run", "gpu-template", "--name", "my-job", "--region", "us-east-1"],
             )
-            assert result.exit_code == 0  # Command succeeds but reports failure
-            assert "failed" in result.output.lower()
+
+        assert result.exit_code == 1
+        assert (
+            "Failed to run template: API request failed: "
+            "Image registry not trusted: example.com/x; Namespace not allowed"
+        ) in result.stderr
+        assert "created from template" not in result.output
 
     def test_templates_run_error(self):
         """Test templates run with error."""

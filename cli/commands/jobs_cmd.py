@@ -7,26 +7,16 @@ from typing import Any
 
 import click
 
-from gco.job_admission import SANDBOX_MODES, apply_sandbox
+from gco.job_admission import apply_sandbox
 
 from ..config import GCOConfig
 from ..jobs import JobInfo, get_job_manager, resolve_submission_identity
 from ..output import confirm, format_job_table, get_output_formatter
+from .queue_cmd import queue_submit, sandbox_option
 
 logger = logging.getLogger(__name__)
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
-
-#: ``--sandbox`` for every submit command (gco.job_admission.apply_sandbox).
-sandbox_option = click.option(
-    "--sandbox",
-    type=click.Choice(sorted(SANDBOX_MODES)),
-    help=(
-        "Run every pod in an AWS Nitro Sandbox: isolated sets runtimeClassName: "
-        "isolated-sandbox on each pod template. Needs EKS 1.36 or later; see "
-        "docs/NITRO_SANDBOXES.md"
-    ),
-)
 
 
 def _resolve_result_namespace(result: Any, fallback: str) -> str:
@@ -39,6 +29,53 @@ def _resolve_result_job_name(result: Any) -> str | None:
     """Pick the generated/submitted Job name from a submission response."""
     job_name, _namespace = resolve_submission_identity(result)
     return job_name
+
+
+#: ``submit`` / ``submit-direct --wait`` exit status when the job ran and
+#: finished with status ``failed``. Distinct from 1 (not submitted, or the wait
+#: could not read the job) so a script can tell "do not resubmit, it ran" from
+#: "nothing ran"; 2 stays Click's usage error.
+EXIT_JOB_FAILED = 3
+#: ``--wait`` exit status when the job had not finished by ``--timeout``. The
+#: job keeps running; only the wait gave up.
+EXIT_WAIT_TIMEOUT = 4
+
+
+def _wait_for_submitted_job(
+    formatter: Any,
+    job_manager: Any,
+    *,
+    job_name: str,
+    namespace: str,
+    region: str | None,
+    timeout: int,
+) -> None:
+    """Wait for a submitted job and exit non-zero unless it succeeded.
+
+    The submission already succeeded when this runs, so a failure here is
+    reported as what it is (the job failed, the wait timed out, the status
+    read failed) rather than as a failed submission. The exit status
+    contract is spelled out in the ``submit`` / ``submit-direct`` help.
+    """
+    formatter.print_info(f"Waiting for job {job_name} to complete...")
+    try:
+        final_job = job_manager.wait_for_job(
+            job_name=job_name,
+            namespace=namespace,
+            region=region,
+            timeout_seconds=timeout,
+        )
+    except TimeoutError as e:
+        formatter.print_error(f"Job {job_name} was submitted but is not finished: {e}")
+        sys.exit(EXIT_WAIT_TIMEOUT)
+    except Exception as e:
+        formatter.print_error(f"Job {job_name} was submitted, but waiting for it failed: {e}")
+        sys.exit(1)
+
+    if str(final_job.status).lower() == "failed":
+        formatter.print_error(f"Job {job_name} finished with status: {final_job.status}")
+        sys.exit(EXIT_JOB_FAILED)
+    formatter.print_success(f"Job completed with status: {final_job.status}")
 
 
 @click.group()
@@ -67,7 +104,12 @@ def jobs(config: Any) -> None:
 )
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @sandbox_option
-@click.option("--wait", "-w", is_flag=True, help="Wait for job completion")
+@click.option(
+    "--wait",
+    "-w",
+    is_flag=True,
+    help="Wait for job completion; exits 3 if the job fails, 4 on --timeout",
+)
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
 def submit_job(
@@ -85,6 +127,14 @@ def submit_job(
     """Submit a job to GCO.
 
     MANIFEST_PATH can be a YAML file or directory containing YAML files.
+
+    \b
+    Exit status:
+      0  submitted; with --wait, the job succeeded
+      1  not submitted, or --wait could not read the job's status
+      2  invalid options or arguments
+      3  --wait: the job finished with status failed
+      4  --wait: the job had not finished when --timeout expired
     """
     formatter = get_output_formatter(config)
     job_manager = get_job_manager(config)
@@ -113,6 +163,7 @@ def submit_job(
             sandbox=sandbox,
         )
 
+    wait_target: tuple[str, str] | None = None
     try:
         result = job_manager.submit_job(
             manifests=manifest_path,
@@ -151,18 +202,21 @@ def submit_job(
                 resolved_ns = _resolve_result_namespace(
                     result, fallback=namespace or config.default_namespace
                 )
-                formatter.print_info(f"Waiting for job {job_name} to complete...")
-                final_job = job_manager.wait_for_job(
-                    job_name=job_name,
-                    namespace=resolved_ns,
-                    region=target_region,
-                    timeout_seconds=timeout,
-                )
-                formatter.print_success(f"Job completed with status: {final_job.status}")
+                wait_target = (job_name, resolved_ns)
 
     except Exception as e:
         formatter.print_error(f"Failed to submit job: {e}")
         sys.exit(1)
+
+    if wait_target is not None:
+        _wait_for_submitted_job(
+            formatter,
+            job_manager,
+            job_name=wait_target[0],
+            namespace=wait_target[1],
+            region=target_region,
+            timeout=timeout,
+        )
 
 
 @jobs.command("submit-direct")
@@ -176,7 +230,12 @@ def submit_job(
 @click.option("--dry-run", is_flag=True, help="Validate without applying")
 @click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
 @sandbox_option
-@click.option("--wait", "-w", is_flag=True, help="Wait for job completion")
+@click.option(
+    "--wait",
+    "-w",
+    is_flag=True,
+    help="Wait for job completion; exits 3 if the job fails, 4 on --timeout",
+)
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
 def submit_job_direct(
@@ -211,6 +270,14 @@ def submit_job_direct(
     Examples:
         gco jobs submit-direct job.yaml --region us-east-1
         gco jobs submit-direct job.yaml -r us-west-2 -n gco-jobs --wait
+
+    \b
+    Exit status:
+      0  submitted; with --wait, the job succeeded
+      1  not submitted, or --wait could not read the job's status
+      2  invalid options or arguments
+      3  --wait: the job finished with status failed
+      4  --wait: the job had not finished when --timeout expired
     """
     formatter = get_output_formatter(config)
     job_manager = get_job_manager(config)
@@ -228,6 +295,7 @@ def submit_job_direct(
             )
         labels[key] = value
 
+    wait_target: tuple[str, str] | None = None
     try:
         formatter.print_info(f"Submitting directly to cluster in {region} via kubectl...")
 
@@ -260,18 +328,21 @@ def submit_job_direct(
                 resolved_ns = _resolve_result_namespace(
                     result, fallback=namespace or config.default_namespace
                 )
-                formatter.print_info(f"Waiting for job {job_name} to complete...")
-                final_job = job_manager.wait_for_job(
-                    job_name=job_name,
-                    namespace=resolved_ns,
-                    region=region,
-                    timeout_seconds=timeout,
-                )
-                formatter.print_success(f"Job completed with status: {final_job.status}")
+                wait_target = (job_name, resolved_ns)
 
     except Exception as e:
         formatter.print_error(f"Failed to submit job directly: {e}")
         sys.exit(1)
+
+    if wait_target is not None:
+        _wait_for_submitted_job(
+            formatter,
+            job_manager,
+            job_name=wait_target[0],
+            namespace=wait_target[1],
+            region=region,
+            timeout=timeout,
+        )
 
 
 @jobs.command("submit-sqs")
@@ -395,11 +466,13 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
     """Show job queue status across regions.
 
     Displays the number of pending, in-flight, and failed messages
-    in the job queues.
+    in the job queues. With -o json/yaml, --all-regions prints one list of
+    the per-region statuses (empty when no region could be read).
 
     Examples:
         gco jobs queue-status --region us-east-1
         gco jobs queue-status --all-regions
+        gco -o json jobs queue-status --all-regions
     """
     formatter = get_output_formatter(config)
     job_manager = get_job_manager(config)
@@ -422,6 +495,12 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
 
             if not results:
                 formatter.print_warning("No queue status available")
+            if config.output_format != "table":
+                # One document in every machine mode: the per-region statuses,
+                # an empty list when no region answered.
+                formatter.print(results)
+                return
+            if not results:
                 return
 
             # Format as table
@@ -448,7 +527,13 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
 @click.option("--region", "-r", help="Target region (required unless --all-regions)")
 @click.option("--status", "-s", type=click.Choice(["pending", "running", "succeeded", "failed"]))
 @click.option("--all-regions", "-a", is_flag=True, help="Query all regions via global API")
-@click.option("--limit", "-l", default=50, help="Maximum jobs to return")
+@click.option(
+    "--limit",
+    "-l",
+    default=50,
+    type=click.IntRange(min=1),
+    help="Maximum jobs to return (read across as many API pages as needed)",
+)
 @pass_config
 def list_jobs(
     config: Any, namespace: Any, region: Any, status: Any, all_regions: Any, limit: Any
@@ -521,7 +606,11 @@ def list_jobs(
         else:
             # Query specific region
             jobs_list = job_manager.list_jobs(
-                region=region, namespace=namespace, status=status, all_regions=False
+                region=region,
+                namespace=namespace,
+                status=status,
+                all_regions=False,
+                limit=limit,
             )
 
             if config.output_format == "table":
@@ -628,7 +717,11 @@ def get_job(config: Any, job_name: Any, namespace: Any, region: Any) -> None:
 @click.option(
     "--since", "-s", default=24, type=int, help="Hours to look back in CloudWatch (default: 24)"
 )
-@click.option("--container", "-c", help="Container name (for multi-container pods)")
+@click.option(
+    "--container",
+    "-c",
+    help="Container to read in a multi-container pod (default: the pod's first container)",
+)
 @click.option(
     "--node",
     default=0,
@@ -649,8 +742,10 @@ def get_logs(
     """Get logs from a job.
 
     Fetches logs from the Kubernetes API if the pod is still running.
-    If the pod is gone, falls back to CloudWatch Logs automatically.
-    Use --since to control how far back CloudWatch searches.
+    If the pod is gone, falls back to CloudWatch Logs automatically: the
+    newest --tail lines from this job's pods in --namespace (and only the
+    --container stream when given). Use --since to control how far back
+    CloudWatch searches.
 
     Kubeflow TrainJobs are resolved automatically; use --node to pick a
     node rank other than 0.
@@ -667,7 +762,13 @@ def get_logs(
 
     try:
         logs = job_manager.get_job_logs(
-            job_name, namespace, region, tail_lines=tail, since_hours=since, node=node
+            job_name,
+            namespace,
+            region,
+            tail_lines=tail,
+            since_hours=since,
+            node=node,
+            container=container,
         )
         print(logs)
     except Exception as e:
@@ -1586,96 +1687,7 @@ def check_policy(
         sys.exit(1)
 
 
-@jobs.command("submit-queue")
-@click.argument("manifest_path", type=click.Path(exists=True))
-@click.option("--region", "-r", required=True, help="Target region for job execution")
-@click.option("--namespace", "-n", default="gco-jobs", help="Kubernetes namespace")
-@click.option(
-    "--priority",
-    "-p",
-    type=click.IntRange(0, 100),
-    default=0,
-    help="Job priority (0-100, higher = more important)",
-)
-@click.option("--label", "-l", multiple=True, help="Add labels (key=value)")
-@sandbox_option
-@pass_config
-def submit_job_queue(
-    config: Any,
-    manifest_path: Any,
-    region: Any,
-    namespace: Any,
-    priority: Any,
-    label: Any,
-    sandbox: Any,
-) -> None:
-    """Submit a job to the global DynamoDB queue for regional pickup.
-
-    Jobs are stored in DynamoDB and picked up by the target region's
-    manifest processor. This enables global job submission with
-    centralized tracking and status history.
-
-    This is different from submit-sqs which uses regional SQS queues.
-    The DynamoDB queue provides:
-    - Global visibility of all queued jobs
-    - Status tracking and history
-    - Priority-based scheduling
-    - Cross-region job management
-
-    Use 'gco queue list' to view queued jobs and their status.
-
-    Examples:
-        gco jobs submit-queue job.yaml --region us-east-1
-        gco jobs submit-queue job.yaml -r us-west-2 --priority 50
-        gco jobs submit-queue job.yaml -r us-east-1 -l team=ml -l project=training
-    """
-
-    from gco.services.manifest_processor import safe_load_yaml
-
-    formatter = get_output_formatter(config)
-
-    # Parse and validate labels at the CLI boundary. Silently dropping a
-    # malformed value would submit a differently labelled workload than the
-    # operator requested; values may still contain additional ``=`` bytes.
-    labels = {}
-    for lbl in label:
-        key, separator, value = lbl.partition("=")
-        if not separator or not key:
-            raise click.BadParameter(
-                "labels must use key=value with a non-empty key",
-                param_hint="--label",
-            )
-        labels[key] = value
-
-    try:
-        # Load manifest
-        with open(manifest_path, encoding="utf-8") as f:
-            manifest = safe_load_yaml(f, allow_aliases=False)
-        if sandbox:
-            apply_sandbox([manifest], sandbox)
-
-        # Submit via API
-        from ..aws_client import get_aws_client
-
-        aws_client = get_aws_client(config)
-
-        result = aws_client.call_api(
-            method="POST",
-            path="/api/v1/queue/jobs",
-            region=region,
-            body={
-                "manifest": manifest,
-                "target_region": region,
-                "namespace": namespace,
-                "priority": priority,
-                "labels": labels if labels else None,
-            },
-        )
-
-        formatter.print_success(f"Job queued for {region}")
-        formatter.print_info("Use 'gco queue list' or 'gco queue get <job_id>' to track status")
-        formatter.print(result)
-
-    except Exception as e:
-        formatter.print_error(f"Failed to queue job: {e}")
-        sys.exit(1)
+# ``gco jobs submit-queue`` is ``gco queue submit`` registered under a second
+# name: one command object, so the two cannot drift apart in options,
+# validation or routing again.
+jobs.add_command(queue_submit, name="submit-queue")

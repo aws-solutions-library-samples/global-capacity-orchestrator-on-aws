@@ -69,6 +69,122 @@ def _readable(region: str) -> RegionPolicy:
     return RegionPolicy(region=region, status=FETCH_OK, policy=MagicMock())
 
 
+_WAIT_SUBMITTERS = [
+    ("submit", [], "submit_job"),
+    ("submit-direct", ["--region", "us-east-1"], "submit_job_direct"),
+]
+
+
+class TestSubmitWaitExitStatus:
+    """``--wait`` turns the job's outcome into the documented exit status."""
+
+    @staticmethod
+    def _manager(submit_method: str) -> MagicMock:
+        manager = MagicMock()
+        getattr(manager, submit_method).return_value = {
+            "job_name": "trainer",
+            "namespace": "gco-jobs",
+        }
+        return manager
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_failed_job_exits_3(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        manager = self._manager(submit_method)
+        manager.wait_for_job.return_value = SimpleNamespace(status="failed")
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait"], manager
+        )
+
+        assert result.exit_code == 3, result.output
+        formatter.print_error.assert_called_once_with("Job trainer finished with status: failed")
+        assert call("Job completed with status: failed") not in formatter.print_success.mock_calls
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_succeeded_job_exits_0(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        manager = self._manager(submit_method)
+        manager.wait_for_job.return_value = SimpleNamespace(status="succeeded")
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait"], manager
+        )
+
+        assert result.exit_code == 0, result.output
+        formatter.print_success.assert_called_with("Job completed with status: succeeded")
+        formatter.print_error.assert_not_called()
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_wait_timeout_exits_4_without_claiming_the_submit_failed(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        manager = self._manager(submit_method)
+        manager.wait_for_job.side_effect = TimeoutError("did not complete within 5 seconds")
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait", "--timeout", "5"], manager
+        )
+
+        assert result.exit_code == 4, result.output
+        message = formatter.print_error.call_args.args[0]
+        assert message.startswith("Job trainer was submitted but is not finished")
+        assert "Failed to submit" not in message
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_unreadable_status_while_waiting_exits_1(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        manager = self._manager(submit_method)
+        manager.wait_for_job.side_effect = ValueError("Job trainer not found in namespace gco-jobs")
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait"], manager
+        )
+
+        assert result.exit_code == 1, result.output
+        assert formatter.print_error.call_args.args[0] == (
+            "Job trainer was submitted, but waiting for it failed: "
+            "Job trainer not found in namespace gco-jobs"
+        )
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_json_mode_keeps_the_submission_document_and_exits_3(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        """The real formatter: stdout holds the submission, stderr the verdict."""
+        from cli.main import cli
+
+        manager = self._manager(submit_method)
+        manager.wait_for_job.return_value = SimpleNamespace(status="failed")
+        with patch("cli.commands.jobs_cmd.get_job_manager", return_value=manager):
+            result = CliRunner().invoke(
+                cli, ["-o", "json", "jobs", subcommand, manifest_path, *extra, "--wait"]
+            )
+
+        assert result.exit_code == 3
+        assert json.loads(result.stdout) == {"job_name": "trainer", "namespace": "gco-jobs"}
+        assert "finished with status: failed" in result.stderr
+
+    @pytest.mark.parametrize(("subcommand", "extra", "submit_method"), _WAIT_SUBMITTERS)
+    def test_help_documents_the_exit_status(
+        self, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        from cli.main import cli
+
+        result = CliRunner().invoke(cli, ["jobs", subcommand, "--help"])
+
+        assert result.exit_code == 0
+        assert "Exit status:" in result.output
+        for line in (
+            "3  --wait: the job finished with status failed",
+            "4  --wait: the job had not finished when --timeout expired",
+        ):
+            assert line in result.output
+
+
 class TestSubmissionContracts:
     def test_submit_surfaces_mapping_warnings_and_waits_with_namespace_fallback(
         self, manifest_path: str
@@ -269,10 +385,12 @@ class TestSubmissionContracts:
             )
 
         assert result.exit_code == 0, result.output
+        # The queue is global: without --regional-api the request goes through
+        # the global API, exactly as `gco queue submit` sends it.
         aws.call_api.assert_called_once_with(
             method="POST",
             path="/api/v1/queue/jobs",
-            region="us-east-1",
+            region=None,
             body={
                 "manifest": {
                     "apiVersion": "batch/v1",
@@ -1172,7 +1290,19 @@ class TestRenderingAndConfirmations:
             tail_lines=12,
             since_hours=48,
             node=3,
+            container=None,
         )
+
+    def test_logs_forwards_container(self) -> None:
+        manager = MagicMock()
+        manager.get_job_logs.return_value = "sidecar line"
+        result, _, _ = _invoke(
+            ["jobs", "logs", "trainer", "-r", "us-east-1", "--container", "sidecar"],
+            manager,
+        )
+        assert result.exit_code == 0, result.output
+        assert manager.get_job_logs.call_args.kwargs["container"] == "sidecar"
+        assert "sidecar line" in result.output
 
     @pytest.mark.parametrize(
         ("args", "method"),
@@ -1233,6 +1363,37 @@ class TestRemainingJobsStateMatrix:
             call("us-east-1"),
             call("us-west-2"),
         ]
+
+    @pytest.mark.parametrize("answering", [["us-east-1", "us-west-2"], []])
+    def test_queue_status_all_regions_json_is_one_list(self, answering: list[str]) -> None:
+        from cli.main import cli
+
+        manager = MagicMock()
+
+        def status(region: str) -> dict[str, Any]:
+            if region not in answering:
+                raise RuntimeError("queue absent")
+            return {
+                "region": region,
+                "messages_available": 1,
+                "messages_in_flight": 0,
+                "messages_delayed": 0,
+                "dlq_messages": 0,
+            }
+
+        manager.get_queue_status.side_effect = status
+        aws = MagicMock()
+        aws.discover_regional_stacks.return_value = {"us-east-1": {}, "us-west-2": {}}
+        with (
+            patch("cli.commands.jobs_cmd.get_job_manager", return_value=manager),
+            patch("cli.aws_client.get_aws_client", return_value=aws),
+        ):
+            result = CliRunner().invoke(cli, ["-o", "json", "jobs", "queue-status", "-a"])
+
+        assert result.exit_code == 0, result.output
+        document = json.loads(result.stdout)
+        assert [entry["region"] for entry in document] == answering
+        assert "REGION" not in result.stdout
 
     def test_queue_status_discovery_failure_is_nonzero(self) -> None:
         aws = MagicMock()
@@ -1658,4 +1819,4 @@ class TestRemainingJobsStateMatrix:
             )
         assert result.exit_code == 1
         aws.call_api.assert_not_called()
-        assert "Failed to queue job" in formatter.print_error.call_args.args[0]
+        assert "Failed to queue job" in result.stderr
