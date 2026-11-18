@@ -65,6 +65,14 @@ _LEGACY_REGION_STATUS_INDEX = "region-status-index"
 # DynamoDB permits one GSI create/delete per table update.
 _REGION_STATUS_WORK_INDEX = "region-status-work-index"
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+# Every store's DynamoDB calls run inside an API request or a queue worker
+# pass, where botocore's defaults (60 s connect and read timeouts, legacy
+# retries) would hold the caller for minutes on an unreachable endpoint.
+_DYNAMODB_CONFIG = Config(
+    connect_timeout=3,
+    read_timeout=10,
+    retries={"max_attempts": 3, "mode": "standard"},
+)
 
 
 def _iso_utc(moment: datetime) -> str:
@@ -139,7 +147,9 @@ class TemplateStore:
             or os.getenv("GLOBAL_REGION")
             or os.getenv("AWS_REGION", "us-east-1")
         )
-        self._dynamodb = boto3.resource("dynamodb", region_name=self.region)
+        self._dynamodb = boto3.resource(
+            "dynamodb", region_name=self.region, config=_DYNAMODB_CONFIG
+        )
         self._table = self._dynamodb.Table(self.table_name)
 
     def list_templates(self) -> list[dict[str, Any]]:
@@ -323,17 +333,8 @@ class WebhookStore:
             or os.getenv("GLOBAL_REGION")
             or os.getenv("AWS_REGION", "us-east-1")
         )
-        # Bounded like JobStore: delivery lookups run inside the health API,
-        # where botocore's defaults (60 s timeouts, legacy retries) would hold
-        # a delivery for minutes on an unreachable endpoint.
         self._dynamodb = boto3.resource(
-            "dynamodb",
-            region_name=self.region,
-            config=Config(
-                connect_timeout=3,
-                read_timeout=10,
-                retries={"max_attempts": 3, "mode": "standard"},
-            ),
+            "dynamodb", region_name=self.region, config=_DYNAMODB_CONFIG
         )
         self._table = self._dynamodb.Table(self.table_name)
 
@@ -506,13 +507,7 @@ class JobStore:
             _MAX_CLAIM_LEASE_SECONDS,
         )
         self._dynamodb = boto3.resource(
-            "dynamodb",
-            region_name=self.region,
-            config=Config(
-                connect_timeout=3,
-                read_timeout=10,
-                retries={"max_attempts": 3, "mode": "standard"},
-            ),
+            "dynamodb", region_name=self.region, config=_DYNAMODB_CONFIG
         )
         self._table = self._dynamodb.Table(self.table_name)
         self._legacy_migration_cursors: dict[tuple[str, str], dict[str, Any]] = {}
