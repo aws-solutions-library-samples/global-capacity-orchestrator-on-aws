@@ -153,6 +153,23 @@ _CLOUDFORMATION_DELETE_HEARTBEAT_SECONDS = 60.0
 _CLOUDFORMATION_SETTLE_UNKNOWN_TIMEOUT_SECONDS = 60.0
 _CLOUDFORMATION_SETTLE_UNKNOWN_POLL_SECONDS = 5.0
 _BOOTSTRAP_HEALTHY_STATUSES = frozenset({"CREATE_COMPLETE", "UPDATE_COMPLETE"})
+# CDKToolkit statuses CloudFormation leaves on its own; a bootstrap check waits
+# for them. REVIEW_IN_PROGRESS is not one: it is a change set nobody executed,
+# which `cdk bootstrap` replaces.
+_BOOTSTRAP_IN_PROGRESS_STATUSES = frozenset(
+    {
+        "CREATE_IN_PROGRESS",
+        "DELETE_IN_PROGRESS",
+        "IMPORT_IN_PROGRESS",
+        "IMPORT_ROLLBACK_IN_PROGRESS",
+        "ROLLBACK_IN_PROGRESS",
+        "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS",
+        "UPDATE_IN_PROGRESS",
+        "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
+        "UPDATE_ROLLBACK_IN_PROGRESS",
+    }
+)
+_BOOTSTRAP_SETTLE_POLL_SECONDS = 15.0
 # AWS Backup job states that can still write a recovery point.
 _BACKUP_JOB_UNFINISHED_STATES = ("CREATED", "PENDING", "RUNNING")
 # CDK's ``prepare-change-set`` mode can return before a fresh CREATE change set
@@ -3989,9 +4006,21 @@ class StackManager:
     def is_bootstrapped(self, region: str) -> bool:
         """Check if CDK has been bootstrapped in a region.
 
-        Looks for the CDKToolkit CloudFormation stack which is created
-        by ``cdk bootstrap``. Result is cached per region for the lifetime
+        Looks for the CDKToolkit CloudFormation stack which is created by
+        ``cdk bootstrap``. Only CREATE_COMPLETE and UPDATE_COMPLETE count as
+        bootstrapped, the statuses strict deployments require; a failed,
+        rolled-back or unexecuted bootstrap does not, so
+        :meth:`ensure_bootstrapped` reruns ``cdk bootstrap`` to repair it. A
+        stack CloudFormation is still working on is waited for, up to
+        GCO_CDK_SETTLE_TIMEOUT_SECONDS. Only CloudFormation's "does not exist"
+        answer means absent. The result is cached per region for the lifetime
         of this StackManager instance.
+
+        Raises:
+            botocore.exceptions.BotoCoreError, ClientError: when CloudFormation
+                cannot be read (expired credentials, AccessDenied, throttling);
+                bootstrapping would fail the same way.
+            RuntimeError: when CDKToolkit stays in progress past the timeout.
         """
         if not hasattr(self, "_bootstrap_cache"):
             self._bootstrap_cache: dict[str, bool] = {}
@@ -3999,25 +4028,38 @@ class StackManager:
         if region in self._bootstrap_cache:
             return self._bootstrap_cache[region]
 
+        import time
+
         import boto3
 
         cf = boto3.client("cloudformation", region_name=region)
-        try:
-            response = cf.describe_stacks(StackName="CDKToolkit")
-            stacks = response.get("Stacks", [])
-            if stacks:
-                status = stacks[0].get("StackStatus", "")
-                # Any non-deleted state counts as bootstrapped
-                result = "DELETE" not in status
-                self._bootstrap_cache[region] = result
-                return result
-        except ClientError:
-            pass  # Stack doesn't exist — not bootstrapped
-        except Exception as e:
-            logger.debug("Failed to check CDK bootstrap in %s: %s", region, e)
+        timeout = _env_timeout_seconds("GCO_CDK_SETTLE_TIMEOUT_SECONDS", 1200.0)
+        deadline = time.monotonic() + timeout
+        reported = False
+        while True:
+            try:
+                stacks = cf.describe_stacks(StackName="CDKToolkit").get("Stacks", [])
+            except ClientError as exc:
+                if not self._stack_missing(exc):
+                    raise
+                stacks = []
+            status = str(stacks[0].get("StackStatus") or "") if stacks else ""
+            if status not in _BOOTSTRAP_IN_PROGRESS_STATUSES:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"CDKToolkit in {region} is still {status} after {timeout:.0f}s. Wait for "
+                    "the bootstrap or deletion running there to finish and retry, or raise "
+                    "GCO_CDK_SETTLE_TIMEOUT_SECONDS to wait longer."
+                )
+            if not reported:
+                print(f"  CDKToolkit in {region} is {status}; waiting for it to settle...")
+                reported = True
+            time.sleep(_BOOTSTRAP_SETTLE_POLL_SECONDS)
 
-        self._bootstrap_cache[region] = False
-        return False
+        result = status in _BOOTSTRAP_HEALTHY_STATUSES
+        self._bootstrap_cache[region] = result
+        return result
 
     def _validate_bootstrap_stack(
         self,
@@ -4430,7 +4472,9 @@ class StackManager:
     def ensure_bootstrapped(self, region: str) -> bool:
         """Ensure a region is CDK-bootstrapped, auto-bootstrapping if needed.
 
-        Returns True if the region is (or was successfully) bootstrapped.
+        Returns True if the region is (or was successfully) bootstrapped. An
+        error reading the CDKToolkit stack propagates from
+        :meth:`is_bootstrapped` instead of starting a bootstrap.
         """
         if self.is_bootstrapped(region):
             return True

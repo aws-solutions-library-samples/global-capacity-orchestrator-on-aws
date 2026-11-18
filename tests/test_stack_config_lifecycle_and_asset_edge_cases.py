@@ -4392,7 +4392,9 @@ def test_analytics_dependency_exception_rechecks_actual_imports(
 
 def test_is_bootstrapped_caches_false_after_missing_stack(stack_manager: Any) -> None:
     client = MagicMock()
-    client.describe_stacks.side_effect = _client_error("ValidationError", "missing")
+    client.describe_stacks.side_effect = _client_error(
+        "ValidationError", "Stack with id CDKToolkit does not exist"
+    )
     with patch("boto3.client", return_value=client):
         assert stack_manager.is_bootstrapped("eu-west-1") is False
         assert stack_manager.is_bootstrapped("eu-west-1") is False

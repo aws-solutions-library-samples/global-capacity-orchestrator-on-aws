@@ -5135,6 +5135,15 @@ gco stacks status gco-us-east-1 --region us-east-1
 
 Deploy a single stack. Automatically bootstraps CDK in the target region if needed.
 
+A region counts as bootstrapped when its `CDKToolkit` stack is `CREATE_COMPLETE`
+or `UPDATE_COMPLETE`. A missing stack, or one left failed, rolled back or in
+`REVIEW_IN_PROGRESS`, is bootstrapped again; one that CloudFormation is still
+creating, updating or deleting is waited for first (up to
+`GCO_CDK_SETTLE_TIMEOUT_SECONDS`, 1,200 seconds by default). When CloudFormation
+cannot be read at all (expired credentials, `AccessDenied`, throttling), the
+deploy fails with that error instead of starting a bootstrap that would fail the
+same way.
+
 ```bash
 gco stacks deploy STACK_NAME [OPTIONS]
 ```
