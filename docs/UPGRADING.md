@@ -29,6 +29,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [vLLM endpoints deployed with MODEL](#vllm-endpoints-deployed-with-model)
   - [API calls need an IAM permission](#api-calls-need-an-iam-permission)
   - [Workload alarms move to their Regions](#workload-alarms-move-to-their-regions)
+  - [ECR replication rules of your own are kept](#ecr-replication-rules-of-your-own-are-kept)
 
 ## How an upgrade works
 
@@ -482,3 +483,24 @@ monitoring Region those alarms never left `OK`.
   output. **Subscribe your on-call channel to it in every Region**; the
   monitoring stack's `AlertTopicArn` keeps the API Gateway, Lambda and
   DynamoDB alarms only.
+
+### ECR replication rules of your own are kept
+
+The global stack's `AWS::ECR::ReplicationConfiguration` is the registry's whole
+replication configuration in the global Region. Earlier releases did not retain
+it, so changing GCO's rule rewrote every rule in the registry and deleting the
+stack, or turning `images.replication` off, deleted all of them.
+
+- **The configuration is retained from this release on.** The first redeploy
+  only marks it retained (`DeletionPolicy` and `UpdateReplacePolicy`); it does
+  not touch the registry.
+- **BREAKING: `gco stacks deploy` and `destroy` can refuse.** When the registry
+  has replication rules this deployment did not create, a deploy that would
+  create GCO's configuration, change GCO's rule, or remove a configuration an
+  earlier release deployed is refused with instructions, and so is destroying
+  a global stack an earlier release deployed. Redeploy with this release first;
+  to keep rules of your own, set `images.replication.enabled` to `false` and
+  manage the registry's replication yourself. A plain `cdk deploy` skips the
+  check.
+- **Destroy removes only GCO's rule.** After the global stack is deleted, the
+  CLI removes this project's `<project>/` rule and keeps every other rule.

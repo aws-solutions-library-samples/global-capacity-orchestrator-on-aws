@@ -282,16 +282,21 @@ two produce disjoint resource names and tear down independently
 > project-scoped and coexists cleanly, but the ECR image-replication
 > configuration created by the global stack is a per-account, per-region
 > **singleton**: AWS allows only one `AWS::ECR::ReplicationConfiguration` per
-> registry per region. So if two deployments place their **global** stack in the
-> same region and both leave image replication on (`images.replication.enabled`,
-> the default), the second stack fails to create it
-> (`...ReplicationConfiguration...already exists`). Resolution: set
-> `images.replication.enabled: false` on all but one same-region deployment (the
-> others still get their own project-scoped `<project>/*` ECR repos — they just
-> don't own that region's cross-region replication), **or** give each deployment
-> a different global region. Deployments in different regions never conflict:
-> each region has its own replication configuration with a project-scoped
-> `<project>/` filter.
+> registry per region, and that resource owns every rule in it. Its create fails
+> when the registry already has a rule, and an update writes GCO's rule over all
+> of them. So `gco stacks deploy` refuses, with instructions, to deploy a global
+> stack that would create the configuration over replication rules GCO did not
+> create (another deployment's or your own), or change GCO's rule while such
+> rules exist. Resolution: set `images.replication.enabled: false` on all but
+> one same-region deployment (the others still get their own project-scoped
+> `<project>/*` ECR repos — they just don't own that region's cross-region
+> replication, and you can add a `<project>/` rule to the registry yourself),
+> **or** give each deployment a different global region. Deployments in
+> different regions never conflict: each region has its own replication
+> configuration with a project-scoped `<project>/` filter. The configuration is
+> retained when the global stack is deleted; `gco stacks destroy` and
+> `destroy-all` then remove only this project's rule and keep every other rule.
+> A plain `cdk deploy` skips these checks.
 
 ### What `project_name` scopes
 

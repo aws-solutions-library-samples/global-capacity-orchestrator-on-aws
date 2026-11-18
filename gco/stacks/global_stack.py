@@ -2386,6 +2386,17 @@ class GCOGlobalStack(Stack):
         region. When replication is disabled or the destination list is
         empty (e.g. single-region deploy), no replication resource is
         provisioned and the method becomes a no-op.
+
+        The resource is the registry's single replication configuration for
+        this Region, not just GCO's rule: its update writes this rule over
+        every rule in the registry and its delete clears all of them. It is
+        therefore retained (``DeletionPolicy`` and ``UpdateReplacePolicy``),
+        so removing it or deleting the stack never deletes rules GCO did not
+        create, and the CLI (``cli/ecr_replication.py``) refuses deploys that
+        would overwrite such rules and removes only GCO's rule after the stack
+        is destroyed. Keep the logical id: a stack last deployed without the
+        retain policy deletes the configuration if the resource is removed or
+        replaced.
         """
         if not self.images_config["replication"]["enabled"]:
             return
@@ -2396,7 +2407,7 @@ class GCOGlobalStack(Stack):
         if not destinations:
             return
 
-        ecr.CfnReplicationConfiguration(
+        replication = ecr.CfnReplicationConfiguration(
             self,
             "GcoImageReplicationConfig",
             replication_configuration=ecr.CfnReplicationConfiguration.ReplicationConfigurationProperty(
@@ -2422,6 +2433,7 @@ class GCOGlobalStack(Stack):
                 ]
             ),
         )
+        replication.apply_removal_policy(RemovalPolicy.RETAIN)
 
     def _create_image_lookup_lambda(self) -> None:
         """Create the lookup-or-create custom resource Lambda for image repos.

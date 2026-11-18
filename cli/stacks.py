@@ -2599,6 +2599,19 @@ class StackManager:
         # teardown starts with is a deploy, though, and uploads assets, so it
         # does.
         self.ensure_asset_sources_readable()
+        # A deploy that can reach the global stack (CDK adds a stack's
+        # dependencies unless --exclusively) must not delete or overwrite ECR
+        # replication rules GCO did not create; see cli/ecr_replication.py.
+        if (
+            all_stacks
+            or not exclusively
+            or stack_name in (None, f"{self.config.project_name}-global")
+        ):
+            refusal = self._ecr_replication_deploy_preflight()
+            if refusal is not None:
+                from cli.ecr_replication import ReplicationConflictError
+
+                raise ReplicationConflictError(refusal)
         # Synchronize canonical checked-in copies first, then source-check and
         # atomically publish only stale generated assets. A deploy must never
         # destructively rebuild a fresh tree while another CDK process may be
@@ -2981,6 +2994,15 @@ class StackManager:
         lock_context = (
             _config_mutation_lock(config_path) if config_path is not None else nullcontext()
         )
+        # Deleting the global stack must not delete ECR replication rules GCO
+        # did not create, and GCO's own (retained) rule goes once the stack is
+        # gone; see cli/ecr_replication.py.
+        removes_global = all_stacks or stack_name == f"{self.config.project_name}-global"
+        if removes_global:
+            refusal = self._ecr_replication_destroy_preflight()
+            if refusal is not None:
+                print(refusal)
+                return False
         with lock_context:
             original_bytes: bytes | None = None
             original_mode: int | None = None
@@ -2988,7 +3010,7 @@ class StackManager:
                 original_bytes = config_path.read_bytes()
                 original_mode = stat.S_IMODE(config_path.stat().st_mode)
             try:
-                return self._destroy(
+                destroyed = self._destroy(
                     stack_name=stack_name,
                     all_stacks=all_stacks,
                     force=force,
@@ -3006,6 +3028,14 @@ class StackManager:
             finally:
                 if config_path is not None and original_bytes is not None:
                     _atomic_write_bytes(config_path, original_bytes, mode=original_mode)
+        if destroyed and removes_global:
+            removed = self._remove_gco_replication_rules()
+            if removed:
+                print(
+                    f"Removed {self.config.project_name}'s ECR replication rule from the "
+                    f"registry in {self.config.global_region}; other rules were kept."
+                )
+        return destroyed
 
     def _destroy(
         self,
@@ -3405,6 +3435,77 @@ class StackManager:
             return False
         interactive_echo("Aborted.")
         return False
+
+    def _ecr_replication_context(self) -> dict[str, Any]:
+        """The cdk.json context the global stack's replication rule is built from."""
+        cdk_json_path = _find_cdk_json()
+        if not cdk_json_path:
+            return {}
+        with open(cdk_json_path, encoding="utf-8") as handle:
+            context = json.load(handle).get("context") or {}
+        return context if isinstance(context, dict) else {}
+
+    def _ecr_replication_deploy_preflight(self) -> str | None:
+        """Why deploying the global stack would break the registry's replication rules.
+
+        See ``cli/ecr_replication.py``. Returns ``None`` when the deploy cannot
+        delete or overwrite a rule GCO did not create.
+        """
+        import boto3
+
+        from cli import ecr_replication as replication
+
+        project = self.config.project_name
+        region = self.config.global_region
+        context = self._ecr_replication_context()
+        managed = (
+            replication.desired_gco_rule(context, project_name=project, account_id="") is not None
+        )
+        state = replication.deployed_state(
+            boto3.client("cloudformation", region_name=region), f"{project}-global"
+        )
+        if not managed and state != "deletes":
+            return None
+        account_id, rules = replication.read_registry(boto3.client("ecr", region_name=region))
+        return replication.deploy_conflict(
+            rules,
+            desired=replication.desired_gco_rule(
+                context, project_name=project, account_id=account_id
+            ),
+            state=state,
+            project_name=project,
+            account_id=account_id,
+            region=region,
+        )
+
+    def _ecr_replication_destroy_preflight(self) -> str | None:
+        """Why destroying the global stack would delete replication rules GCO did not create."""
+        import boto3
+
+        from cli import ecr_replication as replication
+
+        project = self.config.project_name
+        region = self.config.global_region
+        state = replication.deployed_state(
+            boto3.client("cloudformation", region_name=region), f"{project}-global"
+        )
+        if state != "deletes":
+            return None
+        account_id, rules = replication.read_registry(boto3.client("ecr", region_name=region))
+        return replication.destroy_conflict(
+            rules, state=state, project_name=project, account_id=account_id, region=region
+        )
+
+    def _remove_gco_replication_rules(self) -> int:
+        """Remove this project's retained replication rule after the global stack is gone."""
+        import boto3
+
+        from cli import ecr_replication as replication
+
+        return replication.remove_gco_rules(
+            boto3.client("ecr", region_name=self.config.global_region),
+            project_name=self.config.project_name,
+        )
 
     @staticmethod
     def _stack_missing(exc: ClientError) -> bool:

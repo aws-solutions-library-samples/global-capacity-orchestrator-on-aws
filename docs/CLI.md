@@ -2785,6 +2785,17 @@ gco images replication COMMAND
 - `status` - Print per-image replication status across project repos
 - `sync` - Apply the project's standard replication rule (`gco/*` to all deployed regions)
 
+The global stack owns the registry's replication configuration when
+`images.replication` is on. Every `gco stacks deploy`/`deploy-all` that can
+reach the global stack reads the registry (`ecr:DescribeRegistry`) and the
+deployed template (`cloudformation:GetTemplate`) in the global Region and
+refuses, with instructions, when the deploy would delete or overwrite
+replication rules GCO did not create. Destroying the global stack retains the
+configuration; the CLI then removes only this project's rule
+(`ecr:PutReplicationConfiguration`). See
+[CUSTOMIZATION.md](CUSTOMIZATION.md#running-multiple-deployments-in-one-account-and-region)
+for the same-region caveat.
+
 **Example:**
 
 ```bash
