@@ -5089,6 +5089,21 @@ Manage CDK infrastructure stacks.
 
 </details>
 
+The commands that run the CDK CLI start it in its own process group. When
+`gco` receives SIGTERM while CDK runs (cancelling an MCP deploy or destroy task
+sends one), it terminates that process group, and every one a `--parallel` run
+started, before it exits with status 143. CloudFormation still completes or
+rolls back the stack operation that was already in progress.
+
+Every command here that edits cdk.json (the feature toggles such as
+`gco stacks fsx enable`, and the managed-config commands `gco stacks regions`
+and `gco stacks bedrock`) rewrites the whole file in one format: two-space
+indentation, keys in their existing order, non-ASCII text such as the
+comments' em dashes kept as UTF-8 rather than `\uXXXX` escapes, and one
+trailing newline. Code that writes cdk.json the same way can use
+`cli.stacks.serialize_cdk_json`. When cdk.json is a symlink, the edit rewrites
+the file it points at and the link stays in place.
+
 #### `gco stacks list`
 
 List all GCO stacks.
@@ -5126,6 +5141,15 @@ gco stacks status gco-us-east-1 --region us-east-1
 #### `gco stacks deploy`
 
 Deploy a single stack. Automatically bootstraps CDK in the target region if needed.
+
+A region counts as bootstrapped when its `CDKToolkit` stack is `CREATE_COMPLETE`
+or `UPDATE_COMPLETE`. A missing stack, or one left failed, rolled back or in
+`REVIEW_IN_PROGRESS`, is bootstrapped again; one that CloudFormation is still
+creating, updating or deleting is waited for first (up to
+`GCO_CDK_SETTLE_TIMEOUT_SECONDS`, 1,200 seconds by default). When CloudFormation
+cannot be read at all (expired credentials, `AccessDenied`, throttling), the
+deploy fails with that error instead of starting a bootstrap that would fail the
+same way.
 
 ```bash
 gco stacks deploy STACK_NAME [OPTIONS]
@@ -5219,21 +5243,32 @@ gco stacks destroy-all [OPTIONS]
 | `--parallel` | `-p` | Destroy regional stacks in parallel |
 | `--max-workers` | `-w` | Max parallel workers (default: 4) |
 | `--retain-volumes` | | Report each cluster's orphaned EBS volumes instead of deleting them |
-| `--keep-control-plane` | | Destroy only the regional API bridges and regional stacks; leave the global, API Gateway and monitoring stacks standing (scale to zero workload Regions) |
+| `--keep-control-plane` | | Destroy only the regional API bridges and regional stacks; leave the global, API Gateway, monitoring and analytics stacks standing (scale to zero workload Regions) |
 | `--enable` | | Evaluate the same app the overridden deploy did (`NAME[,NAME...]`, repeatable). Not required for deletion — `DeleteStack` removes whatever the deployed template contains |
+
+A failed teardown is retried up to three times in all, 30 seconds apart. The
+closing `Destroyed: N/M stacks` line counts the stacks of the destroy set that
+some attempt deleted and the last attempt did not report as failed, so stacks a
+stopped teardown never reached do not count as destroyed. The command exits 1
+unless every stack is gone.
 
 ##### Keeping the control plane (`--keep-control-plane`)
 
 `--keep-control-plane` scales the deployment to zero workload Regions instead of
 removing it. Only the regional API bridges and the base regional stacks are
-destroyed; `<project>-global`, `<project>-api-gateway` and `<project>-monitoring`
-stay, together with everything they own — the DynamoDB tables, the model and
-cluster-shared buckets, the image registry, EFS recovery points in the backup
-vault, and the cost-report bucket. Before anything is deleted the monitoring stack
+destroyed; `<project>-global`, `<project>-api-gateway`, `<project>-monitoring`
+and, when deployed, `<project>-analytics` stay, together with everything they
+own — the DynamoDB tables, the model and cluster-shared buckets, the image
+registry, EFS recovery points in the backup vault, the cost-report bucket, and
+the analytics stack's Studio home directories, Cognito users and notebook
+outputs. Before anything is deleted the monitoring stack
 is updated in place with `--context gco:control-plane-only=true` (the run-scoped
 equivalent of an empty `deployment_regions.regional`) so it stops referencing the
 regional stacks; CloudFormation would otherwise refuse to delete a stack whose
-exports are still consumed. The sweeps that only make sense for a full teardown
+exports are still consumed. When that update fails, the attempt deletes nothing:
+the command reports that the monitoring stack could not be updated (it is not
+part of the destroy set, so it is not listed as a failed delete) and exits 1
+once the retries are spent. The sweeps that only make sense for a full teardown
 are skipped: the image-registry preflight, the backup-vault purge, bastion IAM
 retirement, and the traffic-dial parameter purge. Per-stack sweeps (orphaned
 bastions, roles held in instance profiles, implicit and recreated log groups,
@@ -5282,6 +5317,14 @@ is named, so nothing survives silently.
 Deletion is irreversible, so use `--retain-volumes` if you want to keep
 Prometheus history or take snapshots first.
 
+CloudFormation cannot delete a backup vault that still holds recovery points, so
+a full `destroy-all` empties the global stack's AWS Backup vault twice: when the
+teardown starts, and again right before it deletes `<project>-global`, often an
+hour later, by which time the daily (03:00 UTC) or weekly (Sundays 04:00 UTC)
+backup may have written a new recovery point. Each pass first stops the backup
+jobs still writing to that vault. If the global stack's delete still fails on
+the vault, it is emptied again and the delete is retried once.
+
 After stack deletion, `destroy-all` makes a best-effort sweep of known resources
 that CloudFormation never modeled. It targets the implicit CloudWatch log groups
 created out-of-band by Lambda (`/aws/lambda/<function>`), the EKS control plane
@@ -5308,7 +5351,10 @@ resources configured for retention, and unexpected resources outside the known
 inventory, may remain. Only exact names taken from the destroyed stacks' own
 resources are considered, and only for stacks whose deletion succeeded. Sweep
 failures are reported best-effort and do not fail the destroy command; log
-groups belonging to stacks that failed to delete are left untouched.
+groups belonging to stacks that failed to delete are left untouched. When an
+error interrupts the teardown, the log-group sweep still runs, for every stack
+CloudFormation confirms is gone, before the error is reported: the names were
+read from the live stacks, so a later run could not find them.
 
 #### `gco stacks bootstrap`
 
@@ -5347,6 +5393,16 @@ gco stacks access                             # Auto-detect region from cdk.json
 gco stacks access -r us-west-2                # Specific region
 gco stacks access -c my-cluster -r eu-west-1  # Custom cluster name
 ```
+
+The command exits non-zero when a step fails: an access entry that cannot be
+created (only `ResourceInUseException`, an entry that already exists, is
+tolerated), a policy that cannot be associated, or a final
+`kubectl get nodes` that fails for any reason other than reaching the API
+server. kubectl's error is printed; an `Unauthorized` right after the entry
+was created usually means it has not reached the cluster yet, so rerun the
+command. An API server this host cannot reach (a private endpoint, or a CIDR
+allowlist that leaves out your egress IP) only warns: the access entry and
+policy still apply to callers inside the network.
 
 The access entry this creates is required even when you reach a PRIVATE
 endpoint through `gco cluster tunnel` — the tunnel solves reachability,
@@ -5425,7 +5481,7 @@ gco stacks capabilities status [OPTIONS]
 
 ```bash
 gco stacks capabilities status                                      # first deployment region
-gco stacks capabilities status --all-regions --output json          # one document per region
+gco -o json stacks capabilities status --all-regions                # one document per region
 ```
 
 #### `gco stacks regions`
@@ -5503,8 +5559,16 @@ gco stacks fsx COMMAND [OPTIONS]
 ```bash
 gco stacks fsx status
 gco stacks fsx enable --storage-capacity 1200 -y
+gco stacks fsx enable -d PERSISTENT_2 --throughput 500 -y
 gco stacks fsx disable -y
 ```
+
+`enable --throughput` (`-t`) sets the per-unit storage throughput, in MB/s per
+TiB, of a PERSISTENT file system, and only the values FSx for Lustre accepts for
+the deployment type pass: 50, 100 or 200 for `PERSISTENT_1` (default 200), and
+125, 250, 500 or 1000 for `PERSISTENT_2` (default 250). `SCRATCH_1` and
+`SCRATCH_2` file systems have no such setting, so `enable` writes none for them
+and refuses `--throughput`.
 
 #### `gco stacks valkey`
 
@@ -5582,7 +5646,7 @@ gco stacks pcs COMMAND [OPTIONS]
 
 ```bash
 gco stacks pcs status
-gco stacks pcs status --all-regions --output json
+gco -o json stacks pcs status --all-regions
 gco stacks pcs enable -y
 gco stacks pcs enable --region us-east-1 --mode existing --cluster-id pcs_0123456789abcdef -y
 gco stacks pcs preflight -r us-east-1
@@ -5623,7 +5687,7 @@ gco stacks hyperpod COMMAND [OPTIONS]
 
 ```bash
 gco stacks hyperpod status
-gco stacks hyperpod status --all-regions --output json
+gco -o json stacks hyperpod status --all-regions
 gco stacks hyperpod enable -y
 gco stacks hyperpod enable --region us-east-1 --instance-type ml.p5.48xlarge --instance-count 4 --availability-zone us-east-1b -y
 gco stacks hyperpod preflight -r us-east-1
@@ -5650,13 +5714,14 @@ gco stacks addons COMMAND [OPTIONS]
 | `--region` | `-r` | AWS region (default: first deployment region) |
 | `--all-regions` | `-A` | Apply across all deployment regions |
 
-`status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply.
+`status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply. An active teardown fence (`_teardown`) shows as `teardown-active`. The command exits 1 when any row is not healthy or a Region's records cannot be read. With `gco -o json` or `-o yaml` it prints one list of `{region, name, status, message}` rows across the Regions; a Region whose records cannot be read contributes a row with status `error` and no name.
 
 **Example:**
 
 ```bash
 gco stacks addons status
 gco stacks addons status --all-regions
+gco -o json stacks addons status --all-regions
 gco stacks addons install -r us-west-2
 ```
 

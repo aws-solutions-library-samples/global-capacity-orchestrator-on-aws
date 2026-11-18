@@ -1116,6 +1116,29 @@ class TestStackManagerOperations:
         mock_popen.assert_called_once()
         assert process.communicate_timeouts == [None]
 
+    def test_deploy_prepares_assets_once_per_stack(self):
+        """deploy() prepares the assets itself; its CDK run must not hash them again."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="", stderr="")
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(manager, "ensure_asset_sources_readable"),
+            patch.object(manager, "_sync_lambda_sources"),
+            patch.object(manager, "_check_and_fix_stuck_stack"),
+            patch.object(manager, "ensure_bootstrapped", return_value=True),
+            patch.object(manager, "_get_stack_status", return_value="UPDATE_COMPLETE"),
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build") as mock_prepare,
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
+            assert manager.deploy("gco-global", require_approval=False) is True
+
+        mock_prepare.assert_called_once_with()
+        assert mock_popen.call_args.args[0][:3] == ["cdk", "deploy", "gco-global"]
+
     def test_list_stacks(self):
         """Test listing CDK stacks."""
         from cli.stacks import StackManager
@@ -1388,6 +1411,44 @@ class TestStackDeploymentOrder:
 
         assert result == ["gco-regional-api-us-east-1", "gco-us-west-2", "gco-us-east-1"]
 
+    def test_analytics_stack_is_ordered_with_the_control_plane(self):
+        """``<project>-analytics`` is a global-tier stack, never a base regional one.
+
+        app.py makes the analytics stack depend on the global stack and the API
+        Gateway stack on the analytics stack, so it deploys between the two and
+        is destroyed between them. A keep-control-plane teardown (destroy-all
+        --keep-control-plane, gco upgrade) must never list it: that would delete
+        Studio home directories and Cognito users the operator was told survive.
+        """
+        from cli.stacks import get_stack_deployment_order, get_stack_destroy_order
+
+        stacks = [
+            "acme-us-east-1",
+            "acme-analytics",
+            "acme-global",
+            "acme-regional-api-us-east-1",
+            "acme-api-gateway",
+            "acme-monitoring",
+        ]
+
+        assert get_stack_deployment_order(stacks, project_name="acme")[:3] == [
+            "acme-global",
+            "acme-analytics",
+            "acme-api-gateway",
+        ]
+        assert get_stack_destroy_order(stacks, project_name="acme") == [
+            "acme-monitoring",
+            "acme-regional-api-us-east-1",
+            "acme-us-east-1",
+            "acme-api-gateway",
+            "acme-analytics",
+            "acme-global",
+        ]
+        assert get_stack_destroy_order(stacks, project_name="acme", keep_control_plane=True) == [
+            "acme-regional-api-us-east-1",
+            "acme-us-east-1",
+        ]
+
     def test_deployment_order_non_gco_project(self):
         """#139: ordering is by suffix, so a non-``gco`` project orders
         identically. Regression for the hardcoded ``gco-*`` priority dict."""
@@ -1477,6 +1538,48 @@ class TestStackManagerOrchestrated:
             "gco-regional-api-us-west-2",
             "gco-monitoring",
         ]
+
+    def test_deploy_orchestrated_deploys_analytics_between_global_and_api_gateway(self):
+        """The analytics stack is a sequential global-tier deploy, not a regional one.
+
+        As a "regional" stack it was deployed with --exclusively, in parallel
+        with the regional stacks, and its route refresh redeployed the API
+        Gateway stack that the regional stacks import from while they deployed.
+        """
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        stacks = [
+            "gco-us-east-1",
+            "gco-analytics",
+            "gco-global",
+            "gco-regional-api-us-east-1",
+            "gco-api-gateway",
+            "gco-monitoring",
+            "gco-us-west-2",
+        ]
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(StackManager, "list_stacks", return_value=stacks),
+            patch.object(StackManager, "deploy", return_value=True) as mock_deploy,
+        ):
+            manager = StackManager(config)
+            success, _, failed = manager.deploy_orchestrated(require_approval=False, parallel=True)
+
+        assert success is True
+        assert failed == []
+        calls = [
+            (call.kwargs["stack_name"], call.kwargs.get("exclusively", False))
+            for call in mock_deploy.call_args_list
+        ]
+        assert calls[:3] == [
+            ("gco-global", False),
+            ("gco-analytics", False),
+            ("gco-api-gateway", False),
+        ]
+        assert [name for name, _ in calls].count("gco-analytics") == 1
+        assert sorted(name for name, _ in calls[3:5]) == ["gco-us-east-1", "gco-us-west-2"]
 
     def test_destroy_orchestrated_orders_regional_bridges_before_base_stacks(self):
         """Sequential destroy releases bridge VPC imports before base teardown."""
@@ -3178,6 +3281,7 @@ class TestStackManagerDestroyAnalyticsFallback:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (
@@ -3305,6 +3409,7 @@ class TestStackManagerDestroyExclusively:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (
@@ -3348,6 +3453,7 @@ class TestStackManagerDestroyExclusively:
         from cli.stacks import StackManager
 
         config = MagicMock()
+        config.project_name = "gco"
         config.api_gateway_region = "us-east-2"
 
         with (
@@ -4004,6 +4110,7 @@ class TestCleanupEksSecurityGroups:
                 {
                     "GroupId": "sg-12345",
                     "GroupName": "eks-cluster-sg-gco-us-east-1-123456",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
                 }
             ]
         }
@@ -4017,9 +4124,50 @@ class TestCleanupEksSecurityGroups:
             manager._cleanup_eks_security_groups("gco-us-east-1")
 
             mock_ec2.describe_security_groups.assert_called_once_with(
-                Filters=[{"Name": "group-name", "Values": ["eks-cluster-sg-gco-us-east-1-*"]}]
+                Filters=[
+                    {"Name": "group-name", "Values": ["eks-cluster-sg-gco-us-east-1-*"]},
+                    {"Name": "tag:aws:eks:cluster-name", "Values": ["gco-us-east-1"]},
+                ]
             )
             mock_ec2.delete_security_group.assert_called_once_with(GroupId="sg-12345")
+
+    def test_cleanup_leaves_other_clusters_security_groups_alone(self):
+        """gco-us-east-1's name prefix also matches the group of gco-us-east-1-dev."""
+        from cli.stacks import StackManager
+
+        config = MagicMock()
+        config.project_name = "gco"
+        mock_ec2 = MagicMock()
+        mock_ec2.describe_security_groups.return_value = {
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-dev",
+                    "GroupName": "eks-cluster-sg-gco-us-east-1-dev-987654",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1-dev"}],
+                },
+                {"GroupId": "sg-untagged", "GroupName": "eks-cluster-sg-gco-us-east-1-555"},
+                {
+                    "GroupId": "sg-own",
+                    "GroupName": "eks-cluster-sg-gco-us-east-1-123456",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                },
+            ]
+        }
+        mock_ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
+        with (
+            patch("boto3.client", return_value=mock_ec2),
+            patch.object(StackManager, "_find_project_root", return_value=Path(".")),
+        ):
+            outcome = StackManager(config)._cleanup_eks_security_groups("gco-us-east-1")
+
+        mock_ec2.delete_security_group.assert_called_once_with(GroupId="sg-own")
+        mock_ec2.describe_network_interfaces.assert_called_once_with(
+            Filters=[{"Name": "group-id", "Values": ["sg-own"]}]
+        )
+        assert outcome["inspected"] == 1
+        assert {"Name": "tag:aws:eks:cluster-name", "Values": ["gco-us-east-1"]} in (
+            mock_ec2.describe_security_groups.call_args.kwargs["Filters"]
+        )
 
     def test_cleanup_waits_for_enis_before_deleting_sg(self):
         """Service-managed ENIs block cleanup without being detached or deleted."""
@@ -4034,6 +4182,7 @@ class TestCleanupEksSecurityGroups:
                 {
                     "GroupId": "sg-12345",
                     "GroupName": "eks-cluster-sg-gco-us-east-1-123456",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
                 }
             ]
         }

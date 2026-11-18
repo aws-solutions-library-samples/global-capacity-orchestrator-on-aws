@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 
 class _FakePopenProcess:
@@ -632,14 +633,113 @@ class TestIsBootstrapped:
         mgr = self._make_manager()
         assert mgr.is_bootstrapped("eu-west-1") is True
 
+    @staticmethod
+    def _missing() -> ClientError:
+        return ClientError(
+            {
+                "Error": {
+                    "Code": "ValidationError",
+                    "Message": "Stack with id CDKToolkit does not exist",
+                }
+            },
+            "DescribeStacks",
+        )
+
     @patch("boto3.client")
     def test_not_bootstrapped_stack_not_found(self, mock_boto_client):
-        """describe_stacks raises exception (stack not found) → False."""
+        """CloudFormation says CDKToolkit does not exist → False."""
         cf = MagicMock()
         mock_boto_client.return_value = cf
-        cf.describe_stacks.side_effect = Exception("Stack not found")
+        cf.describe_stacks.side_effect = self._missing()
         mgr = self._make_manager()
         assert mgr.is_bootstrapped("ap-southeast-1") is False
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            "ROLLBACK_COMPLETE",
+            "CREATE_FAILED",
+            "REVIEW_IN_PROGRESS",
+            "UPDATE_ROLLBACK_COMPLETE",
+            "UPDATE_ROLLBACK_FAILED",
+            "DELETE_FAILED",
+        ],
+    )
+    @patch("boto3.client")
+    def test_not_bootstrapped_unhealthy_toolkit(self, mock_boto_client, status):
+        """A failed, rolled-back or unexecuted bootstrap is not a usable one."""
+        cf = MagicMock()
+        mock_boto_client.return_value = cf
+        cf.describe_stacks.return_value = {"Stacks": [{"StackStatus": status}]}
+        mgr = self._make_manager()
+        assert mgr.is_bootstrapped("us-east-1") is False
+        cf.describe_stacks.assert_called_once_with(StackName="CDKToolkit")
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ClientError(
+                {"Error": {"Code": "ExpiredToken", "Message": "token expired"}}, "DescribeStacks"
+            ),
+            ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "not authorized"}}, "DescribeStacks"
+            ),
+            ClientError(
+                {"Error": {"Code": "Throttling", "Message": "slow down"}}, "DescribeStacks"
+            ),
+            ClientError(
+                {"Error": {"Code": "ValidationError", "Message": "1 validation error"}},
+                "DescribeStacks",
+            ),
+            EndpointConnectionError(endpoint_url="https://cloudformation.us-east-1.amazonaws.com"),
+        ],
+    )
+    @patch("boto3.client")
+    def test_unreadable_toolkit_raises_instead_of_bootstrapping(self, mock_boto_client, error):
+        """Only a missing stack means absent; bootstrapping would fail the same way."""
+        cf = MagicMock()
+        mock_boto_client.return_value = cf
+        cf.describe_stacks.side_effect = error
+        mgr = self._make_manager()
+        with (
+            patch.object(mgr, "bootstrap") as bootstrap,
+            pytest.raises(type(error)),
+        ):
+            mgr.ensure_bootstrapped("us-east-1")
+        bootstrap.assert_not_called()
+        assert "us-east-1" not in getattr(mgr, "_bootstrap_cache", {})
+
+    @patch("boto3.client")
+    def test_in_progress_toolkit_is_waited_for(self, mock_boto_client, capsys):
+        """A bootstrap another process is running settles before the check answers."""
+        cf = MagicMock()
+        mock_boto_client.return_value = cf
+        cf.describe_stacks.side_effect = [
+            {"Stacks": [{"StackStatus": "CREATE_IN_PROGRESS"}]},
+            {"Stacks": [{"StackStatus": "CREATE_IN_PROGRESS"}]},
+            {"Stacks": [{"StackStatus": "CREATE_COMPLETE"}]},
+        ]
+        mgr = self._make_manager()
+        with patch("time.sleep") as sleep:
+            assert mgr.is_bootstrapped("us-east-1") is True
+        assert sleep.call_count == 2
+        assert capsys.readouterr().out.count("CDKToolkit in us-east-1 is CREATE_IN_PROGRESS") == 1
+
+    @patch("boto3.client")
+    def test_toolkit_that_never_settles_fails_the_check(self, mock_boto_client, monkeypatch):
+        cf = MagicMock()
+        mock_boto_client.return_value = cf
+        cf.describe_stacks.return_value = {"Stacks": [{"StackStatus": "UPDATE_IN_PROGRESS"}]}
+        monkeypatch.setenv("GCO_CDK_SETTLE_TIMEOUT_SECONDS", "30")
+        mgr = self._make_manager()
+        clock = iter([0.0, 10.0, 40.0])
+        with (
+            patch("time.monotonic", side_effect=lambda: next(clock)),
+            patch("time.sleep") as sleep,
+            pytest.raises(RuntimeError, match="still UPDATE_IN_PROGRESS after 30s"),
+        ):
+            mgr.is_bootstrapped("us-east-1")
+        sleep.assert_called_once()
 
     @patch("boto3.client")
     def test_not_bootstrapped_delete_complete(self, mock_boto_client):
@@ -652,14 +752,16 @@ class TestIsBootstrapped:
 
     @patch("boto3.client")
     def test_not_bootstrapped_delete_in_progress(self, mock_boto_client):
-        """CDKToolkit stack with DELETE_IN_PROGRESS → False."""
+        """A CDKToolkit being deleted is waited for, then absent → False."""
         cf = MagicMock()
         mock_boto_client.return_value = cf
-        cf.describe_stacks.return_value = {
-            "Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}],
-        }
+        cf.describe_stacks.side_effect = [
+            {"Stacks": [{"StackStatus": "DELETE_IN_PROGRESS"}]},
+            self._missing(),
+        ]
         mgr = self._make_manager()
-        assert mgr.is_bootstrapped("us-west-2") is False
+        with patch("time.sleep"):
+            assert mgr.is_bootstrapped("us-west-2") is False
 
     @patch("boto3.client")
     def test_not_bootstrapped_empty_stacks(self, mock_boto_client):

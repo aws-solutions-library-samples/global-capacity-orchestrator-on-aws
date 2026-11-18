@@ -747,7 +747,7 @@ def test_stacks_destroy_all_confirms_retries_cleanup_and_then_succeeds(
     destroy_order.assert_called_once_with(
         stack_names, project_name="test-gco", keep_control_plane=False
     )
-    manager.cleanup_orphaned_network_interfaces.assert_called_once_with()
+    manager.cleanup_orphaned_network_interfaces.assert_called_once_with(keep_control_plane=False)
     sleep.assert_called_once_with(30)
     assert manager.destroy_orchestrated.call_count == 2
     assert manager.destroy_orchestrated.call_args.kwargs["parallel"] is True
@@ -1443,3 +1443,126 @@ def test_destroy_all_keep_control_plane_with_yes_skips_the_prompt(runner: CliRun
     assert "Are you sure" not in result.output
     assert "gco stacks regions remove <region>" in result.output
     assert manager.destroy_orchestrated.call_args.kwargs["keep_control_plane"] is True
+
+
+_FULL_DEPLOYMENT = [
+    "test-gco-global",
+    "test-gco-api-gateway",
+    "test-gco-us-east-1",
+    "test-gco-us-west-2",
+    "test-gco-regional-api-us-east-1",
+    "test-gco-monitoring",
+]
+
+
+def test_destroy_all_counts_only_the_stacks_it_destroyed(runner: CliRunner) -> None:
+    """A failed monitoring delete stops the teardown before anything else goes."""
+    from cli.commands.stacks_cmd import stacks
+
+    manager = MagicMock()
+    manager.list_stacks.return_value = list(_FULL_DEPLOYMENT)
+    manager.destroy_orchestrated.return_value = (False, [], ["test-gco-monitoring"])
+    with (
+        patch("cli.stacks.get_stack_manager", return_value=manager),
+        patch("time.sleep"),
+    ):
+        result = _invoke(runner, stacks, ["destroy-all", "-y"])
+
+    assert result.exit_code == 1, result.output
+    assert "Destroyed: 0/6 stacks" in result.output
+    assert "Some stacks failed to destroy: test-gco-monitoring" in result.output
+
+
+def test_destroy_all_counts_stacks_destroyed_by_earlier_attempts(runner: CliRunner) -> None:
+    from cli.commands.stacks_cmd import stacks
+
+    manager = MagicMock()
+    manager.list_stacks.return_value = list(_FULL_DEPLOYMENT)
+    manager.destroy_orchestrated.side_effect = [
+        (False, ["test-gco-monitoring", "test-gco-regional-api-us-east-1"], ["test-gco-us-east-1"]),
+        # Already gone, so the retry sees no monitoring stack to delete.
+        (False, ["test-gco-monitoring", "test-gco-us-west-2"], ["test-gco-us-east-1"]),
+        (False, [], ["test-gco-us-east-1"]),
+    ]
+    with (
+        patch("cli.stacks.get_stack_manager", return_value=manager),
+        patch("time.sleep"),
+    ):
+        result = _invoke(runner, stacks, ["destroy-all", "-y"])
+
+    assert result.exit_code == 1, result.output
+    assert "Destroyed: 3/6 stacks" in result.output
+    assert "Some stacks failed to destroy: test-gco-us-east-1" in result.output
+
+
+def test_destroy_all_keep_control_plane_reports_a_failed_monitoring_detach(
+    runner: CliRunner,
+) -> None:
+    """The monitoring stack is updated, not destroyed: its failure is not a failed delete."""
+    from cli.commands.stacks_cmd import stacks
+
+    manager = MagicMock()
+    manager.list_stacks.return_value = list(_FULL_DEPLOYMENT)
+    manager.destroy_orchestrated.return_value = (False, [], ["test-gco-monitoring"])
+    with (
+        patch("cli.stacks.get_stack_manager", return_value=manager),
+        patch("time.sleep"),
+    ):
+        result = _invoke(runner, stacks, ["destroy-all", "-y", "--keep-control-plane"])
+
+    assert result.exit_code == 1, result.output
+    # The destroy set is the bridge and the two regional stacks.
+    assert "Destroyed: 0/3 stacks" in result.output
+    assert (
+        "Could not update test-gco-monitoring to stop referencing the regional stacks"
+        in result.output
+    )
+    assert "failed to destroy" not in result.output
+    assert "stack(s) failed" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("deployment_type", "expected"),
+    [("PERSISTENT_1", 200), ("PERSISTENT_2", 250), ("SCRATCH_1", None), ("SCRATCH_2", None)],
+)
+def test_fsx_enable_writes_a_throughput_the_deployment_type_accepts(
+    runner: CliRunner, deployment_type: str, expected: int | None
+) -> None:
+    """PERSISTENT_2 rejects 200 MB/s/TiB, and SCRATCH file systems take no throughput."""
+    with patch("cli.stacks.update_fsx_config") as update:
+        result = _invoke(
+            runner,
+            stacks,
+            ["fsx", "enable", "--deployment-type", deployment_type],
+            input_text="y\n",
+        )
+
+    assert result.exit_code == 0, result.output
+    assert update.call_args.args[0]["per_unit_storage_throughput"] == expected
+    if expected is None:
+        assert "Throughput" not in result.output
+    else:
+        assert f"Throughput: {expected} MB/s per TiB" in result.output
+
+
+@pytest.mark.parametrize(
+    ("deployment_type", "throughput", "message"),
+    [
+        ("PERSISTENT_2", "200", "PERSISTENT_2 accepts 125, 250, 500 or 1000 MB/s per TiB, not 200"),
+        ("PERSISTENT_1", "125", "PERSISTENT_1 accepts 50, 100 or 200 MB/s per TiB, not 125"),
+        ("SCRATCH_2", "200", "--throughput applies only to PERSISTENT_1 and PERSISTENT_2"),
+    ],
+)
+def test_fsx_enable_rejects_a_throughput_the_deployment_type_refuses(
+    runner: CliRunner, deployment_type: str, throughput: str, message: str
+) -> None:
+    with patch("cli.stacks.update_fsx_config") as update:
+        result = _invoke(
+            runner,
+            stacks,
+            ["fsx", "enable", "-y", "--deployment-type", deployment_type, "-t", throughput],
+        )
+
+    assert result.exit_code == 1, result.output
+    assert message in result.output
+    update.assert_not_called()

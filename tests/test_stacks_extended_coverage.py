@@ -44,15 +44,18 @@ from click import Abort
 
 
 @pytest.fixture
-def stacks_module() -> Any:
-    """Reload cli.stacks so the runtime cache starts fresh."""
-    import importlib
+def stacks_module(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Return cli.stacks with its container-runtime cache reset for the test.
 
+    The module is not reloaded: a reload builds a new ``StackManager`` class,
+    and tests/conftest.py's no-op stubs for the destroy-cleanup sweeps and the
+    stuck-stack pre-check are patched onto the class that existed before it.
+    """
     import cli.stacks as stacks_mod
 
-    importlib.reload(stacks_mod)
-    yield stacks_mod
-    importlib.reload(stacks_mod)
+    monkeypatch.setattr(stacks_mod, "_container_runtime_cache", None)
+    monkeypatch.setattr(stacks_mod, "_container_runtime_checked", False)
+    return stacks_mod
 
 
 @pytest.fixture
@@ -64,6 +67,28 @@ def manager(stacks_module: Any) -> Any:
     config.api_gateway_region = "us-east-2"
     config.regions = ["us-east-2"]
     return stacks_module.StackManager(config)
+
+
+def test_conftest_aws_stubs_cover_this_modules_managers(manager: Any) -> None:
+    """The fixtures must not hand tests a StackManager the conftest stubs miss.
+
+    tests/conftest.py no-ops every destroy-cleanup sweep and the stuck-stack
+    pre-check by patching cli.stacks.StackManager; a manager built from any
+    other class object, such as one a module reload created, would run them
+    against AWS.
+    """
+    import cli.stacks as stacks
+
+    assert type(manager) is stacks.StackManager
+    for helper in (
+        "_check_and_fix_stuck_stack",
+        "_cleanup_cluster_volumes",
+        "_cleanup_eks_security_groups",
+        "_cleanup_implicit_log_groups",
+        "_stop_backup_vault_jobs",
+    ):
+        assert isinstance(getattr(stacks.StackManager, helper), MagicMock), helper
+    assert manager._cleanup_cluster_volumes() == {"deleted": [], "surviving": [], "errors": []}
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +714,7 @@ class TestCleanupBackupVault:
         )
         backup = MagicMock()
         backup.describe_backup_vault.return_value = {"BackupVaultArn": vault_arn}
-        backup.get_paginator.return_value = _make_paginator(
+        backup.recovery_points = _make_paginator(
             [
                 {
                     "RecoveryPoints": [
@@ -698,6 +723,10 @@ class TestCleanupBackupVault:
                     ]
                 }
             ]
+        )
+        backup.backup_jobs = _make_paginator_callable([{"BackupJobs": []}])
+        backup.get_paginator.side_effect = lambda operation: (
+            backup.backup_jobs if operation == "list_backup_jobs" else backup.recovery_points
         )
         if recovery_delete_error is not None:
             backup.delete_recovery_point.side_effect = recovery_delete_error
@@ -720,10 +749,11 @@ class TestCleanupBackupVault:
             StackName=self._STACK_ID
         )
         backup.describe_backup_vault.assert_called_once_with(BackupVaultName="GcoBackupVault")
-        backup.get_paginator.assert_called_once_with("list_recovery_points_by_backup_vault")
-        backup.get_paginator.return_value.paginate.assert_called_once_with(
-            BackupVaultName="GcoBackupVault"
-        )
+        assert [call.args for call in backup.get_paginator.call_args_list] == [
+            ("list_backup_jobs",),
+            ("list_recovery_points_by_backup_vault",),
+        ]
+        backup.recovery_points.paginate.assert_called_once_with(BackupVaultName="GcoBackupVault")
         assert backup.delete_recovery_point.call_count == 2
         assert "Cleaned up 2 backup recovery points" in capsys.readouterr().out
 
@@ -749,6 +779,147 @@ class TestCleanupBackupVault:
             manager._cleanup_backup_vault()
         assert backup.delete_recovery_point.call_count == 2
 
+    def test_unfinished_jobs_are_stopped_before_the_points_are_deleted(
+        self, manager: Any, capsys: Any
+    ) -> None:
+        """A scheduled job must not add a recovery point right after the sweep."""
+        resources = [
+            {
+                "LogicalResourceId": "BackupVault",
+                "ResourceType": "AWS::Backup::BackupVault",
+                "PhysicalResourceId": (
+                    "arn:aws:backup:us-east-2:123456789012:backup-vault:GcoBackupVault"
+                ),
+                "ResourceStatus": "DELETE_FAILED",
+            }
+        ]
+        _cloudformation, backup, client = self._clients(resources=resources)
+        order: list[str] = []
+        backup.delete_recovery_point.side_effect = lambda **_kwargs: order.append("delete")
+
+        def stop_jobs(backup_client: Any, vault_name: str) -> dict[str, list[Any]]:
+            assert backup_client is backup
+            assert vault_name == "GcoBackupVault"
+            order.append("stop")
+            return {"stopped": ["job-1"], "unstoppable": [], "errors": [{"error": "denied"}]}
+
+        with (
+            patch("boto3.client", side_effect=client),
+            patch.object(manager, "_stop_backup_vault_jobs", side_effect=stop_jobs),
+        ):
+            result = manager._cleanup_backup_vault()
+
+        assert order == ["stop", "delete", "delete"]
+        assert result["stopped_backup_jobs"] == ["job-1"]
+        assert result["errors"] == [{"error": "denied"}]
+        assert result["status"] == "partial"
+        assert result["resource_status"] == "DELETE_FAILED"
+        assert "Stopped 1 unfinished AWS Backup job(s) writing to GcoBackupVault" in (
+            capsys.readouterr().out
+        )
+
+    def test_a_vault_cloudformation_already_deleted_is_absent(self, manager: Any) -> None:
+        """After a stack delete that failed elsewhere, the vault resource is DELETE_COMPLETE."""
+        resources = [
+            {
+                "LogicalResourceId": "BackupVault",
+                "ResourceType": "AWS::Backup::BackupVault",
+                "PhysicalResourceId": "GcoBackupVault",
+                "ResourceStatus": "DELETE_COMPLETE",
+            }
+        ]
+        _cloudformation, backup, client = self._clients(resources=resources)
+        with patch("boto3.client", side_effect=client):
+            result = manager._cleanup_backup_vault()
+        assert result["status"] == "vault-resource-absent"
+        assert result["errors"] == []
+        backup.describe_backup_vault.assert_not_called()
+
+
+def _client_error(code: str, operation: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": code}}, operation)
+
+
+class TestStopBackupVaultJobs:
+    """``ListBackupJobs`` takes one state per call; every unfinished job gets a stop request."""
+
+    @staticmethod
+    def _backup(jobs_by_state: dict[str, list[dict[str, Any]]]) -> Any:
+        backup = MagicMock()
+        backup.get_paginator.return_value.paginate.side_effect = lambda ByBackupVaultName, ByState: [
+            {"BackupJobs": jobs_by_state.get(ByState, [])}
+        ]
+        return backup
+
+    def test_stops_each_unfinished_job_of_the_exact_vault(self, manager: Any) -> None:
+        backup = self._backup(
+            {
+                "CREATED": [{"BackupJobId": "job-created", "BackupVaultName": "vault"}],
+                "RUNNING": [
+                    {"BackupJobId": "job-running", "BackupVaultName": "vault"},
+                    {"BackupJobId": "job-elsewhere", "BackupVaultName": "other-vault"},
+                    {"BackupVaultName": "vault"},
+                ],
+            }
+        )
+
+        outcome = manager._stop_backup_vault_jobs(backup, "vault")
+
+        backup.get_paginator.assert_called_once_with("list_backup_jobs")
+        assert [
+            call.kwargs for call in backup.get_paginator.return_value.paginate.call_args_list
+        ] == [
+            {"ByBackupVaultName": "vault", "ByState": state}
+            for state in ("CREATED", "PENDING", "RUNNING")
+        ]
+        assert [call.kwargs for call in backup.stop_backup_job.call_args_list] == [
+            {"BackupJobId": "job-created"},
+            {"BackupJobId": "job-running"},
+        ]
+        assert outcome == {
+            "stopped": ["job-created", "job-running"],
+            "unstoppable": [],
+            "errors": [],
+        }
+
+    def test_a_job_that_already_finished_is_not_an_error(self, manager: Any) -> None:
+        backup = self._backup(
+            {
+                "PENDING": [
+                    {"BackupJobId": "job-done", "BackupVaultName": "vault"},
+                    {"BackupJobId": "job-gone", "BackupVaultName": "vault"},
+                ]
+            }
+        )
+        backup.stop_backup_job.side_effect = [
+            _client_error("InvalidRequestException", "StopBackupJob"),
+            _client_error("ResourceNotFoundException", "StopBackupJob"),
+        ]
+
+        outcome = manager._stop_backup_vault_jobs(backup, "vault")
+
+        assert outcome == {
+            "stopped": [],
+            "unstoppable": [
+                {"backup_job_id": "job-done", "code": "InvalidRequestException"},
+                {"backup_job_id": "job-gone", "code": "ResourceNotFoundException"},
+            ],
+            "errors": [],
+        }
+
+    def test_other_failures_are_recorded_not_raised(self, manager: Any) -> None:
+        backup = self._backup({"RUNNING": [{"BackupJobId": "job-1", "BackupVaultName": "vault"}]})
+        backup.stop_backup_job.side_effect = _client_error("AccessDeniedException", "StopBackupJob")
+        outcome = manager._stop_backup_vault_jobs(backup, "vault")
+        assert outcome["stopped"] == [] and outcome["unstoppable"] == []
+        assert outcome["errors"][0]["error"].startswith("ClientError: ")
+
+        listing = MagicMock()
+        listing.get_paginator.side_effect = RuntimeError("throttled")
+        assert manager._stop_backup_vault_jobs(listing, "vault")["errors"] == [
+            {"error": "RuntimeError: throttled"}
+        ]
+
 
 # ---------------------------------------------------------------------------
 # EKS security group cleanup + watchdog
@@ -767,7 +938,11 @@ class TestEksSecurityGroupCleanup:
         ec2 = MagicMock()
         ec2.describe_security_groups.return_value = {
             "SecurityGroups": [
-                {"GroupId": "sg-123", "GroupName": "eks-cluster-sg-gco-us-east-1-abc"}
+                {
+                    "GroupId": "sg-123",
+                    "GroupName": "eks-cluster-sg-gco-us-east-1-abc",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                }
             ]
         }
         ec2.describe_network_interfaces.return_value = {
@@ -790,7 +965,13 @@ class TestEksSecurityGroupCleanup:
     ) -> None:
         ec2 = MagicMock()
         ec2.describe_security_groups.return_value = {
-            "SecurityGroups": [{"GroupId": "sg-x", "GroupName": "eks-cluster-sg-x"}]
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-x",
+                    "GroupName": "eks-cluster-sg-x",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                }
+            ]
         }
         ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
         with patch("boto3.client", return_value=ec2):
@@ -801,7 +982,13 @@ class TestEksSecurityGroupCleanup:
     def test_sg_delete_failure_logged(self, manager: Any) -> None:
         ec2 = MagicMock()
         ec2.describe_security_groups.return_value = {
-            "SecurityGroups": [{"GroupId": "sg-x", "GroupName": "eks-cluster-sg-x"}]
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-x",
+                    "GroupName": "eks-cluster-sg-x",
+                    "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+                }
+            ]
         }
         ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
         ec2.delete_security_group.side_effect = RuntimeError("dependency")
@@ -819,7 +1006,14 @@ class TestEksSecurityGroupCleanup:
             patch.object(
                 manager,
                 "list_stacks",
-                return_value=["gco-global", "gco-api-gateway", "gco-monitoring", "gco-us-east-1"],
+                return_value=[
+                    "gco-global",
+                    "gco-api-gateway",
+                    "gco-monitoring",
+                    "gco-analytics",
+                    "gco-regional-api-us-east-1",
+                    "gco-us-east-1",
+                ],
             ),
             patch.object(manager, "_cleanup_eks_security_groups") as mock_clean,
         ):
@@ -827,6 +1021,13 @@ class TestEksSecurityGroupCleanup:
         # Only the regional stack is cleaned.
         called_stacks = [c.args[0] for c in mock_clean.call_args_list]
         assert called_stacks == ["gco-us-east-1"]
+
+    def test_a_stack_naming_no_region_owns_no_cluster_security_group(self, manager: Any) -> None:
+        with patch("boto3.client") as client:
+            outcome = manager._cleanup_eks_security_groups("gco-analytics", region="us-east-1")
+        client.assert_not_called()
+        assert outcome["skipped"] == "not-a-regional-stack"
+        assert outcome["errors"] == [] and outcome["deleted"] == []
 
 
 class TestClusterVolumeCleanup:
@@ -1058,11 +1259,30 @@ class TestClusterVolumeCleanup:
 
     def test_public_wrapper_skips_global_stacks(self, manager: Any) -> None:
         with patch.object(manager, "_cleanup_cluster_volumes") as worker:
-            for stack in ("gco-global", "gco-api-gateway", "gco-monitoring"):
+            for stack in (
+                "gco-global",
+                "gco-api-gateway",
+                "gco-monitoring",
+                "gco-analytics",
+                "gco-regional-api-us-east-1",
+            ):
                 assert manager.cleanup_cluster_volumes(stack)["skipped"] == "not-a-regional-stack"
             worker.assert_not_called()
             manager.cleanup_cluster_volumes("gco-us-east-1", retain=True)
         worker.assert_called_once_with("gco-us-east-1", region=None, retain=True)
+
+    def test_a_stack_naming_no_region_is_never_swept(self, manager: Any) -> None:
+        """``gco-analytics`` used to resolve to the Region ``analytics``.
+
+        The operator then saw ``Could not dispose of EBS volume gco-analytics:
+        EndpointConnectionError ... eks.analytics.amazonaws.com``.
+        """
+        with patch("boto3.client") as client, patch("builtins.print") as printed:
+            outcome = manager._cleanup_cluster_volumes("gco-analytics", region="us-east-1")
+        client.assert_not_called()
+        printed.assert_not_called()
+        assert outcome["skipped"] == "not-a-regional-stack"
+        assert outcome["errors"] == [] and outcome["deleted"] == []
 
 
 class TestEksSgWatchdog:

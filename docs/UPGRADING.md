@@ -31,9 +31,11 @@ recreates every regional stack, and the data inside those stacks goes with them.
 ## How an upgrade works
 
 GCO has two tiers of stacks. The **control plane** — `<project>-global`,
-`<project>-api-gateway` and `<project>-monitoring` — holds the shared state:
+`<project>-api-gateway`, `<project>-monitoring` and, when the analytics
+environment is enabled, `<project>-analytics` — holds the shared state:
 DynamoDB tables, the model and cluster-shared S3 buckets, the image registry, the
-backup vault, the cost-report bucket, the auth secret and the private TLS root.
+backup vault, the cost-report bucket, the auth secret, the private TLS root, and
+the SageMaker Studio domain with its home directories and Cognito users.
 The **workload tier** — one `<project>-<region>` stack and one
 `<project>-regional-api-<region>` bridge per entry in
 `deployment_regions.regional` — holds the EKS clusters and everything that runs
@@ -48,8 +50,11 @@ release, while the control plane is updated in place and keeps its state:
    `vMAJOR.MINOR.PATCH` (or the tag named with `--ref`).
 2. **Move the checkout.** `git checkout --detach <tag>`. `cdk.json` is the
    deployment's configuration, not the release's, so its exact bytes are
-   snapshotted first and written back afterwards — your project name, Regions and
-   feature toggles are what deploys, not the release's defaults.
+   snapshotted first, copied to `cdk.json.pre-upgrade-<UTC time>`, and written
+   back afterwards — your project name, Regions and feature toggles are what
+   deploys, not the release's defaults. The bytes are written back even when
+   the checkout fails; the copy is deleted once they are back and kept when
+   anything fails.
 3. **Refresh the local install.** `pip install -e '.[cdk,...]'` when the running
    `gco` is the editable install of this checkout: the `cdk` extra plus every
    extra that was already installed, so the CDK library the redeploy synthesizes
@@ -70,10 +75,10 @@ release, while the control plane is updated in place and keeps its state:
    delete cannot leave the stack in `DELETE_FAILED`. The teardown is the one in
    the release you upgrade from (see [Run the upgrade](#3-run-the-upgrade)), so upgrades from v8.14.0 or
    earlier do not get this sweep; see [If it stops halfway](#if-it-stops-halfway).
-5. **Deploy-all on the new release.** `<project>-global` and
-   `<project>-api-gateway` are updated in place, the regional stacks and their
-   bridges are recreated from `cdk.json`, and the monitoring stack is updated back
-   to the full topology.
+5. **Deploy-all on the new release.** `<project>-global`,
+   `<project>-api-gateway` and (when enabled) `<project>-analytics` are updated
+   in place, the regional stacks and their bridges are recreated from
+   `cdk.json`, and the monitoring stack is updated back to the full topology.
 
 Expect 45–90 minutes for a single Region (EKS cluster deletion and creation
 dominate); `--parallel` overlaps the regional work when there are several.
@@ -91,6 +96,7 @@ dominate); `--parallel` overlaps the regional work when there are several.
 | Cluster-shared bucket, model bucket, DynamoDB tables (jobs, templates, webhooks, vector store), ECR image registry | global stack | Survive — updated in place |
 | Auth secret, private TLS root CA, API Gateway, WAF, aggregator | API Gateway stack | Survive — updated in place |
 | Cost-report bucket, Glue/Athena, alarms, dashboard | monitoring stack | Survive — updated in place (the dashboard briefly shows only its control-plane sections while the workload tier is down) |
+| SageMaker Studio domain, Studio home directories (EFS), Cognito users, analytics buckets | analytics stack, when enabled | Survive — updated in place |
 | Global Accelerator, endpoint groups, traffic-dial state | global stack | Survive; the regional ALBs re-register as the regional stacks come back |
 | CDK bootstrap stacks, IAM roles outside GCO | account | Untouched |
 
@@ -183,6 +189,12 @@ Every step reports what it did, and the command tells you where it stopped.
 
 - **Before the checkout** (dirty tree, no release tags, no container runtime):
   nothing has changed. Fix the cause and rerun.
+- **At the checkout** (`git checkout --quiet --detach <tag> failed`, for
+  example because an untracked file is in the way of one the release adds):
+  `cdk.json` is written back as it was, and the message names the
+  `cdk.json.pre-upgrade-<UTC time>` copy it kept. Move the named file aside,
+  delete the copy, and rerun. If the message says `cdk.json` itself could not
+  be restored, copy that file over `cdk.json` before running anything else.
 - **After the checkout, during the install refresh**: the checkout is on the new
   release; the message names the `pip`/`uv` command to run by hand, then
   `gco upgrade --skip-checkout` finishes the stack cycle.

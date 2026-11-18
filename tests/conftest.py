@@ -321,10 +321,11 @@ def _no_real_mission_memory():
 #
 # ``StackManager.destroy_orchestrated`` runs a set of boto3/AWS-CLI-backed
 # sweeps around the stack deletions: the image-registry preflight, the
-# ephemeral-bastion sweep (EC2 TerminateInstances), the backup-vault purge,
-# the EKS security-group watchdog and its final pass, the implicit log-group
-# sweep (CloudWatch DeleteLogGroup on every Lambda/EKS/Container Insights
-# group the stacks imply), the sweep of explicit log groups Lambda recreated
+# ephemeral-bastion sweep (EC2 TerminateInstances), the backup-vault purge
+# (Backup StopBackupJob and DeleteRecoveryPoint), the EKS security-group
+# watchdog and its final pass, the implicit log-group sweep (CloudWatch
+# DeleteLogGroup on every Lambda/EKS/Container Insights group the stacks
+# imply), the sweep of explicit log groups Lambda recreated
 # after CloudFormation deleted them, bastion IAM retirement, the traffic-dial
 # SSM purge, and the post-regional EBS volume and add-on SSM sweeps.
 # Orchestration tests that mock ``destroy`` / ``list_stacks`` but not these
@@ -342,7 +343,16 @@ def _no_real_mission_memory():
 _DESTROY_CLEANUP_STUBS: dict[str, object] = {
     "_image_registry_destroy_preflight": True,
     "cleanup_orphaned_bastions": 0,
-    "_cleanup_backup_vault": None,
+    # The orchestrator reads the outcome (``resource_status``) to decide
+    # whether a failed global-stack delete is retried, so stub a real one.
+    "_cleanup_backup_vault": {
+        "status": "not-needed",
+        "deleted_recovery_points": 0,
+        "stopped_backup_jobs": [],
+        "errors": [],
+    },
+    # Backup StopBackupJob on the global vault's unfinished jobs.
+    "_stop_backup_vault_jobs": {"stopped": [], "unstoppable": [], "errors": []},
     "_cleanup_eks_security_groups": None,
     "_start_eks_sg_watchdog": MagicMock(),
     "_collect_implicit_log_groups": {},
@@ -372,7 +382,10 @@ _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
     "test_cleanup_orphaned_bastions_default_strict_and_empty_inputs": frozenset(
         {"cleanup_orphaned_bastions"}
     ),
-    "TestCleanupBackupVault": frozenset({"_cleanup_backup_vault"}),
+    # The vault sweep stops the vault's unfinished backup jobs first, through
+    # the same mocked Backup client.
+    "TestCleanupBackupVault": frozenset({"_cleanup_backup_vault", "_stop_backup_vault_jobs"}),
+    "TestStopBackupVaultJobs": frozenset({"_stop_backup_vault_jobs"}),
     "TestEksSecurityGroupCleanup": frozenset({"_cleanup_eks_security_groups"}),
     "TestCleanupEksSecurityGroups": frozenset({"_cleanup_eks_security_groups"}),
     "TestEksSgWatchdog": frozenset({"_start_eks_sg_watchdog", "_cleanup_eks_security_groups"}),

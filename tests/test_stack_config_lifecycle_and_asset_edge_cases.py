@@ -740,7 +740,9 @@ def test_setup_access_uses_default_region_and_tolerates_existing_access() -> Non
             )
             return SimpleNamespace(stdout=value, returncode=0)
         if "create-access-entry" in argv or "associate-access-policy" in argv:
-            raise subprocess.CalledProcessError(1, argv, stderr="already exists")
+            raise subprocess.CalledProcessError(
+                254, argv, stderr="An error occurred (ResourceInUseException): in use"
+            )
         if argv[0] == "kubectl":
             return SimpleNamespace(returncode=1, stdout="", stderr="i/o timeout")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -755,8 +757,8 @@ def test_setup_access_uses_default_region_and_tolerates_existing_access() -> Non
     assert result.exit_code == 0, result.output
     assert "test-gco-eu-central-1" in result.output
     assert "private-only cluster" in result.output
-    assert "Access entry may already exist" in result.output
-    assert "Policy may already be associated" in result.output
+    assert "Access entry already exists" in result.output
+    assert "Policy already associated" in result.output
     assert any("arn:aws:iam::123456789012:role/Admin" in command for command in commands)
 
 
@@ -778,9 +780,10 @@ def test_setup_access_malformed_assumed_role_keeps_original_principal() -> None:
         patch("time.sleep"),
     ):
         result = _invoke_stacks(["access", "-r", "us-east-1"])
-    assert result.exit_code == 0, result.output
+    # kubectl reached the API server and was refused: that fails the command.
+    assert result.exit_code == 1, result.output
     assert "CIDR allowlist" in result.output
-    assert "connected but no nodes found" in result.output
+    assert "kubectl get nodes failed: authorization failed" in result.output
     assert not any(
         command.args[0][:3] == ["aws", "sts", "get-caller-identity"]
         and "Account" in command.args[0]
@@ -2350,6 +2353,275 @@ def test_build_kubectl_lambda_packages_complete_source(
     run.assert_called_once()
 
 
+_MIB = 1024 * 1024
+
+
+def _sparse_file(path: Path, size: int) -> None:
+    """Create a file of ``size`` bytes without writing them (a hole on disk)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.truncate(size)
+
+
+def _build_kubectl_lambda_with_installed_tree(
+    stack_manager: Any,
+    tmp_path: Path,
+    installed: dict[str, int],
+) -> Path:
+    """Run the kubectl builder; its mocked pip leaves ``installed`` in staging."""
+    import cli.stacks as stacks
+
+    source, _build = stacks._KUBECTL_CDK_ASSET.paths(tmp_path)
+    (source / "manifests").mkdir(parents=True)
+    (source / "handler.py").write_text("handler", encoding="utf-8")
+    (source / "requirements.txt").write_text("kubernetes==37.0.1", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    def prepare(*_args: Any, builder: Any, **_kwargs: Any) -> bool:
+        builder(staging)
+        return True
+
+    def pip_install(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        for relative, size in installed.items():
+            _sparse_file(staging / relative, size)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    with (
+        patch.object(stacks, "_prepare_lambda_asset", side_effect=prepare),
+        patch.object(stacks.subprocess, "run", side_effect=pip_install),
+    ):
+        stack_manager._build_kubectl_lambda()
+    return staging
+
+
+def test_lambda_zip_limit_is_lambdas_unzipped_package_quota() -> None:
+    import cli.stacks as stacks
+
+    # 250 MB, where Lambda's MB is 1,024 KB (the quota's own wording).
+    assert stacks._LAMBDA_ZIP_UNZIPPED_LIMIT_BYTES == 262_144_000
+
+
+def test_build_kubectl_lambda_rejects_package_over_lambda_unzipped_limit(
+    stack_manager: Any,
+    tmp_path: Path,
+) -> None:
+    # 255 MiB of dependencies: over the 250 MiB quota by about 5 MiB.
+    installed = {
+        "kubernetes/client/api.py": 200 * _MIB,
+        "botocore/data/endpoints.json": 40 * _MIB,
+        "yaml/_yaml.so": 10 * _MIB,
+        "urllib3/__init__.py": 4 * _MIB,
+        "six.py": 1 * _MIB,
+    }
+    with pytest.raises(RuntimeError) as raised:
+        _build_kubectl_lambda_with_installed_tree(stack_manager, tmp_path, installed)
+
+    message = str(raised.value)
+    assert "kubectl-applier-simple Lambda package" in message
+    assert "255.0 MiB" in message
+    assert "250 MiB (262,144,000 bytes)" in message
+    # The largest directories, largest first; a loose top-level file is no directory.
+    assert "kubernetes/ 200.0 MiB, botocore/ 40.0 MiB, yaml/ 10.0 MiB" in message
+    assert "six.py" not in message
+    assert "lambda/kubectl-applier-simple/requirements.txt" in message
+
+
+def test_build_kubectl_lambda_warns_near_lambda_unzipped_limit(
+    stack_manager: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    installed = {
+        "kubernetes/client/api.py": 200 * _MIB,
+        "botocore/data/endpoints.json": 30 * _MIB,
+    }
+    _build_kubectl_lambda_with_installed_tree(stack_manager, tmp_path, installed)
+
+    output = capsys.readouterr().out
+    assert "Warning: kubectl-applier-simple Lambda package unzips to 230.0 MiB" in output
+    assert "92% of Lambda's 250 MiB (262,144,000 bytes) limit" in output
+    assert "kubernetes/ 200.0 MiB, botocore/ 30.0 MiB" in output
+
+
+def test_lambda_zip_size_counts_what_cdk_assets_zips(tmp_path: Path) -> None:
+    import cli.stacks as stacks
+
+    _sparse_file(tmp_path / "kubernetes" / "client" / "api.py", 3 * _MIB)
+    _sparse_file(tmp_path / "botocore" / "data.json", 2 * _MIB)
+    _sparse_file(tmp_path / "six.py", 1 * _MIB)
+    # cdk-assets zips a symlink's target; a dangling link has nothing to zip.
+    (tmp_path / "kubernetes" / "alias.py").symlink_to("client/api.py")
+    (tmp_path / "botocore" / "dangling.py").symlink_to("missing.py")
+
+    total, largest = stacks._lambda_zip_unzipped_size(tmp_path)
+
+    assert total == 9 * _MIB
+    assert largest == [("kubernetes", 6 * _MIB), ("botocore", 2 * _MIB)]
+
+
+def _run_kubectl_builder(stack_manager: Any, tmp_path: Path, run: Any) -> MagicMock:
+    """Run the kubectl builder with ``run`` standing in for its pip subprocess."""
+    import cli.stacks as stacks
+
+    source, _build = stacks._KUBECTL_CDK_ASSET.paths(tmp_path)
+    (source / "manifests").mkdir(parents=True)
+    (source / "handler.py").write_text("handler", encoding="utf-8")
+    (source / "requirements.txt").write_text("kubernetes==37.0.1", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    def prepare(*_args: Any, builder: Any, **_kwargs: Any) -> bool:
+        builder(staging)
+        return True
+
+    mock_run = MagicMock(side_effect=run)
+    with (
+        patch.object(stacks, "_prepare_lambda_asset", side_effect=prepare),
+        patch.object(stacks.subprocess, "run", mock_run),
+    ):
+        stack_manager._build_kubectl_lambda()
+    return mock_run
+
+
+def test_kubectl_builder_stops_a_pip_install_that_does_not_finish(
+    stack_manager: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GCO_ASSET_BUILD_TIMEOUT_SECONDS", raising=False)
+    calls: list[Any] = []
+
+    def hang(command: list[str], **kwargs: Any) -> Any:
+        calls.append(kwargs.get("timeout"))
+        # TimeoutExpired carries bytes whatever text= was.
+        raise subprocess.TimeoutExpired(
+            command, kwargs["timeout"], stderr=b"WARNING: Retrying after connection broken\n"
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        _run_kubectl_builder(stack_manager, tmp_path, hang)
+
+    assert calls == [600.0]
+    message = str(raised.value)
+    assert "pip install of the kubectl-applier-simple Lambda dependencies" in message
+    assert "did not finish within 600s" in message
+    assert "GCO_ASSET_BUILD_TIMEOUT_SECONDS" in message
+    assert message.endswith("Last output:\nWARNING: Retrying after connection broken")
+    assert isinstance(raised.value.__cause__, subprocess.TimeoutExpired)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("42", 42.0), ("0", 600.0), ("-5", 600.0), ("nan", 600.0), ("soon", 600.0)],
+)
+def test_asset_build_timeout_is_tunable(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    expected: float,
+) -> None:
+    import cli.stacks as stacks
+
+    monkeypatch.setenv("GCO_ASSET_BUILD_TIMEOUT_SECONDS", raw)
+    assert stacks._asset_build_timeout_seconds() == expected
+
+
+def test_kubectl_builder_reports_the_end_of_pip_stderr(
+    stack_manager: Any,
+    tmp_path: Path,
+) -> None:
+    error = "ERROR: No matching distribution found for kubernetes==99.0.0"
+    stderr = "WARNING: the index is slow\n" * 200 + error + "\n"
+
+    def fail(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stderr=stderr)
+
+    with pytest.raises(RuntimeError) as raised:
+        _run_kubectl_builder(stack_manager, tmp_path, fail)
+
+    message = str(raised.value)
+    assert message.startswith("kubectl Lambda dependency installation failed: ...")
+    assert message.endswith(error)
+    assert len(message) < 2100
+
+
+def test_inference_builder_bounds_npm_ci_and_reports_its_last_output(
+    stack_manager: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cli.stacks as stacks
+
+    monkeypatch.setenv("GCO_ASSET_BUILD_TIMEOUT_SECONDS", "120")
+    source, _build = stacks._INFERENCE_STREAMING_CDK_ASSET.paths(tmp_path)
+    source.mkdir(parents=True)
+    for name in stacks._INFERENCE_STREAMING_CDK_ASSET.source_inputs or ():
+        (source / name).write_text("{}", encoding="utf-8")
+    (source / "package.json").write_text(
+        json.dumps({"packageManager": "npm@10.9.2"}), encoding="utf-8"
+    )
+    staging = tmp_path / "node-staging"
+    staging.mkdir()
+
+    def run_builder(*_args: Any, builder: Any, **_kwargs: Any) -> bool:
+        builder(staging)
+        return True
+
+    version = SimpleNamespace(returncode=0, stdout="10.9.2\n", stderr="")
+    timeouts: list[Any] = []
+
+    def npm(results: list[Any]) -> Any:
+        def run(command: list[str], **kwargs: Any) -> Any:
+            if command[1:2] == ["ci"]:
+                timeouts.append(kwargs.get("timeout"))
+            result = results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        return run
+
+    hung = subprocess.TimeoutExpired(["npm", "ci"], 120.0)
+    error = "npm error code E404\nnpm error 404 Not Found - GET https://registry/x"
+    failed = SimpleNamespace(returncode=1, stdout="", stderr="npm warn old\n" * 300 + error)
+    with (
+        patch.object(stacks, "_prepare_lambda_asset", side_effect=run_builder),
+        patch.object(stacks.shutil, "which", return_value="/usr/bin/npm"),
+    ):
+        with (
+            patch.object(stacks.subprocess, "run", side_effect=npm([version, hung])),
+            pytest.raises(RuntimeError) as timed_out,
+        ):
+            stack_manager._build_inference_streaming_proxy_lambda()
+        with (
+            patch.object(stacks.subprocess, "run", side_effect=npm([version, failed])),
+            pytest.raises(RuntimeError) as install_failed,
+        ):
+            stack_manager._build_inference_streaming_proxy_lambda()
+
+    assert timeouts == [120.0, 120.0]
+    assert "npm ci for the inference streaming Lambda did not finish within 120s" in str(
+        timed_out.value
+    )
+    # No partial output was captured, so none is quoted.
+    assert "Last output" not in str(timed_out.value)
+    assert str(install_failed.value).endswith(error)
+    assert "Failed to install pinned inference streaming Lambda dependencies: ..." in str(
+        install_failed.value
+    )
+
+
+def test_build_kubectl_lambda_is_silent_well_under_the_limit(
+    stack_manager: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    installed = {"kubernetes/client/api.py": 180 * _MIB}
+    _build_kubectl_lambda_with_installed_tree(stack_manager, tmp_path, installed)
+
+    assert "Warning" not in capsys.readouterr().out
+
+
 def test_inference_streaming_builder_handles_pin_read_and_npm_failures(
     stack_manager: Any,
     tmp_path: Path,
@@ -2462,6 +2734,141 @@ def test_run_cdk_cancels_process_started_during_race(stack_manager: Any) -> None
     ):
         stack_manager._run_cdk(["bootstrap"])
     terminate.assert_called_once_with(process)
+
+
+@contextmanager
+def _sigterm_must_not_reach_previous_handler() -> Iterator[Any]:
+    """Guard the test process: a missing handler would let SIGTERM kill pytest."""
+    import signal
+
+    def previous(signum: int, frame: Any) -> None:
+        raise AssertionError("SIGTERM reached the previous handler")
+
+    original = signal.signal(signal.SIGTERM, previous)
+    try:
+        yield previous
+    finally:
+        signal.signal(signal.SIGTERM, original)
+
+
+def test_sigterm_while_cdk_runs_terminates_its_process_group(stack_manager: Any) -> None:
+    """An MCP task cancel sends SIGTERM to gco; CDK runs in its own session.
+
+    With no handler Python died without unwinding, so _run_cdk never
+    terminated CDK, which kept deploying with no parent.
+    """
+    import signal
+
+    from cli.stacks import StackOperationTerminated
+
+    process = MagicMock(pid=4242)
+    process.communicate.side_effect = lambda **_kwargs: signal.raise_signal(signal.SIGTERM)
+    stack_manager._cdk_path = "cdk"
+    stack_manager._ensure_cdk_toolchain = MagicMock()
+    stack_manager._get_python_path = MagicMock(return_value="pythonpath")
+
+    with (
+        _sigterm_must_not_reach_previous_handler() as previous,
+        patch("cli.stacks.subprocess.Popen", return_value=process),
+        patch.object(stack_manager, "_terminate_cdk_process") as terminate,
+    ):
+        with pytest.raises(StackOperationTerminated) as raised:
+            stack_manager._run_cdk(["deploy", "gco-us-east-1"])
+        assert signal.getsignal(signal.SIGTERM) is previous
+
+    assert raised.value.code == 128 + signal.SIGTERM
+    assert isinstance(raised.value, SystemExit) and not isinstance(raised.value, Exception)
+    terminate.assert_called_once_with(process)
+    assert stack_manager._active_cdk_processes == {}
+
+
+def test_sigterm_during_a_parallel_batch_cancels_every_cdk_process(
+    stack_manager: Any,
+) -> None:
+    """Workers cannot install a handler, so the main thread holds one for the batch."""
+    import signal
+
+    from cli.stacks import StackOperationTerminated
+
+    def interrupted_wait(_futures: Any) -> Iterator[Any]:
+        signal.raise_signal(signal.SIGTERM)
+        yield from ()
+
+    with (
+        _sigterm_must_not_reach_previous_handler() as previous,
+        patch("cli.stacks.as_completed", side_effect=interrupted_wait),
+        patch.object(stack_manager, "deploy", return_value=True),
+        patch.object(stack_manager, "destroy", return_value=True),
+        patch.object(stack_manager, "cancel_active_cdk_processes") as cancel,
+    ):
+        for run in (
+            lambda: stack_manager._deploy_stacks_parallel(
+                stacks=["gco-us-east-1", "gco-us-west-2"],
+                require_approval=False,
+                outputs_file=None,
+                parameters=None,
+                tags=None,
+                progress="events",
+                on_stack_start=None,
+                on_stack_complete=None,
+                max_workers=2,
+                allow_bootstrap=True,
+                bootstrap_stacks=None,
+                expected_stack_ids=None,
+                prepared_change_sets=None,
+                authorize_stack=None,
+            ),
+            lambda: stack_manager._destroy_stacks_parallel(
+                stacks=["gco-us-east-1", "gco-us-west-2"],
+                force=True,
+                on_stack_start=None,
+                on_stack_complete=None,
+                max_workers=2,
+                expected_stack_ids=None,
+                authorize_stack=None,
+                allow_bootstrap=True,
+                bootstrap_stacks=None,
+                prepared_change_sets=None,
+            ),
+        ):
+            with pytest.raises(StackOperationTerminated):
+                run()
+            assert signal.getsignal(signal.SIGTERM) is previous
+
+    assert cancel.call_count == 2
+
+
+def test_sigterm_handler_is_only_installed_on_the_main_thread() -> None:
+    import signal
+    import threading
+
+    from cli.stacks import _sigterm_raises_terminated
+
+    seen: list[Any] = []
+
+    def worker() -> None:
+        with _sigterm_raises_terminated():
+            seen.append(signal.getsignal(signal.SIGTERM))
+
+    before = signal.getsignal(signal.SIGTERM)
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+    assert seen == [before]
+
+
+def test_sigterm_handler_installed_outside_python_restores_the_default() -> None:
+    import signal
+
+    from cli.stacks import _sigterm_raises_terminated
+
+    original = signal.getsignal(signal.SIGTERM)
+    try:
+        with patch("cli.stacks.signal.getsignal", return_value=None), _sigterm_raises_terminated():
+            pass
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGTERM, original)
 
 
 def test_run_cdk_terminates_process_on_caller_exception(stack_manager: Any) -> None:
@@ -2698,6 +3105,27 @@ def test_deploy_reconciles_cdk_and_cloudformation_outcomes(
         stack_manager._diagnose_deploy_failure.assert_called_once_with("gco-global")
 
 
+def test_deploy_does_not_wait_for_a_review_in_progress_stack_to_settle(
+    stack_manager: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """REVIEW_IN_PROGRESS is a change set nobody executed: it never settles."""
+    import cli.stacks as stacks
+
+    _ready_deploy_manager(stack_manager)
+    stack_manager._run_cdk.return_value = SimpleNamespace(returncode=1)
+    stack_manager._get_stack_status.return_value = "REVIEW_IN_PROGRESS"
+
+    with patch.object(stacks, "_detect_container_runtime", return_value="docker"):
+        assert stack_manager.deploy(stack_name="gco-global") is False
+
+    stack_manager._wait_for_stack_settle.assert_not_called()
+    stack_manager._diagnose_deploy_failure.assert_called_once_with("gco-global")
+    output = capsys.readouterr().out
+    assert "gco-global is REVIEW_IN_PROGRESS" in output
+    assert "change set was never executed. Treating as a failed deploy." in output
+
+
 def test_deploy_timeout_and_cancellation_are_reconciled_separately(
     stack_manager: Any,
 ) -> None:
@@ -2787,6 +3215,94 @@ def test_strict_and_standard_analytics_deploy_refresh_routes(
         assert original(stack_manager, stack_name="gco-analytics") is True
     assert recursive.call_args.kwargs["stack_name"] == "gco-api-gateway"
     assert recursive.call_args.kwargs["exclusively"] is True
+
+
+@pytest.mark.parametrize(
+    "stack_name",
+    ["dataanalytics-api-gateway", "dataanalytics-us-east-1", "dataanalytics-global"],
+)
+def test_analytics_route_refresh_needs_the_exact_analytics_stack(
+    stack_manager: Any, stack_name: str
+) -> None:
+    """``analytics`` is valid inside a project name; only ``<project>-analytics`` is that stack.
+
+    With a substring test every deploy of project ``dataanalytics`` refreshed
+    the API routes, and since ``dataanalytics-api-gateway`` contains the word
+    too, the refresh redeployed itself without bound.
+    """
+    import cli.stacks as stacks
+
+    stack_manager.config.project_name = "dataanalytics"
+    original = stacks.StackManager.deploy
+    _ready_deploy_manager(stack_manager)
+    with (
+        patch.object(stacks, "_detect_container_runtime", return_value="docker"),
+        patch.object(stack_manager, "deploy", return_value=True) as recursive,
+    ):
+        assert original(stack_manager, stack_name=stack_name) is True
+    recursive.assert_not_called()
+
+    _ready_deploy_manager(stack_manager)
+    stack_manager._describe_stack_target = MagicMock(return_value=None)
+    stack_manager._preflight_strict_change_set = MagicMock()
+    stack_manager._execute_prepared_change_set = MagicMock(return_value=True)
+    strict = {
+        **_strict_deploy_kwargs(),
+        "stack_name": stack_name,
+        "expected_stack_ids": {stack_name: None},
+        "prepared_change_sets": {stack_name: {}},
+    }
+    with (
+        patch.object(stacks, "_detect_container_runtime", return_value="docker"),
+        patch.object(stack_manager, "deploy", return_value=True) as recursive,
+    ):
+        assert original(stack_manager, **strict) is True
+    recursive.assert_not_called()
+
+    _ready_deploy_manager(stack_manager)
+    with (
+        patch.object(stacks, "_detect_container_runtime", return_value="docker"),
+        patch.object(stack_manager, "deploy", return_value=True) as recursive,
+    ):
+        assert original(stack_manager, stack_name="dataanalytics-analytics") is True
+    assert recursive.call_args.kwargs["stack_name"] == "dataanalytics-api-gateway"
+
+
+def test_destroy_takes_analytics_paths_only_for_the_exact_analytics_stack(
+    stack_manager: Any,
+) -> None:
+    """A destroy of any ``dataanalytics-*`` stack used to take the cdk.json lock.
+
+    It also toggled analytics and redeployed the API Gateway stack first. The
+    lock is process-wide, so ``destroy-all --parallel`` ran one stack at a time.
+    """
+    import cli.stacks as stacks
+
+    stack_manager.config.project_name = "dataanalytics"
+    with (
+        patch.object(stacks, "_find_cdk_json") as find_config,
+        patch.object(stacks, "_config_mutation_lock") as config_lock,
+        patch.object(stack_manager, "_destroy", return_value=True),
+    ):
+        assert stack_manager.destroy(stack_name="dataanalytics-us-east-1") is True
+    find_config.assert_not_called()
+    config_lock.assert_not_called()
+
+    _ready_destroy_manager(stack_manager)
+    stack_manager._stack_exists_in_cloudformation.return_value = True
+    stack_manager._get_stack_status.return_value = "DELETE_IN_PROGRESS"
+    assert stack_manager._destroy(stack_name="dataanalytics-api-gateway") is True
+    stack_manager._ensure_analytics_enabled_for_destroy.assert_not_called()
+    stack_manager._remove_api_gateway_analytics_dependency.assert_not_called()
+
+    _ready_destroy_manager(stack_manager)
+    assert stack_manager._destroy(
+        stack_name="dataanalytics-us-east-1",
+        expected_stack_ids={"dataanalytics-us-east-1": "arn:stack"},
+        authorize_stack=MagicMock(),
+    )
+    stack_manager._remove_api_gateway_analytics_dependency.assert_not_called()
+    stack_manager._cloudformation_delete_stack.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -3874,7 +4390,9 @@ def test_analytics_dependency_exception_rechecks_actual_imports(
 
 def test_is_bootstrapped_caches_false_after_missing_stack(stack_manager: Any) -> None:
     client = MagicMock()
-    client.describe_stacks.side_effect = _client_error("ValidationError", "missing")
+    client.describe_stacks.side_effect = _client_error(
+        "ValidationError", "Stack with id CDKToolkit does not exist"
+    )
     with patch("boto3.client", return_value=client):
         assert stack_manager.is_bootstrapped("eu-west-1") is False
         assert stack_manager.is_bootstrapped("eu-west-1") is False
@@ -4329,10 +4847,30 @@ def test_eks_security_group_cleanup_handles_absent_blocked_deleted_and_errors(
     ec2 = MagicMock()
     ec2.describe_security_groups.return_value = {
         "SecurityGroups": [
-            {"GroupId": "sg-blocked", "GroupName": "blocked", "VpcId": "vpc-1"},
-            {"GroupId": "sg-deleted", "GroupName": "deleted", "VpcId": "vpc-1"},
-            {"GroupId": "sg-missing", "GroupName": "missing", "VpcId": "vpc-1"},
-            {"GroupId": "sg-error", "GroupName": "error", "VpcId": "vpc-1"},
+            {
+                "GroupId": "sg-blocked",
+                "GroupName": "blocked",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            },
+            {
+                "GroupId": "sg-deleted",
+                "GroupName": "deleted",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            },
+            {
+                "GroupId": "sg-missing",
+                "GroupName": "missing",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            },
+            {
+                "GroupId": "sg-error",
+                "GroupName": "error",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            },
         ]
     }
     ec2.describe_network_interfaces.side_effect = [
@@ -5118,7 +5656,14 @@ def test_eks_security_group_cleanup_rejects_identity_and_delete_errors(
 
     ec2 = MagicMock()
     ec2.describe_security_groups.return_value = {
-        "SecurityGroups": [{"GroupId": "sg-one", "GroupName": "one", "VpcId": "vpc-other"}]
+        "SecurityGroups": [
+            {
+                "GroupId": "sg-one",
+                "GroupName": "one",
+                "VpcId": "vpc-other",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            }
+        ]
     }
     with patch("boto3.client", return_value=ec2):
         outcome = _REAL_CLEANUP_EKS_SECURITY_GROUPS(
@@ -5130,7 +5675,14 @@ def test_eks_security_group_cleanup_rejects_identity_and_delete_errors(
 
     ec2 = MagicMock()
     ec2.describe_security_groups.return_value = {
-        "SecurityGroups": [{"GroupId": "sg-one", "GroupName": "one", "VpcId": "vpc-1"}]
+        "SecurityGroups": [
+            {
+                "GroupId": "sg-one",
+                "GroupName": "one",
+                "VpcId": "vpc-1",
+                "Tags": [{"Key": "aws:eks:cluster-name", "Value": "gco-us-east-1"}],
+            }
+        ]
     }
     ec2.describe_network_interfaces.return_value = {"NetworkInterfaces": []}
     ec2.delete_security_group.side_effect = _client_error("AccessDeniedException")
