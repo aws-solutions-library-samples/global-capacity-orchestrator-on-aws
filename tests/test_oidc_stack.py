@@ -718,3 +718,84 @@ class TestCDKAppEntryPoint:
         conditions = self._trust_conditions(template)
 
         assert _UPSTREAM_SUBJECT_PREFIX in json.dumps(conditions)
+
+
+_EXISTING_PROVIDER_ARN = (
+    "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+)
+
+
+class TestOIDCProviderOwnership:
+    """The account's GitHub provider may be trusted by other repositories' roles.
+
+    An account has one IAM OIDC provider per issuer URL. The stack used to
+    create it unconditionally (failing when it existed) and delete it with the
+    stack, which broke every other role that trusted it.
+    """
+
+    def test_created_provider_is_retained_on_delete_and_replace(self):
+        template = _synth_stack().to_json()
+        providers = {
+            logical_id: resource
+            for logical_id, resource in template["Resources"].items()
+            if resource["Type"] == "Custom::AWSCDKOpenIdConnectProvider"
+        }
+        ((logical_id, provider),) = providers.items()
+        assert logical_id.startswith("GitHubOIDCProvider"), "keep the construct id"
+        assert provider["DeletionPolicy"] == "Retain"
+        assert provider["UpdateReplacePolicy"] == "Retain"
+
+    def test_existing_provider_is_trusted_without_creating_one(self):
+        app = cdk.App()
+        stack = GCOGitHubOIDCStack(
+            app, "TestOIDCExistingProvider", existing_provider_arn=_EXISTING_PROVIDER_ARN
+        )
+        template = Template.from_stack(stack)
+        template.resource_count_is("Custom::AWSCDKOpenIdConnectProvider", 0)
+        # Only the CI role remains: no provider custom resource, so no provider role.
+        template.resource_count_is("AWS::IAM::Role", 1)
+        template.has_resource_properties(
+            "AWS::IAM::Role",
+            {
+                "AssumeRolePolicyDocument": {
+                    "Statement": [
+                        Match.object_like({"Principal": {"Federated": _EXISTING_PROVIDER_ARN}})
+                    ]
+                }
+            },
+        )
+        template.has_output("OIDCProviderArn", {"Value": _EXISTING_PROVIDER_ARN})
+
+    @pytest.mark.parametrize(
+        "arn",
+        [
+            "arn:aws:iam::123456789012:oidc-provider/example.com",
+            "arn:aws:iam::1234:oidc-provider/token.actions.githubusercontent.com",
+            "token.actions.githubusercontent.com",
+            "",
+            42,
+        ],
+    )
+    def test_existing_provider_arn_must_name_the_github_issuer(self, arn: object):
+        with pytest.raises(ValueError, match="github_oidc_provider_arn"):
+            GCOGitHubOIDCStack(cdk.App(), "TestOIDCBadArn", existing_provider_arn=arn)  # type: ignore[arg-type]
+
+    def test_partition_qualified_provider_arn_is_accepted(self):
+        arn = "arn:aws-us-gov:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+        template = Template.from_stack(
+            GCOGitHubOIDCStack(cdk.App(), "TestOIDCGovArn", existing_provider_arn=arn)
+        )
+        template.has_output("OIDCProviderArn", {"Value": arn})
+
+    def test_app_reads_the_existing_provider_from_context(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        template = TestCDKAppEntryPoint._run_app(
+            tmp_path, monkeypatch, {"github_oidc_provider_arn": _EXISTING_PROVIDER_ARN}
+        )
+        assert not [
+            resource
+            for resource in template["Resources"].values()
+            if resource["Type"] == "Custom::AWSCDKOpenIdConnectProvider"
+        ]
+        assert template["Outputs"]["OIDCProviderArn"]["Value"] == _EXISTING_PROVIDER_ARN

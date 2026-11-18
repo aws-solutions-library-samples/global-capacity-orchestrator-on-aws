@@ -16,6 +16,8 @@ Configuration is read from ``cdk.json`` context values:
                              immutable repositories include owner/repository IDs
     github_branch          — Branch restriction; "main" = main only (default),
                              "*" = explicit opt-in to any branch/tag
+    github_oidc_provider_arn — Optional ARN of the account's existing GitHub
+                             OIDC provider; the stack then creates none
 """
 
 import aws_cdk as cdk
@@ -30,6 +32,7 @@ github_repo = (
 )
 github_subject_prefix = app.node.try_get_context("github_subject_prefix")
 github_branch = app.node.try_get_context("github_branch") or "main"
+github_oidc_provider_arn = app.node.try_get_context("github_oidc_provider_arn")
 
 GCOGitHubOIDCStack(
     app,
@@ -37,6 +40,7 @@ GCOGitHubOIDCStack(
     github_repo=github_repo,
     github_subject_prefix=github_subject_prefix,
     github_branch=github_branch,
+    existing_provider_arn=github_oidc_provider_arn,
     description="GitHub Actions OIDC provider and CI role for GCO",
 )
 
