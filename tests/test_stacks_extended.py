@@ -2215,7 +2215,7 @@ class TestInferenceStreamingProxyBuild:
             source / "package-lock.json"
         ).read_bytes()
         run_cdk.assert_called_once_with(
-            ["synth", "gco-api-gateway", "--quiet"], capture_output=True
+            ["synth", "gco-api-gateway", "--quiet"], capture_output=True, prepare_assets=False
         )
 
     def test_failed_rebuild_preserves_previous_complete_final(self, tmp_path: Path) -> None:

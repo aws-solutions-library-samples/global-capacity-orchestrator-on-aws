@@ -2230,6 +2230,7 @@ class StackManager:
         capture_output: bool = False,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
+        prepare_assets: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         """Run a CDK command.
 
@@ -2246,6 +2247,13 @@ class StackManager:
                 pass a per-stack budget so a wedged ``cdk destroy`` (e.g. its
                 post-delete polling loop hanging after CloudFormation has
                 already finished) can't block the orchestrator forever.
+            prepare_assets: Prepare the generated Lambda assets before a
+                command that evaluates app.py (the default). ``deploy()``,
+                ``synth()`` and ``diff()`` pass ``False``: they have just
+                prepared them, and hashing the build trees again costs seconds
+                per stack. Freshness does not depend on it: app.py revalidates
+                every asset under shared locks while it synthesizes and
+                rebuilds one whose sources changed in between.
         """
         # Fail fast with an actionable message when the CDK Python toolchain
         # isn't importable (e.g. a base uvx/pip install without the [cdk]
@@ -2257,7 +2265,8 @@ class StackManager:
         # stack graph references ignored generated Lambda assets, so prepare
         # them centrally rather than relying on individual command wrappers.
         if command and command[0] in {"deploy", "destroy", "diff", "list", "synth"}:
-            self._ensure_lambda_build()
+            if prepare_assets:
+                self._ensure_lambda_build()
             # Apply registered context overrides uniformly to every
             # app-evaluating command so deploy, destroy, and the stack listing
             # all synthesize the same graph (see set_extra_cdk_context).
@@ -2358,7 +2367,7 @@ class StackManager:
         if quiet:
             cmd.append("--quiet")
 
-        result = self._run_cdk(cmd, capture_output=True)
+        result = self._run_cdk(cmd, capture_output=True, prepare_assets=False)
         if result.returncode != 0:
             raise RuntimeError(f"CDK synth failed: {result.stderr}")
         return str(result.stdout)
@@ -2370,7 +2379,7 @@ class StackManager:
         if stack_name:
             cmd.append(stack_name)
 
-        result = self._run_cdk(cmd, capture_output=True)
+        result = self._run_cdk(cmd, capture_output=True, prepare_assets=False)
         # diff returns non-zero if there are differences, which is expected
         return str(result.stdout or result.stderr)
 
@@ -2595,7 +2604,7 @@ class StackManager:
         deploy_start = datetime.now(UTC)
 
         try:
-            result = self._run_cdk(cmd, env=env, timeout=timeout_s)
+            result = self._run_cdk(cmd, env=env, timeout=timeout_s, prepare_assets=False)
             success = result.returncode == 0
         except subprocess.TimeoutExpired:
             print(

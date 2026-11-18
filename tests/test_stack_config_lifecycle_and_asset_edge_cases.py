@@ -1547,9 +1547,11 @@ def test_synth_and_diff_without_stack_names_build_expected_commands(
     )
     assert stack_manager.synth(stack_name=None, quiet=False) == "template"
     assert stack_manager.diff(stack_name=None) == "difference"
-    assert stack_manager._run_cdk.call_args_list[0] == call(["synth"], capture_output=True)
+    assert stack_manager._run_cdk.call_args_list[0] == call(
+        ["synth"], capture_output=True, prepare_assets=False
+    )
     assert stack_manager._run_cdk.call_args_list[1] == call(
-        ["diff", "--no-color"], capture_output=True
+        ["diff", "--no-color"], capture_output=True, prepare_assets=False
     )
 
 
@@ -2901,8 +2903,8 @@ def test_synth_and_diff_named_stack_include_optional_arguments(
     assert stack_manager.synth("gco-global", quiet=True) == "template"
     assert stack_manager.diff("gco-global") == "difference"
     assert stack_manager._run_cdk.call_args_list == [
-        call(["synth", "gco-global", "--quiet"], capture_output=True),
-        call(["diff", "--no-color", "gco-global"], capture_output=True),
+        call(["synth", "gco-global", "--quiet"], capture_output=True, prepare_assets=False),
+        call(["diff", "--no-color", "gco-global"], capture_output=True, prepare_assets=False),
     ]
 
 

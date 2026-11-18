@@ -1116,6 +1116,47 @@ class TestStackManagerOperations:
         mock_popen.assert_called_once()
         assert process.communicate_timeouts == [None]
 
+    def test_deploy_prepares_assets_once_per_stack(self):
+        """deploy() prepares the assets itself; its CDK run must not hash them again."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="", stderr="")
+        with (
+            patch("cli.stacks._detect_container_runtime", return_value="docker"),
+            patch.object(manager, "ensure_asset_sources_readable"),
+            patch.object(manager, "_sync_lambda_sources"),
+            patch.object(manager, "_check_and_fix_stuck_stack"),
+            patch.object(manager, "ensure_bootstrapped", return_value=True),
+            patch.object(manager, "_get_stack_status", return_value="UPDATE_COMPLETE"),
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build") as mock_prepare,
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
+            assert manager.deploy("gco-global", require_approval=False) is True
+
+        mock_prepare.assert_called_once_with()
+        assert mock_popen.call_args.args[0][:3] == ["cdk", "deploy", "gco-global"]
+
+    @pytest.mark.parametrize("method", ["synth", "diff"])
+    def test_synth_and_diff_prepare_assets_once(self, method):
+        """The CDK run behind synth()/diff() reuses the preparation they just did."""
+        from cli.stacks import StackManager
+
+        manager = StackManager(MagicMock())
+        manager._cdk_path = "cdk"
+        process = _FakePopenProcess(stdout="out", stderr="")
+        with (
+            patch.object(manager, "_ensure_cdk_toolchain"),
+            patch.object(manager, "_ensure_lambda_build") as mock_prepare,
+            patch("cli.stacks.subprocess.Popen", return_value=process) as mock_popen,
+        ):
+            assert getattr(manager, method)("gco-global") == "out"
+
+        mock_prepare.assert_called_once_with()
+        assert mock_popen.call_args.args[0][1] == method
+
     def test_list_stacks(self):
         """Test listing CDK stacks."""
         from cli.stacks import StackManager
