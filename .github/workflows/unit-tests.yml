@@ -1386,7 +1386,8 @@ jobs:
         with:
           python-version-file: ".python-version"
       - name: Install uv
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Derive the documented --python value from requires-python
         run: |
           set -euo pipefail

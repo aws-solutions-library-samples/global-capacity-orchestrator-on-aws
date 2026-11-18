@@ -99,6 +99,38 @@ jobs:
         id: chart
         run: python3 .github/scripts/validate_grafana_dashboards.py chart-version
 
+      - name: Derive the Helm pin from the production installer Dockerfile
+        # lambda/helm-installer/Dockerfile is the single source for the Helm
+        # version + checksum: this step loads HELM_VERSION / HELM_SHA256 from
+        # its authenticated RUN line, so CI installs the exact binary the
+        # installer Lambda ships and a bump edits one file only.
+        run: |
+          set -euo pipefail
+          source .github/scripts/lib_dependency_scan.sh
+          extract_helm_installer_pins lambda/helm-installer/Dockerfile | grep '^HELM_' | tr '|' '=' | tee -a "$GITHUB_ENV"
+          grep -q '^HELM_VERSION=' "$GITHUB_ENV" && grep -q '^HELM_SHA256=' "$GITHUB_ENV"
+      - name: Install Helm
+        # The pin (version + checksum) was derived from the installer
+        # Dockerfile in the previous step, so this validates against the
+        # exact authenticated binary that performs the real install.
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/helm.tar.gz"
+          install_dir="${RUNNER_TEMP}/helm-install"
+          curl --fail --show-error --location \
+            --connect-timeout 15 --max-time 60 \
+            --retry 3 --retry-all-errors --retry-max-time 180 \
+            --remove-on-error \
+            --output "${archive}" \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive}" -C "${install_dir}" \
+            --strip-components=1 --no-same-owner linux-amd64/helm
+          sudo install -m 0755 "${install_dir}/helm" /usr/local/bin/helm
+          rm -f "${archive}" "${install_dir}/helm"
+          rmdir "${install_dir}"
+          helm version --short
       - name: Resolve the Grafana image from the chart pin
         id: image
         run: |

@@ -129,6 +129,10 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      # Single-job pin, declared next to its install; the monthly deps scan
+      # compares it with pypa/pip-audit's releases (CI tooling).
+      PIP_AUDIT_VERSION: "2.10.1"
     steps:
       - name: Keep temporary files on the work disk
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
@@ -140,8 +144,9 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install pip-audit
-        run: |
-          pip install pip-audit
+        # The lock constrains the dependencies pip-audit shares with the
+        # project; the rest are pip-audit's own.
+        run: pip install -c requirements-lock.txt "pip-audit==${PIP_AUDIT_VERSION}"
       - name: Validate .pip-audit-ignore expirations
         # Every entry in .pip-audit-ignore must carry an `exp:YYYY-MM-DD`
         # marker (per the file's own rules). The script fails the job when:
@@ -155,9 +160,12 @@ jobs:
         # tests/test_pip_audit_ignore_validator.py.
         run: python3 .github/scripts/check_pip_audit_ignore.py .github/config/.pip-audit-ignore
       - name: Run pip-audit
-        # First invocation writes the artifact even on failure; the second
-        # fails the job when vulnerabilities are present. Mirrors the
-        # retired GitLab pipeline.
+        # One audit writes the JSON artifact and decides the job. The lock is
+        # pip-compile output that pins every transitive dependency exactly,
+        # so --no-deps --disable-pip audits exactly those pins without
+        # building and resolving a throwaway virtualenv (the previous two
+        # invocations each did, against the same file). On failure the
+        # findings are printed from the report, so the log still names them.
         #
         # IGNORE_FLAGS expands the project-local .pip-audit-ignore file
         # into repeated `--ignore-vuln ID` flags. pip-audit has no native
@@ -175,11 +183,22 @@ jobs:
               IGNORE_FLAGS+=(--ignore-vuln "$id")
             done < <(grep -vE '^[[:space:]]*(#|$)' .github/config/.pip-audit-ignore | awk '{print $1}')
           fi
-          pip-audit -r requirements-lock.txt --format json \
+          rc=0
+          pip-audit -r requirements-lock.txt --no-deps --disable-pip \
+            --progress-spinner off --format json \
             --output pip-audit-report.json --desc \
-            "${IGNORE_FLAGS[@]}" || true
-          pip-audit -r requirements-lock.txt --desc \
-            "${IGNORE_FLAGS[@]}"
+            "${IGNORE_FLAGS[@]}" || rc=$?
+          if [ "$rc" -ne 0 ] && [ -s pip-audit-report.json ]; then
+            python3 - <<'PY'
+          import json
+          report = json.load(open("pip-audit-report.json", encoding="utf-8"))
+          for dependency in report["dependencies"]:
+              for vuln in dependency.get("vulns", []):
+                  fixes = ", ".join(vuln.get("fix_versions", [])) or "no fix"
+                  print(f"{dependency['name']} {dependency['version']}: {vuln['id']} (fixed in {fixes})")
+          PY
+          fi
+          exit "$rc"
       - name: Upload pip-audit report
         if: always()
         uses: ./.github/actions/upload-artifact-with-retry

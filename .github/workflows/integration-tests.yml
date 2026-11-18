@@ -480,7 +480,8 @@ jobs:
         # can actually boot under claude.
         run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Boot the autopilot session to the credential boundary
         run: bash .github/scripts/autopilot_claude_code_boot_probe.sh
       - name: Upload session evidence
@@ -538,7 +539,8 @@ jobs:
         # can actually boot under codex.
         run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Boot the codex autopilot session to the credential boundary
         run: bash .github/scripts/autopilot_codex_boot_probe.sh
       - name: Upload session evidence
@@ -599,7 +601,8 @@ jobs:
         # can actually boot under opencode.
         run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Boot the opencode autopilot session to the credential boundary
         run: bash .github/scripts/autopilot_opencode_boot_probe.sh
       - name: Upload session evidence

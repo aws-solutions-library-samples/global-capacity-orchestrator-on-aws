@@ -727,6 +727,7 @@ for spec in specs:
 PY
             echo "github-release|aquasecurity/trivy|$(extract_install_trivy_pin .github/actions/install-trivy/action.yml)"
             echo "github-release|rhysd/actionlint|$(extract_workflow_env_pin ACTIONLINT_VERSION | head -1)"
+            echo "github-release|pypa/pip-audit|v$(extract_workflow_env_pin PIP_AUDIT_VERSION | head -1)"
             echo "github-release|helm/helm|$(extract_helm_installer_pins lambda/helm-installer/Dockerfile | awk -F'|' '$1=="HELM_VERSION"{print $2}')"
             installer_kubectl="$(extract_helm_installer_pins lambda/helm-installer/Dockerfile | awk -F'|' '$1=="KUBECTL_VERSION"{print $2}')"
             [ -n "$installer_kubectl" ] && echo "k8s-stable|$(printf '%s' "${installer_kubectl#v}" | cut -d. -f1-2)|$installer_kubectl"
@@ -860,6 +861,7 @@ YAML
 name: Lint
 env:
   ACTIONLINT_VERSION: "1.7.12"
+  PIP_AUDIT_VERSION: "2.10.1"
 jobs:
   ruff:
     runs-on: ubuntu-latest
@@ -1253,6 +1255,7 @@ findings_path() {
     # ...and its tag is compared like any other image's.
     [[ "$output" == *"  - hadolint/hadolint:v2.14.0-debian -> v3.14.0-debian"* ]]
     [[ "$output" == *"  - datreeio/CRDs-catalog (CRD_CATALOG_COMMIT): 0123456789ab -> 123456789abc"* ]]
+    [[ "$output" == *"  - pip-audit (PIP_AUDIT_VERSION): 2.10.1 -> v3.10.1"* ]]
     [[ "$output" == *"  - keda (keda): 2.20.2 -> 3.20.2"* ]]
     [[ "$output" == *"  - kueue (kueue): 0.19.2 -> 1.19.2"* ]]
     [[ "$output" == *"  - metrics-server: v0.9.0-eksbuild.7 -> v1.9.0-eksbuild.7"* ]]
@@ -1526,14 +1529,15 @@ STUB
 
     [ "$status" -eq 0 ]
     local why=" (GitHub API: rate limit exceeded on the anonymous 60 req/h bucket, set GITHUB_TOKEN)."
-    # The eight CI-tooling releases, the CRD catalog's main head, the two
+    # The nine CI-tooling releases, the CRD catalog's main head, the two
     # GitHub-hosted pre-commit hooks and the five GitHub-backed Dockerfile.dev
-    # pins all read api.github.com, so all sixteen go incomplete together and
-    # every line says the same thing.
+    # pins all read api.github.com, so all seventeen go incomplete together
+    # and every line says the same thing.
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Trivy (install-trivy action default) (aquasecurity/trivy)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for kind (kubernetes-sigs/kind)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for Crossplane function-go-templating (post-helm-crossplane.yaml) (crossplane-contrib/function-go-templating)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: GitHub commit lookup failed for datreeio/CRDs-catalog main${why}"* ]]
+    [[ "$output" == *"INCOMPLETE: GitHub release lookup failed for pip-audit (PIP_AUDIT_VERSION) (pypa/pip-audit)${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/astral-sh/ruff-pre-commit${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Pre-commit tag lookup failed for https://github.com/DavidAnson/markdownlint-cli2${why}"* ]]
     [[ "$output" == *"INCOMPLETE: Upstream version lookup failed for Dockerfile.dev pin AWSCLI_VERSION${why}"* ]]
@@ -1544,7 +1548,7 @@ STUB
     # Surfaces on other hosts are untouched: the npm-backed CDK pin still
     # resolves, and nothing else went incomplete.
     [[ "$output" != *"Dockerfile.dev pin CDK_VERSION"* ]]
-    [[ "$output" == *"Incomplete lookups:       16"* ]]
+    [[ "$output" == *"Incomplete lookups:       17"* ]]
     grep -qx 'scan_complete=false' "$GITHUB_OUTPUT"
     # No token was offered, so no request carried one.
     ! grep -q '\[bearer\]' "$CALLS"
@@ -1820,6 +1824,7 @@ YAML
     [[ "$output" == *"INCOMPLETE: Could not parse the kubectl pin from lambda/helm-installer/Dockerfile."* ]]
     [[ "$output" == *"INCOMPLETE: Could not parse the kind node-image pin from integration-tests.yml."* ]]
     [[ "$output" == *"INCOMPLETE: Could not parse CRD_CATALOG_COMMIT from .github/scripts/validate_k8s_manifests.py."* ]]
+    [[ "$output" == *"INCOMPLETE: Could not parse the committed version pin for pip-audit (PIP_AUDIT_VERSION)."* ]]
     [[ "$output" == *"  - pyproject.toml [build-system] requires is missing or unparseable"* ]]
     [[ "$output" == *"  - Lambda runtime pin: pyproject.toml: missing or unparseable, cannot verify Lambda pins"* ]]
     [[ "$output" == *"INCOMPLETE: Lockfile freshness validation failed; inspect its error above."* ]]

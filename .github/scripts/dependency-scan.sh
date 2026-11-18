@@ -53,7 +53,7 @@
 #     endpoint, no credentials
 #   - CI tooling the workflows install by hand: Trivy (the install-trivy
 #     composite action's version default),
-#     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
+#     actionlint (ACTIONLINT_VERSION), pip-audit (PIP_AUDIT_VERSION), Helm and kubectl (HELM_VERSION /
 #     KUBECTL_VERSION), kubeconform (KUBECONFORM_VERSION), Calico
 #     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), kind + its
 #     node image, the Crossplane function-go-templating package
@@ -2197,6 +2197,12 @@ check_github_tool "Trivy (install-trivy action default)" "$TRIVY_PIN" "aquasecur
 ACTIONLINT_PIN="$(extract_workflow_env_pin ACTIONLINT_VERSION | head -1)"
 check_github_tool "actionlint (ACTIONLINT_VERSION)" "$ACTIONLINT_PIN" "rhysd/actionlint" \
   "https://github.com/rhysd/actionlint/releases"
+
+# pip-audit (pypa/pip-audit) — PIP_AUDIT_VERSION, the single-job pin
+# security:pip-audit:deps installs to audit requirements-lock.txt.
+PIP_AUDIT_PIN="$(extract_workflow_env_pin PIP_AUDIT_VERSION | head -1)"
+check_github_tool "pip-audit (PIP_AUDIT_VERSION)" "$PIP_AUDIT_PIN" "pypa/pip-audit" \
+  "https://github.com/pypa/pip-audit/releases"
 
 # Helm (helm/helm) — the authenticated RUN-line pin in
 # lambda/helm-installer/Dockerfile, the single source every CI job derives

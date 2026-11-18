@@ -2973,3 +2973,89 @@ def test_ci_md_names_every_permission_beyond_contents_read() -> None:
                     missing.append(f"{workflow_path.name}: {scope}: {level}")
     assert not missing, missing
 
+
+_HELM_COMMAND = re.compile(
+    r"(?:^|[\s;&|(])helm\s+(?:repo|template|install|upgrade|show|search|pull|dependency)\b",
+    re.MULTILINE,
+)
+
+
+def test_jobs_that_run_helm_install_the_installer_pinned_helm_first() -> None:
+    """Finding C17: grafana-dashboards.yml rendered kube-prometheus-stack with
+    whatever helm the runner image shipped, while every other job installs the
+    authenticated Helm release lambda/helm-installer/Dockerfile pins. Any job
+    step that runs helm must come after a step that downloads that release
+    and checks its SHA-256."""
+    offenders = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            installed = False
+            for step in job.get("steps") or []:
+                run = step.get("run") or ""
+                if "get.helm.sh/helm-${HELM_VERSION}" in run and "sha256sum -c" in run:
+                    installed = True
+                elif "docker run" in run and "helm-installer:ci" in run:
+                    continue  # the installer image's own, Dockerfile-pinned helm
+                elif _HELM_COMMAND.search(run) and not installed:
+                    offenders.append(f"{path.name}:{job_id}:{step.get('name')}")
+    assert not offenders, offenders
+    assert "extract_helm_installer_pins" in _read(".github/workflows/grafana-dashboards.yml")
+
+
+def _all_steps(document: dict | None) -> list[dict]:
+    """Every step of a workflow's jobs, or of a composite action."""
+    if not isinstance(document, dict):
+        return []
+    steps = list((document.get("runs") or {}).get("steps") or [])
+    for job in (document.get("jobs") or {}).values():
+        steps.extend(job.get("steps") or [])
+    return [step for step in steps if isinstance(step, dict)]
+
+
+def test_ci_installs_uv_at_the_dockerfile_dev_pin() -> None:
+    """Finding C17: four jobs ran ``pip install uv`` (whatever PyPI served)
+    while Dockerfile.dev pins UV_VERSION and the deps scan tracks that pin.
+    Every uv install goes through use-pinned-uv.sh, which reads it."""
+    installs = []
+    for path in sorted((ROOT / ".github").rglob("*.yml")):
+        for step in _all_steps(yaml.safe_load(path.read_text(encoding="utf-8"))):
+            run = step.get("run") or ""
+            assert not re.search(r"pip install\s+['\"]?uv\b", run), f"{path}: {run}"
+            if "use-pinned-uv.sh" in run:
+                installs.append(path.name)
+    assert sorted(installs) == ["integration-tests.yml"] * 3 + ["unit-tests.yml"]
+    assert re.search(r"^ARG UV_VERSION=\d+\.\d+\.\d+$", _read("Dockerfile.dev"), re.MULTILINE)
+
+
+def test_pip_audit_is_pinned_and_audits_the_lock_once() -> None:
+    """Finding C17: pip-audit was installed unpinned and run twice over the
+    same lock, each run resolving the lock into a fresh virtualenv. One
+    --no-deps --disable-pip run over the fully pinned lock now writes the
+    report and decides the job."""
+    job = yaml.safe_load(_read(".github/workflows/security.yml"))["jobs"]["security-pip-audit-deps"]
+    assert re.fullmatch(r"\d+\.\d+\.\d+", job["env"]["PIP_AUDIT_VERSION"])
+    runs = "\n".join(step.get("run") or "" for step in job["steps"])
+    assert 'pip install -c requirements-lock.txt "pip-audit==${PIP_AUDIT_VERSION}"' in runs
+    audits = re.findall(r"^\s*pip-audit -r requirements-lock\.txt[^\n]*", runs, re.MULTILINE)
+    assert len(audits) == 1, audits
+    assert "--no-deps --disable-pip" in audits[0]
+    assert "--output pip-audit-report.json" in runs
+    assert "|| true" not in runs
+    # Every requirement in the lock is an exact pin, which --no-deps needs.
+    requirements = [
+        line
+        for line in _read("requirements-lock.txt").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert requirements
+    assert all(re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*==\S+$", line) for line in requirements)
+
+
+def test_cve_scan_job_installs_nothing_trivy_does_not_need() -> None:
+    """Finding C17: the cve-scan job installed the project's security extra
+    although it only runs Trivy, which reads requirements-lock.txt itself."""
+    job = yaml.safe_load(_read(".github/workflows/cve-scan.yml"))["jobs"]["cve-scan"]
+    for step in job["steps"]:
+        assert "pip install" not in (step.get("run") or ""), step.get("name")
+        assert not str(step.get("uses", "")).startswith("actions/setup-python@")
