@@ -45,7 +45,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 from typing import Any, NoReturn, TypedDict
 from urllib.parse import urlsplit
@@ -454,10 +454,11 @@ ENDPOINT_TLS_PROXY_DRAIN_SECONDS = MODEL_POD_TERMINATION_GRACE_SECONDS - 5
 SKIP_CONTAINERS_ANNOTATION = "eks.amazonaws.com/skip-containers"
 
 # Digest of the rendered sidecar and its volumes, stamped on the pod template.
-# Reconcile patches a Deployment in place only when the digest differs, which
-# is how endpoints created before the sidecar existed pick it up, and how an
-# image override or model-port change reaches running pods without rewriting
-# unchanged templates on every pass.
+# Reconcile patches a Deployment in place only when the stamp does not match the
+# rendered sidecar (EndpointTLSProxy.matches_stamp), which is how endpoints
+# created before the sidecar existed pick it up, and how an image override or
+# model-port change reaches running pods without rewriting unchanged templates
+# on every pass.
 ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION = "gco.io/endpoint-tls-proxy-digest"
 
 # Digest of the rendered ``mooncake.json``, stamped on every Mooncake role pod
@@ -1071,6 +1072,122 @@ def _reject_bootstrap_window_collision(base_port: int) -> None:
         )
 
 
+# Every field kubernetes client 37.0.1's ``to_dict()`` emits for each model the
+# sidecar renders, ``None`` when unset. GCO v8.23.0 and earlier hashed that form
+# (v8.22.x under client 36.0.3, which lacks the fields in
+# _CLIENT_37_ADDED_SIDECAR_FIELDS), so the shape of their digest followed the
+# client's model schema. Frozen here, the stamps they wrote stay recognizable
+# whatever client this monitor runs (see _released_tls_proxy_digests).
+_CLIENT_37_SIDECAR_FIELDS: dict[str, tuple[str, ...]] = {
+    model: tuple(fields.split())
+    for model, fields in {
+        "V1Container": (
+            "args command env env_from image image_pull_policy lifecycle liveness_probe name"
+            " ports readiness_probe resize_policy resources restart_policy restart_policy_rules"
+            " security_context startup_probe stdin stdin_once termination_message_path"
+            " termination_message_policy tty volume_devices volume_mounts working_dir"
+        ),
+        "V1EnvVar": "name value value_from",
+        "V1Probe": (
+            "_exec failure_threshold grpc http_get initial_delay_seconds period_seconds"
+            " success_threshold tcp_socket termination_grace_period_seconds timeout_seconds"
+        ),
+        "V1TCPSocketAction": "host port",
+        "V1ContainerPort": "container_port host_ip host_port name protocol",
+        "V1ResourceRequirements": "claims limits requests",
+        "V1SecurityContext": (
+            "allow_privilege_escalation app_armor_profile capabilities privileged proc_mount"
+            " read_only_root_filesystem run_as_group run_as_non_root run_as_user"
+            " se_linux_options seccomp_profile windows_options"
+        ),
+        "V1Capabilities": "add drop",
+        "V1SeccompProfile": "localhost_profile type",
+        "V1VolumeMount": (
+            "bind_mount_options mount_path mount_propagation name read_only recursive_read_only"
+            " sub_path sub_path_expr"
+        ),
+        "V1Volume": (
+            "aws_elastic_block_store azure_disk azure_file cephfs cinder config_map csi"
+            " downward_api empty_dir ephemeral fc flex_volume flocker gce_persistent_disk"
+            " git_repo glusterfs host_path image iscsi name nfs persistent_volume_claim"
+            " photon_persistent_disk portworx_volume projected quobyte rbd scale_io secret"
+            " storageos vsphere_volume"
+        ),
+        "V1SecretVolumeSource": "default_mode default_user items optional secret_name",
+        "V1ConfigMapVolumeSource": "default_mode default_user items name optional",
+    }.items()
+}
+
+# The fields above that client 37.0.1 added over 36.0.3.
+_CLIENT_37_ADDED_SIDECAR_FIELDS = frozenset(
+    {
+        ("V1VolumeMount", "bind_mount_options"),
+        ("V1SecretVolumeSource", "default_user"),
+        ("V1ConfigMapVolumeSource", "default_user"),
+    }
+)
+
+_CLIENT_36_SIDECAR_FIELDS: dict[str, tuple[str, ...]] = {
+    model: tuple(name for name in fields if (model, name) not in _CLIENT_37_ADDED_SIDECAR_FIELDS)
+    for model, fields in _CLIENT_37_SIDECAR_FIELDS.items()
+}
+
+
+@cache
+def _wire_serializer() -> client.ApiClient:
+    """A client used only for its serializer; it never sends a request."""
+    return client.ApiClient()
+
+
+def _sidecar_digest(rendered: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(rendered, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _released_to_dict(value: Any, fields: Mapping[str, tuple[str, ...]]) -> Any:
+    """``value`` as a client's ``to_dict()`` rendered it, with ``fields`` per model.
+
+    Raises:
+        KeyError: For a model ``fields`` does not describe.
+    """
+    if isinstance(value, list | tuple):
+        return [_released_to_dict(item, fields) for item in value]
+    if isinstance(value, dict):
+        return {key: _released_to_dict(item, fields) for key, item in value.items()}
+    if value is None or isinstance(value, str | int | float):
+        return value
+    return {
+        name: _released_to_dict(getattr(value, name, None), fields)
+        for name in fields[type(value).__name__]
+    }
+
+
+def _released_tls_proxy_digests(
+    container: client.V1Container, volumes: tuple[client.V1Volume, ...]
+) -> frozenset[str]:
+    """The digests GCO v8.22.x and v8.23.0 stamped for this same sidecar.
+
+    Those releases hashed the client's ``to_dict()``, which lists every field
+    the client declares, so one sidecar hashed differently under client 36.0.3
+    (v8.22.x) and 37.0.1 (v8.23.0). Both forms are rebuilt from the frozen
+    field lists; a sidecar holding a model those releases never rendered has no
+    released digest.
+    """
+    digests = set()
+    for fields in (_CLIENT_36_SIDECAR_FIELDS, _CLIENT_37_SIDECAR_FIELDS):
+        try:
+            rendered = {
+                "container": _released_to_dict(container, fields),
+                "volumes": _released_to_dict(volumes, fields),
+                "termination_grace_period_seconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
+            }
+        except KeyError:
+            return frozenset()
+        digests.add(_sidecar_digest(rendered))
+    return frozenset(digests)
+
+
 @dataclass(frozen=True)
 class EndpointTLSProxy:
     """The TLS sidecar a managed model pod carries, with its volumes and digest."""
@@ -1078,6 +1195,17 @@ class EndpointTLSProxy:
     container: client.V1Container
     volumes: tuple[client.V1Volume, ...]
     digest: str
+
+    def matches_stamp(self, stamp: str | None) -> bool:
+        """Whether a pod template stamped ``stamp`` already runs this sidecar.
+
+        True for :attr:`digest`, and for the digest GCO v8.22.x or v8.23.0
+        stamped for the same rendering: their digest followed the kubernetes
+        client's model schema, and restamping would roll the pod for nothing.
+        """
+        return stamp == self.digest or stamp in _released_tls_proxy_digests(
+            self.container, self.volumes
+        )
 
 
 def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> EndpointTLSProxy:
@@ -1097,7 +1225,9 @@ def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> Endpoi
     The digest covers everything rendered here plus the pod grace period, so a
     changed image, upstream port, or sidecar shape is detected on existing
     Deployments; the program's source is deliberately excluded (see
-    :meth:`InferenceMonitor._ensure_tls_proxy_configmap`).
+    :meth:`InferenceMonitor._ensure_tls_proxy_configmap`). It hashes the wire
+    form, the JSON the API server receives with unset fields omitted, so a
+    kubernetes client that declares new fields renders the same digest.
     """
     container = client.V1Container(
         name=ENDPOINT_TLS_PROXY_CONTAINER,
@@ -1180,15 +1310,22 @@ def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> Endpoi
             ),
         ),
     )
-    rendered = {
-        "container": container.to_dict(),
-        "volumes": [volume.to_dict() for volume in volumes],
-        "termination_grace_period_seconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
-    }
-    digest = hashlib.sha256(
-        json.dumps(rendered, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    serializer = _wire_serializer()
+    digest = _sidecar_digest(
+        {
+            "container": serializer.sanitize_for_serialization(container),
+            "volumes": serializer.sanitize_for_serialization(list(volumes)),
+            "terminationGracePeriodSeconds": MODEL_POD_TERMINATION_GRACE_SECONDS,
+        }
+    )
     return EndpointTLSProxy(container=container, volumes=volumes, digest=digest)
+
+
+def _pod_template_annotations(deployment: Any) -> dict[str, str]:
+    """A copy of a live Deployment's pod-template annotations (empty when it has none)."""
+    template = getattr(getattr(deployment, "spec", None), "template", None)
+    annotations = getattr(getattr(template, "metadata", None), "annotations", None)
+    return dict(annotations) if isinstance(annotations, dict) else {}
 
 
 def _endpoint_tls_pod_annotations(
@@ -4903,6 +5040,9 @@ class InferenceMonitor:
             liveness_probe=_pd_proxy_health_probe(liveness=True),
         )
         sidecar = build_endpoint_tls_proxy(PD_PROXY_PORT, _tls_proxy_config_map_name(name))
+        template_annotations = _endpoint_tls_pod_annotations(
+            self._provenance_annotations(), sidecar
+        )
 
         deployment = client.V1Deployment(
             metadata=client.V1ObjectMeta(
@@ -4916,10 +5056,7 @@ class InferenceMonitor:
                 selector=client.V1LabelSelector(match_labels={"app": proxy_name}),
                 template=client.V1PodTemplateSpec(
                     metadata=client.V1ObjectMeta(
-                        labels=dict(labels),
-                        annotations=_endpoint_tls_pod_annotations(
-                            self._provenance_annotations(), sidecar
-                        ),
+                        labels=dict(labels), annotations=template_annotations
                     ),
                     spec=client.V1PodSpec(
                         service_account_name="gco-service-account",
@@ -4988,6 +5125,16 @@ class InferenceMonitor:
                 ) from error
             _metadata, _annotations, _uid, resource_version = self._object_metadata(existing)
             present(deployment.metadata, "deployment.metadata").resource_version = resource_version
+            live_stamp = _pod_template_annotations(existing).get(
+                ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION
+            )
+            if live_stamp is not None and sidecar.matches_stamp(live_stamp):
+                # Keep the stamp an earlier release wrote for this same sidecar:
+                # rewriting it would change the pod template and roll the proxy.
+                template_annotations[ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION] = live_stamp
+                present(deployment.spec, "deployment.spec").template.metadata = client.V1ObjectMeta(
+                    labels=dict(labels), annotations=template_annotations
+                )
             self._assert_mutation_authority()
             # A JSON merge patch replaces the containers and volumes lists
             # wholesale (a strategic merge would key them by name and merge each
@@ -5309,13 +5456,15 @@ class InferenceMonitor:
 
         Deployments created before the sidecar existed (or rendered with a
         different sidecar image or upstream port) are patched when the live pod
-        template lacks the sidecar or carries a different
-        ``ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION``. A strategic merge adds the
-        sidecar container and its volumes by name, merges the annotations, and
-        leaves the model container untouched: its image, port, and probes stay
-        exactly as reconciled. The observed resourceVersion makes the patch a
-        compare-and-swap; the resulting rollout replaces pods like any other
-        template change.
+        template lacks the sidecar or carries an
+        ``ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION`` that does not match it (see
+        :meth:`EndpointTLSProxy.matches_stamp`: the stamp an earlier release
+        wrote for the same sidecar matches, and is left in place). A strategic
+        merge adds the sidecar container and its volumes by name, merges the
+        annotations, and leaves the model container untouched: its image, port,
+        and probes stay exactly as reconciled. The observed resourceVersion
+        makes the patch a compare-and-swap; the resulting rollout replaces pods
+        like any other template change.
 
         Args:
             deploy_name: The Deployment to converge.
@@ -5344,7 +5493,9 @@ class InferenceMonitor:
             getattr(container, "name", None) == ENDPOINT_TLS_PROXY_CONTAINER
             for container in containers
         )
-        if has_sidecar and annotations.get(ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION) == sidecar.digest:
+        if has_sidecar and sidecar.matches_stamp(
+            annotations.get(ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION)
+        ):
             return False
 
         _metadata, _annotations, _uid, resource_version = self._object_metadata(deployment)

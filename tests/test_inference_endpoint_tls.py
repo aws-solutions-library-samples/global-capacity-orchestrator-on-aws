@@ -60,12 +60,14 @@ from gco.services.inference_monitor import (
     PD_PROXY_CA_FILE,
     PD_PROXY_PORT,
     SKIP_CONTAINERS_ANNOTATION,
+    EndpointTLSProxy,
     InferenceMonitor,
     ReconcileFencedError,
     ResourceCleanupResult,
     _merge_skip_containers,
     _model_server_port,
     _pd_proxy_health_probe,
+    _released_tls_proxy_digests,
     _service_publishes_only_tls,
     build_endpoint_tls_proxy,
 )
@@ -1428,6 +1430,173 @@ def test_sidecar_digest_is_stable_and_tracks_every_rendered_input() -> None:
     assert build_endpoint_tls_proxy(8000, TLS_PROXY_CONFIG_MAP).digest == base.digest
     assert build_endpoint_tls_proxy(8001, TLS_PROXY_CONFIG_MAP).digest != base.digest
     assert build_endpoint_tls_proxy(8000, "other-tls-proxy").digest != base.digest
+
+
+# ---------------------------------------------------------------------------
+# Upgrading from a release whose digest followed the client's model schema
+# ---------------------------------------------------------------------------
+
+# The sidecar image v8.22.x and v8.23.0 pinned, and the digest each stamped on
+# the pods of endpoint "chat" by model port. Every value was computed by running
+# that tag's own build_endpoint_tls_proxy under the kubernetes client it shipped
+# with (v8.22.x: 36.0.3, v8.23.0: 37.0.1). Both hashed the client's to_dict(),
+# which lists every declared field, so one sidecar carries a different stamp
+# under each client: 37.0.1 declares four more, all unset here.
+RELEASED_SIDECAR_IMAGE = (
+    "public.ecr.aws/docker/library/python:3.14.9-slim"
+    "@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8"
+)
+RELEASED_SIDECAR_STAMPS = {
+    ("v8.22.x", 8000): "ae7a2e54b218a24ab8fc74b2e0b7c82576ec46c9b84546f5af915d9ff1dff77d",
+    ("v8.22.x", 9000): "70a57d2cbcffc23380feb143485d266155dfcbfe759e2f55702d0fd0b8d177ab",
+    ("v8.23.0", 8000): "705d907bb8cb2328f6328cd10dd2e33082df223454e3ac8f5220b6e82d3d7adf",
+    ("v8.23.0", 9000): "8e68b1c479eb1f5c2578f4b8fc1838deef239522688886e9a15128ca5a5ebece",
+}
+# This release's digest of the same sidecars, computed under both clients.
+CURRENT_SIDECAR_DIGESTS = {
+    8000: "578bb585cfd2094afa825addbde0e378d16e5a64805b38218f92de711d9f5a56",
+    9000: "3660ea388b9a831f511bb883186a8328165b9e73ad4d3da7515c1b1005e610b1",
+}
+
+
+@pytest.mark.parametrize("port", sorted(CURRENT_SIDECAR_DIGESTS))
+def test_sidecar_digest_does_not_follow_the_client_model_schema(
+    monkeypatch: pytest.MonkeyPatch, port: int
+) -> None:
+    """The digest hashes the wire form, which a client adding fields leaves unchanged."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+
+    assert (
+        build_endpoint_tls_proxy(port, TLS_PROXY_CONFIG_MAP).digest
+        == (CURRENT_SIDECAR_DIGESTS[port])
+    )
+
+
+@pytest.mark.parametrize("port", sorted(CURRENT_SIDECAR_DIGESTS))
+def test_released_stamps_are_rebuilt_without_the_released_clients(
+    monkeypatch: pytest.MonkeyPatch, port: int
+) -> None:
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    sidecar = build_endpoint_tls_proxy(port, TLS_PROXY_CONFIG_MAP)
+
+    assert _released_tls_proxy_digests(sidecar.container, sidecar.volumes) == {
+        RELEASED_SIDECAR_STAMPS["v8.22.x", port],
+        RELEASED_SIDECAR_STAMPS["v8.23.0", port],
+    }
+
+
+@pytest.mark.parametrize(("release", "port"), sorted(RELEASED_SIDECAR_STAMPS))
+def test_sidecar_stamped_by_an_earlier_release_is_not_rolled(
+    monitor: InferenceMonitor, monkeypatch: pytest.MonkeyPatch, release: str, port: int
+) -> None:
+    """Upgrading from v8.22.x or v8.23.0 writes nothing to a pod whose sidecar is unchanged."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    sidecar = build_endpoint_tls_proxy(port, TLS_PROXY_CONFIG_MAP)
+    stamp = RELEASED_SIDECAR_STAMPS[release, port]
+    assert stamp != sidecar.digest
+    deployment = _live_deployment(
+        "chat",
+        containers=[_model_container(port), sidecar.container],
+        annotations={ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: stamp},
+    )
+
+    patched = monitor._converge_endpoint_tls_proxy(
+        "chat", NAMESPACE, deployment, config_map_name=TLS_PROXY_CONFIG_MAP, fallback_port=8000
+    )
+
+    assert patched is False
+    monitor.apps_v1.patch_namespaced_deployment.assert_not_called()
+
+
+@pytest.mark.parametrize("release", ["v8.22.x", "v8.23.0"])
+@pytest.mark.parametrize("change", ["model-port", "image"])
+def test_changed_sidecar_under_an_earlier_release_stamp_is_rolled(
+    monitor: InferenceMonitor, monkeypatch: pytest.MonkeyPatch, release: str, change: str
+) -> None:
+    """A released stamp matches only its own rendering: a real change still rolls."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    released = build_endpoint_tls_proxy(8000, TLS_PROXY_CONFIG_MAP)
+    model_port = 9000 if change == "model-port" else 8000
+    if change == "image":
+        monkeypatch.setenv(
+            ENDPOINT_TLS_PROXY_IMAGE_ENV,
+            "registry.example.com/mirror/python:3.14.9-slim@sha256:" + "c" * 64,
+        )
+    deployment = _live_deployment(
+        "chat",
+        containers=[_model_container(model_port), released.container],
+        annotations={ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: RELEASED_SIDECAR_STAMPS[release, 8000]},
+    )
+
+    patched = monitor._converge_endpoint_tls_proxy(
+        "chat", NAMESPACE, deployment, config_map_name=TLS_PROXY_CONFIG_MAP, fallback_port=8000
+    )
+
+    assert patched is True
+    expected = build_endpoint_tls_proxy(model_port, TLS_PROXY_CONFIG_MAP)
+    template = _deployment_patch(monitor, "chat")["spec"]["template"]
+    assert template["metadata"]["annotations"][ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION] == (
+        expected.digest
+    )
+    assert template["spec"]["containers"] == [_wire(expected.container)]
+
+
+def test_sidecar_holding_a_model_no_release_rendered_has_no_released_stamp() -> None:
+    sidecar = build_endpoint_tls_proxy(8000, TLS_PROXY_CONFIG_MAP)
+    container = client.V1Container(
+        name=ENDPOINT_TLS_PROXY_CONTAINER,
+        lifecycle=client.V1Lifecycle(
+            pre_stop=client.V1LifecycleHandler(sleep=client.V1SleepAction(seconds=5))
+        ),
+    )
+
+    assert _released_tls_proxy_digests(container, sidecar.volumes) == frozenset()
+    assert not EndpointTLSProxy(container, sidecar.volumes, "d" * 64).matches_stamp(
+        RELEASED_SIDECAR_STAMPS["v8.23.0", 8000]
+    )
+
+
+@pytest.mark.parametrize(
+    ("stamp", "kept"),
+    [
+        (RELEASED_SIDECAR_STAMPS["v8.22.x", 8000], True),
+        (RELEASED_SIDECAR_STAMPS["v8.23.0", 8000], True),
+        ("0" * 64, False),
+    ],
+    ids=["v8.22.x-stamp", "v8.23.0-stamp", "stale-stamp"],
+)
+def test_pd_proxy_merge_patch_keeps_a_released_stamp_of_the_same_sidecar(
+    monitor: InferenceMonitor, monkeypatch: pytest.MonkeyPatch, stamp: str, kept: bool
+) -> None:
+    """The PD proxy is merge-patched every pass; that patch must not restamp its pods."""
+    monkeypatch.setenv(ENDPOINT_TLS_PROXY_IMAGE_ENV, RELEASED_SIDECAR_IMAGE)
+    _admit_named_admin_secret(monitor)
+    sidecar = build_endpoint_tls_proxy(PD_PROXY_PORT, TLS_PROXY_CONFIG_MAP)
+    monitor.apps_v1.create_namespaced_deployment.side_effect = ApiException(status=409)
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {
+            "chat-proxy": _live_deployment(
+                "chat-proxy",
+                containers=[_model_container(PD_PROXY_PORT), sidecar.container],
+                annotations={ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION: stamp},
+            )
+        }
+    )
+    monitor.core_v1.create_namespaced_service.side_effect = ApiException(status=409)
+    monitor.core_v1.read_namespaced_service.side_effect = _by_name(
+        {"chat-proxy": _live_service("chat-proxy", ports=_tls_ports())}
+    )
+
+    monitor._create_pd_proxy("chat", NAMESPACE, _pd_spec(), {"lifecycle_id": "life-1"})
+
+    [patched] = monitor.apps_v1.patch_namespaced_deployment.call_args_list
+    template = _wire(patched.kwargs["body"])["spec"]["template"]
+    assert template["metadata"]["annotations"][ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION] == (
+        stamp if kept else sidecar.digest
+    )
+    assert template["metadata"]["annotations"][SKIP_CONTAINERS_ANNOTATION] == (
+        ENDPOINT_TLS_PROXY_CONTAINER
+    )
 
 
 # ---------------------------------------------------------------------------

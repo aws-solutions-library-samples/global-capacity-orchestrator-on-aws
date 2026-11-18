@@ -192,7 +192,12 @@ proxy from the moment the upgraded proxy dials 8443 until the endpoint's first
 TLS-capable pod is Ready; the new pod needs a free GPU and a model load, so
 plan the upgrade like an image update. A later change to the sidecar program
 alone reaches running sidecars at their next restart and does not roll GPU
-pods. See [UPGRADING.md](UPGRADING.md#in-cluster-tls-and-tracing).
+pods. The digest hashes the sidecar as the API server receives it, unset
+fields omitted, so a Kubernetes client upgrade that adds model fields does not
+change it either; the stamps v8.22.x and v8.23.0 wrote (their digest followed
+the client's model schema) are recognized and left in place, so upgrading from
+either rolls no pod whose sidecar is unchanged.
+See [UPGRADING.md](UPGRADING.md#in-cluster-tls-and-tracing).
 
 ### Self-Healing
 
