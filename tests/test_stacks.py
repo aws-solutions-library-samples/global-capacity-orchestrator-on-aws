@@ -643,6 +643,137 @@ class TestAssetLockSharedFirst:
         finally:
             holder.close()
 
+    def test_waiting_publisher_stops_once_another_publish_is_fresh(self, tmp_path, monkeypatch):
+        """A publisher queued behind another's rebuild does not starve.
+
+        Several pytest workers start against a stale asset; one rebuilds it,
+        and every worker that then sees it fresh holds a shared lock for its
+        whole session (the lock held here for the whole test). A worker
+        still waiting for the exclusive lock could only time out, failing
+        every test on it. It must notice the published build and return.
+        """
+        import time
+
+        import cli.stacks as stacks_module
+
+        monkeypatch.setenv("GCO_ASSET_LOCK_TIMEOUT_SECONDS", "10")
+        monkeypatch.setattr(stacks_module, "_ASSET_PUBLISHED_RECHECK_SECONDS", 0.05)
+        source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "old-version"
+        )
+        (source_dir / "handler.py").write_text("new-version", encoding="utf-8")
+        failures: list[BaseException] = []
+
+        def publish_elsewhere() -> None:
+            try:
+                time.sleep(0.3)
+                staging_dir = TestCdkAssetConsumerLocking._stage_helm_asset(
+                    stacks_module,
+                    source_dir,
+                    build_dir,
+                    "new-version",
+                    update_source=False,
+                )
+                stacks_module._publish_staged_asset(staging_dir, build_dir)
+            except BaseException as exc:  # pragma: no cover - surfaced by assertion below
+                failures.append(exc)
+
+        def forbidden_builder(staging_dir: Path) -> None:
+            raise AssertionError("the published build must be used, not rebuilt")
+
+        holder = self._hold_shared_lock(stacks_module, build_dir)
+        publisher = Thread(target=publish_elsewhere)
+        try:
+            publisher.start()
+            started = time.monotonic()
+            changed = stacks_module._prepare_lambda_asset(
+                source_dir,
+                build_dir,
+                source_inputs=None,
+                display_name="helm-installer",
+                builder=forbidden_builder,
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            publisher.join(5)
+            holder.close()
+
+        assert failures == []
+        assert changed is False
+        assert elapsed < 5
+        assert (build_dir / "handler.py").read_text(encoding="utf-8") == "new-version"
+
+    def test_waiting_publisher_still_times_out_when_nothing_is_published(
+        self, tmp_path, monkeypatch
+    ):
+        """The re-checks keep the bounded wait: a stale asset still times out."""
+        import cli.stacks as stacks_module
+
+        monkeypatch.setenv("GCO_ASSET_LOCK_TIMEOUT_SECONDS", "0.5")
+        monkeypatch.setattr(stacks_module, "_ASSET_PUBLISHED_RECHECK_SECONDS", 0.05)
+        source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "old-version"
+        )
+        (source_dir / "handler.py").write_text("new-version", encoding="utf-8")
+        real_is_fresh = stacks_module._asset_build_is_fresh_unlocked
+        checks: list[Path] = []
+
+        def counted_is_fresh(source: Path, build: Path, *, source_inputs):
+            checks.append(build)
+            return real_is_fresh(source, build, source_inputs=source_inputs)
+
+        def forbidden_builder(staging_dir: Path) -> None:
+            raise AssertionError("no exclusive lock, so nothing may be built")
+
+        holder = self._hold_shared_lock(stacks_module, build_dir)
+        try:
+            with (
+                patch.object(
+                    stacks_module, "_asset_build_is_fresh_unlocked", side_effect=counted_is_fresh
+                ),
+                pytest.raises(TimeoutError, match="GCO_ASSET_LOCK_TIMEOUT_SECONDS"),
+            ):
+                stacks_module._prepare_lambda_asset(
+                    source_dir,
+                    build_dir,
+                    source_inputs=None,
+                    display_name="helm-installer",
+                    builder=forbidden_builder,
+                )
+        finally:
+            holder.close()
+
+        # The shared check before the wait, then re-checks while waiting.
+        assert len(checks) >= 3
+        assert set(checks) == {build_dir}
+
+    def test_published_check_reads_nothing_while_a_publish_holds_the_lock(
+        self, tmp_path, monkeypatch
+    ):
+        """A publisher mid-rename holds the exclusive lock: that is "not yet"."""
+        import fcntl
+
+        import cli.stacks as stacks_module
+
+        monkeypatch.setattr(stacks_module, "_ASSET_PUBLISHED_RECHECK_SECONDS", 0.0)
+        source_dir, build_dir = TestCdkAssetConsumerLocking._write_fresh_helm_asset(
+            stacks_module, tmp_path, "fresh-version"
+        )
+        published = stacks_module._published_while_waiting(
+            source_dir, build_dir, source_inputs=None
+        )
+        lock_path = build_dir.with_name(f".{build_dir.name}.lock")
+        with lock_path.open("a+b") as publisher_lock:
+            fcntl.flock(publisher_lock.fileno(), fcntl.LOCK_EX)
+            with patch.object(
+                stacks_module,
+                "_asset_build_is_fresh_unlocked",
+                side_effect=AssertionError("must not read during a publish"),
+            ):
+                assert published() is False
+
+        assert published() is True
+
 
 class TestStackInfo:
     """Tests for StackInfo dataclass."""

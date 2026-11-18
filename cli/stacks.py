@@ -132,6 +132,10 @@ _LAMBDA_ZIP_WARN_FRACTION = 0.9
 #: How many of a package's largest top-level directories a size report names.
 _LAMBDA_ZIP_SIZE_REPORT_DIRECTORIES = 5
 _FILE_LOCK_RETRY_SECONDS = 0.05
+#: How often a publisher waiting for the exclusive asset lock checks whether
+#: another process published the asset meanwhile. The check digests the source
+#: and build trees, so it runs far less often than the lock retries.
+_ASSET_PUBLISHED_RECHECK_SECONDS = 2.0
 # 15 minutes: comfortably above the longest legitimate hold (a cold publisher
 # rebuild, minutes) while bounding the pathological one (an abandoned pytest
 # session's session-long shared locks, indefinite).
@@ -681,14 +685,20 @@ def _acquire_posix_flock(
     lock_name: object,
     exclusive: bool,
     purpose: _FileLockPurpose,
-) -> None:
-    """Acquire one POSIX flock with the shared warning and timeout contract."""
+    stop_waiting: Callable[[], bool] | None = None,
+) -> bool:
+    """Acquire one POSIX flock with the shared warning and timeout contract.
+
+    Returns True once the lock is held. ``stop_waiting`` is asked after each
+    contended retry; when it returns True the wait ends and False is returned
+    with nothing locked.
+    """
     import fcntl
 
     operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     try:
         fcntl.flock(lock_fd, operation | fcntl.LOCK_NB)
-        return
+        return True
     except OSError as exc:
         if not _posix_lock_is_contended(exc):
             raise
@@ -704,10 +714,12 @@ def _acquire_posix_flock(
     while True:
         try:
             fcntl.flock(lock_fd, operation | fcntl.LOCK_NB)
-            return
+            return True
         except OSError as exc:
             if not _posix_lock_is_contended(exc):
                 raise
+            if stop_waiting is not None and stop_waiting():
+                return False
             if time.monotonic() >= deadline:
                 _raise_file_lock_timeout(
                     lock_name,
@@ -722,13 +734,16 @@ def _acquire_file_lock(
     *,
     exclusive: bool,
     purpose: _FileLockPurpose,
-) -> None:
+    stop_waiting: Callable[[], bool] | None = None,
+) -> bool:
     """Acquire a platform-native interprocess lock, loudly and boundedly.
 
     The first attempt is non-blocking. On contention a purpose-specific warning
     names the lock file, then acquisition polls until the env-tunable deadline
     so a stuck holder produces an actionable error instead of an indefinite
-    silent hang.
+    silent hang. Returns True once the lock is held, or False, with nothing
+    locked, when ``stop_waiting`` (asked after each contended retry) returns
+    True.
     """
     if os.name == "nt":
         import msvcrt
@@ -746,7 +761,7 @@ def _acquire_file_lock(
                 # Windows readers and writers preserves correctness while POSIX
                 # keeps true shared-reader concurrency through flock below.
                 msvcrt_api.locking(lock_file.fileno(), msvcrt_api.LK_NBLCK, 1)
-                return
+                return True
             except OSError as exc:
                 if not _windows_lock_is_contended(exc):
                     raise
@@ -760,6 +775,8 @@ def _acquire_file_lock(
                         purpose=purpose,
                     )
                     warned = True
+                if stop_waiting is not None and stop_waiting():
+                    return False
                 assert deadline is not None and timeout is not None
                 if time.monotonic() >= deadline:
                     _raise_file_lock_timeout(
@@ -769,12 +786,44 @@ def _acquire_file_lock(
                     )
                 time.sleep(_FILE_LOCK_RETRY_SECONDS)
 
-    _acquire_posix_flock(
+    return _acquire_posix_flock(
         lock_file.fileno(),
         lock_name=getattr(lock_file, "name", "<unknown>"),
         exclusive=exclusive,
         purpose=purpose,
+        stop_waiting=stop_waiting,
     )
+
+
+def _try_shared_file_lock(lock_file: BinaryIO) -> bool:
+    """Take a shared lock without waiting; False while a holder excludes it.
+
+    Windows has only exclusive byte-range locks (see ``_acquire_file_lock``),
+    so there the attempt is exclusive as well.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt_api: Any = msvcrt
+        _ensure_windows_lock_byte(lock_file)
+        lock_file.seek(0)
+        try:
+            msvcrt_api.locking(lock_file.fileno(), msvcrt_api.LK_NBLCK, 1)
+        except OSError as exc:
+            if not _windows_lock_is_contended(exc):
+                raise
+            return False
+        return True
+
+    import fcntl
+
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError as exc:
+        if not _posix_lock_is_contended(exc):
+            raise
+        return False
+    return True
 
 
 def _release_file_lock(lock_file: BinaryIO) -> None:
@@ -792,11 +841,26 @@ def _release_file_lock(lock_file: BinaryIO) -> None:
     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _asset_lock_path(build_dir: Path) -> Path:
+    """The lock file that guards ``build_dir``; it outlives every publish."""
+    return build_dir.with_name(f".{build_dir.name}.lock")
+
+
 @contextmanager
-def _lambda_asset_lock(build_dir: Path, *, exclusive: bool) -> Iterator[None]:
-    """Serialize publishers and keep freshness reads off rename windows."""
+def _lambda_asset_lock(
+    build_dir: Path,
+    *,
+    exclusive: bool,
+    stop_waiting: Callable[[], bool] | None = None,
+) -> Iterator[bool]:
+    """Serialize publishers and keep freshness reads off rename windows.
+
+    Yields True while the lock is held. With ``stop_waiting`` a contended wait
+    can end early (see ``_acquire_file_lock``); the block then receives False
+    and runs with nothing locked, so a caller that passes it must check.
+    """
     build_dir.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = build_dir.with_name(f".{build_dir.name}.lock")
+    lock_path = _asset_lock_path(build_dir)
     lock_key = os.path.normcase(os.path.abspath(lock_path))
     held = _thread_asset_locks()
     existing = held.get(lock_key)
@@ -806,19 +870,66 @@ def _lambda_asset_lock(build_dir: Path, *, exclusive: bool) -> Iterator[None]:
             raise RuntimeError(f"Cannot upgrade shared asset lock to exclusive: {lock_path}")
         held[lock_key] = (held_exclusive, depth + 1)
         try:
-            yield
+            yield True
         finally:
             held[lock_key] = (held_exclusive, depth)
         return
 
     with lock_path.open("a+b") as lock_file:
-        _acquire_file_lock(lock_file, exclusive=exclusive, purpose="asset")
+        if not _acquire_file_lock(
+            lock_file,
+            exclusive=exclusive,
+            purpose="asset",
+            stop_waiting=stop_waiting,
+        ):
+            yield False
+            return
         held[lock_key] = (exclusive, 1)
         try:
-            yield
+            yield True
         finally:
             held.pop(lock_key, None)
             _release_file_lock(lock_file)
+
+
+def _published_while_waiting(
+    source_dir: Path,
+    build_dir: Path,
+    *,
+    source_inputs: tuple[str, ...] | None,
+) -> Callable[[], bool]:
+    """Return a check that another process published a fresh ``build_dir``.
+
+    For a publisher waiting for the exclusive asset lock. Once the asset is
+    fresh, every pytest worker that sees it so holds a shared lock on it for
+    its whole session, so a publisher that queued behind another one's rebuild
+    would wait out GCO_ASSET_LOCK_TIMEOUT_SECONDS for a lock it no longer
+    needs. The check digests both trees, so it runs at most every
+    ``_ASSET_PUBLISHED_RECHECK_SECONDS``, under a non-blocking shared lock on
+    its own descriptor of the lock file; a held exclusive lock (a publish in
+    progress) counts as not published yet.
+    """
+    next_check = time.monotonic() + _ASSET_PUBLISHED_RECHECK_SECONDS
+
+    def published() -> bool:
+        nonlocal next_check
+        now = time.monotonic()
+        if now < next_check:
+            return False
+        next_check = now + _ASSET_PUBLISHED_RECHECK_SECONDS
+        with _asset_lock_path(build_dir).open("a+b") as probe_file:
+            if not _try_shared_file_lock(probe_file):
+                return False
+            try:
+                return _asset_build_is_fresh_unlocked(
+                    source_dir,
+                    build_dir,
+                    source_inputs=source_inputs,
+                )
+            finally:
+                _release_file_lock(probe_file)
+
+    return published
 
 
 def _asset_build_is_fresh(
@@ -889,11 +1000,24 @@ def _prepare_lambda_asset(
     session's session-long shared locks. Only a genuinely stale asset
     escalates to the exclusive publisher lock, which re-checks freshness
     after acquisition (another publisher may have finished the same rebuild
-    while this one waited).
+    while this one waited). While it waits, it also stops waiting as soon as
+    another publisher's build is fresh: the pytest sessions that then hold
+    shared locks for their whole run would otherwise keep the exclusive lock
+    from it until the timeout.
     """
     if _asset_build_is_fresh(source_dir, build_dir, source_inputs=source_inputs):
         return False
-    with _lambda_asset_lock(build_dir, exclusive=True):
+    with _lambda_asset_lock(
+        build_dir,
+        exclusive=True,
+        stop_waiting=_published_while_waiting(
+            source_dir,
+            build_dir,
+            source_inputs=source_inputs,
+        ),
+    ) as locked:
+        if not locked:
+            return False
         _recover_interrupted_asset_publish(build_dir)
         source_digest = _asset_tree_digest(source_dir, source_inputs=source_inputs)
         if source_digest is None:
