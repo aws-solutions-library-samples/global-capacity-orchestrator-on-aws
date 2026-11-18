@@ -239,7 +239,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `metrics_cloudwatch_get` | Read one [CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/WhatIsCloudWatch.html) datapoint as a canonical metric. |
 | `metrics_from_job_logs` | Extract a scalar from the tail of a job's logs. |
 | `metrics_from_local_file` | Read a named field from a LOCAL metrics file. |
-| `metrics_from_shared_storage_file` | Read a named field from a shared-storage metrics file. |
+| `metrics_from_shared_storage_file` | Read a named field from a metrics file on the cluster's shared EFS file system (`gco files download` through a helper pod; needs kubectl access; does not read S3). |
 
 ### `mission.py`
 

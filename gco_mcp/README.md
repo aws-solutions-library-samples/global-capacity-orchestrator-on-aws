@@ -897,7 +897,7 @@ Read-only metric-reader tools that surface a single training-style scalar (loss,
 |------|-------------|-----------|----------|
 | `metrics_cloudwatch_get` | Read one CloudWatch datapoint as a canonical metric | safe | — |
 | `metrics_from_job_logs` | Extract a scalar from the tail of a job's logs by JSON key or regex | safe | — |
-| `metrics_from_shared_storage_file` | Read a named field from a shared-storage metrics file (JSON, CSV, HF Trainer state, JSONL, YAML, Parquet, tfevents) | safe | — |
+| `metrics_from_shared_storage_file` | Read a named field from a metrics file on the cluster's shared EFS file system, copied out through a helper pod (JSON, CSV, HF Trainer state, JSONL, YAML, Parquet, tfevents; not S3) | safe | — |
 | `metrics_from_local_file` | Read a named field from a local metrics file confined to `GCO_METRICS_LOCAL_ROOT` | safe | `GCO_ENABLE_LOCAL_METRICS` |
 | `metrics_semantic_progress` | Score how close a Mission is to its directive against a fixed rubric (LLM-as-judge); returns `{"metrics": {"progress_score": <0.0-1.0>}}` | safe | `GCO_ENABLE_SEMANTIC_PROGRESS` |
 
