@@ -1128,6 +1128,7 @@ from types import MappingProxyType  # noqa: E402
 from typing import Any  # noqa: E402
 
 from . import audit as _audit  # noqa: E402
+from .types import VerdictReason  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Env helpers — module-level so the constants below are read once at import
@@ -1234,20 +1235,30 @@ class SandboxTerminated(Exception):
     cap fired before the script returned.
 
     ``cause`` is the underlying Monty exception's class name (e.g.
-    ``"MontyRuntimeError"``, ``"MontyTypingError"``) so callers can render
-    a stable structured-error envelope without holding a reference to
-    the original Monty exception object.
+    ``"MontyRuntimeError"``, ``"MontyTypingError"``), or ``"TimeoutError"``
+    when the host-side wall-clock cap fired, so callers can render a stable
+    structured-error envelope without holding a reference to the original
+    Monty exception object.
+
+    ``reason`` is the :data:`~mission.types.VerdictReason` the iteration
+    terminates with (``script_time_limit``, ``script_memory_limit`` or
+    ``script_error``) and ``detail`` the error the sandbox reported, at most
+    200 characters.
     """
 
     def __init__(
         self,
         cause: str,
         *,
+        reason: VerdictReason = "script_error",
+        detail: str | None = None,
         partial_observations: list[dict[str, Any]] | None = None,
         partial_events: list[dict[str, Any]] | None = None,
         partial_script_call_log: list[dict[str, Any]] | None = None,
     ) -> None:
         self.cause: str = cause
+        self.reason: VerdictReason = reason
+        self.detail: str = (detail if detail is not None else cause)[:200]
         # Defensive copies: callers occasionally inspect these lists
         # after the exception has propagated several frames up. A
         # shared reference would let a later mutation in the original
@@ -1264,6 +1275,33 @@ class SandboxTerminated(Exception):
         # observe / event lists above.
         self.partial_script_call_log: list[dict[str, Any]] = list(partial_script_call_log or [])
         super().__init__(f"sandbox terminated: {cause}")
+
+
+def _monty_termination(exc: Exception) -> tuple[VerdictReason, str]:
+    """Return the verdict reason and a short detail for a ``MontyError``.
+
+    Monty reports its own limits as the script's exception: a ``MemoryError``
+    for the memory cap and a ``TimeoutError`` whose message says the time
+    limit was exceeded. Anything else (an uncaught exception, a syntax or
+    type-check failure, a crashed worker) is a script error. The detail names
+    the script-side exception when Monty exposes one.
+    """
+    inner: BaseException | None = None
+    accessor = getattr(exc, "exception", None)
+    if callable(accessor):
+        try:
+            candidate = accessor()
+        except Exception:
+            candidate = None
+        if isinstance(candidate, BaseException):
+            inner = candidate
+    source: BaseException = inner if inner is not None else exc
+    detail = f"{type(source).__name__}: {source}"[:200]
+    if isinstance(inner, MemoryError):
+        return "script_memory_limit", detail
+    if isinstance(inner, TimeoutError) and "time limit exceeded" in str(inner):
+        return "script_time_limit", detail
+    return "script_error", detail
 
 
 # ---------------------------------------------------------------------------
@@ -1875,6 +1913,11 @@ class MissionSandbox:
                 raise
             raise SandboxTerminated(
                 "TimeoutError",
+                reason="script_time_limit",
+                detail=(
+                    f"TimeoutError: script exceeded its {_DURATION_LIMIT_SECS:g}-second "
+                    "wall-clock cap"
+                ),
                 partial_observations=list(observe_log),
                 partial_events=list(event_log),
                 partial_script_call_log=list(script_call_log),
@@ -1886,8 +1929,11 @@ class MissionSandbox:
             # adding a new error type still routes through
             # ``SandboxTerminated`` rather than escaping as an opaque
             # ``Exception``.
+            reason, detail = _monty_termination(exc)
             raise SandboxTerminated(
                 type(exc).__name__,
+                reason=reason,
+                detail=detail,
                 partial_observations=list(observe_log),
                 partial_events=list(event_log),
                 partial_script_call_log=list(script_call_log),

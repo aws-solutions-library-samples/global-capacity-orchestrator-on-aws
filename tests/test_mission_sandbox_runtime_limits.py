@@ -8,6 +8,9 @@
   partial script-call log and in the audit stream.
 * Errors raised inside the script still end the run through Monty's error
   path.
+* Each stop carries the verdict reason the session terminates with:
+  ``script_time_limit``, ``script_memory_limit`` or ``script_error``, never
+  the session-budget reason ``max_wall_clock``.
 """
 
 from __future__ import annotations
@@ -86,6 +89,10 @@ class TestWallClockCap:
 
         assert elapsed < 4.0, f"script ran {elapsed:.2f}s past a 0.5s cap"
         assert exc_info.value.cause == "TimeoutError"
+        assert exc_info.value.reason == "script_time_limit"
+        assert exc_info.value.detail == (
+            "TimeoutError: script exceeded its 0.5-second wall-clock cap"
+        )
         partial = exc_info.value.partial_script_call_log
         assert 0 < len(partial) < 300
         assert calls < 300
@@ -143,7 +150,27 @@ class TestWallClockCap:
             await box.run("r = await list_jobs()\nd = {}\nx = d['missing']\n", None, dispatcher)
 
         assert exc_info.value.cause == "MontyRuntimeError"
+        assert exc_info.value.reason == "script_error"
+        assert exc_info.value.detail == "KeyError: 'missing'"
         assert [call["status"] for call in exc_info.value.partial_script_call_log] == ["ok"]
+
+    async def test_the_memory_cap_reports_script_memory_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sandbox_module, "_DURATION_LIMIT_SECS", 30.0)
+        monkeypatch.setattr(sandbox_module, "_MEMORY_LIMIT_BYTES", 5_000_000)
+
+        async def dispatcher(name: str, args: dict[str, Any], ctx: Any) -> None:
+            return None
+
+        box = sandbox_module.MissionSandbox(["list_jobs"], _session())
+        script = "x = []\nwhile True:\n    x = x + ['a' * 100000]\n"
+
+        with pytest.raises(sandbox_module.SandboxTerminated) as exc_info:
+            await box.run(script, None, dispatcher)
+
+        assert exc_info.value.reason == "script_memory_limit"
+        assert exc_info.value.detail.startswith("MemoryError: memory limit exceeded")
 
     async def test_a_timeout_error_the_cap_did_not_raise_propagates(
         self, monkeypatch: pytest.MonkeyPatch
@@ -172,3 +199,148 @@ class TestWallClockCap:
 
         with pytest.raises(TimeoutError, match="provider transport timed out"):
             await box.run("r = await list_jobs()\n", None, dispatcher)
+
+
+class _FakeMontyError(Exception):
+    """Monty-shaped error whose ``exception()`` returns the script-side error."""
+
+    def __init__(self, inner: object) -> None:
+        super().__init__("monty failed")
+        self._inner = inner
+
+    def exception(self) -> object:
+        if isinstance(self._inner, type) and issubclass(self._inner, Exception):
+            raise self._inner("no inner exception")
+        return self._inner
+
+
+class TestTerminationReasons:
+    @pytest.mark.parametrize(
+        ("error", "reason", "detail"),
+        [
+            (
+                _FakeMontyError(TimeoutError("feed time limit exceeded: 301ms > 300ms")),
+                "script_time_limit",
+                "TimeoutError: feed time limit exceeded: 301ms > 300ms",
+            ),
+            (
+                # A TimeoutError the script (or a tool) raised is a script error.
+                _FakeMontyError(TimeoutError("connect timed out")),
+                "script_error",
+                "TimeoutError: connect timed out",
+            ),
+            (
+                _FakeMontyError(MemoryError("memory limit exceeded: 6 bytes > 5 bytes")),
+                "script_memory_limit",
+                "MemoryError: memory limit exceeded: 6 bytes > 5 bytes",
+            ),
+            (_FakeMontyError(SyntaxError("bad syntax")), "script_error", "SyntaxError: bad syntax"),
+            # exception() failing or returning a non-exception falls back to
+            # the Monty error itself.
+            (_FakeMontyError(RuntimeError), "script_error", "_FakeMontyError: monty failed"),
+            (_FakeMontyError("not an exception"), "script_error", "_FakeMontyError: monty failed"),
+            (RuntimeError("crashed worker"), "script_error", "RuntimeError: crashed worker"),
+        ],
+    )
+    def test_monty_errors_map_to_the_reason_that_stopped_the_script(
+        self, error: Exception, reason: str, detail: str
+    ) -> None:
+        assert sandbox_module._monty_termination(error) == (reason, detail)
+
+    def test_detail_is_bounded(self) -> None:
+        error = _FakeMontyError(ValueError("x" * 500))
+
+        reason, detail = sandbox_module._monty_termination(error)
+
+        assert reason == "script_error"
+        assert len(detail) == 200
+
+    def test_sandbox_terminated_defaults_keep_older_callers_working(self) -> None:
+        stopped = sandbox_module.SandboxTerminated("MontyRuntimeError")
+
+        assert stopped.reason == "script_error"
+        assert stopped.detail == "MontyRuntimeError"
+
+
+class TestEngineReportsTheRealReason:
+    async def test_a_script_error_terminates_the_session_with_script_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A plain KeyError used to end the session as ``max_wall_clock``."""
+        from mission import SCHEMA_VERSION
+        from mission.engine import MissionEngine
+        from mission.sandbox import make_default_sandbox_runner
+        from mission.state import FilesystemBackend
+
+        monkeypatch.setattr(sandbox_module, "_DURATION_LIMIT_SECS", 30.0)
+        backend = FilesystemBackend(root=tmp_path)
+        session: dict[str, Any] = {
+            "version": SCHEMA_VERSION,
+            "session_id": "sess-script-error",
+            "directive_text": "Script-error fixture session.",
+            "criteria": [
+                {
+                    "criterion_id": "c1",
+                    "kind": "metric_threshold",
+                    "required": True,
+                    "metric": "loss",
+                    "op": "<",
+                    "target": -1.0,
+                }
+            ],
+            "budget": {"max_iterations": 10, "max_wall_clock_seconds": 600},
+            "tool_allowlist": ["find_examples"],
+            "checkpoint_cadence": {"kind": "every_iteration"},
+            "stagnation_threshold": 10,
+            "use_sampling": False,
+            "allow_scripted_strategies": True,
+            "status": "pending",
+            "created_at": "2025-01-01T00:00:00Z",
+            "iterations": [],
+            "no_progress_counter": 0,
+        }
+        backend.save_session(session)  # type: ignore[arg-type]
+
+        async def dispatcher(tool_name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
+            return {"ok": True}
+
+        engine = MissionEngine(
+            backend=backend,
+            tool_dispatcher=dispatcher,
+            sampling_callable=None,
+            sandbox_runner=make_default_sandbox_runner(["find_examples"], session),
+        )
+        monkeypatch.setattr(
+            MissionEngine,
+            "_deterministic_strategy",
+            lambda self, sess: {
+                "script": "r = await find_examples()\nd = {}\nx = d['missing']\n",
+                "rationale": "fixture: script raises KeyError",
+            },
+        )
+
+        record = await engine.run_iteration("sess-script-error")
+
+        assert record["verdict"] == "terminate"
+        assert record["verdict_reason"] == "script_error"
+        assert record["sandbox_terminated_detail"] == "KeyError: 'missing'"
+        assert [call["status"] for call in record["script_call_log"]] == ["ok"]
+        persisted = backend.load_session("sess-script-error")
+        assert persisted is not None
+        assert persisted["status"] == "terminated"
+
+
+def test_final_report_followups_name_the_script_limit_that_fired() -> None:
+    from mission import final_report
+
+    session: Any = {}
+    time_limit = final_report._build_followups_template(session, "terminate", "script_time_limit")
+    memory_limit = final_report._build_followups_template(
+        session, "terminate", "script_memory_limit"
+    )
+    script_error = final_report._build_followups_template(session, "terminate", "script_error")
+
+    assert "GCO_MCP_CODE_MODE_MAX_DURATION_SECS" in time_limit[0]
+    assert "GCO_MCP_CODE_MODE_MAX_MEMORY" in memory_limit[0]
+    assert "sandbox_terminated_detail" in script_error[0]
+    assert all("max_wall_clock_seconds" not in line for line in time_limit)

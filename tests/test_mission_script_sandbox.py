@@ -589,16 +589,16 @@ async def test_scripted_strategy_runs_end_to_end(
 #
 # * ``test_scripted_strategy_terminated_by_max_duration`` patches the
 #   sandbox's module-level duration cap to 1.0 second and runs a
-#   ``while True`` script. Monty kills the script for exceeding the
-#   cap; :class:`MissionSandbox.run` catches the ``MontyError`` and
-#   re-raises as :class:`SandboxTerminated`; the engine's
-#   ``_execute_script`` swallows the exception, stashes the
-#   ``sandbox_terminated_reason`` sentinel on the iteration record,
-#   and lets the cascade fall through to its default branches; the
-#   Decide_Phase reads the sentinel and emits ``("terminate",
-#   "max_wall_clock")``. The execute phase is recorded as
-#   ``status="succeeded"`` because the engine handled the cap
-#   internally — the cap is a budget event, not a phase exception.
+#   ``while True`` script. The sandbox's wall-clock cap stops the
+#   script and :class:`MissionSandbox.run` raises
+#   :class:`SandboxTerminated`; the engine's ``_execute_script``
+#   swallows the exception, stashes the ``sandbox_terminated_reason``
+#   sentinel on the iteration record, and lets the cascade fall
+#   through to its default branches; the Decide_Phase reads the
+#   sentinel and emits ``("terminate", "script_time_limit")``. The
+#   execute phase is recorded as ``status="succeeded"`` because the
+#   engine handled the cap internally — the cap is a budget event, not
+#   a phase exception.
 
 
 def _make_terminated_session(
@@ -658,7 +658,7 @@ _DURATION_CAP_SCRIPT: str = "while True:\n    pass\n"
 async def test_scripted_strategy_terminated_by_max_duration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Sandbox duration cap propagates up to a ``("terminate", "max_wall_clock")`` verdict.
+    """Sandbox duration cap propagates up to a ``("terminate", "script_time_limit")`` verdict.
 
     Patches ``mission.sandbox._DURATION_LIMIT_SECS`` to 1.0 so a
     ``while True: pass`` script trips the per-call duration cap on
@@ -669,7 +669,7 @@ async def test_scripted_strategy_terminated_by_max_duration(
     ``sandbox_terminated_reason`` sentinel on the iteration record,
     and lets the iteration finish cleanly. The Decide_Phase's
     cascade reads the sentinel at the very top and emits
-    ``("terminate", "max_wall_clock")`` before any other branch is
+    ``("terminate", "script_time_limit")`` before any other branch is
     consulted.
 
     The execute phase records ``status="succeeded"`` because the cap
@@ -721,7 +721,8 @@ async def test_scripted_strategy_terminated_by_max_duration(
 
     # The cascade reads the sandbox sentinel before any other branch.
     assert record["verdict"] == "terminate"
-    assert record["verdict_reason"] == "max_wall_clock"
+    assert record["verdict_reason"] == "script_time_limit"
+    assert "wall-clock cap" in record["sandbox_terminated_detail"]
 
     # Execute_Phase is recorded as ``succeeded`` because the engine
     # handled the cap internally rather than raising.

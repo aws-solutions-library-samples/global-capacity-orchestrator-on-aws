@@ -923,7 +923,7 @@ Scripted strategies are opt-in via `--allow-scripted-strategies` on the CLI (or 
 
 Inside the script, allowlisted tools are exposed as awaitable callables. A `mission` namespace exposes `mission.observe(key, value)` and `mission.event(name)` for incremental Observation building. Every in-script tool call goes through the standard MCP audit decorator and emits a follow-up Mission audit event with `via_script=true`.
 
-A script that exceeds either cap is terminated; partial observations recorded via `mission.observe(...)` are preserved, the iteration's verdict resolves to `terminate`, and the reason carries the loop-limit cap that fired.
+A script that exceeds either cap, or raises an error it does not catch, is stopped. Partial observations recorded via `mission.observe(...)` and the tool calls made so far are preserved, and the iteration's verdict resolves to `terminate` with a reason that says what stopped the script: `script_time_limit` (the duration cap), `script_memory_limit` (the memory cap), or `script_error` (an uncaught exception, a script the sandbox could not run, or a sandbox failure). The iteration record's `sandbox_terminated_detail` carries the error the sandbox reported, for example `KeyError: missing`.
 
 ## Loop Limits
 

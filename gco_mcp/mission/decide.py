@@ -109,18 +109,17 @@ def decide_verdict(
     out of budget rather than because the goal was reached on the
     closing iteration.
     Note: When the prior Execute_Phase ran a scripted Strategy and the
-    sandbox cap fired, ``_execute_script`` writes
-    ``iteration["sandbox_terminated_reason"]`` and the cascade returns
-    that reason verbatim before anything else is consulted. The
-    sandbox limit is a true budget cap — the script ran out of wall
-    clock during execution — so it routes to a ``terminate`` verdict
-    on the same path as the ``BudgetControls``-driven caps below.
+    sandbox stopped it, ``_execute_script`` writes
+    ``iteration["sandbox_terminated_reason"]`` (``script_time_limit``,
+    ``script_memory_limit`` or ``script_error``) and the cascade returns
+    that reason verbatim before anything else is consulted, as a
+    ``terminate`` verdict.
     """
-    # 0. Sandbox-cap propagation. ``_execute_script`` stashes the
+    # 0. Sandbox-stop propagation. ``_execute_script`` stashes the
     # reason on the in-progress iteration when the sandbox runner
     # raised :class:`SandboxTerminated`. Reading the sentinel here
     # means the engine's Execute_Phase can complete cleanly (no phase
-    # failure) while still routing the verdict to the budget-cap path.
+    # failure) while the verdict still reports why the script stopped.
     sandbox_reason = iteration.get("sandbox_terminated_reason")
     if sandbox_reason is not None:
         return ("terminate", sandbox_reason)

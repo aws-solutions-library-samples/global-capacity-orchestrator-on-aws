@@ -899,17 +899,18 @@ class MissionEngine:
         * :class:`ScriptRejected` from inside the runner — the runner
           re-validated the script just before execution and the AST
           gate fired. Re-raise as ``script_rejected``.
-        * :class:`SandboxTerminated` from inside the runner — Monty
-          killed the script for exceeding a duration / memory cap.
-          The cap is a true budget cap, not a code-quality failure,
-          so the engine *swallows* the exception, builds a partial
-          Observation from whatever the script collected before being
-          killed, stashes the partial ``script_call_log`` and a
-          ``sandbox_terminated_reason`` sentinel on the iteration
-          record, and returns a list of partial calls. The Decide_Phase
-          reads the sentinel and emits ``("terminate",
-          "max_wall_clock")`` so the verdict surfaces on the
-          budget-cap path rather than via a phase failure.
+        * :class:`SandboxTerminated` from inside the runner — the
+          sandbox stopped the script: its wall-clock or memory cap
+          fired, or the script raised an error. The engine *swallows*
+          the exception, builds a partial Observation from whatever the
+          script collected before it stopped, stashes the partial
+          ``script_call_log``, the ``sandbox_terminated_reason``
+          sentinel (``script_time_limit``, ``script_memory_limit`` or
+          ``script_error``) and the ``sandbox_terminated_detail`` error
+          text on the iteration record, and returns a list of partial
+          calls. The Decide_Phase reads the sentinel and emits
+          ``("terminate", <reason>)`` so the verdict names what stopped
+          the script rather than surfacing as a phase failure.
 
         The sandbox module is imported lazily inside this method so
         the engine module stays importable on hosts where the
@@ -948,16 +949,15 @@ class MissionEngine:
             if isinstance(exc, ScriptRejected):
                 raise MissionEngineError("script_rejected") from exc
             if isinstance(exc, SandboxTerminated):
-                # The sandbox cap is a budget cap, not a phase
-                # failure: the script ran out of wall clock (or
-                # memory, or hit a runtime / typing / syntax error
-                # mid-run) under operator-supplied limits. Capture
-                # whatever it collected before being killed and
-                # route the verdict through the budget-cap path.
+                # A sandbox stop is not a phase failure: the script ran
+                # out of wall clock or memory, or raised an error, under
+                # operator-supplied limits. Capture whatever it collected
+                # before it stopped and end the session with the reason
+                # the sandbox reported.
                 #
                 # The sentinel on the iteration record is what the
                 # cascade in ``decide_verdict`` reads to short-
-                # circuit to ``("terminate", "max_wall_clock")``
+                # circuit to ``("terminate", exc.reason)``
                 # before any other branch is consulted; without it
                 # the cascade would fall through to the default
                 # ``("continue", "in_progress")`` because no other
@@ -985,7 +985,8 @@ class MissionEngine:
                         if isinstance(entry, dict) and "key" in entry
                     }
                 record["observation"] = cast(Observation, partial_observation)
-                record["sandbox_terminated_reason"] = "max_wall_clock"
+                record["sandbox_terminated_reason"] = exc.reason
+                record["sandbox_terminated_detail"] = exc.detail
                 return cast("list[ToolCallRecord]", list(exc.partial_script_call_log))
             raise
         # The sandbox already produced a normalized Observation dict,

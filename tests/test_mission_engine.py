@@ -893,8 +893,8 @@ async def test_run_iteration_translates_sandbox_terminated_from_runner(
     those on the iteration record and writes a
     ``sandbox_terminated_reason`` sentinel that
     :func:`mcp.mission.decide.decide_verdict` reads at the very top of
-    its cascade to short-circuit to ``("terminate",
-    "max_wall_clock")``.
+    its cascade to short-circuit to ``("terminate", <reason>)``, with
+    the reason the sandbox reported (here ``script_memory_limit``).
     """
 
     sys.path.insert(0, str(Path(__file__).parent.parent / "gco_mcp"))
@@ -904,7 +904,9 @@ async def test_run_iteration_translates_sandbox_terminated_from_runner(
         script: str, ctx: Any, tool_dispatcher: Any
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise SandboxTerminated(
-            "MontyDurationError",
+            "MontyRuntimeError",
+            reason="script_memory_limit",
+            detail="MemoryError: memory limit exceeded: 210000000 bytes > 200000000 bytes",
             partial_observations=[{"key": "progress", "value": 0.5}],
             partial_events=[{"event_name": "halfway"}],
             partial_script_call_log=[
@@ -942,9 +944,10 @@ async def test_run_iteration_translates_sandbox_terminated_from_runner(
     record = await engine.run_iteration(session["session_id"])
 
     # The cascade reads ``sandbox_terminated_reason`` before any other
-    # branch and produces a ``("terminate", "max_wall_clock")`` tuple.
+    # branch and produces a ``("terminate", <reason>)`` tuple.
     assert record["verdict"] == "terminate"
-    assert record["verdict_reason"] == "max_wall_clock"
+    assert record["verdict_reason"] == "script_memory_limit"
+    assert record["sandbox_terminated_detail"].startswith("MemoryError: memory limit exceeded")
     # Partial logs from the killed script land on the iteration record
     # so the audit trail stays complete even when the script was cut
     # short mid-loop.
