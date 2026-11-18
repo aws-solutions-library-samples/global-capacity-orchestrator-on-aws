@@ -173,7 +173,9 @@ def _live_deployment(
                 spec=client.V1PodSpec(containers=containers or [_model_container()]),
             ),
         ),
-        status=client.V1DeploymentStatus(replicas=replicas, ready_replicas=ready_replicas),
+        status=client.V1DeploymentStatus(
+            replicas=replicas, updated_replicas=replicas, ready_replicas=ready_replicas
+        ),
     )
 
 

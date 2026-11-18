@@ -1375,6 +1375,32 @@ def build_endpoint_tls_proxy(upstream_port: int, config_map_name: str) -> Endpoi
     return EndpointTLSProxy(container=container, volumes=volumes, digest=digest)
 
 
+def _rolled_out_ready_replicas(deployment: Any) -> int:
+    """Ready replicas known to run ``deployment``'s current pod template.
+
+    ``readyReplicas`` also counts the previous template's pods while a rollout
+    replaces them. Until the Deployment controller has observed the current
+    generation every pod counts as old; after that the pods not yet updated
+    (``replicas - updatedReplicas``) are subtracted as if all were Ready. The
+    result is a lower bound, exact once the old pods are gone. The API omits
+    zero counts, so a missing ``updatedReplicas`` is zero; a status without a
+    ``replicas`` count has no pods to tell apart.
+    """
+    status = getattr(deployment, "status", None)
+    ready = getattr(status, "ready_replicas", None)
+    ready_count = ready if isinstance(ready, int) else 0
+    generation = getattr(getattr(deployment, "metadata", None), "generation", None)
+    observed = getattr(status, "observed_generation", None)
+    if isinstance(generation, int) and not (isinstance(observed, int) and observed >= generation):
+        return 0
+    total = getattr(status, "replicas", None)
+    if not isinstance(total, int):
+        return ready_count
+    updated = getattr(status, "updated_replicas", None)
+    updated_count = updated if isinstance(updated, int) else 0
+    return max(0, min(ready_count - (total - updated_count), updated_count))
+
+
 def _pod_template_annotations(deployment: Any) -> dict[str, str]:
     """A copy of a live Deployment's pod-template annotations (empty when it has none)."""
     template = getattr(getattr(deployment, "spec", None), "template", None)
@@ -2720,22 +2746,36 @@ class InferenceMonitor:
         # endpoint flap back to "creating". Keep reporting that live target so
         # status and watchdog diagnostics remain truthful.
         state = "running" if ready_replicas >= readiness_floor else "creating"
+        # Pods of the previous template keep the region serving through a
+        # rolling update, but the update is done only once pods of the current
+        # template meet the floor; until then the endpoint is not promoted.
+        rollout_complete = _rolled_out_ready_replicas(deployment) >= readiness_floor
+        extra: dict[str, Any] = {}
+        if canary_status is not None:
+            extra["canary"] = canary_status
+        if state == "running" and not rollout_complete:
+            extra["rollout_complete"] = False
         self.store.update_region_status(
             name,
             self.region,
             state,
             replicas_ready=ready_replicas,
             replicas_desired=status_desired_replicas,
-            extra={"canary": canary_status} if canary_status is not None else None,
+            extra=extra or None,
             **status_conditions,
         )
 
-        self._promote_deploying_endpoint(name, endpoint, state)
+        self._promote_deploying_endpoint(name, endpoint, state, rollout_complete=rollout_complete)
 
         return None
 
     def _promote_deploying_endpoint(
-        self, name: str, endpoint: dict[str, Any], local_state: str
+        self,
+        name: str,
+        endpoint: dict[str, Any],
+        local_state: str,
+        *,
+        rollout_complete: bool = True,
     ) -> bool:
         """Promote ``desired_state`` from ``deploying`` to ``running`` once every region is up.
 
@@ -2743,7 +2783,11 @@ class InferenceMonitor:
         is ``running``, so a deploying endpoint that never promotes is
         unreachable even when every pod is Ready. Promotion is decided from live
         local readiness (``local_state``, the state this pass just wrote) plus
-        explicit ``running`` observations for every *other* target region. The
+        explicit ``running`` observations for every *other* target region. A
+        region whose rolling update is still under way (``rollout_complete`` is
+        false here, or ``rollout_complete: false`` in its stored status) serves
+        from the previous template's pods but has not applied the change, so it
+        holds the promotion back. The
         endpoint object may contain a stale local region_status from before this
         pass, which is why the local region is never read back from it.
 
@@ -2754,7 +2798,11 @@ class InferenceMonitor:
         Returns:
             ``True`` when a promotion write was issued, ``False`` otherwise.
         """
-        if local_state != "running" or endpoint.get("desired_state") != "deploying":
+        if (
+            local_state != "running"
+            or not rollout_complete
+            or endpoint.get("desired_state") != "deploying"
+        ):
             return False
         stored_statuses = endpoint.get("region_status", {})
         target_regions = endpoint.get("target_regions", [])
@@ -2766,7 +2814,11 @@ class InferenceMonitor:
             target_status = (
                 stored_statuses.get(target_region, {}) if isinstance(stored_statuses, dict) else {}
             )
-            if not isinstance(target_status, dict) or target_status.get("state") != "running":
+            if (
+                not isinstance(target_status, dict)
+                or target_status.get("state") != "running"
+                or target_status.get("rollout_complete") is False
+            ):
                 return False
         lifecycle_id = endpoint.get("lifecycle_id")
         if not isinstance(lifecycle_id, str) or not lifecycle_id:
@@ -6087,7 +6139,10 @@ class InferenceMonitor:
             # count means Kubernetes' default of 1.
             live_replicas = deployment.spec.replicas
             current_replicas = 1 if live_replicas is None else live_replicas
-            ready_replicas = present(deployment.status, "deployment.status").ready_replicas or 0
+            # Routing trusts this count to mean "Ready on canary_image": pods of
+            # an earlier canary template do not count.
+            present(deployment.status, "deployment.status")
+            ready_replicas = _rolled_out_ready_replicas(deployment)
             if current_image != canary_image:
                 self._update_deployment_image(canary_name, namespace, canary_image)
                 ready_replicas = 0
