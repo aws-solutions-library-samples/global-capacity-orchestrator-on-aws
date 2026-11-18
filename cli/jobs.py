@@ -38,6 +38,9 @@ from .config import GCOConfig, get_config
 
 logger = __import__("logging").getLogger(__name__)
 
+#: ``GET /api/v1/jobs`` serves at most this many jobs per page.
+JOBS_PAGE_MAX = 1000
+
 
 def _format_duration(seconds: int) -> str:
     """Format seconds into a human-readable duration string."""
@@ -648,6 +651,7 @@ class JobManager:
         namespace: str | None = None,
         status: str | None = None,
         all_regions: bool = False,
+        limit: int | None = None,
     ) -> list[JobInfo]:
         """
         List jobs across GCO clusters.
@@ -657,9 +661,12 @@ class JobManager:
             namespace: Filter by namespace
             status: Filter by status
             all_regions: Query all discovered regions
+            limit: Maximum jobs to return per region, read across as many
+                API pages as that takes; None reads every page
 
         Returns:
-            List of JobInfo objects
+            List of JobInfo objects (newest first within a region, the
+            API's default order)
 
         Raises:
             Exception: Whatever the single-region read raised (HTTP error,
@@ -673,23 +680,33 @@ class JobManager:
             stacks = self._aws_client.discover_regional_stacks()
             for stack_region in stacks:
                 try:
-                    region_jobs = self._query_jobs_in_region(stack_region, namespace, status)
+                    region_jobs = self._query_jobs_in_region(stack_region, namespace, status, limit)
                     jobs.extend(region_jobs)
                 except Exception as e:
                     logger.warning("Failed to query jobs in %s: %s", stack_region, e)
                     continue
         elif region:
-            jobs = self._query_jobs_in_region(region, namespace, status)
+            jobs = self._query_jobs_in_region(region, namespace, status, limit)
         else:
             # Use default region
-            jobs = self._query_jobs_in_region(self.config.default_region, namespace, status)
+            jobs = self._query_jobs_in_region(self.config.default_region, namespace, status, limit)
 
         return jobs
 
     def _query_jobs_in_region(
-        self, region: str, namespace: str | None, status: str | None
+        self,
+        region: str,
+        namespace: str | None,
+        status: str | None,
+        limit: int | None = None,
     ) -> list[JobInfo]:
-        """Query jobs in a specific region.
+        """Query jobs in a specific region, following pages up to *limit*.
+
+        ``GET /api/v1/jobs`` is offset-paginated (at most
+        :data:`JOBS_PAGE_MAX` per page, ``has_more`` while jobs remain).
+        Pages are requested until *limit* jobs are read, the API reports no
+        more, or the offset reaches the reported ``total``; with *limit*
+        None every page is read.
 
         A failed read raises. Returning an empty list here would tell the
         caller the region has no jobs when it was never read, and a
@@ -697,8 +714,28 @@ class JobManager:
         on a 403. The all-regions fan-out in :meth:`list_jobs` catches the
         error per region, logs it, and carries on with the others.
         """
-        response = self._aws_client.get_jobs(region=region, namespace=namespace, status=status)
-        return [self._parse_job_info(job_data, region) for job_data in response.get("jobs", [])]
+        jobs: list[JobInfo] = []
+        offset = 0
+        while limit is None or len(jobs) < limit:
+            page_size = JOBS_PAGE_MAX if limit is None else min(limit - len(jobs), JOBS_PAGE_MAX)
+            response = self._aws_client.get_jobs(
+                region=region,
+                namespace=namespace,
+                status=status,
+                limit=page_size,
+                offset=offset,
+            )
+            page = response.get("jobs") or []
+            jobs.extend(self._parse_job_info(job_data, region) for job_data in page)
+            offset += len(page)
+            total = response.get("total")
+            if (
+                not page
+                or not response.get("has_more")
+                or (isinstance(total, int) and offset >= total)
+            ):
+                break
+        return jobs if limit is None else jobs[:limit]
 
     def _parse_job_info(self, job_data: dict[str, Any], region: str) -> JobInfo:
         """Parse job data into JobInfo object."""

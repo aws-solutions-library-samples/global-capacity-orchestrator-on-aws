@@ -3473,7 +3473,7 @@ gco jobs list [OPTIONS]
 | `--all-regions` | `-a` | Query all regions via global API |
 | `--namespace` | `-n` | Filter by namespace |
 | `--status` | `-s` | Filter by status |
-| `--limit` | `-l` | Maximum results (default: 50) |
+| `--limit` | `-l` | Maximum jobs to return (default: 50, at least 1). With `--region` the CLI reads as many API pages (up to 1000 jobs each) as that takes, newest first |
 
 With `--region`, a read that fails (an HTTP error from the regional API, a Region
 without the regional API bridge, missing credentials) prints the error on stderr and

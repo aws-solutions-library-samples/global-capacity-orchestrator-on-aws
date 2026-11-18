@@ -529,7 +529,13 @@ def queue_status(config: Any, region: Any, all_regions: Any) -> None:
 @click.option("--region", "-r", help="Target region (required unless --all-regions)")
 @click.option("--status", "-s", type=click.Choice(["pending", "running", "succeeded", "failed"]))
 @click.option("--all-regions", "-a", is_flag=True, help="Query all regions via global API")
-@click.option("--limit", "-l", default=50, help="Maximum jobs to return")
+@click.option(
+    "--limit",
+    "-l",
+    default=50,
+    type=click.IntRange(min=1),
+    help="Maximum jobs to return (read across as many API pages as needed)",
+)
 @pass_config
 def list_jobs(
     config: Any, namespace: Any, region: Any, status: Any, all_regions: Any, limit: Any
@@ -602,7 +608,11 @@ def list_jobs(
         else:
             # Query specific region
             jobs_list = job_manager.list_jobs(
-                region=region, namespace=namespace, status=status, all_regions=False
+                region=region,
+                namespace=namespace,
+                status=status,
+                all_regions=False,
+                limit=limit,
             )
 
             if config.output_format == "table":

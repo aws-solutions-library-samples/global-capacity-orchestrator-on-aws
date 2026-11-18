@@ -571,7 +571,7 @@ class TestJobManagerListJobs:
         result = manager.list_jobs(region="eu-west-1")
         assert result == []
         manager._aws_client.get_jobs.assert_called_with(
-            region="eu-west-1", namespace=None, status=None
+            region="eu-west-1", namespace=None, status=None, limit=1000, offset=0
         )
 
     def test_list_jobs_all_regions(self):
@@ -1495,7 +1495,7 @@ class TestJobManagerQueryJobsInRegion:
             "us-west-2": object(),
         }
 
-        def get_jobs(region=None, namespace=None, status=None):
+        def get_jobs(region=None, namespace=None, status=None, limit=None, offset=0):
             if region == "us-east-1":
                 raise RuntimeError("403 Forbidden")
             return {"jobs": [{"metadata": {"name": "j", "namespace": "gco-jobs"}, "status": {}}]}
@@ -1843,7 +1843,7 @@ class TestJobManagerListJobsAllRegions:
         }
 
         # First region succeeds, second fails
-        def get_jobs_side_effect(region, namespace, status):
+        def get_jobs_side_effect(region, namespace, status, limit=None, offset=0):
             if region == "us-east-1":
                 return {
                     "jobs": [
@@ -2372,3 +2372,124 @@ class TestJobsListRegionErrors:
         # Nothing reaches stdout, so a pipeline never mistakes the failure
         # for an empty listing.
         assert result.stdout.strip() == ""
+
+
+class TestJobsListPagination:
+    """``list_jobs`` follows ``GET /api/v1/jobs`` pages up to the limit."""
+
+    @staticmethod
+    def _paged_client(total):
+        """A client serving *total* jobs in pages, recording each request."""
+        calls = []
+
+        def get_jobs(region=None, namespace=None, status=None, limit=None, offset=0):
+            calls.append({"limit": limit, "offset": offset})
+            size = min(limit or 50, 1000)
+            names = range(offset, min(offset + size, total))
+            return {
+                "jobs": [
+                    {"metadata": {"name": f"j{i}", "namespace": "gco-jobs"}, "status": {}}
+                    for i in names
+                ],
+                "total": total,
+                "has_more": offset + size < total,
+            }
+
+        client = MagicMock()
+        client.get_jobs.side_effect = get_jobs
+        return client, calls
+
+    def _manager(self, client):
+        from cli.jobs import JobManager
+
+        manager = JobManager()
+        manager._aws_client = client
+        return manager
+
+    def test_small_limit_requests_only_that_many(self):
+        client, calls = self._paged_client(120)
+
+        jobs = self._manager(client).list_jobs(region="us-east-1", limit=5)
+
+        assert [job.name for job in jobs] == ["j0", "j1", "j2", "j3", "j4"]
+        assert calls == [{"limit": 5, "offset": 0}]
+
+    def test_large_limit_follows_pages_of_at_most_1000(self):
+        client, calls = self._paged_client(5000)
+
+        jobs = self._manager(client).list_jobs(region="us-east-1", limit=2500)
+
+        assert len(jobs) == 2500
+        assert jobs[-1].name == "j2499"
+        assert calls == [
+            {"limit": 1000, "offset": 0},
+            {"limit": 1000, "offset": 1000},
+            {"limit": 500, "offset": 2000},
+        ]
+
+    def test_stops_when_the_api_has_no_more(self):
+        client, calls = self._paged_client(1200)
+
+        jobs = self._manager(client).list_jobs(region="us-east-1", limit=5000)
+
+        assert len(jobs) == 1200
+        assert calls == [{"limit": 1000, "offset": 0}, {"limit": 1000, "offset": 1000}]
+
+    def test_no_limit_reads_every_page(self):
+        client, calls = self._paged_client(2001)
+
+        jobs = self._manager(client).list_jobs(region="us-east-1")
+
+        assert len(jobs) == 2001
+        assert [call["offset"] for call in calls] == [0, 1000, 2000]
+
+    def test_empty_page_or_offset_past_total_stops_a_misbehaving_server(self):
+        client = MagicMock()
+        # A server that ignores ``offset`` keeps answering has_more=True.
+        client.get_jobs.return_value = {
+            "jobs": [{"metadata": {"name": "same", "namespace": "gco-jobs"}, "status": {}}],
+            "total": 2,
+            "has_more": True,
+        }
+        assert len(self._manager(client).list_jobs(region="us-east-1")) == 2
+
+        client.get_jobs.return_value = {"jobs": [], "has_more": True}
+        assert self._manager(client).list_jobs(region="us-east-1") == []
+        assert client.get_jobs.call_count == 3
+
+    def test_get_jobs_sends_limit_offset_and_encoded_filters(self):
+        from cli.aws_client import GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config, patch("boto3.Session"):
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+            client = GCOAWSClient()
+        response = MagicMock()
+        response.json.return_value = {"jobs": []}
+        client.make_authenticated_request = MagicMock(return_value=response)
+
+        client.get_jobs("us-east-1", namespace="ml jobs", status="running", limit=5, offset=10)
+        path = client.make_authenticated_request.call_args.kwargs["path"]
+        assert path == "/api/v1/jobs?namespace=ml%20jobs&status=running&limit=5&offset=10"
+
+        client.get_jobs("us-east-1")
+        assert client.make_authenticated_request.call_args.kwargs["path"] == "/api/v1/jobs"
+
+    def test_cli_limit_is_honoured_and_validated(self):
+        import json
+
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        client, calls = self._paged_client(120)
+        with patch("cli.jobs.get_aws_client", return_value=client):
+            result = CliRunner().invoke(
+                cli, ["-o", "json", "jobs", "list", "-r", "us-east-1", "--limit", "70"]
+            )
+            assert result.exit_code == 0, result.output
+            assert len(json.loads(result.stdout)) == 70
+            assert calls == [{"limit": 70, "offset": 0}]
+
+            result = CliRunner().invoke(cli, ["jobs", "list", "-r", "us-east-1", "--limit", "0"])
+        assert result.exit_code == 2
+        assert "--limit" in result.output

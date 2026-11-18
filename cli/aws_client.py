@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, cast
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import boto3
 import requests
@@ -807,14 +807,18 @@ class GCOAWSClient:
         region: str | None = None,
         namespace: str | None = None,
         status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """
-        Get jobs from GCO clusters.
+        Get one page of jobs from GCO clusters.
 
         Args:
             region: Specific region to query (None for all regions)
             namespace: Filter by namespace
             status: Filter by status (running, completed, failed)
+            limit: Page size (the API accepts 1-1000; its default is 50)
+            offset: Number of jobs to skip, for the following pages
 
         Returns:
             The ``GET /api/v1/jobs`` envelope: the Job objects under
@@ -822,13 +826,17 @@ class GCOAWSClient:
             ``limit``, ``offset``, ``has_more``) and the answering
             cluster's ``cluster_id`` / ``region``.
         """
-        params = []
+        params: dict[str, str] = {}
         if namespace:
-            params.append(f"namespace={namespace}")
+            params["namespace"] = namespace
         if status:
-            params.append(f"status={status}")
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = str(limit)
+        if offset:
+            params["offset"] = str(offset)
 
-        query_string = f"?{'&'.join(params)}" if params else ""
+        query_string = f"?{urlencode(params, quote_via=quote)}" if params else ""
 
         response = self.make_authenticated_request(
             method="GET", path=f"/api/v1/jobs{query_string}", target_region=region
