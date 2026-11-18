@@ -27,6 +27,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [In-cluster TLS and tracing](#in-cluster-tls-and-tracing)
   - [Tenant write fence and MLflow over HTTPS](#tenant-write-fence-and-mlflow-over-https)
   - [vLLM endpoints deployed with MODEL](#vllm-endpoints-deployed-with-model)
+  - [Stricter cdk.json validation](#stricter-cdkjson-validation)
 
 ## How an upgrade works
 
@@ -437,3 +438,83 @@ v0.31.0 and v0.32.0) and `gco inference invoke` gets a 404 for the model it asks
 - **`gco inference models <endpoint>` shows what an endpoint serves.** From
   the release after v8.13.0, `invoke` also names the served model when vLLM
   rejects the requested one.
+
+### Stricter cdk.json validation
+
+This release validates every block of `cdk.json` when the app synthesizes,
+before any stack changes. `gco upgrade` keeps your `cdk.json` byte for byte,
+and the `cdk.json` files earlier releases shipped (v8.23.0 included) still
+pass, with the deprecation warnings below. A file you edited can fail: each
+error names the full key path (for example `cost_monitoring.reports.interval`)
+and what the key accepts, and `gco stacks synth` shows it without deploying.
+
+**Fix errors before you run `gco upgrade`.** The upgrade validates your file
+when it first synthesizes with the new release. With a deployed monitoring
+stack that happens before the teardown; without one it can happen after it.
+If the upgrade stops on a validation error, fix `cdk.json` and run
+`gco stacks deploy-all` (see [If it stops halfway](#if-it-stops-halfway)).
+
+**String flags are never read differently on upgrade.** Earlier releases read
+the `enabled` flags of `fsx_lustre` (and `fsx_lustre_regions`), `valkey`,
+`aurora_pgvector`, `cluster_observability.mlflow`, `queue_processor`,
+`drift_detection`, `mcp_server`, `volcano_image_mirror`, `images.replication`
+and the `helm` charts by truthiness, so a quoted `"false"`, like every
+non-empty string, turned the feature on. Reading it as off now would delete a
+running file system, cache, database cluster or MLflow volume, or uninstall a
+chart, on the next deploy. So `"true"` (any case) still reads as on, with a
+warning, and any other string fails with a message saying how the setting has
+been running. Write `true` to keep the feature, or `false` to remove it, which
+for the storage features deletes the resource and its data: back up first
+([step 2](#2-back-up-regional-data-to-the-cluster-shared-bucket)).
+
+Errors (the synth fails):
+
+| What fails | Fix |
+|---|---|
+| A block written as a scalar, such as `"cluster_observability": false`; earlier releases read it as an absent block and applied its defaults | Write the object: `{"enabled": false}` |
+| A key a block does not define (a typo such as `cost_monitoring.reports.interval`) | Use a key from the allowed list in the message; `_comment*` keys stay allowed everywhere |
+| `true` or `false` where an integer belongs (`manifest_processor.replicas`, the thresholds and limits) | Write the number |
+| An `enabled` flag written as a string other than `"true"` (the flags listed above) | Write the JSON boolean `true` to keep the feature or `false` to remove it |
+| `aurora_pgvector.deletion_protection`, `helm.argocd.enabled` or `helm.slurm.enabled` as a string | Write a JSON boolean (a string always failed here) |
+| `project_name` that is not 2-31 characters of lowercase letters and digits in runs joined by single hyphens, starting with a letter (`gco-` and `a--b` were accepted and then failed at deploy) | Pick a valid name; renaming means a new deployment |
+| `global_accelerator.name` outside the CreateAccelerator rule (1-64 letters, digits, periods and hyphens, not starting or ending with a period or hyphen) | Fix the name, or leave it out for `<project_name>-accelerator` |
+| `global_accelerator.health_check_path` other than `/api/v1/health`, `/healthz`, `/readyz` or `/metrics` (a query string is allowed); every other path needs authentication, so every probe failed | Use `/api/v1/health`, the default |
+| `kubernetes_version` as a JSON number (`1.30` read as `1.3`) | Quote it: `"1.30"` |
+| `eks_cluster.public_access_cidrs` as a string (it was split into characters) or with an entry that is not an IPv4 CIDR | Write a list: `["203.0.113.7/32"]` |
+| A `fsx_lustre_regions`, `pcs_regions` or `hyperpod_regions` key that is not an AWS Region | Fix the Region name |
+| An `fsx_lustre` value FSx rejects: deployment type, storage capacity (1200, 2400, then multiples of 2400, or 3600 for `SCRATCH_1`), Lustre version, `per_unit_storage_throughput` outside the type's values (`PERSISTENT_1` 50/100/200, `PERSISTENT_2` 125/250/500/1000), a non-`s3://` path, an `export_path` without an `import_path` in the same bucket | Use a value the message lists. `PERSISTENT_2` without a throughput now gets 250, its own default, instead of 200, which FSx rejects |
+| `valkey` limits below their minimums (`max_data_storage_gb` 1, `max_ecpu_per_second` 1000, `snapshot_retention_limit` 0) or `aurora_pgvector` capacity outside 0-256 (`max_acu` from 1) in steps of 0.5, `max_acu` below `min_acu`, or `backup_retention_days` outside 1-35 | Use a value in range |
+| A `cluster_observability` `persistence_size` (Grafana, Prometheus, Alertmanager or MLflow) that is not a positive Kubernetes quantity, such as `"10GB"` | Write a quantity: `"10Gi"`, `"500Mi"` |
+| A `helm.slurm` partition larger than `resource_quota` after its defaults are merged in | Shrink the partition or raise `resource_quota` |
+| `vector_store.embedding_model_id` that is not a Bedrock foundation-model id (`provider.model[:version]`) | Use the model id, for example `amazon.titan-embed-text-v2:0`; surrounding spaces are removed |
+| `helm.argocd.gitops.repo_url` that does not start with `https://`, `ssh://` or `git@` (such as `http://host/repo.git`) | Use an `https://` or `ssh://` URL |
+| A `gateway_health_check` value the load balancer rejects: interval 5-300 seconds, timeout 2-120 and below the interval, thresholds 2-10 | Use a value in range, or leave the block out for 15 / 5 / 2 / 2 |
+| A `tags` value that is not a string | Quote it |
+
+A `cdk.json` without `project_name` is now validated too (it used to skip
+every check); the name defaults to `gco`.
+
+Warnings (the synth continues; the key is ignored, so remove it):
+
+| Key | Why |
+|---|---|
+| `alb_config` | It never configured the platform ALB; `gateway_health_check` does, with the 15-second interval, 5-second timeout and thresholds of 2 that have always been deployed |
+| `manifest_processor.image` | The regional stack builds that image itself |
+| `global_accelerator.health_check_grace_period`, `global_accelerator.health_check_timeout` | Global Accelerator endpoint groups have no such settings |
+| `fsx_lustre.node_group` (also in `fsx_lustre_regions`) | FSx workloads run on the EKS Auto Mode node pools; `gco stacks fsx enable` removes it |
+| `images.removal_policy`, `images.empty_on_delete`, `images.lifecycle` | No stack creates or deletes the `<project_name>/*` ECR repositories (the gco CLI creates them), so they survive a destroy whatever these say, and `gco images init` applies its own lifecycle policy. Delete a repository with `gco images delete-repo <name> --force -y`; change a policy with `gco images lifecycle set` |
+| An `enabled` flag written as `"true"` | Write the JSON boolean `true` |
+| A top-level key in GCO's `snake_case` style that GCO does not read | Most likely a misspelt block, whose settings would not apply |
+| A `*_regions` overlay for a Region that is not in `deployment_regions.regional` | Nothing reads it until the Region is added |
+
+Command changes that go with it:
+
+- `gco stacks destroy` and `destroy-all` no longer refuse to destroy the
+  global stack, or ask to delete the image repositories, because of
+  `images.removal_policy` / `images.empty_on_delete`: nothing ever deleted
+  the repositories.
+- `gco stacks fsx enable` writes the configuration its summary shows and
+  removes the options you leave out, so an import path, export path or
+  throughput from an earlier run no longer carries over.
+- The committed `cdk.json` is stored exactly as the CLI writes it, so the
+  first `gco stacks ... enable` changes only the keys it touches.
