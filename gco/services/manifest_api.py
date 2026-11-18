@@ -375,10 +375,11 @@ async def get_service_status() -> dict[str, Any]:
     templates_count = 0
     webhooks_count = 0
     try:
+        # DynamoDB scans: in worker threads, like every blocking call here.
         if template_store:
-            templates_count = len(template_store.list_templates())
+            templates_count = len(await asyncio.to_thread(template_store.list_templates))
         if webhook_store:
-            webhooks_count = len(webhook_store.list_webhooks())
+            webhooks_count = len(await asyncio.to_thread(webhook_store.list_webhooks))
     except Exception as e:
         logger.warning(f"Failed to get store counts: {e}")
 

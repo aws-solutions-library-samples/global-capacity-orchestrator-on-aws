@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -34,7 +35,7 @@ async def list_webhooks(namespace: str | None = None) -> Response:
     """List all registered webhooks."""
     store = _get_webhook_store()
     try:
-        webhooks_list = store.list_webhooks(namespace=namespace)
+        webhooks_list = await asyncio.to_thread(store.list_webhooks, namespace=namespace)
         return JSONResponse(
             status_code=200,
             content={
@@ -59,7 +60,10 @@ async def create_webhook(request: WebhookRequest) -> Response:
     # optional allowed_domains from WEBHOOK_ALLOWED_DOMAINS env var.
     allowed_domains_str = os.getenv("WEBHOOK_ALLOWED_DOMAINS", "")
     allowed_domains = [d.strip() for d in allowed_domains_str.split(",") if d.strip()]
-    is_valid, error = validate_webhook_url(request.url, allowed_domains=allowed_domains or None)
+    # The validator resolves the host name, which blocks; so do the store calls.
+    is_valid, error = await asyncio.to_thread(
+        validate_webhook_url, request.url, allowed_domains=allowed_domains or None
+    )
     if not is_valid:
         raise HTTPException(
             status_code=400,
@@ -69,7 +73,8 @@ async def create_webhook(request: WebhookRequest) -> Response:
     webhook_id = str(uuid.uuid4())[:8]
 
     try:
-        webhook = store.create_webhook(
+        webhook = await asyncio.to_thread(
+            store.create_webhook,
             webhook_id=webhook_id,
             url=request.url,
             events=[e.value for e in request.events],
@@ -95,7 +100,7 @@ async def delete_webhook(webhook_id: str) -> Response:
     """Delete a webhook."""
     store = _get_webhook_store()
     try:
-        deleted = store.delete_webhook(webhook_id)
+        deleted = await asyncio.to_thread(store.delete_webhook, webhook_id)
         if not deleted:
             raise HTTPException(status_code=404, detail=f"Webhook '{webhook_id}' not found")
         return JSONResponse(

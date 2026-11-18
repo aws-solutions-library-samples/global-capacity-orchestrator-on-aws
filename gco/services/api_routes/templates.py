@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -39,7 +40,7 @@ async def list_templates() -> Response:
     """List all job templates."""
     store = _get_template_store()
     try:
-        templates = store.list_templates()
+        templates = await asyncio.to_thread(store.list_templates)
         return JSONResponse(
             status_code=200,
             content={
@@ -57,7 +58,8 @@ async def create_template(request: JobTemplateRequest) -> Response:
     """Create a new job template."""
     store = _get_template_store()
     try:
-        template = store.create_template(
+        template = await asyncio.to_thread(
+            store.create_template,
             name=request.name,
             manifest=request.manifest,
             description=request.description,
@@ -82,7 +84,7 @@ async def get_template(name: str) -> Response:
     """Get a specific job template."""
     store = _get_template_store()
     try:
-        template = store.get_template(name)
+        template = await asyncio.to_thread(store.get_template, name)
         if template is None:
             raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
         return JSONResponse(
@@ -100,7 +102,7 @@ async def delete_template(name: str) -> Response:
     """Delete a job template."""
     store = _get_template_store()
     try:
-        deleted = store.delete_template(name)
+        deleted = await asyncio.to_thread(store.delete_template, name)
         if not deleted:
             raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
         return JSONResponse(
@@ -122,7 +124,7 @@ async def create_job_from_template(name: str, request: JobFromTemplateRequest) -
     processor = _check_processor()
     store = _get_template_store()
 
-    template = store.get_template(name)
+    template = await asyncio.to_thread(store.get_template, name)
     if template is None:
         raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
 

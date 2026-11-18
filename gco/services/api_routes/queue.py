@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -134,7 +135,8 @@ async def submit_job_to_queue(
     store = _get_job_store()
 
     try:
-        job = store.submit_job(
+        job = await asyncio.to_thread(
+            store.submit_job,
             job_id=job_id,
             manifest=manifest,
             target_region=request.target_region,
@@ -178,7 +180,8 @@ async def list_queued_jobs(
     """List one bounded page of jobs with optional filters."""
     store = _get_job_store()
     try:
-        jobs, next_cursor, partial = store.list_jobs_page(
+        jobs, next_cursor, partial = await asyncio.to_thread(
+            store.list_jobs_page,
             target_region=target_region,
             status=status,
             namespace=namespace,
@@ -206,7 +209,7 @@ async def get_queued_job(job_id: str) -> Response:
     """Get details of a specific queued job."""
     store = _get_job_store()
     try:
-        job = store.get_job(job_id)
+        job = await asyncio.to_thread(store.get_job, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
         return JSONResponse(
@@ -226,7 +229,7 @@ async def cancel_queued_job(
     """Cancel a job only while it remains unclaimed in the queue."""
     store = _get_job_store()
     try:
-        cancelled = store.cancel_job(job_id, reason=reason)
+        cancelled = await asyncio.to_thread(store.cancel_job, job_id, reason=reason)
         if not cancelled:
             raise HTTPException(
                 status_code=409,
@@ -250,7 +253,7 @@ async def get_queue_stats() -> Response:
     """Get job queue statistics by region and status."""
     store = _get_job_store()
     try:
-        counts, records_evaluated, truncated = store.get_job_count_summary()
+        counts, records_evaluated, truncated = await asyncio.to_thread(store.get_job_count_summary)
         total_jobs = sum(sum(statuses.values()) for statuses in counts.values())
         total_queued = sum(statuses.get("queued", 0) for statuses in counts.values())
         total_running = sum(statuses.get("running", 0) for statuses in counts.values())
