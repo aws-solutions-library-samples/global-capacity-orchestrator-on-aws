@@ -749,6 +749,92 @@ class TestCostMonitorListReports:
         assert prefix == f"{ADHOC_PREFIX}/region=us-east-1/"
 
 
+class _FakeListPaginator:
+    """list_objects_v2 over a key set: Prefix, Delimiter, and MaxItems as S3 applies them."""
+
+    def __init__(self, keys: list[str]) -> None:
+        self.keys = sorted(keys)
+        self.calls: list[dict[str, Any]] = []
+
+    def paginate(self, *, Bucket: str, Prefix: str, Delimiter: str | None = None, **kwargs):
+        self.calls.append({"Prefix": Prefix, "Delimiter": Delimiter, **kwargs})
+        under = [key for key in self.keys if key.startswith(Prefix)]
+        if Delimiter:
+            prefixes = sorted(
+                {
+                    Prefix + key[len(Prefix) :].split(Delimiter)[0] + Delimiter
+                    for key in under
+                    if Delimiter in key[len(Prefix) :]
+                }
+            )
+            contents = [key for key in under if Delimiter not in key[len(Prefix) :]]
+            return [
+                {
+                    "CommonPrefixes": [{"Prefix": p} for p in prefixes],
+                    "Contents": self._entries(contents),
+                }
+            ]
+        max_items = kwargs.get("PaginationConfig", {}).get("MaxItems", len(under))
+        return [{"Contents": self._entries(under[:max_items])}]
+
+    @staticmethod
+    def _entries(keys: list[str]) -> list[dict[str, Any]]:
+        entries = []
+        for key in keys:
+            day = key.split("date=")[1][:10]
+            entries.append(
+                {
+                    "Key": key,
+                    "Size": 1,
+                    "LastModified": datetime.fromisoformat(day).replace(tzinfo=UTC),
+                }
+            )
+        return entries
+
+
+class TestBoundedReportListing:
+    def test_a_short_listing_reads_only_the_newest_days(self):
+        days = [datetime(2025, 1, 1, tzinfo=UTC) + timedelta(days=offset) for offset in range(400)]
+        keys = [
+            f"{SCHEDULED_PREFIX}/region=us-east-1/date={day:%Y-%m-%d}/allocation-{hour:02d}.parquet"
+            for day in days
+            for hour in range(3)
+        ]
+        paginator = _FakeListPaginator(keys)
+        monitor = _monitor()
+        monitor._s3.get_paginator.return_value = paginator
+
+        reports = monitor.list_reports(limit=5)
+
+        assert [report["key"].split("date=")[1][:10] for report in reports] == [
+            "2026-02-04",
+            "2026-02-04",
+            "2026-02-04",
+            "2026-02-03",
+            "2026-02-03",
+        ]
+        # One delimiter listing plus the two newest days, not 400 days of objects.
+        assert [call["Prefix"].rsplit("/", 2)[-2] for call in paginator.calls[1:]] == [
+            "date=2026-02-04",
+            "date=2026-02-03",
+        ]
+        assert paginator.calls[0]["Delimiter"] == "/"
+
+    def test_a_single_day_is_read_up_to_a_cap(self):
+        keys = [
+            f"{SCHEDULED_PREFIX}/region=us-east-1/date=2026-07-26/allocation-{index:05d}.parquet"
+            for index in range(cost_monitor_module._LIST_PARTITION_MAX_OBJECTS + 10)
+        ]
+        paginator = _FakeListPaginator(keys)
+        monitor = _monitor()
+        monitor._s3.get_paginator.return_value = paginator
+
+        assert len(monitor.list_reports(limit=1_000)) == 1_000
+        assert paginator.calls[1]["PaginationConfig"] == {
+            "MaxItems": cost_monitor_module._LIST_PARTITION_MAX_OBJECTS
+        }
+
+
 class TestCostMonitorStatus:
     def test_healthy_with_data(self):
         monitor = _monitor()

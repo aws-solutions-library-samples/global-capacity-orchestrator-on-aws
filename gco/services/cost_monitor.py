@@ -477,6 +477,21 @@ def rows_to_parquet_bytes(rows: list[dict[str, Any]]) -> bytes:
     return sink.getvalue()
 
 
+#: Most objects one report listing reads from a single day's partition.
+_LIST_PARTITION_MAX_OBJECTS = 5_000
+
+
+def _report_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """One listed report object as the API returns it."""
+    return {
+        "key": entry["Key"],
+        "size_bytes": int(entry.get("Size", 0)),
+        "last_modified": (
+            entry["LastModified"].astimezone(UTC).isoformat() if entry.get("LastModified") else None
+        ),
+    }
+
+
 def _check_window(window_start: datetime, window_end: datetime) -> None:
     """Reject report windows that are inverted, too long, or too short."""
     if window_end <= window_start:
@@ -749,7 +764,14 @@ class CostMonitor:
     # ------------------------------------------------------------------
 
     def list_reports(self, *, adhoc: bool = False, limit: int = 50) -> list[dict[str, Any]]:
-        """List this region's most recent report objects, newest first."""
+        """List this region's most recent report objects, newest first.
+
+        Reports sit in one ``date=YYYY-MM-DD/`` partition per day. The day
+        partitions are read newest first and the listing stops once ``limit``
+        objects are in hand, so a call reads what it returns plus at most one
+        more day, however long the bucket's history (at most
+        ``_LIST_PARTITION_MAX_OBJECTS`` objects from any one day).
+        """
         prefix = (
             f"{ADHOC_PREFIX}/region={self.region}/"
             if adhoc
@@ -758,20 +780,22 @@ class CostMonitor:
         bounded_limit = min(max(int(limit), 1), 1_000)
         bucket = self._resolve_bucket()
         paginator = self._s3.get_paginator("list_objects_v2")
+
         objects: list[dict[str, Any]] = []
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for entry in page.get("Contents", []):
-                objects.append(
-                    {
-                        "key": entry["Key"],
-                        "size_bytes": int(entry.get("Size", 0)),
-                        "last_modified": (
-                            entry["LastModified"].astimezone(UTC).isoformat()
-                            if entry.get("LastModified")
-                            else None
-                        ),
-                    }
-                )
+        partitions: list[str] = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/"):
+            partitions.extend(str(entry["Prefix"]) for entry in page.get("CommonPrefixes", []))
+            objects.extend(_report_entry(entry) for entry in page.get("Contents", []))
+        # date=YYYY-MM-DD sorts chronologically as text.
+        for partition in sorted(partitions, reverse=True):
+            if len(objects) >= bounded_limit:
+                break
+            for page in paginator.paginate(
+                Bucket=bucket,
+                Prefix=partition,
+                PaginationConfig={"MaxItems": _LIST_PARTITION_MAX_OBJECTS},
+            ):
+                objects.extend(_report_entry(entry) for entry in page.get("Contents", []))
         objects.sort(key=lambda item: str(item["last_modified"] or ""), reverse=True)
         return objects[:bounded_limit]
 
