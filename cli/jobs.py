@@ -1399,8 +1399,7 @@ class JobManager:
         # Apply additional labels
         if labels:
             for manifest in manifest_list:
-                if "metadata" not in manifest:
-                    manifest["metadata"] = {}
+                # The namespace loop above already gave every manifest metadata.
                 if "labels" not in manifest["metadata"]:
                     manifest["metadata"]["labels"] = {}
                 manifest["metadata"]["labels"].update(labels)
