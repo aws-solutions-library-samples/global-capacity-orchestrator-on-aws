@@ -118,7 +118,7 @@ def create_mock_regional_stack(
     Both default to disabled so existing tests stay unchanged.
 
     No ALB mock is needed — the monitoring stack's ALB widgets use a
-    CloudWatch SEARCH expression with a ``LoadBalancer="app/k8s-gco-"``
+    CloudWatch SEARCH expression with a ``LoadBalancer=app/k8s-gcosyste-gcogatew-``
     prefix filter, so there's no per-stack resource reference involved.
     """
     mock_regional_stack = MagicMock()
@@ -634,50 +634,67 @@ class TestMonitoringStackOptionalDataServices:
 
     # ── ALB widgets ──────────────────────────────────────────────────────
 
-    def test_alb_widgets_filter_to_platform_alb_name_prefix(self):
-        """ALB widgets use a SEARCH composite-token match on ``app/k8s-gco-``.
+    def test_alb_widgets_filter_to_the_gateway_alb_name_prefix(self):
+        """ALB widgets match the load balancer of the ``gco-system/gco-gateway`` Gateway.
 
-        The AWS Load Balancer Controller names the platform ALB
-        ``k8s-gco-<hash>`` (the namespace is shortened because the
-        controller enforces a 32-char total name limit). CloudWatch's
-        ``LoadBalancer`` dimension is the ARN suffix ``app/<name>/<hash>``.
-
-        We use an UNQUOTED filter in the SEARCH expression
-        (``LoadBalancer=app/k8s-gco-``) so CloudWatch performs a
-        composite-token match rather than exact string match. Quoting
-        the value (``LoadBalancer="app/k8s-gco-"``) would force exact
-        match and return nothing — no ALB's dimension value is literally
-        ``app/k8s-gco-``. Matches every GCO platform ALB; inference ALBs
-        have a different prefix so they don't match.
+        The AWS Load Balancer Controller names a Gateway's load balancer
+        ``k8s-<namespace>-<name>-<hash>`` with namespace and name cut to 8
+        alphanumerics: ``k8s-gcosyste-gcogatew-<hash>``. The old filter
+        ``app/k8s-gco-`` matched the name of the retired Ingress ALB, so every
+        ALB graph was empty. CloudWatch's ``LoadBalancer`` dimension is
+        ``app/<name>/<id>``; the filter stays UNQUOTED, which makes it a
+        composite-token prefix match (a quoted value must match exactly).
         """
+        from gco.stacks.monitoring_stack import PLATFORM_ALB_SEARCH_FILTER
+
+        assert PLATFORM_ALB_SEARCH_FILTER == "LoadBalancer=app/k8s-gcosyste-gcogatew-"
         stack = self._build_stack(MockConfigLoader())
         body = self._dashboard_body(stack)
-        # Unquoted composite-token filter (JSON-escaped body form)
-        assert "LoadBalancer=app/k8s-gco-" in body
+        for metric, stat in (
+            ("RequestCount", "Sum"),
+            ("TargetResponseTime", "Average"),
+            ("TargetResponseTime", "p99"),
+            ("HTTPCode_Target_4XX_Count", "Sum"),
+            ("HTTPCode_Target_5XX_Count", "Sum"),
+            ("ActiveConnectionCount", "Sum"),
+        ):
+            expression = (
+                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
+                f'MetricName=\\"{metric}\\" LoadBalancer=app/k8s-gcosyste-gcogatew-\', '
+                f"'{stat}', 300)"
+            )
+            assert expression in body, (metric, stat)
+        assert "k8s-gco-'" not in body and "k8s-gco-\\'" not in body
 
     def test_alb_widgets_do_not_match_all_albs(self):
         """Regression gate: the ALB SEARCH must be scoped by LoadBalancer name.
 
-        The original dashboard used ``Namespace="AWS/ApplicationELB"`` with
-        no name-prefix filter, so every ALB in the account appeared. We
-        now include ``LoadBalancer=app/k8s-gco-`` to scope the search.
-        This test fails if someone drops the filter.
-
-        The metric-schema form ``{AWS/ApplicationELB,LoadBalancer}`` is
-        still allowed — that's the SEARCH syntax that constrains which
-        dimension tuples CloudWatch considers, not a namespace-only
-        wildcard.
+        A namespace-only search would graph every ALB in the account, and a
+        double-quoted LoadBalancer value is an exact match that finds nothing.
         """
         stack = self._build_stack(MockConfigLoader())
         body = self._dashboard_body(stack)
-        # The double-quoted namespace-only form must NOT be present
         assert 'Namespace=\\"AWS/ApplicationELB\\"' not in body
         assert 'Namespace="AWS/ApplicationELB"' not in body
-        # And the exact-match quoted filter must not be used either —
-        # that was my initial attempt and it returned zero data because
-        # no ALB has LoadBalancer literally equal to "app/k8s-gco-".
-        assert 'LoadBalancer=\\"app/k8s-gco-\\"' not in body
-        assert 'LoadBalancer="app/k8s-gco-"' not in body
+        assert 'LoadBalancer=\\"app/' not in body
+        assert 'LoadBalancer="app/' not in body
+
+    # ── EKS widgets ──────────────────────────────────────────────────────
+
+    def test_eks_api_server_widget_uses_a_published_metric(self):
+        """The widget reads EKS's vended ``apiserver_request_total_5XX`` per cluster.
+
+        ``cluster_failed_request_count`` with a ``cluster_name`` dimension does
+        not exist in ``AWS/EKS``, so the old "Failed Requests" widget was
+        always empty.
+        """
+        stack = self._build_stack(MockConfigLoader())
+        body = self._dashboard_body(stack)
+        assert "cluster_failed_request_count" not in body
+        for region in ("us-east-1", "us-west-2"):
+            metric = f'["AWS/EKS","apiserver_request_total_5XX","ClusterName","gco-test-{region}"'
+            assert metric in body, region
+        assert "EKS API Server - 5XX Responses" in body
 
     # ── Cross-cutting ────────────────────────────────────────────────────
 

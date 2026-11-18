@@ -152,6 +152,20 @@ def dynamodb_search_sum(
     )
 
 
+#: SEARCH filter for the platform ALB: the AWS Load Balancer Controller names
+#: the ``gco-system/gco-gateway`` Gateway's load balancer
+#: ``k8s-gcosyste-gcogatew-<hash>`` (see ``_create_alb_widgets``).
+PLATFORM_ALB_SEARCH_FILTER = "LoadBalancer=app/k8s-gcosyste-gcogatew-"
+
+
+def _platform_alb_search(metric_name: str, statistic: str) -> str:
+    """SEARCH expression for one ALB metric of the platform ALB."""
+    return (
+        "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
+        f"MetricName=\"{metric_name}\" {PLATFORM_ALB_SEARCH_FILTER}', '{statistic}', 300)"
+    )
+
+
 if TYPE_CHECKING:
     from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
     from gco.stacks.global_stack import GCOGlobalStack
@@ -1390,16 +1404,20 @@ class GCOMonitoringStack(Stack):
             for regional_stack in self.regional_stacks
         ]
 
-        # EKS cluster status
+        # API server requests answered with a server error. EKS publishes its
+        # control-plane metrics for clusters on Kubernetes 1.28 and later in
+        # AWS/EKS ("Monitor cluster data with Amazon CloudWatch", EKS User
+        # Guide), free of charge.
         cluster_status_widget = cloudwatch.SingleValueWidget(
-            title="EKS Clusters - Failed Requests",
+            title="EKS API Server - 5XX Responses",
             metrics=[
                 cloudwatch.Metric(
                     namespace="AWS/EKS",
-                    metric_name="cluster_failed_request_count",
-                    dimensions_map={"cluster_name": cluster_name},
+                    metric_name="apiserver_request_total_5XX",
+                    dimensions_map={"ClusterName": cluster_name},
                     statistic="Sum",
                     period=Duration.minutes(5),
+                    label=region,
                     region=region,
                 )
                 for cluster_name, region in cluster_info
@@ -1972,26 +1990,25 @@ class GCOMonitoringStack(Stack):
     def _create_alb_widgets(self) -> list[cloudwatch.IWidget]:
         """Create ALB monitoring widgets scoped to the GCO platform ALB.
 
-        ALBs are created by the AWS Load Balancer Controller at runtime
-        from an Ingress resource (not by CDK), so the exact ALB name
-        isn't known at synth time. We originally tried reading the ARN
-        off the regional stack's ``GaRegistration`` custom resource via
-        ``cross_region_references=True``, but that path races the
-        custom-resource response pipeline: CDK's cross-region
-        ``ExportsWriter`` executes ``Fn::GetAtt: [GaRegistration, AlbArn]``
-        before CloudFormation has the updated response data stored, and
-        errors with "Vendor response doesn't contain AlbArn attribute".
+        The platform ALB is created at runtime by the AWS Load Balancer
+        Controller from the ``gco-system/gco-gateway`` Gateway (not by CDK),
+        so its name is not known at synth time. Reading the ARN off the
+        regional stack's ``GaRegistration`` custom resource through
+        ``cross_region_references=True`` races the custom-resource response
+        pipeline (CDK's cross-region ``ExportsWriter`` evaluates
+        ``Fn::GetAtt: [GaRegistration, AlbArn]`` before CloudFormation has
+        the response data and fails with "Vendor response doesn't contain
+        AlbArn attribute"), so the widgets use a SEARCH expression instead.
 
-        Instead we use a SEARCH expression with a composite-token
-        filter. The ALB Controller names the platform ALB
-        ``k8s-gco-<hash>`` (the namespace is shortened because the
-        controller enforces a 32-char total name limit); CloudWatch's
-        ``LoadBalancer`` dimension is the ARN suffix ``app/<name>/<hash>``,
-        so an unquoted filter ``LoadBalancer=app/k8s-gco-`` performs a
-        composite-token match (the sequence ``app``, ``k``, ``8``, ``s``,
-        ``gco`` must appear consecutively in the dimension value).
-        Double-quoted filters would be exact matches and return nothing
-        because no ALB's dimension value is literally ``app/k8s-gco-``.
+        The controller names a Gateway's load balancer
+        ``k8s-<namespace>-<name>-<hash>`` with the namespace and name stripped
+        of non-alphanumerics and cut to 8 characters, which for this Gateway
+        is ``k8s-gcosyste-gcogatew-<hash>`` in every deployment. CloudWatch's
+        ``LoadBalancer`` dimension is the ARN suffix ``app/<name>/<id>``, so
+        the unquoted filter ``PLATFORM_ALB_SEARCH_FILTER`` is a
+        composite-token match on that prefix; a double-quoted filter would be
+        an exact match and find nothing. Another GCO deployment's Gateway ALB
+        in the same Region carries the same prefix and shows up too.
         """
         widgets: list[cloudwatch.IWidget] = []
 
@@ -2001,11 +2018,10 @@ class GCOMonitoringStack(Stack):
                 markdown=(
                     "# Application Load Balancers\n"
                     "Request metrics, response time, HTTP errors, and "
-                    "connection counts — scoped via SEARCH composite-token "
-                    "match to ALBs named ``app/k8s-gco-*`` so only the GCO "
-                    "platform ALB in each region appears. Inference ALBs "
-                    "(named per endpoint) and unrelated ALBs in the "
-                    "account are excluded."
+                    "connection counts of the GCO platform ALB that the "
+                    "gco-system/gco-gateway Gateway creates in each region "
+                    "(a SEARCH on load balancers named k8s-gcosyste-gcogatew-*); "
+                    "unrelated ALBs in the account are excluded."
                 ),
                 width=24,
                 height=1,
@@ -2019,11 +2035,7 @@ class GCOMonitoringStack(Stack):
                     title=f"ALB - Request Count ({region})",
                     left=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="RequestCount" '
-                                'LoadBalancer=app/k8s-gco-\', "Sum", 300)'
-                            ),
+                            expression=_platform_alb_search("RequestCount", "Sum"),
                             label="Request Count",
                             period=Duration.minutes(5),
                         ),
@@ -2041,20 +2053,12 @@ class GCOMonitoringStack(Stack):
                     title=f"ALB - Response Time ({region})",
                     left=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="TargetResponseTime" '
-                                'LoadBalancer=app/k8s-gco-\', "Average", 300)'
-                            ),
+                            expression=_platform_alb_search("TargetResponseTime", "Average"),
                             label="Avg Response Time",
                             period=Duration.minutes(5),
                         ),
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="TargetResponseTime" '
-                                'LoadBalancer=app/k8s-gco-\', "p99", 300)'
-                            ),
+                            expression=_platform_alb_search("TargetResponseTime", "p99"),
                             label="p99 Response Time",
                             period=Duration.minutes(5),
                         ),
@@ -2072,22 +2076,14 @@ class GCOMonitoringStack(Stack):
                     title=f"ALB - HTTP Errors ({region})",
                     left=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="HTTPCode_Target_4XX_Count" '
-                                'LoadBalancer=app/k8s-gco-\', "Sum", 300)'
-                            ),
+                            expression=_platform_alb_search("HTTPCode_Target_4XX_Count", "Sum"),
                             label="4XX Errors",
                             period=Duration.minutes(5),
                         ),
                     ],
                     right=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="HTTPCode_Target_5XX_Count" '
-                                'LoadBalancer=app/k8s-gco-\', "Sum", 300)'
-                            ),
+                            expression=_platform_alb_search("HTTPCode_Target_5XX_Count", "Sum"),
                             label="5XX Errors",
                             period=Duration.minutes(5),
                         ),
@@ -2105,11 +2101,7 @@ class GCOMonitoringStack(Stack):
                     title=f"ALB - Active Connections ({region})",
                     left=[
                         cloudwatch.MathExpression(
-                            expression=(
-                                "SEARCH('{AWS/ApplicationELB,LoadBalancer} "
-                                'MetricName="ActiveConnectionCount" '
-                                'LoadBalancer=app/k8s-gco-\', "Sum", 300)'
-                            ),
+                            expression=_platform_alb_search("ActiveConnectionCount", "Sum"),
                             label="Active Connections",
                             period=Duration.minutes(5),
                         ),
