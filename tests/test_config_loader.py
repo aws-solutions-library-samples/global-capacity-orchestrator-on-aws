@@ -398,6 +398,42 @@ class TestGlobalAcceleratorValidation:
             ConfigLoader(app)
 
 
+class TestPendingThresholdDefaults:
+    """An omitted pending_* threshold means the same thing to the loader and the monitor."""
+
+    def test_omitted_keys_match_the_health_monitor_fallbacks(self, valid_context, monkeypatch):
+        from gco.services.health_monitor import thresholds_from_env
+
+        for variable in (
+            "PENDING_PODS_THRESHOLD",
+            "PENDING_REQUESTED_CPU_VCPUS",
+            "PENDING_REQUESTED_MEMORY_GB",
+            "PENDING_REQUESTED_GPUS",
+        ):
+            monkeypatch.delenv(variable, raising=False)
+        loaded = ConfigLoader(MockApp(valid_context)).get_resource_thresholds()
+        monitor = thresholds_from_env()
+        for field in (
+            "pending_pods_threshold",
+            "pending_requested_cpu_vcpus",
+            "pending_requested_memory_gb",
+            "pending_requested_gpus",
+        ):
+            assert getattr(loaded, field) == getattr(monitor, field), field
+        assert loaded.pending_requested_gpus == 8
+
+    def test_the_shipped_file_disables_the_pending_gpu_check(self):
+        import json
+        from pathlib import Path
+
+        context = json.loads(
+            (Path(__file__).resolve().parents[1] / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        thresholds = ConfigLoader(MockApp(context)).get_resource_thresholds()
+        assert thresholds.pending_requested_gpus == -1
+        assert thresholds.is_disabled("pending_requested_gpus")
+
+
 class TestResourceQuota:
     """resource_quota is merged over its defaults and validated by the loader too."""
 

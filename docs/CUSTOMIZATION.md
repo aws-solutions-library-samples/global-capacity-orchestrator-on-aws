@@ -850,15 +850,20 @@ The health monitor compares cluster utilization against configurable thresholds 
 }
 ```
 
-| Threshold | Default | Description |
-|-----------|---------|-------------|
-| `cpu_threshold` | 80 | CPU utilization % (0-100, or -1 to disable) |
-| `memory_threshold` | 80 | Memory utilization % (0-100, or -1 to disable) |
-| `gpu_threshold` | -1 | GPU utilization % (0-100, or -1 to disable) |
-| `pending_pods_threshold` | 10 | Max pending pods before unhealthy (-1 to disable) |
-| `pending_requested_cpu_vcpus` | 100 | Max vCPUs requested by pending pods (-1 to disable) |
-| `pending_requested_memory_gb` | 200 | Max GB memory requested by pending pods (-1 to disable) |
-| `pending_requested_gpus` | -1 | Max GPUs requested by pending pods (-1 to disable) |
+| Threshold | Shipped value | If omitted | Description |
+|-----------|---------------|------------|-------------|
+| `cpu_threshold` | 80 | required | CPU utilization % (0-100, or -1 to disable) |
+| `memory_threshold` | 80 | required | Memory utilization % (0-100, or -1 to disable) |
+| `gpu_threshold` | -1 | required | GPU utilization % (0-100, or -1 to disable) |
+| `pending_pods_threshold` | 10 | 10 | Max pending pods before unhealthy (-1 to disable) |
+| `pending_requested_cpu_vcpus` | 100 | 100 | Max vCPUs requested by pending pods (-1 to disable) |
+| `pending_requested_memory_gb` | 200 | 200 | Max GB memory requested by pending pods (-1 to disable) |
+| `pending_requested_gpus` | -1 | 8 | Max GPUs requested by pending pods (-1 to disable) |
+
+The shipped value is what the committed `cdk.json` sets. A file that leaves a
+`pending_*` key out gets the value in the "If omitted" column, which is also
+what the health monitor uses without its environment variable; keep
+`pending_requested_gpus` at `-1` to leave the pending-GPU check off.
 
 Set a threshold to `-1` to disable that check entirely. GPU thresholds are disabled by default because inference endpoints naturally saturate GPU resources and should not trigger unhealthy status.
 

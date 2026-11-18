@@ -2402,24 +2402,32 @@ class ConfigLoader:
         return self.app.node.try_get_context("kubernetes_version") or "1.37"
 
     def get_resource_thresholds(self) -> ResourceThresholds:
-        """Get resource thresholds configuration"""
-        thresholds_config = self.app.node.try_get_context("resource_thresholds") or {
-            "cpu_threshold": 80,
-            "memory_threshold": 80,
-            "gpu_threshold": -1,
-            "pending_pods_threshold": 10,
-            "pending_requested_cpu_vcpus": 100,
-            "pending_requested_memory_gb": 200,
-            "pending_requested_gpus": -1,
+        """Get resource thresholds configuration.
+
+        ``cpu_threshold``, ``memory_threshold`` and ``gpu_threshold`` are
+        required (see :meth:`_validate_resource_thresholds`). An omitted
+        ``pending_*`` key takes the :class:`ResourceThresholds` default, the
+        same value the health monitor falls back to: 10 pods, 100 vCPUs,
+        200 GB and 8 GPUs. The shipped cdk.json sets
+        ``pending_requested_gpus`` to -1 (disabled), so 8 applies only to a
+        file that leaves the key out.
+        """
+        thresholds_config = self.app.node.try_get_context("resource_thresholds") or {}
+        optional = {
+            key: thresholds_config[key]
+            for key in (
+                "pending_pods_threshold",
+                "pending_requested_cpu_vcpus",
+                "pending_requested_memory_gb",
+                "pending_requested_gpus",
+            )
+            if key in thresholds_config
         }
         return ResourceThresholds(
             cpu_threshold=thresholds_config["cpu_threshold"],
             memory_threshold=thresholds_config["memory_threshold"],
             gpu_threshold=thresholds_config["gpu_threshold"],
-            pending_pods_threshold=thresholds_config.get("pending_pods_threshold", 10),
-            pending_requested_cpu_vcpus=thresholds_config.get("pending_requested_cpu_vcpus", 100),
-            pending_requested_memory_gb=thresholds_config.get("pending_requested_memory_gb", 200),
-            pending_requested_gpus=thresholds_config.get("pending_requested_gpus", 8),
+            **optional,
         )
 
     def get_cluster_config(self, region: str) -> ClusterConfig:
