@@ -384,7 +384,9 @@ creates with `gco.io/endpoint: <name>` (object metadata only, never a pod
 template) and never patches, claims or deletes an object labelled for another
 endpoint. Objects created before the label existed get it on their next
 metadata claim; until then, one of another lifecycle whose name another
-endpoint also derives is left untouched rather than cleaned up as stale.
+endpoint also derives is left untouched rather than cleaned up as stale. The
+[tenant write fence](ARCHITECTURE.md#tenant-write-fence) lets only the monitor
+set, change or remove the label on the objects it manages.
 
 This endpoint autoscaler is separate from the shared `inference-proxy` data
 plane. Each regional stack installs the managed EKS Metrics Server add-on that

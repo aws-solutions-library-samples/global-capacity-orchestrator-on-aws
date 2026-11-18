@@ -5,8 +5,9 @@ optional kro, Argo CD and Crossplane tenant roles leave: they may write
 ConfigMaps, Secrets, Services, Deployments and StatefulSets in the two tenant
 namespaces, and RBAC cannot tell a tenant's object there from GCO's. The
 policy keeps what the inference monitor manages its own (the objects it
-labels, the shared Mooncake master, the ConfigMaps its pods mount by name, its
-provenance annotations), the model endpoints' keypair cert-manager's, and the
+labels and the ``gco.io/endpoint`` label naming their endpoint, the shared
+Mooncake master, the ConfigMaps its pods mount by name, its provenance
+annotations), the model endpoints' keypair cert-manager's, and the
 CA bundle trust-manager publishes in gco-jobs trust-manager's.
 
 Its CEL compiles and runs in cel-expr-python (``tests/_cel.py``). The names it keys on are pinned to
@@ -55,6 +56,8 @@ GARBAGE_COLLECTOR = "system:serviceaccount:kube-system:generic-garbage-collector
 
 LABEL_KEY, LABEL_VALUE = next(iter(inference_monitor.INFERENCE_POD_SELECTOR.items()))
 MANAGED_LABELS = {"app": "ep", "project": "gco", LABEL_KEY: LABEL_VALUE}
+#: The label naming the endpoint that owns an object the monitor manages.
+ENDPOINT_LABEL = inference_monitor.ENDPOINT_NAME_LABEL
 PROVENANCE_KEYS = tuple(
     ReconcileAuthority(
         endpoint_name="ep", lifecycle_id="l", region_generation="r", leader_epoch="e"
@@ -71,6 +74,7 @@ ONLY_THE_MONITOR = (
 )
 MANAGED_CONTENT = "is managed by the inference monitor: only"
 POD_PROGRAM = "the inference monitor mounts ConfigMaps named"
+ENDPOINT_LABEL_OWNED = "may set, change or remove the gco.io/endpoint label"
 PROVENANCE_OWNED = "may set, change or remove the gco.io/lifecycle-id"
 KEYPAIR_OWNED = "only the cert-manager controller (system:serviceaccount:cert-manager:cert-manager)"
 BUNDLE_OWNED = "only trust-manager (system:serviceaccount:trust-manager:trust-manager)"
@@ -426,7 +430,7 @@ class TestFencePolicy:
 
     def test_every_rule_is_forbidden_with_a_one_line_message(self) -> None:
         validations = _policy()["spec"]["validations"]
-        assert len(validations) == 6
+        assert len(validations) == 7
         for validation in validations:
             assert validation["reason"] == "Forbidden"
             assert validation["message"].strip() and "\n" not in validation["message"]
@@ -536,6 +540,17 @@ class TestNamesMatchTheirOwners:
             _assert_verdict(_review(obj, user=TENANT), ONLY_THE_MONITOR)
             assert _review(obj, user=MONITOR) == [], kind
 
+    def test_the_endpoint_label_is_the_one_the_monitor_owns_objects_by(self) -> None:
+        """The monitor labels what it creates and refuses objects labelled for another endpoint."""
+        monitor = object.__new__(InferenceMonitor)
+        monitor._active_authority = ReconcileAuthority(
+            endpoint_name="ep", lifecycle_id="l", region_generation="r", leader_epoch="e"
+        )
+        assert monitor._owned_labels(MANAGED_LABELS) == {**MANAGED_LABELS, ENDPOINT_LABEL: "ep"}
+        relabelled = _changed(_LABELLED_DEPLOYMENT, _set_label(ENDPOINT_LABEL, "other"))
+        verdict = _review(relabelled, user=TENANT, old=_LABELLED_DEPLOYMENT)
+        _assert_verdict(verdict, ENDPOINT_LABEL_OWNED)
+
     @pytest.mark.parametrize("key", PROVENANCE_KEYS)
     def test_the_annotations_are_the_monitors_authority_claim(self, key: str) -> None:
         assert set(PROVENANCE_KEYS) == {
@@ -594,6 +609,13 @@ _MANAGED_CONFIG_MAP = _config_map(
 _MANAGED_SECRET = _secret("ep-admin", labels=MANAGED_LABELS, annotations=PROVENANCE)
 _MANAGED_DEPLOYMENT = _deployment("ep", labels=MANAGED_LABELS, pod_labels=MANAGED_LABELS)
 _MANAGED_SERVICE = _service("ep", labels=MANAGED_LABELS)
+#: Managed objects as the monitor labels them for their endpoint.
+_LABELLED_DEPLOYMENT = _deployment(
+    "ep", labels={**MANAGED_LABELS, ENDPOINT_LABEL: "ep"}, pod_labels=MANAGED_LABELS
+)
+_LABELLED_CONFIG_MAP = _config_map(
+    "ep-tls-proxy", labels={**MANAGED_LABELS, ENDPOINT_LABEL: "ep"}, annotations=PROVENANCE
+)
 _MASTER = _stateful_set(MASTER, labels={"app": MASTER, "project": "gco"})
 _TENANT_CONFIG_MAP = _config_map("tenant-config", labels={"app": "mine"})
 _STAMPED_CONFIG_MAP = _config_map("tenant-config", annotations=PROVENANCE)
@@ -755,6 +777,49 @@ UPDATE_CASES = [
         _set_label(LABEL_KEY, LABEL_VALUE),
         ONLY_THE_MONITOR,
     ),
+    # The endpoint label, on what the monitor manages.
+    (
+        "a tenant relabels a Deployment for another endpoint",
+        TENANT,
+        _LABELLED_DEPLOYMENT,
+        _set_label(ENDPOINT_LABEL, "other"),
+        ENDPOINT_LABEL_OWNED,
+    ),
+    (
+        "a tenant strips the endpoint label from a pod program",
+        TENANT,
+        _LABELLED_CONFIG_MAP,
+        _drop_label(ENDPOINT_LABEL),
+        ENDPOINT_LABEL_OWNED,
+    ),
+    (
+        "a tenant labels an object created before the label for another endpoint",
+        TENANT,
+        _MANAGED_SERVICE,
+        _set_label(ENDPOINT_LABEL, "other"),
+        ENDPOINT_LABEL_OWNED,
+    ),
+    (
+        "a tenant labels the shared master for an endpoint",
+        TENANT,
+        _MASTER,
+        _set_label(ENDPOINT_LABEL, "ep"),
+        ENDPOINT_LABEL_OWNED,
+    ),
+    (
+        "a tenant labels an unlabelled pod program from before the fence",
+        TENANT,
+        _LEGACY_POD_PROGRAM,
+        _set_label(ENDPOINT_LABEL, "other"),
+        ENDPOINT_LABEL_OWNED,
+    ),
+    (
+        "the applier is not the monitor for the endpoint label",
+        APPLIER,
+        _LABELLED_DEPLOYMENT,
+        _drop_label(ENDPOINT_LABEL),
+        ENDPOINT_LABEL_OWNED,
+    ),
     # Provenance, on any object.
     (
         "a tenant stamps provenance",
@@ -800,6 +865,20 @@ UPDATE_CASES = [
         None,
     ),
     ("a tenant re-applies a managed object unchanged", TENANT, _MANAGED_SERVICE, _no_change, None),
+    (
+        "a tenant annotates a labelled Deployment, keeping its endpoint label",
+        TENANT,
+        _LABELLED_DEPLOYMENT,
+        _set_annotation("example.com/note", "hi"),
+        None,
+    ),
+    (
+        "a tenant labels its own ConfigMap with an endpoint name",
+        TENANT,
+        _TENANT_CONFIG_MAP,
+        _set_label(ENDPOINT_LABEL, "ep"),
+        None,
+    ),
     (
         "a tenant edits its own ConfigMap",
         TENANT,
@@ -849,6 +928,13 @@ UPDATE_CASES = [
         MONITOR,
         _TENANT_CONFIG_MAP,
         _set_label(LABEL_KEY, LABEL_VALUE),
+        None,
+    ),
+    (
+        "the monitor labels an object created before the label for its endpoint",
+        MONITOR,
+        _MANAGED_SERVICE,
+        _set_label(ENDPOINT_LABEL, "ep"),
         None,
     ),
 ]

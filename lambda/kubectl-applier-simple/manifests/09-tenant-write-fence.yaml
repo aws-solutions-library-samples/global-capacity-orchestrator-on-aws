@@ -19,6 +19,10 @@
 #   * forge the monitor's provenance (the gco.io/type: inference label and the
 #     gco.io/lifecycle-id, gco.io/region-generation and gco.io/leader-epoch
 #     annotations), so the monitor adopts an object it never created;
+#   * relabel one of the monitor's objects for another endpoint, or strip that
+#     gco.io/endpoint label, so the monitor no longer manages it as its
+#     endpoint's (it never patches or deletes an object labelled for another
+#     endpoint, and leaves it running when the endpoint is deleted);
 #   * create or edit the gco-inference-tls Secret before or after cert-manager
 #     issues it, planting a ca.crt that the PD proxies would then trust;
 #   * edit the gco-internal-ca ConfigMap trust-manager publishes in gco-jobs
@@ -37,6 +41,8 @@
 #       - change what any of these objects runs, serves or carries: a
 #         ConfigMap's or Secret's data (a Secret's stringData included),
 #         binaryData and immutable, and any other kind's spec;
+#       - set, change or remove the gco.io/endpoint label on any of these
+#         objects;
 #       - set, change or remove a provenance annotation, on any object.
 #   * Only cert-manager's controller
 #     (system:serviceaccount:cert-manager:cert-manager) may create or update
@@ -130,6 +136,12 @@ spec:
     - name: oldAnnotations
       expression: >-
         variables.isUpdate && has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}
+    # The label naming the endpoint that owns a managed object.
+    - name: endpointLabelKept
+      expression: >-
+        ('gco.io/endpoint' in variables.labels) == ('gco.io/endpoint' in variables.oldLabels)
+        && (!('gco.io/endpoint' in variables.labels)
+        || variables.labels['gco.io/endpoint'] == variables.oldLabels['gco.io/endpoint'])
     - name: provenanceKept
       expression: >-
         ['gco.io/lifecycle-id', 'gco.io/region-generation', 'gco.io/leader-epoch'].all(key,
@@ -196,6 +208,17 @@ spec:
         <name>-pd-proxy and <name>-mooncake into its pods, so only
         system:serviceaccount:gco-system:gco-inference-monitor-sa may create one, not '
         + request.userInfo.username
+      reason: Forbidden
+    # So is the label naming the endpoint that owns one of them.
+    - expression: >-
+        !variables.inInference || variables.fromMonitor || !variables.managed
+        || variables.endpointLabelKept
+      message: >-
+        only the inference monitor may set, change or remove the gco.io/endpoint label on an
+        object it manages in gco-inference
+      messageExpression: >-
+        variables.objectRef + ': only the inference monitor may set, change or remove the
+        gco.io/endpoint label of an object it manages, not ' + request.userInfo.username
       reason: Forbidden
     # Its provenance annotations are its own on every object.
     - expression: "!variables.inInference || variables.fromMonitor || variables.provenanceKept"
