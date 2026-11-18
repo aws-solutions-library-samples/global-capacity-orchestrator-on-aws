@@ -3576,6 +3576,14 @@ gco jobs logs JOB_NAME [OPTIONS]
 Kubeflow TrainJobs are resolved automatically: logs come from the
 rank-`--node` pod of the training job (rank 0 by default).
 
+When the pod is gone (completed and cleaned up) or still pending, the command
+falls back to CloudWatch Logs (`/aws/containerinsights/<cluster>/application`,
+written by the CloudWatch Observability add-on) and prints the newest `--tail`
+lines of the last `--since` hours, oldest first. It reads only the streams of
+this job's pods in `--namespace` (for a TrainJob, the rank-`--node` pod), and only
+the `--container` stream when that option is given; a job named `train` never
+picks up `pretrain` or `train-v2` logs.
+
 **Example:**
 
 ```bash

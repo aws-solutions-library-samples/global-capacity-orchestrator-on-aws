@@ -734,8 +734,10 @@ def get_logs(
     """Get logs from a job.
 
     Fetches logs from the Kubernetes API if the pod is still running.
-    If the pod is gone, falls back to CloudWatch Logs automatically.
-    Use --since to control how far back CloudWatch searches.
+    If the pod is gone, falls back to CloudWatch Logs automatically: the
+    newest --tail lines from this job's pods in --namespace (and only the
+    --container stream when given). Use --since to control how far back
+    CloudWatch searches.
 
     Kubeflow TrainJobs are resolved automatically; use --node to pick a
     node rank other than 0.

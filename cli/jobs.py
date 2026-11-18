@@ -4,6 +4,7 @@ Job management for GCO CLI.
 Provides functionality to submit, query, and manage jobs across GCO clusters.
 """
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -47,6 +48,84 @@ def _format_duration(seconds: int) -> str:
         return f"{minutes}m{secs:02d}s"
     hours, mins = divmod(minutes, 60)
     return f"{hours}h{mins:02d}m{secs:02d}s"
+
+
+# CloudWatch Logs fallback naming. The CloudWatch Observability add-on's Fluent
+# Bit tails /var/log/containers/*.log with tag ``application.*`` and writes each
+# file to a stream named ``<node-host>-application.var.log.containers.<file>``,
+# where the kubelet names the file ``<pod>_<namespace>_<container>-<id>.log``.
+_CONTAINER_LOG_STREAM_PREFIX = r"application\.var\.log\.containers\."
+#: Job names are DNS-1123 subdomains (dots allowed) of at most 63 characters.
+_K8S_SUBDOMAIN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
+#: Namespaces and container names are DNS-1123 labels.
+_K8S_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
+#: The API server cuts a ``generateName`` prefix to 58 characters before it
+#: appends the 5-character random suffix (63 - 5).
+_GENERATED_NAME_PREFIX_MAX = 58
+_RANDOM_POD_SUFFIX = "[a-z0-9]{5}"
+
+
+def _require_k8s_name(value: str, what: str, pattern: re.Pattern[str]) -> str:
+    """Return *value* if it is a valid Kubernetes name of the given kind.
+
+    The CloudWatch Logs Insights query embeds these names in a regular
+    expression, so validation is what keeps a quote or a slash in user input
+    from changing the query.
+    """
+    if len(value) > 63 or pattern.fullmatch(value) is None:
+        raise ValueError(f"{what} {value!r} is not a valid Kubernetes name")
+    return value
+
+
+def _job_pod_name_regex(job_name: str, index: int | None = None) -> str:
+    """Regex for the names of the pods a batch Job named *job_name* creates.
+
+    The Job controller names pods ``<job>-<random5>`` (NonIndexed) or
+    ``<job>-<index>-<random5>`` (Indexed), and the API server truncates the
+    part before the random suffix to 58 characters. With *index* only that
+    completion index matches. *job_name* must already be validated: dots are
+    the only regex metacharacter a Kubernetes name can contain.
+    """
+
+    def literal(text: str) -> str:
+        return text.replace(".", r"\.")
+
+    if index is not None:
+        return literal(f"{job_name}-{index}-"[:_GENERATED_NAME_PREFIX_MAX]) + _RANDOM_POD_SUFFIX
+    base = f"{job_name}-"
+    room = _GENERATED_NAME_PREFIX_MAX - len(base)
+    if room <= 0:
+        return literal(base[:_GENERATED_NAME_PREFIX_MAX]) + _RANDOM_POD_SUFFIX
+    # An Indexed pod's "<index>-" is cut like the rest of the prefix: it fits
+    # whole, or only its first ``room`` characters (digits) survive.
+    index_part = "[0-9]" if room == 1 else f"(?:[0-9]{{1,{room - 1}}}-|[0-9]{{{room}}})"
+    return f"{literal(base)}(?:{index_part})?{_RANDOM_POD_SUFFIX}"
+
+
+def job_log_stream_regex(
+    job_name: str, namespace: str, container: str | None = None, node: int = 0
+) -> str:
+    """Regex for the Container Insights log streams of one job's pods.
+
+    Matches the batch Job's own pods and, for a Kubeflow TrainJob of that
+    name, the rank-*node* pod of its child Job ``<name>-node-0`` (the same
+    pod ``gco jobs logs --node`` reads from the API). The namespace and,
+    when given, the container must match exactly, so a job named ``train``
+    never picks up ``pretrain-...`` or ``train-v2-...`` streams.
+    """
+    _require_k8s_name(job_name, "job name", _K8S_SUBDOMAIN)
+    _require_k8s_name(namespace, "namespace", _K8S_LABEL)
+    if container is not None:
+        _require_k8s_name(container, "container name", _K8S_LABEL)
+    container_part = container if container is not None else _K8S_LABEL.pattern
+    pods = (
+        f"(?:{_job_pod_name_regex(job_name)}"
+        f"|{_job_pod_name_regex(f'{job_name}-node-0', index=node)})"
+    )
+    return (
+        f"{_CONTAINER_LOG_STREAM_PREFIX}{pods}_{namespace}_{container_part}"
+        r"-[0-9a-f]+\.log$"
+    )
 
 
 def resolve_submission_identity(
@@ -862,9 +941,9 @@ class JobManager:
             follow: Stream logs (not implemented yet)
             since_hours: Hours to look back in CloudWatch (default 24)
             node: Node rank to fetch for a distributed TrainJob (default 0)
-            container: Container to read in a multi-container pod, on the
-                Kubernetes path and the TrainJob path alike; None reads the
-                pod's first container there
+            container: Container to read in a multi-container pod. None
+                reads the pod's first container from the API, and every
+                container of the job's pods from CloudWatch
 
         Returns:
             Log content as string
@@ -908,9 +987,12 @@ class JobManager:
                 try:
                     return self._get_cloudwatch_logs(
                         job_name=job_name,
+                        namespace=namespace,
                         region=target_region,
                         tail_lines=tail_lines,
                         since_hours=since_hours,
+                        container=container,
+                        node=node,
                     )
                 except Exception as cw_err:
                     logger.debug("CloudWatch fallback failed: %s", cw_err)
@@ -986,9 +1068,12 @@ class JobManager:
     def _get_cloudwatch_logs(
         self,
         job_name: str,
+        namespace: str,
         region: str,
         tail_lines: int = 100,
         since_hours: int = 24,
+        container: str | None = None,
+        node: int = 0,
     ) -> str:
         """
         Fetch job logs from CloudWatch Logs (Container Insights).
@@ -996,15 +1081,23 @@ class JobManager:
         The CloudWatch Observability addon ships container stdout/stderr to:
           /aws/containerinsights/{cluster_name}/application
 
+        Only the streams of this job's pods in *namespace* are read (see
+        :func:`job_log_stream_regex`), and the newest *tail_lines* lines are
+        returned oldest-first, like ``kubectl logs --tail``.
+
         Args:
-            job_name: Name of the job (used to filter log streams)
+            job_name: Name of the job (its pods' log streams are matched)
+            namespace: Namespace of the job
             region: AWS region
-            tail_lines: Number of log lines to return
+            tail_lines: Number of log lines to return (the most recent)
             since_hours: Hours to look back (default 24)
+            container: Read only this container's stream; None reads all
+            node: TrainJob node rank whose child-Job pod is matched
 
         Returns:
             Log content as string
         """
+        stream_regex = job_log_stream_regex(job_name, namespace, container, node)
         cluster_name = f"{self.config.project_name}-{region}"
         log_group = f"/aws/containerinsights/{cluster_name}/application"
 
@@ -1015,10 +1108,12 @@ class JobManager:
         now = int(time.time())
         start_time = now - (since_hours * 3600)
 
+        # Sort newest-first so ``limit`` keeps the most recent lines; the
+        # rows are put back in time order below.
         query = (
             f"fields @timestamp, @message "
-            f'| filter @logStream like "{job_name}" '
-            f"| sort @timestamp asc "
+            f"| filter @logStream like /{stream_regex}/ "
+            f"| sort @timestamp desc "
             f"| limit {tail_lines}"
         )
 
@@ -1061,7 +1156,7 @@ class JobManager:
         import json as _json
 
         lines = []
-        for row in result["results"]:
+        for row in reversed(result["results"]):
             for entry in row:
                 if entry["field"] == "@message":
                     raw = entry["value"].rstrip()

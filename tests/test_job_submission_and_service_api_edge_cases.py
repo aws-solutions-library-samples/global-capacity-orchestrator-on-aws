@@ -2661,19 +2661,20 @@ def test_cli_list_parse_trainjob_logs_cloudwatch_and_wait_paths(capsys: Any) -> 
 
     logs = MagicMock()
     logs.start_query.return_value = {"queryId": "q"}
+    # Insights answers newest-first (the query sorts by @timestamp desc).
     logs.get_query_results.return_value = {
         "status": "Complete",
         "results": [
+            [{"field": "@message", "value": "second"}],
             [
                 {"field": "other", "value": "ignored"},
                 {"field": "@message", "value": '{"log":"first"}'},
             ],
-            [{"field": "@message", "value": "second"}],
         ],
     }
     manager._aws_client._session.client.return_value = logs
     with patch("time.sleep"):
-        output = manager._get_cloudwatch_logs("j", "us-east-1")
+        output = manager._get_cloudwatch_logs("j", "gco-jobs", "us-east-1")
     assert output.endswith("first\nsecond")
 
     pending = JobInfo(
@@ -3169,15 +3170,15 @@ def test_cli_cloudwatch_logs_preserve_non_object_and_non_string_envelopes() -> N
     logs.get_query_results.return_value = {
         "status": "Complete",
         "results": [
-            [{"field": "@message", "value": "42"}],
-            [{"field": "@message", "value": '["list"]'}],
-            [{"field": "@message", "value": '{"log":42}'}],
             [{"field": "@message", "value": '{"log":"clean"}'}],
+            [{"field": "@message", "value": '{"log":42}'}],
+            [{"field": "@message", "value": '["list"]'}],
+            [{"field": "@message", "value": "42"}],
         ],
     }
     manager._aws_client._session.client.return_value = logs
     with patch("time.sleep"):
-        output = manager._get_cloudwatch_logs("trainer", "us-east-1")
+        output = manager._get_cloudwatch_logs("trainer", "gco-jobs", "us-east-1")
     assert output.endswith('42\n["list"]\n{"log":42}\nclean')
 
 
@@ -3327,7 +3328,7 @@ def test_cli_cloudwatch_logs_ignore_rows_without_a_message_field() -> None:
     }
     manager._aws_client._session.client.return_value = logs
     with patch("time.sleep"):
-        output = manager._get_cloudwatch_logs("trainer", "us-east-1")
+        output = manager._get_cloudwatch_logs("trainer", "gco-jobs", "us-east-1")
     assert output.endswith("\nvisible")
     assert "metadata" not in output
 
