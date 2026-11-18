@@ -865,3 +865,54 @@ class TestHeartbeatActivityBranches:
 
         assert payload["status"] == "ok"
         assert payload["task_id"] == "heartbeat-branches"
+
+
+class TestCancelHeartbeatTask:
+    """Only the heartbeat's own cancellation is absorbed (X22)."""
+
+    def test_cancellation_of_the_waiting_task_propagates(self) -> None:
+        """The waiter is cancelled while the heartbeat is still stopping.
+
+        Suppressing ``CancelledError`` around ``await task`` returned normally
+        here, so the cancelled caller carried on.
+        """
+
+        async def scenario() -> None:
+            release = asyncio.Event()
+
+            async def slow_to_stop() -> None:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    await release.wait()
+                    raise
+
+            heartbeat = asyncio.create_task(slow_to_stop())
+            await asyncio.sleep(0)
+            waiter = asyncio.create_task(long_task._cancel_heartbeat_task(heartbeat))
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            release.set()
+            await asyncio.wait({heartbeat})
+            assert heartbeat.cancelled()
+
+        asyncio.run(scenario())
+
+    def test_heartbeat_cancellation_and_failure_are_absorbed(self) -> None:
+        async def scenario() -> None:
+            sleeping = asyncio.create_task(asyncio.sleep(3600))
+            await asyncio.sleep(0)
+            await long_task._cancel_heartbeat_task(sleeping)
+            assert sleeping.cancelled()
+
+            async def broken() -> None:
+                raise RuntimeError("heartbeat failed")
+
+            failed = asyncio.create_task(broken())
+            await asyncio.sleep(0)
+            await long_task._cancel_heartbeat_task(failed)
+            assert isinstance(failed.exception(), RuntimeError)
+
+        asyncio.run(scenario())
