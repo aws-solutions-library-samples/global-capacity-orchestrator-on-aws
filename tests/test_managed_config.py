@@ -106,17 +106,47 @@ def cdk_json(tmp_path: Path) -> Path:
     return path
 
 
+# How long the cross-process tests wait for a spawned child to start, finish
+# or reach the lock. It bounds failure time only: a spawned child imports the
+# CLI before it can signal, which takes seconds under xdist load.
+_CHILD_PROCESS_WAIT_SECONDS = 60.0
+
+
 def _hold_config_lock_worker(path: str, ready: Any, release: Any) -> None:
-    """Process target that holds the shared directory lock until released."""
+    """Process target that holds the shared directory lock until released.
+
+    The parent always sets ``release``; the bound only ends an orphaned holder,
+    and it outlasts every wait the parent makes while the lock is held.
+    """
     from cli.stacks import _config_mutation_lock
 
     with _config_mutation_lock(Path(path)):
         ready.set()
-        release.wait(10)
+        release.wait(5 * _CHILD_PROCESS_WAIT_SECONDS)
 
 
-def _add_region_worker(path: str, started: Any, result_queue: Any) -> None:
-    """Process target that reports whether a managed update completed."""
+class _LockWaitSignal(logging.Handler):
+    """Set an event when ``cli.stacks`` reports waiting for the config lock."""
+
+    def __init__(self, event: Any) -> None:
+        super().__init__(logging.WARNING)
+        self._event = event
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if "configuration lock" in record.getMessage():
+            self._event.set()
+
+
+def _add_region_worker(
+    path: str, started: Any, result_queue: Any, waiting: Any | None = None
+) -> None:
+    """Process target that reports whether a managed update completed.
+
+    ``waiting`` is set when the writer finds the configuration lock held and
+    starts waiting for it.
+    """
+    if waiting is not None:
+        logging.getLogger("cli.stacks").addHandler(_LockWaitSignal(waiting))
     started.set()
     try:
         add_deployment_region("us-west-2", config_path=path)
@@ -500,12 +530,14 @@ class TestEngineWriteMechanics:
     def test_process_update_waits_for_shared_lock(self, cdk_json: Path):
         """The advisory lock coordinates separate CLI/MCP processes."""
         import multiprocessing
+        import queue
         import time
 
         context = multiprocessing.get_context("spawn")
         ready = context.Event()
         release = context.Event()
         started = context.Event()
+        waiting = context.Event()
         result_queue = context.Queue()
         holder = context.Process(
             target=_hold_config_lock_worker,
@@ -513,24 +545,32 @@ class TestEngineWriteMechanics:
         )
         writer = context.Process(
             target=_add_region_worker,
-            args=(str(cdk_json), started, result_queue),
+            args=(str(cdk_json), started, result_queue, waiting),
         )
 
         holder.start()
         try:
-            assert ready.wait(5), "lock-holder process did not start"
+            assert ready.wait(_CHILD_PROCESS_WAIT_SECONDS), "lock-holder process did not start"
             writer.start()
-            assert started.wait(5), "writer process did not start"
-            time.sleep(0.1)
-            assert writer.is_alive(), "writer bypassed the held cross-process lock"
+            assert started.wait(_CHILD_PROCESS_WAIT_SECONDS), "writer process did not start"
+            deadline = time.monotonic() + _CHILD_PROCESS_WAIT_SECONDS
+            while not waiting.wait(0.05):
+                assert result_queue.empty(), "writer bypassed the held cross-process lock"
+                assert time.monotonic() < deadline, "writer never waited for the held lock"
+            # Waiting on the held lock, the writer cannot have written or reported.
+            with pytest.raises(queue.Empty):
+                result_queue.get(timeout=0.5)
+            assert holder.is_alive(), "holder released the lock before the check"
+            assert get_deployment_regions_status(config_path=cdk_json)["regional"] == ["us-east-1"]
         finally:
             release.set()
-            holder.join(timeout=5)
-            writer.join(timeout=5)
+            holder.join(timeout=_CHILD_PROCESS_WAIT_SECONDS)
+            writer.join(timeout=_CHILD_PROCESS_WAIT_SECONDS)
 
         assert holder.exitcode == 0
         assert writer.exitcode == 0
-        assert result_queue.get(timeout=2) == (True, "")
+        # Released, the writer completes the update it was waiting to make.
+        assert result_queue.get(timeout=_CHILD_PROCESS_WAIT_SECONDS) == (True, "")
         assert get_deployment_regions_status(config_path=cdk_json)["regional"] == [
             "us-east-1",
             "us-west-2",
@@ -560,13 +600,14 @@ class TestEngineWriteMechanics:
 
         holder.start()
         try:
-            assert ready.wait(5), "lock-holder process did not start"
+            assert ready.wait(_CHILD_PROCESS_WAIT_SECONDS), "lock-holder process did not start"
             writer.start()
-            assert started.wait(5), "writer process did not start"
-            writer.join(timeout=5)
+            assert started.wait(_CHILD_PROCESS_WAIT_SECONDS), "writer process did not start"
+            # With a 0.2 s lock timeout the writer gives up long before this bound.
+            writer.join(timeout=_CHILD_PROCESS_WAIT_SECONDS)
             assert not writer.is_alive(), "writer ignored the configured lock timeout"
             assert writer.exitcode == 0
-            succeeded, error = result_queue.get(timeout=2)
+            succeeded, error = result_queue.get(timeout=_CHILD_PROCESS_WAIT_SECONDS)
             assert succeeded is False
             assert "ManagedConfigError" in error
             assert "Timed out" in error
@@ -574,8 +615,8 @@ class TestEngineWriteMechanics:
             assert holder.is_alive(), "holder released the lock before the timeout was observed"
         finally:
             release.set()
-            holder.join(timeout=5)
-            writer.join(timeout=5)
+            holder.join(timeout=_CHILD_PROCESS_WAIT_SECONDS)
+            writer.join(timeout=_CHILD_PROCESS_WAIT_SECONDS)
 
         assert holder.exitcode == 0
         assert get_deployment_regions_status(config_path=cdk_json)["regional"] == ["us-east-1"]
