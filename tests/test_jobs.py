@@ -17,6 +17,13 @@ import pytest
 import yaml
 
 
+def _trainjob_404():
+    """What call_api raises when the manifests endpoint finds no TrainJob."""
+    from cli.aws_client import APIRequestError
+
+    return APIRequestError(404, "Resource not found")
+
+
 class TestJobInfo:
     """Tests for JobInfo dataclass."""
 
@@ -380,7 +387,7 @@ class TestJobManagerOperations:
                 mock_aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
                     response=MagicMock(status_code=404)
                 )
-                mock_aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
+                mock_aws_client.call_api.side_effect = _trainjob_404()
                 mock_aws.return_value = mock_aws_client
 
                 manager = JobManager()
@@ -636,7 +643,7 @@ class TestJobManagerGetJob:
         manager._aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
             response=MagicMock(status_code=404)
         )
-        manager._aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
+        manager._aws_client.call_api.side_effect = _trainjob_404()
 
         result = manager.get_job("nonexistent", "default", "us-east-1")
         assert result is None
@@ -1620,7 +1627,7 @@ class TestJobManagerWaitExtended:
             mock_client.get_job_details.side_effect = requests.exceptions.HTTPError(
                 response=MagicMock(status_code=404)
             )
-            mock_client.call_api.side_effect = RuntimeError("API request failed: not found")
+            mock_client.call_api.side_effect = _trainjob_404()
 
             manager = JobManager()
 
@@ -2162,7 +2169,7 @@ class TestTrainJobLifecycleFallbacks:
     def test_get_job_returns_none_when_trainjob_also_missing(self):
         manager = self._manager()
         manager._aws_client.get_job_details.side_effect = self._http_404()
-        manager._aws_client.call_api.side_effect = RuntimeError("API request failed: not found")
+        manager._aws_client.call_api.side_effect = _trainjob_404()
 
         assert manager.get_job("nope", "gco-jobs", "us-east-1") is None
 
@@ -2544,3 +2551,59 @@ class TestSubmitJobSqsNamespace:
 
         assert body["manifests"][0]["metadata"] == {"namespace": "research"}
         assert result["namespace"] == "research"
+
+
+class TestGetJobTrainJobLookupErrors:
+    """A failed TrainJob lookup is an error, not "not found"."""
+
+    @staticmethod
+    def _manager(trainjob_error):
+        import requests
+
+        from cli.jobs import JobManager
+
+        manager = JobManager()
+        manager._aws_client = MagicMock()
+        manager._aws_client.get_job_details.side_effect = requests.exceptions.HTTPError(
+            response=MagicMock(status_code=404)
+        )
+        manager._aws_client.call_api.side_effect = trainjob_error
+        return manager
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    def test_server_errors_propagate(self, status):
+        from cli.aws_client import APIRequestError
+
+        manager = self._manager(APIRequestError(status, "Service Unavailable"))
+
+        with pytest.raises(APIRequestError) as error:
+            manager.get_job("train", "gco-jobs", "us-east-1")
+        assert error.value.status_code == status
+
+    def test_an_unreachable_bridge_propagates(self):
+        manager = self._manager(RuntimeError("Regional API endpoint is not deployed in us-east-1"))
+
+        with pytest.raises(RuntimeError, match="not deployed"):
+            manager.get_job("train", "gco-jobs", "us-east-1")
+
+    @pytest.mark.parametrize("status", [403, 404])
+    def test_definitive_answers_mean_not_found(self, status):
+        from cli.aws_client import APIRequestError
+
+        manager = self._manager(APIRequestError(status, "no TrainJob"))
+
+        assert manager.get_job("train", "gco-jobs", "us-east-1") is None
+
+    def test_cli_reports_the_failure_instead_of_not_found(self):
+        from click.testing import CliRunner
+
+        from cli.aws_client import APIRequestError
+        from cli.main import cli
+
+        manager = self._manager(APIRequestError(503, "Service Unavailable"))
+        with patch("cli.commands.jobs_cmd.get_job_manager", return_value=manager):
+            result = CliRunner().invoke(cli, ["jobs", "get", "train", "-r", "us-east-1"])
+
+        assert result.exit_code == 1
+        assert "Failed to get job: API request failed: Service Unavailable" in result.stderr
+        assert "not found" not in result.stderr

@@ -19,7 +19,7 @@ from gco.job_admission import apply_sandbox
 from gco.job_envelope import build_job_message
 from gco.services.manifest_processor import TRAINJOB_API_VERSION, safe_load_all_yaml
 
-from .aws_client import get_aws_client
+from .aws_client import APIRequestError, get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -802,9 +802,11 @@ class JobManager:
         TrainJobs.
 
         ``None`` means the API confirmed the job does not exist (HTTP 404 on
-        both lookups). Any other failure — an unreachable regional API bridge,
-        an auth error, a 5xx — propagates to the caller so it is never
-        misreported as "not found" (see issue #258).
+        the batch lookup, and 404 on the TrainJob lookup or a 403 saying the
+        deployment admits no TrainJobs). Any other failure — an unreachable
+        regional API bridge, an auth error, a 5xx, on either lookup —
+        propagates to the caller so it is never misreported as "not found"
+        (see issue #258).
 
         Args:
             job_name: Name of the job
@@ -840,7 +842,14 @@ class JobManager:
             raise
 
     def _get_trainjob_info(self, job_name: str, namespace: str, region: str) -> JobInfo | None:
-        """Fetch a TrainJob through the generic manifests endpoint, or None."""
+        """Fetch a TrainJob through the generic manifests endpoint, or None.
+
+        None only when the API answers that there is no TrainJob to see:
+        404 (no such TrainJob) or 403 (the deployment's policy does not admit
+        the TrainJob kind, so none can exist). Any other failure (a 5xx,
+        throttling, an unreachable regional bridge) propagates, so get_job
+        never reports a job it could not read as "not found".
+        """
         try:
             response = self._aws_client.call_api(
                 "GET",
@@ -848,10 +857,10 @@ class JobManager:
                 region=region,
                 params={"api_version": TRAINJOB_API_VERSION, "kind": "TrainJob"},
             )
-        except RuntimeError as e:
-            # 404 (no such TrainJob either) and transport errors both mean
-            # "not resolvable as a TrainJob"; the caller reports not-found.
-            logger.debug("TrainJob fallback lookup failed for %s: %s", job_name, e)
+        except APIRequestError as e:
+            if e.status_code not in (403, 404):
+                raise
+            logger.debug("No TrainJob %s in %s/%s: %s", job_name, region, namespace, e)
             return None
         resource = response.get("resource") or {}
         if not resource.get("exists", False):
