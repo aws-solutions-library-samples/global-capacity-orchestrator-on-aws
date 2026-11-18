@@ -45,6 +45,7 @@ from pathlib import Path
 # ``pip install -e .``. The project root is two parents up.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from diagrams.code_diagrams._readme import newest_stamp
 from diagrams.code_diagrams._renderer import (
     RenderedTarget,
     _output_stem_for,
@@ -53,8 +54,8 @@ from diagrams.code_diagrams._renderer import (
     write_readme,
 )
 from diagrams.code_diagrams._source_marker import (
+    MARKER_SOURCE_ROOTS,
     SENTINEL,
-    is_marker_source,
     strip_all_markers,
     strip_markers_from,
     upsert_markers,
@@ -180,9 +181,15 @@ def newest_provenance_stamp(manifest: dict[str, dict[str, str]]) -> tuple[str, s
 
     The catalogue README carries one stamp describing the most recent
     regeneration; per-source stamps live in the manifest and the markers.
+    :func:`newest_stamp` is the README writer's own choice, so the two agree
+    even when sources tie on ``generated_at``.
     """
-    newest = max(manifest.values(), key=lambda entry: entry["generated_at"])
-    return newest["generated_at"], newest["source_commit"]
+    newest = newest_stamp(
+        (entry["generated_at"], entry["source_commit"]) for entry in manifest.values()
+    )
+    if newest is None:
+        raise ValueError(f"{PROVENANCE_MANIFEST_NAME} records no sources")
+    return newest
 
 
 def write_provenance_manifest(
@@ -555,13 +562,22 @@ def prune_retired_markers(project_root: Path, *, charted: set[str]) -> int:
     A full ``strip_all_markers`` + reinsert pass would rewrite every charted
     source on every run, which is exactly the catalogue-wide churn incremental
     generation exists to avoid. Only genuinely retired sources are touched.
+
+    Walks only :data:`MARKER_SOURCE_ROOTS`, as ``strip_all_markers`` and the
+    repository contract do. Walking the whole project and filtering afterwards
+    crossed ``.venv``, ``node_modules`` and every ``.worktrees`` checkout:
+    about forty times the files, and half a minute on a developer machine.
     """
+    candidates: list[Path] = []
+    for root in MARKER_SOURCE_ROOTS:
+        root_path = project_root / root
+        candidates.extend([root_path] if root_path.is_file() else root_path.rglob("*.py"))
     modified = 0
-    for source_path in sorted(project_root.rglob("*.py")):
+    for source_path in sorted(candidates):
+        if not source_path.is_file():
+            continue
         relative = source_path.relative_to(project_root).as_posix()
         if relative in charted or "-build" in relative:
-            continue
-        if not is_marker_source(relative):
             continue
         original = source_path.read_text(encoding="utf-8")
         if SENTINEL not in original:

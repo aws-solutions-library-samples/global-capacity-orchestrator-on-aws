@@ -24,8 +24,11 @@ description: |
 inputs:
   images:
     description: |
-      Whitespace- or newline-separated image references to pull, e.g.
-      `koalaman/shellcheck-alpine:v0.11.0`. Always pin a tag or digest.
+      Whitespace- or newline-separated image references to pull. Always pin a
+      tag. An image a security or lint gate runs is pinned by tag and
+      manifest-list digest (`<repository>:<tag>@sha256:<digest>`, e.g. the
+      `SHELLCHECK_IMAGE` env of lint.yml), so a re-pushed tag cannot change
+      it; tests/test_supply_chain_integrity.py requires that shape there.
     required: true
   attempts:
     description: "Total attempts per image (default 3). Set to 1 to disable retries."

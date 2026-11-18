@@ -53,11 +53,13 @@
 #     endpoint, no credentials
 #   - CI tooling the workflows install by hand: Trivy (the install-trivy
 #     composite action's version default),
-#     actionlint (ACTIONLINT_VERSION), Helm and kubectl (HELM_VERSION /
+#     actionlint (ACTIONLINT_VERSION), pip-audit (PIP_AUDIT_VERSION), Helm and kubectl (HELM_VERSION /
 #     KUBECTL_VERSION), kubeconform (KUBECONFORM_VERSION), Calico
 #     (CALICO_VERSION), Metrics Server (METRICS_SERVER_VERSION), kind + its
-#     node image, and the Crossplane function-go-templating package
-#     post-helm-crossplane.yaml installs — public endpoints, no AWS creds
+#     node image, the Crossplane function-go-templating package
+#     post-helm-crossplane.yaml installs, and the datreeio/CRDs-catalog
+#     commit validate_k8s_manifests.py reads CRD schemas at (against the
+#     catalog's main head) — public endpoints, no AWS creds
 #   - Version consistency: ruff (pyproject / pre-commit / lint workflow),
 #     Python and Node runtime pins, npm packageManager + CDK CLI pins, every
 #     owned npm graph's lockfile/Dependabot coverage, duplicated *_VERSION
@@ -84,7 +86,9 @@
 #    on $GITHUB_OUTPUT so the calling workflow can manage a rolling issue.
 #
 # Environment inputs:
-#   WORKFLOWS_DIR  default: .github/workflows
+#   WORKFLOWS_DIR    default: .github/workflows
+#   CDK_ENUM_PYTHON  default: python3; the interpreter whose aws-cdk-lib the
+#                    CDK enum check reads
 #
 # Outputs (via $GITHUB_OUTPUT):
 #   has_drift     "true" when any version is outdated, else "false"
@@ -589,6 +593,22 @@ KIND_NODE_IMAGE_REF="$(extract_kind_pins .github/workflows/integration-tests.yml
 if split_pinned_image_ref "$KIND_NODE_IMAGE_REF" >/dev/null; then
   check_pinned_digest "$KIND_NODE_IMAGE_REF" ".github/workflows/integration-tests.yml KIND_NODE_IMAGE" no
 fi
+
+# Every other image the workflows run (the security and lint scanners, the
+# Floci emulator) is pinned by tag AND manifest-list digest, so a re-pushed tag
+# cannot change what a gate runs with no diff here
+# (tests/test_supply_chain_integrity.py requires the shape). This pass keeps
+# each digest bound to its tag, and the tag joins the sweep: the free-form
+# scan above only recognizes bare names such as alpine:<tag>, never the
+# <namespace>/<repo>:<tag> the scanner images use. The kind node image has its
+# own pass above.
+echo "Checking workflow image digests ($WORKFLOWS_DIR)..."
+WORKFLOW_PINNED_REFS="$(grep -rhoE "[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}" \
+  "$WORKFLOWS_DIR" 2>/dev/null | grep -v '^kindest/node:' | sort -u)"
+while read -r pinned_ref; do
+  [ -z "$pinned_ref" ] && continue
+  check_pinned_digest "$pinned_ref" "$WORKFLOWS_DIR"
+done <<< "$WORKFLOW_PINNED_REFS"
 
 # One lookup per distinct image: ``python:3.14.8-slim`` and
 # ``docker.io/library/python:3.14.8-slim`` are the same Docker Hub tag, and
@@ -1853,10 +1873,13 @@ PRECOMMIT_COUNT="$(wc -l < "$PRECOMMIT_RESULTS" 2>/dev/null | tr -d ' ')"
 # the "Aurora PostgreSQL engine" section validates it against the live RDS
 # API — the authoritative source — instead of the CDK library's catalog.
 #
-# The deps-scan workflow installs the latest ``aws-cdk-lib`` for this
-# section; locally the helper just reflects whatever's already on the
-# active interpreter. If aws-cdk-lib isn't importable we skip with a
-# one-line note (mirrors the AWS-creds skip pattern used elsewhere).
+# ``CDK_ENUM_PYTHON`` names the interpreter whose aws-cdk-lib is read. The
+# deps-scan workflow points it at a virtualenv holding the latest release:
+# the project install at the top of this scan pins aws-cdk-lib exactly, so a
+# latest copy in the scan's own environment is downgraded before this
+# section runs. Unset (a local run), the section reads whatever the active
+# interpreter has. If aws-cdk-lib isn't importable we skip with a one-line
+# note (mirrors the AWS-creds skip pattern used elsewhere).
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Checking CDK enum constants ==="
@@ -1864,7 +1887,7 @@ echo "=== Checking CDK enum constants ==="
 CDK_ENUM_RESULTS="$(mktemp)"
 CDK_ENUM_SKIP_REASON=""
 
-if ! python3 -c "import aws_cdk" 2>/dev/null; then
+if ! "${CDK_ENUM_PYTHON:-python3}" -c "import aws_cdk" 2>/dev/null; then
   CDK_ENUM_SKIP_REASON="aws-cdk-lib not importable. Install with 'pip install aws-cdk-lib' to enable."
   echo "  $CDK_ENUM_SKIP_REASON"
 else
@@ -2175,6 +2198,12 @@ ACTIONLINT_PIN="$(extract_workflow_env_pin ACTIONLINT_VERSION | head -1)"
 check_github_tool "actionlint (ACTIONLINT_VERSION)" "$ACTIONLINT_PIN" "rhysd/actionlint" \
   "https://github.com/rhysd/actionlint/releases"
 
+# pip-audit (pypa/pip-audit) — PIP_AUDIT_VERSION, the single-job pin
+# security:pip-audit:deps installs to audit requirements-lock.txt.
+PIP_AUDIT_PIN="$(extract_workflow_env_pin PIP_AUDIT_VERSION | head -1)"
+check_github_tool "pip-audit (PIP_AUDIT_VERSION)" "$PIP_AUDIT_PIN" "pypa/pip-audit" \
+  "https://github.com/pypa/pip-audit/releases"
+
 # Helm (helm/helm) — the authenticated RUN-line pin in
 # lambda/helm-installer/Dockerfile, the single source every CI job derives
 # its HELM_VERSION/HELM_SHA256 from at runtime.
@@ -2287,6 +2316,23 @@ if [ -n "$KIND_NODE_PIN" ]; then
   fi
 else
   mark_scan_incomplete "Could not parse the kind node-image pin from integration-tests.yml."
+fi
+
+# datreeio/CRDs-catalog — validate_k8s_manifests.py reads CRD schemas at one
+# commit of the catalog's main branch (CRD_CATALOG_COMMIT), so an upstream
+# schema change reaches integration:k8s:manifest-schema only when the pin
+# moves. The catalog has published no release since 2023, so drift is main
+# having moved past the pin: set the constant to main's head and re-run the
+# validator.
+CRD_CATALOG_PIN="$(extract_python_string_constant CRD_CATALOG_COMMIT .github/scripts/validate_k8s_manifests.py)"
+if ! [[ "$CRD_CATALOG_PIN" =~ ^[0-9a-f]{40}$ ]]; then
+  mark_scan_incomplete "Could not parse CRD_CATALOG_COMMIT from .github/scripts/validate_k8s_manifests.py."
+elif ! crd_catalog_head="$(github_api_get "https://api.github.com/repos/datreeio/CRDs-catalog/commits/main" \
+    | jq -r '.sha // empty' 2>/dev/null)" || ! [[ "$crd_catalog_head" =~ ^[0-9a-f]{40}$ ]]; then
+  mark_scan_incomplete "GitHub commit lookup failed for datreeio/CRDs-catalog main$(github_api_failure_hint)."
+elif [ "$CRD_CATALOG_PIN" != "$crd_catalog_head" ]; then
+  echo "  - datreeio/CRDs-catalog (CRD_CATALOG_COMMIT): ${CRD_CATALOG_PIN:0:12} -> ${crd_catalog_head:0:12}"
+  echo "datreeio/CRDs-catalog (CRD_CATALOG_COMMIT)|${CRD_CATALOG_PIN:0:12}|${crd_catalog_head:0:12}|https://github.com/datreeio/CRDs-catalog/compare/${CRD_CATALOG_PIN}...${crd_catalog_head}" >> "$CI_TOOLING_RESULTS"
 fi
 
 CI_TOOLING_COUNT="$(wc -l < "$CI_TOOLING_RESULTS" 2>/dev/null | tr -d ' ')"
@@ -2421,8 +2467,10 @@ if [ -n "$NPM_MANAGEMENT_PROBLEMS" ]; then
 fi
 
 # Every tool pinned in more than one workflow (or more than one job) must
-# agree. CALICO_* and METRICS_SERVER_* are here because the kind jobs install
-# them per job — two jobs on different Calico builds would enforce
+# agree. CALICO_* and METRICS_SERVER_* are here because a job-level copy
+# would shadow the one declaration the kind jobs share (kind and Calico live
+# in integration-tests.yml's workflow-level env) — two jobs on different
+# Calico builds would enforce
 # NetworkPolicy with two different engines, and a version/checksum pair that
 # disagrees fails the download as what looks like a flake. The PR-time half of
 # this contract lives in

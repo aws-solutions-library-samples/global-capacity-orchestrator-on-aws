@@ -742,8 +742,8 @@ If stage 2 fails partway (for example, the tag pushed but the Release wasn't
 created), re-run it from Actions → Release Publish → "Run workflow" on
 `main`; every step is idempotent and completes only what's missing. A
 VERSION change that reaches `main` without a `Release vX.Y.Z` commit subject
-is deliberately not auto-tagged — publish it explicitly the same way after
-review.
+is deliberately never tagged: the push run skips it, a dispatch refuses it,
+and its changes ship with the next release cut through stage 1.
 
 #### Manual Release (Alternative)
 

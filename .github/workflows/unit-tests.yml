@@ -636,7 +636,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install CLI
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
       - name: Exercise CLI surface
         run: |
           python -c "from cli import GCOConfig, JobManager, CapacityChecker; print('CLI imports OK')"
@@ -662,7 +662,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install CLI with CDK and test dependencies
-        run: pip install -e ".[cdk,test]"
+        run: pip install -c requirements-lock.txt -e ".[cdk,test]"
       - name: Exercise native Windows imports and asset locks
         shell: pwsh
         run: |
@@ -727,7 +727,7 @@ jobs:
         run: bash .github/scripts/use-pinned-npm.sh package.json
       - name: Install CLI
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
       - name: Resolve every launch plan without agent CLIs installed
         run: |
           gco autopilot --help
@@ -834,6 +834,7 @@ jobs:
         # Execute the exact lazy-install commands production Autopilot uses,
         # then prove each real binary and installed-plan state.
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           import subprocess
 
@@ -847,12 +848,19 @@ jobs:
           subprocess.run(codex_install_command(), check=True)
           subprocess.run(opencode_install_command(), check=True)
           PY
-          claude --version | grep -qF \
-            "$(python3 .github/scripts/autopilot_ci_contract.py pin)"
-          codex --version | grep -qF \
-            "$(python3 .github/scripts/autopilot_ci_contract.py pin --engine codex)"
-          opencode --version | grep -qF \
-            "$(python3 .github/scripts/autopilot_ci_contract.py pin --engine opencode)"
+          # Each pin and each reported version is read into a variable first.
+          # As an inline "$(...)" grep pattern, a failed pin lookup expanded to
+          # "", and the empty pattern matched any version, so the check passed.
+          for pair in claude-code:claude codex:codex opencode:opencode; do
+            engine="${pair%%:*}" binary="${pair#*:}"
+            pin="$(python3 .github/scripts/autopilot_ci_contract.py pin --engine "$engine")"
+            test -n "$pin"
+            reported="$("$binary" --version)"
+            if ! grep -qF -- "$pin" <<< "$reported"; then
+              echo "${binary} --version reported '${reported}', not the pinned ${pin}" >&2
+              exit 1
+            fi
+          done
           # Parse the exact session-precedence and resume spellings production
           # uses for OpenCode (root TUI and `run`), and confirm the utility
           # subcommands still reject them — the reason autopilot withholds the
@@ -1226,8 +1234,11 @@ jobs:
         # own toolchain (pytest, pytest-xdist, moto, ruff, mypy, aws-cdk-lib,
         # etc.) installs against live PyPI on every run. That means a
         # transitive bump to pluggy or coverage between PR runs could
-        # silently change test behavior. Locking everything keeps every job
-        # reproducible against a known pinned tree.
+        # silently change test behavior. Locking everything, and installing
+        # every job against the lock (`-r requirements-lock.txt`, or
+        # `-c requirements-lock.txt` beside the project install), keeps every
+        # job reproducible against a known pinned tree; unit:fresh-install is
+        # the deliberate cold exception.
         env:
           # pip-compile invokes pip, which can hit interactive keyring prompts
           # on CI ("Unhandled exception: EOF when reading a line"). Disabling
@@ -1313,8 +1324,8 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install core + inference-monitor image dependencies
         run: |
-          pip install -e .
-          pip install -e ".[image-inference-monitor]"
+          pip install -c requirements-lock.txt -e .
+          pip install -c requirements-lock.txt -e ".[image-inference-monitor]"
       - name: Import health-monitor + manifest-processor
         run: |
           python -c "from gco.services.health_api import app; print('health-monitor OK')"
@@ -1375,7 +1386,8 @@ jobs:
         with:
           python-version-file: ".python-version"
       - name: Install uv
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Derive the documented --python value from requires-python
         run: |
           set -euo pipefail

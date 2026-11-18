@@ -26,7 +26,7 @@
 #   - integration:docker:inference-monitor        — build + import smoke + functional metrics/resilience/shutdown contract
 #   - integration:docker:inference-proxy          — build + import smoke + functional boot/probe/shutdown contract
 #   - integration:docker:manifest-processor       — build + import smoke + functional boot/probe/shutdown contract
-#   - integration:docker:queue-processor          — build + import smoke + moto-SQS consume/reject/exit-code contract
+#   - integration:docker:queue-processor          — build + import smoke + consume/reject/exit-code contract against the Floci SQS emulator
 #   - integration:docker:tls-certificate-manager  — build + Lambda handler import + RIE invoke
 #   - integration:helm:charts-valid               — every charts.yaml (chart,version) resolves + renders with helm
 #   - integration:k8s:manifest-schema             — kubeconform schema validation + YAML/required-kinds/DAG checks
@@ -114,7 +114,7 @@ jobs:
           cache: "pip"
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project (provides PyYAML for the validator)
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Derive the Helm pin from the production installer Dockerfile
         # lambda/helm-installer/Dockerfile is the single source for the Helm
         # version + checksum: this step loads HELM_VERSION / HELM_SHA256 from
@@ -175,7 +175,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
       - name: Install pinned kubeconform
         run: |
           set -euo pipefail
@@ -341,7 +341,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install project
         run: |
-          pip install -e .
+          pip install -c requirements-lock.txt -e .
       - name: Import each Lambda handler
         run: python3 .github/scripts/verify_lambda_imports.py
 
@@ -379,7 +379,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install test dependencies
         run: |
-          pip install -e ".[test]"
+          pip install -c requirements-lock.txt -e ".[test]"
       - name: Run integration pytest
         run: |
           pytest tests/test_integration.py -v --tb=short \
@@ -420,7 +420,7 @@ jobs:
           cache-dependency-path: "requirements-lock.txt"
       - name: Install dev + mcp
         run: |
-          pip install -e ".[dev,mcp]"
+          pip install -c requirements-lock.txt -e ".[dev,mcp]"
       - name: Run MCP integration tests
         run: |
           pytest tests/test_mcp_integration.py -v --tb=short \
@@ -478,9 +478,10 @@ jobs:
         # [mcp] brings fastmcp so the gco server entry in the generated
         # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
         # can actually boot under claude.
-        run: pip install -e ".[mcp]"
+        run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Boot the autopilot session to the credential boundary
         run: bash .github/scripts/autopilot_claude_code_boot_probe.sh
       - name: Upload session evidence
@@ -536,9 +537,10 @@ jobs:
         # [mcp] brings fastmcp so the gco server entry in the generated
         # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
         # can actually boot under codex.
-        run: pip install -e ".[mcp]"
+        run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Boot the codex autopilot session to the credential boundary
         run: bash .github/scripts/autopilot_codex_boot_probe.sh
       - name: Upload session evidence
@@ -597,9 +599,10 @@ jobs:
         # [mcp] brings fastmcp so the gco server entry in the generated
         # config (python3 gco_mcp/run_mcp.py, straight off this checkout)
         # can actually boot under opencode.
-        run: pip install -e ".[mcp]"
+        run: pip install -c requirements-lock.txt -e ".[mcp]"
       - name: Install uv (uvx launches the PyPI companion MCP servers)
-        run: pip install uv
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
       - name: Boot the opencode autopilot session to the credential boundary
         run: bash .github/scripts/autopilot_opencode_boot_probe.sh
       - name: Upload session evidence
@@ -1361,7 +1364,7 @@ jobs:
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev gco capacity --help
           docker run --rm -v "$PWD":/workspace -w /workspace gco-dev gco stacks --help
       - name: Verify pinned toolchain versions
-        # The verifier reads all eight reviewed Dockerfile ARG pins and fails
+        # The verifier reads every Dockerfile ARG pin DEV_PIN_NAMES lists and fails
         # when any installed tool reports a different runtime version.
         run: >-
           python3 .github/scripts/verify_container_tool_versions.py
@@ -1626,7 +1629,7 @@ jobs:
         # stack calls, and the SQS job envelope `gco jobs submit-sqs` builds —
         # and parse manifests with PyYAML, so the project supplies its own
         # dependencies to this job.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Reclaim runner disk space before Kind image builds
         uses: ./.github/actions/free-disk-space
       - name: Pre-pull Kind bootstrap images with retry
@@ -1659,68 +1662,11 @@ jobs:
         # what Docker 29's containerd image store needs (kind#4224).
         run: python3 .github/scripts/preload_kind_images.py --cluster gco-ci --image busybox:1.38.0
       - name: Install Calico for NetworkPolicy enforcement
-        # kind's default kindnet does not enforce NetworkPolicy. Calico does,
-        # so 03-network-policies.yaml is actually exercised here.
-        #
-        # Use `rollout status` rather than `kubectl wait --for=condition=Ready
-        # pods -l …` because wait returns "no matching resources found" if
-        # the pods haven't been scheduled yet by the apiserver — a race that
-        # fires within a second of the apply. rollout status waits for the
-        # workload to exist first, then waits for it to become Ready.
-        #
-        # The rollout wait is wrapped in a retry loop because calico-node
-        # readiness is a known CI flake: the DaemonSet pod pulls its image
-        # from quay.io and runs the install-cni / mount-bpffs init containers,
-        # which can exceed a single timeout window under runner image-pull
-        # latency or resource contention. The apply is idempotent, so each
-        # attempt re-applies (a no-op once the objects exist) and re-waits;
-        # transient slowness converges on a later attempt. On the final
-        # failure we dump pod/event diagnostics so a genuine (non-transient)
-        # break is debuggable from the log rather than just "timed out".
-        #
-        # Budget: 3 attempts x (4m node + 2m controllers) = 18m worst case,
-        # inside the job's 30m timeout-minutes.
-        run: |
-          set -euo pipefail
-          calico_manifest="${RUNNER_TEMP}/calico.yaml"
-          curl --fail --show-error --location \
-            --connect-timeout 15 --max-time 60 \
-            --retry 3 --retry-all-errors --retry-max-time 180 \
-            --remove-on-error \
-            --output "${calico_manifest}" \
-            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
-          kubectl apply -f "${calico_manifest}"
-
-          attempts=3
-          for i in $(seq 1 "${attempts}"); do
-            echo "::group::Calico rollout attempt ${i}/${attempts}"
-            # Re-apply is idempotent; nudges anything that failed to schedule.
-            kubectl apply -f "${calico_manifest}"
-            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
-               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
-              echo "Calico is ready."
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "Calico not ready on attempt ${i}/${attempts}."
-            echo "::endgroup::"
-            if [ "${i}" -lt "${attempts}" ]; then
-              echo "Retrying in 15s..."
-              sleep 15
-            fi
-          done
-
-          echo "::error::Calico did not become ready after ${attempts} attempts."
-          echo "===== Diagnostics: calico pods ====="
-          kubectl -n kube-system get pods -l k8s-app=calico-node -o wide || true
-          kubectl -n kube-system get pods -l k8s-app=calico-kube-controllers -o wide || true
-          echo "===== Diagnostics: describe calico-node ====="
-          kubectl -n kube-system describe daemonset/calico-node || true
-          kubectl -n kube-system describe pods -l k8s-app=calico-node || true
-          echo "===== Diagnostics: recent kube-system events ====="
-          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
-          exit 1
+        # kind's default kindnet does not enforce NetworkPolicy; Calico does.
+        # The one script every kind job shares downloads the pinned manifest
+        # (CALICO_VERSION / CALICO_SHA256 in this workflow's env), checks it,
+        # applies it, waits with retries and prints diagnostics on failure.
+        run: bash .github/scripts/install-calico.sh
       - name: Install Metrics Server for HPA reconciliation
         # Production uses the EKS managed metrics-server add-on. kind needs the
         # upstream component plus insecure kubelet TLS because its node serving
@@ -3412,7 +3358,7 @@ jobs:
         # -e . provides PyYAML for validate_helm_charts.py --emit-* and the
         # render step below, which parses the shipped cost-monitor manifest
         # rather than patching it with sed.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Derive the Helm pin from the production installer Dockerfile
         # Single source: lambda/helm-installer/Dockerfile (see the
         # charts-valid job for the full rationale).
@@ -3522,45 +3468,11 @@ jobs:
           python3 .github/scripts/preload_kind_images.py --cluster gco-cost-pipeline \
             --pinned "${CI_S3_EMULATOR_IMAGE}=${CI_S3_LOCAL_IMAGE}"
       - name: Install Calico for NetworkPolicy enforcement
-        # Mirrors the proven step in integration:kind:cluster-e2e, including
-        # the retry loop: calico-node readiness is a known CI flake because
-        # it pulls from quay.io and runs install-cni / mount-bpffs init
-        # containers, which can exceed one timeout window under runner
-        # image-pull latency. The apply is idempotent, so each attempt
-        # re-applies and re-waits.
-        run: |
-          set -euo pipefail
-          calico_manifest="${RUNNER_TEMP}/calico.yaml"
-          curl --fail --show-error --location \
-            --connect-timeout 15 --max-time 60 \
-            --retry 3 --retry-all-errors --retry-max-time 180 \
-            --remove-on-error \
-            --output "${calico_manifest}" \
-            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
-          kubectl apply -f "${calico_manifest}"
-
-          attempts=3
-          for i in $(seq 1 "${attempts}"); do
-            echo "::group::Calico rollout attempt ${i}/${attempts}"
-            kubectl apply -f "${calico_manifest}"
-            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
-               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
-              echo "Calico is ready."
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "Calico not ready on attempt ${i}/${attempts}."
-            echo "::endgroup::"
-            if [ "${i}" -lt "${attempts}" ]; then
-              sleep 15
-            fi
-          done
-
-          echo "::error::Calico did not become ready after ${attempts} attempts."
-          kubectl -n kube-system get pods -o wide || true
-          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
-          exit 1
+        # kind's default kindnet does not enforce NetworkPolicy; Calico does.
+        # The one script every kind job shares downloads the pinned manifest
+        # (CALICO_VERSION / CALICO_SHA256 in this workflow's env), checks it,
+        # applies it, waits with retries and prints diagnostics on failure.
+        run: bash .github/scripts/install-calico.sh
       - name: Set up Buildx (enables shared GHA layer cache)
         uses: ./.github/actions/setup-buildx-with-retry
       - name: Build cost-monitor image
@@ -4620,7 +4532,7 @@ jobs:
         # gco.services.manifest_processor importable so the can-i sweep
         # derives (group, plural) pairs from the SAME constants production
         # enforces — no hardcoded copy to drift.
-        run: pip install -e .
+        run: pip install -c requirements-lock.txt -e .
       - name: Derive the Helm pin from the production installer Dockerfile
         # Single source: lambda/helm-installer/Dockerfile (see the
         # charts-valid job for the full rationale).
@@ -4728,45 +4640,11 @@ jobs:
           # installs Calico and waits via rollout status.
           wait: "0s"
       - name: Install Calico for NetworkPolicy enforcement
-        # Mirrors the proven step in integration:kind:cluster-e2e, including
-        # the retry loop: calico-node readiness is a known CI flake because
-        # it pulls from quay.io and runs install-cni / mount-bpffs init
-        # containers, which can exceed one timeout window under runner
-        # image-pull latency. The apply is idempotent, so each attempt
-        # re-applies and re-waits.
-        run: |
-          set -euo pipefail
-          calico_manifest="${RUNNER_TEMP}/calico.yaml"
-          curl --fail --show-error --location \
-            --connect-timeout 15 --max-time 60 \
-            --retry 3 --retry-all-errors --retry-max-time 180 \
-            --remove-on-error \
-            --output "${calico_manifest}" \
-            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
-          kubectl apply -f "${calico_manifest}"
-
-          attempts=3
-          for i in $(seq 1 "${attempts}"); do
-            echo "::group::Calico rollout attempt ${i}/${attempts}"
-            kubectl apply -f "${calico_manifest}"
-            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
-               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
-              echo "Calico is ready."
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "Calico not ready on attempt ${i}/${attempts}."
-            echo "::endgroup::"
-            if [ "${i}" -lt "${attempts}" ]; then
-              sleep 15
-            fi
-          done
-
-          echo "::error::Calico did not become ready after ${attempts} attempts."
-          kubectl -n kube-system get pods -o wide || true
-          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
-          exit 1
+        # kind's default kindnet does not enforce NetworkPolicy; Calico does.
+        # The one script every kind job shares downloads the pinned manifest
+        # (CALICO_VERSION / CALICO_SHA256 in this workflow's env), checks it,
+        # applies it, waits with retries and prints diagnostics on failure.
+        run: bash .github/scripts/install-calico.sh
       - name: Apply platform namespaces + RBAC
         # 01-serviceaccounts / 02-rbac carry {{...ROLE_ARN}} IRSA annotation
         # tokens; annotations are opaque strings to the apiserver, so the
@@ -5923,8 +5801,9 @@ jobs:
   #     else; the server only reads); deleting the root Application detaches
   #     the Job instead of deleting it; the shipped example Application syncs
   #     and its resources finalizer cascades when the helm installer's
-  #     pre-uninstall cleanup deletes every argoproj.io object; the applier's
-  #     disable-path inventories remove the rest.
+  #     pre-uninstall cleanup deletes the argoproj.io objects in the argocd
+  #     namespace (it does so only while GCO's own Argo CD release exists);
+  #     the applier's disable-path inventories remove the rest.
   #   * Crossplane: the go-templating function turns Healthy, the example XRD
   #     and Composition serve BatchJob, an XR in gco-jobs composes a Job that
   #     completes and marks the XR Ready, an XR in gco-system cannot compose
@@ -5972,7 +5851,7 @@ jobs:
         # own helpers, the teardown runs the Lambda handlers' own functions and
         # the dashboards are captured by the CLI's screenshot code. The
         # diagrams extra is the pinned Playwright those commands need.
-        run: pip install -e ".[diagrams]"
+        run: pip install -c requirements-lock.txt -e ".[diagrams]"
       - name: Install the headless Chromium the captures drive (with retry)
         run: |
           set -euo pipefail
@@ -6393,8 +6272,9 @@ jobs:
           PY
       - name: Cascade the example Application through the installer cleanup
         # The example Application DOES carry the resources finalizer: when the
-        # helm installer's pre-uninstall cleanup deletes every argoproj.io
-        # object (what a disabled chart or a stack delete runs), Argo CD
+        # helm installer's pre-uninstall cleanup deletes the argoproj.io
+        # objects in the argocd namespace (what a disabled chart or a stack
+        # delete runs while GCO's own Argo CD release exists), Argo CD
         # deletes the Job before the Application goes. The projects get a
         # later pass (the controller finalizes nothing whose project is
         # gone), so the cascade must finish inside the wait: needing the

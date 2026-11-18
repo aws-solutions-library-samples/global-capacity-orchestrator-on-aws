@@ -2,8 +2,12 @@
 
 import ast
 import json
+import os
 import re
+import shlex
 import stat
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -165,14 +169,6 @@ def test_downloaded_release_assets_have_committed_checksums(
         ),
         (
             ".github/workflows/integration-tests.yml",
-            "Install Calico for NetworkPolicy enforcement",
-            'CALICO_VERSION: "v3.33.0"',
-            'CALICO_SHA256: "2de8f47595fb9c41b3f47d7b767a1f8e72ecf84057af834738ff12689a234da5"',
-            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
-            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
-        ),
-        (
-            ".github/workflows/integration-tests.yml",
             "Install Metrics Server for HPA reconciliation",
             'METRICS_SERVER_VERSION: "v0.9.1"',
             'METRICS_SERVER_SHA256: "3c7f57cdbee0f57fb0259a150e8f6d6cb4f29d72d1aa5dce8803151dd6d4c2a1"',
@@ -315,6 +311,131 @@ def test_workflows_never_pip_install_a_package_pyproject_declares() -> None:
     )
 
 
+# Jobs that install the project without the lock, each for a stated reason.
+_UNCONSTRAINED_PROJECT_INSTALLS = {
+    # Proves a cold install resolves from pyproject.toml's metadata alone.
+    ("unit-tests.yml", "unit-fresh-install"),
+}
+
+
+def _project_install_commands(run: str) -> list[str]:
+    """Every ``pip install`` invocation in ``run`` that installs the project itself."""
+    joined = re.sub(r"\\\n\s*", " ", run)
+    commands = []
+    for invocation in re.findall(r"pip install([^\n|;&]*)", joined):
+        tokens = [token.strip("\"'") for token in invocation.split()]
+        if any(token == "." or token.startswith(".[") for token in tokens):
+            commands.append(" ".join(["pip", "install", *invocation.split()]))
+    return commands
+
+
+def test_project_installs_are_constrained_by_the_lock() -> None:
+    """Every job that installs the project resolves its transitive graph from the lock.
+
+    ``pip install -e ".[extra]"`` alone resolves every transitive dependency
+    against live PyPI, so mypy, the strict wiki build and the Pages site could
+    change or break between two runs of one commit: 58 of the 127 packages
+    ``.[docs]`` resolved to had already moved past the lock when this guard
+    landed. The lock has no direct references, so it works as a constraints
+    file, the way the service Dockerfiles use it. A ``--no-deps`` install
+    (after ``pip install -r requirements-lock.txt``) resolves nothing, and
+    deps-scan.yml resolves against latest on purpose.
+    """
+    sources = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    sources += sorted((ROOT / ".github" / "actions").glob("*/action.yml"))
+    unconstrained: list[str] = []
+    exempted: set[tuple[str, str]] = set()
+    for path in sources:
+        if path.name == "deps-scan.yml":
+            continue
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        jobs = document.get("jobs") or {"runs": document.get("runs") or {}}
+        for job_id, job in jobs.items():
+            for step in job.get("steps") or []:
+                for command in _project_install_commands(step.get("run") or ""):
+                    tokens = command.split()
+                    if "--no-deps" in tokens or "-c requirements-lock.txt" in command:
+                        continue
+                    key = (path.name, job_id)
+                    if key in _UNCONSTRAINED_PROJECT_INSTALLS:
+                        exempted.add(key)
+                        continue
+                    unconstrained.append(f"{path.relative_to(ROOT)}:{job_id}: {command}")
+
+    assert not unconstrained, (
+        "project installs must constrain the transitive graph with "
+        "`-c requirements-lock.txt`: " + "; ".join(unconstrained)
+    )
+    assert exempted == _UNCONSTRAINED_PROJECT_INSTALLS, (
+        "an exemption no longer matches an unconstrained install; drop it"
+    )
+    assert _project_install_commands('pip install -e ".[docs]" && x') == [
+        'pip install -e ".[docs]"'
+    ]
+    assert _project_install_commands("pip install \\\n  -e .") == ["pip install -e ."]
+    assert _project_install_commands("pip install uv") == []
+
+
+def test_dev_container_installs_the_project_against_the_lock() -> None:
+    """Dockerfile.dev constrains its project installs the way CI and the service images do.
+
+    Its ``.[dev,mcp]`` install resolved every transitive dependency against
+    live PyPI, so two builds of one commit could ship different packages.
+    """
+    commands = [
+        command
+        for run in _dockerfile_run_instructions(_read("Dockerfile.dev"))
+        for command in _project_install_commands(run)
+    ]
+    assert len(commands) == 2, commands
+    for command in commands:
+        assert "-c requirements-lock.txt" in command, command
+    assert "COPY pyproject.toml requirements-lock.txt ./" in _read("Dockerfile.dev")
+
+
+def test_retried_artifact_uploads_overwrite_only_their_own_first_attempt() -> None:
+    """Retries overwrite, so no two uploads in one workflow may share a name.
+
+    The artifact service can fail the finalize call after it has recorded the
+    artifact, and upload-artifact v4+ refuses a second upload under that name
+    (409 "an artifact with this name already exists"), so retries that kept
+    the caller's ``overwrite: false`` could never succeed. They now overwrite,
+    which replaces only the step's own first attempt as long as every upload
+    in a workflow has its own name and every matrix leg names its artifact
+    after its leg.
+    """
+    action = yaml.safe_load(_read(".github/actions/upload-artifact-with-retry/action.yml"))
+    uploads = [
+        step
+        for step in action["runs"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+    assert len(uploads) == 3
+    assert uploads[0]["with"]["overwrite"] == "${{ inputs.overwrite }}"
+    assert [upload["with"]["overwrite"] for upload in uploads[1:]] == [True, True]
+
+    checked = 0
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        names: list[str] = []
+        for job_id, job in workflow["jobs"].items():
+            matrix = (job.get("strategy") or {}).get("matrix")
+            for step in job.get("steps") or []:
+                uses = str(step.get("uses", ""))
+                if uses != "./.github/actions/upload-artifact-with-retry" and not uses.startswith(
+                    "actions/upload-artifact@"
+                ):
+                    continue
+                name = str(step["with"]["name"])
+                if matrix:
+                    assert "${{ matrix." in name, f"{path.name}:{job_id}: every leg uploads {name}"
+                names.append(name)
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        assert not duplicates, f"{path.name}: several uploads share {duplicates}"
+        checked += len(names)
+    assert checked >= 30, checked
+
+
 def test_workflows_do_not_execute_mutable_remote_installers() -> None:
     workflows = "\n".join(
         path.read_text(encoding="utf-8")
@@ -343,12 +464,6 @@ def test_workflows_do_not_execute_mutable_remote_installers() -> None:
         ),
         (
             "integration-kind-cluster-e2e",
-            "Install Calico for NetworkPolicy enforcement",
-            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
-            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
-        ),
-        (
-            "integration-kind-cluster-e2e",
             "Install Metrics Server for HPA reconciliation",
             "metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml",
             'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -',
@@ -360,22 +475,10 @@ def test_workflows_do_not_execute_mutable_remote_installers() -> None:
             'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
         ),
         (
-            "integration-kind-cost-pipeline",
-            "Install Calico for NetworkPolicy enforcement",
-            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
-            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
-        ),
-        (
             "integration-kind-examples-smoke",
             "Install Helm",
             "helm-${HELM_VERSION}-linux-amd64.tar.gz",
             'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
-        ),
-        (
-            "integration-kind-examples-smoke",
-            "Install Calico for NetworkPolicy enforcement",
-            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
-            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
         ),
         (
             "integration-kind-platform-addons",
@@ -499,7 +602,7 @@ def test_every_kind_image_load_goes_through_the_preload_script() -> None:
             installs = [
                 index
                 for index, step in enumerate(steps)
-                if re.search(r"pip install -e [\"']?\.", step.get("run") or "")
+                if re.search(r"pip install [^\n]*-e [\"']?\.", step.get("run") or "")
             ]
             for index, step in enumerate(steps):
                 run = step.get("run") or ""
@@ -648,7 +751,7 @@ def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> 
     assert "playwright install --with-deps --only-shell chromium" in chromium
     assert "for attempt in 1 2 3" in chromium
     assert by_name["Install project (renderers, Lambda helpers and the capture code)"]["run"] == (
-        'pip install -e ".[diagrams]"'
+        'pip install -c requirements-lock.txt -e ".[diagrams]"'
     )
     upload = by_name["Upload the dashboard captures"]
     assert upload["if"] == "always()"
@@ -1332,9 +1435,10 @@ def test_kind_manifests_are_authenticated_before_local_apply() -> None:
         r"kubectl\s+apply\s+-f\s+(?:\\\s*)?[\"']?https://",
         workflow,
     )
-    assert 'kubectl apply -f "${calico_manifest}"' in workflow
+    calico = _read(".github/scripts/install-calico.sh")
+    assert 'kubectl apply -f "${calico_manifest}"' in calico
     assert 'kubectl apply -f "${metrics_manifest}"' in workflow
-    assert 'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -' in workflow
+    assert 'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -' in calico
     assert 'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -' in workflow
     # Piping curl into kubectl would evade the URL regex above while skipping
     # the checksum; every downloaded manifest lands in a file first.
@@ -1362,7 +1466,35 @@ def test_dependency_scan_credentials_are_default_branch_only() -> None:
     ) in workflow
     assert "persist-credentials: false" in workflow
     assert "persist-credentials: true" not in workflow
-    assert "steps.scan.outputs.scan_complete == 'true'" in workflow
+    assert "needs.deps-scan.outputs.scan_complete == 'true'" in workflow
+
+
+def test_dependency_scan_keeps_each_credential_in_its_own_job() -> None:
+    """The scan's third-party code never shares a job with the issue-writing token.
+
+    The scan installs latest-PyPI packages and runs a ~7,000-line script. With
+    ``issues: write`` and ``id-token: write`` granted workflow-wide, the OIDC
+    request variables were present during those installs and the issue-writing
+    GITHUB_TOKEN reached the scan step. Now the scan job alone can mint the AWS
+    OIDC token, and the job that writes issues checks nothing out and runs only
+    ``gh`` against the scan job's outputs and uploaded report.
+    """
+    workflow = yaml.safe_load(_read(".github/workflows/deps-scan.yml"))
+    assert workflow["permissions"] == {"contents": "read"}
+    scan, issue = workflow["jobs"]["deps-scan"], workflow["jobs"]["drift-issue"]
+    assert scan["permissions"] == {"contents": "read", "id-token": "write"}
+    assert issue["permissions"] == {"issues": "write"}
+    assert issue["needs"] == "deps-scan"
+    assert set(scan["outputs"]) == {"has_drift", "scan_complete"}
+    issue_steps = issue["steps"]
+    assert [step.get("uses", "").split("@")[0] for step in issue_steps if "uses" in step] == [
+        "actions/download-artifact"
+    ]
+    for step in issue_steps:
+        assert "steps.scan" not in json.dumps(step), step.get("name")
+    scan_runs = "\n".join(step.get("run", "") for step in scan["steps"])
+    # The runner image's AWS CLI v2; pip's awscli is v1 and pins botocore exactly.
+    assert "pip install awscli" not in scan_runs
 
 
 def test_dependency_scanner_records_incomplete_queries_before_issue_closure() -> None:
@@ -1789,16 +1921,18 @@ def test_release_stage_one_never_writes_to_main() -> None:
 def test_release_stage_two_publishes_only_the_merged_release_commit() -> None:
     """Stage 2 (release-publish.yml) tags main's merge commit, idempotently.
 
-    It reacts only to main pushes that change VERSION, refuses to move an
-    existing v-tag (immutability), verifies every version mirror agrees
-    before tagging, and gates push-event publishes on the `Release vX.Y.Z`
-    commit subject so a stray VERSION edit is never auto-tagged.
+    It reacts only to main pushes that change VERSION, tags the newest
+    first-parent commit that changed VERSION rather than the run's head,
+    refuses to move an existing v-tag (immutability), verifies every version
+    mirror agrees before tagging, and gates every publish on the
+    `Release vX.Y.Z` commit subject so a stray VERSION edit is never tagged.
     """
     workflow = _read(".github/workflows/release-publish.yml")
 
     assert "branches: [main]" in workflow
     assert "- VERSION" in workflow
-    assert 'git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}" "$GITHUB_SHA"' in workflow
+    assert 'git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}" "$RELEASE_SHA"' in workflow
+    assert "git log -1 --first-parent --format=%H -- VERSION" in workflow
     assert 'git push origin "refs/tags/v${NEW_VERSION}"' in workflow
     assert "--verify-tag" in workflow
     # Immutability + idempotency guards.
@@ -1811,17 +1945,288 @@ def test_release_stage_two_publishes_only_the_merged_release_commit() -> None:
     assert 'pattern="^Release v${NEW_VERSION//./\\\\.}( \\(#[0-9]+\\))?$"' in workflow
 
 
-def test_release_workflows_share_one_serialized_concurrency_group() -> None:
-    """Both stages share `group: release` and never cancel in-flight runs.
+_WORKFLOW_EXPRESSION = re.compile(r"\$\{\{\s*(.+?)\s*\}\}")
+_STEP_OUTPUT_EXPRESSION = re.compile(r"steps\.([\w-]+)\.outputs\.([\w-]+)")
 
-    A publish interleaving with the next release's branch cut (or a canceled
-    half-publish) is exactly the torn state the old single-stage atomic push
-    protected against; the shared no-cancel group is its replacement.
+
+def _git(cwd: Path, *args: str, env: dict[str, str]) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, env=env, capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
+
+
+def _release_repository(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A checkout of a main branch whose first commit is the v1.0.0 release."""
+    env = {
+        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "tester",
+        "GIT_AUTHOR_EMAIL": "tester@example.com",
+        "GIT_COMMITTER_NAME": "tester",
+        "GIT_COMMITTER_EMAIL": "tester@example.com",
+    }
+    origin = tmp_path / "origin.git"
+    checkout = tmp_path / "checkout"
+    _git(tmp_path, "init", "--quiet", "--bare", "--initial-branch=main", str(origin), env=env)
+    _git(tmp_path, "init", "--quiet", "--initial-branch=main", str(checkout), env=env)
+    _git(checkout, "remote", "add", "origin", str(origin), env=env)
+    _commit_version(checkout, "1.0.0", "Release v1.0.0 (#1)", env)
+    return checkout, env
+
+
+def _commit_version(checkout: Path, version: str, subject: str, env: dict[str, str]) -> str:
+    (checkout / "gco").mkdir(exist_ok=True)
+    (checkout / "cli").mkdir(exist_ok=True)
+    (checkout / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    (checkout / "gco/__init__.py").write_text("", encoding="utf-8")
+    (checkout / "gco/_version.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    (checkout / "cli/__init__.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    return _commit_all(checkout, subject, env)
+
+
+def _commit_all(checkout: Path, subject: str, env: dict[str, str]) -> str:
+    _git(checkout, "add", "--all", env=env)
+    _git(checkout, "commit", "--quiet", "--allow-empty", "-m", subject, env=env)
+    return _git(checkout, "rev-parse", "HEAD", env=env)
+
+
+def _run_release_publish(
+    checkout: Path, event_name: str, env: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], dict[str, dict[str, str]]]:
+    """Run release-publish.yml's shell steps, up to the tag push, as the runner would.
+
+    The GitHub Release step is the one step left out: it needs the GitHub API.
     """
+    job = yaml.safe_load(_read(".github/workflows/release-publish.yml"))["jobs"]["publish"]
+    runner = checkout.parent / "runner"
+    runner.mkdir(exist_ok=True)
+    outputs: dict[str, dict[str, str]] = {}
+
+    def resolve(expression: str) -> str:
+        if expression == "github.event_name":
+            return event_name
+        match = _STEP_OUTPUT_EXPRESSION.fullmatch(expression)
+        assert match, f"unhandled workflow expression in release-publish.yml: {expression}"
+        return outputs.get(match.group(1), {}).get(match.group(2), "")
+
+    result = subprocess.CompletedProcess[str]([], 0, "", "")
+    for index, step in enumerate(job["steps"]):
+        if "run" not in step or step["name"].startswith("Create GitHub Release"):
+            continue
+        condition = step.get("if")
+        if condition is not None:
+            left, _, right = condition.partition(" == ")
+            assert right.startswith("'") and right.endswith("'"), condition
+            if resolve(left) != right.strip("'"):
+                continue
+        output_file = runner / f"output-{index}"
+        output_file.write_text("", encoding="utf-8")
+        step_env = {
+            **env,
+            "GITHUB_SHA": _git(checkout, "rev-parse", "HEAD", env=env),
+            "GITHUB_OUTPUT": str(output_file),
+            "GITHUB_ENV": str(runner / "env"),
+            "GITHUB_STEP_SUMMARY": str(runner / "summary.md"),
+            "RUNNER_TEMP": str(runner),
+        }
+        for name, value in (step.get("env") or {}).items():
+            step_env[name] = _WORKFLOW_EXPRESSION.sub(lambda m: resolve(m.group(1)), str(value))
+        result = subprocess.run(
+            ["bash", "-e", "-c", step["run"]],
+            cwd=checkout,
+            env=step_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            break
+        if "id" in step:
+            lines = output_file.read_text(encoding="utf-8").splitlines()
+            outputs[step["id"]] = dict(line.split("=", 1) for line in lines)
+    return result, outputs
+
+
+def test_release_publish_dispatch_tags_the_release_commit_not_mains_head(
+    tmp_path: Path,
+) -> None:
+    """A re-dispatch after later merges tags, and then resumes on, the release commit.
+
+    GITHUB_SHA of a dispatch is main's head, not the release: tagging it
+    released unmerged-at-release-time commits under vX.Y.Z, and a second
+    dispatch then failed the immutability check forever.
+    """
+    checkout, env = _release_repository(tmp_path)
+    release = _git(checkout, "rev-parse", "HEAD", env=env)
+    (checkout / "feature.txt").write_text("later work\n", encoding="utf-8")
+    head = _commit_all(checkout, "feat: later work (#2)", env)
+
+    result, outputs = _run_release_publish(checkout, "workflow_dispatch", env)
+
+    assert result.returncode == 0, result.stderr
+    origin = tmp_path / "origin.git"
+    assert _git(origin, "rev-parse", "v1.0.0^{commit}", env=env) == release != head
+    assert outputs["gate"]["publish"] == "true"
+
+    # The documented recovery path: dispatching again resumes instead of failing.
+    _git(checkout, "checkout", "--quiet", "main", env=env)
+    resumed, _ = _run_release_publish(checkout, "workflow_dispatch", env)
+
+    assert resumed.returncode == 0, resumed.stderr
+    assert f"Tag v1.0.0 already points at {release}" in resumed.stdout
+
+
+def test_release_publish_never_tags_a_version_change_that_is_not_a_release(
+    tmp_path: Path,
+) -> None:
+    """A hand-edited VERSION is skipped on push and refused on dispatch, never tagged."""
+    checkout, env = _release_repository(tmp_path)
+    _commit_version(checkout, "1.0.1", "chore: edit VERSION by hand (#3)", env)
+
+    pushed, outputs = _run_release_publish(checkout, "push", env)
+
+    assert pushed.returncode == 0, pushed.stderr
+    assert outputs["gate"]["publish"] == "false"
+    summary = (tmp_path / "runner/summary.md").read_text(encoding="utf-8")
+    assert "chore: edit VERSION by hand (#3)" in summary
+
+    _git(checkout, "checkout", "--quiet", "main", env=env)
+    dispatched, _ = _run_release_publish(checkout, "workflow_dispatch", env)
+
+    assert dispatched.returncode != 0
+    assert "not a release commit" in dispatched.stderr
+    assert _git(checkout, "tag", "--list", env=env) == ""
+    assert _git(tmp_path / "origin.git", "tag", "--list", env=env) == ""
+
+
+def test_release_publish_refuses_to_move_an_existing_tag(tmp_path: Path) -> None:
+    checkout, env = _release_repository(tmp_path)
+    _git(checkout, "tag", "-a", "v1.0.1", "-m", "elsewhere", env=env)
+    released = _commit_version(checkout, "1.0.1", "Release v1.0.1 (#4)", env)
+
+    result, _ = _run_release_publish(checkout, "push", env)
+
+    assert result.returncode != 0
+    assert f"not {released}" in result.stderr
+    assert "Released tags are immutable" in result.stderr
+
+
+def test_release_stages_never_cancel_each_other() -> None:
+    """Each stage serializes in a group of its own and never cancels a run.
+
+    GitHub keeps at most one pending run per concurrency group, and a newer
+    queued run cancels the pending one even with ``cancel-in-progress: false``.
+    While both stages shared ``group: release``, a Release dispatch made while
+    stage 1 was running cancelled a publish queued behind it, and that merged
+    version was never tagged or released.
+    """
+    groups = {}
     for path in (".github/workflows/release.yml", ".github/workflows/release-publish.yml"):
-        workflow = _read(path)
-        assert "group: release" in workflow, path
-        assert "cancel-in-progress: false" in workflow, path
+        concurrency = yaml.safe_load(_read(path))["concurrency"]
+        assert concurrency["cancel-in-progress"] is False, path
+        groups[path] = concurrency["group"]
+    assert groups == {
+        ".github/workflows/release.yml": "release",
+        ".github/workflows/release-publish.yml": "release-publish",
+    }
+    # No other workflow may join either group and cancel a pending release run.
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        if f".github/workflows/{path.name}" in groups:
+            continue
+        group = (yaml.safe_load(path.read_text(encoding="utf-8")).get("concurrency") or {}).get(
+            "group"
+        )
+        assert group not in groups.values(), path.name
+
+
+def _run_agent_version_check(
+    tmp_path: Path, pins: dict[str, str], versions: dict[str, str], failing_pin: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """Run unit:cli:autopilot's version-check loop against fake agent CLIs."""
+    run = _workflow_job_step(
+        ".github/workflows/unit-tests.yml",
+        "unit-cli-autopilot",
+        "Install every pinned agent CLI and re-resolve",
+    )["run"]
+    assert run.startswith("set -euo pipefail\n")
+    start = run.index("for pair in ")
+    loop = run[start : run.index("\ndone\n", start) + len("\ndone\n")]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    lookup = "\n".join(
+        f'  {engine}) echo "{pin}" ;;' for engine, pin in pins.items() if engine != failing_pin
+    )
+    (bin_dir / "python3").write_text(
+        f'#!/bin/bash\ncase "$4" in\n{lookup}\n  *) exit 2 ;;\nesac\n', encoding="utf-8"
+    )
+    for binary, version in versions.items():
+        (bin_dir / binary).write_text(f'#!/bin/bash\necho "{version}"\n', encoding="utf-8")
+    for tool in bin_dir.iterdir():
+        tool.chmod(0o755)
+    return subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + loop],
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+_AGENT_PINS = {"claude-code": "2.1.316", "codex": "0.166.0", "opencode": "1.19.5"}
+_AGENT_VERSIONS = {
+    "claude": "2.1.316 (Claude Code)",
+    "codex": "codex-cli 0.166.0",
+    "opencode": "1.19.5",
+}
+
+
+def test_agent_version_check_passes_only_on_the_pinned_versions(tmp_path: Path) -> None:
+    passing = _run_agent_version_check(tmp_path / "ok", _AGENT_PINS, _AGENT_VERSIONS)
+    assert passing.returncode == 0, passing.stderr
+
+    drifted = _run_agent_version_check(
+        tmp_path / "drift", _AGENT_PINS, {**_AGENT_VERSIONS, "codex": "codex-cli 0.167.0"}
+    )
+    assert drifted.returncode == 1
+    assert "codex --version reported 'codex-cli 0.167.0', not the pinned 0.166.0" in drifted.stderr
+
+
+@pytest.mark.parametrize("pins", [{**_AGENT_PINS, "codex": ""}, _AGENT_PINS])
+def test_agent_version_check_fails_when_a_pin_cannot_be_read(
+    tmp_path: Path, pins: dict[str, str]
+) -> None:
+    """A failed or empty pin lookup fails the check instead of matching every version.
+
+    The step grepped each ``--version`` for ``"$(... pin ...)"``; when the lookup
+    failed, the pattern was empty and grep matched anything.
+    """
+    failing = "" if pins["codex"] == "" else "codex"
+    result = _run_agent_version_check(tmp_path, pins, _AGENT_VERSIONS, failing_pin=failing)
+    assert result.returncode != 0
+    assert "--version reported" not in result.stderr
+
+
+def test_no_ci_step_greps_for_an_inline_command_substitution() -> None:
+    """``grep PATTERN`` where PATTERN is ``"$(cmd)"`` passes on any input when cmd fails.
+
+    The substitution's exit status is lost inside the argument list, even
+    under ``set -e``, and an empty pattern matches every line. Read the value
+    into a variable (which ``set -e`` does check) and test it is non-empty.
+    """
+    sources = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    sources += sorted((ROOT / ".github" / "actions").glob("*/action.yml"))
+    offenders: list[str] = []
+    for path in sources:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_id, job in (document.get("jobs") or {"runs": document.get("runs") or {}}).items():
+            for step in job.get("steps") or []:
+                run = re.sub(r"\\\n\s*", " ", step.get("run") or "")
+                if re.search(r'\bgrep\b[^\n|;&]*"\$\(', run):
+                    offenders.append(f"{path.relative_to(ROOT)}:{job_id}:{step.get('name')}")
+    assert not offenders, offenders
 
 
 def test_model_sync_uses_an_immutable_official_aws_cli_image() -> None:
@@ -1896,16 +2301,119 @@ def test_container_tool_checksums_are_non_overridable_trust_anchors() -> None:
     ) in kubectl_section
 
 
-def test_incomplete_dependency_scan_ends_with_a_failing_step() -> None:
-    workflow = _read(".github/workflows/deps-scan.yml")
-    failure_step = workflow.index("- name: Fail an incomplete dependency scan")
+def _dockerfile_run_instructions(content: str) -> list[str]:
+    """Every RUN instruction, its continuation lines joined into one command."""
+    runs: list[str] = []
+    current: str | None = None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if current is None:
+            if not stripped.startswith("RUN "):
+                continue
+            current = ""
+            stripped = stripped.removeprefix("RUN ")
+        current += " " + stripped.removesuffix("\\").strip()
+        if not stripped.endswith("\\"):
+            runs.append(current.strip())
+            current = None
+    return runs
 
-    assert failure_step > workflow.index("- name: Close the resolved drift issue")
-    failure_contract = workflow[failure_step:]
-    assert "always()" in failure_contract
-    assert "steps.scan.outputs.scan_complete != 'true'" in failure_contract
-    assert "exit 1" in failure_contract
-    assert "SCAN_COMPLETE: ${{ steps.scan.outputs.scan_complete }}" in workflow
+
+_CURL_DOWNLOAD = re.compile(r'curl\s+(?P<flags>(?:-\S+\s+)*)"(?P<url>[^"]+)"\s+-o\s+(?P<out>\S+)')
+
+
+def test_dev_container_downloads_fail_closed_and_are_checksummed() -> None:
+    """Every vendor download in Dockerfile.dev stops on HTTP errors and is verified.
+
+    The image mounts ~/.aws and the host Docker socket, so its binaries run
+    with the contributor's AWS credentials and root-equivalent access to the
+    host Docker daemon. kubectl and the AWS CLI zip were fetched without
+    ``--fail`` or a checksum, and the Docker archive without a checksum, while
+    the comments said every tool was verified. Each download must now be a
+    ``curl --fail`` to an output file that ``sha256sum -c`` checks in the same
+    RUN, and the three new anchors are literals a build-arg cannot override.
+    """
+    dockerfile = _read("Dockerfile.dev")
+    checked: list[str] = []
+    for run in _dockerfile_run_instructions(dockerfile):
+        downloads = list(_CURL_DOWNLOAD.finditer(run))
+        invocations = re.findall(r"\bcurl\s+[-\"]", run)
+        assert len(downloads) == len(invocations), f"unrecognised curl shape: {run}"
+        for download in downloads:
+            flags = download.group("flags").split()
+            assert "--fail" in flags or any(
+                flag.startswith("-") and not flag.startswith("--") and "f" in flag for flag in flags
+            ), f"download without --fail: {download.group('url')}"
+            out = re.escape(download.group("out"))
+            assert re.search(rf'echo "\$\{{[A-Z0-9_]+\}}  {out}" \| sha256sum -c -', run), (
+                f"download without a checksum: {download.group('url')}"
+            )
+            checked.append(download.group("url"))
+    assert len(checked) == 7, checked
+
+    for name in ("KUBECTL_SHA256", "AWSCLI_SHA256", "DOCKER_SHA256"):
+        assert f"ARG {name}" not in dockerfile
+    for anchor in (
+        'amd64) KUBECTL_SHA256="c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4"',
+        'arm64) KUBECTL_SHA256="fcc16f63186659d9722014b7e02d5fdd2d4e669cb8c0ab66365d7d3b8ba03509"',
+        'amd64) AWSCLI_SHA256="14cb35809ad7547dd3c69fa9899a3975fbd850b6a6791f3fe264856490cd9a63"',
+        'arm64) AWSCLI_SHA256="f6eb845fbacb11bee87de3f5fbe8043773cbe89d0414607b44b71e216eb9226b"',
+        'amd64) DOCKER_SHA256="9ac225999fd5e863f7694c728ef23d480616b1e5639328fa309befd4243d69eb"',
+        'arm64) DOCKER_SHA256="873b3e0207857c3b2f28392fb922f3ea6efe37620c16d4d4aaf2fef409c90b73"',
+    ):
+        assert anchor in dockerfile, anchor
+    assert "ARG KUBECTL_VERSION=v1.37.2" in dockerfile
+    assert "ARG AWSCLI_VERSION=2.39.3" in dockerfile
+    assert "ARG DOCKER_VERSION=29.9.2" in dockerfile
+
+    # One kubectl release, one amd64 binary: the installer Lambda pins the same.
+    installer = _read("lambda/helm-installer/Dockerfile")
+    installer_version = re.search(r"dl\.k8s\.io/release/(v[\d.]+)/", installer)
+    installer_sha = re.search(r"([0-9a-f]{64})\s+/tmp/kubectl", installer)
+    assert installer_version and installer_sha
+    if installer_version.group(1) == "v1.37.2":
+        assert f'amd64) KUBECTL_SHA256="{installer_sha.group(1)}"' in dockerfile
+
+
+def test_latest_cdk_enum_install_is_isolated_and_cannot_cost_the_report() -> None:
+    """The latest aws-cdk-lib lives in its own virtualenv, and its install may fail.
+
+    Installed into the scan's environment it was downgraded again by the
+    scan's exact-pinned project install before the CDK-enum section read it,
+    and a PyPI blip failed the job before any report or issue was written.
+    CDK_ENUM_PYTHON is exported before the install, so a failed install skips
+    the enum check instead of reading the pinned library.
+    """
+    step = _workflow_job_step(
+        ".github/workflows/deps-scan.yml",
+        "deps-scan",
+        "Install latest aws-cdk-lib (for CDK enum drift check)",
+    )
+    assert step["continue-on-error"] is True
+    run = step["run"]
+    assert "pip install --upgrade aws-cdk-lib" not in run
+    assert run.index('echo "CDK_ENUM_PYTHON=${venv}/bin/python"') < run.index(
+        'python -m venv "$venv"'
+    )
+    assert '"${venv}/bin/pip" install --quiet aws-cdk-lib' in run
+    scanner = _read(".github/scripts/dependency-scan.sh")
+    assert '"${CDK_ENUM_PYTHON:-python3}" -c "import aws_cdk"' in scanner
+
+
+def test_incomplete_dependency_scan_ends_with_a_failing_step() -> None:
+    """An incomplete scan fails its job after uploading its report, and still refreshes."""
+    workflow = _read(".github/workflows/deps-scan.yml")
+    jobs = yaml.safe_load(workflow)["jobs"]
+    scan_steps = [step.get("name") for step in jobs["deps-scan"]["steps"]]
+    assert scan_steps[-1] == "Fail an incomplete dependency scan"
+    assert scan_steps.index("Upload the drift report") < len(scan_steps) - 1
+    failure = jobs["deps-scan"]["steps"][-1]
+    assert "always()" in failure["if"]
+    assert "steps.scan.outputs.scan_complete != 'true'" in failure["if"]
+    assert "exit 1" in failure["run"]
+    # The issue job must still run after that deliberate failure.
+    assert jobs["drift-issue"]["if"].startswith("always() &&")
+    assert "SCAN_COMPLETE: ${{ needs.deps-scan.outputs.scan_complete }}" in workflow
     assert "The report is partial because one or more checks were incomplete" in workflow
 
 
@@ -1940,25 +2448,196 @@ def test_dev_container_matrix_keeps_native_amd64_and_arm64_coverage() -> None:
     }
 
 
-def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
-    workflow = yaml.safe_load(_read(".github/workflows/security.yml"))
-    scanner_jobs = {
-        "security-trufflehog-secrets": "trufflesecurity/trufflehog:3.96.0",
-        "security-gitleaks-secrets": "zricethezav/gitleaks:v8.30.1",
-        "security-checkov-iac": "bridgecrew/checkov:3.2.524",
-        "security-kics-iac": "checkmarx/kics:v2.1.20",
+#: The scanners and linters the gates start with ``docker run``, by job: the
+#: job ``env`` variable that is the image's one source (the pre-pull and the
+#: run both read it) and the repository it names.
+_DOCKER_RUN_GATES: dict[tuple[str, str], tuple[str, str]] = {
+    (".github/workflows/security.yml", "security-trufflehog-secrets"): (
+        "TRUFFLEHOG_IMAGE",
+        "trufflesecurity/trufflehog",
+    ),
+    (".github/workflows/security.yml", "security-gitleaks-secrets"): (
+        "GITLEAKS_IMAGE",
+        "zricethezav/gitleaks",
+    ),
+    (".github/workflows/security.yml", "security-checkov-iac"): (
+        "CHECKOV_IMAGE",
+        "bridgecrew/checkov",
+    ),
+    (".github/workflows/security.yml", "security-kics-iac"): ("KICS_IMAGE", "checkmarx/kics"),
+    (".github/workflows/lint.yml", "lint-hadolint-dockerfile"): (
+        "HADOLINT_IMAGE",
+        "hadolint/hadolint",
+    ),
+    (".github/workflows/lint.yml", "lint-shellcheck-shell"): (
+        "SHELLCHECK_IMAGE",
+        "koalaman/shellcheck-alpine",
+    ),
+}
+_GATE_WORKFLOWS = (".github/workflows/security.yml", ".github/workflows/lint.yml")
+_PINNED_IMAGE = re.compile(r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}")
+_ENV_EXPRESSION = re.compile(r"\$\{\{\s*env\.(\w+)\s*\}\}")
+_SHELL_VARIABLE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+#: ``docker run`` options that consume the next argument.
+_DOCKER_RUN_VALUE_OPTIONS = frozenset(
+    {
+        "-e",
+        "--entrypoint",
+        "--env",
+        "--mount",
+        "--name",
+        "--network",
+        "-p",
+        "--platform",
+        "--publish",
+        "-u",
+        "--user",
+        "-v",
+        "--volume",
+        "-w",
+        "--workdir",
     }
+)
 
-    for job_name, image in scanner_jobs.items():
-        steps = workflow["jobs"][job_name]["steps"]
+
+def _expand_env_expressions(text: str, env: dict[str, str]) -> str:
+    """``text`` with each ``${{ env.X }}`` replaced; an unknown one is kept."""
+    return _ENV_EXPRESSION.sub(lambda match: str(env.get(match.group(1), match.group(0))), text)
+
+
+def _docker_run_images(script: str, env: dict[str, str]) -> list[str]:
+    """The image operand of every ``docker run`` in a run script, with a
+    ``${{ env.X }}`` expression or a whole-token ``$X`` resolved."""
+    images = []
+    script = _expand_env_expressions(script, env)
+    for line in script.replace("\\\n", " ").splitlines():
+        if "docker run" not in line or line.lstrip().startswith("#"):
+            continue
+        # Tokens are read lazily: an argument after the image may open a
+        # quote that closes on a later line (hadolint's ``-c '...'``).
+        lexer = shlex.shlex(line.split("docker run", 1)[1], posix=True)
+        lexer.whitespace_split = True
+        skip_value = False
+        for token in lexer:
+            if skip_value:
+                skip_value = False
+            elif token.startswith("-"):
+                skip_value = token in _DOCKER_RUN_VALUE_OPTIONS
+            else:
+                variable = _SHELL_VARIABLE.fullmatch(token)
+                name = variable and (variable.group(1) or variable.group(2))
+                images.append(str(env.get(name, token)) if name else token)
+                break
+    return images
+
+
+def _gate_job_images(workflow: dict, job: dict) -> list[str]:
+    """Every image a job runs: its container, services, pre-pulls and docker runs."""
+    env = {**(workflow.get("env") or {}), **(job.get("env") or {})}
+    images = []
+    container = job.get("container")
+    if container:
+        images.append(container if isinstance(container, str) else container["image"])
+    images.extend(service["image"] for service in (job.get("services") or {}).values())
+    for step in job.get("steps") or []:
+        if step.get("uses") == "./.github/actions/docker-pull-with-retry":
+            images.extend(_expand_env_expressions(step["with"]["images"], env).split())
+        images.extend(_docker_run_images(step.get("run", ""), env))
+    return images
+
+
+def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
+    """Each scanner a gate starts with ``docker run`` is pulled first through
+    the retrying action, and both steps read the image from one job ``env``
+    value, so the pre-pull cannot warm a different image than the run uses."""
+    for (path, job_id), (variable, repository) in _DOCKER_RUN_GATES.items():
+        job = yaml.safe_load(_read(path))["jobs"][job_id]
+        image = job["env"][variable]
+        assert image.startswith(f"{repository}:"), f"{job_id}: {image}"
+        steps = job["steps"]
         pull_index = next(
             index
             for index, step in enumerate(steps)
             if step.get("uses") == "./.github/actions/docker-pull-with-retry"
-            and step.get("with", {}).get("images") == image
+            and step.get("with", {}).get("images") == f"${{{{ env.{variable} }}}}"
         )
-        run_index = next(index for index, step in enumerate(steps) if image in step.get("run", ""))
-        assert pull_index < run_index, f"{job_name} must pre-pull {image} before scanning"
+        run_index = next(
+            index for index, step in enumerate(steps) if f'"${variable}"' in step.get("run", "")
+        )
+        assert pull_index < run_index, f"{job_id} must pre-pull {image} before scanning"
+        assert not any(image in step.get("run", "") for step in steps), (
+            f"{job_id}: the image must have one source, job.env.{variable}"
+        )
+
+
+def test_gate_images_are_pinned_by_tag_and_digest() -> None:
+    """Every image a security or lint job runs names its tag and manifest-list
+    digest (finding C11). A tag alone can be re-pushed upstream, which changes
+    what a gate runs, and so what it lets through, with no diff here; the
+    monthly deps scan reports when a pinned tag's digest moves. The tag stays
+    beside the digest for readers and for that scan's version sweep."""
+    found: dict[tuple[str, str], list[str]] = {}
+    for path in _GATE_WORKFLOWS:
+        workflow = yaml.safe_load(_read(path))
+        for job_id, job in workflow["jobs"].items():
+            images = _gate_job_images(workflow, job)
+            if images:
+                found[(path, job_id)] = images
+
+    # The walk sees every known gate (semgrep runs as the job container).
+    known = set(_DOCKER_RUN_GATES) | {(".github/workflows/security.yml", "security-semgrep-sast")}
+    assert known <= set(found), sorted(known - set(found))
+    unpinned = {
+        f"{path}:{job_id}": image
+        for (path, job_id), images in found.items()
+        for image in images
+        if not _PINNED_IMAGE.fullmatch(image)
+    }
+    assert not unpinned, f"pin these as <repository>:<tag>@sha256:<digest>: {unpinned}"
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [
+        ('docker run --rm -v "$PWD":/repo -w /repo "$IMAGE" scan .', ["repo/tool:1@sha256:x"]),
+        (
+            "xargs -0 -- \\\n  docker run --rm \\\n    --entrypoint /bin/x \\\n    ${IMAGE} \\\n    -c '\n",
+            ["repo/tool:1@sha256:x"],
+        ),
+        ("docker run --rm -e A=1 --name n literal/image:2 true", ["literal/image:2"]),
+        ('docker run --rm "$UNSET" true', ["$UNSET"]),
+        ("  # docker run --rm commented/out:1\necho docker", []),
+        ("docker run --rm ${{ env.IMAGE }} --version", ["repo/tool:1@sha256:x"]),
+    ],
+)
+def test_docker_run_image_parser_reads_the_image_operand(script: str, expected: list[str]) -> None:
+    """The pinning guard is only as good as its reading of ``docker run``."""
+    assert _docker_run_images(script, {"IMAGE": "repo/tool:1@sha256:x"}) == expected
+
+
+def test_gate_image_walk_reads_containers_services_and_pre_pulls() -> None:
+    workflow = {"env": {"SHARED": "shared/image:1"}}
+    job = {
+        "env": {"OWN": "own/image:2"},
+        "container": {"image": "container/image:3"},
+        "services": {"db": {"image": "service/image:4"}},
+        "steps": [
+            {
+                "uses": "./.github/actions/docker-pull-with-retry",
+                "with": {"images": "${{ env.SHARED }}\n${{ env.OWN }}\nbare/image:5\n"},
+            },
+            {"run": 'docker run --rm "$OWN" lint'},
+        ],
+    }
+    assert _gate_job_images(workflow, job) == [
+        "container/image:3",
+        "service/image:4",
+        "shared/image:1",
+        "own/image:2",
+        "bare/image:5",
+        "own/image:2",
+    ]
+    assert _gate_job_images({}, {"container": "string/container:6"}) == ["string/container:6"]
 
 
 def test_npm_audit_retries_a_registry_operational_error() -> None:
@@ -2102,6 +2781,12 @@ def test_repeated_workflow_pins_agree_across_jobs() -> None:
     )
 
 
+def _installs_calico(step: dict) -> bool:
+    """The step installs Calico: the shared script, or an inline download."""
+    run = step.get("run") or ""
+    return "install-calico.sh" in run or "projectcalico/calico" in run
+
+
 def test_every_calico_installing_job_pins_version_and_checksum() -> None:
     """Every job that installs Calico must resolve both of its pins.
 
@@ -2118,7 +2803,7 @@ def test_every_calico_installing_job_pins_version_and_checksum() -> None:
     installing_jobs = [
         name
         for name, job in workflow["jobs"].items()
-        if any("projectcalico/calico" in (step.get("run") or "") for step in job.get("steps") or [])
+        if any(_installs_calico(step) for step in job.get("steps") or [])
     ]
     assert installing_jobs, "no job installs Calico — has the CNI setup moved?"
 
@@ -2164,7 +2849,234 @@ def test_kind_clusters_without_a_default_cni_install_one() -> None:
         )
         if not uses_calico_config:
             continue
-        assert any("projectcalico/calico" in (step.get("run") or "") for step in steps), (
+        assert any(_installs_calico(step) for step in steps), (
             f"{job_name} creates a kind cluster with the default CNI disabled "
             "but never installs Calico"
         )
+
+
+def test_pre_commit_ruff_hooks_skip_generated_trees_and_keep_pyprojects_excludes() -> None:
+    """Finding C16. pre-commit matches a hook's ``exclude`` with ``re.search``
+    against repository-relative paths, so the old ``'/(\\.venv|cdk\\.out|...)/'``
+    needed a slash before ``.venv`` and never matched a top-level path. The
+    ruff hook's ``--exclude`` args replaced ``[tool.ruff] exclude`` instead of
+    extending it (ruff-pre-commit's entries already pass ``--force-exclude``,
+    so pyproject's list applies to the files pre-commit passes)."""
+    config = yaml.safe_load(_read(".pre-commit-config.yaml"))
+    hooks = {
+        hook["id"]: hook
+        for repo in config["repos"]
+        if repo["repo"] == "https://github.com/astral-sh/ruff-pre-commit"
+        for hook in repo["hooks"]
+    }
+    assert set(hooks) == {"ruff-format", "ruff"}
+    for hook_id, hook in hooks.items():
+        exclude = re.compile(hook["exclude"])
+        for generated in (
+            ".venv/lib/python3.14/site-packages/x.py",
+            "cdk.out/asset.0123/handler.py",
+            "lambda/helm-installer-build/handler.py",
+            "lambda/kubectl-applier-simple-build/handler.py",
+        ):
+            assert exclude.search(generated), (hook_id, generated)
+        for authored in ("lambda/helm-installer/handler.py", "gco/services/api.py", "app.py"):
+            assert not exclude.search(authored), (hook_id, authored)
+        assert not any(
+            arg == "--exclude" or arg.startswith("--exclude=") for arg in hook.get("args", [])
+        ), f"{hook_id}: a CLI --exclude replaces [tool.ruff] exclude"
+
+
+def test_pre_commit_comments_name_real_ci_jobs() -> None:
+    """The mypy hook's comment named lint:typecheck-stacks, a job that no
+    longer exists (finding C16); every CI job the config names must exist."""
+    names = {
+        job["name"] for job in yaml.safe_load(_read(".github/workflows/lint.yml"))["jobs"].values()
+    }
+    mentioned = set(re.findall(r"\b(lint:[a-z0-9:-]+) job\b", _read(".pre-commit-config.yaml")))
+    assert mentioned, "the mypy hook's comment names the CI job that checks gco/stacks/"
+    assert mentioned <= names, sorted(mentioned - names)
+
+
+def test_queue_processor_docs_name_the_floci_emulator_not_moto() -> None:
+    """integration:docker:queue-processor consumes from the Floci service
+    container; four job descriptions still said it ran against moto's SQS
+    server (finding C15)."""
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    services = workflow["jobs"]["integration-docker-queue-processor"]["services"]
+    assert services["floci"]["image"].startswith("floci/floci:")
+    for relative in (
+        ".github/CI.md",
+        ".github/workflows/README.md",
+        ".github/scripts/README.md",
+        ".github/workflows/integration-tests.yml",
+    ):
+        assert not re.search(r"moto[- ]SQS", _read(relative), re.IGNORECASE), relative
+
+
+def test_composite_action_descriptions_never_name_a_stale_pin() -> None:
+    """A composite action's description named an older release of the action
+    it wraps than the one its steps pin (finding C15: build-push-action
+    v7.3.0 against v7.4.0, setup-buildx-action v4.2.0 against v4.4.1,
+    upload-artifact v7.0.1 against v7.0.2). A description may name the action
+    without a version; a version it names must be the pinned one."""
+    pinned_use = re.compile(r"uses:\s*([\w.-]+/[\w.-]+)@[0-9a-f]{40}\s+#\s*(v\d+(?:\.\d+)*)")
+    checked = 0
+    for action in sorted((ROOT / ".github/actions").glob("*/action.yml")):
+        text = action.read_text(encoding="utf-8")
+        description = yaml.safe_load(text)["description"]
+        for repository, version in set(pinned_use.findall(text)):
+            named = re.findall(rf"{re.escape(repository)}@(v\d+(?:\.\d+)*)", description)
+            assert set(named) <= {version}, (
+                f"{action.parent.name}: {repository} {named} != {version}"
+            )
+            checked += 1
+    assert checked >= 3
+
+
+def test_ci_md_names_every_permission_beyond_contents_read() -> None:
+    """The permissions bullet in .github/CI.md listed some grants and not
+    others (finding C15: cve-scan's issues: write, pr-type-label's
+    pull-requests: write and CodeQL's security-events: write were missing).
+    Every grant beyond contents: read must be named with its workflow."""
+    bullet = next(
+        line for line in _read(".github/CI.md").splitlines() if line.startswith("- `permissions:`")
+    )
+    missing = []
+    for workflow_path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        grants = [workflow.get("permissions") or {}]
+        grants += [job.get("permissions") or {} for job in (workflow.get("jobs") or {}).values()]
+        for grant in grants:
+            for scope, level in grant.items():
+                if (scope, level) == ("contents", "read") or level == "none":
+                    continue
+                if f"`{workflow_path.name}`" not in bullet or f"`{scope}: {level}`" not in bullet:
+                    missing.append(f"{workflow_path.name}: {scope}: {level}")
+    assert not missing, missing
+
+
+_HELM_COMMAND = re.compile(
+    r"(?:^|[\s;&|(])helm\s+(?:repo|template|install|upgrade|show|search|pull|dependency)\b",
+    re.MULTILINE,
+)
+
+
+def test_jobs_that_run_helm_install_the_installer_pinned_helm_first() -> None:
+    """Finding C17: grafana-dashboards.yml rendered kube-prometheus-stack with
+    whatever helm the runner image shipped, while every other job installs the
+    authenticated Helm release lambda/helm-installer/Dockerfile pins. Any job
+    step that runs helm must come after a step that downloads that release
+    and checks its SHA-256."""
+    offenders = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            installed = False
+            for step in job.get("steps") or []:
+                run = step.get("run") or ""
+                if "get.helm.sh/helm-${HELM_VERSION}" in run and "sha256sum -c" in run:
+                    installed = True
+                elif "docker run" in run and "helm-installer:ci" in run:
+                    continue  # the installer image's own, Dockerfile-pinned helm
+                elif _HELM_COMMAND.search(run) and not installed:
+                    offenders.append(f"{path.name}:{job_id}:{step.get('name')}")
+    assert not offenders, offenders
+    assert "extract_helm_installer_pins" in _read(".github/workflows/grafana-dashboards.yml")
+
+
+def _all_steps(document: dict | None) -> list[dict]:
+    """Every step of a workflow's jobs, or of a composite action."""
+    if not isinstance(document, dict):
+        return []
+    steps = list((document.get("runs") or {}).get("steps") or [])
+    for job in (document.get("jobs") or {}).values():
+        steps.extend(job.get("steps") or [])
+    return [step for step in steps if isinstance(step, dict)]
+
+
+def test_ci_installs_uv_at_the_dockerfile_dev_pin() -> None:
+    """Finding C17: four jobs ran ``pip install uv`` (whatever PyPI served)
+    while Dockerfile.dev pins UV_VERSION and the deps scan tracks that pin.
+    Every uv install goes through use-pinned-uv.sh, which reads it."""
+    installs = []
+    for path in sorted((ROOT / ".github").rglob("*.yml")):
+        for step in _all_steps(yaml.safe_load(path.read_text(encoding="utf-8"))):
+            run = step.get("run") or ""
+            assert not re.search(r"pip install\s+['\"]?uv\b", run), f"{path}: {run}"
+            if "use-pinned-uv.sh" in run:
+                installs.append(path.name)
+    assert sorted(installs) == ["integration-tests.yml"] * 3 + ["unit-tests.yml"]
+    assert re.search(r"^ARG UV_VERSION=\d+\.\d+\.\d+$", _read("Dockerfile.dev"), re.MULTILINE)
+
+
+def test_pip_audit_is_pinned_and_audits_the_lock_once() -> None:
+    """Finding C17: pip-audit was installed unpinned and run twice over the
+    same lock, each run resolving the lock into a fresh virtualenv. One
+    --no-deps --disable-pip run over the fully pinned lock now writes the
+    report and decides the job."""
+    job = yaml.safe_load(_read(".github/workflows/security.yml"))["jobs"]["security-pip-audit-deps"]
+    assert re.fullmatch(r"\d+\.\d+\.\d+", job["env"]["PIP_AUDIT_VERSION"])
+    runs = "\n".join(step.get("run") or "" for step in job["steps"])
+    assert 'pip install -c requirements-lock.txt "pip-audit==${PIP_AUDIT_VERSION}"' in runs
+    audits = re.findall(r"^\s*pip-audit -r requirements-lock\.txt[^\n]*", runs, re.MULTILINE)
+    assert len(audits) == 1, audits
+    assert "--no-deps --disable-pip" in audits[0]
+    assert "--output pip-audit-report.json" in runs
+    assert "|| true" not in runs
+    # Every requirement in the lock is an exact pin, which --no-deps needs.
+    requirements = [
+        line
+        for line in _read("requirements-lock.txt").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert requirements
+    assert all(re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*==\S+$", line) for line in requirements)
+
+
+def test_cve_scan_job_installs_nothing_trivy_does_not_need() -> None:
+    """Finding C17: the cve-scan job installed the project's security extra
+    although it only runs Trivy, which reads requirements-lock.txt itself."""
+    job = yaml.safe_load(_read(".github/workflows/cve-scan.yml"))["jobs"]["cve-scan"]
+    for step in job["steps"]:
+        assert "pip install" not in (step.get("run") or ""), step.get("name")
+        assert not str(step.get("uses", "")).startswith("actions/setup-python@")
+
+
+def test_every_kind_calico_install_runs_the_one_script() -> None:
+    """Finding C18: the Calico install was copied into three kind jobs and
+    the copies diverged (two lost the calico-node describe diagnostics and
+    the retry log line). All three now run .github/scripts/install-calico.sh,
+    which keeps the authenticated download, the retried rollout wait and the
+    fullest diagnostics (tests/BATS/test_install_calico.bats runs it)."""
+    workflow_text = _read(".github/workflows/integration-tests.yml")
+    workflow = yaml.safe_load(workflow_text)
+    steps = {
+        job_id: step
+        for job_id, job in workflow["jobs"].items()
+        for step in job.get("steps") or []
+        if step.get("name") == "Install Calico for NetworkPolicy enforcement"
+    }
+    assert set(steps) == {
+        "integration-kind-cluster-e2e",
+        "integration-kind-cost-pipeline",
+        "integration-kind-examples-smoke",
+    }
+    for job_id, step in steps.items():
+        assert step["run"].strip() == "bash .github/scripts/install-calico.sh", job_id
+    # The pins stay the workflow-level env the script reads.
+    assert re.fullmatch(r"v\d+\.\d+\.\d+", workflow["env"]["CALICO_VERSION"])
+    assert re.fullmatch(r"[0-9a-f]{64}", workflow["env"]["CALICO_SHA256"])
+    assert "projectcalico/calico/" not in workflow_text
+    script = _read(".github/scripts/install-calico.sh")
+    download = script[script.index("curl --fail") : script.index("sha256sum -c -")]
+    for option in ("--connect-timeout 15", "--max-time 60", "--retry 3", "--retry-all-errors"):
+        assert option in download, option
+    assert "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml" in download
+    for diagnostic in (
+        "get pods -o wide",
+        "describe daemonset/calico-node",
+        "describe pods -l k8s-app=calico-node",
+        "get events --sort-by=.lastTimestamp",
+    ):
+        assert diagnostic in script, diagnostic
+    assert 'echo "Retrying in ${delay}s..."' in script

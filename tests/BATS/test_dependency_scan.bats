@@ -1901,6 +1901,46 @@ EOF
     [ -z "$output" ]
 }
 
+# make_cdk_interpreter <dir> — <dir>/python, an interpreter whose aws_cdk
+# exposes runtimes newer than any release, so an answer naming them can only
+# have come from it.
+make_cdk_interpreter() {
+    mkdir -p "$1/site/aws_cdk"
+    : > "$1/site/aws_cdk/__init__.py"
+    printf '%s\n' 'class Runtime:' '    PYTHON_3_12 = 1' '    PYTHON_3_99 = 2' \
+        '    PYTHON_3_99_PREVIEW = 3' '    NODEJS_22_X = 4' '    NODEJS_99_X = 5' \
+        > "$1/site/aws_cdk/aws_lambda.py"
+    printf '#!/usr/bin/env bash\nPYTHONPATH="%s" exec python3 "$@"\n' "$1/site" > "$1/python"
+    chmod +x "$1/python"
+}
+
+@test "get_latest_lambda_*_runtime read the aws-cdk-lib of CDK_ENUM_PYTHON when it is set" {
+    # The deps-scan workflow keeps the latest aws-cdk-lib in a virtualenv of
+    # its own, because the scan's project install pins it exactly.
+    make_cdk_interpreter "$BATS_TEST_TMPDIR/cdk-latest"
+    CDK_ENUM_PYTHON="$BATS_TEST_TMPDIR/cdk-latest/python" run get_latest_lambda_python_runtime
+    [ "$status" -eq 0 ]
+    [ "$output" = "PYTHON_3_99" ]
+    CDK_ENUM_PYTHON="$BATS_TEST_TMPDIR/cdk-latest/python" run get_latest_lambda_nodejs_runtime
+    [ "$status" -eq 0 ]
+    [ "$output" = "NODEJS_99_X" ]
+}
+
+@test "get_latest_lambda_*_runtime print nothing when CDK_ENUM_PYTHON has no aws-cdk-lib" {
+    # The virtualenv exists but its aws-cdk-lib install failed.
+    write_stub "$BATS_TEST_TMPDIR/no-cdk" python <<'STUB'
+#!/usr/bin/env bash
+echo "ModuleNotFoundError: No module named 'aws_cdk'" >&2
+exit 1
+STUB
+    CDK_ENUM_PYTHON="$BATS_TEST_TMPDIR/no-cdk/python" run get_latest_lambda_python_runtime
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    CDK_ENUM_PYTHON="$BATS_TEST_TMPDIR/no-cdk/python" run get_latest_lambda_nodejs_runtime
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
 # ── get_latest_python_release ───────────────────────────────────────────────
 
 @test "get_latest_python_release: parses endoflife.date-shaped fixture" {

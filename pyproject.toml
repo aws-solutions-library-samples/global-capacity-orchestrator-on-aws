@@ -313,7 +313,8 @@ docs = [
     # pages.yml both install this extra. Zensical bundles the theme and the
     # Python-Markdown extensions; its transitive pins (pymdown-extensions,
     # Pygments, Markdown, ...) are version-controlled through
-    # requirements-lock.txt.
+    # requirements-lock.txt, which both installs pass as a constraints file
+    # (`-c requirements-lock.txt`).
     "zensical==0.0.74",
 ]
 dev = [
