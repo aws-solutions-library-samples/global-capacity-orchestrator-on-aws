@@ -3465,6 +3465,10 @@ gco jobs list [OPTIONS]
 | `--status` | `-s` | Filter by status |
 | `--limit` | `-l` | Maximum results (default: 50) |
 
+With `--region`, a read that fails (an HTTP error from the regional API, a Region
+without the regional API bridge, missing credentials) prints the error on stderr and
+exits 1 in every output mode; it is never reported as an empty job list.
+
 **Example:**
 
 ```bash

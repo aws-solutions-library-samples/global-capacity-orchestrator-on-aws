@@ -581,6 +581,11 @@ class JobManager:
 
         Returns:
             List of JobInfo objects
+
+        Raises:
+            Exception: Whatever the single-region read raised (HTTP error,
+                missing regional API, credentials). With ``all_regions`` a
+                region that cannot be read is logged and skipped instead.
         """
         jobs = []
 
@@ -605,13 +610,16 @@ class JobManager:
     def _query_jobs_in_region(
         self, region: str, namespace: str | None, status: str | None
     ) -> list[JobInfo]:
-        """Query jobs in a specific region."""
-        try:
-            response = self._aws_client.get_jobs(region=region, namespace=namespace, status=status)
-            return [self._parse_job_info(job_data, region) for job_data in response.get("jobs", [])]
-        except Exception as exc:
-            logger.warning("Failed to query jobs in %s: %s", region, exc)
-            return []
+        """Query jobs in a specific region.
+
+        A failed read raises. Returning an empty list here would tell the
+        caller the region has no jobs when it was never read, and a
+        single-region ``gco jobs list`` would print "No results" and exit 0
+        on a 403. The all-regions fan-out in :meth:`list_jobs` catches the
+        error per region, logs it, and carries on with the others.
+        """
+        response = self._aws_client.get_jobs(region=region, namespace=namespace, status=status)
+        return [self._parse_job_info(job_data, region) for job_data in response.get("jobs", [])]
 
     def _parse_job_info(self, job_data: dict[str, Any], region: str) -> JobInfo:
         """Parse job data into JobInfo object."""

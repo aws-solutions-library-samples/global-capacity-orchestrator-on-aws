@@ -1465,19 +1465,46 @@ class TestJobManagerQueryJobsInRegion:
         assert len(result) == 1
         assert result[0].name == "job1"
 
-    def test_query_jobs_in_region_error(self):
-        """Test querying jobs when API returns error."""
+    def test_query_jobs_in_region_error_propagates(self):
+        """A failed regional read raises instead of reading as "no jobs"."""
+        from unittest.mock import MagicMock
+
+        import pytest
+
+        from cli.jobs import JobManager
+
+        manager = JobManager()
+        manager._aws_client = MagicMock()
+        manager._aws_client.get_jobs.side_effect = RuntimeError("403 Forbidden")
+
+        with pytest.raises(RuntimeError, match="403 Forbidden"):
+            manager._query_jobs_in_region("us-east-1", None, None)
+        with pytest.raises(RuntimeError, match="403 Forbidden"):
+            manager.list_jobs(region="us-east-1")
+
+    def test_list_jobs_all_regions_skips_a_failed_region(self):
+        """The fan-out keeps the regions that answered and skips the one that failed."""
         from unittest.mock import MagicMock
 
         from cli.jobs import JobManager
 
         manager = JobManager()
         manager._aws_client = MagicMock()
-        manager._aws_client.get_jobs.side_effect = Exception("API error")
+        manager._aws_client.discover_regional_stacks.return_value = {
+            "us-east-1": object(),
+            "us-west-2": object(),
+        }
 
-        result = manager._query_jobs_in_region("us-east-1", None, None)
+        def get_jobs(region=None, namespace=None, status=None):
+            if region == "us-east-1":
+                raise RuntimeError("403 Forbidden")
+            return {"jobs": [{"metadata": {"name": "j", "namespace": "gco-jobs"}, "status": {}}]}
 
-        assert result == []
+        manager._aws_client.get_jobs.side_effect = get_jobs
+
+        jobs = manager.list_jobs(all_regions=True)
+
+        assert [(job.name, job.region) for job in jobs] == [("j", "us-west-2")]
 
     def test_query_jobs_in_region_envelope_without_jobs_key(self):
         """An envelope that carries no ``jobs`` key (an empty page) yields no jobs."""
@@ -2302,3 +2329,25 @@ class TestTrainJobLifecycleFallbacks:
 
         assert logs == "[CloudWatch Logs]"
         mock_cw.assert_called_once()
+
+
+class TestJobsListRegionErrors:
+    """``gco jobs list --region`` reports a failed read instead of "No results"."""
+
+    @pytest.mark.parametrize("output_args", [[], ["-o", "json"], ["-o", "yaml"]])
+    def test_failed_regional_read_exits_nonzero_in_every_output_mode(self, output_args):
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        client = MagicMock()
+        client.get_jobs.side_effect = RuntimeError("403 Forbidden")
+        with patch("cli.jobs.get_aws_client", return_value=client):
+            result = CliRunner().invoke(cli, [*output_args, "jobs", "list", "-r", "us-east-1"])
+
+        assert result.exit_code == 1
+        assert "403 Forbidden" in result.stderr
+        assert "No results" not in result.output
+        # Nothing reaches stdout, so a pipeline never mistakes the failure
+        # for an empty listing.
+        assert result.stdout.strip() == ""
