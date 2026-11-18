@@ -115,7 +115,7 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [Image Build Failures](#image-build-failures)
   - [Manifest Application Failures](#manifest-application-failures)
 - [Regional API Gateway (Aggregation Bridge and Direct Regional Access)](#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
-  - [Enable Direct Regional Access in the aws Partition](#enable-direct-regional-access-in-the-aws-partition)
+  - [Who May Call a Bridge](#who-may-call-a-bridge)
   - [How It Works](#how-it-works-1)
   - [Using Regional APIs](#using-regional-apis)
   - [Security Considerations](#security-considerations)
@@ -2835,39 +2835,26 @@ See `examples/trainium-job.yaml` and `examples/inferentia-job.yaml` for complete
 
 A regional API bridge is always deployed in every workload region. The
 centralized aggregator is not VPC-attached and uses these reachable API Gateway
-endpoints to fan out to each region. In the commercial `aws` partition,
-`api_gateway.regional_api_enabled` controls whether other IAM-authorized
-principals in the deployment account may invoke a bridge directly. In every
-other AWS partition, Global Accelerator is omitted and same-account direct
-regional access is enabled automatically as the supported workload ingress.
+endpoints to fan out to each region. Region-pinned CLI commands and SDK calls
+invoke a bridge directly, and in every AWS partition other than `aws`, where
+Global Accelerator is omitted, the bridges are the supported workload ingress.
 
-### Enable Direct Regional Access in the `aws` Partition
+### Who May Call a Bridge
 
-Edit `cdk.json` to admit direct same-account callers to every regional bridge.
-Outside `aws`, no opt-in is needed and this setting cannot disable the required
-regional ingress:
-
-```json
-{
-  "context": {
-    "api_gateway": {
-      "regional_api_enabled": true
-    }
-  }
-}
-```
-
-Then redeploy:
-
-```bash
-gco stacks deploy-all -y
-```
+The bridge's resource policy names only the aggregator role. Every other
+caller in the deployment account is authorized by its own identity-based
+policy, which must allow `execute-api:Invoke` on the bridge (see
+[CLI.md → Regional API Mode](CLI.md#regional-api-mode) and
+[docs/iam-policies](iam-policies/README.md)); callers in other accounts are
+refused. `api_gateway.regional_api_enabled` no longer changes this: it used to
+add a statement admitting every principal of the account, including principals
+with no `execute-api:Invoke` permission.
 
 ### How It Works
 
 Each bridge uses an IAM-authorized API Gateway and a Lambda in the workload
-VPC. The global aggregator reaches it over AWS-managed TLS with [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html); an
-opted-in user follows the same first hop:
+VPC. The global aggregator reaches it over AWS-managed TLS with [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html); a
+direct caller follows the same first hop:
 
 ```text
 Aggregator or authorized direct user

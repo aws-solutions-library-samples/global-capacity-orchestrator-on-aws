@@ -134,22 +134,43 @@ and `region`, while ordinary table output retains `✓ Job my-job deleted`.
 ### Regional API Mode
 
 Every workload region has a regional API bridge because the centralized
-aggregator uses it to reach that region's private VPC. In the commercial `aws`
-partition, the bridge's resource policy admits only the aggregator role by
-default, and `api_gateway.regional_api_enabled=true` additionally permits
-IAM-authorized principals from the deployment account. In other partitions,
-same-account direct access is enabled automatically because [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html)
-and its global proxy routes are omitted.
+aggregator uses it to reach that region's private VPC. Outside the commercial
+`aws` partition it is also the supported workload ingress, because [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html)
+and its global proxy routes are omitted there.
 
 When a command supplies an exact target region, the CLI automatically resolves
 and signs against that region's API Gateway; it never forwards a routing header
 to the global endpoint. When `--regional-api` is enabled (or
 `GCO_REGIONAL_API=true` is set), the CLI requires a selected region for every API
-call and never uses the global API Gateway → Global Accelerator path. In `aws`,
-enable the policy opt-in in `cdk.json` and redeploy before using either form of
-direct regional access. Outside `aws`, the deployment enables that same-account
-policy automatically. The global endpoint rejects `X-GCO-Target-Region` rather
-than silently pretending a region pin succeeded.
+call and never uses the global API Gateway → Global Accelerator path. The global
+endpoint rejects `X-GCO-Target-Region` rather than silently pretending a region
+pin succeeded.
+
+The CLI signs every request with your AWS credentials, and neither API's
+resource policy admits the account as a whole, so those credentials need an IAM
+policy that allows `execute-api:Invoke` on the GCO APIs: the global API in
+`deployment_regions.api_gateway` and each regional bridge. Administrator
+credentials have it; for a narrower identity, attach a policy such as:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "execute-api:Invoke",
+      "Resource": "arn:aws:execute-api:*:123456789012:*/prod/*"
+    }
+  ]
+}
+```
+
+Replace the account ID, and replace the API id wildcard with the ids of the
+APIs in the `<project>-api-gateway` and `<project>-regional-api-<region>`
+stacks to grant nothing beyond GCO. [docs/iam-policies](iam-policies/README.md) has per-route examples.
+`api_gateway.regional_api_enabled` no longer changes anything: it used to add a
+resource-policy statement that let every principal of the account call the
+bridge without such a permission.
 
 Both API Gateway hops use AWS-managed TLS and [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html). The regional VPC Lambda
 then uses HMAC plus deployment-local private-root TLS to the internal ALB.
@@ -1812,7 +1833,7 @@ Generate and list OpenCost allocation reports through the authenticated GCO API 
 gco costs report COMMAND [OPTIONS]
 ```
 
-Passing `--region` pins the request to that region's API bridge (each region's cost monitor owns its own OpenCost data); in the commercial partition direct bridge access requires `api_gateway.regional_api_enabled=true`. Without `--region` the request rides the global API and is served by the nearest healthy region — the response names the region that answered.
+Passing `--region` pins the request to that region's API bridge (each region's cost monitor owns its own OpenCost data); your credentials need `execute-api:Invoke` on that bridge ([Regional API Mode](#regional-api-mode)). Without `--region` the request rides the global API and is served by the nearest healthy region — the response names the region that answered.
 
 #### `gco costs report generate`
 

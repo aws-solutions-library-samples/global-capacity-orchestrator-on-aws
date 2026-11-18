@@ -106,9 +106,9 @@ Each region contains:
 
 - Created in every workload region because the centralized aggregator cannot join arbitrary regional VPCs
 - Regional REST API uses AWS-managed TLS and IAM authentication ([SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html))
-- Its resource policy always admits the exact aggregator role
-- In the commercial `aws` partition, `api_gateway.regional_api_enabled=true` additionally admits IAM-authorized principals from the deployment account for direct region-pinned access
-- In other partitions, same-account direct access is enabled automatically because this bridge is the supported workload ingress when Global Accelerator is absent
+- Its resource policy names only the exact aggregator role, for the routes it fans out to
+- Region-pinned calls by other principals of the deployment account use the bridge directly; each caller needs an identity-based policy that allows `execute-api:Invoke` on it, because no statement admits the account as a whole
+- In other partitions this bridge is also the supported workload ingress, because Global Accelerator is absent
 - The buffered Python VPC Lambda resolves and verifies the internal ALB from `/<project>/alb-hostname-<region>` for `/api/v1/*`
 - A separate Node.js 24 VPC Lambda applies the same HMAC, private-root TLS, and ALB-ownership controls while streaming `/inference/*` responses
 - Neither path requires a VPC Link or Network Load Balancer
@@ -338,7 +338,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 **Layers of Defense:**
 
-1. API Gateway IAM authorization, account-scoped resource policy, WAF, and throttling
+1. API Gateway IAM authorization (each caller's identity-based `execute-api:Invoke` permission; no resource-policy statement admits the account as a whole), WAF, and throttling
 2. Request-bound HMAC authentication between trusted proxies and backend services
 3. Internal ALB and private-subnet isolation
 4. Security groups, Kubernetes NetworkPolicies, and RBAC

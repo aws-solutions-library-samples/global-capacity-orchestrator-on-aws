@@ -36,8 +36,8 @@
   <text x="1982" y="336.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">by endpoint name</text>
   <path d="M 550 239 H 574 V 343 H 725" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
   <text x="717" y="337" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/studio/login †</text>
-  <path d="M 170 294.5 H 194 V 387.5 H 300" fill="none" stroke="#475569" stroke-width="1.4" stroke-dasharray="7 5" marker-end="url(#arrow)"/>
-  <text x="292" y="381.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">SigV4 · opt-in</text>
+  <path d="M 170 294.5 H 194 V 387.5 H 300" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="292" y="381.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">SigV4</text>
   <path d="M 550 387.5 H 574 V 535 H 725" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>
   <text x="717" y="529" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="normal" text-anchor="end" fill="#475569">/inference/{proxy+}</text>
   <path d="M 950 535 H 974 V 295 H 1250" fill="none" stroke="#475569" stroke-width="1.4" marker-end="url(#arrow)"/>

@@ -80,11 +80,10 @@ aggregate-only, so workload control and inference always use a regional bridge.
 ### Regional bridge and direct access
 
 Every workload region has a stack named `<project>-regional-api-<region>` with a
-`RegionalApiEndpoint` output because cross-region aggregation depends on it. In
-`aws`, `api_gateway.regional_api_enabled=true` additionally permits
-IAM-authorized same-account callers to invoke that endpoint directly. Other
-partitions enable that policy automatically because this endpoint is the
-supported workload ingress without Global Accelerator:
+`RegionalApiEndpoint` output because cross-region aggregation depends on it.
+Callers of the deployment account invoke that endpoint directly for
+region-pinned requests, and outside `aws` it is the supported workload ingress
+because Global Accelerator is omitted:
 
 ```bash
 aws cloudformation describe-stacks \
@@ -103,9 +102,10 @@ Client → regional API Gateway (AWS-managed TLS + SigV4)
 ```
 
 Sign requests in the region that owns the selected API Gateway endpoint. The
-bridge always exists for aggregator fan-out. In `aws`, direct invocation
-requires the resource-policy opt-in; outside `aws`, the deployment enables that
-same-account policy automatically. The aggregator itself uses AWS-managed TLS
+bridge's resource policy names only the aggregator role, so a direct caller
+needs an IAM policy of its own that allows `execute-api:Invoke` on the bridge
+([examples](../iam-policies/README.md)); the same holds for the global API.
+The aggregator itself uses AWS-managed TLS
 and SigV4 to the bridge; it does not read [ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html) [SSM](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html) state, the HMAC secret, or
 private-root trust.
 

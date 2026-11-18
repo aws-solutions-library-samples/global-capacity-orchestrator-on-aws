@@ -2,32 +2,31 @@
 Regional API Gateway bridge for authenticated access to private regional ALBs.
 
 Every deployment creates this regional bridge so the centralized aggregator has
-a reachable, IAM-authenticated path into each regional VPC. In the commercial
-``aws`` partition, ``api_gateway.regional_api_enabled`` optionally admits other
-same-account principals. In every other AWS partition, Global Accelerator is
-omitted and this regional IAM path is enabled for same-account callers
-regardless of that setting.
+a reachable, IAM-authenticated path into each regional VPC. Region-pinned CLI
+and SDK calls use the same bridge; outside the commercial ``aws`` partition,
+where Global Accelerator is omitted, it is the supported workload ingress.
 
 Architecture:
     Aggregator → Regional API Gateway → buffered VPC Lambda → Internal ALB → EKS pods
-    User (optional in ``aws``; required elsewhere) ────────┤
+    Region-pinned caller ─────────────────────────────────┤
                                         └→ streaming VPC Lambda → inference proxy
 
 Security:
     - API Gateway uses AWS-managed TLS and IAM authentication (SigV4)
-    - The resource policy always admits only the aggregator role by default
-    - Optional direct mode additionally admits IAM-authorized account principals
+    - The resource policy names only the aggregator role, for its routes
+    - Any other caller in the account needs an identity-based policy that
+      allows ``execute-api:Invoke`` on the bridge; callers in other accounts
+      are refused
     - Lambda runs inside the VPC with access to the internal ALB
     - Lambda verifies the deployment-local ALB certificate with explicit SNI
     - Lambda adds a short-lived per-request HMAC envelope to the ALB request
     - No public exposure of the ALB or EKS API
 
 Configuration:
-    In the commercial ``aws`` partition, set
-    ``api_gateway.regional_api_enabled`` to ``true`` when callers need direct
-    region-pinned access. Outside that partition, the regional API is the
-    supported workload ingress and same-account access is forced on. Global
-    aggregation always uses its dedicated role in every partition.
+    ``api_gateway.regional_api_enabled`` no longer changes this stack. It used
+    to add a resource-policy statement admitting every principal of the
+    account (always outside ``aws``), which let principals without any
+    ``execute-api:Invoke`` permission call the bridge.
 """
 
 from typing import Any
@@ -69,12 +68,12 @@ from gco.stacks.lambda_assets import lambda_source_code
 
 
 class GCORegionalApiGatewayStack(Stack):
-    """Regional aggregation bridge with optional direct caller access.
+    """Regional aggregation bridge, also used for region-pinned calls.
 
     The VPC Lambda gives the global aggregator a reachable path to one internal
-    regional ALB. Direct region-pinned access for other IAM-authorized account
-    principals is optional in the commercial ``aws`` partition and mandatory
-    in partitions where Global Accelerator is unavailable.
+    regional ALB. Other principals of the account call the bridge directly for
+    region-pinned operations when their identity-based policy allows
+    ``execute-api:Invoke`` on it.
 
     Attributes:
         api: Regional REST API with IAM authentication.
@@ -100,10 +99,6 @@ class GCORegionalApiGatewayStack(Stack):
         self.deployment_region = region
         self.vpc = vpc
         self.alb_dns_name = alb_dns_name
-        supports_global_accelerator = getattr(config, "supports_global_accelerator", None)
-        self.global_accelerator_enabled = (
-            bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
-        )
         self.auth_secret_arn = auth_secret_arn
         self.aggregator_role_arn = aggregator_role_arn
 
@@ -486,8 +481,14 @@ class GCORegionalApiGatewayStack(Stack):
             cloud_watch_role_removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # The bridge is private at the authorization layer by default: only
-        # the aggregator execution role is named in the API resource policy.
+        # The resource policy names only the aggregator execution role, for
+        # exactly the routes it fans out to. Every other caller in the account
+        # is authorized by its identity-based policy alone: for an
+        # IAM-authorized method and a same-account caller, API Gateway allows
+        # the request when that policy allows execute-api:Invoke and nothing
+        # denies it. No statement admits the account as a whole, so a
+        # principal without that permission cannot call the bridge, and
+        # callers in other accounts are refused.
         api.add_to_resource_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -499,27 +500,6 @@ class GCORegionalApiGatewayStack(Stack):
                 ],
             )
         )
-
-        # Direct regional mode is an explicit opt-in in the commercial
-        # partition. It becomes the required supported ingress in partitions
-        # where Global Accelerator does not exist. Methods still require SigV4
-        # and callers still need identity-policy permission to invoke.
-        if (
-            self.config.get_api_gateway_config()["regional_api_enabled"]
-            or not self.global_accelerator_enabled
-        ):
-            api.add_to_resource_policy(
-                iam.PolicyStatement(
-                    effect=iam.Effect.ALLOW,
-                    principals=[iam.AnyPrincipal()],
-                    actions=["execute-api:Invoke"],
-                    resources=["execute-api:/*"],
-                    conditions={
-                        "StringEquals": {"aws:PrincipalAccount": self.account},
-                        "ArnNotEquals": {"aws:PrincipalArn": self.aggregator_role_arn},
-                    },
-                )
-            )
 
         # Keep control-plane integration semantics unchanged. Inference uses
         # InvokeWithResponseStream and may remain open for API Gateway's full
@@ -578,23 +558,26 @@ class GCORegionalApiGatewayStack(Stack):
                     "id": "AwsSolutions-APIG3",
                     "reason": (
                         "This regional bridge is not a general public API: every method "
-                        "requires SigV4 and its resource policy admits only the exact "
-                        "aggregator role unless account-local direct access is explicitly "
-                        "enabled. A separate WAF would duplicate those identity controls."
+                        "requires SigV4, its resource policy names only the exact "
+                        "aggregator role, and every other caller needs an identity-based "
+                        "execute-api:Invoke permission in this account. A separate WAF "
+                        "would duplicate those identity controls."
                     ),
                 },
                 {
                     "id": "NIST.800.53.R5-APIGWAssociatedWithWAF",
                     "reason": (
-                        "The IAM-authenticated regional bridge has an aggregator-only resource "
-                        "policy by default; unauthorized traffic is rejected before integration."
+                        "Every method of the regional bridge requires SigV4 and an "
+                        "execute-api:Invoke permission granted in this account; API Gateway "
+                        "rejects other requests before the integration runs."
                     ),
                 },
                 {
                     "id": "PCI.DSS.321-APIGWAssociatedWithWAF",
                     "reason": (
-                        "The IAM-authenticated regional bridge has an aggregator-only resource "
-                        "policy by default and carries no payment-card-specific public surface."
+                        "Every method of the regional bridge requires SigV4 and an "
+                        "execute-api:Invoke permission granted in this account; it carries "
+                        "no payment-card-specific public surface."
                     ),
                 },
             ],

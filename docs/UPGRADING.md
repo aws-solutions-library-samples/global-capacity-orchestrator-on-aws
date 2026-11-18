@@ -27,6 +27,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [In-cluster TLS and tracing](#in-cluster-tls-and-tracing)
   - [Tenant write fence and MLflow over HTTPS](#tenant-write-fence-and-mlflow-over-https)
   - [vLLM endpoints deployed with MODEL](#vllm-endpoints-deployed-with-model)
+  - [API calls need an IAM permission](#api-calls-need-an-iam-permission)
 
 ## How an upgrade works
 
@@ -437,3 +438,28 @@ v0.31.0 and v0.32.0) and `gco inference invoke` gets a 404 for the model it asks
 - **`gco inference models <endpoint>` shows what an endpoint serves.** From
   the release after v8.13.0, `invoke` also names the served model when vLLM
   rejects the requested one.
+
+### API calls need an IAM permission
+
+Earlier releases put a statement in the global API's resource policy that
+admitted every principal of the deployment account, and the regional bridges
+had the same statement when `api_gateway.regional_api_enabled` was `true` (and
+always outside the `aws` partition). For a caller in the same account, API
+Gateway allows a request that either the caller's identity policy or the
+resource policy allows, so any role or user in the account could call every
+IAM-authorized route without an `execute-api:Invoke` permission of its own.
+
+- **BREAKING: callers without `execute-api:Invoke` are refused (403).** After
+  the redeploy, a caller in the account needs an identity-based policy that
+  allows `execute-api:Invoke` on the route. Administrator credentials already
+  have it. Before redeploying, grant it to every other role or user that calls
+  the global API or a regional bridge (CI pipelines, notebooks outside the
+  analytics stack, scripts); see
+  [CLI.md → Regional API Mode](CLI.md#regional-api-mode) for a policy that
+  covers the CLI and [docs/iam-policies](iam-policies/README.md) for narrower
+  ones.
+- **`api_gateway.regional_api_enabled` no longer has an effect.** Region-pinned
+  calls reach the bridges with the permission above whatever its value.
+- **The analytics `/studio/*` pages keep working.** Their requests carry no IAM
+  identity, so the resource policy still admits `GET /studio/*`; the Cognito
+  authorizer decides who signs in.

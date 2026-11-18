@@ -11,7 +11,7 @@
     }
   },
   "info": {
-    "description": "Direct regional API for gco in us-east-1\n\nOne IAM-authenticated REST API per deployment region, fronting that region's internal ALB through VPC Lambdas. Its first job is to be the aggregator's path into the region: the resource policy always admits the cross-region aggregator's execution role for the aggregate routes. Direct calls by other principals of the deploying account are an explicit opt-in (`api_gateway.regional_api_enabled`) in the commercial `aws` partition and the required ingress in partitions without Global Accelerator. The routes are the same control-plane and inference catch-alls as the global API, with the additional `HEAD` and `OPTIONS` methods on `/api/v1/{proxy+}`.",
+    "description": "Direct regional API for gco in us-east-1\n\nOne IAM-authenticated REST API per deployment region, fronting that region's internal ALB through VPC Lambdas. Its first job is to be the aggregator's path into the region: the resource policy names only the cross-region aggregator's execution role, for the aggregate routes. Region-pinned calls by other principals of the deploying account use it too, authorized by their own identity-based `execute-api:Invoke` permission; it is the required ingress in partitions without Global Accelerator. The routes are the same control-plane and inference catch-alls as the global API, with the additional `HEAD` and `OPTIONS` methods on `/api/v1/{proxy+}`.",
     "title": "GCO Regional API Gateway",
     "version": "1.0.0"
   },
@@ -731,24 +731,6 @@
       ]
     }
   ],
-  "x-gco-resource-policy-direct-access": [
-    {
-      "Action": "execute-api:Invoke",
-      "Condition": {
-        "ArnNotEquals": {
-          "aws:PrincipalArn": "arn:aws:iam::${AWS::AccountId}:role/gco-cross-region-aggregator"
-        },
-        "StringEquals": {
-          "aws:PrincipalAccount": "${AWS::AccountId}"
-        }
-      },
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "*"
-      },
-      "Resource": "execute-api:/*"
-    }
-  ],
   "x-gco-source": {
     "construct": "GCORegionalApiGatewayStack",
     "generator": "scripts/generate_api_gateway_openapi.py",
@@ -758,8 +740,7 @@
     "stackName": "gco-regional-api-us-east-1",
     "synthesizedWith": {
       "partition": "aws",
-      "region": "us-east-1",
-      "regionalApiEnabled": false
+      "region": "us-east-1"
     }
   },
   "x-gco-stage": {

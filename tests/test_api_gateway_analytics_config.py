@@ -277,3 +277,30 @@ class TestSetAnalyticsConfigMutator:
         stack.set_analytics_config(cfg)
         with pytest.raises(RuntimeError, match="already has an analytics_config"):
             stack.set_analytics_config(cfg)
+
+
+class TestResourcePolicy:
+    """The global API's resource policy admits nothing account-wide.
+
+    For an IAM-authorized method and a same-account caller, API Gateway allows
+    the request when either the caller's identity policy or the resource policy
+    allows it. A resource-policy Allow for every principal of the account let
+    principals without any ``execute-api:Invoke`` permission call every route.
+    Only the Cognito-authorized and unauthenticated ``GET /studio/*`` routes,
+    whose requests carry no IAM identity, need (and keep) an explicit Allow.
+    """
+
+    @pytest.mark.parametrize("template_name", ["absent_template", "present_template"])
+    def test_only_the_studio_get_routes_are_admitted(
+        self, template_name: str, request: pytest.FixtureRequest
+    ) -> None:
+        template: assertions.Template = request.getfixturevalue(template_name)
+        (rest_api,) = template.find_resources("AWS::ApiGateway::RestApi").values()
+        assert rest_api["Properties"]["Policy"]["Statement"] == [
+            {
+                "Action": "execute-api:Invoke",
+                "Effect": "Allow",
+                "Principal": {"AWS": "*"},
+                "Resource": "execute-api:/*/GET/studio/*",
+            }
+        ]

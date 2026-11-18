@@ -184,10 +184,9 @@ def main() -> None:
 
         # Every region gets an IAM-authenticated API bridge so the centralized
         # aggregator can reach the private ALB through a VPC-attached Lambda.
-        # In commercial ``aws``, ``regional_api_enabled`` controls whether
-        # other account principals may invoke the bridge directly. Other
-        # partitions enable that IAM-authenticated workload ingress
-        # automatically. Neither mode disables the aggregator's required path.
+        # Region-pinned calls use the same bridge (the workload ingress outside
+        # ``aws``); callers other than the aggregator need their own
+        # identity-based execute-api:Invoke permission.
         regional_api_stack = GCORegionalApiGatewayStack(
             app,
             f"{project_name}-regional-api-{region}",

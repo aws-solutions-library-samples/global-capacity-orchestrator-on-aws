@@ -355,7 +355,7 @@ The generated reference architecture shows the commercial `aws` workload path. O
 3. **NodePools** provision capacity on demand: built-in `system` and `general-purpose`, plus [`gpu-x86-pool`](./lambda/kubectl-applier-simple/manifests/40-nodepool-gpu-x86.yaml), [`gpu-arm-pool`](./lambda/kubectl-applier-simple/manifests/41-nodepool-gpu-arm.yaml), [`gpu-inference-pool`](./lambda/kubectl-applier-simple/manifests/42-nodepool-inference.yaml), [`gpu-efa-pool`](./lambda/kubectl-applier-simple/manifests/43-nodepool-efa.yaml), [`mooncake-efa-pool`](./lambda/kubectl-applier-simple/manifests/46-nodepool-mooncake-efa.yaml), [`neuron-pool`](./lambda/kubectl-applier-simple/manifests/44-nodepool-neuron.yaml), and [`cpu-general-pool`](./lambda/kubectl-applier-simple/manifests/45-nodepool-cpu-general.yaml).
 4. **Workloads and platform services** run across [namespaces](./lambda/kubectl-applier-simple/manifests/00-namespaces.yaml): `gco-system` ([Health Monitor](./gco/services/health_monitor.py), [Manifest Processor](./gco/services/manifest_processor.py), [Queue Processor](./gco/services/queue_processor.py), [Inference Monitor](./gco/services/inference_monitor.py), [Inference Proxy](./gco/services/inference_api.py), and the [Cost Monitor](./gco/services/cost_monitor.py) when cost monitoring is on, as it is by default) and `gco-jobs` / `gco-inference` (training and batch jobs, inference endpoints, and job DAG pipelines).
 5. **Storage and data services** back workloads: Amazon EFS, optional FSx for Lustre, optional Valkey, optional [Aurora](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html) [pgvector](https://github.com/pgvector/pgvector), and [KMS](https://aws.amazon.com/kms/)-encrypted [Amazon S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html) shared buckets: the Region's own regional-shared bucket, plus the cluster-shared and model-weights buckets the global stack owns.
-6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB. Direct same-account access is optional through `regional_api_enabled` in `aws` and enabled automatically as the required workload ingress elsewhere.
+6. An always-deployed **Regional API Gateway bridge** gives the aggregator a SigV4-authenticated path to the VPC Lambda and internal ALB. Region-pinned commands use it too, and it is the required workload ingress outside `aws`; every caller needs `execute-api:Invoke` in its own IAM policy.
 7. The bridge's **[regional API proxy Lambda](./lambda/regional-api-proxy/)** runs in the VPC's private subnets and forwards each authenticated call to the internal ALB.
 8. **Regional AWS services** complete the stack: [Amazon SQS](https://aws.amazon.com/sqs/) for job ingestion, the shared [DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html) tables, which live in the global Region, and [Amazon CloudWatch](https://docs.aws.amazon.com/cloudwatch/) [metrics](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/working_with_metrics.html) and [logs](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html).
 
@@ -413,10 +413,11 @@ User → Regional API Gateway (AWS TLS + SigV4) → VPC Lambda (HMAC)
   → pod TLS proxy (re-encrypted HTTPS) → AuthenticationMiddleware (pod loopback)
 ```
 
-Every Region's API bridge is required for aggregator fan-out. [Direct regional
-access](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
-is optional for same-account callers in `aws` and enabled automatically as the
-supported workload ingress in other partitions.
+Every Region's API bridge is required for aggregator fan-out, and
+[region-pinned calls](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access)
+use it directly. Neither API's resource policy admits the account as a whole:
+a caller needs an IAM policy of its own that allows `execute-api:Invoke`
+([examples](docs/iam-policies/README.md)).
 
 </details>
 

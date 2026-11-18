@@ -353,14 +353,14 @@ Aggregator → Regional API Gateway → HMAC-signing VPC Lambda
   → Internal Regional ALB (private-root TLS) → EKS pod (re-encrypted HTTPS)
 ```
 
-The bridge resource policy always admits the exact aggregator role. In the
-commercial `aws` partition, `regional_api_enabled=true` additionally allows
-IAM-authorized principals from the deployment account to invoke the
-region-pinned endpoint directly. In other partitions that same-account policy
-is enabled automatically because Global Accelerator is omitted:
+The bridge resource policy names only the exact aggregator role. Other
+principals of the deployment account invoke the region-pinned endpoint directly
+when their identity-based policy allows `execute-api:Invoke` on it; no
+statement admits the account as a whole. In other partitions this is the
+supported workload ingress because Global Accelerator is omitted:
 
 ```text
-User (optional in `aws`; required ingress elsewhere) → Regional API Gateway → HMAC-signing VPC Lambda
+User (region-pinned in `aws`; required ingress elsewhere) → Regional API Gateway → HMAC-signing VPC Lambda
   → Internal Regional ALB (private-root TLS) → EKS pod (re-encrypted HTTPS)
 ```
 
@@ -374,20 +374,11 @@ User (optional in `aws`; required ingress elsewhere) → Regional API Gateway �
 
 - Separate endpoint per region
 - No automatic cross-region failover on a directly invoked endpoint
-- Direct callers require the explicit resource-policy opt-in in `aws`; other partitions enable it automatically
+- Each direct caller needs `execute-api:Invoke` on the bridge in its own IAM policy
 
-**Enable Direct Regional Access in `aws`:**
-
-```json
-// cdk.json
-{
-  "context": {
-    "api_gateway": {
-      "regional_api_enabled": true
-    }
-  }
-}
-```
+`api_gateway.regional_api_enabled` no longer changes the bridge; it used to add a
+resource-policy statement that let every principal of the account call it
+without that permission.
 
 **Use Regional APIs:**
 

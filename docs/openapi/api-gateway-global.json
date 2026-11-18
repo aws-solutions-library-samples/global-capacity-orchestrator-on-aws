@@ -1075,19 +1075,6 @@
   "x-gco-resource-policy": [
     {
       "Action": "execute-api:Invoke",
-      "Condition": {
-        "StringEquals": {
-          "aws:PrincipalAccount": "${AWS::AccountId}"
-        }
-      },
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "*"
-      },
-      "Resource": "execute-api:/*"
-    },
-    {
-      "Action": "execute-api:Invoke",
       "Effect": "Allow",
       "Principal": {
         "AWS": "*"

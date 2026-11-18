@@ -41,19 +41,6 @@ Statements deployed on the REST API (`${AWS::AccountId}` is the deploying accoun
 [
   {
     "Action": "execute-api:Invoke",
-    "Condition": {
-      "StringEquals": {
-        "aws:PrincipalAccount": "${AWS::AccountId}"
-      }
-    },
-    "Effect": "Allow",
-    "Principal": {
-      "AWS": "*"
-    },
-    "Resource": "execute-api:/*"
-  },
-  {
-    "Action": "execute-api:Invoke",
     "Effect": "Allow",
     "Principal": {
       "AWS": "*"
