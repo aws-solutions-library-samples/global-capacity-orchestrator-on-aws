@@ -52,57 +52,33 @@ from gco.stacks.lambda_assets import lambda_source_code
 # <pyflowchart-code-diagram> END
 
 
-# Default values for the ``images`` cdk.json block. The defaults match the
-# documented retention posture: repos survive a stack destroy by default
-# (``retain``), non-empty repos block destroy unless the operator explicitly
-# flips ``empty_on_delete`` to true, lifecycle keeps the latest 20 tagged
-# images and expires untagged ones after 7 days, and replication is enabled
-# by default to every deployed region.
-_IMAGES_DEFAULT_REMOVAL_POLICY = "retain"
-_IMAGES_DEFAULT_EMPTY_ON_DELETE = False
-_IMAGES_DEFAULT_KEEP_TAGGED = 20
-_IMAGES_DEFAULT_EXPIRE_UNTAGGED_DAYS = 7
+# Default values for the ``images`` cdk.json block: the global stack
+# replicates the project's ``<project_name>/*`` ECR repositories to every
+# deployed region. The block's ``removal_policy``, ``empty_on_delete`` and
+# ``lifecycle`` keys are deprecated and ignored (see DEPRECATED_BLOCK_KEYS in
+# gco/config/config_loader.py): no stack creates or deletes the repositories,
+# which the gco CLI creates through the ECR API.
 _IMAGES_DEFAULT_REPLICATION_ENABLED = True
 _IMAGES_DEFAULT_REPLICATION_DESTINATIONS = "all_deployed_regions"
-
-_IMAGES_VALID_REMOVAL_POLICIES = ("retain", "destroy")
 
 
 def _parse_images_config(cdk_context: dict[str, Any] | None) -> dict[str, Any]:
     """Parse the ``images`` block from cdk.json with defaults applied.
 
     Returns a normalized dict shape that the rest of the global stack
-    can consume without re-parsing. Validates ``removal_policy`` against
-    the set ``{"retain", "destroy"}`` and ``replication.destinations``
+    can consume without re-parsing. Validates ``replication.destinations``
     against either the literal string ``"all_deployed_regions"`` or a
-    ``list[str]``.
+    ``list[str]``. The deprecated keys are not read.
 
     Args:
         cdk_context: The dict returned by ``self.node.try_get_context("images")``.
             ``None`` (the key being absent) is equivalent to an empty dict.
 
     Returns:
-        A dict with keys ``removal_policy``, ``empty_on_delete``,
-        ``lifecycle`` (with ``keep_tagged`` and ``expire_untagged_days``),
-        and ``replication`` (with ``enabled`` and ``destinations``).
+        A dict with the key ``replication`` (with ``enabled`` and
+        ``destinations``).
     """
     raw = cdk_context or {}
-
-    removal_policy = raw.get("removal_policy", _IMAGES_DEFAULT_REMOVAL_POLICY)
-    if not isinstance(removal_policy, str) or removal_policy not in _IMAGES_VALID_REMOVAL_POLICIES:
-        raise ValueError(
-            f"images.removal_policy must be 'retain' or 'destroy', got {removal_policy!r}"
-        )
-
-    empty_on_delete = bool(raw.get("empty_on_delete", _IMAGES_DEFAULT_EMPTY_ON_DELETE))
-
-    lifecycle_raw = raw.get("lifecycle") or {}
-    if not isinstance(lifecycle_raw, dict):
-        raise ValueError(f"images.lifecycle must be a mapping, got {type(lifecycle_raw).__name__}")
-    keep_tagged = int(lifecycle_raw.get("keep_tagged", _IMAGES_DEFAULT_KEEP_TAGGED))
-    expire_untagged_days = int(
-        lifecycle_raw.get("expire_untagged_days", _IMAGES_DEFAULT_EXPIRE_UNTAGGED_DAYS)
-    )
 
     replication_raw = raw.get("replication") or {}
     if not isinstance(replication_raw, dict):
@@ -135,12 +111,6 @@ def _parse_images_config(cdk_context: dict[str, Any] | None) -> dict[str, Any]:
         )
 
     return {
-        "removal_policy": removal_policy,
-        "empty_on_delete": empty_on_delete,
-        "lifecycle": {
-            "keep_tagged": keep_tagged,
-            "expire_untagged_days": expire_untagged_days,
-        },
         "replication": {
             "enabled": replication_enabled,
             "destinations": destinations,
@@ -202,12 +172,12 @@ class GCOGlobalStack(Stack):
         # Create AWS Backup plan for DynamoDB tables
         self._create_backup_plan()
 
-        # Container image registry — parses the cdk.json ``images`` block,
-        # provisions the optional ECR replication rule for ``gco/*`` repos,
-        # and creates the lookup-or-create custom resource Lambda that
-        # ``cli images init`` will invoke per-repo on demand. The Lambda
-        # construct is created here regardless of replication settings so
-        # the function ARN is available for downstream invocations.
+        # Container image registry — parses the cdk.json ``images`` block and
+        # provisions the optional ECR replication rule for the project's
+        # ``<project_name>/*`` repos. The repositories themselves are not stack
+        # resources: the gco CLI creates them through the ECR API, and they
+        # survive a destroy. The lookup-or-create Lambda is provisioned too, but
+        # no custom resource and no CLI command invokes it.
         self.images_config = _parse_images_config(self.node.try_get_context("images"))
         self._create_image_replication_rule()
         self._create_image_lookup_lambda()
@@ -2431,10 +2401,10 @@ class GCOGlobalStack(Stack):
         """Create the lookup-or-create custom resource Lambda for image repos.
 
         The Lambda implements the adopt-or-create pattern for ECR repos
-        under the project's ``gco/*`` prefix. It is invoked at the time
-        ``cli images init`` registers a new repo with the global stack via
-        a ``CustomResource``; the function itself is provisioned here so
-        the ARN is stable across deploys.
+        under the project's ``gco/*`` prefix. Nothing invokes it: no stack
+        declares a ``CustomResource`` backed by it, and ``gco images init``
+        creates repositories through the ECR API itself. Only its ARN is
+        exported.
 
         The Lambda's IAM role grants read/write access to ECR repository
         APIs scoped to the project's prefix, plus the standard basic

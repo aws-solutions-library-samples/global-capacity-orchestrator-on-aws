@@ -272,13 +272,10 @@
       "pending_requested_gpus": -1
     },
 
-    "_comment_images": "ECR image registry. removal_policy: 'retain' keeps repos when the stack is destroyed (production default); 'destroy' wipes them. empty_on_delete: only honored with removal_policy='destroy'; if false, non-empty repos block stack deletion. lifecycle.keep_tagged: number of most-recent tagged images retained. lifecycle.expire_untagged_days: untagged image TTL in days. See https://docs.aws.amazon.com/AmazonECR/latest/userguide/LifecyclePolicies.html.",
+    "_comment_images": "ECR image registry for the project's <project_name>/* repositories, which the gco CLI creates (gco images init / build / push / mirror) and no stack deletes: they survive a destroy (remove them with 'gco images delete-repo'). replication.enabled (default true): the global stack replicates <project_name>/* to replication.destinations (default 'all_deployed_regions', or a list of Region names). ECR allows one replication configuration per registry, so two deployments whose global stacks share a Region must set false on all but one (docs/CUSTOMIZATION.md).",
     "images": {
-      "removal_policy": "retain",
-      "empty_on_delete": false,
-      "lifecycle": {
-        "keep_tagged": 20,
-        "expire_untagged_days": 7
+      "replication": {
+        "enabled": true
       }
     },
 

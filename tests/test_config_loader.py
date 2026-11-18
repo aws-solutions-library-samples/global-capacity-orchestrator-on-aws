@@ -2222,6 +2222,39 @@ class TestBlockShapes:
             "global_accelerator.health_check_timeout",
         ]
 
+    def test_images_destroy_and_lifecycle_keys_are_deprecated(self, valid_context):
+        """No stack creates or deletes the image repositories, so these never took effect."""
+        valid_context["images"] = {
+            "removal_policy": "destroy",
+            "empty_on_delete": True,
+            "lifecycle": {"keep_tagged": 20, "expire_untagged_days": 7},
+            "replication": {"enabled": True},
+        }
+        config = ConfigLoader(MockApp(valid_context))
+        deprecated = {w.split(" is deprecated")[0]: w for w in config.warnings if "images." in w}
+        assert sorted(deprecated) == [
+            "images.empty_on_delete",
+            "images.lifecycle",
+            "images.removal_policy",
+        ]
+        assert "gco images delete-repo <name> --force -y" in deprecated["images.removal_policy"]
+        assert "gco images lifecycle set" in deprecated["images.lifecycle"]
+
+    @pytest.mark.parametrize(
+        "images",
+        [
+            {"removal_policy": "shred"},
+            {"empty_on_delete": "false"},
+            {"lifecycle": "keep 20"},
+            {"lifecycle": {"keep_everything": True}},
+        ],
+    )
+    def test_deprecated_images_values_are_not_validated(self, valid_context, images):
+        """Ignored keys cannot fail the synth, whatever they hold."""
+        valid_context["images"] = images
+        config = ConfigLoader(MockApp(valid_context))
+        assert any(" is deprecated and ignored" in w for w in config.warnings)
+
     def test_unknown_top_level_keys_in_gco_style_warn(self, valid_context):
         valid_context.update(
             {

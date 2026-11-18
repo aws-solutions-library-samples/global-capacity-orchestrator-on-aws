@@ -2538,8 +2538,12 @@ instead of failing halfway through a deploy.
   names it and says what to do; nothing reads its value. These are
   `alb_config`, `fsx_lustre.node_group`, `manifest_processor.image` (the
   stack builds that image itself),
-  `global_accelerator.health_check_grace_period` and
-  `global_accelerator.health_check_timeout`.
+  `global_accelerator.health_check_grace_period`,
+  `global_accelerator.health_check_timeout`, and `images.removal_policy`,
+  `images.empty_on_delete` and `images.lifecycle` (no stack creates or
+  deletes the `<project_name>/*` ECR repositories: the gco CLI creates them,
+  they survive a destroy, and `gco images init` applies its own lifecycle
+  policy).
 - The per-Region overlays (`fsx_lustre_regions`, `pcs_regions`,
   `hyperpod_regions`) are keyed by Region name. A name that is not an AWS
   Region fails; a real Region that is not in `deployment_regions.regional`

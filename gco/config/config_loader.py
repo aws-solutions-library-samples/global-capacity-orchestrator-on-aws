@@ -136,6 +136,22 @@ DEPRECATED_BLOCK_KEYS: dict[str, str] = {
         "Global Accelerator endpoint groups have no probe timeout setting, so it never "
         "took effect. Remove it from cdk.json."
     ),
+    "images.removal_policy": (
+        "no stack creates the <project_name>/* ECR repositories (the gco CLI creates them "
+        "through the ECR API), so destroying the stacks has never deleted them, whatever "
+        "this says. Remove it from cdk.json; delete a repository with "
+        "'gco images delete-repo <name> --force -y'."
+    ),
+    "images.empty_on_delete": (
+        "no stack deletes the <project_name>/* ECR repositories, so it never took effect "
+        "(it only gated a check before 'gco stacks destroy', which is gone). Remove it from "
+        "cdk.json; empty and delete a repository with 'gco images delete-repo <name> --force -y'."
+    ),
+    "images.lifecycle": (
+        "nothing applies it: 'gco images init' gives each new repository its own policy "
+        "(keep the 20 newest tagged images, expire untagged ones after 7 days). Remove it "
+        "from cdk.json; change a repository's policy with 'gco images lifecycle set'."
+    ),
 }
 
 #: The charts of the ``helm`` block that take nothing but ``enabled``.
@@ -277,8 +293,15 @@ BLOCK_KEYS: dict[str, frozenset[str]] = {
             "pending_requested_gpus",
         }
     ),
-    "images": frozenset({"removal_policy", "empty_on_delete", "lifecycle", "replication"}),
-    "images.lifecycle": frozenset({"keep_tagged", "expire_untagged_days"}),
+    "images": frozenset(
+        {
+            "replication",
+            # Deprecated (DEPRECATED_BLOCK_KEYS): warned about and ignored.
+            "removal_policy",
+            "empty_on_delete",
+            "lifecycle",
+        }
+    ),
     "images.replication": frozenset({"enabled", "destinations"}),
     "volcano_image_mirror": frozenset({"enabled", "ecr_namespace"}),
     "s3_access_logs": frozenset({"retention_days"}),

@@ -1745,7 +1745,6 @@ class TestStackManagerOrchestrated:
         thread = MagicMock()
         with (
             patch.object(StackManager, "list_stacks", return_value=stacks),
-            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(StackManager, "cleanup_orphaned_bastions"),
             patch.object(StackManager, "_cleanup_backup_vault"),
             patch.object(StackManager, "_start_eks_sg_watchdog", return_value=thread),
@@ -1938,70 +1937,6 @@ class TestStackManagerOrchestrated:
             assert successful == ["gco-us-east-1", "gco-global"]
             assert failed == []
 
-    def test_destroy_orchestrated_runs_image_registry_preflight_first(self):
-        """The image-registry preflight must fire before any teardown so
-        operators don't end up with monitoring + regional + api-gateway
-        already destroyed when the global-stack ECR delete fails on a
-        non-empty repo. When the preflight refuses (e.g.
-        ``removal_policy: "destroy"`` + ``empty_on_delete: false`` with
-        repos still present), ``destroy_orchestrated`` returns
-        ``(False, [], <every stack>)`` without invoking ``destroy()``."""
-        from cli.stacks import StackManager
-
-        config = MagicMock()
-
-        with (
-            patch.object(StackManager, "list_stacks") as mock_list,
-            patch.object(StackManager, "destroy") as mock_destroy,
-            patch.object(StackManager, "_image_registry_destroy_preflight") as mock_preflight,
-            patch.object(StackManager, "_cleanup_backup_vault") as mock_cleanup_vault,
-        ):
-            mock_list.return_value = ["gco-global", "gco-us-east-1", "gco-monitoring"]
-            mock_preflight.return_value = False  # preflight refuses
-
-            manager = StackManager(config)
-            success, successful, failed = manager.destroy_orchestrated(force=True)
-
-            assert success is False
-            assert successful == []
-            # Every stack reported as failed (none were attempted).
-            assert set(failed) == {"gco-global", "gco-us-east-1", "gco-monitoring"}
-            # destroy() must NOT have been called — refusal happens
-            # before any teardown.
-            mock_destroy.assert_not_called()
-            # The preflight took a force=True hint so it can match the
-            # caller's confirmation posture.
-            mock_preflight.assert_called_once_with(force=True)
-            # And the backup-vault cleanup must NOT have run either —
-            # we're returning before any AWS-side mutation.
-            mock_cleanup_vault.assert_not_called()
-
-    def test_destroy_orchestrated_proceeds_when_preflight_passes(self):
-        """When the preflight returns True (the default ``retain`` posture
-        or an empty registry under ``destroy``), orchestration proceeds
-        to the backup-vault cleanup and per-stack destroy phases."""
-        from cli.stacks import StackManager
-
-        config = MagicMock()
-
-        with (
-            patch.object(StackManager, "list_stacks") as mock_list,
-            patch.object(StackManager, "_stack_exists_in_cloudformation", return_value=False),
-            patch.object(StackManager, "destroy") as mock_destroy,
-            patch.object(StackManager, "_image_registry_destroy_preflight") as mock_preflight,
-            patch.object(StackManager, "_cleanup_backup_vault") as mock_cleanup_vault,
-        ):
-            mock_list.return_value = ["gco-global", "gco-us-east-1"]
-            mock_destroy.return_value = True
-            mock_preflight.return_value = True  # preflight passes
-
-            manager = StackManager(config)
-            success, _successful, _failed = manager.destroy_orchestrated(force=True)
-
-            assert success is True
-            assert mock_destroy.call_count >= 2
-            mock_cleanup_vault.assert_called_once()
-
     def test_destroy_orchestrated_failure_blocks_dependent_stacks(self):
         """A regional failure prevents dependent API and global teardown."""
         from cli.stacks import StackManager
@@ -2173,7 +2108,6 @@ class TestParallelDeployment:
         thread = MagicMock()
         with (
             patch.object(StackManager, "list_stacks", return_value=stacks),
-            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(StackManager, "cleanup_orphaned_bastions"),
             patch.object(StackManager, "_cleanup_backup_vault"),
             patch.object(StackManager, "_start_eks_sg_watchdog", return_value=thread),

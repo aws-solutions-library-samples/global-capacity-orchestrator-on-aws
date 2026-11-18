@@ -3505,13 +3505,9 @@ def test_destroy_rejects_invalid_identity_fences(
         stack_manager._destroy(**kwargs)
 
 
-def test_destroy_honors_registry_and_strict_teardown_guards(
+def test_destroy_honors_strict_teardown_guards(
     stack_manager: Any,
 ) -> None:
-    stack_manager._image_registry_destroy_preflight = MagicMock(return_value=False)
-    assert stack_manager._destroy(stack_name="gco-global") is False
-
-    stack_manager._image_registry_destroy_preflight.return_value = True
     stack_manager._cdk_cancel_event.set()
     with pytest.raises(RuntimeError, match="cancelled before deleting"):
         stack_manager._destroy(
@@ -3560,7 +3556,6 @@ def _ready_destroy_manager(manager: Any) -> None:
     manager._wait_for_stack_delete_convergence = MagicMock(return_value=True)
     manager._print_stack_delete_heartbeat = MagicMock()
     manager._cloudformation_delete_stack = MagicMock(return_value=True)
-    manager._image_registry_destroy_preflight = MagicMock(return_value=True)
 
 
 def test_destroy_handles_orphan_regional_api_absence_and_direct_delete(
@@ -3653,34 +3648,6 @@ def test_destroy_cancellation_after_cdk_does_not_reconcile(
     with pytest.raises(RuntimeError, match="cancelled before AWS-side reconciliation"):
         stack_manager._destroy(stack_name="gco-us-east-1")
     stack_manager._cdk_cancel_event.clear()
-
-
-def test_image_registry_inventory_aggregates_owned_repositories(
-    stack_manager: Any,
-) -> None:
-    manager = MagicMock()
-    manager.list_repos.return_value = [
-        {"name": "gco/one"},
-        {"name": "foreign/two"},
-        {"name": "gco/broken"},
-    ]
-    manager.list_tags.side_effect = [
-        [{"size_bytes": 10}, {"size_bytes": "unknown"}],
-        RuntimeError("cannot list"),
-    ]
-    manager._collect_inference_image_refs.return_value = {"a", "b"}
-    manager._collect_recent_job_image_refs.return_value = {"job"}
-
-    with patch("cli.images.ImageManager", return_value=manager):
-        inventory = stack_manager._build_image_registry_inventory()
-
-    assert inventory == {
-        "repo_count": 3,
-        "tag_count": 2,
-        "total_bytes": 10,
-        "endpoint_refs": 2,
-        "job_refs": 1,
-    }
 
 
 def test_describe_stack_target_treats_missing_exact_and_named_stack_as_absent(
@@ -4167,7 +4134,6 @@ def test_parallel_deploy_classifies_results_and_cancels_on_worker_error(
 
 def _ready_destroy_orchestrator(manager: Any, names: list[str]) -> None:
     manager.list_stacks = MagicMock(return_value=names)
-    manager._image_registry_destroy_preflight = MagicMock(return_value=True)
     manager.cleanup_orphaned_bastions = MagicMock(return_value=1)
     manager._cleanup_bastion_iam = MagicMock(return_value={"completed_steps": 1})
     manager._cleanup_backup_vault = MagicMock(return_value={"errors": []})
@@ -4288,15 +4254,6 @@ def test_destroy_orchestration_parallel_bridge_failure_stops_regional_phase(
     assert result[0] is False
     assert result[2] == ["gco-regional-api-us-west-2"]
     stack_manager._start_eks_sg_watchdog.assert_not_called()
-
-
-def test_destroy_orchestration_registry_refusal_returns_every_stack(
-    stack_manager: Any,
-) -> None:
-    names = ["gco-global", "gco-us-east-1"]
-    _ready_destroy_orchestrator(stack_manager, names)
-    stack_manager._image_registry_destroy_preflight.return_value = False
-    assert stack_manager.destroy_orchestrated() == (False, [], names)
 
 
 def test_parallel_destroy_classifies_results_and_cancels_on_worker_error(
@@ -4469,26 +4426,6 @@ def test_run_cdk_resolves_executable_lazily(stack_manager: Any) -> None:
     assert result.stdout == "output"
     assert stack_manager._cdk_path == "/local/cdk"
     popen.assert_called_once()
-
-
-def test_image_registry_inventory_falls_back_when_import_is_unavailable(
-    stack_manager: Any,
-) -> None:
-    real_import = builtins.__import__
-
-    def fail_images(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "cli.images":
-            raise ImportError("images unavailable")
-        return real_import(name, *args, **kwargs)
-
-    with patch("builtins.__import__", side_effect=fail_images):
-        assert stack_manager._build_image_registry_inventory() == {
-            "repo_count": 0,
-            "tag_count": 0,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
 
 
 def test_describe_stack_target_propagates_non_missing_client_error(
