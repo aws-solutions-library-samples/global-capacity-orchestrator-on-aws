@@ -4,7 +4,7 @@ Tests for gco/config/config_loader.ConfigLoader.
 Drives ConfigLoader against a MockApp/MockNode pair that surfaces a
 hand-crafted CDK context dict. Verifies happy-path loading of every
 top-level field (project_name, deployment_regions, kubernetes_version,
-resource_thresholds, global_accelerator, alb_config, inference_proxy,
+resource_thresholds, global_accelerator, inference_proxy,
 manifest_processor, job_validation_policy, api_gateway, tags) and
 that missing required fields raise ConfigValidationError with an
 informative message. Companion suite to test_config_loader_validation.py
@@ -56,12 +56,6 @@ def minimal_context() -> dict:
         },
         "kubernetes_version": "1.37",
         "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 80, "gpu_threshold": -1},
-        "alb_config": {
-            "health_check_interval": 30,
-            "health_check_timeout": 5,
-            "healthy_threshold": 2,
-            "unhealthy_threshold": 2,
-        },
         "manifest_processor": {
             "image": "gco/manifest-processor:latest",
             "replicas": 3,
@@ -559,12 +553,15 @@ class TestConfigLoaderGetters:
         assert mp_config["replicas"] == 3
         assert mp_config["allowed_namespaces"] == ["gco-jobs"]
 
-    def test_get_alb_config(self, valid_context):
-        """Test getting ALB config."""
+    def test_alb_config_is_deprecated_and_its_values_are_ignored(self, valid_context):
+        """alb_config validates with a warning; the ALB probe comes from gateway_health_check."""
         app = MockApp(valid_context)
         config = ConfigLoader(app)
-        alb_config = config.get_alb_config()
-        assert alb_config["health_check_interval"] == 30
+        assert not hasattr(config, "get_alb_config")
+        assert config.get_gateway_health_check_config()["interval_seconds"] == 15
+        assert [w.split(":")[0] for w in config.warnings] == [
+            "alb_config is deprecated and ignored"
+        ]
 
 
 class TestInferenceProxyConfig:
@@ -1280,12 +1277,11 @@ class TestConfigValidationEdgeCases:
         assert ga_config["traffic_dial"]["enabled"] is False
         assert ga_config["traffic_dial"]["mode"] == "monitor"
 
-    def test_missing_alb_config(self, valid_context):
-        """Test that missing alb_config raises error."""
+    def test_missing_alb_config_is_valid(self, valid_context):
+        """alb_config is deprecated, so leaving it out is valid and warns about nothing."""
         del valid_context["alb_config"]
         app = MockApp(valid_context)
-        with pytest.raises(ConfigValidationError, match="alb_config configuration is required"):
-            ConfigLoader(app)
+        assert ConfigLoader(app).warnings == []
 
     def test_missing_manifest_processor_config(self, valid_context):
         """Test that missing manifest_processor config raises error."""
@@ -1400,23 +1396,16 @@ class TestConfigValidationEdgeCases:
         # Explicit keys still override their defaults.
         assert ga_config["name"] == "gco-accelerator"
 
-    def test_missing_alb_field(self, valid_context):
-        """Test that missing ALB field raises error."""
-        del valid_context["alb_config"]["healthy_threshold"]
+    @pytest.mark.parametrize(
+        "alb_config",
+        [{"health_check_interval": 30}, {"healthy_threshold": -1}, {"health_check_timeout": "5"}],
+    )
+    def test_alb_config_contents_are_no_longer_validated(self, valid_context, alb_config):
+        """The deprecated block is ignored whole: partial or invalid contents only warn."""
+        valid_context["alb_config"] = alb_config
         app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="Missing alb_config configuration: healthy_threshold"
-        ):
-            ConfigLoader(app)
-
-    def test_negative_alb_value(self, valid_context):
-        """Test that negative ALB value raises error."""
-        valid_context["alb_config"]["unhealthy_threshold"] = 0
-        app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="unhealthy_threshold must be a positive integer"
-        ):
-            ConfigLoader(app)
+        config = ConfigLoader(app)
+        assert config.warnings[0].startswith("alb_config is deprecated and ignored")
 
     def test_missing_api_gateway_field(self, valid_context):
         """Test that missing API Gateway field raises error."""

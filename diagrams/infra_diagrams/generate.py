@@ -169,12 +169,6 @@ _BASE_CONTEXT: dict[str, Any] = {
         "pending_requested_memory_gb": 200,
         "pending_requested_gpus": -1,
     },
-    "alb_config": {
-        "health_check_interval": 30,
-        "health_check_timeout": 5,
-        "healthy_threshold": 2,
-        "unhealthy_threshold": 2,
-    },
     "manifest_processor": {
         "image": "gco/manifest-processor:latest",
         "replicas": 3,

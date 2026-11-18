@@ -29,6 +29,8 @@ from typing import Any
 import pytest
 import yaml
 
+from gco.gateway_health_check_config import render_gateway_health_check_defaults
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 GATEWAY_MANIFEST = (
     PROJECT_ROOT / "lambda" / "kubectl-applier-simple" / "manifests" / "post-helm-gateway.yaml"
@@ -81,7 +83,9 @@ def _segments(path: str) -> list[str]:
 def _load_httproute() -> dict[str, Any]:
     documents = [
         document
-        for document in yaml.safe_load_all(GATEWAY_MANIFEST.read_text(encoding="utf-8"))
+        for document in yaml.safe_load_all(
+            render_gateway_health_check_defaults(GATEWAY_MANIFEST.read_text(encoding="utf-8"))
+        )
         if document and document.get("kind") == "HTTPRoute"
     ]
     assert len(documents) == 1, (

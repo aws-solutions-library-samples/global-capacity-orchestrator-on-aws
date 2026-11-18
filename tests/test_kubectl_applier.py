@@ -27,6 +27,11 @@ import pytest
 import urllib3
 import yaml
 
+from gco.gateway_health_check_config import (
+    GATEWAY_HEALTH_CHECK_TOKENS,
+    render_gateway_health_check_defaults,
+)
+
 
 def _fully_enabled_replacements(manifests_dir: Path) -> dict[str, str]:
     """Stub every feature-gate placeholder in the real manifests directory.
@@ -53,6 +58,7 @@ def _fully_enabled_replacements(manifests_dir: Path) -> dict[str, str]:
         "{{MP_HPA_MAX_REPLICAS}}",
         "{{MP_HPA_CPU_TARGET_UTILIZATION}}",
     }
+    integer_tokens |= set(GATEWAY_HEALTH_CHECK_TOKENS.values())
     integer_prefixes = ("{{QP_", "{{LIMIT_", "{{QUOTA_MAX_PODS}}")
     replacements: dict[str, str] = {
         "{{VPC_ENDPOINT_CIDR_BLOCKS}}": '- ipBlock:\n            cidr: "10.0.0.0/16"',
@@ -2339,7 +2345,9 @@ class TestInferenceProxyAutoscalingManifest:
             / "manifests"
             / "post-helm-gateway.yaml"
         )
-        documents = list(yaml.safe_load_all(gateway_path.read_text()))
+        documents = list(
+            yaml.safe_load_all(render_gateway_health_check_defaults(gateway_path.read_text()))
+        )
         target_group = next(
             document
             for document in documents

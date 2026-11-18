@@ -11,7 +11,7 @@ Configuration Sections:
 - kubernetes_version: EKS Kubernetes version
 - resource_thresholds: CPU/memory/GPU utilization thresholds
 - global_accelerator: Global Accelerator settings
-- alb_config: Application Load Balancer health check settings
+- gateway_health_check: Target-group health check of the platform ALB
 - inference_proxy: Shared inference TLS proxy CPU request and HPA target
 - manifest_processor: Manifest validation and resource limits
 - api_gateway: Throttling and logging configuration
@@ -45,6 +45,11 @@ from gco.eks_capabilities_config import (
     merge_eks_capabilities_overrides,
     parse_eks_capabilities_overrides,
     validate_eks_capabilities_config,
+)
+from gco.gateway_health_check_config import (
+    GATEWAY_HEALTH_CHECK_CONTEXT_KEY,
+    GatewayHealthCheckConfigError,
+    validate_gateway_health_check_config,
 )
 from gco.hyperpod_config import (
     HYPERPOD_FEATURE_KEY,
@@ -83,6 +88,20 @@ from gco.stacks.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Top-level cdk.json blocks that no longer take effect, each with what to do
+#: instead. ``gco upgrade`` keeps an operator's cdk.json byte for byte, so a
+#: file that still carries one validates, with a warning naming the block;
+#: nothing reads its values.
+DEPRECATED_CONTEXT_KEYS: dict[str, str] = {
+    "alb_config": (
+        "it never configured the platform ALB. Remove it from cdk.json; set "
+        "gateway_health_check (interval_seconds, timeout_seconds, healthy_threshold, "
+        "unhealthy_threshold) to change the ALB target-group health check, which "
+        "defaults to the 15-second interval, 5-second timeout and thresholds of 2 "
+        "that have always been deployed."
+    ),
+}
 
 #: ``manifest_processor.autoscaling`` defaults. Off: the API tier is I/O-bound
 #: (Kubernetes round trips), so CPU is a weak saturation signal; an operator who
@@ -316,7 +335,27 @@ class ConfigLoader:
 
     def __init__(self, app: App):
         self.app = app
+        #: Non-fatal findings of the validation (deprecated keys, keys that
+        #: take no effect), in the order they were found. Each is also logged
+        #: at WARNING, which ``cdk synth`` prints.
+        self.warnings: list[str] = []
         self._validate_configuration()
+
+    def _warn(self, message: str) -> None:
+        """Record and log one validation warning (each distinct message once)."""
+        if message not in self.warnings:
+            self.warnings.append(message)
+            logger.warning("%s", message)
+
+    def _warn_deprecated_blocks(self) -> None:
+        """Warn about each deprecated top-level block present in the context.
+
+        A deprecated block is ignored: nothing reads it, and its values never
+        take effect. See :data:`DEPRECATED_CONTEXT_KEYS`.
+        """
+        for key, advice in DEPRECATED_CONTEXT_KEYS.items():
+            if self.app.node.try_get_context(key) is not None:
+                self._warn(f"{key} is deprecated and ignored: {advice}")
 
     def _validate_configuration(self) -> None:
         """Validate the entire configuration.
@@ -361,8 +400,11 @@ class ConfigLoader:
         # Validate inference proxy TLS sidecar autoscaling settings
         self._validate_inference_proxy_config()
 
-        # Validate ALB config
-        self._validate_alb_config()
+        # Deprecated blocks (alb_config, ...) are ignored with a warning
+        self._warn_deprecated_blocks()
+
+        # Validate the platform ALB target-group health check
+        self._validate_gateway_health_check_config()
 
         # Validate manifest processor config
         self._validate_manifest_processor_config()
@@ -691,25 +733,9 @@ class ConfigLoader:
                 f"got {config['max_replicas']} < {config['min_replicas']}"
             )
 
-    def _validate_alb_config(self) -> None:
-        """Validate ALB configuration"""
-        alb_config = self.app.node.try_get_context("alb_config")
-        if not alb_config:
-            raise ConfigValidationError("alb_config configuration is required")
-
-        required_fields = [
-            "health_check_interval",
-            "health_check_timeout",
-            "healthy_threshold",
-            "unhealthy_threshold",
-        ]
-        for field in required_fields:
-            if field not in alb_config:
-                raise ConfigValidationError(f"Missing alb_config configuration: {field}")
-
-            value = alb_config[field]
-            if not isinstance(value, int) or value <= 0:
-                raise ConfigValidationError(f"{field} must be a positive integer, got {value}")
+    def _validate_gateway_health_check_config(self) -> None:
+        """Validate the optional ``gateway_health_check`` block (see the getter)."""
+        self.get_gateway_health_check_config()
 
     def _validate_manifest_processor_config(self) -> None:
         """Validate manifest processor configuration.
@@ -1983,14 +2009,35 @@ class ConfigLoader:
             )
         return {**defaults, **configured}
 
-    def get_alb_config(self) -> dict[str, Any]:
-        """Get ALB configuration"""
-        return self.app.node.try_get_context("alb_config") or {
-            "health_check_interval": 30,
-            "health_check_timeout": 5,
-            "healthy_threshold": 2,
-            "unhealthy_threshold": 2,
-        }
+    def get_gateway_health_check_config(self) -> dict[str, int]:
+        """Return the platform ALB's target-group health check settings.
+
+        The ``gateway_health_check`` block merged over
+        :data:`gco.gateway_health_check_config.GATEWAY_HEALTH_CHECK_DEFAULTS`
+        (15-second interval, 5-second timeout, 2 consecutive results to flip
+        a target either way, the values the gateway manifest shipped with).
+        The regional stack renders them into the default
+        ``TargetGroupConfiguration`` of ``post-helm-gateway.yaml``, which
+        every platform target group inherits.
+
+        Keys:
+            - interval_seconds: seconds between probes of one target (5-300)
+            - timeout_seconds: seconds without a response that fail a probe
+              (2-120, less than ``interval_seconds``)
+            - healthy_threshold: consecutive passes that mark a target
+              healthy (2-10)
+            - unhealthy_threshold: consecutive failures that mark a target
+              unhealthy (2-10)
+
+        Raises:
+            ConfigValidationError: If the block is malformed.
+        """
+        try:
+            return validate_gateway_health_check_config(
+                self.app.node.try_get_context(GATEWAY_HEALTH_CHECK_CONTEXT_KEY)
+            )
+        except GatewayHealthCheckConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
 
     def get_manifest_processor_config(self) -> dict[str, Any]:
         """Get manifest processor configuration.

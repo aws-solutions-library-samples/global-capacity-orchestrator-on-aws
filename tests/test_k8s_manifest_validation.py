@@ -258,6 +258,18 @@ class TestRenderPlaceholders:
         docs = [doc for doc in yaml.safe_load_all(validator.render_placeholders(raw)) if doc]
         assert docs and all({"apiVersion", "kind", "metadata"} <= set(doc) for doc in docs)
 
+    def test_gateway_health_check_tokens_render_the_shipped_probe(self) -> None:
+        # The TargetGroupConfiguration CRD bounds these fields, so the stubs
+        # are the shipped defaults, not the generic integer 1.
+        from gco.gateway_health_check_config import (
+            GATEWAY_HEALTH_CHECK_DEFAULTS,
+            GATEWAY_HEALTH_CHECK_TOKENS,
+        )
+
+        for name, token in GATEWAY_HEALTH_CHECK_TOKENS.items():
+            out = validator.render_placeholders(f"field: {token}")
+            assert out == f"field: {GATEWAY_HEALTH_CHECK_DEFAULTS[name]}", token
+
     def test_text_without_placeholders_is_unchanged(self) -> None:
         text = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: gco-jobs\n"
         assert validator.render_placeholders(text) == text
@@ -274,6 +286,7 @@ class TestRenderPlaceholders:
             "31-manifest-processor.yaml",  # REST policy env wiring
             "33-inference-proxy.yaml",  # quoted Quantity + bare integer HPA target
             "post-helm-sqs-consumer.yaml",  # the bare integer placeholders
+            "post-helm-gateway.yaml",  # the bare integer health-check placeholders
             "04-resource-quotas.yaml",  # quoted-string placeholders only
         ],
     )

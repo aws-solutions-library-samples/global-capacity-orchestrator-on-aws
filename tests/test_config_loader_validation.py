@@ -21,12 +21,6 @@ def _minimal_context() -> dict:
         "deployment_regions": {"regional": ["us-east-1"]},
         "kubernetes_version": "1.37",
         "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 80, "gpu_threshold": -1},
-        "alb_config": {
-            "health_check_interval": 30,
-            "health_check_timeout": 5,
-            "healthy_threshold": 2,
-            "unhealthy_threshold": 2,
-        },
         "manifest_processor": {
             "image": "test",
             "replicas": 1,

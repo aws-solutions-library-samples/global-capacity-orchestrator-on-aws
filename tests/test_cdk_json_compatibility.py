@@ -37,3 +37,18 @@ def test_released_cdk_json_passes_validation(path: Path) -> None:
     config = ConfigLoader(cdk.App(context=context))
     assert config.get_project_name() == context["project_name"]
     assert config.get_regions() == context["deployment_regions"]["regional"]
+
+
+@pytest.mark.parametrize("path", RELEASED, ids=[path.stem for path in RELEASED])
+def test_released_cdk_json_raises_only_deprecation_warnings(path: Path) -> None:
+    """Anything the release shipped that no longer takes effect is reported as deprecated."""
+    config = ConfigLoader(cdk.App(context=_context(path)))
+    for warning in config.warnings:
+        assert " is deprecated and ignored" in warning, warning
+
+
+def test_v8_23_0_deprecations_are_the_expected_keys() -> None:
+    """Pins which v8.23.0 keys are deprecated, so a new deprecation is a reviewed change."""
+    config = ConfigLoader(cdk.App(context=_context(FIXTURES / "v8.23.0.json")))
+    deprecated = {warning.split(" is deprecated and ignored")[0] for warning in config.warnings}
+    assert deprecated == {"alb_config"}

@@ -1562,7 +1562,35 @@ kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch
 
 ### Load Balancer Configuration
 
-GCO installs the AWS Load Balancer Controller with Gateway API support and intentionally creates one internal ALB from the `gco-system/gco-gateway` Gateway (see `lambda/kubectl-applier-simple/manifests/post-helm-gateway.yaml`). If you add another operator-owned Gateway, keep its exposure explicit and do not create endpoint-specific inference routes that bypass the authenticated proxy:
+GCO installs the AWS Load Balancer Controller with Gateway API support and intentionally creates one internal ALB from the `gco-system/gco-gateway` Gateway (see `lambda/kubectl-applier-simple/manifests/post-helm-gateway.yaml`).
+
+#### Platform ALB health check
+
+The ALB probes `/healthz` over HTTPS on every target of the health-monitor, manifest-processor and inference-proxy target groups. The probe's timing comes from the `gateway_health_check` block in `cdk.json`:
+
+```json
+"gateway_health_check": {
+  "interval_seconds": 15,
+  "timeout_seconds": 5,
+  "healthy_threshold": 2,
+  "unhealthy_threshold": 2
+}
+```
+
+| Key | Default | Range | Meaning |
+|-----|---------|-------|---------|
+| `interval_seconds` | `15` | 5-300 | Seconds between probes of one target |
+| `timeout_seconds` | `5` | 2-120, less than `interval_seconds` | Seconds without an answer that fail a probe |
+| `healthy_threshold` | `2` | 2-10 | Consecutive passing probes that mark a target healthy |
+| `unhealthy_threshold` | `2` | 2-10 | Consecutive failing probes that mark a target unhealthy |
+
+The ranges are the ones Elastic Load Balancing accepts for an Application Load Balancer target group ([Health checks for Application Load Balancer target groups](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html)); a value outside them, a non-integer, or an unknown key fails `cdk synth`. Every key is optional and an omitted one keeps its default. The regional stack renders the values into the default `TargetGroupConfiguration` of `post-helm-gateway.yaml`; redeploy the regional stacks to apply a change.
+
+`gateway_health_check` replaces the `alb_config` block of earlier releases. `alb_config` was required and validated, but nothing read it, and its 30-second interval was never what ran. A `cdk.json` that still has `alb_config` synthesizes with a deprecation warning and its values have no effect; delete the block and set `gateway_health_check` if you want a different probe.
+
+#### Additional Gateways
+
+If you add another operator-owned Gateway, keep its exposure explicit and do not create endpoint-specific inference routes that bypass the authenticated proxy:
 
 ```yaml
 apiVersion: gateway.k8s.aws/v1

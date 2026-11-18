@@ -178,10 +178,10 @@ class MockConfigLoader:
             "trust_cache_max_stale_seconds": 3600,
         }
 
-    def get_alb_config(self):
+    def get_gateway_health_check_config(self):
         return {
-            "health_check_interval": 30,
-            "health_check_timeout": 5,
+            "interval_seconds": 15,
+            "timeout_seconds": 5,
             "healthy_threshold": 2,
             "unhealthy_threshold": 2,
         }
@@ -1071,7 +1071,7 @@ class TestConfigIntegration:
         assert config.get_resource_thresholds() is not None
         assert config.get_cluster_config("us-east-1") is not None
         assert config.get_global_accelerator_config() is not None
-        assert config.get_alb_config() is not None
+        assert config.get_gateway_health_check_config() is not None
         assert config.get_manifest_processor_config() is not None
         assert config.get_inference_proxy_config() == {
             "tls_proxy_cpu_request_millicores": 100,
