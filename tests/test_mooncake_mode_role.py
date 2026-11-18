@@ -132,7 +132,7 @@ def _reconcile_workers(mode: str, prefill: int, decode: int, protocol: str):
     monitor._create_pd_proxy = lambda *_a, **_k: None
     monitor._create_service = lambda *_a, **_k: None
     monitor._create_role_hpa = lambda *_a, **_k: None
-    monitor._report_role_status = lambda *_a, **_k: "creating"
+    monitor._report_role_status = lambda *_a, **_k: mod.RoleStatusReport("creating", False)
 
     spec = _build_spec(mode, prefill, decode, protocol)
     endpoint = {"name": "endpoint", "spec": spec}
@@ -248,7 +248,7 @@ def test_role_pods_use_spec_bootstrap_base_port_override() -> None:
     monitor._create_pd_proxy = lambda *_a, **_k: None
     monitor._create_service = lambda *_a, **_k: None
     monitor._create_role_hpa = lambda *_a, **_k: None
-    monitor._report_role_status = lambda *_a, **_k: "creating"
+    monitor._report_role_status = lambda *_a, **_k: mod.RoleStatusReport("creating", False)
 
     spec = {
         "image": "example/mooncake-vllm:pinned",

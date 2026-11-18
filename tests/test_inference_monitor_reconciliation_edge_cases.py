@@ -758,7 +758,8 @@ def test_report_role_status_marks_underready_split_topology_creating() -> None:
         "topology": {"prefill": 2, "decode": 1},
     }
 
-    assert monitor._report_role_status("ep", NAMESPACE, mooncake, {}, _endpoint()) == "creating"
+    report = monitor._report_role_status("ep", NAMESPACE, mooncake, {}, _endpoint())
+    assert report.state == "creating"
     kwargs = store.update_region_status.call_args.kwargs
     assert kwargs["replicas_ready"] == 1
     assert kwargs["replicas_desired"] == 3
@@ -1724,7 +1725,7 @@ def test_role_status_handles_omitted_split_role_and_underready_store() -> None:
             NAMESPACE,
             {"mode": "disaggregated", "topology": {"prefill": 1}},
             {},
-        )
+        ).state
         == "running"
     )
     assert split._get_deployment.call_args_list == [
@@ -1737,7 +1738,8 @@ def test_role_status_handles_omitted_split_role_and_underready_store() -> None:
     store_monitor._get_deployment = MagicMock(  # type: ignore[method-assign]
         return_value=_deployment(replicas=1, ready=0)
     )
-    assert store_monitor._report_role_status("ep", NAMESPACE, {"mode": "store"}, {}) == "creating"
+    store_report = store_monitor._report_role_status("ep", NAMESPACE, {"mode": "store"}, {})
+    assert store_report.state == "creating"
     assert store_backend.update_region_status.call_args.kwargs["replicas_ready"] == 0
 
 

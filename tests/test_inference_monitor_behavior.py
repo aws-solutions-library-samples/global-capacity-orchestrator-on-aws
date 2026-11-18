@@ -26,6 +26,7 @@ from gco.services.inference_monitor import (
     RegionalScopeResolution,
     RegionServicesResolution,
     ResourceCleanupResult,
+    RoleStatusReport,
     build_endpoint_tls_proxy,
     mooncake_config_digest,
     render_mooncake_config,
@@ -431,7 +432,7 @@ def test_report_role_status_uses_split_role_readiness(
         "topology": {"prefill": 2, "decode": 1},
     }
 
-    state = monitor._report_role_status("chat", NAMESPACE, mooncake, REGION_SERVICES)
+    state = monitor._report_role_status("chat", NAMESPACE, mooncake, REGION_SERVICES).state
 
     assert state == expected_state
     store.update_region_status.assert_called_once_with(
@@ -515,7 +516,7 @@ def test_split_role_status_waits_for_the_pd_proxy(
     if mode == "both":
         mooncake["store"] = {"enabled": True}
 
-    state = monitor._report_role_status("chat", NAMESPACE, mooncake, REGION_SERVICES)
+    state = monitor._report_role_status("chat", NAMESPACE, mooncake, REGION_SERVICES).state
 
     assert state == expected_state
     kwargs = store.update_region_status.call_args.kwargs
@@ -538,7 +539,7 @@ def test_report_role_status_requires_store_master_readiness(
     )
     mooncake = {"mode": "store", "store": {"enabled": True}}
 
-    state = monitor._report_role_status("chat", NAMESPACE, mooncake, REGION_SERVICES)
+    state = monitor._report_role_status("chat", NAMESPACE, mooncake, REGION_SERVICES).state
 
     assert state == expected_state
     store.update_region_status.assert_called_once_with(
@@ -694,7 +695,7 @@ async def test_reconcile_mooncake_orders_roles_autoscalers_and_front_end() -> No
 
     def report(*_args, **_kwargs):
         events.append("status")
-        return "running"
+        return RoleStatusReport("running", True)
 
     def ensure_role(_name, _ns, _spec, role, **_kwargs):
         events.append(f"role:{role}")
@@ -787,7 +788,7 @@ async def test_mooncake_delayed_keda_hpa_blocks_proxy_across_reconcile_passes() 
     )
     monitor._create_role_service = MagicMock()  # type: ignore[method-assign]
     monitor._create_pd_proxy = MagicMock()  # type: ignore[method-assign]
-    monitor._report_role_status = MagicMock(return_value="running")  # type: ignore[method-assign]
+    monitor._report_role_status = MagicMock(return_value=RoleStatusReport("running", True))  # type: ignore[method-assign]
     spec = {
         "mooncake": {
             "mode": "disaggregated",
@@ -851,14 +852,18 @@ async def test_reconcile_mooncake_reports_admin_key_failure_without_status_overw
     monitor._report_role_status.assert_not_called()
 
 
-def _store_mode_monitor(store: MagicMock, *, reported_state: str) -> InferenceMonitor:
+def _store_mode_monitor(
+    store: MagicMock, *, reported_state: str, rollout_complete: bool = True
+) -> InferenceMonitor:
     """A monitor whose Mooncake pass is admitted end to end and reports ``reported_state``."""
     monitor = _make_monitor(store)
     _admit_mooncake(monitor)
     monitor._ensure_mooncake_configmap = MagicMock()  # type: ignore[method-assign]
     monitor._ensure_role_deployment = MagicMock(return_value=(1, 1, False))  # type: ignore[method-assign]
     monitor._create_service = MagicMock()  # type: ignore[method-assign]
-    monitor._report_role_status = MagicMock(return_value=reported_state)  # type: ignore[method-assign]
+    monitor._report_role_status = MagicMock(  # type: ignore[method-assign]
+        return_value=RoleStatusReport(reported_state, rollout_complete)
+    )
     return monitor
 
 
@@ -877,9 +882,8 @@ def _deploying_endpoint(*regions: str, local_region: str = "us-east-1") -> dict[
 async def test_reconcile_mooncake_promotes_deploying_endpoint_once_roles_are_running() -> None:
     """A Mooncake endpoint leaves ``deploying`` the same way a classic one does.
 
-    The inference proxy refuses traffic while ``desired_state`` is ``deploying``;
-    live validation found store and disaggregated endpoints answering 503 "not
-    ready in this region" forever because only the classic path promoted. The
+    Live validation found store and disaggregated endpoints left in
+    ``deploying`` forever because only the classic path promoted. The
     promotion is fenced on the lifecycle id and the ``deploying`` state.
     """
     store = MagicMock()
@@ -946,6 +950,19 @@ async def test_reconcile_mooncake_does_not_promote_while_roles_are_creating() ->
 
 
 @pytest.mark.asyncio
+async def test_reconcile_mooncake_does_not_promote_while_a_role_rolls_out() -> None:
+    """Finding I21: old-template role pods keep the region serving, not the update applied."""
+    store = MagicMock()
+    monitor = _store_mode_monitor(store, reported_state="running", rollout_complete=False)
+    spec = {"mooncake": {"mode": "store", "store": {"enabled": True}}}
+
+    action = await monitor._reconcile_mooncake("chat", NAMESPACE, spec, _deploying_endpoint())
+
+    assert action == {"action": "reconcile_mooncake", "endpoint": "chat", "state": "running"}
+    store.update_desired_state.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_reconcile_mooncake_passes_unresolved_cold_tier_reason_to_status() -> None:
     """An unresolved cold-tier bucket is reported through the role status, not raised."""
     store = MagicMock()
@@ -1007,7 +1024,7 @@ async def test_reconcile_mooncake_store_mode_uses_direct_service_front_end() -> 
     monitor._create_role_service = MagicMock()  # type: ignore[method-assign]
     monitor._create_pd_proxy = MagicMock()  # type: ignore[method-assign]
     monitor._create_service = MagicMock()  # type: ignore[method-assign]
-    monitor._report_role_status = MagicMock(return_value="running")  # type: ignore[method-assign]
+    monitor._report_role_status = MagicMock(return_value=RoleStatusReport("running", True))  # type: ignore[method-assign]
     spec = {
         "image": "vllm/vllm-openai:pinned",
         "mooncake": {"mode": "store", "store": {"enabled": True}},

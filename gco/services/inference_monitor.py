@@ -49,7 +49,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import cache, partial
 from pathlib import Path
-from typing import Any, NoReturn, TypedDict
+from typing import Any, NamedTuple, NoReturn, TypedDict
 from urllib.parse import urlsplit
 
 from kubernetes import client, config
@@ -597,6 +597,18 @@ class ForeignEndpointResourceError(RuntimeError):
     claimed or deleted: cleanup treats it as absent, and creating this
     endpoint's own object under the name fails with this error.
     """
+
+
+class RoleStatusReport(NamedTuple):
+    """The region status :meth:`InferenceMonitor._report_role_status` wrote.
+
+    ``rollout_complete`` is false while a role (or the PD proxy) still has
+    fewer Ready pods of its current template than its floor: the region may
+    serve from the previous template's pods, but the change is not applied.
+    """
+
+    state: str
+    rollout_complete: bool
 
 
 @dataclass(frozen=True)
@@ -3158,7 +3170,7 @@ class InferenceMonitor:
         endpoint: dict[str, Any] | None = None,
         *,
         cold_tier_error: str | None = None,
-    ) -> str:
+    ) -> RoleStatusReport:
         """Write the role-keyed region status for a Mooncake endpoint.
 
         For split topologies the status carries a ``roles`` map of observed and
@@ -3176,14 +3188,22 @@ class InferenceMonitor:
         ``gco inference status`` shows that the hot-path store is serving
         without its S3 tier instead of hiding the downgrade.
 
+        Readiness counts every Ready pod, so a region keeps serving from the
+        previous template's pods through a rolling update (after
+        ``update-image`` or a ``configure-store`` roll). Whether the update is
+        done counts only pods of each Deployment's current template, as for a
+        classic endpoint: until they meet the floor, a running region reports
+        ``rollout_complete: false`` and the endpoint is not promoted.
+
         Args:
             cold_tier_error: Why the cold tier was dropped this pass, or
                 ``None`` when it resolved (or was not requested).
 
         Returns:
-            The reported endpoint state: ``"running"`` once every desired role
-            replica (and, when applicable, the proxy's configured replicas and
-            the master) is Ready, otherwise ``"creating"``.
+            The reported state, ``"running"`` once every desired role replica
+            (and, when applicable, the proxy's configured replicas and the
+            master) is Ready, otherwise ``"creating"``, and whether pods of the
+            current templates meet the same floors.
         """
         mode = mooncake.get("mode")
         roles = self._desired_roles(mode)
@@ -3191,6 +3211,7 @@ class InferenceMonitor:
         total_ready = 0
         total_desired = 0
         all_ready = True
+        rollout_complete = True
 
         if mode in ("disaggregated", "both"):
             roles_block: dict[str, Any] = {}
@@ -3198,34 +3219,37 @@ class InferenceMonitor:
                 if role not in roles:
                     continue
                 configured_floor = self._replica_count_for_role(mooncake, role)
-                ready, desired = self._deployment_replicas(
-                    self._get_deployment(f"{name}-{role}", ns), configured_floor
-                )
+                role_deployment = self._get_deployment(f"{name}-{role}", ns)
+                ready, desired = self._deployment_replicas(role_deployment, configured_floor)
                 roles_block[role] = {"ready": ready, "desired": desired}
                 total_ready += ready
                 total_desired += desired
                 if ready < configured_floor:
                     all_ready = False
+                if _rolled_out_ready_replicas(role_deployment) < configured_floor:
+                    rollout_complete = False
             extra["roles"] = roles_block
             # Requests reach a split endpoint only through its prefill-decode
             # proxy, so Ready roles alone do not make it serve.
             proxy_floor = _pd_proxy_replicas(mooncake)
-            proxy_ready, proxy_desired = self._deployment_replicas(
-                self._get_deployment(f"{name}-proxy", ns), proxy_floor
-            )
+            proxy_deployment = self._get_deployment(f"{name}-proxy", ns)
+            proxy_ready, proxy_desired = self._deployment_replicas(proxy_deployment, proxy_floor)
             extra["proxy"] = {"ready": proxy_ready, "desired": proxy_desired}
             if proxy_ready < proxy_floor:
                 all_ready = False
+            if _rolled_out_ready_replicas(proxy_deployment) < proxy_floor:
+                rollout_complete = False
         else:
             # Store mode runs a single kv_both Deployment under the endpoint name.
             configured_floor = self._replica_count_for_role(mooncake, "single")
-            ready, desired = self._deployment_replicas(
-                self._get_deployment(name, ns), configured_floor
-            )
+            single_deployment = self._get_deployment(name, ns)
+            ready, desired = self._deployment_replicas(single_deployment, configured_floor)
             total_ready += ready
             total_desired += desired
             if ready < configured_floor:
                 all_ready = False
+            if _rolled_out_ready_replicas(single_deployment) < configured_floor:
+                rollout_complete = False
 
         store = mooncake.get("store") or {}
         if store.get("enabled"):
@@ -3248,6 +3272,8 @@ class InferenceMonitor:
                 all_ready = False
 
         state = "running" if all_ready and total_desired > 0 else "creating"
+        if state == "running" and not rollout_complete:
+            extra["rollout_complete"] = False
         status_conditions = self._status_write_conditions(endpoint or {})
         self.store.update_region_status(
             name,
@@ -3258,7 +3284,7 @@ class InferenceMonitor:
             extra=extra or None,
             **status_conditions,
         )
-        return state
+        return RoleStatusReport(state, rollout_complete)
 
     async def _reconcile_mooncake(
         self,
@@ -3514,7 +3540,7 @@ class InferenceMonitor:
         # promotion the classic path performs. Without it a Mooncake endpoint
         # would report ``deploying`` forever despite Ready role pods (the
         # inference proxy still serves a region whose own status is running).
-        state = self._report_role_status(
+        report = self._report_role_status(
             name,
             ns,
             mooncake,
@@ -3522,8 +3548,10 @@ class InferenceMonitor:
             endpoint,
             cold_tier_error=services.error if services.cold_tier_unresolved else None,
         )
-        self._promote_deploying_endpoint(name, endpoint, state)
-        return {"action": "reconcile_mooncake", "endpoint": name, "state": state}
+        self._promote_deploying_endpoint(
+            name, endpoint, report.state, rollout_complete=report.rollout_complete
+        )
+        return {"action": "reconcile_mooncake", "endpoint": name, "state": report.state}
 
     def _reconcile_stopped(
         self,

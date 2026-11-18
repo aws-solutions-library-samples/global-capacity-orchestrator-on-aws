@@ -263,6 +263,7 @@ def test_disaggregated_reconcile_creates_prefill_and_decode_services(monitor):
         RegionalScopeResolution,
         RegionServicesResolution,
         ResourceCleanupResult,
+        RoleStatusReport,
     )
 
     monitor._resolve_region_services = lambda *a, **k: RegionServicesResolution(
@@ -275,7 +276,7 @@ def test_disaggregated_reconcile_creates_prefill_and_decode_services(monitor):
     monitor._reconcile_role_autoscaler = lambda *a, **k: ResourceCleanupResult()
     monitor._ensure_role_deployment = lambda *a, **k: (0, 1, False)
     monitor._create_pd_proxy = lambda *a, **k: None
-    monitor._report_role_status = lambda *a, **k: "creating"
+    monitor._report_role_status = lambda *a, **k: RoleStatusReport("creating", False)
 
     created = []
     monitor._create_role_service = lambda name, ns, role, port=8000: created.append(role)
