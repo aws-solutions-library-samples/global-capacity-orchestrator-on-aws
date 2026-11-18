@@ -227,6 +227,9 @@ def templates_run(
 ) -> None:
     """Create and run a job from a template.
 
+    A rendered manifest the API rejects (untrusted registry, namespace not
+    allowed, over a resource cap) exits 1 with each validation error.
+
     Examples:
         gco templates run gpu-template --name my-job --region us-east-1
         gco templates run gpu-template -n my-job -r us-east-1 -p image=custom:v1
@@ -256,11 +259,10 @@ def templates_run(
             },
         )
 
-        if result.get("success"):
-            formatter.print_success(f"Job '{name}' created from template '{template_name}'")
-        else:
-            formatter.print_error("Failed to create job from template")
-
+        # The API answers 201 only when the job was created; a rejected
+        # manifest is a 400 whose ``errors`` list call_api puts in the
+        # exception message, reported below.
+        formatter.print_success(f"Job '{name}' created from template '{template_name}'")
         formatter.print(result)
 
     except Exception as e:

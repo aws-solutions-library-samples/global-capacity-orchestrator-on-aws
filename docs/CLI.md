@@ -6526,6 +6526,10 @@ gco templates run TEMPLATE_NAME [OPTIONS]
 | `--namespace` | | Kubernetes namespace |
 | `--param` | `-p` | Parameter override (key=value), can be repeated |
 
+When the rendered manifest is rejected (an untrusted registry, a namespace
+outside the allowlist, a resource cap), the API answers `400` and the command
+prints each validation error and exits 1.
+
 **Example:**
 
 ```bash

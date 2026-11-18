@@ -167,6 +167,25 @@ def _validate_max_attempts(max_attempts: int | None) -> None:
         raise ValueError("max_attempts must be a positive integer")
 
 
+def _with_reported_errors(message: Any, body: Any) -> Any:
+    """Append a failed response's ``errors`` list to *message*.
+
+    Routes that run a manifest submission (``POST
+    /api/v1/jobs/from-template/{name}``, the job retry) answer 400 with
+    ``{"success": false, "errors": [...]}`` and no ``error``/``detail`` key,
+    so without this the caller saw only "400 Bad Request". When the body has
+    its own message the errors follow it; otherwise they are the message.
+    """
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if not isinstance(errors, list):
+        return message
+    details = "; ".join(str(error) for error in errors if str(error).strip())
+    if not details:
+        return message
+    has_own_message = any(key in body for key in ("error", "message", "detail"))
+    return f"{message}: {details}" if has_own_message else details
+
+
 def _decode_log_payload(payload: Any) -> str:
     """Return log text, decoding bytes and exact Python bytes-literal envelopes."""
     if isinstance(payload, str):
@@ -558,6 +577,7 @@ class GCOAWSClient:
                     error_msg = error_data["message"]
                 elif "detail" in error_data:
                     error_msg = error_data["detail"]
+                error_msg = _with_reported_errors(error_msg, error_data)
             except json.JSONDecodeError, KeyError:
                 error_msg = response.text or error_msg
             raise APIRequestError(response.status_code, str(error_msg))

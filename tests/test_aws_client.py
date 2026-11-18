@@ -3250,3 +3250,50 @@ class TestJobLogsContainerQuery:
 
         path = client.make_authenticated_request.call_args.kwargs["path"]
         assert path == "/api/v1/jobs/gco-jobs/train/logs?tail=20"
+
+
+class TestCallApiReportedErrors:
+    """``call_api`` keeps the ``errors`` list a failed submission route returns."""
+
+    @staticmethod
+    def _failing_client(status_code, body):
+        from cli.aws_client import GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config, patch("boto3.Session"):
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+            client = GCOAWSClient()
+        response = MagicMock(ok=False, status_code=status_code, reason="Bad Request")
+        response.json.return_value = body
+        client.make_authenticated_request = MagicMock(return_value=response)
+        return client
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            # templates run: no message of its own, the errors are the message
+            (
+                {"success": False, "errors": ["bad image", "bad namespace"]},
+                "bad image; bad namespace",
+            ),
+            # retry-shaped: the route's message, then its errors
+            (
+                {"success": False, "message": "Failed to create retry job", "errors": ["bad"]},
+                "Failed to create retry job: bad",
+            ),
+            ({"detail": "Template 't' not found"}, "Template 't' not found"),
+            ({"success": False, "errors": []}, "400 Bad Request"),
+            ({"success": False, "errors": ["", "  "]}, "400 Bad Request"),
+            ({"success": False, "errors": None}, "400 Bad Request"),
+            (["not", "an", "object"], "400 Bad Request"),
+        ],
+    )
+    def test_error_message(self, body, expected):
+        from cli.aws_client import APIRequestError
+
+        client = self._failing_client(400, body)
+
+        with pytest.raises(APIRequestError) as error:
+            client.call_api("POST", "/api/v1/jobs/from-template/t", region="us-east-1")
+
+        assert str(error.value) == f"API request failed: {expected}"
+        assert error.value.status_code == 400
