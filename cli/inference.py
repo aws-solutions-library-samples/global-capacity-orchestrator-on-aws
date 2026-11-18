@@ -1065,18 +1065,15 @@ class InferenceManager:
         # Region appeared earlier in cleanup history. This invalidates a prior
         # terminal removal acknowledgement before resources can be recreated.
         region_generations[region] = secrets.token_hex(32)
-        try:
-            result = store.update_target_regions(
-                endpoint_name,
-                regions,
-                cleanup_regions,
-                region_generations,
-                expected_lifecycle_id=lifecycle_id,
-                expected_updated_at=updated_at,
-            )
-        except Exception as e:
-            logger.error("Failed to add region: %s", e)
-            return None
+        # A failed write propagates: None means only that the endpoint was not found.
+        result = store.update_target_regions(
+            endpoint_name,
+            regions,
+            cleanup_regions,
+            region_generations,
+            expected_lifecycle_id=lifecycle_id,
+            expected_updated_at=updated_at,
+        )
         if result is None:
             self._raise_write_conflict(endpoint_name, "added to a Region")
         return result
@@ -1111,18 +1108,15 @@ class InferenceManager:
         # The cleanup pass must acknowledge this removal, not any earlier
         # remove/re-add cycle for the same Region.
         region_generations[region] = secrets.token_hex(32)
-        try:
-            result = store.update_target_regions(
-                endpoint_name,
-                regions,
-                cleanup_regions,
-                region_generations,
-                expected_lifecycle_id=lifecycle_id,
-                expected_updated_at=updated_at,
-            )
-        except Exception as e:
-            logger.error("Failed to remove region: %s", e)
-            return None
+        # A failed write propagates: None means only that the endpoint was not found.
+        result = store.update_target_regions(
+            endpoint_name,
+            regions,
+            cleanup_regions,
+            region_generations,
+            expected_lifecycle_id=lifecycle_id,
+            expected_updated_at=updated_at,
+        )
         if result is None:
             self._raise_write_conflict(endpoint_name, "removed from a Region")
         return result

@@ -11,6 +11,7 @@ during tests.
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -632,6 +633,43 @@ class TestInferenceAddRegion:
         assert result.exit_code == 1
         assert "Failed to add us-west-2 to endpoint 'ep': throttled" in result.output
 
+    def test_a_failed_write_reports_its_error_not_a_missing_endpoint(self, runner):
+        """Finding CC15: the manager turned a store failure into "not found"."""
+        store = _region_store(["us-east-1"])
+        result = self._invoke(
+            runner, _real_manager(store), _region_client("us-east-1", "us-west-2")
+        )
+        assert result.exit_code == 1
+        assert "Failed to add us-west-2 to endpoint 'ep': ProvisionedThroughputExceeded" in (
+            result.output
+        )
+        assert "not found" not in result.output
+
+
+def _region_store(target_regions: list[str]) -> MagicMock:
+    """A store holding endpoint ``ep`` whose Region write fails."""
+    store = MagicMock()
+    store.get_endpoint.return_value = {
+        "endpoint_name": "ep",
+        "desired_state": "running",
+        "lifecycle_id": "life-1",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "target_regions": list(target_regions),
+        "cleanup_regions": list(target_regions),
+    }
+    store.update_target_regions.side_effect = RuntimeError("ProvisionedThroughputExceeded")
+    return store
+
+
+def _real_manager(store: MagicMock) -> Any:
+    from cli.inference import InferenceManager
+
+    manager = InferenceManager.__new__(InferenceManager)
+    manager.config = MagicMock()
+    manager._aws_client = MagicMock()
+    manager._get_store = MagicMock(return_value=store)  # type: ignore[method-assign]
+    return manager
+
 
 class TestInferenceRemoveRegion:
     def _invoke(self, runner, mgr, client, *args, input=None):
@@ -740,6 +778,19 @@ class TestInferenceRemoveRegion:
         result = self._invoke(runner, mgr, client, *self._command("-y"))
         assert result.exit_code == 0, result.output
         assert "Could not list the deployed Regions (throttled)" in result.output
+
+    def test_a_failed_write_reports_its_error_not_a_missing_endpoint(self, runner):
+        """Finding CC15: the manager turned a store failure into "not found"."""
+        store = _region_store(["us-east-1", "us-west-2"])
+        result = self._invoke(
+            runner, _real_manager(store), _region_client("us-east-1"), *self._command("-y")
+        )
+        assert result.exit_code == 1
+        assert (
+            "Failed to remove us-west-2 from endpoint 'ep': ProvisionedThroughputExceeded"
+            in result.output
+        )
+        assert "not found" not in result.output
 
 
 # =============================================================================

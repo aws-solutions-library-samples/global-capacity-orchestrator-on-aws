@@ -1112,8 +1112,9 @@ class TestInferenceManagerRegions:
         mock_store.update_target_regions.side_effect = Exception("DDB error")
         manager._get_store.return_value = mock_store
 
-        result = manager.add_region("ep", "eu-west-1")
-        assert result is None
+        # The write's own error, never None ("not found").
+        with pytest.raises(Exception, match="DDB error"):
+            manager.add_region("ep", "eu-west-1")
 
     def test_remove_region_success(self, manager):
         mock_store = MagicMock()
@@ -1176,8 +1177,9 @@ class TestInferenceManagerRegions:
         mock_store.update_target_regions.side_effect = Exception("DDB error")
         manager._get_store.return_value = mock_store
 
-        result = manager.remove_region("ep", "us-east-1")
-        assert result is None
+        # The write's own error, never None ("not found").
+        with pytest.raises(Exception, match="DDB error"):
+            manager.remove_region("ep", "us-east-1")
 
 
 # =============================================================================
