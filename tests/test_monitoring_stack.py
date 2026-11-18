@@ -738,3 +738,83 @@ class TestMonitoringStackOptionalDataServices:
         # region refs present, synth raises).
         template = assertions.Template.from_stack(stack)
         template.resource_count_is("AWS::CloudWatch::Dashboard", 1)
+
+
+class TestDynamoDbMetricsCoverEveryOperation:
+    """DynamoDB publishes ThrottledRequests and SystemErrors per TableName and Operation.
+
+    A metric with the TableName dimension alone never has data, so the jobs
+    table alarms (and the dashboard lines) must sum over operations.
+    """
+
+    @pytest.fixture
+    def template(self):
+        from gco.stacks.monitoring_stack import GCOMonitoringStack
+
+        stack = GCOMonitoringStack(
+            cdk.App(),
+            "TestMonitoringDynamoDb",
+            config=MockConfigLoader(cost_monitoring_enabled=False),
+            global_stack=create_mock_global_stack(),
+            regional_stacks=[create_mock_regional_stack("us-east-1")],
+            api_gateway_stack=create_mock_api_gateway_stack(),
+            env=cdk.Environment(account="123456789012", region="us-east-2"),
+        )
+        return assertions.Template.from_stack(stack)
+
+    @pytest.mark.parametrize(
+        ("alarm_prefix", "metric_name"),
+        [
+            ("DynamoDBJobsThrottleAlarm", "ThrottledRequests"),
+            ("DynamoDBJobsErrorsAlarm", "SystemErrors"),
+        ],
+    )
+    def test_jobs_table_alarm_sums_every_operation(self, template, alarm_prefix, metric_name):
+        from gco.stacks.monitoring_stack import DYNAMODB_ALARM_OPERATIONS
+
+        (alarm,) = [
+            resource["Properties"]
+            for logical_id, resource in template.find_resources("AWS::CloudWatch::Alarm").items()
+            if logical_id.startswith(alarm_prefix)
+        ]
+        assert "MetricName" not in alarm and "Dimensions" not in alarm
+        queries = alarm["Metrics"]
+        (expression,) = [query for query in queries if "Expression" in query]
+        assert expression["Expression"] == "SUM(FILL(METRICS(), 0))"
+        assert expression["ReturnData"] is True
+        stats = [query["MetricStat"] for query in queries if "MetricStat" in query]
+        # An alarm's metric math may reference at most 10 metrics.
+        assert len(stats) == len(DYNAMODB_ALARM_OPERATIONS) <= 10
+        operations = []
+        for stat in stats:
+            metric = stat["Metric"]
+            assert metric["Namespace"] == "AWS/DynamoDB"
+            assert metric["MetricName"] == metric_name
+            assert stat["Stat"] == "Sum" and stat["Period"] == 300
+            dimensions = {d["Name"]: d["Value"] for d in metric["Dimensions"]}
+            assert set(dimensions) == {"TableName", "Operation"}
+            assert dimensions["TableName"] == "gco-test-jobs"
+            operations.append(dimensions["Operation"])
+        assert operations == list(DYNAMODB_ALARM_OPERATIONS)
+        assert {"GetItem", "PutItem", "UpdateItem", "DeleteItem", "Query", "Scan"} <= set(
+            operations
+        )
+
+    def test_dashboard_lines_search_every_operation(self, template):
+        import json
+
+        (dashboard,) = template.find_resources("AWS::CloudWatch::Dashboard").values()
+        body = json.dumps(dashboard["Properties"]["DashboardBody"])
+        for metric_name, tables in (
+            ("ThrottledRequests", ("gco-test-jobs", "gco-test-templates", "gco-test-webhooks")),
+            ("SystemErrors", ("gco-test-jobs", "gco-test-templates")),
+        ):
+            for table in tables:
+                expression = (
+                    "SUM(SEARCH('{AWS/DynamoDB,Operation,TableName} "
+                    f'MetricName=\\\\\\"{metric_name}\\\\\\" TableName=\\\\\\"{table}\\\\\\"\', '
+                    "'Sum', 300))"
+                )
+                assert expression in body, (metric_name, table)
+            # No line may ask for the metric by TableName alone.
+            assert f'\\"{metric_name}\\",\\"TableName\\"' not in body

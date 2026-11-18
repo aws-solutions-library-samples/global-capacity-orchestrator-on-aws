@@ -86,6 +86,72 @@ from gco.stacks.constants import (
 # <pyflowchart-code-diagram> END
 
 
+#: DynamoDB publishes ``ThrottledRequests`` and ``SystemErrors`` only per
+#: ``TableName`` *and* ``Operation``; a metric with ``TableName`` alone never
+#: has data. The alarms sum these operations (every operation GCO issues on the
+#: jobs table, plus the batch and transaction calls). An alarm's metric math
+#: may reference at most 10 metrics, which is exactly this list.
+DYNAMODB_ALARM_OPERATIONS: tuple[str, ...] = (
+    "GetItem",
+    "PutItem",
+    "UpdateItem",
+    "DeleteItem",
+    "Query",
+    "Scan",
+    "BatchGetItem",
+    "BatchWriteItem",
+    "TransactGetItems",
+    "TransactWriteItems",
+)
+
+
+def dynamodb_operations_sum(
+    metric_name: str, table_name: str, *, region: str, label: str
+) -> cloudwatch.MathExpression:
+    """Sum of a per-operation DynamoDB metric over ``DYNAMODB_ALARM_OPERATIONS``.
+
+    ``FILL(..., 0)`` gives every period a value even when no operation had a
+    datapoint, so the sum never depends on all ten series being present.
+    """
+    return cloudwatch.MathExpression(
+        expression="SUM(FILL(METRICS(), 0))",
+        using_metrics={
+            f"m{index}": cloudwatch.Metric(
+                namespace="AWS/DynamoDB",
+                metric_name=metric_name,
+                dimensions_map={"TableName": table_name, "Operation": operation},
+                statistic="Sum",
+                period=Duration.minutes(5),
+                region=region,
+            )
+            for index, operation in enumerate(DYNAMODB_ALARM_OPERATIONS)
+        },
+        label=label,
+        period=Duration.minutes(5),
+    )
+
+
+def dynamodb_search_sum(
+    metric_name: str, table_name: str, *, region: str, label: str, color: str
+) -> cloudwatch.MathExpression:
+    """Dashboard line: a per-operation DynamoDB metric summed over every operation.
+
+    ``SEARCH`` finds whichever operations have data, without the 10-metric
+    limit that alarm math has; alarms cannot use ``SEARCH``.
+    """
+    return cloudwatch.MathExpression(
+        expression=(
+            "SUM(SEARCH('{AWS/DynamoDB,Operation,TableName} "
+            f'MetricName="{metric_name}" TableName="{table_name}"\', \'Sum\', 300))'
+        ),
+        using_metrics={},
+        label=label,
+        color=color,
+        period=Duration.minutes(5),
+        search_region=region,
+    )
+
+
 if TYPE_CHECKING:
     from gco.stacks.api_gateway_global_stack import GCOApiGatewayGlobalStack
     from gco.stacks.global_stack import GCOGlobalStack
@@ -1258,40 +1324,23 @@ class GCOMonitoringStack(Stack):
         )
         widgets.append(latency_widget)
 
-        # Throttled requests
+        # Throttled requests and system errors. Both metrics exist only per
+        # TableName and Operation, so each line sums every operation.
         throttle_widget = cloudwatch.GraphWidget(
             title="DynamoDB - Throttled Requests",
             left=[
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="ThrottledRequests",
-                    dimensions_map={"TableName": jobs_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Jobs",
-                    color="#d62728",
+                dynamodb_search_sum(
+                    "ThrottledRequests",
+                    table,
                     region=global_region,
-                ),
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="ThrottledRequests",
-                    dimensions_map={"TableName": templates_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Templates",
-                    color="#ff7f0e",
-                    region=global_region,
-                ),
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="ThrottledRequests",
-                    dimensions_map={"TableName": webhooks_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Webhooks",
-                    color="#9467bd",
-                    region=global_region,
-                ),
+                    label=label,
+                    color=color,
+                )
+                for table, label, color in (
+                    (jobs_table, "Jobs", "#d62728"),
+                    (templates_table, "Templates", "#ff7f0e"),
+                    (webhooks_table, "Webhooks", "#9467bd"),
+                )
             ],
             width=12,
             height=6,
@@ -1299,30 +1348,20 @@ class GCOMonitoringStack(Stack):
         )
         widgets.append(throttle_widget)
 
-        # System errors
         errors_widget = cloudwatch.GraphWidget(
             title="DynamoDB - System Errors",
             left=[
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="SystemErrors",
-                    dimensions_map={"TableName": jobs_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Jobs",
-                    color="#d62728",
+                dynamodb_search_sum(
+                    "SystemErrors",
+                    table,
                     region=global_region,
-                ),
-                cloudwatch.Metric(
-                    namespace="AWS/DynamoDB",
-                    metric_name="SystemErrors",
-                    dimensions_map={"TableName": templates_table},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                    label="Templates",
-                    color="#ff7f0e",
-                    region=global_region,
-                ),
+                    label=label,
+                    color=color,
+                )
+                for table, label, color in (
+                    (jobs_table, "Jobs", "#d62728"),
+                    (templates_table, "Templates", "#ff7f0e"),
+                )
             ],
             width=12,
             height=6,
@@ -2400,13 +2439,11 @@ class GCOMonitoringStack(Stack):
             self,
             "DynamoDBJobsThrottleAlarm",
             alarm_description="DynamoDB jobs table is being throttled",
-            metric=cloudwatch.Metric(
-                namespace="AWS/DynamoDB",
-                metric_name="ThrottledRequests",
-                dimensions_map={"TableName": jobs_table},
-                statistic="Sum",
-                period=Duration.minutes(5),
+            metric=dynamodb_operations_sum(
+                "ThrottledRequests",
+                jobs_table,
                 region=global_region,
+                label="Jobs table throttled requests (all operations)",
             ),
             threshold=1,
             comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
@@ -2421,13 +2458,11 @@ class GCOMonitoringStack(Stack):
             self,
             "DynamoDBJobsErrorsAlarm",
             alarm_description="DynamoDB jobs table has system errors",
-            metric=cloudwatch.Metric(
-                namespace="AWS/DynamoDB",
-                metric_name="SystemErrors",
-                dimensions_map={"TableName": jobs_table},
-                statistic="Sum",
-                period=Duration.minutes(5),
+            metric=dynamodb_operations_sum(
+                "SystemErrors",
+                jobs_table,
                 region=global_region,
+                label="Jobs table system errors (all operations)",
             ),
             threshold=1,
             comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
