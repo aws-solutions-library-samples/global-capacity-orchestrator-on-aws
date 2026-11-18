@@ -80,6 +80,7 @@ from gco.inference_proxy_config import (
     INFERENCE_PROXY_TLS_CPU_REQUEST_MILLICORES_DEFAULT,
     INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION_DEFAULT,
 )
+from gco.k8s_quantity import memory_bytes
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.models import ClusterConfig, ResourceThresholds
 from gco.pcs_config import (
@@ -2005,22 +2006,24 @@ class ConfigLoader:
                 f"{type(obs_ctx['enabled']).__name__}: {obs_ctx['enabled']!r}"
             )
 
-        # Non-empty-string checks for the size / retention knobs.
-        string_fields = (
-            ("grafana", "persistence_size"),
-            ("prometheus", "persistence_size"),
-            ("prometheus", "retention"),
-            ("alertmanager", "persistence_size"),
-        )
-        for sub_block, field in string_fields:
+        # The volume sizes render verbatim into the charts' PVC requests, so
+        # each must be a positive Kubernetes quantity string ("10Gi"); a typo
+        # such as "10GB" or "10 Gi" used to fail the Helm install in every
+        # Region. The Prometheus retention is a duration string.
+        for sub_block in ("grafana", "prometheus", "alertmanager", "mlflow"):
             sub_ctx = obs_ctx.get(sub_block)
-            if not isinstance(sub_ctx, dict) or field not in sub_ctx:
-                continue
-            value = sub_ctx[field]
-            if not isinstance(value, str) or not value.strip():
+            if isinstance(sub_ctx, dict) and "persistence_size" in sub_ctx:
+                self._validate_volume_size(
+                    f"cluster_observability.{sub_block}.persistence_size",
+                    sub_ctx["persistence_size"],
+                )
+        prometheus_ctx = obs_ctx.get("prometheus")
+        if isinstance(prometheus_ctx, dict) and "retention" in prometheus_ctx:
+            retention = prometheus_ctx["retention"]
+            if not isinstance(retention, str) or not retention.strip():
                 raise ConfigValidationError(
-                    f"cluster_observability.{sub_block}.{field} must be a non-empty "
-                    f"string, got {value!r}"
+                    "cluster_observability.prometheus.retention must be a non-empty "
+                    f"string, got {retention!r}"
                 )
 
         # `grafana.admin_password_rotation_schedule`: the cron for the in-cluster
@@ -2046,15 +2049,6 @@ class ConfigLoader:
         )
         if "enabled" in mlflow_ctx:
             self._parse_mlflow_enabled(mlflow_ctx["enabled"])
-        if "persistence_size" in mlflow_ctx and (
-            not isinstance(mlflow_ctx["persistence_size"], str)
-            or not mlflow_ctx["persistence_size"].strip()
-        ):
-            raise ConfigValidationError(
-                "cluster_observability.mlflow.persistence_size must be a non-empty "
-                f"string, got {mlflow_ctx['persistence_size']!r}"
-            )
-
         # `alertmanager.enabled` must be a bool if the sub-block carries it.
         alertmanager_ctx = obs_ctx.get("alertmanager")
         if (
@@ -2067,6 +2061,20 @@ class ConfigLoader:
                 f"{type(alertmanager_ctx['enabled']).__name__}: "
                 f"{alertmanager_ctx['enabled']!r}"
             )
+
+    @staticmethod
+    def _validate_volume_size(path: str, value: object) -> None:
+        """A PVC size must be a positive Kubernetes quantity string such as ``"10Gi"``."""
+        try:
+            if not isinstance(value, str):
+                raise ValueError("it is not a string")
+            if memory_bytes(value) <= 0:
+                raise ValueError("it is not positive")
+        except ValueError as exc:
+            raise ConfigValidationError(
+                f"{path} must be a positive Kubernetes quantity string such as '10Gi', "
+                f"got {value!r} ({exc})"
+            ) from exc
 
     def _validate_cost_monitoring_config(self) -> None:
         """Validate the optional ``cost_monitoring`` block in cdk.json.

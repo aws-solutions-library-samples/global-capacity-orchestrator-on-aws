@@ -160,8 +160,30 @@ def test_non_bool_enabled_is_rejected() -> None:
 
 
 def test_non_string_persistence_size_is_rejected() -> None:
-    with pytest.raises(ConfigValidationError, match="persistence_size must be a non-empty string"):
+    with pytest.raises(
+        ConfigValidationError, match="persistence_size must be a positive Kubernetes quantity"
+    ):
         _loader({"prometheus": {"persistence_size": 50}})
+
+
+@pytest.mark.parametrize("sub_block", ["grafana", "prometheus", "alertmanager", "mlflow"])
+@pytest.mark.parametrize("size", ["10GB", "10 Gi", "-1Gi", "0", "", "lots"])
+def test_volume_sizes_must_be_positive_quantities(sub_block: str, size: str) -> None:
+    """The sizes render into PVC requests; a typo used to fail the Helm install."""
+    with pytest.raises(
+        ConfigValidationError,
+        match=re.escape(
+            f"cluster_observability.{sub_block}.persistence_size must be a positive Kubernetes "
+            "quantity string"
+        ),
+    ):
+        _loader({sub_block: {"persistence_size": size}})
+
+
+@pytest.mark.parametrize("size", ["10Gi", "500Mi", "1Ti", "20G"])
+def test_volume_sizes_in_any_kubernetes_unit_are_accepted(size: str) -> None:
+    cfg = _loader({"prometheus": {"persistence_size": size}}).get_cluster_observability_config()
+    assert cfg["prometheus"]["persistence_size"] == size
 
 
 def test_empty_retention_is_rejected() -> None:
@@ -211,11 +233,12 @@ def test_non_string_rotation_schedule_is_rejected() -> None:
         ),
         (
             {"persistence_size": 10},
-            "cluster_observability.mlflow.persistence_size must be a non-empty string, got 10",
+            "cluster_observability.mlflow.persistence_size must be a positive Kubernetes "
+            "quantity string such as '10Gi', got 10 (it is not a string)",
         ),
         (
             {"persistence_size": " "},
-            "cluster_observability.mlflow.persistence_size must be a non-empty string",
+            "cluster_observability.mlflow.persistence_size must be a positive Kubernetes",
         ),
     ],
 )
