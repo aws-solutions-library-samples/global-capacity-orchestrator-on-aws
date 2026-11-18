@@ -37,6 +37,41 @@ def test_mount_metrics_exposes_prometheus_endpoint() -> None:
     assert 'method="GET"' in body
 
 
+def test_an_unhandled_route_exception_is_recorded_as_a_500() -> None:
+    """The app's exception handler answers 500; the request still counts."""
+    from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse
+    from fastapi.testclient import TestClient
+    from prometheus_client import REGISTRY
+
+    from gco.services.service_metrics import mount_metrics
+
+    app = FastAPI()
+
+    @app.get("/boom")
+    async def boom() -> dict:
+        raise RuntimeError("unexpected")
+
+    @app.exception_handler(Exception)
+    async def handler(request: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=500, content={"error": "Internal server error"})
+
+    mount_metrics(app, "unhandled-probe-svc")
+
+    def sample(name: str, labels: dict[str, str]) -> float:
+        return REGISTRY.get_sample_value(name, labels) or 0.0
+
+    labels = {"service": "unhandled-probe-svc", "method": "GET"}
+    before_500 = sample("gco_http_requests_total", {**labels, "status": "500"})
+    before_count = sample("gco_http_request_duration_seconds_count", labels)
+
+    response = TestClient(app, raise_server_exceptions=False).get("/boom")
+
+    assert response.status_code == 500
+    assert sample("gco_http_requests_total", {**labels, "status": "500"}) == before_500 + 1
+    assert sample("gco_http_request_duration_seconds_count", labels) == before_count + 1
+
+
 def test_callable_collector_exports_numeric_and_bool_metrics() -> None:
     def fake_metrics() -> dict[str, object]:
         return {

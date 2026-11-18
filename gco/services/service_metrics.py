@@ -65,8 +65,9 @@ def _render_latest() -> tuple[bytes, str]:
 def mount_metrics(app: FastAPI, service_name: str) -> None:
     """Add a ``/metrics`` endpoint and request instrumentation to a FastAPI app.
 
-    Records request count and latency for every non-``/metrics`` request and
-    exposes the default Prometheus registry at ``/metrics``. Cardinality is kept
+    Records request count and latency for every non-``/metrics`` request
+    (an unhandled exception counts as status 500) and exposes the default
+    Prometheus registry at ``/metrics``. Cardinality is kept
     low: series are labelled by service, HTTP method, and status code only, not
     by raw request path.
     """
@@ -81,12 +82,21 @@ def mount_metrics(app: FastAPI, service_name: str) -> None:
         if request.url.path == _METRICS_PATH:
             return await call_next(request)
         start = time.perf_counter()
-        response = await call_next(request)
-        elapsed = time.perf_counter() - start
-        _LATENCY.labels(service=service_name, method=request.method).observe(elapsed)
-        _REQUESTS.labels(
-            service=service_name, method=request.method, status=str(response.status_code)
-        ).inc()
+
+        def record(status: str) -> None:
+            elapsed = time.perf_counter() - start
+            _LATENCY.labels(service=service_name, method=request.method).observe(elapsed)
+            _REQUESTS.labels(service=service_name, method=request.method, status=status).inc()
+
+        try:
+            response = await call_next(request)
+        except Exception:
+            # An unhandled route error leaves call_next as an exception; the
+            # app's error handler, outside this middleware, answers it with a
+            # 500. Count it as one before passing it on.
+            record("500")
+            raise
+        record(str(response.status_code))
         return response
 
     async def _metrics_endpoint(_request: Request) -> Response:
