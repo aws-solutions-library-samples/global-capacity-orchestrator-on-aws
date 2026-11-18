@@ -2544,7 +2544,9 @@ instead of failing halfway through a deploy.
   warning, because it is most likely a misspelt block. Keys of the CDK itself
   (`@aws-cdk/...`, `aws:cdk:...`) are not checked.
 - Numbers must be numbers: `true` is not accepted where an integer belongs.
-  `tags` values must be strings.
+  `tags` values must be strings, and `kubernetes_version` is a quoted
+  `"<major>.<minor>"` string such as `"1.37"` (a JSON number `1.30` would read
+  as `1.3`).
 
 ### Boolean flags
 

@@ -882,6 +882,18 @@ class ConfigLoader:
         # Validate project_name format before anything consumes it (#139).
         self._validate_project_name()
 
+        # kubernetes_version is a "<major>.<minor>" string: a JSON number
+        # such as 1.30 used to reach EKS as "1.3".
+        kubernetes_version = self.app.node.try_get_context("kubernetes_version")
+        if not isinstance(kubernetes_version, str) or not re.fullmatch(
+            r"[1-9][0-9]*\.(?:0|[1-9][0-9]*)", kubernetes_version
+        ):
+            raise ConfigValidationError(
+                'kubernetes_version must be a "<major>.<minor>" string such as "1.37", got '
+                f"{kubernetes_version!r}; write it in quotes, because a JSON number such as "
+                "1.30 is read as 1.3"
+            )
+
         # Check for deployment_regions
         deployment_regions = self.app.node.try_get_context("deployment_regions")
         if not isinstance(deployment_regions, dict) or not deployment_regions:

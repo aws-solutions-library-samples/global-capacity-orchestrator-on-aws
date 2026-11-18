@@ -396,6 +396,24 @@ class TestGlobalAcceleratorValidation:
             ConfigLoader(app)
 
 
+class TestKubernetesVersion:
+    """kubernetes_version is a quoted "<major>.<minor>" string."""
+
+    @pytest.mark.parametrize("version", ["1.37", "1.30", "1.0", "2.10"])
+    def test_minor_version_strings_are_accepted(self, valid_context, version):
+        valid_context["kubernetes_version"] = version
+        assert ConfigLoader(MockApp(valid_context)).get_kubernetes_version() == version
+
+    @pytest.mark.parametrize("version", [1.30, 1.37, 2, "1.30.1", "v1.30", "1.030", " 1.30", True])
+    def test_anything_else_fails_at_synth(self, valid_context, version):
+        """A JSON number 1.30 used to become the version "1.3"."""
+        valid_context["kubernetes_version"] = version
+        with pytest.raises(
+            ConfigValidationError, match=r'kubernetes_version must be a "<major>\.<minor>" string'
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+
 class TestPublicAccessCidrs:
     """eks_cluster.public_access_cidrs is a list of IPv4 CIDRs."""
 
