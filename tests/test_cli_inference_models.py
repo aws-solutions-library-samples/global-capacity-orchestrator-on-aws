@@ -800,6 +800,67 @@ class TestInferenceUpdateImage:
         assert result.exit_code != 0
 
 
+class TestSpecChangeOnStoppedEndpoint:
+    """Finding I13: a stopped endpoint keeps a spec change until it is started."""
+
+    NOTE = "Endpoint 'ep' is stopped; the change takes effect when it starts"
+    CASES = [
+        (["update-image", "ep", "-i", "new:v2"], "update_image", "Rolling update will be applied"),
+        (
+            ["set-topology", "ep", "--prefill", "2", "--decode", "2"],
+            "set_topology",
+            "adjust prefill",
+        ),
+        (
+            ["configure-store", "ep", "--offload", "cpu"],
+            "configure_store",
+            "re-render the KV-cache",
+        ),
+        (["canary", "ep", "-i", "new:v2"], "canary_deploy", None),
+        (["promote", "ep", "-y"], "promote_canary", None),
+        (["rollback", "ep", "-y"], "rollback_canary", None),
+    ]
+
+    @staticmethod
+    def _manager(method: str, desired_state: str) -> MagicMock:
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = {
+            "endpoint_name": "ep",
+            "spec": {"image": "img:v1", "canary": {"image": "new:v2", "weight": 10}},
+        }
+        getattr(mock_mgr, method).return_value = {
+            "endpoint_name": "ep",
+            "desired_state": desired_state,
+            "spec": {"image": "new:v2"},
+        }
+        return mock_mgr
+
+    @pytest.mark.parametrize(("args", "method", "rollout_message"), CASES)
+    def test_a_stopped_endpoint_is_told_the_change_waits_for_start(
+        self, runner, args, method, rollout_message
+    ):
+        with patch(
+            "cli.inference.get_inference_manager", return_value=self._manager(method, "stopped")
+        ):
+            result = runner.invoke(cli, ["inference", *args])
+        assert result.exit_code == 0, result.output
+        assert self.NOTE in result.output
+        assert "gco inference start ep" in result.output
+        if rollout_message is not None:
+            assert rollout_message not in result.output
+
+    @pytest.mark.parametrize(("args", "method", "rollout_message"), CASES)
+    def test_a_live_endpoint_gets_no_stopped_note(self, runner, args, method, rollout_message):
+        with patch(
+            "cli.inference.get_inference_manager", return_value=self._manager(method, "deploying")
+        ):
+            result = runner.invoke(cli, ["inference", *args])
+        assert result.exit_code == 0, result.output
+        assert self.NOTE not in result.output
+        if rollout_message is not None:
+            assert rollout_message in result.output
+
+
 # =============================================================================
 # models upload
 # =============================================================================

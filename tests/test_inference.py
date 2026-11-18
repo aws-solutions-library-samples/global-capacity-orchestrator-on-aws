@@ -524,6 +524,44 @@ class TestInferenceEndpointStore:
         assert result is not None
         assert result["desired_state"] == "deploying"  # reset on spec change
 
+    def test_update_spec_leaves_a_stopped_endpoint_stopped(self, store):
+        """Finding I13: a spec change is applied on the next start, not by restarting."""
+        created = store.create_endpoint("stopped-ep", {"image": "img:v1"}, ["us-east-1"])
+        stopped = store.update_desired_state(
+            "stopped-ep", "stopped", expected_lifecycle_id=created["lifecycle_id"]
+        )
+
+        result = store.update_spec(
+            "stopped-ep",
+            {"image": "img:v2"},
+            expected_lifecycle_id=created["lifecycle_id"],
+            expected_updated_at=stopped["updated_at"],
+        )
+
+        assert (result["desired_state"], result["spec"]) == ("stopped", {"image": "img:v2"})
+        latest = store.get_endpoint("stopped-ep", consistent_read=True)
+        assert (latest["desired_state"], latest["spec"]["image"]) == ("stopped", "img:v2")
+        started = store.start_endpoint("stopped-ep")
+        assert (started["desired_state"], started["spec"]["image"]) == ("running", "img:v2")
+
+    def test_update_spec_of_a_stopped_endpoint_still_needs_a_fresh_snapshot(self, store):
+        created = store.create_endpoint("stale-ep", {"image": "img:v1"}, ["us-east-1"])
+        store.update_desired_state(
+            "stale-ep", "stopped", expected_lifecycle_id=created["lifecycle_id"]
+        )
+
+        assert (
+            store.update_spec(
+                "stale-ep",
+                {"image": "img:v2"},
+                expected_lifecycle_id=created["lifecycle_id"],
+                expected_updated_at=created["updated_at"],
+            )
+            is None
+        )
+        latest = store.get_endpoint("stale-ep", consistent_read=True)
+        assert (latest["desired_state"], latest["spec"]["image"]) == ("stopped", "img:v1")
+
     def test_deleted_lifecycle_rejects_ordinary_store_mutations(self, store):
         created = store.create_endpoint(
             "terminal-ep", {"image": "old", "replicas": 1}, ["us-east-1"]
@@ -807,11 +845,13 @@ class TestInferenceMonitor:
         monitor.core_v1.delete_namespaced_service.assert_any_call(
             "ep", "ns", body=ANY, _request_timeout=30
         )
-        # Legacy per-endpoint routing objects are removed during terminal proof;
-        # the shared platform route has a different fixed name and is untouched.
-        monitor.networking_v1.delete_namespaced_ingress.assert_any_call(
-            "ep", "ns", body=ANY, _request_timeout=30
-        )
+        # The Ingresses releases up to v4.1.0 created are removed during terminal
+        # proof; the shared platform route has a different fixed name and is untouched.
+        for ingress_name in ("inference-ep", "inference-ep-proxy"):
+            monitor.networking_v1.delete_namespaced_ingress.assert_any_call(
+                ingress_name, "ns", body=ANY, _request_timeout=30
+            )
+        assert observed_ingresses == {"inference-ep", "inference-ep-proxy"}
         monitor.networking_v1.create_namespaced_ingress.assert_not_called()
 
     def test_delete_resources_tears_down_mooncake_topology(self, monitor):

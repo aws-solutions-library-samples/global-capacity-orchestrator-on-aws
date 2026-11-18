@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -421,6 +422,7 @@ def test_report_role_status_uses_split_role_readiness(
         f"chat-{role}": _deployment_with_ready_replicas(ready)
         for role, ready in ready_by_role.items()
     }
+    deployments["chat-proxy"] = _deployment_with_ready_replicas(1)
     monitor._get_deployment = MagicMock(  # type: ignore[method-assign]
         side_effect=lambda name, _namespace: deployments[name]
     )
@@ -442,9 +444,84 @@ def test_report_role_status_uses_split_role_readiness(
             "roles": {
                 "prefill": {"ready": ready_by_role["prefill"], "desired": 2},
                 "decode": {"ready": ready_by_role["decode"], "desired": 1},
-            }
+            },
+            "proxy": {"ready": 1, "desired": 1},
         },
     )
+
+
+@pytest.mark.parametrize(
+    ("mode", "proxy_block", "proxy", "expected_state", "expected_proxy"),
+    [
+        ("disaggregated", None, None, "creating", {"ready": 0, "desired": 1}),
+        (
+            "disaggregated",
+            {},
+            _deployment_with_ready_replicas(0),
+            "creating",
+            {"ready": 0, "desired": 1},
+        ),
+        (
+            "disaggregated",
+            {},
+            _deployment_with_ready_replicas(1),
+            "running",
+            {"ready": 1, "desired": 1},
+        ),
+        (
+            "disaggregated",
+            {"replicas": 2},
+            SimpleNamespace(
+                spec=SimpleNamespace(replicas=2), status=SimpleNamespace(ready_replicas=1)
+            ),
+            "creating",
+            {"ready": 1, "desired": 2},
+        ),
+        (
+            "both",
+            {"replicas": True},
+            _deployment_with_ready_replicas(0),
+            "creating",
+            {"ready": 0, "desired": 1},
+        ),
+        ("both", {}, _deployment_with_ready_replicas(1), "running", {"ready": 1, "desired": 1}),
+    ],
+    ids=["missing", "unready", "ready", "short-of-configured", "both-unready", "both-ready"],
+)
+def test_split_role_status_waits_for_the_pd_proxy(
+    mode: str,
+    proxy_block: dict[str, Any] | None,
+    proxy: Any,
+    expected_state: str,
+    expected_proxy: dict[str, int],
+) -> None:
+    """Requests reach a split endpoint only through ``<name>-proxy`` (finding I11)."""
+    store = MagicMock()
+    monitor = _make_monitor(store)
+    monitor._mooncake_master_ready_replicas = MagicMock(  # type: ignore[method-assign]
+        return_value=1
+    )
+    deployments = {
+        "chat-prefill": _deployment_with_ready_replicas(1),
+        "chat-decode": _deployment_with_ready_replicas(1),
+        "chat-proxy": proxy,
+    }
+    monitor._get_deployment = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda name, _namespace: deployments[name]
+    )
+    mooncake: dict[str, Any] = {"mode": mode, "topology": {"prefill": 1, "decode": 1}}
+    if proxy_block is not None:
+        mooncake["proxy"] = proxy_block
+    if mode == "both":
+        mooncake["store"] = {"enabled": True}
+
+    state = monitor._report_role_status("chat", NAMESPACE, mooncake, REGION_SERVICES)
+
+    assert state == expected_state
+    kwargs = store.update_region_status.call_args.kwargs
+    assert kwargs["extra"]["proxy"] == expected_proxy
+    # The flat totals stay the model-serving replicas.
+    assert (kwargs["replicas_ready"], kwargs["replicas_desired"]) == (2, 2)
 
 
 @pytest.mark.parametrize(("master_ready", "expected_state"), [(1, "running"), (0, "creating")])
@@ -1528,12 +1605,12 @@ def test_active_cleanup_request_budget_is_explicit_and_bounded() -> None:
             custom,
         )
     )
-    # Read-before-delete avoids 28 unnecessary delete calls on an already
-    # absent pass. The fixed 33 requests still cover every parent (including
+    # Read-before-delete avoids 27 unnecessary delete calls on an already
+    # absent pass. The fixed 32 requests still cover every parent (including
     # the TLS sidecar program ConfigMap), generated child, and legacy route
     # exactly once; future expansion must update this reviewed bound rather
     # than introducing an unbounded hot loop.
-    assert request_count == 33
+    assert request_count == 32
 
 
 class TestKubernetesLifecycleFencing:

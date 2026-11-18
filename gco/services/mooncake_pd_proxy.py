@@ -35,8 +35,11 @@ with a client error before either backend is called.
 
 Prefill and decode are addressed through their in-cluster Services, so kube-proxy
 load-balances across only the Ready role pods. When the decode Service has no
-Ready endpoints the proxy rejects the request with a stable 503 rather than
-emitting partial output. The privileged ``/instances/add`` admin path requires
+Ready endpoints (the connection is refused, or not accepted within the connect
+timeout) the proxy rejects the request with a stable 503 rather than emitting
+partial output; a decode call that times out otherwise answers 504, and any
+other transport failure 502, as the authenticated inference proxy maps them.
+The privileged ``/instances/add`` admin path requires
 the ``ADMIN_API_KEY`` header and is never published on the public Ingress.
 
 The ``kv_transfer_params`` handshake is best-effort and pass-through: the proxy
@@ -237,9 +240,16 @@ def _is_serving_path(path: str) -> bool:
     return path.endswith(("/completions", "/chat/completions", "/embeddings"))
 
 
+#: Fields a one-token, non-streamed priming call must not carry: vLLM refuses
+#: ``stream_options`` without ``stream`` and a minimum above ``max_tokens``.
+#: vLLM's own disaggregation proxies drop them for prefill the same way; decode
+#: still receives the caller's request with them.
+_PREFILL_DROPPED_FIELDS = ("stream_options", "min_tokens", "min_completion_tokens")
+
+
 def _prefill_body(body: dict[str, Any]) -> dict[str, Any]:
     """Body for priming prefill: one token, no stream, request remote decode."""
-    pf = dict(body)
+    pf = {key: value for key, value in body.items() if key not in _PREFILL_DROPPED_FIELDS}
     pf["stream"] = False
     pf["max_tokens"] = 1
     if "max_completion_tokens" in pf:
@@ -317,12 +327,16 @@ def _response_headers(response: httpx.Response) -> list[tuple[bytes, bytes]]:
     return relayed
 
 
+def _decode_failure(status_code: int, message: str, error_type: str) -> JSONResponse:
+    """An error answer for a decode call that did not produce a response."""
+    return JSONResponse(
+        {"error": {"message": message, "type": error_type}}, status_code=status_code
+    )
+
+
 def _no_decode_backend() -> JSONResponse:
     """The stable answer for a decode backend the proxy cannot reach."""
-    return JSONResponse(
-        {"error": {"message": NO_DECODE_MESSAGE, "type": "no_decode_backend"}},
-        status_code=NO_DECODE_STATUS,
-    )
+    return _decode_failure(NO_DECODE_STATUS, NO_DECODE_MESSAGE, "no_decode_backend")
 
 
 async def _relay_decode(
@@ -399,13 +413,22 @@ async def _stream_decode(
         upstream_request = client.build_request(method, url, **request_kwargs)
         resp = await client.send(upstream_request, stream=True)
         return _DecodeStreamingResponse(resp, client, want_stream=want_stream)
-    except httpx.ConnectError as exc:
-        # No Ready decode endpoint behind the Service (or a TLS handshake the
-        # decode sidecar failed): reject with a stable status instead of
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        # No Ready decode endpoint behind the Service (the connection is
+        # refused, or dropped until the connect timeout) or a TLS handshake the
+        # decode sidecar failed: reject with a stable status instead of
         # emitting any partial output, and log why for the operator.
         await _release_upstream(resp, client)
-        logger.warning("decode backend unreachable: %s", exc)
+        logger.warning("decode backend unreachable: %s [%s]", exc, type(exc).__name__)
         return _no_decode_backend()
+    except httpx.TimeoutException as exc:
+        await _release_upstream(resp, client)
+        logger.warning("decode backend timed out: %s [%s]", exc, type(exc).__name__)
+        return _decode_failure(504, "decode backend timed out", "decode_timeout")
+    except httpx.TransportError as exc:
+        await _release_upstream(resp, client)
+        logger.warning("decode backend failed: %s [%s]", exc, type(exc).__name__)
+        return _decode_failure(502, "decode backend failed", "decode_unavailable")
     except BaseException:
         # Anything else, a cancelled request included, releases it too.
         await _release_upstream(resp, client)

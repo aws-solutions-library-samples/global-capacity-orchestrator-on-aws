@@ -2475,7 +2475,7 @@ decode Services over HTTPS on 8443, trusting only the internal CA:
 |----------|-------------|
 | `GET /health`, `GET /healthz` | Liveness for the proxy pod |
 | `POST /instances/add` | Register a prefill or decode instance. Requires the `ADMIN_API_KEY` shared secret via `x-admin-api-key` or `Authorization: Bearer`; `403` otherwise. Never exposed through an Ingress |
-| `POST /{path}` | Disaggregation dispatch for serving paths; non-serving POSTs pass through to decode. Bodies must be JSON objects (`400` otherwise). `503` when no decode backend is Ready |
+| `POST /{path}` | Disaggregation dispatch for serving paths; non-serving POSTs pass through to decode. Bodies must be JSON objects (`400` otherwise). Prefill is primed with a one-token, non-streamed copy of the request without `stream_options`, `min_tokens` or `min_completion_tokens`; decode receives the request as sent. `503` (`no_decode_backend`) when no decode backend is Ready (connection refused or not accepted within 5 s), `504` (`decode_timeout`) when the decode call times out otherwise, `502` (`decode_unavailable`) for any other transport failure |
 | `GET /{path}` | Pass through to decode, including OpenAI-compatible model discovery such as `GET /v1/models`; path and query are preserved |
 
 The Mooncake hop forwards the inference proxy's approved end-to-end request

@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubernetes.client.rest import ApiException
 
 # =============================================================================
 # Helper to build a monitor fixture with all K8s clients mocked
@@ -212,6 +213,10 @@ class TestHPACreation:
     def test_hpa_create_cpu_metric(self):
         monitor = _make_monitor()
         mock_hpa_api = MagicMock()
+        # No HPA exists yet: the monitor reads before it creates.
+        mock_hpa_api.read_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(
+            status=404
+        )
         spec = {
             "autoscaling": {
                 "enabled": True,
@@ -232,6 +237,10 @@ class TestHPACreation:
     def test_hpa_create_memory_metric(self):
         monitor = _make_monitor()
         mock_hpa_api = MagicMock()
+        # No HPA exists yet: the monitor reads before it creates.
+        mock_hpa_api.read_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(
+            status=404
+        )
         spec = {
             "autoscaling": {
                 "enabled": True,
@@ -250,6 +259,10 @@ class TestHPACreation:
     def test_hpa_create_unknown_metric_defaults_to_cpu(self):
         monitor = _make_monitor()
         mock_hpa_api = MagicMock()
+        # No HPA exists yet: the monitor reads before it creates.
+        mock_hpa_api.read_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(
+            status=404
+        )
         spec = {
             "autoscaling": {
                 "enabled": True,
@@ -309,6 +322,10 @@ class TestHPACreation:
     def test_hpa_multiple_metrics(self):
         monitor = _make_monitor()
         mock_hpa_api = MagicMock()
+        # No HPA exists yet: the monitor reads before it creates.
+        mock_hpa_api.read_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(
+            status=404
+        )
         spec = {
             "autoscaling": {
                 "enabled": True,

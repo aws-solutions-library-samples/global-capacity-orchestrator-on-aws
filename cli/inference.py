@@ -814,7 +814,8 @@ class InferenceManager:
 
         Updates ``spec.mooncake.topology`` to the new XpYd counts and
         re-triggers reconciliation (via :meth:`InferenceEndpointStore.update_spec`,
-        which flips ``desired_state`` to ``deploying``) so the per-region
+        which moves a live endpoint to ``deploying``; a stopped one stays
+        stopped until started) so the per-region
         monitor adjusts the prefill and decode role replica counts.
 
         Both counts must be integers in the inclusive range
@@ -886,7 +887,8 @@ class InferenceManager:
 
         Merges ``store_config`` into ``spec.mooncake.store`` and re-triggers
         reconciliation (via :meth:`InferenceEndpointStore.update_spec`, which
-        flips ``desired_state`` to ``deploying``) so the per-region monitor
+        moves a live endpoint to ``deploying``; a stopped one stays stopped
+        until started) so the per-region monitor
         picks up the new store settings.
 
         Store byte-size fields are authored as base-10 integer decimal strings

@@ -179,6 +179,63 @@ def test_stream_decode_rejects_when_no_decode_backend(monkeypatch, caplog) -> No
     client.aclose.assert_awaited_once_with()
 
 
+@pytest.mark.parametrize(
+    ("error", "status", "error_type", "logged"),
+    [
+        # An empty Service can drop the SYN instead of refusing it, so no
+        # Ready decode pod also shows up as a connect timeout (finding I14).
+        (proxy.httpx.ConnectTimeout("timed out"), 503, "no_decode_backend", "unreachable"),
+        (proxy.httpx.ReadTimeout("slow"), 504, "decode_timeout", "timed out"),
+        (proxy.httpx.PoolTimeout("busy"), 504, "decode_timeout", "timed out"),
+        (proxy.httpx.RemoteProtocolError("closed"), 502, "decode_unavailable", "failed"),
+        (proxy.httpx.ReadError("reset"), 502, "decode_unavailable", "failed"),
+    ],
+    ids=["connect-timeout", "read-timeout", "pool-timeout", "protocol-error", "read-error"],
+)
+def test_stream_decode_maps_transport_failures_like_the_inference_proxy(
+    monkeypatch, caplog, error, status, error_type, logged
+) -> None:
+    """Connection failures answer 503, timeouts 504, other transport errors 502."""
+    client = MagicMock()
+    client.build_request = MagicMock(return_value="REQ")
+    client.send = AsyncMock(side_effect=error)
+    monkeypatch.setattr(proxy, "DECODE_URL", "http://ep-decode:8000")
+    _install_client(monkeypatch, client)
+
+    with caplog.at_level(logging.WARNING, logger="mooncake-pd-proxy"):
+        response = asyncio.run(proxy._stream_decode("POST", "/v1/completions", {"stream": True}))
+
+    assert isinstance(response, proxy.JSONResponse)
+    assert response.status_code == status
+    assert json.loads(response.body)["error"]["type"] == error_type
+    assert f"decode backend {logged}" in caplog.text
+    assert type(error).__name__ in caplog.text
+    client.aclose.assert_awaited_once_with()
+
+
+def test_a_connect_timeout_reaches_the_client_as_503_not_500(monkeypatch) -> None:
+    """End to end through the app, as the audit reproduced it."""
+
+    class _TimingOutClient:
+        def build_request(self, *_args: object, **_kwargs: object) -> object:
+            return object()
+
+        async def send(self, *_args: object, **_kwargs: object) -> None:
+            raise proxy.httpx.ConnectTimeout("timed out")
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        proxy, "DECODE_URL", "https://ep-decode.gco-inference.svc.cluster.local:8443"
+    )
+    monkeypatch.setattr(proxy, "_new_client", _TimingOutClient)
+    with TestClient(proxy.app, raise_server_exceptions=False) as test_client:
+        response = test_client.post("/v1/models/x", json={"a": 1})
+    assert response.status_code == 503
+    assert response.json()["error"]["type"] == "no_decode_backend"
+
+
 def test_stream_decode_streams_decode_response(monkeypatch) -> None:
     """The decode body is relayed chunk-for-chunk and the upstream is closed."""
     upstream = _FakeStreamResponse(

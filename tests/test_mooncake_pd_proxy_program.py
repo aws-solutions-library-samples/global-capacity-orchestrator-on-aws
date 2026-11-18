@@ -31,6 +31,36 @@ def test_prefill_priming_caps_chat_completion_tokens() -> None:
     assert pf["max_completion_tokens"] == 1
 
 
+def test_prefill_priming_drops_fields_a_one_token_request_cannot_carry() -> None:
+    """vLLM refuses stream_options without stream, and min_tokens above max_tokens.
+
+    vLLM's own disaggregation proxies (the Mooncake connector example and the
+    NIXL toy proxy) drop ``stream_options`` and keep ``min_tokens`` /
+    ``min_completion_tokens`` for decode only. Kept on the priming call, either
+    one made prefill answer 400, so decode recomputed the prompt (finding I15).
+    """
+    body = {
+        "model": "m",
+        "messages": [],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "min_tokens": 16,
+        "min_completion_tokens": 16,
+        "max_completion_tokens": 64,
+    }
+
+    pf = proxy._prefill_body(body)
+    dc = proxy._decode_body(body, {"remote_engine_id": "e"})
+
+    assert not {"stream_options", "min_tokens", "min_completion_tokens"} & set(pf)
+    assert (pf["stream"], pf["max_tokens"], pf["max_completion_tokens"]) == (False, 1, 1)
+    # Decode serves the caller's request as sent.
+    assert dc["stream_options"] == {"include_usage": True}
+    assert (dc["min_tokens"], dc["min_completion_tokens"]) == (16, 16)
+    assert body["stream_options"] == {"include_usage": True}
+    assert body["min_tokens"] == 16
+
+
 def test_decode_relays_prefill_transfer_params() -> None:
     body = {"model": "m", "prompt": "hi", "max_tokens": 128}
     dc = proxy._decode_body(body, {"remote_block_ids": [1, 2], "remote_engine_id": "e"})

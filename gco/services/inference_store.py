@@ -200,9 +200,18 @@ class InferenceEndpointStore:
         desired_state: str | None = None,
         target_region: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List all endpoints, optionally filtered."""
+        """List all endpoints, optionally filtered.
+
+        A scan returns at most 1 MB of items per call, so this follows
+        ``LastEvaluatedKey`` until the table is exhausted: the reconcile loop
+        and the deploy-time name-collision check both need every record.
+        """
         response = self._table.scan()
-        items = [_deserialize_from_dynamo(i) for i in response.get("Items", [])]
+        raw_items = list(response.get("Items", []))
+        while "LastEvaluatedKey" in response:
+            response = self._table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+            raw_items.extend(response.get("Items", []))
+        items = [_deserialize_from_dynamo(i) for i in raw_items]
         if desired_state:
             items = [i for i in items if i.get("desired_state") == desired_state]
         if target_region:
@@ -411,37 +420,54 @@ class InferenceEndpointStore:
         expected_lifecycle_id: str,
         expected_updated_at: str | None = None,
     ) -> dict[str, Any] | None:
-        """Conditionally update a live lifecycle's spec and trigger reconciliation."""
+        """Conditionally update a live lifecycle's spec and trigger reconciliation.
+
+        A running or deploying endpoint re-enters ``deploying``, so the
+        monitors roll the change out and promote the endpoint again. A stopped
+        endpoint stays stopped and runs the new spec once it is started. Each
+        case is one conditional write; the second runs only when the first
+        found the endpoint stopped (or found no endpoint to update).
+
+        Returns:
+            The updated record, or ``None`` when no live record matches the
+            lifecycle (and ``expected_updated_at``, when given).
+        """
         _validate_endpoint_spec(spec)
         if not expected_lifecycle_id:
             raise ValueError("Spec updates require an expected lifecycle id")
-        condition = (
-            "attribute_exists(endpoint_name) AND lifecycle_id = :expected_lifecycle_id "
-            "AND desired_state <> :deleted"
-        )
+        condition = "attribute_exists(endpoint_name) AND lifecycle_id = :expected_lifecycle_id"
         values: dict[str, Any] = {
             ":s": _serialize_for_dynamo(spec),
             ":u": _utc_now_iso(),
-            ":ds": "deploying",
-            ":deleted": "deleted",
+            ":stopped": "stopped",
             ":expected_lifecycle_id": expected_lifecycle_id,
         }
         if expected_updated_at is not None:
             condition += " AND updated_at = :expected_updated_at"
             values[":expected_updated_at"] = expected_updated_at
-        try:
-            response = self._table.update_item(
-                Key={"endpoint_name": endpoint_name},
-                UpdateExpression="SET spec = :s, updated_at = :u, desired_state = :ds",
-                ExpressionAttributeValues=values,
-                ConditionExpression=condition,
-                ReturnValues="ALL_NEW",
-            )
+        attempts: tuple[tuple[str, str, dict[str, Any]], ...] = (
+            (
+                "SET spec = :s, updated_at = :u, desired_state = :ds",
+                " AND desired_state <> :deleted AND desired_state <> :stopped",
+                {":ds": "deploying", ":deleted": "deleted"},
+            ),
+            ("SET spec = :s, updated_at = :u", " AND desired_state = :stopped", {}),
+        )
+        for update_expression, state_condition, state_values in attempts:
+            try:
+                response = self._table.update_item(
+                    Key={"endpoint_name": endpoint_name},
+                    UpdateExpression=update_expression,
+                    ExpressionAttributeValues={**values, **state_values},
+                    ConditionExpression=condition + state_condition,
+                    ReturnValues="ALL_NEW",
+                )
+            except ClientError as e:
+                if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                    raise
+                continue
             return _deserialize_from_dynamo(response.get("Attributes", {}))
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                return None
-            raise
+        return None
 
     def update_target_regions(
         self,
