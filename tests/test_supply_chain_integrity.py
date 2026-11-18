@@ -2872,3 +2872,45 @@ def test_kind_clusters_without_a_default_cni_install_one() -> None:
             f"{job_name} creates a kind cluster with the default CNI disabled "
             "but never installs Calico"
         )
+
+
+def test_pre_commit_ruff_hooks_skip_generated_trees_and_keep_pyprojects_excludes() -> None:
+    """Finding C16. pre-commit matches a hook's ``exclude`` with ``re.search``
+    against repository-relative paths, so the old ``'/(\\.venv|cdk\\.out|...)/'``
+    needed a slash before ``.venv`` and never matched a top-level path. The
+    ruff hook's ``--exclude`` args replaced ``[tool.ruff] exclude`` instead of
+    extending it (ruff-pre-commit's entries already pass ``--force-exclude``,
+    so pyproject's list applies to the files pre-commit passes)."""
+    config = yaml.safe_load(_read(".pre-commit-config.yaml"))
+    hooks = {
+        hook["id"]: hook
+        for repo in config["repos"]
+        if repo["repo"] == "https://github.com/astral-sh/ruff-pre-commit"
+        for hook in repo["hooks"]
+    }
+    assert set(hooks) == {"ruff-format", "ruff"}
+    for hook_id, hook in hooks.items():
+        exclude = re.compile(hook["exclude"])
+        for generated in (
+            ".venv/lib/python3.14/site-packages/x.py",
+            "cdk.out/asset.0123/handler.py",
+            "lambda/helm-installer-build/handler.py",
+            "lambda/kubectl-applier-simple-build/handler.py",
+        ):
+            assert exclude.search(generated), (hook_id, generated)
+        for authored in ("lambda/helm-installer/handler.py", "gco/services/api.py", "app.py"):
+            assert not exclude.search(authored), (hook_id, authored)
+        assert not any(
+            arg == "--exclude" or arg.startswith("--exclude=") for arg in hook.get("args", [])
+        ), f"{hook_id}: a CLI --exclude replaces [tool.ruff] exclude"
+
+
+def test_pre_commit_comments_name_real_ci_jobs() -> None:
+    """The mypy hook's comment named lint:typecheck-stacks, a job that no
+    longer exists (finding C16); every CI job the config names must exist."""
+    names = {
+        job["name"] for job in yaml.safe_load(_read(".github/workflows/lint.yml"))["jobs"].values()
+    }
+    mentioned = set(re.findall(r"\b(lint:[a-z0-9:-]+) job\b", _read(".pre-commit-config.yaml")))
+    assert mentioned, "the mypy hook's comment names the CI job that checks gco/stacks/"
+    assert mentioned <= names, sorted(mentioned - names)

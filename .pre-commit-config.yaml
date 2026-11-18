@@ -2,13 +2,21 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.3
     hooks:
+      # pre-commit matches `exclude` against repository-relative paths, so it
+      # is anchored at the start; both hooks skip the virtualenv, cdk.out and
+      # the lambda/*-build staging bundles. The hooks' own entries pass
+      # --force-exclude, so [tool.ruff] exclude in pyproject.toml (the list
+      # CI's ruff reads) applies as well. Do not add a CLI --exclude: it
+      # replaces that list instead of extending it.
+      #
       # Formatter. Run before ``ruff`` so the check sees formatter output.
       - id: ruff-format
-        exclude: '/(\.venv|cdk\.out|lambda/kubectl-applier-simple-build|lambda/helm-installer-build)/'
+        exclude: &generated_trees '^(\.venv|cdk\.out|lambda/[^/]+-build)/'
       # Linter, including isort-style import sorting via the ``I`` rule
       # selected in pyproject.toml.
       - id: ruff
-        args: [--fix, --exclude, lambda/kubectl-applier-simple-build, --exclude, lambda/helm-installer-build]
+        args: [--fix]
+        exclude: *generated_trees
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v2.4.1
@@ -30,7 +38,7 @@ repos:
             cli,
           ]
         # gco/stacks/ excluded here because CDK type stubs aren't installed in pre-commit.
-        # Stacks are type-checked in CI via the lint:typecheck-stacks job.
+        # Stacks are type-checked in CI via the lint:mypy:stacks job.
         files: ^(gco/(config|models|services)/|cli/)
         pass_filenames: false
 
