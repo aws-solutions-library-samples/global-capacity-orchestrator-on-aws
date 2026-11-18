@@ -2559,9 +2559,10 @@ Write flags such as `enabled` as JSON booleans, `true` or `false`, without
 quotes. Earlier releases read the `enabled` flags of `fsx_lustre` (and its
 `fsx_lustre_regions` overlays), `valkey`, `aurora_pgvector`,
 `cluster_observability.mlflow`, `queue_processor`, `drift_detection`,
-`mcp_server`, `volcano_image_mirror` and the `helm` charts by truthiness, so a
-quoted `"false"`, like every non-empty string, turned the feature on. So that
-an upgrade never turns off a feature that has been running:
+`mcp_server`, `volcano_image_mirror`, `images.replication` and the `helm`
+charts by truthiness, so a quoted `"false"`, like every non-empty string,
+turned the feature on. So that an upgrade never turns off a feature that has
+been running:
 
 - `"true"` in any case still reads as `true`, with a deprecation warning.
 - Any other string there, `"false"` included, fails validation with a message

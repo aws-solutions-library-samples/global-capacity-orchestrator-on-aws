@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import aws_cdk as cdk
@@ -53,7 +53,9 @@ def _context_with_flag(path: str, value: object) -> dict[str, Any]:
 
 
 def _loader(context: dict[str, Any]) -> ConfigLoader:
-    return ConfigLoader(cdk.App(context=context))
+    """ConfigLoader over ``context`` through a plain node double (no jsii App per case)."""
+    node = SimpleNamespace(try_get_context=context.get, get_all_context=lambda: context)
+    return ConfigLoader(cast(cdk.App, SimpleNamespace(node=node)))
 
 
 class _Stop(Exception):

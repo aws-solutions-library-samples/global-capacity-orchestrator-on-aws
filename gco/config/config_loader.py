@@ -785,13 +785,14 @@ _HELM_CHART_OFF_DELETES: dict[str, str] = {
     "crossplane": "every Crossplane composite resource with the resources it composed",
 }
 
-#: Enabled flags inside cdk.json blocks that the regional stack reads from the
-#: raw context instead of through a ConfigLoader getter, each with what
-#: switching it off deletes (``None``: nothing that holds data), for
+#: Enabled flags inside cdk.json blocks that the regional and global stacks
+#: read from the raw context instead of through a ConfigLoader getter, each
+#: with what switching it off deletes (``None``: nothing that holds data), for
 #: :func:`parse_block_flag`'s message. ConfigLoader validates each one and the
-#: stack reads each one with :func:`read_block_flag`, so both read a value the
+#: stacks read each one with :func:`read_block_flag`, so both read a value the
 #: same way. Earlier releases read all of them by truthiness.
 STACK_BLOCK_FLAGS: dict[str, str | None] = {
+    "images.replication.enabled": None,
     "queue_processor.enabled": None,
     "drift_detection.enabled": "the drift-detection SNS topic and its subscriptions",
     "mcp_server.enabled": None,
@@ -813,7 +814,7 @@ _OWN_VALIDATOR_STACK_BLOCK_FLAGS = frozenset({"helm.argocd.enabled", "helm.slurm
 
 
 def _reported_by_config_loader(_message: str) -> None:
-    """The ``warn`` of the stack's reads: ConfigLoader has reported the same value."""
+    """The ``warn`` of the stacks' reads: ConfigLoader has reported the same value."""
 
 
 def read_block_flag(
@@ -828,8 +829,8 @@ def read_block_flag(
     ``block`` is the raw value at the parent path (``None`` when absent). An
     absent block or key reads as ``default``; a present value goes through
     :func:`parse_block_flag` with the arguments the loader validates it with.
-    The regional stack keeps the default ``warn``, because ConfigLoader has
-    already warned about a deprecated ``"true"`` string.
+    The stacks keep the default ``warn``, because ConfigLoader has already
+    warned about a deprecated ``"true"`` string.
 
     Raises:
         ConfigValidationError: If ``block`` is not an object, or the flag is
@@ -910,11 +911,12 @@ class ConfigLoader:
         self._warn_unknown_context_keys()
 
     def _validate_stack_block_flags(self) -> None:
-        """Validate the enabled flags the regional stack reads from the raw context.
+        """Validate the enabled flags the stacks read from the raw context.
 
-        These are the :data:`STACK_BLOCK_FLAGS`: ``queue_processor``,
-        ``drift_detection``, ``mcp_server``, ``volcano_image_mirror`` and the
-        optional ``helm`` charts. Earlier releases read them by truthiness, so
+        These are the :data:`STACK_BLOCK_FLAGS`: ``images.replication``,
+        ``queue_processor``, ``drift_detection``, ``mcp_server``,
+        ``volcano_image_mirror`` and the optional ``helm`` charts. Earlier
+        releases read them by truthiness, so
         a string is never reinterpreted (:func:`parse_block_flag`): ``"true"``
         reads as true with a deprecation warning, and every other string fails
         with what to write instead. ``helm.argocd.enabled`` and

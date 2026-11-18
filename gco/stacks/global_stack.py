@@ -33,7 +33,7 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
-from gco.config.config_loader import ConfigLoader
+from gco.config.config_loader import ConfigLoader, read_block_flag
 from gco.stacks.constants import (
     LAMBDA_PYTHON_RUNTIME,
     cluster_shared_ssm_parameter_prefix,
@@ -109,7 +109,11 @@ def _parse_images_config(cdk_context: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError(
             f"images.replication must be a mapping, got {type(replication_raw).__name__}"
         )
-    replication_enabled = bool(replication_raw.get("enabled", _IMAGES_DEFAULT_REPLICATION_ENABLED))
+    # Strict, like every enabled flag: bool("false") is True, and earlier
+    # releases read a quoted "false" here as on (see parse_block_flag).
+    replication_enabled = read_block_flag(
+        replication_raw, "images.replication.enabled", default=_IMAGES_DEFAULT_REPLICATION_ENABLED
+    )
     destinations = replication_raw.get("destinations", _IMAGES_DEFAULT_REPLICATION_DESTINATIONS)
     if isinstance(destinations, str):
         if destinations != _IMAGES_DEFAULT_REPLICATION_DESTINATIONS:
