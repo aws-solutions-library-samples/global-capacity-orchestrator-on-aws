@@ -265,7 +265,10 @@ shipping a skew.
    - `lambda/helm-installer/Dockerfile` — the `dl.k8s.io/release/...` URL and
      the `sha256sum -c` line under it (the checksum for each release binary is
      published alongside it as `<url>.sha256`)
-   - `Dockerfile.dev` (`ARG KUBECTL_VERSION`)
+   - `Dockerfile.dev` — `ARG KUBECTL_VERSION` and the two per-architecture
+     SHA-256s in that `RUN`'s `TARGETARCH` case (amd64 and arm64, each
+     published as `https://dl.k8s.io/release/<version>/bin/linux/<arch>/kubectl.sha256`);
+     the build fails closed until all three move together
 
    No workflow edits are needed: every workflow that installs kubectl derives
    the version and checksum from the installer Dockerfile at runtime
@@ -354,7 +357,7 @@ constant still says `v1beta1`, as the reminder.
   `tests/test_integration.py::test_kubectl_versions_follow_eks_skew_policy`.
 - **kubernetes Python client**: its major must equal the cluster minor
   (`kubernetes==37.x` ↔ EKS `1.37`) or trail it by exactly one
-  (`kubernetes==36.x` on EKS `1.37`). kubernetes-client/python documents that
+  (`kubernetes==37.x` on EKS `1.38`). kubernetes-client/python documents that
   a client one version behind the server works for every API the two have in
   common, and GCO uses only GA core APIs, so the one-minor lag is safe while
   upstream has no stable release for the new minor. A client ahead of the

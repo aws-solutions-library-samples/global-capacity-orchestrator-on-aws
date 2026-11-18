@@ -2871,8 +2871,8 @@ if m:
 
 # extract_kubernetes_client_pin [pyproject_path]
 #
-# Prints the exact ``kubernetes==X.Y.Z`` version pinned in
-# ``[project.dependencies]`` of pyproject.toml (``36.0.3``), or nothing when
+# Prints the version of the exact ``kubernetes==X.Y.Z`` pin in
+# ``[project.dependencies]`` of pyproject.toml (``X.Y.Z``), or nothing when
 # the file is missing, unparseable, or carries no exact pin. Callers treat
 # empty output as "skip", matching the other extractors here.
 #
@@ -2907,8 +2907,9 @@ for spec in (data.get('project', {}) or {}).get('dependencies', []) or []:
 # the Kubernetes release; this check is the monthly reminder that the one
 # allowed minor of lag is being used, so the report nags until the client is
 # bumped. Prints one ``problem`` line when the client trails the cluster
-# (``kubernetes==36.0.3 is one minor behind EKS 1.37; pin 37.x once
-# released``); prints nothing when they agree. A client *ahead* of the
+# (for a 37.x client on EKS 1.38: ``kubernetes==37.0.1 is one minor behind
+# EKS 1.38; pin kubernetes==38.x once a stable release is on PyPI``);
+# prints nothing when they agree. A client *ahead* of the
 # cluster, or two or more minors behind, is also reported — the PR-time
 # guard rejects both, so seeing either here means the guard was bypassed.
 # Empty input prints nothing (the caller already skipped).
