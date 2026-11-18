@@ -158,9 +158,11 @@ internal CA (the chain is described in
   opens a new client for every prefill and decode call with keep-alive off,
   so kube-proxy spreads the calls across the Ready role pods, and it re-reads
   the CA bundle when the file changes, so a rotated CA takes effect on the
-  next call without restarting the pod. While the bundle is unusable the
-  proxy answers 503 (`no_decode_backend`). Its probes are exec checks
-  against its loopback `/healthz`.
+  next call without restarting the pod. While the bundle is unusable, or no
+  decode pod accepts the connection, the proxy answers 503
+  (`no_decode_backend`); a decode call that times out otherwise answers 504
+  and any other transport failure 502, as the inference proxy maps them. Its
+  probes are exec checks against its loopback `/healthz`.
 
 **Calling a model from inside the cluster.** Model Services no longer answer
 plain HTTP. A workload of your own that calls one directly must use
