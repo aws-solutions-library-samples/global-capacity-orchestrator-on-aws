@@ -61,6 +61,14 @@ python3 -m pip install -r lambda/kubectl-applier-simple/requirements.txt \
   --platform manylinux2014_x86_64 --only-binary=:all:
 ```
 
+Lambda rejects a .zip package whose contents unzip to more than 250 MiB
+(262,144,000 bytes, layers included; this function has none), and only when
+CloudFormation creates or updates the function. The CLI's build therefore
+measures the installed tree before publishing it: it fails, naming the size,
+the quota and the largest directories, when the package is over the quota, and
+prints a warning above 90% of it. `kubernetes` is most of the package, so a
+`kubernetes` bump in `requirements.txt` is the change to watch.
+
 The inference streaming proxy has a separate production npm graph. CI and CDK staging install it from its committed lockfile with lifecycle scripts disabled:
 
 ```bash

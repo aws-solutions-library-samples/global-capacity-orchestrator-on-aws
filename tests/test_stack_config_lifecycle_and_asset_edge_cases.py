@@ -2353,6 +2353,124 @@ def test_build_kubectl_lambda_packages_complete_source(
     run.assert_called_once()
 
 
+_MIB = 1024 * 1024
+
+
+def _sparse_file(path: Path, size: int) -> None:
+    """Create a file of ``size`` bytes without writing them (a hole on disk)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.truncate(size)
+
+
+def _build_kubectl_lambda_with_installed_tree(
+    stack_manager: Any,
+    tmp_path: Path,
+    installed: dict[str, int],
+) -> Path:
+    """Run the kubectl builder; its mocked pip leaves ``installed`` in staging."""
+    import cli.stacks as stacks
+
+    source, _build = stacks._KUBECTL_CDK_ASSET.paths(tmp_path)
+    (source / "manifests").mkdir(parents=True)
+    (source / "handler.py").write_text("handler", encoding="utf-8")
+    (source / "requirements.txt").write_text("kubernetes==37.0.1", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    def prepare(*_args: Any, builder: Any, **_kwargs: Any) -> bool:
+        builder(staging)
+        return True
+
+    def pip_install(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        for relative, size in installed.items():
+            _sparse_file(staging / relative, size)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    with (
+        patch.object(stacks, "_prepare_lambda_asset", side_effect=prepare),
+        patch.object(stacks.subprocess, "run", side_effect=pip_install),
+    ):
+        stack_manager._build_kubectl_lambda()
+    return staging
+
+
+def test_lambda_zip_limit_is_lambdas_unzipped_package_quota() -> None:
+    import cli.stacks as stacks
+
+    # 250 MB, where Lambda's MB is 1,024 KB (the quota's own wording).
+    assert stacks._LAMBDA_ZIP_UNZIPPED_LIMIT_BYTES == 262_144_000
+
+
+def test_build_kubectl_lambda_rejects_package_over_lambda_unzipped_limit(
+    stack_manager: Any,
+    tmp_path: Path,
+) -> None:
+    # 255 MiB of dependencies: over the 250 MiB quota by about 5 MiB.
+    installed = {
+        "kubernetes/client/api.py": 200 * _MIB,
+        "botocore/data/endpoints.json": 40 * _MIB,
+        "yaml/_yaml.so": 10 * _MIB,
+        "urllib3/__init__.py": 4 * _MIB,
+        "six.py": 1 * _MIB,
+    }
+    with pytest.raises(RuntimeError) as raised:
+        _build_kubectl_lambda_with_installed_tree(stack_manager, tmp_path, installed)
+
+    message = str(raised.value)
+    assert "kubectl-applier-simple Lambda package" in message
+    assert "255.0 MiB" in message
+    assert "250 MiB (262,144,000 bytes)" in message
+    # The largest directories, largest first; a loose top-level file is no directory.
+    assert "kubernetes/ 200.0 MiB, botocore/ 40.0 MiB, yaml/ 10.0 MiB" in message
+    assert "six.py" not in message
+    assert "lambda/kubectl-applier-simple/requirements.txt" in message
+
+
+def test_build_kubectl_lambda_warns_near_lambda_unzipped_limit(
+    stack_manager: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    installed = {
+        "kubernetes/client/api.py": 200 * _MIB,
+        "botocore/data/endpoints.json": 30 * _MIB,
+    }
+    _build_kubectl_lambda_with_installed_tree(stack_manager, tmp_path, installed)
+
+    output = capsys.readouterr().out
+    assert "Warning: kubectl-applier-simple Lambda package unzips to 230.0 MiB" in output
+    assert "92% of Lambda's 250 MiB (262,144,000 bytes) limit" in output
+    assert "kubernetes/ 200.0 MiB, botocore/ 30.0 MiB" in output
+
+
+def test_lambda_zip_size_counts_what_cdk_assets_zips(tmp_path: Path) -> None:
+    import cli.stacks as stacks
+
+    _sparse_file(tmp_path / "kubernetes" / "client" / "api.py", 3 * _MIB)
+    _sparse_file(tmp_path / "botocore" / "data.json", 2 * _MIB)
+    _sparse_file(tmp_path / "six.py", 1 * _MIB)
+    # cdk-assets zips a symlink's target; a dangling link has nothing to zip.
+    (tmp_path / "kubernetes" / "alias.py").symlink_to("client/api.py")
+    (tmp_path / "botocore" / "dangling.py").symlink_to("missing.py")
+
+    total, largest = stacks._lambda_zip_unzipped_size(tmp_path)
+
+    assert total == 9 * _MIB
+    assert largest == [("kubernetes", 6 * _MIB), ("botocore", 2 * _MIB)]
+
+
+def test_build_kubectl_lambda_is_silent_well_under_the_limit(
+    stack_manager: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    installed = {"kubernetes/client/api.py": 180 * _MIB}
+    _build_kubectl_lambda_with_installed_tree(stack_manager, tmp_path, installed)
+
+    assert "Warning" not in capsys.readouterr().out
+
+
 def test_inference_streaming_builder_handles_pin_read_and_npm_failures(
     stack_manager: Any,
     tmp_path: Path,

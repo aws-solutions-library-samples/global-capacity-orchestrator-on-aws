@@ -123,6 +123,14 @@ _LAMBDA_SOURCE_IGNORED_FILES = frozenset({".DS_Store"})
 #: The caches the stacks leave out of every zipped Lambda source directory,
 #: left out of the CLI's own builds the same way.
 _LAMBDA_SOURCE_COPY_IGNORE_PATTERNS = LAMBDA_SOURCE_ASSET_EXCLUDE
+#: Lambda's quota on the unzipped contents of a .zip deployment package,
+#: layers included: 250 MB, where Lambda's MB is 1,024 KB. The kubectl-applier
+#: function uses no layers, so its build tree is the whole package.
+_LAMBDA_ZIP_UNZIPPED_LIMIT_BYTES = 250 * 1024 * 1024
+#: Above this share of the quota a build still publishes, with a warning.
+_LAMBDA_ZIP_WARN_FRACTION = 0.9
+#: How many of a package's largest top-level directories a size report names.
+_LAMBDA_ZIP_SIZE_REPORT_DIRECTORIES = 5
 _FILE_LOCK_RETRY_SECONDS = 0.05
 # 15 minutes: comfortably above the longest legitimate hold (a cold publisher
 # rebuild, minutes) while bounding the pathological one (an abandoned pytest
@@ -882,6 +890,64 @@ def _prepare_lambda_asset(
             _remove_asset_tree(staging_dir)
         print(f"  {display_name} built successfully")
         return True
+
+
+def _lambda_zip_unzipped_size(root: Path) -> tuple[int, list[tuple[str, int]]]:
+    """Return the bytes a zip asset tree unpacks to and its largest top-level directories.
+
+    cdk-assets zips every file below the staged copy, following symlinks, so a
+    symlinked file counts at its target's size and a dangling one adds
+    nothing. The CLI's builds contain no symlinks: wheels cannot carry them
+    and the builders' copies dereference them.
+
+    Returns:
+        The total size in bytes and up to ``_LAMBDA_ZIP_SIZE_REPORT_DIRECTORIES``
+        ``(directory name, bytes)`` pairs, largest first.
+    """
+    total = 0
+    directories: dict[str, int] = {}
+    for directory, _subdirectories, files in os.walk(root):
+        for name in files:
+            path = Path(directory, name)
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            total += size
+            parts = path.relative_to(root).parts
+            if len(parts) > 1:
+                directories[parts[0]] = directories.get(parts[0], 0) + size
+    largest = sorted(directories.items(), key=lambda item: (-item[1], item[0]))
+    return total, largest[:_LAMBDA_ZIP_SIZE_REPORT_DIRECTORIES]
+
+
+def _mebibytes(size: int) -> str:
+    return f"{size / (1024 * 1024):.1f} MiB"
+
+
+def _check_lambda_zip_size(root: Path, *, display_name: str, remedy: str) -> None:
+    """Fail a zip Lambda build that Lambda would reject; warn when it nears the quota.
+
+    Lambda enforces the unzipped-size quota only when CloudFormation creates or
+    updates the function, after the deploy's earlier stacks have gone through.
+    Measuring the staged tree fails the build before anything is deployed and
+    names what takes the space.
+
+    Raises:
+        RuntimeError: when the tree is larger than the quota.
+    """
+    total, largest = _lambda_zip_unzipped_size(root)
+    limit = _LAMBDA_ZIP_UNZIPPED_LIMIT_BYTES
+    if total <= limit * _LAMBDA_ZIP_WARN_FRACTION:
+        return
+    breakdown = ", ".join(f"{name}/ {_mebibytes(size)}" for name, size in largest)
+    measurement = (
+        f"{display_name} unzips to {_mebibytes(total)} ({total:,} bytes), "
+        f"{total / limit:.0%} of Lambda's {limit // (1024 * 1024)} MiB ({limit:,} bytes) "
+        f"limit for a .zip deployment package. Largest directories: {breakdown or 'none'}."
+    )
+    if total > limit:
+        raise RuntimeError(f"{measurement} Lambda rejects a larger package: {remedy}.")
+    print(f"  Warning: {measurement}")
 
 
 def _atomic_copy_file(source: Path, target: Path) -> None:
@@ -1802,6 +1868,7 @@ class StackManager:
         requirements = source_dir / "requirements.txt"
         if not source_dir.is_dir() or not requirements.is_file():
             return
+        display_name = "kubectl-applier-simple Lambda package"
 
         def build(staging_dir: Path) -> None:
             shutil.copy2(source_dir / "handler.py", staging_dir / "handler.py")
@@ -1831,12 +1898,20 @@ class StackManager:
                 raise RuntimeError(
                     "kubectl Lambda dependency installation failed: " + result.stderr[:200]
                 )
+            _check_lambda_zip_size(
+                staging_dir,
+                display_name=display_name,
+                remedy=(
+                    "pin smaller versions in lambda/kubectl-applier-simple/requirements.txt "
+                    "or drop the dependencies handler.py does not import"
+                ),
+            )
 
         _prepare_lambda_asset(
             source_dir,
             build_dir,
             source_inputs=_KUBECTL_CDK_ASSET.source_inputs,
-            display_name="kubectl-applier-simple Lambda package",
+            display_name=display_name,
             builder=build,
         )
 
