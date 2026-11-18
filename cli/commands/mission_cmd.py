@@ -212,14 +212,17 @@ def mission_cmd() -> None:
 @click.option(
     "--tool-allowlist",
     multiple=True,
-    help="Tool name to allowlist; pass multiple times. Optional with --allow-all-tools.",
+    help=(
+        "Tool name to allowlist; pass multiple times. Optional with --allow-all-tools. "
+        "The mission_* control tools and the swarm_* tools are refused."
+    ),
 )
 @click.option(
     "--allow-all-tools",
     is_flag=True,
     help=(
         "Resolve the session's tool allowlist to every registered MCP tool "
-        "(minus the mission_* control tools). Makes --tool-allowlist optional; "
+        "(minus the mission_* and swarm_* tools). Makes --tool-allowlist optional; "
         "mutually exclusive with it."
     ),
 )
@@ -591,7 +594,8 @@ def _resolve_cli_allowlist(*, allow_all_tools: bool, tool_allowlist: tuple[str, 
     The all-tools branch populates the registry on demand and resolves the
     effective list from it. The explicit branch preserves the thin CLI path
     (no per-name registry check) but enforces at-least-one, emitting the
-    existing ``empty`` rejection when no name is supplied. On any
+    existing ``empty`` rejection when no name is supplied, and rejects the
+    loop-management tools (``control_tool_not_allowed``). On any
     :class:`MissionValidationError` the structured envelope is emitted and the
     process exits 1 — before the caller builds or persists a session.
     """
@@ -613,6 +617,12 @@ def _resolve_cli_allowlist(*, allow_all_tools: bool, tool_allowlist: tuple[str, 
         return resolved
     if not tool_allowlist:
         _emit_error("validation_error", {"field": "tool_allowlist", "reason": "empty"})
+        sys.exit(1)
+    # A session must not drive Mission or swarm sessions from its own loop.
+    try:
+        mission_validation.reject_control_tools(list(tool_allowlist))
+    except MissionValidationError as exc:
+        _emit_error(exc.code, exc.details)
         sys.exit(1)
     return list(tool_allowlist)
 
@@ -1263,14 +1273,17 @@ def mission_scaffold_criteria_cmd(
 @click.option(
     "--tool-allowlist",
     multiple=True,
-    help="Tool name to allowlist; pass multiple times. Optional with --allow-all-tools.",
+    help=(
+        "Tool name to allowlist; pass multiple times. Optional with --allow-all-tools. "
+        "The mission_* control tools and the swarm_* tools are refused."
+    ),
 )
 @click.option(
     "--allow-all-tools",
     is_flag=True,
     help=(
         "Resolve the session's tool allowlist to every registered MCP tool "
-        "(minus the mission_* control tools). Makes --tool-allowlist optional; "
+        "(minus the mission_* and swarm_* tools). Makes --tool-allowlist optional; "
         "mutually exclusive with it."
     ),
 )

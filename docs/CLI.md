@@ -3987,8 +3987,8 @@ gco mission run [OPTIONS]
 **Options:**
 
 - `--directive TEXT` — Required. Natural-language goal description.
-- `--tool-allowlist NAME` — Repeatable. Tools the loop may invoke; required unless `--allow-all-tools` is set. The first allowlisted tool also seeds the deterministic strategy when sampling is off.
-- `--allow-all-tools` — Resolve the session's tool allowlist to every registered MCP tool (minus the `mission_*` control tools). Mutually exclusive with `--tool-allowlist`.
+- `--tool-allowlist NAME` — Repeatable. Tools the loop may invoke; required unless `--allow-all-tools` is set. The first allowlisted tool also seeds the deterministic strategy when sampling is off. The `mission_*` control tools and the `swarm_*` tools are refused (`control_tool_not_allowed`).
+- `--allow-all-tools` — Resolve the session's tool allowlist to every registered MCP tool (minus the `mission_*` and `swarm_*` tools). Mutually exclusive with `--tool-allowlist`.
 - `--max-iterations INTEGER` — Iteration cap (default: 5). Pass `-1` to opt out.
 - `--max-wall-clock INTEGER` — Wall-clock cap in seconds (default: 300). Pass `-1` to opt out.
 - `--max-criteria INTEGER` — Cap on the number of criterion entries the scaffolder emits (default: 5).
@@ -4037,8 +4037,8 @@ gco mission start [OPTIONS]
 - `--with-defaults` — Use a basic placeholder predicate criterion when no `--criteria-file` is provided.
 - `--max-iterations INTEGER` — Required. Hard cap on iterations. Pass `-1` to opt out (uncapped).
 - `--max-wall-clock INTEGER` — Required. Hard cap on wall-clock seconds. Pass `-1` to opt out (uncapped).
-- `--tool-allowlist NAME` — Repeatable. Tools the loop may invoke; required unless `--allow-all-tools` is set.
-- `--allow-all-tools` — Resolve the session's tool allowlist to every registered MCP tool (minus the `mission_*` control tools). Mutually exclusive with `--tool-allowlist`.
+- `--tool-allowlist NAME` — Repeatable. Tools the loop may invoke; required unless `--allow-all-tools` is set. The `mission_*` control tools and the `swarm_*` tools are refused (`control_tool_not_allowed`).
+- `--allow-all-tools` — Resolve the session's tool allowlist to every registered MCP tool (minus the `mission_*` and `swarm_*` tools). Mutually exclusive with `--tool-allowlist`.
 - `--cadence` — Checkpoint cadence kind (default: `every_iteration`).
 - `--cadence-n INTEGER` — `n` parameter for `every_n_iterations`.
 - `--cadence-t INTEGER` — `t` parameter (seconds) for `every_t_seconds`.

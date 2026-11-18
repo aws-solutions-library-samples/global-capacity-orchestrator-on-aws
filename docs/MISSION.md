@@ -721,7 +721,7 @@ Every Mission session carries a **tool allowlist** — the set of tool names the
 
 ### `--allow-all-tools` / `allow_all_tools`
 
-Enumerating every tool name is tedious when you simply want the loop to reach for whatever the server exposes. Both surfaces accept an all-tools option that resolves the session's allowlist to **every currently-registered tool** (minus the nine `mission_*` control tools — see [Risk-tier scope](#risk-tier-scope)) without naming each one:
+Enumerating every tool name is tedious when you simply want the loop to reach for whatever the server exposes. Both surfaces accept an all-tools option that resolves the session's allowlist to **every currently-registered tool** (minus the `mission_*` and `swarm_*` tools — see [Risk-tier scope](#risk-tier-scope)) without naming each one:
 
 | Surface | Input | Default |
 |---------|-------|---------|
@@ -787,7 +787,7 @@ The per-session option resolves its allowlist **from whatever is registered** �
 
 Every MCP tool carries a risk-tier tag (`safe`, `low-risk`, `destructive`, `infrastructure`, `cost-incurring`, `data-upload`, `image`). The all-tools option resolves to **all registered tools regardless of risk tier** — it does not stop at read-only `safe` tools. The blast-radius control is the **registration layer**, not this option: a destructive, infrastructure, or cost-incurring tool enters scope only if its gating feature flag was set when the server registered tools, in which case you have already opted into exposing it. Concretely, registering those higher-risk tools via their feature flags (including the `GCO_ENABLE_ALL_TOOLS` umbrella) brings them into scope of the all-tools expansion.
 
-The **only** names excluded from the expansion are the nine `mission_*` control tools (`mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`), so a Mission session can never recursively invoke the session-management tools that drive it. If you want a session bounded to read-only tools only, use an explicit `--tool-allowlist` of `safe`-tagged tools instead of `--allow-all-tools`.
+The **only** names excluded from the expansion are the `mission_*` tools and the `swarm_*` tools, so a Mission session can never recursively invoke the session-management tools that drive it. An explicit `--tool-allowlist` / `tool_allowlist` may not name them either: a list that names one of the nine `mission_*` control tools (`mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`) or a `swarm_*` tool is rejected with `validation_error` / `control_tool_not_allowed` before a session is created. (`mission_memory_search`, which only reads Mission memory, may be named explicitly.) If you want a session bounded to read-only tools only, use an explicit `--tool-allowlist` of `safe`-tagged tools instead of `--allow-all-tools`.
 
 ## Sampling
 
