@@ -54,7 +54,7 @@ import time
 import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -2357,13 +2357,21 @@ class StackManager:
                 process.wait()
             return
 
+        # killpg raises ProcessLookupError, or PermissionError on macOS when
+        # only the group's zombie leader is left, once nothing in the group
+        # can be signalled. That happens when CDK exits between the poll()
+        # above and the signal; poll() also returns None while another
+        # thread holds the Popen wait lock. The group is gone then, so the
+        # wait below reaps it instead of the error escaping.
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=CDK_TERMINATE_GRACE_SECONDS)
         except OSError, subprocess.TimeoutExpired:
             if process.poll() is None:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    with suppress(ProcessLookupError, PermissionError):
+                        os.killpg(process.pid, signal.SIGKILL)
                 finally:
                     process.wait()
 

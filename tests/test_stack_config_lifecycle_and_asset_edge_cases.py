@@ -34,6 +34,7 @@ import pytest
 from botocore.exceptions import ClientError
 from click.testing import CliRunner
 
+from cli.stacks import CDK_TERMINATE_GRACE_SECONDS
 from cli.stacks import StackManager as _StackManager
 from tests._minimal_cdk_context import minimal_context
 
@@ -1505,6 +1506,51 @@ def test_terminate_cdk_process_handles_already_exited_and_posix_failure(
     assert killpg.call_args_list[0] == call(123, __import__("signal").SIGTERM)
     assert killpg.call_args_list[1] == call(123, __import__("signal").SIGKILL)
     process.wait.assert_called_once_with()
+
+
+@pytest.mark.parametrize("gone", [ProcessLookupError, PermissionError])
+def test_terminate_cdk_process_treats_a_group_with_nothing_to_signal_as_gone(
+    stack_manager: Any, gone: type[OSError]
+) -> None:
+    """CDK exited after poll(): killpg raises, and the error used to escape.
+
+    poll() returns None while another thread holds the Popen wait lock, so the
+    SIGTERM can reach a group that has already exited (ProcessLookupError), or
+    on macOS one whose leader is a zombie (PermissionError). The fallback
+    SIGKILL then raised the same error out of the cleanup.
+    """
+    process = MagicMock(pid=321)
+    process.poll.return_value = None
+    with (
+        patch("cli.stacks.os.name", "posix"),
+        patch("cli.stacks.os.killpg", side_effect=gone()) as killpg,
+    ):
+        stack_manager._terminate_cdk_process(process)
+    assert killpg.call_args_list == [call(321, __import__("signal").SIGTERM)]
+    process.wait.assert_called_once_with(timeout=CDK_TERMINATE_GRACE_SECONDS)
+
+
+@pytest.mark.parametrize("gone", [ProcessLookupError, PermissionError])
+def test_terminate_cdk_process_tolerates_the_group_exiting_before_sigkill(
+    stack_manager: Any, gone: type[OSError]
+) -> None:
+    signal_module = __import__("signal")
+    process = MagicMock(pid=322)
+    process.poll.return_value = None
+    process.wait.side_effect = [
+        subprocess.TimeoutExpired(["cdk"], CDK_TERMINATE_GRACE_SECONDS),
+        0,
+    ]
+    with (
+        patch("cli.stacks.os.name", "posix"),
+        patch("cli.stacks.os.killpg", side_effect=[None, gone()]) as killpg,
+    ):
+        stack_manager._terminate_cdk_process(process)
+    assert killpg.call_args_list == [
+        call(322, signal_module.SIGTERM),
+        call(322, signal_module.SIGKILL),
+    ]
+    assert process.wait.call_args_list[-1] == call()
 
 
 def test_run_cdk_cancellation_and_timeout_preserve_output(stack_manager: Any) -> None:
