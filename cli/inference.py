@@ -72,8 +72,6 @@ MOONCAKE_TRANSFER_PROTOCOLS: frozenset[str] = frozenset({"rdma", "tcp"})
 #: KV-store offload tiers for spilling cache beyond GPU memory.
 MOONCAKE_OFFLOAD_TIERS: frozenset[str] = frozenset({"cpu", "disk", "none"})
 
-#: PD proxy request-scheduling strategies supported today.
-MOONCAKE_PROXY_SCHEDULING: frozenset[str] = frozenset({"round_robin"})
 
 #: Inclusive bounds for per-role replica counts in an XpYd topology.
 MOONCAKE_TOPOLOGY_MIN: int = 1
@@ -132,7 +130,8 @@ class MooncakeTransferConfig(TypedDict, total=False):
 class MooncakeProxyConfig(TypedDict, total=False):
     """PD proxy configuration. ``admin_api_key_secret`` names the Kubernetes
     Secret holding the proxy admin key; the key value is never carried on the
-    endpoint spec."""
+    endpoint spec. ``scheduling`` is accepted from specs earlier releases wrote
+    and has no effect: the role Services spread requests across Ready pods."""
 
     image: str
     scheduling: Literal["round_robin"]
