@@ -1118,7 +1118,8 @@ def validate_script_ast(script: str, allowlist: list[str]) -> None:
 # engine's ``_decide_phase`` can produce a deterministic ``terminate``
 # verdict with the partial observation attached.
 
-import copy  # noqa: E402 — runtime layer below; keep imports near their consumers
+import asyncio  # noqa: E402 — runtime layer below; keep imports near their consumers
+import copy  # noqa: E402
 import os  # noqa: E402
 import time  # noqa: E402
 from collections.abc import Awaitable, Callable  # noqa: E402
@@ -1411,11 +1412,9 @@ def _make_tool_wrapper(
         # the dispatcher mutates the dict downstream.
         args = dict(kwargs)
         started = time.monotonic()
-        try:
-            result = await tool_dispatcher(tool_name, dict(args), ctx)
-        except Exception as exc:
+
+        def record_failure(error_message: str) -> None:
             duration_ms = max(int((time.monotonic() - started) * 1000), 0)
-            error_message = f"{type(exc).__name__}: {exc}"[:200]
             script_call_log.append(
                 {
                     "tool_name": tool_name,
@@ -1426,7 +1425,7 @@ def _make_tool_wrapper(
                     # Truncated to 200 chars to match the audit
                     # module's existing convention for error_message
                     # fields elsewhere in the engine.
-                    "error_message": error_message,
+                    "error_message": error_message[:200],
                 }
             )
             # Emit the via_script audit row before re-raising so the
@@ -1438,8 +1437,20 @@ def _make_tool_wrapper(
                 tool_name,
                 "failed",
                 duration_ms,
-                error_message=error_message,
+                error_message=error_message[:200],
             )
+
+        try:
+            result = await tool_dispatcher(tool_name, dict(args), ctx)
+        except asyncio.CancelledError:
+            # The script's wall-clock cap (or the caller) stopped the script
+            # while this call was in flight. Record it so the partial log
+            # shows every call the script started; the call itself may
+            # still complete in the background.
+            record_failure("CancelledError: the script stopped before this call returned")
+            raise
+        except Exception as exc:
+            record_failure(f"{type(exc).__name__}: {exc}")
             raise
         duration_ms = max(int((time.monotonic() - started) * 1000), 0)
         record: dict[str, Any] = {
@@ -1721,8 +1732,10 @@ class MissionSandbox:
         :class:`ToolCallRecord`-shaped dicts.
 
         On any ``MontyError`` from the provider — duration cap, memory
-        cap, runtime / typing / syntax error inside the script — the
-        method re-raises as :class:`SandboxTerminated` carrying the
+        cap, runtime / typing / syntax error inside the script — and when
+        the wall-clock cap expires (``_DURATION_LIMIT_SECS`` of elapsed
+        time, including time spent waiting on tool calls), the method
+        re-raises as :class:`SandboxTerminated` carrying the
         closure-captured partial observations and events. The engine's
         decide-phase pattern-matches on this exception and produces a
         ``terminate`` verdict for the iteration.
@@ -1845,12 +1858,27 @@ class MissionSandbox:
 
         phase_started_at = datetime.now(UTC).isoformat()
 
+        # Monty's ``max_feed_duration_secs`` counts only time spent inside the
+        # VM, so a script that loops over tool calls never reaches it. This
+        # host-side deadline makes the same limit a wall-clock cap that
+        # includes the time spent waiting on tool calls.
+        wall_clock_cap = asyncio.timeout(_DURATION_LIMIT_SECS)
         try:
-            await self._provider.run(
-                code=final_source,
-                inputs={},
-                external_functions=external_functions,
-            )
+            async with wall_clock_cap:
+                await self._provider.run(
+                    code=final_source,
+                    inputs={},
+                    external_functions=external_functions,
+                )
+        except TimeoutError as exc:
+            if not wall_clock_cap.expired():
+                raise
+            raise SandboxTerminated(
+                "TimeoutError",
+                partial_observations=list(observe_log),
+                partial_events=list(event_log),
+                partial_script_call_log=list(script_call_log),
+            ) from exc
         except monty_error_cls as exc:
             # ``MontyError`` is the base of the limit / runtime /
             # typing / syntax error family. Catching the base class

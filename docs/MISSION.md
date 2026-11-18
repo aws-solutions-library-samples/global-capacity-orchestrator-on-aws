@@ -918,8 +918,8 @@ Scripted strategies are opt-in via `--allow-scripted-strategies` on the CLI (or 
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `GCO_MCP_CODE_MODE_MAX_DURATION_SECS` | `30` | Cap on a single script's execution time, counted only while the sandbox runs (time spent waiting on tool calls is excluded). |
-| `GCO_MCP_CODE_MODE_MAX_MEMORY` | `268435456` (256 MiB) | Resident memory cap on the sandbox process. |
+| `GCO_MCP_CODE_MODE_MAX_DURATION_SECS` | `30` | Wall-clock cap on a single script run, including time spent waiting on tool calls. A tool call still waiting when the cap is reached is recorded as failed in the iteration's `script_call_log`; the call itself may still complete. |
+| `GCO_MCP_CODE_MODE_MAX_MEMORY` | `200000000` (200 MB) | Memory cap on the sandbox. |
 
 Inside the script, allowlisted tools are exposed as awaitable callables. A `mission` namespace exposes `mission.observe(key, value)` and `mission.event(name)` for incremental Observation building. Every in-script tool call goes through the standard MCP audit decorator and emits a follow-up Mission audit event with `via_script=true`.
 

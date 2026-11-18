@@ -699,6 +699,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_mission_allow_all_tools_mcp.py` | MCP-tool tests for the ``mission_start`` all-tools resolution path. |
 | `test_mission_allow_all_tools_validation.py` | Property-based checks for the Mission all-tools allowlist resolver. |
 | `test_mission_metric_trend.py` | Tests for the cumulative-metrics view and the ``metric_trend`` criterion. |
+| `test_mission_sandbox_runtime_limits.py` | Mission script sandbox runtime limits against the real Monty provider: the script cap is wall-clock time including tool calls, a call in flight when the cap fires is recorded as failed, and script errors still end the run through Monty's error path. |
 
 ### Additional Tests
 
