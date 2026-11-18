@@ -319,6 +319,22 @@ class TestGlobalAcceleratorValidation:
         ga_config = config.get_global_accelerator_config()
         assert ga_config["name"] == "gco-accelerator"
 
+    @pytest.mark.parametrize("path", ["/api/v1/jobs", "/health", "/api/v1/health/", "/"])
+    def test_health_check_path_that_needs_authentication_fails(self, valid_context, path):
+        """A probe of an authenticated path gets 401, so GA would mark every Region unhealthy."""
+        valid_context["global_accelerator"]["health_check_path"] = path
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(valid_context))
+        message = str(raised.value)
+        assert message.startswith(f"global_accelerator.health_check_path {path!r} needs request")
+        assert "/api/v1/health, /healthz, /metrics, /readyz" in message
+
+    @pytest.mark.parametrize("path", ["/healthz", "/readyz", "/api/v1/health?source=ga"])
+    def test_health_check_path_the_services_answer_unauthenticated(self, valid_context, path):
+        valid_context["global_accelerator"]["health_check_path"] = path
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_global_accelerator_config()["health_check_path"] == path
+
     def test_invalid_health_check_path(self, valid_context):
         """Test health check path not starting with / raises error."""
         valid_context["global_accelerator"]["health_check_path"] = "api/health"

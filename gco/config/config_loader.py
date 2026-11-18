@@ -102,6 +102,7 @@ from gco.stacks.constants import (
     validated_regional_deployment_regions,
     validated_request_body_limit,
 )
+from gco.unauthenticated_paths import UNAUTHENTICATED_PATHS
 
 logger = logging.getLogger(__name__)
 
@@ -1260,7 +1261,11 @@ class ConfigLoader:
           Global Accelerator API accepts (UpdateEndpointGroup rejects others).
         - ``health_check_threshold``: integer 1-10 (the API ThresholdCount
           range).
-        - ``health_check_path``: must start with ``/``.
+        - ``health_check_path``: must start with ``/`` and, without its query
+          string, be one of the paths the services answer without
+          authentication (:data:`gco.unauthenticated_paths.UNAUTHENTICATED_PATHS`):
+          a probe of any other path gets an authentication error, so Global
+          Accelerator would mark every Region unhealthy.
         - ``client_affinity``: NONE or SOURCE_IP, case-insensitive.
         - ``traffic_dial``: see :meth:`_validate_traffic_dial_config`.
 
@@ -1309,6 +1314,15 @@ class ConfigLoader:
         if not isinstance(path, str) or not path.startswith("/"):
             raise ConfigValidationError(
                 f"global_accelerator.health_check_path must start with '/', got {path!r}"
+            )
+        if path.partition("?")[0] not in UNAUTHENTICATED_PATHS:
+            raise ConfigValidationError(
+                f"global_accelerator.health_check_path {path!r} needs request authentication, "
+                "which a Global Accelerator health check cannot send, so every check would "
+                "fail and every Region would be marked unhealthy. Use a path the services "
+                "answer without authentication: "
+                + ", ".join(sorted(UNAUTHENTICATED_PATHS))
+                + " (the default is /api/v1/health)."
             )
 
         allowed_affinity = {"NONE", "SOURCE_IP"}

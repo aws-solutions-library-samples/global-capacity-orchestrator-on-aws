@@ -922,7 +922,7 @@ Global Accelerator uses HTTP health checks to determine if a region is healthy. 
 
 | Setting | Default | Description |
 |---|---|---|
-| `health_check_path` | `/api/v1/health` | HTTPS path GA uses to check ALB health. Must be in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` |
+| `health_check_path` | `/api/v1/health` | HTTPS path GA uses to check ALB health. Must be one of the paths the services answer without authentication (`UNAUTHENTICATED_PATHS` in `gco/unauthenticated_paths.py`: `/api/v1/health`, `/healthz`, `/readyz`, `/metrics`), optionally with a query string; any other path fails at synth |
 | `health_check_interval` | `30` | Seconds between health checks. The Global Accelerator API accepts only `10` or `30`; anything else fails at synth |
 | `health_check_threshold` | `3` | Consecutive health checks (1-10) before an endpoint flips healthy/unhealthy |
 | `client_affinity` | `NONE` | Listener client affinity. `NONE` spreads connections across endpoints for even load distribution; `SOURCE_IP` pins each client IP to the same endpoint for session stickiness |
@@ -935,7 +935,7 @@ them from existing configs at your convenience.
 
 The `/api/v1/health` endpoint returns 200 when the cluster is within resource thresholds and 503 when overloaded. This enables intelligent routing — GA automatically routes traffic away from overloaded regions.
 
-The health check path must be listed in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` so Global Accelerator can probe it without a per-request HMAC envelope. A CI test (`tests/test_health_check_coverage.py`) validates this automatically.
+The health check path must be listed in `UNAUTHENTICATED_PATHS` in `gco/unauthenticated_paths.py` (which the auth middleware in `gco/services/auth_middleware.py` applies) so Global Accelerator can probe it without a per-request HMAC envelope. Every other path answers the probe with an authentication error, which would mark every Region unhealthy, so the synth rejects it. A CI test (`tests/test_health_check_coverage.py`) also checks the ALB target-group paths.
 
 #### Client Affinity
 
