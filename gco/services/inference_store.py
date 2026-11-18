@@ -200,9 +200,18 @@ class InferenceEndpointStore:
         desired_state: str | None = None,
         target_region: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List all endpoints, optionally filtered."""
+        """List all endpoints, optionally filtered.
+
+        A scan returns at most 1 MB of items per call, so this follows
+        ``LastEvaluatedKey`` until the table is exhausted: the reconcile loop
+        and the deploy-time name-collision check both need every record.
+        """
         response = self._table.scan()
-        items = [_deserialize_from_dynamo(i) for i in response.get("Items", [])]
+        raw_items = list(response.get("Items", []))
+        while "LastEvaluatedKey" in response:
+            response = self._table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+            raw_items.extend(response.get("Items", []))
+        items = [_deserialize_from_dynamo(i) for i in raw_items]
         if desired_state:
             items = [i for i in items if i.get("desired_state") == desired_state]
         if target_region:
