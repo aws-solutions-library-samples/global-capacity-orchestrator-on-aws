@@ -1249,11 +1249,26 @@ _FEATURE_RESOURCE_INVENTORY: dict[
 # valid, and is re-issued by the new issuer as soon as its issuerRef changes.
 # On a fresh cluster the cert-manager CRDs do not exist yet in the base pass,
 # which the sweep treats as already absent.
+#
+# gco-ingress (gco-system), IngressClass alb, IngressClassParams alb: the ALB
+# entry point of v0.1.0 through v4.1.0 (10-ingressclass.yaml, 11-ingress.yaml),
+# an internet-facing EKS Auto Mode ALB in the `gco` group routing to the API
+# Services on port 80. v5.0.0 replaced it with the Gateway API entry point
+# (post-helm-gateway.yaml) and the Services now publish only 443, so on a
+# cluster updated in place the old ALB stays up with no valid backend. Deleting
+# the Ingress lets EKS Auto Mode delete that load balancer. The order is the
+# one the EKS Auto Mode guide gives for removing an ALB: the Ingress, then the
+# IngressClass it names, then the IngressClassParams the class references.
+# IngressClassParams is an EKS Auto Mode API; where it does not exist the
+# sweep treats the object as already absent.
 _LEGACY_REMOVED_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
     ("apps/v1", "DaemonSet", "kube-system", "nvidia-device-plugin-daemonset"),
     ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-vpc-endpoint-egress"),
     ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-ray-cluster-internal"),
     ("cert-manager.io/v1", "Issuer", "gco-system", "gco-api-selfsigned"),
+    ("networking.k8s.io/v1", "Ingress", "gco-system", "gco-ingress"),
+    ("networking.k8s.io/v1", "IngressClass", None, "alb"),
+    ("eks.amazonaws.com/v1", "IngressClassParams", None, "alb"),
 )
 
 

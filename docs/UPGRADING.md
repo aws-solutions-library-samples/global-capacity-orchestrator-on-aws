@@ -405,6 +405,22 @@ ways during an in-place redeploy:
   its object is deleted once; see
   [TROUBLESHOOTING.md → Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask).
 
+### Clusters first deployed with v4.1.0 or earlier
+
+Releases up to v4.1.0 published the API through an internet-facing ALB that
+EKS Auto Mode built from the Ingress `gco-system/gco-ingress`, the IngressClass
+`alb` and the IngressClassParams `alb`. v5.0.0 moved the API to the internal
+Gateway ALB but left those objects, and with them the old load balancer, on
+clusters updated in place; it routes to a Service port that no longer exists.
+
+- **The old load balancer is deleted.** The base pass now deletes the Ingress,
+  then the IngressClass and the IngressClassParams, and EKS Auto Mode removes
+  the load balancer it built for them.
+- **Ingresses of your own on the `alb` class lose their load balancer too.**
+  The `alb` class was the cluster's default IngressClass. Before redeploying,
+  create an IngressClass and IngressClassParams of your own under another name
+  and point those Ingresses at it with `spec.ingressClassName`.
+
 ### vLLM endpoints deployed with MODEL
 
 From v8.12.0 the inference monitor starts vLLM with `--model $(MODEL)` when an

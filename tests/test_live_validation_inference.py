@@ -1337,7 +1337,9 @@ def _owned_inventory_item(summary_key: str, endpoint_name: str) -> dict[str, Any
         return {"metadata": {"name": f"{endpoint_name}-mooncake"}}
     if summary_key == "generated_admin_secrets":
         return {"metadata": {"name": f"{endpoint_name}-admin"}}
-    if summary_key in {"legacy_ingresses", "legacy_http_routes"}:
+    if summary_key == "legacy_ingresses":
+        return {"metadata": {"name": f"inference-{endpoint_name}-proxy"}}
+    if summary_key == "legacy_http_routes":
         return {"metadata": {"name": f"{endpoint_name}-proxy"}}
     raise AssertionError(f"Unhandled inventory kind: {summary_key}")
 
@@ -1405,6 +1407,29 @@ class TestStrongAbsence:
         assert evidence["kubernetes_counts"][kind.summary_key] == 1
         assert table.get_calls[-1]["ConsistentRead"] is True
         assert context.session.resource_calls == [("dynamodb", "us-west-2")]
+
+    def test_legacy_ingresses_are_the_ones_releases_up_to_v4_created(self) -> None:
+        # inference-{name} (shared by its canary) and, from v3.0.0,
+        # inference-{name}-proxy; the same names the monitor's cleanup deletes.
+        from gco.services.inference_monitor import _legacy_ingress_names
+
+        classify = inventory_module.InferenceInventoryMixin._owned_inventory_item
+        candidates = (
+            "llama",
+            "llama-canary",
+            "llama-proxy",
+            "inference-llama",
+            "inference-llama-canary",
+            "inference-llama-proxy",
+            "inference-llama-v2",
+        )
+        owned = {
+            name
+            for name in candidates
+            if classify("legacy_ingresses", {"metadata": {"name": name}}, "llama", set())
+        }
+        assert owned == {"inference-llama", "inference-llama-proxy"}
+        assert owned == set(_legacy_ingress_names("llama"))
 
     def test_ddb_presence_blocks_absence_even_when_kubernetes_is_empty(
         self, tmp_path: Path

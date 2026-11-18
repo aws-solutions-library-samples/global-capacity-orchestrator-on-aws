@@ -158,10 +158,12 @@ class InferenceInventoryMixin:
             },
             "config_maps": {f"{endpoint_name}-mooncake", f"{endpoint_name}-pd-proxy"},
             "generated_admin_secrets": {f"{endpoint_name}-admin"},
+            # The Ingresses releases up to v4.1.0 created for an endpoint
+            # (the inference monitor's _legacy_ingress_names): the endpoint's
+            # own, which its canary shared, and from v3.0.0 the PD proxy's.
             "legacy_ingresses": {
-                endpoint_name,
-                f"{endpoint_name}-canary",
-                f"{endpoint_name}-proxy",
+                f"inference-{endpoint_name}",
+                f"inference-{endpoint_name}-proxy",
             },
             "legacy_http_routes": {
                 endpoint_name,

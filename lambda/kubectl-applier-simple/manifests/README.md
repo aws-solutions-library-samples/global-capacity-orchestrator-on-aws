@@ -191,6 +191,13 @@ here from upgraded clusters.
 | `post-helm-slurm-observability.yaml` | The *GCO Slurm* Grafana dashboard `ConfigMap` (pending/running jobs and largest pending job per partition, node states, worker pods per NodeSet, allocated CPUs/GPUs, scheduler cycle times, control-plane status) and the `PrometheusRule` `gco-slurm-alerts` (controller not scraped, no slurmrestd replica, accounting not ready, DOWN nodes, stalled queue, state volume filling) — **skipped and pruned when Slurm or observability is disabled** |
 | `post-helm-sqs-consumer.yaml` | KEDA `ScaledJob` for the [SQS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html) queue processor, with separate projected AWS STS and Kubernetes API service-account tokens — **skipped when queue_processor disabled** |
 
+There is no Ingress manifest. Releases up to v4.1.0 published the API through
+`10-ingressclass.yaml` and `11-ingress.yaml`: an internet-facing EKS Auto Mode
+ALB built from the Ingress `gco-system/gco-ingress`, the IngressClass `alb` and
+the IngressClassParams `alb`. `post-helm-gateway.yaml` replaced them in v5.0.0.
+The applier's legacy sweep deletes those three objects from clusters updated in
+place, the Ingress first, and EKS Auto Mode then deletes the old load balancer.
+
 ## Platform Workload Contract
 
 The five `gco-system` Deployments (`30`–`34`) and the queue-processor
