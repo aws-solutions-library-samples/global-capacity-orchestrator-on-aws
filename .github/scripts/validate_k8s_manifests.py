@@ -238,6 +238,14 @@ _STRUCTURAL_STUBS: dict[str, str] = {
     "{{PCS_RESTAPI_CIDR}}": "10.0.0.0/16",
     "{{ARGOCD_SOURCE_REPOS}}": '["https://github.com/example/*"]',
     "{{ARGOCD_GITOPS_SYNC_POLICY}}": '{"automated": {"selfHeal": true, "prune": false}}',
+    # The platform ALB health check in post-helm-gateway.yaml: bare integers
+    # the TargetGroupConfiguration CRD bounds (interval 5-300, timeout 2-120,
+    # thresholds 2-10), so they render to the shipped defaults of
+    # gco/gateway_health_check_config.py rather than the generic integer 1.
+    "{{GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS}}": "15",
+    "{{GATEWAY_HEALTH_CHECK_TIMEOUT_SECONDS}}": "5",
+    "{{GATEWAY_HEALTHY_THRESHOLD_COUNT}}": "2",
+    "{{GATEWAY_UNHEALTHY_THRESHOLD_COUNT}}": "2",
 }
 
 # Placeholders that sit in a bare (unquoted) numeric scalar position — e.g.

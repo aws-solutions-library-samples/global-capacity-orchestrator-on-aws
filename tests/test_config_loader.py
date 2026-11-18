@@ -4,7 +4,7 @@ Tests for gco/config/config_loader.ConfigLoader.
 Drives ConfigLoader against a MockApp/MockNode pair that surfaces a
 hand-crafted CDK context dict. Verifies happy-path loading of every
 top-level field (project_name, deployment_regions, kubernetes_version,
-resource_thresholds, global_accelerator, alb_config, inference_proxy,
+resource_thresholds, global_accelerator, inference_proxy,
 manifest_processor, job_validation_policy, api_gateway, tags) and
 that missing required fields raise ConfigValidationError with an
 informative message. Companion suite to test_config_loader_validation.py
@@ -40,6 +40,36 @@ class MockApp:
 
     def __init__(self, context: dict):
         self.node = MockNode(context)
+
+
+def minimal_context() -> dict:
+    """The smallest context that passes validation: every optional block is omitted.
+
+    Validation always runs, so the getters' defaults for omitted blocks are
+    observed through a context that carries only the required fields.
+    """
+    return {
+        "deployment_regions": {
+            "global": "us-east-2",
+            "api_gateway": "us-east-2",
+            "monitoring": "us-east-2",
+        },
+        "kubernetes_version": "1.37",
+        "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 80, "gpu_threshold": -1},
+        "manifest_processor": {
+            "image": "gco/manifest-processor:latest",
+            "replicas": 3,
+            "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
+        },
+        "job_validation_policy": {"allowed_namespaces": ["gco-jobs"], "resource_quotas": {}},
+        "api_gateway": {
+            "throttle_rate_limit": 1000,
+            "throttle_burst_limit": 2000,
+            "log_level": "INFO",
+            "metrics_enabled": True,
+            "tracing_enabled": True,
+        },
+    }
 
 
 @pytest.fixture
@@ -123,13 +153,41 @@ class TestConfigLoaderValidation:
         with pytest.raises(ConfigValidationError, match="must be a non-empty object"):
             ConfigLoader(app)
 
-    def test_empty_context_skips_validation(self):
-        """Test that empty context (outside CDK) skips validation."""
-        app = MockApp({})
-        config = ConfigLoader(app)
-        # Should use defaults
+    def test_empty_context_is_validated(self):
+        """An empty context is validated like any other, so required fields fail it."""
+        with pytest.raises(
+            ConfigValidationError,
+            match="Required configuration field 'kubernetes_version' is missing",
+        ):
+            ConfigLoader(MockApp({}))
+
+    def test_missing_project_name_defaults_and_still_validates(self):
+        """Without project_name the documented default applies and every block is checked.
+
+        An absent project_name used to skip all validation, so an invalid region,
+        Global Accelerator interval, TLS lifetime or API Gateway log level was
+        synthesized as written.
+        """
+        context = minimal_context()
+        config = ConfigLoader(MockApp(context))
         assert config.get_project_name() == "gco"
         assert config.get_regions() == ["us-east-1"]
+        invalid_blocks = {
+            "deployment_regions": {**context["deployment_regions"], "regional": ["us-east-99"]},
+            "global_accelerator": {"health_check_interval": 15},
+            "backend_tls": {"leaf_validity_days": 5000},
+            "api_gateway": {**context["api_gateway"], "log_level": "DEBUG"},
+        }
+        for key, value in invalid_blocks.items():
+            with pytest.raises(ConfigValidationError):
+                ConfigLoader(MockApp({**context, key: value}))
+
+    @pytest.mark.parametrize("project_name", ["", "Invalid_Name", 7])
+    def test_explicit_project_name_is_never_replaced_by_the_default(self, project_name):
+        """Only an absent project_name defaults; an explicit invalid one is an error."""
+        context = {**minimal_context(), "project_name": project_name}
+        with pytest.raises(ConfigValidationError, match="Invalid project_name"):
+            ConfigLoader(MockApp(context))
 
 
 def test_config_and_public_stack_exports_import_in_a_clean_interpreter() -> None:
@@ -495,12 +553,15 @@ class TestConfigLoaderGetters:
         assert mp_config["replicas"] == 3
         assert mp_config["allowed_namespaces"] == ["gco-jobs"]
 
-    def test_get_alb_config(self, valid_context):
-        """Test getting ALB config."""
+    def test_alb_config_is_deprecated_and_its_values_are_ignored(self, valid_context):
+        """alb_config validates with a warning; the ALB probe comes from gateway_health_check."""
         app = MockApp(valid_context)
         config = ConfigLoader(app)
-        alb_config = config.get_alb_config()
-        assert alb_config["health_check_interval"] == 30
+        assert not hasattr(config, "get_alb_config")
+        assert config.get_gateway_health_check_config()["interval_seconds"] == 15
+        assert [w.split(":")[0] for w in config.warnings] == [
+            "alb_config is deprecated and ignored"
+        ]
 
 
 class TestInferenceProxyConfig:
@@ -597,7 +658,7 @@ class TestInferenceProxyConfig:
         """CDK normalizes top-level JSON null to omission before validation."""
         from aws_cdk import App
 
-        app = App(context={"inference_proxy": None})
+        app = App(context={**minimal_context(), "inference_proxy": None})
 
         assert "inference_proxy" not in app.node.get_all_context()
         assert ConfigLoader(app).get_inference_proxy_config() == self.DEFAULTS
@@ -903,42 +964,41 @@ class TestDefaultValues:
 
     def test_default_project_name(self):
         """Test default project name."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         assert config.get_project_name() == "gco"
 
     def test_default_regions(self):
         """Test default regions."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         assert config.get_regions() == ["us-east-1"]
 
     def test_default_kubernetes_version(self):
         """Test default Kubernetes version."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         assert config.get_kubernetes_version() == "1.37"
 
     def test_omitted_valkey_config_is_disabled(self):
         """Valkey is opt-in when the entire context block is omitted."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         assert config.get_valkey_config()["enabled"] is False
 
     def test_default_resource_thresholds(self):
-        """Test default resource thresholds."""
-        app = MockApp({})
+        """The optional thresholds a resource_thresholds block leaves out take their defaults."""
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         thresholds = config.get_resource_thresholds()
-        # 80/80 leaves headroom above the idle-cluster platform baseline
-        # (observability stack ~65-70% memory on right-sized Auto Mode nodes).
+        # cpu/memory/gpu are required; minimal_context() sets the shipped values.
         assert thresholds.cpu_threshold == 80
         assert thresholds.memory_threshold == 80
-        assert thresholds.gpu_threshold == -1  # disabled by default for inference workloads
+        assert thresholds.gpu_threshold == -1
         assert thresholds.pending_pods_threshold == 10
         assert thresholds.pending_requested_cpu_vcpus == 100
         assert thresholds.pending_requested_memory_gb == 200
-        assert thresholds.pending_requested_gpus == -1  # disabled by default
+        assert thresholds.pending_requested_gpus == 8
 
 
 class TestFsxLustreConfig:
@@ -946,7 +1006,7 @@ class TestFsxLustreConfig:
 
     def test_get_fsx_lustre_config_defaults(self):
         """Test getting FSx config with defaults."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         fsx_config = config.get_fsx_lustre_config()
 
@@ -1010,7 +1070,7 @@ class TestFsxLustreConfig:
 
     def test_get_fsx_lustre_config_node_group_defaults(self):
         """Test FSx config node_group has all default fields."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         fsx_config = config.get_fsx_lustre_config()
 
@@ -1077,7 +1137,7 @@ class TestEksClusterConfig:
 
     def test_get_eks_cluster_config_defaults(self):
         """Test getting EKS cluster config with defaults."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         eks_config = config.get_eks_cluster_config()
 
@@ -1217,12 +1277,11 @@ class TestConfigValidationEdgeCases:
         assert ga_config["traffic_dial"]["enabled"] is False
         assert ga_config["traffic_dial"]["mode"] == "monitor"
 
-    def test_missing_alb_config(self, valid_context):
-        """Test that missing alb_config raises error."""
+    def test_missing_alb_config_is_valid(self, valid_context):
+        """alb_config is deprecated, so leaving it out is valid and warns about nothing."""
         del valid_context["alb_config"]
         app = MockApp(valid_context)
-        with pytest.raises(ConfigValidationError, match="alb_config configuration is required"):
-            ConfigLoader(app)
+        assert ConfigLoader(app).warnings == []
 
     def test_missing_manifest_processor_config(self, valid_context):
         """Test that missing manifest_processor config raises error."""
@@ -1337,23 +1396,16 @@ class TestConfigValidationEdgeCases:
         # Explicit keys still override their defaults.
         assert ga_config["name"] == "gco-accelerator"
 
-    def test_missing_alb_field(self, valid_context):
-        """Test that missing ALB field raises error."""
-        del valid_context["alb_config"]["healthy_threshold"]
+    @pytest.mark.parametrize(
+        "alb_config",
+        [{"health_check_interval": 30}, {"healthy_threshold": -1}, {"health_check_timeout": "5"}],
+    )
+    def test_alb_config_contents_are_no_longer_validated(self, valid_context, alb_config):
+        """The deprecated block is ignored whole: partial or invalid contents only warn."""
+        valid_context["alb_config"] = alb_config
         app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="Missing alb_config configuration: healthy_threshold"
-        ):
-            ConfigLoader(app)
-
-    def test_negative_alb_value(self, valid_context):
-        """Test that negative ALB value raises error."""
-        valid_context["alb_config"]["unhealthy_threshold"] = 0
-        app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="unhealthy_threshold must be a positive integer"
-        ):
-            ConfigLoader(app)
+        config = ConfigLoader(app)
+        assert config.warnings[0].startswith("alb_config is deprecated and ignored")
 
     def test_missing_api_gateway_field(self, valid_context):
         """Test that missing API Gateway field raises error."""
@@ -1504,7 +1556,7 @@ class TestAuroraPgvectorConfig:
 
     def test_get_aurora_pgvector_config_defaults(self):
         """Test getting Aurora pgvector config with defaults."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         aurora_config = config.get_aurora_pgvector_config()
 
@@ -1552,7 +1604,7 @@ class TestAuroraPgvectorConfig:
 
     def test_get_aurora_pgvector_config_min_acu_zero_for_scale_to_zero(self):
         """Test that min_acu=0 is the default for scale-to-zero support."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         aurora_config = config.get_aurora_pgvector_config()
 
@@ -1575,7 +1627,7 @@ class TestAuroraPgvectorConfig:
 
     def test_get_aurora_pgvector_config_non_dict_context_uses_defaults(self):
         """Test that non-dict context value falls back to defaults."""
-        app = MockApp({"aurora_pgvector": "invalid"})
+        app = MockApp({**minimal_context(), "aurora_pgvector": "invalid"})
         config = ConfigLoader(app)
         aurora_config = config.get_aurora_pgvector_config()
 
@@ -1584,7 +1636,7 @@ class TestAuroraPgvectorConfig:
 
     def test_get_aurora_pgvector_config_disabled_by_default(self):
         """Test that Aurora pgvector is disabled by default."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         aurora_config = config.get_aurora_pgvector_config()
 
@@ -1596,7 +1648,7 @@ class TestAnalyticsEnvironmentConfig:
 
     def test_get_analytics_config_defaults(self):
         """Missing analytics_environment block → defaults apply."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
         analytics_config = config.get_analytics_config()
 
@@ -1611,7 +1663,7 @@ class TestAnalyticsEnvironmentConfig:
 
     def test_get_analytics_enabled_defaults_to_false(self):
         """Missing analytics_environment block → get_analytics_enabled() is False."""
-        app = MockApp({})
+        app = MockApp(minimal_context())
         config = ConfigLoader(app)
 
         assert config.get_analytics_enabled() is False
@@ -1768,7 +1820,7 @@ class TestAnalyticsEnvironmentConfig:
 
     def test_non_dict_analytics_environment_context_uses_defaults(self):
         """Non-dict analytics_environment context value → falls back to defaults."""
-        app = MockApp({"analytics_environment": "invalid"})
+        app = MockApp({**minimal_context(), "analytics_environment": "invalid"})
         config = ConfigLoader(app)
         analytics_config = config.get_analytics_config()
 

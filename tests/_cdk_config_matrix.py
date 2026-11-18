@@ -801,13 +801,14 @@ CONFIGS.extend(
                 }
             },
         ),
-        # Regional ALB probe contract at non-defaults.
+        # Platform ALB target-group probe at non-defaults (rendered into
+        # post-helm-gateway.yaml through the kubectl-applier replacements).
         (
-            "alb-tuned",
+            "gateway-health-check-tuned",
             {
-                "alb_config": {
-                    "health_check_interval": 15,
-                    "health_check_timeout": 10,
+                "gateway_health_check": {
+                    "interval_seconds": 30,
+                    "timeout_seconds": 10,
                     "healthy_threshold": 3,
                     "unhealthy_threshold": 4,
                 }

@@ -81,7 +81,7 @@ def test_controller_namespace_constant_matches_publisher(dial_handler):
     assert published["Namespace"] == dial_handler.HEALTH_METRIC_NAMESPACE
 
 
-def test_cluster_name_convention_matches_controller_derivation():
+def test_cluster_name_convention_matches_controller_derivation(valid_cdk_context):
     """Both sides derive the same ClusterName dimension value.
 
     The health monitor's CLUSTER_NAME env comes from
@@ -93,7 +93,7 @@ def test_cluster_name_convention_matches_controller_derivation():
 
     from gco.config.config_loader import ConfigLoader
 
-    config = ConfigLoader(cdk.App())  # no context: validation skips, defaults apply
+    config = ConfigLoader(cdk.App(context=valid_cdk_context))
     cluster_config = config.get_cluster_config(REGION)
     assert cluster_config.cluster_name == f"{config.get_project_name()}-{REGION}"
     assert cluster_config.cluster_name == CLUSTER

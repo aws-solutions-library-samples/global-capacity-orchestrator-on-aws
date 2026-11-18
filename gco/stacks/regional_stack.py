@@ -136,6 +136,11 @@ from gco.eks_capabilities_config import (
     kro_kubernetes_username,
     normalize_eks_capabilities_config,
 )
+from gco.gateway_health_check_config import (
+    GATEWAY_HEALTH_CHECK_CONTEXT_KEY,
+    compute_gateway_health_check_replacements,
+    validate_gateway_health_check_config,
+)
 from gco.hyperpod_config import (
     compute_hyperpod_replacements,
     hyperpod_enabled,
@@ -2190,6 +2195,22 @@ class GCORegionalStack(Stack):
         return resolve_tracing_config(
             self.node.try_get_context(TRACING_CONTEXT_KEY),
             self.node.try_get_context(TRACING_OVERRIDES_CONTEXT_KEY),
+        )
+
+    def _gateway_health_check_config(self) -> dict[str, int]:
+        """The validated ``gateway_health_check`` block (ALB target-group probe).
+
+        Same optional-accessor posture as :meth:`_tracing_config`: a config
+        double without ``get_gateway_health_check_config`` (or a
+        ``MagicMock``) resolves this stack's own ``gateway_health_check``
+        context, so an absent block yields the shipped 15 / 5 / 2 / 2 probe.
+        """
+        getter = getattr(self.config, "get_gateway_health_check_config", None)
+        raw = getter() if callable(getter) else None
+        if isinstance(raw, dict):
+            return raw
+        return validate_gateway_health_check_config(
+            self.node.try_get_context(GATEWAY_HEALTH_CHECK_CONTEXT_KEY)
         )
 
     def _transaction_search_active(self) -> bool:
@@ -4436,6 +4457,10 @@ class GCORegionalStack(Stack):
             # lockstep (Quantity string for request, YAML integers for the HPA
             # target and the min/max replica bounds).
             **_compute_inference_proxy_tls_replacements(inference_proxy_config),
+            # Platform ALB target-group health check (post-helm-gateway.yaml),
+            # bare YAML integers from cdk.json gateway_health_check. Always
+            # emitted: the Gateway file must never be skipped.
+            **compute_gateway_health_check_replacements(self._gateway_health_check_config()),
             # Manifest-processor sizing is an operator decision made in
             # cdk.json (validated in ConfigLoader): the fixed replica count and
             # the application container's limits render verbatim. The optional

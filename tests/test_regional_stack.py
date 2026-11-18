@@ -77,10 +77,10 @@ class MockConfigLoader:
             "health_check_path": "/api/v1/health",
         }
 
-    def get_alb_config(self):
+    def get_gateway_health_check_config(self):
         return {
-            "health_check_interval": 30,
-            "health_check_timeout": 5,
+            "interval_seconds": 15,
+            "timeout_seconds": 5,
             "healthy_threshold": 2,
             "unhealthy_threshold": 2,
         }
@@ -1551,6 +1551,12 @@ class TestRegionalStackSynthesis:
         assert replacements["{{INFERENCE_PROXY_TLS_CPU_TARGET_UTILIZATION}}"] == "70"
         assert replacements["{{INFERENCE_PROXY_MIN_REPLICAS}}"] == "3"
         assert replacements["{{INFERENCE_PROXY_MAX_REPLICAS}}"] == "10"
+        # The platform ALB health check keeps the 15 / 5 / 2 / 2 probe the
+        # gateway manifest always shipped.
+        assert replacements["{{GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS}}"] == "15"
+        assert replacements["{{GATEWAY_HEALTH_CHECK_TIMEOUT_SECONDS}}"] == "5"
+        assert replacements["{{GATEWAY_HEALTHY_THRESHOLD_COUNT}}"] == "2"
+        assert replacements["{{GATEWAY_UNHEALTHY_THRESHOLD_COUNT}}"] == "2"
         # Manifest-processor sizing renders verbatim from the validated config;
         # with autoscaling off the HPA gate stays unresolved so
         # 35-manifest-processor-hpa.yaml is skipped and pruned.
@@ -1663,6 +1669,72 @@ class TestRegionalStackSynthesis:
         (metric,) = hpa["spec"]["metrics"]
         assert metric["containerResource"]["container"] == app_container["name"]
         assert metric["containerResource"]["target"]["averageUtilization"] == 65
+
+    def test_gateway_health_check_config_renders_the_target_group_probe(self):
+        """cdk.json gateway_health_check reaches the gateway manifest as bare integers."""
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        context = json.loads(
+            (Path(__file__).resolve().parent.parent / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        context["gateway_health_check"] = {
+            "interval_seconds": 30,
+            "timeout_seconds": 10,
+            "healthy_threshold": 3,
+            "unhealthy_threshold": 4,
+        }
+        app = cdk.App(context=context)
+        config = ConfigLoader(app)
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-gateway-health-check",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn=(
+                    "arn:aws:secretsmanager:us-east-2:123456789012:secret:"
+                    "gco/api-gateway-auth-token"
+                ),
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+        resources = assertions.Template.from_stack(stack).to_json()["Resources"]
+        replacements = resources["HelmInstallCharts"]["Properties"]["ImageReplacements"]
+        text = (
+            Path(__file__).resolve().parent.parent
+            / "lambda"
+            / "kubectl-applier-simple"
+            / "manifests"
+            / "post-helm-gateway.yaml"
+        ).read_text(encoding="utf-8")
+        for token, value in replacements.items():
+            if isinstance(value, str):
+                text = text.replace(token, value)
+        text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "test-value", text)
+        target_group = next(
+            doc
+            for doc in yaml.safe_load_all(text)
+            if doc
+            and doc["kind"] == "TargetGroupConfiguration"
+            and doc["metadata"]["name"] == "gco-default-target-group"
+        )
+        assert target_group["spec"]["defaultConfiguration"]["healthCheckConfig"] == {
+            "healthCheckProtocol": "HTTPS",
+            "healthCheckPath": "/healthz",
+            "healthCheckInterval": 30,
+            "healthCheckTimeout": 10,
+            "healthyThresholdCount": 3,
+            "unhealthyThresholdCount": 4,
+        }
 
     def test_non_default_inference_proxy_config_renders_typed_manifest(self):
         """Real config values flow through ImageReplacements into typed YAML."""

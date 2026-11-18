@@ -33,10 +33,12 @@ spec:
       # protected paths after TLS termination.
       healthCheckProtocol: HTTPS
       healthCheckPath: /healthz
-      healthCheckInterval: 15
-      healthCheckTimeout: 5
-      healthyThresholdCount: 2
-      unhealthyThresholdCount: 2
+      # cdk.json gateway_health_check (defaults 15 / 5 / 2 / 2), rendered by
+      # gco/gateway_health_check_config.py.
+      healthCheckInterval: {{GATEWAY_HEALTH_CHECK_INTERVAL_SECONDS}}
+      healthCheckTimeout: {{GATEWAY_HEALTH_CHECK_TIMEOUT_SECONDS}}
+      healthyThresholdCount: {{GATEWAY_HEALTHY_THRESHOLD_COUNT}}
+      unhealthyThresholdCount: {{GATEWAY_UNHEALTHY_THRESHOLD_COUNT}}
     targetGroupAttributes:
       # Keep draining targets alive for the maximum 15-minute inference stream.
       - key: deregistration_delay.timeout_seconds

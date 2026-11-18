@@ -2,7 +2,7 @@
 Tests for gco/config/config_loader.py validation rules.
 
 Exercises the ConfigLoader validator across its defensive branches:
-the no-op path when no context is provided (validation skipped),
+an app without context (validated, so its missing required fields fail),
 missing required fields, empty regional region list, more than ten regions,
 and other field-level constraints. Uses real cdk.App instances with
 context= dicts so the CDK Node wiring is part of the test rather than
@@ -15,20 +15,37 @@ import aws_cdk as cdk
 import pytest
 
 
+def _minimal_context() -> dict:
+    """The required fields only; every optional block is left to its default."""
+    return {
+        "deployment_regions": {"regional": ["us-east-1"]},
+        "kubernetes_version": "1.37",
+        "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 80, "gpu_threshold": -1},
+        "manifest_processor": {
+            "image": "test",
+            "replicas": 1,
+            "resource_limits": {"cpu": "1", "memory": "1Gi"},
+        },
+        "job_validation_policy": {"allowed_namespaces": ["default"], "resource_quotas": {}},
+        "api_gateway": {
+            "throttle_rate_limit": 100,
+            "throttle_burst_limit": 200,
+            "log_level": "INFO",
+            "metrics_enabled": True,
+            "tracing_enabled": True,
+        },
+    }
+
+
 class TestConfigLoaderValidation:
     """Tests for ConfigLoader validation."""
 
-    def test_config_loader_skips_validation_without_context(self):
-        """Test that ConfigLoader skips validation when no context is present."""
-        from gco.config.config_loader import ConfigLoader
+    def test_config_loader_validates_an_app_without_context(self):
+        """An app without context is validated, not skipped: required fields fail it."""
+        from gco.config.config_loader import ConfigLoader, ConfigValidationError
 
-        app = cdk.App()
-        # Should not raise - validation is skipped when project_name is None
-        config = ConfigLoader(app)
-        # Nothing was validated, so nothing was required: the loader is bound to
-        # the app and the app still carries no project_name context.
-        assert config.app is app
-        assert app.node.try_get_context("project_name") is None
+        with pytest.raises(ConfigValidationError, match="Required configuration field"):
+            ConfigLoader(cdk.App())
 
     def test_config_loader_validates_required_fields(self):
         """Test that ConfigLoader validates required fields."""
@@ -601,7 +618,7 @@ class TestConfigLoaderRegionAvailability:
         """Test validate_region_availability returns True for valid region."""
         from gco.config.config_loader import ConfigLoader
 
-        app = cdk.App()
+        app = cdk.App(context=_minimal_context())
         config = ConfigLoader(app)
 
         with patch("boto3.client") as mock_client:
@@ -616,7 +633,7 @@ class TestConfigLoaderRegionAvailability:
         """Test validate_region_availability returns False on error."""
         from gco.config.config_loader import ConfigLoader
 
-        app = cdk.App()
+        app = cdk.App(context=_minimal_context())
         config = ConfigLoader(app)
 
         with patch("boto3.client") as mock_client:
@@ -631,7 +648,7 @@ class TestConfigLoaderRegionAvailability:
         """Test get_available_regions returns list of regions."""
         from gco.config.config_loader import ConfigLoader
 
-        app = cdk.App()
+        app = cdk.App(context=_minimal_context())
         config = ConfigLoader(app)
 
         with patch("boto3.client") as mock_client:
@@ -652,7 +669,7 @@ class TestConfigLoaderRegionAvailability:
         """Test get_available_regions falls back to VALID_REGIONS on error."""
         from gco.config.config_loader import ConfigLoader
 
-        app = cdk.App()
+        app = cdk.App(context=_minimal_context())
         config = ConfigLoader(app)
 
         with patch("boto3.client") as mock_client:
@@ -672,7 +689,7 @@ class TestConfigLoaderGetters:
         """Test get_tags returns empty dict by default."""
         from gco.config.config_loader import ConfigLoader
 
-        app = cdk.App()
+        app = cdk.App(context=_minimal_context())
         config = ConfigLoader(app)
 
         tags = config.get_tags()
@@ -682,7 +699,7 @@ class TestConfigLoaderGetters:
         """Test get_fsx_lustre_config returns defaults."""
         from gco.config.config_loader import ConfigLoader
 
-        app = cdk.App()
+        app = cdk.App(context=_minimal_context())
         config = ConfigLoader(app)
 
         fsx_config = config.get_fsx_lustre_config()

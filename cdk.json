@@ -116,10 +116,10 @@
       "trust_cache_max_stale_seconds": 3600
     },
 
-    "_comment_alb_config": "Internal ALB target-group health checks for the manifest-processor service. health_check_interval / health_check_timeout in seconds. healthy_threshold / unhealthy_threshold are the consecutive-probe counts before a target flips state. See https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html.",
-    "alb_config": {
-      "health_check_interval": 30,
-      "health_check_timeout": 5,
+    "_comment_gateway_health_check": "Target-group health check of the internal platform ALB that the AWS Load Balancer Controller builds from the gco-system/gco-gateway Gateway. Every platform target group (health-monitor, manifest-processor, inference-proxy) inherits it from the default TargetGroupConfiguration in lambda/kubectl-applier-simple/manifests/post-helm-gateway.yaml, which probes /healthz over HTTPS. interval_seconds (5-300) is the time between probes of one target; timeout_seconds (2-120, less than interval_seconds) is how long a probe waits for an answer; healthy_threshold / unhealthy_threshold (2-10) are the consecutive passes / failures that flip a target. Defaults 15 / 5 / 2 / 2. Replaces the former alb_config block, which nothing read. See docs/CUSTOMIZATION.md (Load Balancer Configuration) and https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html.",
+    "gateway_health_check": {
+      "interval_seconds": 15,
+      "timeout_seconds": 5,
       "healthy_threshold": 2,
       "unhealthy_threshold": 2
     },

@@ -30,10 +30,17 @@ tls_policy = config.get_backend_tls_config()
 ## Validation Model
 
 Invalid operator input fails during synthesis through `ConfigValidationError`.
-Validation includes project naming, supported regions, numeric bounds, feature
-sub-block types, and security-sensitive lifecycle relationships such as TLS
-root overlap and trust-cache timing. Secrets and credentials do not belong in
-CDK context.
+Validation runs for every context, including one without `project_name`, which
+then takes its default `gco`. It includes project naming, supported regions,
+numeric bounds, feature sub-block types, and security-sensitive lifecycle
+relationships such as TLS root overlap and trust-cache timing. Secrets and
+credentials do not belong in CDK context.
+
+A block that no longer takes effect (`DEPRECATED_CONTEXT_KEYS`, for example
+`alb_config`) still validates, because `gco upgrade` keeps an operator's
+`cdk.json` byte for byte: the loader ignores it and records a warning naming
+the block and what to do instead. Warnings are logged at `WARNING`, which
+`cdk synth` prints, and collected in `ConfigLoader.warnings`.
 
 ## Source Files
 
@@ -41,5 +48,5 @@ CDK context.
 |------|-------------|
 | `__init__.py` | Exports the package's public configuration API. |
 | `accelerator_catalog.json` | Reviewed NVIDIA GPU and AWS Neuron instance catalog consumed by configuration and capacity validation. |
-| `config_loader.py` | Deployment defaults, typed accessors, cross-field validation, and schema rules. The opt-in `eks_capabilities` block (AWS-managed ACK and kro) is validated through the CDK-free `gco/eks_capabilities_config.py`, and the self-managed Argo CD block (`helm.argocd`) through `gco/argocd_config.py`; the CLI and live validation share both. The `tracing` block and its run-scoped `tracing_overrides` context resolve through `resolve_tracing_config`, which the regional stack also calls. |
+| `config_loader.py` | Deployment defaults, typed accessors, cross-field validation, and schema rules. The opt-in `eks_capabilities` block (AWS-managed ACK and kro) is validated through the CDK-free `gco/eks_capabilities_config.py`, and the self-managed Argo CD block (`helm.argocd`) through `gco/argocd_config.py`; the CLI and live validation share both. The `tracing` block and its run-scoped `tracing_overrides` context resolve through `resolve_tracing_config`, which the regional stack also calls. The `gateway_health_check` block (the platform ALB target-group probe) is validated and rendered by the CDK-free `gco/gateway_health_check_config.py`. |
 | `runai_api_contract.json` | The NVIDIA Run:ai API routes, parameters and fields `gco capacity runai` reads; `.github/scripts/check_runai_api_contract.py` checks it monthly against every published API reference version from its `min_version`. |
