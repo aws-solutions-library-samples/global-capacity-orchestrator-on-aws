@@ -15,6 +15,7 @@ hot loop.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import ipaddress
@@ -43,6 +44,24 @@ from gco.services.webhook_dispatcher import (
     create_webhook_dispatcher_from_env,
     validate_webhook_url,
 )
+
+
+def _stream_via_post(client):
+    """Serve the dispatcher's streamed POSTs from ``client.post``.
+
+    Each delivery attempt is ``client.stream("POST", url, ...)``. These tests
+    configure the outcome of an attempt (a response or an exception) on
+    ``client.post`` and read its ``call_args``, so the stream context awaits
+    ``post`` with the same arguments and yields what it returns.
+    """
+
+    @contextlib.asynccontextmanager
+    async def stream(method, url, **kwargs):
+        assert method == "POST"
+        yield await client.post(url, **kwargs)
+
+    client.stream = stream
+    return client
 
 
 class TestJobStateCache:
@@ -247,6 +266,7 @@ class TestWebhookDispatcher:
             mock_response.status_code = 200
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -271,6 +291,7 @@ class TestWebhookDispatcher:
             mock_response.status_code = 200
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             await dispatcher._deliver_webhook(webhook, payload)
 
@@ -323,6 +344,7 @@ class TestWebhookDispatcher:
             mock_response = MagicMock(status_code=200)
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             results = await dispatcher._dispatch_event(WebhookEvent.JOB_COMPLETED, job)
 
@@ -354,6 +376,7 @@ class TestWebhookDispatcher:
             mock_response_200.status_code = 200
             mock_client.post.side_effect = [mock_response_500, mock_response_200]
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -377,6 +400,7 @@ class TestWebhookDispatcher:
             mock_response.text = "Bad Request"
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -398,6 +422,7 @@ class TestWebhookDispatcher:
             mock_client = AsyncMock()
             mock_client.post.side_effect = httpx2.TimeoutException("Timeout")
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -464,6 +489,7 @@ class TestWebhookDispatcher:
             mock_response.status_code = 200
             mock_client.post.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             results = await dispatcher._dispatch_event(WebhookEvent.JOB_COMPLETED, job)
 
@@ -815,6 +841,7 @@ class TestDeliverWebhookEdgeCases:
             mock_client = AsyncMock()
             mock_client.post.side_effect = httpx2.ConnectError("Connection refused")
             mock_cls.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -837,6 +864,7 @@ class TestDeliverWebhookEdgeCases:
             resp.text = "Service Unavailable"
             mock_client.post.return_value = resp
             mock_cls.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -860,6 +888,7 @@ class TestDeliverWebhookEdgeCases:
                 ok_resp,
             ]
             mock_cls.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             result = await dispatcher._deliver_webhook(webhook, payload)
 
@@ -886,6 +915,7 @@ class TestDeliverWebhookEdgeCases:
             client = AsyncMock()
             client.post.return_value = MagicMock(status_code=204)
             mock_cls.return_value.__aenter__.return_value = client
+            _stream_via_post(client)
             result = await dispatcher._deliver_webhook(webhook, {"event": "job.completed"})
 
         assert result.success is True
@@ -915,6 +945,7 @@ class TestDeliverWebhookEdgeCases:
                 httpx2.ConnectError(f"transport {secret}"),
             ]
             mock_cls.return_value.__aenter__.return_value = client
+            _stream_via_post(client)
             result = await dispatcher._deliver_webhook(webhook, {"event": "job.failed"})
 
         assert result.success is False
@@ -949,6 +980,72 @@ class TestDeliverWebhookEdgeCases:
         assert "abc123" not in caplog.text
         assert not [r for r in caplog.records if r.name.split(".")[0] in {"httpx2", "httpcore2"}]
         assert "wh-quiet" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_the_response_body_is_never_read(self, dispatcher):
+        """A receiver that streams a huge body cannot make delivery buffer it."""
+        address = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.11", 443))]
+        pulled = {"bytes": 0}
+        chunk = b"x" * (64 * 1024)
+
+        class EndlessBody(httpx2.AsyncByteStream):
+            async def __aiter__(self):
+                for _ in range(256):  # 16 MiB
+                    pulled["bytes"] += len(chunk)
+                    yield chunk
+
+        real_client = httpx2.AsyncClient
+
+        def client_with_mock_transport(*args, **kwargs):
+            transport = httpx2.MockTransport(
+                lambda request: httpx2.Response(200, stream=EndlessBody())
+            )
+            return real_client(*args, transport=transport, **kwargs)
+
+        with (
+            patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=address),
+            patch("gco.services.webhook_dispatcher.httpx2.AsyncClient", client_with_mock_transport),
+        ):
+            result = await dispatcher._deliver_webhook(
+                {"id": "wh-big", "url": "https://hooks.example/x"}, {"event": "job.completed"}
+            )
+
+        assert result.success is True
+        assert result.status_code == 200
+        assert pulled["bytes"] == 0
+
+    @pytest.mark.asyncio
+    async def test_each_attempt_has_an_overall_deadline(self, dispatcher):
+        """A receiver that never finishes its response cannot hold an attempt open."""
+        dispatcher.timeout = 0.2
+        address = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.11", 443))]
+        attempts = 0
+
+        async def never_answers(request):
+            nonlocal attempts
+            attempts += 1
+            await asyncio.Event().wait()
+
+        real_client = httpx2.AsyncClient
+
+        def client_with_mock_transport(*args, **kwargs):
+            return real_client(*args, transport=httpx2.MockTransport(never_answers), **kwargs)
+
+        with (
+            patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=address),
+            patch("gco.services.webhook_dispatcher.httpx2.AsyncClient", client_with_mock_transport),
+        ):
+            result = await asyncio.wait_for(
+                dispatcher._deliver_webhook(
+                    {"id": "wh-slow", "url": "https://hooks.example/x"}, {"event": "job.failed"}
+                ),
+                timeout=5,
+            )
+
+        assert result.success is False
+        assert result.error == "Request timed out"
+        assert attempts == dispatcher.max_retries
+        assert dispatcher.get_metrics()["deliveries_failed"] == 1
 
     def test_http_client_loggers_are_capped_at_warning(self):
         for name in ("httpx2", "httpcore2"):
@@ -1029,6 +1126,7 @@ class TestDeliverWebhookEdgeCases:
             client = AsyncMock()
             client.post.side_effect = blocked_post
             mock_cls.return_value.__aenter__.return_value = client
+            _stream_via_post(client)
             task = asyncio.create_task(
                 dispatcher._deliver_webhook(
                     {"id": "wh-cancel", "url": "https://hooks.example/hook"},
@@ -1065,7 +1163,7 @@ class TestDeliverWebhookEdgeCases:
             patch("gco.services.webhook_dispatcher.socket.getaddrinfo", return_value=public),
             patch(
                 "gco.services.webhook_dispatcher.httpx2.AsyncClient",
-                return_value=BlockingExitClient(),
+                return_value=_stream_via_post(BlockingExitClient()),
             ),
         ):
             task = asyncio.create_task(
@@ -1301,6 +1399,7 @@ class TestDispatchEventEdgeCases:
             resp.status_code = 200
             mock_client.post.return_value = resp
             mock_cls.return_value.__aenter__.return_value = mock_client
+            _stream_via_post(mock_client)
 
             results = await dispatcher._dispatch_event(WebhookEvent.JOB_COMPLETED, job)
 

@@ -2097,7 +2097,10 @@ async def test_webhook_nonstring_url_cancel_and_dispatch_cancellation() -> None:
         pinned_url=lambda attempt: "https://8.8.8.8:443/hook",
     )
     http_client = MagicMock()
-    http_client.post = AsyncMock(side_effect=asyncio.CancelledError)
+    stream = MagicMock()
+    stream.__aenter__ = AsyncMock(side_effect=asyncio.CancelledError)
+    stream.__aexit__ = AsyncMock(return_value=False)
+    http_client.stream.return_value = stream
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=http_client)
     context.__aexit__ = AsyncMock(return_value=False)

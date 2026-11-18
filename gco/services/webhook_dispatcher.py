@@ -62,7 +62,8 @@ HMAC Signature:
 Environment Variables:
     CLUSTER_NAME: Name of the EKS cluster
     REGION: AWS region of the cluster
-    WEBHOOK_TIMEOUT: HTTP timeout for webhook calls (default: 30)
+    WEBHOOK_TIMEOUT: Deadline in seconds for one delivery attempt, connection
+        through response headers (default: 30); the response body is never read
     WEBHOOK_MAX_RETRIES: Maximum total delivery attempts (default: 3)
     WEBHOOK_RETRY_DELAY: Initial retry delay in seconds (default: 5)
     WEBHOOKS_TABLE_NAME: DynamoDB table for webhooks
@@ -507,6 +508,35 @@ class WebhookDispatcher:
         ).hexdigest()
         return f"sha256={signature}"
 
+    async def _post_attempt(
+        self,
+        client: httpx2.AsyncClient,
+        target: _ValidatedWebhookTarget,
+        attempt: int,
+        content: str,
+        headers: dict[str, str],
+    ) -> int:
+        """POST one attempt and return its status code, all within ``self.timeout``.
+
+        httpx2's timeout bounds each connect, write and read separately, so a
+        receiver that keeps trickling bytes could hold an attempt open without
+        end; the deadline bounds the whole attempt and raises ``TimeoutError``.
+        Only the status code is used, so the response is streamed and its body
+        is never read: leaving the stream closes the connection, and no
+        receiver can make the dispatcher buffer a body of any size.
+        """
+        async with (
+            asyncio.timeout(self.timeout),
+            client.stream(
+                "POST",
+                target.pinned_url(attempt),
+                content=content,
+                headers=headers,
+                extensions={"sni_hostname": target.hostname},
+            ) as response,
+        ):
+            return response.status_code
+
     async def _deliver_webhook(
         self,
         webhook: dict[str, Any],
@@ -563,24 +593,21 @@ class WebhookDispatcher:
                     while attempts < self.max_retries:
                         attempts += 1
                         try:
-                            response = await client.post(
-                                target.pinned_url(attempts),
-                                content=payload_json,
-                                headers=headers,
-                                extensions={"sni_hostname": target.hostname},
+                            status_code = await self._post_attempt(
+                                client, target, attempts, payload_json, headers
                             )
-                            last_status_code = response.status_code
-                            if 200 <= response.status_code < 300:
-                                successful_status_code = response.status_code
+                            last_status_code = status_code
+                            if 200 <= status_code < 300:
+                                successful_status_code = status_code
                                 break
 
-                            last_error = f"HTTP {response.status_code}"
-                            if response.status_code >= 500:
+                            last_error = f"HTTP {status_code}"
+                            if status_code >= 500:
                                 logger.warning(
                                     "Webhook attempt failed: webhook_id=%s %s status=%s attempt=%s",
                                     webhook_id,
                                     target.log_identity,
-                                    response.status_code,
+                                    status_code,
                                     attempts,
                                 )
                                 if attempts < self.max_retries:
@@ -588,7 +615,7 @@ class WebhookDispatcher:
                                 continue
                             break  # Caller errors are terminal and must not be replayed.
 
-                        except httpx2.TimeoutException:
+                        except httpx2.TimeoutException, TimeoutError:
                             last_error = "Request timed out"
                             logger.warning(
                                 "Webhook attempt timed out: webhook_id=%s %s attempt=%s",

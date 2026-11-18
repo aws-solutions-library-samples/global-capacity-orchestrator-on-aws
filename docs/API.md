@@ -2057,6 +2057,11 @@ When a job event occurs (started, completed, or failed), the webhook dispatcher:
 3. Sends HTTP POST requests to all matching webhook URLs
 4. Retries failed deliveries with exponential backoff (up to 3 attempts)
 
+Each attempt has 30 seconds to connect, send the payload, and receive the
+response status line and headers. Only the status code counts: the dispatcher
+never reads the response body, so a receiver should not rely on the
+dispatcher reading anything it sends back.
+
 The dispatcher runs inside the health-monitor, which has two replicas for
 availability. Only one of them delivers at a time: the replicas elect a
 deliverer through the pre-created `gco-health-monitor-webhooks` Lease in
