@@ -136,6 +136,7 @@ from gco.eks_capabilities_config import (
     kro_kubernetes_username,
     normalize_eks_capabilities_config,
 )
+from gco.fsx_lustre_config import default_per_unit_storage_throughput
 from gco.gateway_health_check_config import (
     GATEWAY_HEALTH_CHECK_CONTEXT_KEY,
     compute_gateway_health_check_replacements,
@@ -7022,10 +7023,16 @@ class GCORegionalStack(Stack):
             "dataCompressionType": fsx_config.get("data_compression_type", "LZ4"),
         }
 
-        # Add throughput for PERSISTENT types
+        # Add throughput for PERSISTENT types. The loader resolves it per type
+        # (PERSISTENT_1 200, PERSISTENT_2 250); a config double without the
+        # key gets the same per-type default, never PERSISTENT_1's 200 for
+        # PERSISTENT_2, which FSx rejects.
         if deployment_type.startswith("PERSISTENT"):
-            lustre_config["perUnitStorageThroughput"] = fsx_config.get(
-                "per_unit_storage_throughput", 200
+            throughput = fsx_config.get("per_unit_storage_throughput")
+            lustre_config["perUnitStorageThroughput"] = (
+                throughput
+                if throughput is not None
+                else default_per_unit_storage_throughput(deployment_type)
             )
 
         # Add S3 import/export if configured

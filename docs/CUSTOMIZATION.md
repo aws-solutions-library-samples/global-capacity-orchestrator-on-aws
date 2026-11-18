@@ -92,6 +92,8 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [Customizing Suppressions](#customizing-suppressions)
   - [Adding New Suppressions](#adding-new-suppressions)
   - [Disabling Compliance Checks](#disabling-compliance-checks)
+- [How cdk.json Is Validated](#how-cdkjson-is-validated)
+  - [Boolean flags](#boolean-flags)
 - [Configuration Best Practices](#configuration-best-practices)
   - [1. Use Configuration Files](#1-use-configuration-files)
   - [2. Environment-Specific Configuration](#2-environment-specific-configuration)
@@ -1757,12 +1759,28 @@ Edit `cdk.json` to customize FSx storage settings:
       "storage_capacity_gib": 1200,
       "deployment_type": "SCRATCH_2",
       "file_system_type_version": "2.15",
-      "data_compression_type": "LZ4",
-      "per_unit_storage_throughput": 200
+      "data_compression_type": "LZ4"
     }
   }
 }
 ```
+
+Every key is optional, an omitted key keeps its default, and every value is
+validated at synth, so a value FSx for Lustre would reject fails `cdk synth`
+with the key's full path instead of failing the deploy.
+
+| Key | Default | Accepted values |
+|-----|---------|-----------------|
+| `enabled` | `false` | `true` / `false` ([JSON booleans](#boolean-flags)) |
+| `storage_capacity_gib` | `1200` | 1200, 2400, then multiples of 2400 GiB (multiples of 3600 for `SCRATCH_1`) |
+| `deployment_type` | `SCRATCH_2` | `SCRATCH_1`, `SCRATCH_2`, `PERSISTENT_1`, `PERSISTENT_2` |
+| `file_system_type_version` | `2.15` | `2.10`, `2.12`, `2.15` (`PERSISTENT_2` does not support `2.10`) |
+| `per_unit_storage_throughput` | `200` for `PERSISTENT_1`, `250` for `PERSISTENT_2` | `PERSISTENT_1`: 50, 100, 200; `PERSISTENT_2`: 125, 250, 500, 1000 (MB/s per TiB). The `SCRATCH` types take no throughput setting; a value set for them is ignored |
+| `data_compression_type` | `LZ4` | `LZ4`, `NONE` |
+| `import_path` / `export_path` | `null` | `s3://bucket[/prefix]`; an export path needs an import path in the same bucket |
+| `auto_import_policy` | `NEW_CHANGED_DELETED` | `NONE`, `NEW`, `NEW_CHANGED`, `NEW_CHANGED_DELETED` (used only with an import path) |
+
+The values follow the [`AWS::FSx::FileSystem` `LustreConfiguration` reference](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-fsx-filesystem-lustreconfiguration.html) for the SSD storage GCO creates.
 
 **Deployment Types:**
 
@@ -1771,15 +1789,15 @@ Edit `cdk.json` to customize FSx storage settings:
 - `PERSISTENT_1`: Persistent storage with data replication
 - `PERSISTENT_2`: Latest persistent storage with higher throughput
 
-**File System Type Version:**
+**Per-Region settings:** `fsx_lustre_regions` holds an object per Region whose
+keys override the global block for that Region only, for example
+`"fsx_lustre_regions": {"us-west-2": {"enabled": true}}`. `gco stacks fsx enable
+-r <region>` writes such an entry.
 
-- `2.15`: Latest version, recommended (default)
-- `2.12`: Compatible with kernel 6.x
-
-**Storage Capacity:**
-
-- Minimum: 1200 GiB for SCRATCH_2
-- Must be in increments of 2400 GiB for SCRATCH_2
+**Removed setting:** earlier releases documented an `fsx_lustre.node_group`
+block, but nothing ever read it: FSx workloads run on the EKS Auto Mode node
+pools. A `node_group` key still validates, with a deprecation warning, and has
+no effect; delete it.
 
 ### Using FSx in Jobs
 
@@ -1861,10 +1879,13 @@ Or edit `cdk.json` directly:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `false` | Enable/disable Valkey cache |
-| `max_data_storage_gb` | 5 | Maximum data storage in GB (auto-scales from 1 GB) |
-| `max_ecpu_per_second` | 5000 | Maximum ElastiCache Processing Units per second |
-| `snapshot_retention_limit` | 1 | Number of daily snapshots to retain |
+| `enabled` | `false` | Enable/disable Valkey cache (`true` / `false`, [JSON booleans](#boolean-flags)) |
+| `max_data_storage_gb` | 5 | Maximum data storage in GB, an integer of at least 1 (auto-scales from 1 GB) |
+| `max_ecpu_per_second` | 5000 | Maximum ElastiCache Processing Units per second, an integer of at least 1000 (the cache's floor) |
+| `snapshot_retention_limit` | 1 | Number of daily snapshots to retain, an integer of at least 0 |
+
+Values of the wrong type, below their floor, and unknown keys fail `cdk synth`
+with the key's full path.
 
 After enabling, redeploy the regional stack:
 
@@ -1939,11 +1960,14 @@ Or edit `cdk.json` directly:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `false` | Enable/disable Aurora pgvector |
-| `min_acu` | 0 | Minimum Aurora Capacity Units (0 = scale to zero / auto-pause) |
-| `max_acu` | 16 | Maximum Aurora Capacity Units |
-| `backup_retention_days` | 7 | Number of days to retain automated backups |
-| `deletion_protection` | `false` | Enable deletion protection (recommended for production) |
+| `enabled` | `false` | Enable/disable Aurora pgvector (`true` / `false`, [JSON booleans](#boolean-flags)) |
+| `min_acu` | 0 | Minimum Aurora Capacity Units, 0-256 in steps of 0.5 (0 = scale to zero / auto-pause) |
+| `max_acu` | 16 | Maximum Aurora Capacity Units, 1-256 in steps of 0.5 and at least `min_acu` |
+| `backup_retention_days` | 7 | Number of days to retain automated backups, 1-35 |
+| `deletion_protection` | `false` | Enable deletion protection (recommended for production; `true` / `false`, [JSON booleans](#boolean-flags)) |
+
+Values outside these ranges, of the wrong type, and unknown keys fail `cdk
+synth` with the key's full path.
 
 Set `min_acu` to `0.5` or higher to disable auto-pause and keep the cluster always warm.
 
@@ -2477,6 +2501,36 @@ def nag_validation_plugins(scope, *, verbose=True):
 ```python
 cdk.Validations.of(app).add_plugins(*nag_validation_plugins(app, verbose=True))
 ```
+
+## How cdk.json Is Validated
+
+`cdk synth`, and every `gco stacks` command that synthesizes, validates the
+whole `context` block before it builds a stack, so a value AWS would reject
+fails with the key's full path (`fsx_lustre_regions.us-west-2.enabled`)
+instead of failing halfway through a deploy.
+
+### Boolean flags
+
+Write flags such as `enabled` as JSON booleans, `true` or `false`, without
+quotes. Earlier releases read the `enabled` flags of `fsx_lustre` (and its
+`fsx_lustre_regions` overlays), `valkey`, `aurora_pgvector` and
+`cluster_observability.mlflow` by truthiness, so a quoted `"false"`, like
+every non-empty string, turned the feature on. So that an upgrade never turns
+off a feature that has been running:
+
+- `"true"` in any case still reads as `true`, with a deprecation warning.
+- Any other string there, `"false"` included, fails validation with a message
+  that says how earlier releases read it. Write `true` to keep the feature, or
+  `false` to remove it. For these storage features `false` deletes the
+  resource and its data (the file system, the cache, the database cluster,
+  the MLflow run-metadata volume), so back up first (see
+  [UPGRADING.md](UPGRADING.md#2-back-up-regional-data-to-the-cluster-shared-bucket)).
+- Numbers, `null` and other types fail validation.
+
+`aurora_pgvector.deletion_protection` follows the same rule; a string there
+always failed the synth, so nothing has been running on one. Top-level keys
+that the CLI passes as `cdk --context key=value` strings, such as
+`gco:control-plane-only`, accept both `"true"` and `"false"`.
 
 ## Configuration Best Practices
 

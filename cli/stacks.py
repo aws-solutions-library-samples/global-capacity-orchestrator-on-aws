@@ -7677,11 +7677,14 @@ def get_stack_destroy_order(
 # Feature toggle helpers
 # =============================================================================
 
+# The block ``gco stacks fsx enable`` creates when cdk.json has none. The
+# default SCRATCH_2 type takes no per-unit storage throughput, so none is
+# written; PERSISTENT types get theirs from the command (see
+# gco/fsx_lustre_config.py).
 _FSX_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "storage_capacity_gib": 1200,
     "deployment_type": "SCRATCH_2",
-    "per_unit_storage_throughput": 200,
     "data_compression_type": "LZ4",
     "import_path": None,
     "export_path": None,

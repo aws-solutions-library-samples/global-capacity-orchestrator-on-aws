@@ -31,7 +31,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, cast
 
 import boto3
@@ -45,6 +45,19 @@ from gco.eks_capabilities_config import (
     merge_eks_capabilities_overrides,
     parse_eks_capabilities_overrides,
     validate_eks_capabilities_config,
+)
+from gco.fsx_lustre_config import (
+    FSX_AUTO_IMPORT_POLICIES,
+    FSX_CAPACITY_INCREMENT_GIB,
+    FSX_DATA_COMPRESSION_TYPES,
+    FSX_DEPLOYMENT_TYPES,
+    FSX_FILE_SYSTEM_TYPE_VERSIONS,
+    FSX_LUSTRE_CONTEXT_KEY,
+    FSX_LUSTRE_DEFAULTS,
+    FSX_LUSTRE_REGIONS_CONTEXT_KEY,
+    FSX_THROUGHPUT_CHOICES,
+    default_per_unit_storage_throughput,
+    valid_storage_capacity,
 )
 from gco.gateway_health_check_config import (
     GATEWAY_HEALTH_CHECK_CONTEXT_KEY,
@@ -319,8 +332,165 @@ def resolve_tracing_config(raw: object, overrides: object = None) -> dict[str, A
     }
 
 
+#: ``valkey`` defaults (an ElastiCache Serverless cache per region, off).
+_VALKEY_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "max_data_storage_gb": 5,
+    "max_ecpu_per_second": 5000,
+    "snapshot_retention_limit": 1,
+}
+
+
+#: ``aurora_pgvector`` defaults (Aurora Serverless v2 + pgvector, off).
+_AURORA_PGVECTOR_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "min_acu": 0,
+    "max_acu": 16,
+    "backup_retention_days": 7,
+    "deletion_protection": False,
+}
+
+
 class ConfigValidationError(Exception):
     """Raised when configuration validation fails."""
+
+
+#: Keys starting with this prefix are documentation (JSON has no comments, so
+#: cdk.json carries ``_comment_<key>`` siblings). Nothing reads them, and the
+#: unknown-key checks skip them.
+COMMENT_KEY_PREFIX = "_comment"
+
+
+def is_comment_key(key: object) -> bool:
+    """Whether ``key`` is a ``_comment*`` documentation key."""
+    return isinstance(key, str) and key.startswith(COMMENT_KEY_PREFIX)
+
+
+def parse_bool_flag(value: object, key: str) -> bool:
+    """Parse a top-level context flag, which ``cdk --context key=value`` may set.
+
+    Accepts JSON booleans and the strings ``"true"`` / ``"false"`` in any
+    case, because ``--context`` passes every value as a string. Anything
+    else, including ``0``, ``1``, ``None`` and ``"yes"``, is an error naming
+    ``key``. Python truthiness is never used: ``bool("false")`` is ``True``.
+    A flag inside a cdk.json block goes through :func:`parse_block_flag`.
+
+    Raises:
+        ConfigValidationError: If ``value`` is not a boolean or one of the
+            two strings.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        folded = value.lower()
+        if folded == "true":
+            return True
+        if folded == "false":
+            return False
+    raise ConfigValidationError(f"{key} must be true or false, got {value!r}")
+
+
+def parse_block_flag(
+    value: object,
+    key: str,
+    warn: Callable[[str], None],
+    *,
+    off_deletes: str | None = None,
+    read_by_truthiness: bool = True,
+) -> bool:
+    """Parse a boolean flag inside a cdk.json block, such as ``valkey.enabled``.
+
+    A nested key can only come from cdk.json (``--context`` sets top-level
+    keys), and earlier releases read these flags by Python truthiness, so
+    every non-empty string, ``"false"`` included, meant on. A string is
+    therefore never reinterpreted on upgrade:
+
+    - JSON booleans are returned as they are.
+    - ``"true"`` in any case still reads as true, with a deprecation warning
+      passed to ``warn``.
+    - Every other string is an error that says how earlier releases read it
+      and what to write instead. Reading ``"false"`` as false would switch
+      off a feature that has been running, and for a storage feature
+      (``off_deletes`` names what switching it off deletes) that deletes its
+      data.
+    - Anything else (numbers, ``null``, lists) is an error naming ``key``.
+
+    ``read_by_truthiness=False`` is for a flag earlier releases did not read
+    by truthiness (a string failed the synth instead), so its error makes no
+    claim about how the deployment has been running.
+
+    Raises:
+        ConfigValidationError: If ``value`` is not a boolean or ``"true"``.
+    """
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        raise ConfigValidationError(f"{key} must be true or false (a JSON boolean), got {value!r}")
+    if value.lower() == "true":
+        warn(
+            f"{key} is the string {value!r}, read as true; write the JSON boolean true "
+            "instead (string flags in cdk.json blocks are deprecated)."
+        )
+        return True
+    problem = f"{key} must be true or false (a JSON boolean), not the string {value!r}."
+    if not read_by_truthiness:
+        raise ConfigValidationError(problem)
+    if value:
+        consequence = f", which deletes {off_deletes}" if off_deletes else ""
+        raise ConfigValidationError(
+            f"{problem} Earlier releases read every non-empty string here as true, so this "
+            f"setting has been on. Write true to keep it on, or false to turn it off{consequence}."
+        )
+    raise ConfigValidationError(
+        f"{problem} Earlier releases read an empty string here as false, so this setting "
+        "has been off. Write false to keep it off, or true to turn it on."
+    )
+
+
+def _check_block_keys(path: str, block: Mapping[str, Any], allowed: Iterable[str]) -> None:
+    """Reject keys of ``block`` (at cdk.json ``path``) outside ``allowed``.
+
+    ``_comment*`` keys are documentation and always allowed. The message
+    names every unknown key and every allowed key with its full path.
+    """
+    known = set(allowed)
+    unknown = sorted(str(key) for key in block if not is_comment_key(key) and key not in known)
+    if unknown:
+        raise ConfigValidationError(
+            f"{path} contains unknown key(s): "
+            + ", ".join(f"{path}.{key}" for key in unknown)
+            + "; allowed keys: "
+            + ", ".join(f"{path}.{key}" for key in sorted(known))
+        )
+
+
+def _object_or_empty(path: str, value: object) -> dict[str, Any]:
+    """Return ``value`` as a block, ``{}`` when absent; anything but an object is an error."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigValidationError(
+            f"{path} must be an object, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
+def _require_int(path: str, value: object, minimum: int, maximum: int | None = None) -> int:
+    """Return ``value`` if it is an integer (never a boolean) inside the inclusive range."""
+    if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
+        bounds = (
+            f"between {minimum} and {maximum}" if maximum is not None else f"of at least {minimum}"
+        )
+        raise ConfigValidationError(f"{path} must be an integer {bounds}, got {value!r}")
+    return value
+
+
+def _require_choice(path: str, value: object, choices: Iterable[str]) -> str:
+    """Return ``value`` if it is one of the (case-sensitive) string ``choices``."""
+    allowed = sorted(choices)
+    if not isinstance(value, str) or value not in allowed:
+        raise ConfigValidationError(f"{path} must be one of {', '.join(allowed)}, got {value!r}")
+    return value
 
 
 class ConfigLoader:
@@ -405,6 +575,12 @@ class ConfigLoader:
 
         # Validate the platform ALB target-group health check
         self._validate_gateway_health_check_config()
+
+        # Validate the optional data services: FSx for Lustre (and its
+        # per-region overlays), the Valkey cache and Aurora pgvector
+        self._validate_fsx_lustre_config()
+        self.get_valkey_config()
+        self.get_aurora_pgvector_config()
 
         # Validate manifest processor config
         self._validate_manifest_processor_config()
@@ -1436,6 +1612,25 @@ class ConfigLoader:
                     f"a 5-field cron expression string, got {schedule!r}"
                 )
 
+        # `mlflow`: the tracking-server sub-toggle and its metadata volume.
+        # Earlier releases read `enabled` by truthiness (`"false"` meant on),
+        # so it goes through parse_block_flag and the getter returns the
+        # parsed boolean.
+        mlflow_ctx = _object_or_empty("cluster_observability.mlflow", obs_ctx.get("mlflow"))
+        _check_block_keys(
+            "cluster_observability.mlflow", mlflow_ctx, ("enabled", "persistence_size")
+        )
+        if "enabled" in mlflow_ctx:
+            self._parse_mlflow_enabled(mlflow_ctx["enabled"])
+        if "persistence_size" in mlflow_ctx and (
+            not isinstance(mlflow_ctx["persistence_size"], str)
+            or not mlflow_ctx["persistence_size"].strip()
+        ):
+            raise ConfigValidationError(
+                "cluster_observability.mlflow.persistence_size must be a non-empty "
+                f"string, got {mlflow_ctx['persistence_size']!r}"
+            )
+
         # `alertmanager.enabled` must be a bool if the sub-block carries it.
         alertmanager_ctx = obs_ctx.get("alertmanager")
         if (
@@ -2207,104 +2402,210 @@ class ConfigLoader:
         }
         return {**default_config, **(self.app.node.try_get_context("eks_cluster") or {})}
 
+    #: Keys of the ``fsx_lustre`` block and of each ``fsx_lustre_regions``
+    #: overlay. ``node_group`` is deprecated: accepted for existing files,
+    #: warned about and ignored.
+    FSX_LUSTRE_KEYS = frozenset(
+        {
+            "enabled",
+            "storage_capacity_gib",
+            "deployment_type",
+            "file_system_type_version",
+            "per_unit_storage_throughput",
+            "data_compression_type",
+            "import_path",
+            "export_path",
+            "auto_import_policy",
+            "node_group",
+        }
+    )
+
+    def _validate_fsx_lustre_config(self) -> None:
+        """Validate ``fsx_lustre`` and every ``fsx_lustre_regions`` overlay.
+
+        Resolving the configuration is the validation: the global block is
+        checked on its own and each overlay merged over it, so an error names
+        the block (and Region) that holds the bad value.
+        """
+        self.get_fsx_lustre_config()
+        overlays = _object_or_empty(
+            FSX_LUSTRE_REGIONS_CONTEXT_KEY,
+            self.app.node.try_get_context(FSX_LUSTRE_REGIONS_CONTEXT_KEY),
+        )
+        for region in sorted(overlays):
+            self.get_fsx_lustre_config(str(region))
+
     def get_fsx_lustre_config(self, region: str | None = None) -> dict[str, Any]:
-        """Get FSx for Lustre configuration.
+        """Get the validated FSx for Lustre configuration.
 
         Args:
-            region: Optional region to get config for. If provided, checks for
-                    region-specific overrides first.
+            region: Optional region. When ``fsx_lustre_regions`` has an entry
+                for it, that entry is merged over the global block.
 
         Returns:
             FSx configuration dictionary with the following keys:
-            - enabled: Whether FSx is enabled
-            - storage_capacity_gib: Storage capacity in GiB (min 1200)
-            - deployment_type: SCRATCH_1, SCRATCH_2, PERSISTENT_1, PERSISTENT_2
-            - file_system_type_version: Lustre version (2.12 or 2.15, default: 2.15)
-              IMPORTANT: Use 2.15 for kernel 6.x compatibility (AL2023, Bottlerocket)
-            - per_unit_storage_throughput: Throughput for PERSISTENT types
-            - data_compression_type: LZ4 or NONE
-            - import_path: S3 path for data import
-            - export_path: S3 path for data export
-            - auto_import_policy: NEW, NEW_CHANGED, NEW_CHANGED_DELETED
-            - node_group: Node group configuration for FSx workloads
-              - instance_types: List of instance types
-              - min_size: Minimum nodes (default: 0)
-              - max_size: Maximum nodes (default: 10)
-              - desired_size: Desired nodes (default: 0, scales from zero)
-              - ami_type: AMI type - one of:
-                  AL2023_X86_64_STANDARD (default), AL2023_ARM_64_STANDARD,
-                  AL2023_X86_64_NVIDIA, AL2023_ARM_64_NVIDIA, AL2023_X86_64_NEURON
-              - capacity_type: ON_DEMAND (default) or SPOT
-              - disk_size: Root disk size in GB (default: 100)
-              - labels: Additional node labels (dict)
+            - enabled: Whether FSx is enabled (a real boolean; ``"true"`` /
+              ``"false"`` strings are parsed, anything else is an error)
+            - storage_capacity_gib: Storage capacity in GiB: 1200, 2400, then
+              multiples of 3600 (SCRATCH_1) or 2400 (the other types)
+            - deployment_type: SCRATCH_1, SCRATCH_2 (default), PERSISTENT_1,
+              PERSISTENT_2
+            - file_system_type_version: Lustre version 2.10, 2.12 or 2.15
+              (default 2.15, which kernel 6.x clients such as AL2023 and
+              Bottlerocket need; PERSISTENT_2 does not support 2.10)
+            - per_unit_storage_throughput: MB/s per TiB for the PERSISTENT
+              types (PERSISTENT_1: 50, 100 or 200, default 200;
+              PERSISTENT_2: 125, 250, 500 or 1000, default 250); ``None`` for
+              the SCRATCH types, which take no throughput setting (a
+              configured value is ignored for them)
+            - data_compression_type: LZ4 (default) or NONE
+            - import_path: S3 path (``s3://...``) for data import, or None
+            - export_path: S3 path for data export in the import bucket, or None
+            - auto_import_policy: NONE, NEW, NEW_CHANGED or NEW_CHANGED_DELETED
+              (default), used only with an import path
+
+        FSx workloads run on the EKS Auto Mode node pools, so there is no
+        node-group setting: a ``node_group`` key, which earlier releases
+        documented but never read, is reported as deprecated and ignored.
+
+        Raises:
+            ConfigValidationError: If a block is not an object, names an
+                unknown key, or holds a value FSx for Lustre rejects.
         """
-        default_config = {
-            "enabled": False,
-            "storage_capacity_gib": 1200,
-            "deployment_type": "SCRATCH_2",
-            "file_system_type_version": "2.15",  # Use 2.15 for kernel 6.x compatibility
-            "per_unit_storage_throughput": 200,
-            "data_compression_type": "LZ4",
-            "import_path": None,
-            "export_path": None,
-            "auto_import_policy": "NEW_CHANGED_DELETED",
-            "node_group": {
-                "instance_types": ["m5.large", "m5.xlarge", "m6i.large", "m6i.xlarge"],
-                "min_size": 0,
-                "max_size": 10,
-                "desired_size": 1,
-                "ami_type": "AL2023_X86_64_STANDARD",
-                "capacity_type": "ON_DEMAND",
-                "disk_size": 100,
-                "labels": {},
-            },
-        }
+        global_path = FSX_LUSTRE_CONTEXT_KEY
+        global_block = _object_or_empty(
+            global_path, self.app.node.try_get_context(FSX_LUSTRE_CONTEXT_KEY)
+        )
+        _check_block_keys(global_path, global_block, self.FSX_LUSTRE_KEYS)
+        # Which block set each key, so an error names the value's own path.
+        sources = dict.fromkeys(global_block, global_path)
+        merged: dict[str, Any] = {**FSX_LUSTRE_DEFAULTS, **global_block}
+        self._warn_fsx_node_group(global_path, global_block)
 
-        # Get global FSx config
-        global_ctx = self.app.node.try_get_context("fsx_lustre")
-        global_config: dict[str, Any] = global_ctx if isinstance(global_ctx, dict) else {}
-        merged_config: dict[str, Any] = {**default_config, **global_config}
-
-        # Ensure node_group has all required fields with defaults
-        if "node_group" in global_config:
-            global_node_group = global_config["node_group"]
-            if isinstance(global_node_group, dict):
-                default_node_group = cast(dict[str, Any], default_config["node_group"])
-                merged_config["node_group"] = {
-                    **default_node_group,
-                    **global_node_group,
-                }
-
-        # Check for region-specific override
         if region:
-            region_overrides_ctx = self.app.node.try_get_context("fsx_lustre_regions")
-            region_overrides: dict[str, Any] = (
-                region_overrides_ctx if isinstance(region_overrides_ctx, dict) else {}
+            overlays = _object_or_empty(
+                FSX_LUSTRE_REGIONS_CONTEXT_KEY,
+                self.app.node.try_get_context(FSX_LUSTRE_REGIONS_CONTEXT_KEY),
             )
-            if region in region_overrides:
-                region_config = region_overrides[region]
-                if isinstance(region_config, dict):
-                    # Preserve the fully merged default/global node group before
-                    # the top-level regional overlay replaces that nested value.
-                    # A regional node_group is a patch, not a wholesale reset.
-                    existing_node_group = merged_config.get("node_group")
-                    merged_config = {**merged_config, **region_config}
-                    # Handle nested node_group override
-                    if "node_group" in region_config:
-                        region_node_group = region_config["node_group"]
-                        if isinstance(region_node_group, dict):
-                            if isinstance(existing_node_group, dict):
-                                base_node_group = existing_node_group
-                            else:
-                                base_node_group = cast(dict[str, Any], default_config["node_group"])
-                            merged_config["node_group"] = {
-                                **base_node_group,
-                                **region_node_group,
-                            }
+            if region in overlays:
+                overlay_path = f"{FSX_LUSTRE_REGIONS_CONTEXT_KEY}.{region}"
+                overlay = _object_or_empty(overlay_path, overlays[region])
+                _check_block_keys(overlay_path, overlay, self.FSX_LUSTRE_KEYS)
+                sources.update(dict.fromkeys(overlay, overlay_path))
+                merged.update(overlay)
+                self._warn_fsx_node_group(overlay_path, overlay)
 
+        def path_of(key: str) -> str:
+            return f"{sources.get(key, global_path)}.{key}"
+
+        resolved = self._resolve_fsx_lustre(merged, path_of, self._warn)
         if self._feature_override_enabled("fsx_lustre"):
-            merged_config["enabled"] = True
-        return merged_config
+            resolved["enabled"] = True
+        return resolved
+
+    def _warn_fsx_node_group(self, path: str, block: Mapping[str, Any]) -> None:
+        """Report a deprecated ``node_group`` key in an FSx block (it is ignored)."""
+        if "node_group" in block:
+            self._warn(
+                f"{path}.node_group is deprecated and ignored: FSx workloads run on the "
+                "EKS Auto Mode node pools and nothing reads it. Remove it from cdk.json."
+            )
+
+    @staticmethod
+    def _resolve_fsx_lustre(
+        merged: Mapping[str, Any],
+        path_of: Callable[[str], str],
+        warn: Callable[[str], None],
+    ) -> dict[str, Any]:
+        """Validate one merged FSx block and return it normalized.
+
+        ``path_of(key)`` is the full cdk.json path of the value ``merged[key]``
+        came from; ``warn`` receives the deprecation warnings.
+        """
+        enabled = parse_block_flag(
+            merged["enabled"],
+            path_of("enabled"),
+            warn,
+            off_deletes="the FSx for Lustre file system and the data on it",
+        )
+        deployment_type = _require_choice(
+            path_of("deployment_type"), merged["deployment_type"], FSX_DEPLOYMENT_TYPES
+        )
+        capacity = _require_int(
+            path_of("storage_capacity_gib"), merged["storage_capacity_gib"], minimum=1200
+        )
+        if not valid_storage_capacity(deployment_type, capacity):
+            increment = FSX_CAPACITY_INCREMENT_GIB[deployment_type]
+            raise ConfigValidationError(
+                f"{path_of('storage_capacity_gib')} must be 1200, 2400 or a multiple of "
+                f"{increment} GiB for {deployment_type}, got {capacity}"
+            )
+        version = _require_choice(
+            path_of("file_system_type_version"),
+            merged["file_system_type_version"],
+            FSX_FILE_SYSTEM_TYPE_VERSIONS,
+        )
+        if deployment_type == "PERSISTENT_2" and version == "2.10":
+            raise ConfigValidationError(
+                f"{path_of('file_system_type_version')} 2.10 is not supported by "
+                "PERSISTENT_2; use 2.12 or 2.15"
+            )
+        throughput: int | None = None
+        choices = FSX_THROUGHPUT_CHOICES.get(deployment_type)
+        if choices is not None:
+            configured = merged["per_unit_storage_throughput"]
+            if configured is None:
+                throughput = default_per_unit_storage_throughput(deployment_type)
+            elif type(configured) is not int or configured not in choices:
+                raise ConfigValidationError(
+                    f"{path_of('per_unit_storage_throughput')} must be one of "
+                    f"{', '.join(str(choice) for choice in choices)} (MB/s per TiB) for "
+                    f"{deployment_type}, got {configured!r}"
+                )
+            else:
+                throughput = configured
+        compression = _require_choice(
+            path_of("data_compression_type"),
+            merged["data_compression_type"],
+            FSX_DATA_COMPRESSION_TYPES,
+        )
+        paths: dict[str, str | None] = {}
+        for key in ("import_path", "export_path"):
+            value = merged[key]
+            if value is not None and (
+                not isinstance(value, str) or not value.startswith("s3://") or len(value) < 6
+            ):
+                raise ConfigValidationError(
+                    f"{path_of(key)} must be an S3 URI (s3://bucket[/prefix]) or null, "
+                    f"got {value!r}"
+                )
+            paths[key] = value
+        if paths["export_path"] is not None:
+            export_bucket = paths["export_path"][5:].split("/", 1)[0]
+            if paths["import_path"] is None:
+                raise ConfigValidationError(
+                    f"{path_of('export_path')} needs an import_path: FSx exports to the "
+                    "bucket it imports from"
+                )
+            if paths["import_path"][5:].split("/", 1)[0] != export_bucket:
+                raise ConfigValidationError(
+                    f"{path_of('export_path')} must use the import_path bucket, got "
+                    f"{paths['export_path']!r} for import_path {paths['import_path']!r}"
+                )
+        auto_import_policy = _require_choice(
+            path_of("auto_import_policy"), merged["auto_import_policy"], FSX_AUTO_IMPORT_POLICIES
+        )
+        return {
+            "enabled": enabled,
+            "storage_capacity_gib": capacity,
+            "deployment_type": deployment_type,
+            "file_system_type_version": version,
+            "per_unit_storage_throughput": throughput,
+            "data_compression_type": compression,
+            "import_path": paths["import_path"],
+            "export_path": paths["export_path"],
+            "auto_import_policy": auto_import_policy,
+        }
 
     def _feature_override_enabled(self, feature_key: str) -> bool:
         """True when ``feature_enabled_overrides`` context forces this feature on."""
@@ -2314,52 +2615,112 @@ class ConfigLoader:
         return feature_key in overrides
 
     def get_valkey_config(self) -> dict[str, Any]:
-        """Get Valkey Serverless cache configuration.
+        """Get the validated Valkey Serverless cache configuration.
 
         Returns:
             Valkey configuration dictionary with the following keys:
             - enabled: Whether Valkey cache is enabled (default: False)
-            - max_data_storage_gb: Maximum data storage in GB (default: 5)
-            - max_ecpu_per_second: Maximum ECPUs per second (default: 5000)
-            - snapshot_retention_limit: Daily snapshots to retain (default: 1)
+            - max_data_storage_gb: Maximum data storage in GB, an integer of
+              at least 1, the cache's minimum (default: 5)
+            - max_ecpu_per_second: Maximum ECPUs per second, an integer of at
+              least 1000, the cache's minimum (default: 5000)
+            - snapshot_retention_limit: Daily snapshots to retain, an integer
+              of at least 0 (default: 1)
+
+        Raises:
+            ConfigValidationError: If the block is malformed.
         """
-        default_config: dict[str, Any] = {
-            "enabled": False,
-            "max_data_storage_gb": 5,
-            "max_ecpu_per_second": 5000,
-            "snapshot_retention_limit": 1,
+        path = "valkey"
+        block = _object_or_empty(path, self.app.node.try_get_context("valkey"))
+        _check_block_keys(path, block, _VALKEY_DEFAULTS)
+        merged = {**_VALKEY_DEFAULTS, **block}
+        resolved: dict[str, Any] = {
+            "enabled": parse_block_flag(
+                merged["enabled"],
+                f"{path}.enabled",
+                self._warn,
+                off_deletes="the Valkey cache and the data in it",
+            ),
+            "max_data_storage_gb": _require_int(
+                f"{path}.max_data_storage_gb", merged["max_data_storage_gb"], minimum=1
+            ),
+            "max_ecpu_per_second": _require_int(
+                f"{path}.max_ecpu_per_second", merged["max_ecpu_per_second"], minimum=1000
+            ),
+            "snapshot_retention_limit": _require_int(
+                f"{path}.snapshot_retention_limit", merged["snapshot_retention_limit"], minimum=0
+            ),
         }
-        valkey_ctx = self.app.node.try_get_context("valkey")
-        valkey_config: dict[str, Any] = valkey_ctx if isinstance(valkey_ctx, dict) else {}
-        merged = {**default_config, **valkey_config}
         if self._feature_override_enabled("valkey"):
-            merged["enabled"] = True
-        return merged
+            resolved["enabled"] = True
+        return resolved
 
     def get_aurora_pgvector_config(self) -> dict[str, Any]:
-        """Get Aurora Serverless v2 + pgvector vector database configuration.
+        """Get the validated Aurora Serverless v2 + pgvector configuration.
 
         Returns:
             Aurora pgvector configuration dictionary with the following keys:
             - enabled: Whether Aurora pgvector is enabled (default: False)
-            - min_acu: Minimum Aurora Capacity Units (default: 0, scales to zero)
-            - max_acu: Maximum Aurora Capacity Units (default: 16)
-            - backup_retention_days: Number of days to retain automated backups (default: 7)
-            - deletion_protection: Whether deletion protection is enabled (default: False)
+            - min_acu: Minimum Aurora Capacity Units, 0-256 in steps of 0.5
+              (default: 0, scales to zero)
+            - max_acu: Maximum Aurora Capacity Units, 1-256 in steps of 0.5
+              and at least min_acu (default: 16)
+            - backup_retention_days: Days to retain automated backups, 1-35
+              (default: 7)
+            - deletion_protection: Whether deletion protection is enabled
+              (default: False)
+
+        Raises:
+            ConfigValidationError: If the block is malformed.
         """
-        default_config: dict[str, Any] = {
-            "enabled": False,
-            "min_acu": 0,
-            "max_acu": 16,
-            "backup_retention_days": 7,
-            "deletion_protection": False,
+        path = "aurora_pgvector"
+        block = _object_or_empty(path, self.app.node.try_get_context("aurora_pgvector"))
+        _check_block_keys(path, block, _AURORA_PGVECTOR_DEFAULTS)
+        merged = {**_AURORA_PGVECTOR_DEFAULTS, **block}
+        capacities: dict[str, float] = {}
+        for key, minimum in (("min_acu", 0), ("max_acu", 1)):
+            value = merged[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not minimum <= value <= 256
+                or (value * 2) % 1 != 0
+            ):
+                raise ConfigValidationError(
+                    f"{path}.{key} must be a number from {minimum} to 256 in steps of 0.5 "
+                    f"(Aurora Serverless v2 capacity units), got {value!r}"
+                )
+            capacities[key] = value
+        if capacities["max_acu"] < capacities["min_acu"]:
+            raise ConfigValidationError(
+                f"{path}.max_acu ({merged['max_acu']}) must be at least "
+                f"{path}.min_acu ({merged['min_acu']})"
+            )
+        resolved: dict[str, Any] = {
+            "enabled": parse_block_flag(
+                merged["enabled"],
+                f"{path}.enabled",
+                self._warn,
+                off_deletes="the Aurora pgvector cluster and its data",
+            ),
+            "min_acu": merged["min_acu"],
+            "max_acu": merged["max_acu"],
+            "backup_retention_days": _require_int(
+                f"{path}.backup_retention_days", merged["backup_retention_days"], 1, 35
+            ),
+            # Earlier releases passed this value to the CDK construct as it
+            # was, and a string failed the synth there; nothing has been
+            # running on a string.
+            "deletion_protection": parse_block_flag(
+                merged["deletion_protection"],
+                f"{path}.deletion_protection",
+                self._warn,
+                read_by_truthiness=False,
+            ),
         }
-        aurora_ctx = self.app.node.try_get_context("aurora_pgvector")
-        aurora_config: dict[str, Any] = aurora_ctx if isinstance(aurora_ctx, dict) else {}
-        merged = {**default_config, **aurora_config}
         if self._feature_override_enabled("aurora_pgvector"):
-            merged["enabled"] = True
-        return merged
+            resolved["enabled"] = True
+        return resolved
 
     def get_analytics_config(self) -> dict[str, Any]:
         """Get optional analytics environment configuration.
@@ -2368,9 +2729,7 @@ class ConfigLoader:
         layered on top of the defaults below. Sub-blocks (``hyperpod``,
         ``cognito``, ``efs``, ``studio``) are deep-merged so a user who
         overrides a single nested key (e.g. ``cognito.domain_prefix``) does
-        not inadvertently wipe the sub-block's other defaults — mirroring the
-        nested-merge pattern used by ``get_fsx_lustre_config`` for its
-        ``node_group`` sub-block.
+        not inadvertently wipe the sub-block's other defaults.
 
         Returns:
             Analytics configuration dictionary with the following keys:
@@ -2495,7 +2854,25 @@ class ConfigLoader:
                 default_sub = cast(dict[str, Any], default_config[sub_block])
                 merged_config[sub_block] = {**default_sub, **override}
 
+        # Resolved before the validators run (the Slurm check asks whether
+        # observability is on), so the mlflow sub-block's shape is checked
+        # here rather than read through a scalar.
+        mlflow = {
+            **cast(dict[str, Any], default_config["mlflow"]),
+            **_object_or_empty("cluster_observability.mlflow", obs_config.get("mlflow")),
+        }
+        mlflow["enabled"] = self._parse_mlflow_enabled(mlflow["enabled"])
+        merged_config["mlflow"] = mlflow
         return merged_config
+
+    def _parse_mlflow_enabled(self, value: object) -> bool:
+        """Parse ``cluster_observability.mlflow.enabled`` (see :func:`parse_block_flag`)."""
+        return parse_block_flag(
+            value,
+            "cluster_observability.mlflow.enabled",
+            self._warn,
+            off_deletes="the MLflow tracking server and its run-metadata volume",
+        )
 
     def get_cluster_observability_enabled(self) -> bool:
         """Return whether in-cluster observability is enabled (default True).

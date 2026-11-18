@@ -9,6 +9,8 @@ from typing import Any
 
 import click
 
+from gco.fsx_lustre_config import FSX_DEFAULT_THROUGHPUT, FSX_THROUGHPUT_CHOICES
+
 from ..config import GCOConfig, _load_cdk_json
 from ..output import confirm, get_output_formatter, interactive_echo
 
@@ -1851,11 +1853,12 @@ def fsx_status(config: Any, region: Any) -> None:
 
 
 #: Per-unit storage throughput (MB/s per TiB) FSx for Lustre accepts for each
-#: SSD deployment type, with the value ``fsx enable`` writes by default.
+#: SSD deployment type, with the value ``fsx enable`` writes by default — the
+#: same tables ConfigLoader validates against (gco/fsx_lustre_config.py).
 #: SCRATCH file systems take none.
 _FSX_THROUGHPUT_CHOICES: dict[str, tuple[tuple[int, ...], int]] = {
-    "PERSISTENT_1": ((50, 100, 200), 200),
-    "PERSISTENT_2": ((125, 250, 500, 1000), 250),
+    deployment_type: (choices, FSX_DEFAULT_THROUGHPUT[deployment_type])
+    for deployment_type, choices in FSX_THROUGHPUT_CHOICES.items()
 }
 
 

@@ -1014,12 +1014,13 @@ class TestFsxLustreConfig:
         assert fsx_config["storage_capacity_gib"] == 1200
         assert fsx_config["deployment_type"] == "SCRATCH_2"
         assert fsx_config["file_system_type_version"] == "2.15"
-        assert fsx_config["per_unit_storage_throughput"] == 200
+        # SCRATCH_2 takes no per-unit storage throughput.
+        assert fsx_config["per_unit_storage_throughput"] is None
         assert fsx_config["data_compression_type"] == "LZ4"
         assert fsx_config["import_path"] is None
         assert fsx_config["export_path"] is None
         assert fsx_config["auto_import_policy"] == "NEW_CHANGED_DELETED"
-        assert "node_group" in fsx_config
+        assert "node_group" not in fsx_config
 
     def test_get_fsx_lustre_config_custom(self, valid_context):
         """Test getting FSx config with custom values."""
@@ -1068,68 +1069,206 @@ class TestFsxLustreConfig:
         fsx_config_east = config.get_fsx_lustre_config(region="us-east-1")
         assert fsx_config_east["storage_capacity_gib"] == 1200
 
-    def test_get_fsx_lustre_config_node_group_defaults(self):
-        """Test FSx config node_group has all default fields."""
-        app = MockApp(minimal_context())
-        config = ConfigLoader(app)
-        fsx_config = config.get_fsx_lustre_config()
-
-        node_group = fsx_config["node_group"]
-        assert "instance_types" in node_group
-        assert node_group["min_size"] == 0
-        assert node_group["max_size"] == 10
-        assert node_group["desired_size"] == 1
-        assert node_group["ami_type"] == "AL2023_X86_64_STANDARD"
-        assert node_group["capacity_type"] == "ON_DEMAND"
-        assert node_group["disk_size"] == 100
-        assert node_group["labels"] == {}
-
-    def test_get_fsx_lustre_config_node_group_custom(self, valid_context):
-        """Test FSx config with custom node_group settings."""
+    def test_fsx_node_group_is_deprecated_and_ignored(self, valid_context):
+        """node_group was documented but never read: it warns and is not returned."""
         valid_context["fsx_lustre"] = {
             "enabled": True,
-            "node_group": {
-                "instance_types": ["m6i.2xlarge"],
-                "max_size": 20,
-                "desired_size": 5,
-            },
+            "node_group": {"instance_types": ["m6i.2xlarge"], "max_size": 20},
         }
-        app = MockApp(valid_context)
-        config = ConfigLoader(app)
-        fsx_config = config.get_fsx_lustre_config()
+        valid_context["fsx_lustre_regions"] = {"us-west-2": {"node_group": {"max_size": 5}}}
+        config = ConfigLoader(MockApp(valid_context))
+        assert "node_group" not in config.get_fsx_lustre_config()
+        assert "node_group" not in config.get_fsx_lustre_config(region="us-west-2")
+        deprecated = [w for w in config.warnings if "node_group" in w]
+        assert [w.split(" is deprecated")[0] for w in deprecated] == [
+            "fsx_lustre.node_group",
+            "fsx_lustre_regions.us-west-2.node_group",
+        ]
 
-        node_group = fsx_config["node_group"]
-        assert node_group["instance_types"] == ["m6i.2xlarge"]
-        assert node_group["max_size"] == 20
-        assert node_group["desired_size"] == 5
-        # Defaults should still be present
-        assert node_group["min_size"] == 0
-        assert node_group["ami_type"] == "AL2023_X86_64_STANDARD"
+    @pytest.mark.parametrize(
+        ("deployment_type", "expected"),
+        [("PERSISTENT_1", 200), ("PERSISTENT_2", 250), ("SCRATCH_1", None), ("SCRATCH_2", None)],
+    )
+    def test_fsx_throughput_defaults_per_deployment_type(
+        self, valid_context, deployment_type, expected
+    ):
+        """PERSISTENT_2 has no 200 setting, so its default is 250; SCRATCH types take none."""
+        valid_context["fsx_lustre"] = {"enabled": True, "deployment_type": deployment_type}
+        fsx_config = ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config()
+        assert fsx_config["per_unit_storage_throughput"] == expected
 
-    def test_get_fsx_lustre_config_region_node_group_override(self, valid_context):
-        """Test FSx config with region-specific node_group override."""
+    def test_fsx_scratch_ignores_a_configured_throughput(self, valid_context):
+        """v8.23.0 shipped 200 next to SCRATCH_2: it is ignored, without a warning."""
         valid_context["fsx_lustre"] = {
-            "enabled": True,
-            "node_group": {
-                "instance_types": ["m5.large"],
-                "max_size": 10,
-            },
+            "deployment_type": "SCRATCH_2",
+            "per_unit_storage_throughput": 200,
         }
-        valid_context["fsx_lustre_regions"] = {
-            "eu-west-1": {
-                "node_group": {
-                    "instance_types": ["m6i.large"],
-                    "max_size": 5,
-                }
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_fsx_lustre_config()["per_unit_storage_throughput"] is None
+        assert not [w for w in config.warnings if "fsx_lustre" in w]
+
+    @pytest.mark.parametrize(
+        ("deployment_type", "allowed", "rejected"),
+        [
+            ("PERSISTENT_1", (50, 100, 200), (125, 250, 12, 40)),
+            ("PERSISTENT_2", (125, 250, 500, 1000), (50, 100, 200)),
+        ],
+    )
+    def test_fsx_throughput_must_suit_the_deployment_type(
+        self, valid_context, deployment_type, allowed, rejected
+    ):
+        for value in allowed:
+            valid_context["fsx_lustre"] = {
+                "deployment_type": deployment_type,
+                "per_unit_storage_throughput": value,
             }
-        }
-        app = MockApp(valid_context)
-        config = ConfigLoader(app)
+            config = ConfigLoader(MockApp(valid_context))
+            assert config.get_fsx_lustre_config()["per_unit_storage_throughput"] == value
+        for value in (*rejected, True, "200"):
+            valid_context["fsx_lustre"] = {
+                "deployment_type": deployment_type,
+                "per_unit_storage_throughput": value,
+            }
+            with pytest.raises(
+                ConfigValidationError,
+                match=rf"fsx_lustre\.per_unit_storage_throughput must be one of .* for "
+                rf"{deployment_type}",
+            ):
+                ConfigLoader(MockApp(valid_context))
 
-        fsx_config = config.get_fsx_lustre_config(region="eu-west-1")
-        node_group = fsx_config["node_group"]
-        assert node_group["instance_types"] == ["m6i.large"]
-        assert node_group["max_size"] == 5
+    @pytest.mark.parametrize(("value", "enabled"), [(True, True), (False, False)])
+    def test_fsx_enabled_takes_json_booleans(self, valid_context, value, enabled):
+        valid_context["fsx_lustre"] = {"enabled": value}
+        assert ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config()["enabled"] is enabled
+
+    def test_fsx_region_overlay_string_false_is_rejected(self, valid_context):
+        """An overlay flag follows the same rule, and the error names the overlay."""
+        valid_context["fsx_lustre_regions"] = {"us-west-2": {"enabled": "false"}}
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"fsx_lustre_regions\.us-west-2\.enabled must be true or false .*"
+            r"which deletes the FSx for Lustre file system and the data on it",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize("value", [1, 0, None, "yes", "", [True]])
+    def test_fsx_enabled_rejects_non_booleans(self, valid_context, value):
+        valid_context["fsx_lustre"] = {"enabled": value}
+        with pytest.raises(
+            ConfigValidationError, match=r"fsx_lustre\.enabled must be true or false"
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize(
+        ("block", "message"),
+        [
+            ({"deployment_type": "PERSISTENT_3"}, r"fsx_lustre\.deployment_type must be one of"),
+            ({"deployment_type": "scratch_2"}, r"fsx_lustre\.deployment_type must be one of"),
+            (
+                {"storage_capacity_gib": 1000},
+                r"storage_capacity_gib must be an integer of at least",
+            ),
+            ({"storage_capacity_gib": 3600}, r"multiple of 2400 GiB for SCRATCH_2"),
+            (
+                {"storage_capacity_gib": 4800, "deployment_type": "SCRATCH_1"},
+                r"multiple of 3600 GiB for SCRATCH_1",
+            ),
+            ({"storage_capacity_gib": True}, r"storage_capacity_gib must be an integer"),
+            ({"file_system_type_version": "2.16"}, r"file_system_type_version must be one of"),
+            ({"file_system_type_version": 2.15}, r"file_system_type_version must be one of"),
+            (
+                {"deployment_type": "PERSISTENT_2", "file_system_type_version": "2.10"},
+                r"2\.10 is not supported by PERSISTENT_2",
+            ),
+            ({"data_compression_type": "ZSTD"}, r"data_compression_type must be one of"),
+            ({"auto_import_policy": "ALL"}, r"auto_import_policy must be one of"),
+            ({"import_path": "my-bucket/data"}, r"import_path must be an S3 URI"),
+            ({"import_path": "s3://"}, r"import_path must be an S3 URI"),
+            ({"export_path": "s3://bucket/out"}, r"export_path needs an import_path"),
+            (
+                {"import_path": "s3://a/in", "export_path": "s3://b/out"},
+                r"export_path must use the import_path bucket",
+            ),
+            ({"node_groups": {}}, r"fsx_lustre contains unknown key\(s\): fsx_lustre\.node_groups"),
+            ("on", r"fsx_lustre must be an object, got str"),
+        ],
+    )
+    def test_fsx_invalid_values_fail_with_the_key_path(self, valid_context, block, message):
+        valid_context["fsx_lustre"] = block
+        with pytest.raises(ConfigValidationError, match=message):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_fsx_capacities_fsx_accepts(self, valid_context):
+        for deployment_type, capacity in (
+            ("SCRATCH_1", 1200),
+            ("SCRATCH_1", 2400),
+            ("SCRATCH_1", 7200),
+            ("SCRATCH_2", 4800),
+            ("PERSISTENT_2", 2400),
+        ):
+            valid_context["fsx_lustre"] = {
+                "deployment_type": deployment_type,
+                "storage_capacity_gib": capacity,
+            }
+            config = ConfigLoader(MockApp(valid_context))
+            assert config.get_fsx_lustre_config()["storage_capacity_gib"] == capacity
+
+    def test_fsx_same_bucket_import_and_export_are_accepted(self, valid_context):
+        valid_context["fsx_lustre"] = {
+            "import_path": "s3://data-bucket/training",
+            "export_path": "s3://data-bucket/results",
+        }
+        fsx_config = ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config()
+        assert fsx_config["export_path"] == "s3://data-bucket/results"
+
+    def test_fsx_region_overlay_errors_name_the_overlay(self, valid_context):
+        """A bad value in an overlay names fsx_lustre_regions.<region>, not the global block."""
+        valid_context["fsx_lustre_regions"] = {
+            "us-west-2": {"deployment_type": "PERSISTENT_2", "per_unit_storage_throughput": 200}
+        }
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"fsx_lustre_regions\.us-west-2\.per_unit_storage_throughput must be one of",
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_fsx_region_overlay_merges_over_a_global_value(self, valid_context):
+        """A global PERSISTENT_2 throughput of 500 stays valid when an overlay changes size."""
+        valid_context["fsx_lustre"] = {
+            "deployment_type": "PERSISTENT_2",
+            "per_unit_storage_throughput": 500,
+        }
+        valid_context["fsx_lustre_regions"] = {"us-west-2": {"storage_capacity_gib": 2400}}
+        west = ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config("us-west-2")
+        assert (west["deployment_type"], west["per_unit_storage_throughput"]) == (
+            "PERSISTENT_2",
+            500,
+        )
+        assert west["storage_capacity_gib"] == 2400
+
+    @pytest.mark.parametrize(
+        ("overlays", "message"),
+        [
+            (["us-east-1"], r"fsx_lustre_regions must be an object, got list"),
+            ({"us-east-1": "on"}, r"fsx_lustre_regions\.us-east-1 must be an object, got str"),
+            (
+                {"us-east-1": {"enable": True}},
+                r"fsx_lustre_regions\.us-east-1 contains unknown key\(s\): "
+                r"fsx_lustre_regions\.us-east-1\.enable",
+            ),
+        ],
+    )
+    def test_fsx_region_overlays_must_be_objects_of_known_keys(
+        self, valid_context, overlays, message
+    ):
+        valid_context["fsx_lustre_regions"] = overlays
+        with pytest.raises(ConfigValidationError, match=message):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_fsx_override_forces_enabled(self, valid_context):
+        valid_context["fsx_lustre"] = {"enabled": False}
+        valid_context["feature_enabled_overrides"] = "fsx_lustre"
+        assert ConfigLoader(MockApp(valid_context)).get_fsx_lustre_config()["enabled"] is True
 
 
 class TestEksClusterConfig:
@@ -1625,14 +1764,11 @@ class TestAuroraPgvectorConfig:
 
         assert aurora_config["min_acu"] == 0.5
 
-    def test_get_aurora_pgvector_config_non_dict_context_uses_defaults(self):
-        """Test that non-dict context value falls back to defaults."""
+    def test_get_aurora_pgvector_config_non_dict_context_is_rejected(self):
+        """A scalar where the block belongs is an error, not a silent fall back to defaults."""
         app = MockApp({**minimal_context(), "aurora_pgvector": "invalid"})
-        config = ConfigLoader(app)
-        aurora_config = config.get_aurora_pgvector_config()
-
-        assert aurora_config["enabled"] is False
-        assert aurora_config["min_acu"] == 0
+        with pytest.raises(ConfigValidationError, match="aurora_pgvector must be an object"):
+            ConfigLoader(app)
 
     def test_get_aurora_pgvector_config_disabled_by_default(self):
         """Test that Aurora pgvector is disabled by default."""
@@ -1641,6 +1777,261 @@ class TestAuroraPgvectorConfig:
         aurora_config = config.get_aurora_pgvector_config()
 
         assert aurora_config["enabled"] is False
+
+
+class TestValkeyConfigValidation:
+    """The valkey block: strict flag, integer usage limits, known keys only."""
+
+    def test_defaults(self, valid_context):
+        assert ConfigLoader(MockApp(valid_context)).get_valkey_config() == {
+            "enabled": False,
+            "max_data_storage_gb": 5,
+            "max_ecpu_per_second": 5000,
+            "snapshot_retention_limit": 1,
+        }
+
+    @pytest.mark.parametrize(
+        ("block", "message"),
+        [
+            ({"enabled": "no"}, r"valkey\.enabled must be true or false"),
+            (
+                {"max_data_storage_gb": 0},
+                r"valkey\.max_data_storage_gb must be an integer of at least 1",
+            ),
+            ({"max_data_storage_gb": 5.5}, r"valkey\.max_data_storage_gb must be an integer"),
+            (
+                {"max_ecpu_per_second": 999},
+                r"valkey\.max_ecpu_per_second must be an integer of at least 1000",
+            ),
+            ({"max_ecpu_per_second": True}, r"valkey\.max_ecpu_per_second must be an integer"),
+            (
+                {"snapshot_retention_limit": -1},
+                r"valkey\.snapshot_retention_limit must be an integer of at least 0",
+            ),
+            ({"max_storage_gb": 5}, r"valkey contains unknown key\(s\): valkey\.max_storage_gb"),
+            (True, r"valkey must be an object, got bool"),
+        ],
+    )
+    def test_invalid_values_fail_with_the_key_path(self, valid_context, block, message):
+        valid_context["valkey"] = block
+        with pytest.raises(ConfigValidationError, match=message):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_comment_keys_are_allowed(self, valid_context):
+        valid_context["valkey"] = {"_comment_limits": "caps", "enabled": True}
+        assert ConfigLoader(MockApp(valid_context)).get_valkey_config()["enabled"] is True
+
+
+class TestAuroraPgvectorConfigValidation:
+    """The aurora_pgvector block: capacity units, retention and the two flags."""
+
+    @pytest.mark.parametrize(
+        ("block", "expected"),
+        [
+            ({"min_acu": 0.5, "max_acu": 1}, (0.5, 1)),
+            ({"min_acu": 0, "max_acu": 256}, (0, 256)),
+            ({"min_acu": 8, "max_acu": 8}, (8, 8)),
+        ],
+    )
+    def test_capacity_ranges_aurora_accepts(self, valid_context, block, expected):
+        valid_context["aurora_pgvector"] = block
+        aurora = ConfigLoader(MockApp(valid_context)).get_aurora_pgvector_config()
+        assert (aurora["min_acu"], aurora["max_acu"]) == expected
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_flags_take_json_booleans(self, valid_context, value):
+        valid_context["aurora_pgvector"] = {"enabled": value, "deletion_protection": value}
+        aurora = ConfigLoader(MockApp(valid_context)).get_aurora_pgvector_config()
+        assert aurora["enabled"] is value
+        assert aurora["deletion_protection"] is value
+
+    def test_string_deletion_protection_makes_no_claim_about_the_past(self, valid_context):
+        """Earlier releases failed the synth on a string here instead of reading it."""
+        valid_context["aurora_pgvector"] = {"deletion_protection": "false"}
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(valid_context))
+        assert str(raised.value) == (
+            "aurora_pgvector.deletion_protection must be true or false (a JSON boolean), "
+            "not the string 'false'."
+        )
+
+    def test_string_true_deletion_protection_reads_as_true_with_a_warning(self, valid_context):
+        valid_context["aurora_pgvector"] = {"deletion_protection": "TRUE"}
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_aurora_pgvector_config()["deletion_protection"] is True
+        assert any(w.startswith("aurora_pgvector.deletion_protection is") for w in config.warnings)
+
+    @pytest.mark.parametrize(
+        ("block", "message"),
+        [
+            ({"min_acu": -0.5}, r"aurora_pgvector\.min_acu must be a number from 0 to 256"),
+            (
+                {"min_acu": 0.25},
+                r"aurora_pgvector\.min_acu must be a number from 0 to 256 in steps of 0\.5",
+            ),
+            ({"max_acu": 0.5}, r"aurora_pgvector\.max_acu must be a number from 1 to 256"),
+            ({"max_acu": 257}, r"aurora_pgvector\.max_acu must be a number from 1 to 256"),
+            ({"max_acu": True}, r"aurora_pgvector\.max_acu must be a number"),
+            ({"max_acu": "16"}, r"aurora_pgvector\.max_acu must be a number"),
+            (
+                {"min_acu": 4, "max_acu": 2},
+                r"aurora_pgvector\.max_acu \(2\) must be at least aurora_pgvector\.min_acu \(4\)",
+            ),
+            (
+                {"backup_retention_days": 0},
+                r"aurora_pgvector\.backup_retention_days must be an integer between 1 and 35",
+            ),
+            (
+                {"backup_retention_days": 36},
+                r"aurora_pgvector\.backup_retention_days must be an integer between 1 and 35",
+            ),
+            (
+                {"deletion_protection": "maybe"},
+                r"aurora_pgvector\.deletion_protection must be true or false",
+            ),
+            (
+                {"min_capacity": 1},
+                r"aurora_pgvector contains unknown key\(s\): aurora_pgvector\.min_capacity",
+            ),
+        ],
+    )
+    def test_invalid_values_fail_with_the_key_path(self, valid_context, block, message):
+        valid_context["aurora_pgvector"] = block
+        with pytest.raises(ConfigValidationError, match=message):
+            ConfigLoader(MockApp(valid_context))
+
+
+def _stateful_flag_context(valid_context: dict, block: str, value: object) -> dict:
+    """``valid_context`` with ``<block>.enabled`` set; ``block`` may be dotted once."""
+    outer, _, inner = block.partition(".")
+    valid_context[outer] = {inner: {"enabled": value}} if inner else {"enabled": value}
+    return valid_context
+
+
+#: The storage features whose "off" deletes data: (block, what turning it off
+#: deletes, how to read the parsed flag back).
+_STATEFUL_FLAGS = [
+    pytest.param(
+        "fsx_lustre",
+        "the FSx for Lustre file system and the data on it",
+        lambda config: config.get_fsx_lustre_config()["enabled"],
+        id="fsx_lustre",
+    ),
+    pytest.param(
+        "valkey",
+        "the Valkey cache and the data in it",
+        lambda config: config.get_valkey_config()["enabled"],
+        id="valkey",
+    ),
+    pytest.param(
+        "aurora_pgvector",
+        "the Aurora pgvector cluster and its data",
+        lambda config: config.get_aurora_pgvector_config()["enabled"],
+        id="aurora_pgvector",
+    ),
+    pytest.param(
+        "cluster_observability.mlflow",
+        "the MLflow tracking server and its run-metadata volume",
+        lambda config: config.get_cluster_observability_config()["mlflow"]["enabled"],
+        id="mlflow",
+    ),
+]
+
+
+class TestStatefulFlagStrings:
+    """A string flag in a storage block is never quietly reinterpreted on upgrade.
+
+    Earlier releases read these flags by truthiness, so ``"false"`` (any
+    non-empty string) has been running as enabled. Reading it as false now
+    would delete the resource and its data on the next deploy, so every
+    string except ``"true"`` fails validation and says what to write.
+    """
+
+    @pytest.mark.parametrize(("block", "deletes", "read_flag"), _STATEFUL_FLAGS)
+    @pytest.mark.parametrize("value", ["false", "False", "0", "off"])
+    def test_non_empty_strings_fail_and_explain(
+        self, valid_context, block, deletes, read_flag, value
+    ):
+        context = _stateful_flag_context(valid_context, block, value)
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(context))
+        assert str(raised.value) == (
+            f"{block}.enabled must be true or false (a JSON boolean), not the string "
+            f"{value!r}. Earlier releases read every non-empty string here as true, so this "
+            "setting has been on. Write true to keep it on, or false to turn it off, which "
+            f"deletes {deletes}."
+        )
+
+    @pytest.mark.parametrize(("block", "deletes", "read_flag"), _STATEFUL_FLAGS)
+    def test_empty_string_fails_and_says_it_has_been_off(
+        self, valid_context, block, deletes, read_flag
+    ):
+        context = _stateful_flag_context(valid_context, block, "")
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(context))
+        assert str(raised.value) == (
+            f"{block}.enabled must be true or false (a JSON boolean), not the string ''. "
+            "Earlier releases read an empty string here as false, so this setting has been "
+            "off. Write false to keep it off, or true to turn it on."
+        )
+
+    @pytest.mark.parametrize(("block", "deletes", "read_flag"), _STATEFUL_FLAGS)
+    @pytest.mark.parametrize("value", ["true", "TRUE", "True"])
+    def test_string_true_keeps_the_feature_on_with_a_warning(
+        self, valid_context, block, deletes, read_flag, value
+    ):
+        config = ConfigLoader(MockApp(_stateful_flag_context(valid_context, block, value)))
+        assert read_flag(config) is True
+        assert (
+            f"{block}.enabled is the string {value!r}, read as true; write the JSON boolean "
+            "true instead (string flags in cdk.json blocks are deprecated)."
+        ) in config.warnings
+
+    @pytest.mark.parametrize(("block", "deletes", "read_flag"), _STATEFUL_FLAGS)
+    @pytest.mark.parametrize("value", [True, False])
+    def test_json_booleans_are_read_as_written_without_a_warning(
+        self, valid_context, block, deletes, read_flag, value
+    ):
+        config = ConfigLoader(MockApp(_stateful_flag_context(valid_context, block, value)))
+        assert read_flag(config) is value
+        assert not [w for w in config.warnings if f"{block}.enabled" in w]
+
+
+class TestParseFlags:
+    """The two flag parsers, called directly."""
+
+    def test_block_flag_without_a_data_consequence(self):
+        from gco.config.config_loader import parse_block_flag
+
+        with pytest.raises(ConfigValidationError) as raised:
+            parse_block_flag("no", "queue_processor.enabled", lambda _message: None)
+        assert str(raised.value).endswith("Write true to keep it on, or false to turn it off.")
+
+    def test_block_flag_rejects_non_strings_by_name(self):
+        from gco.config.config_loader import parse_block_flag
+
+        with pytest.raises(
+            ConfigValidationError,
+            match=r"^x\.enabled must be true or false \(a JSON boolean\), got 1$",
+        ):
+            parse_block_flag(1, "x.enabled", lambda _message: None)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(True, True), (False, False), ("true", True), ("FALSE", False), ("False", False)],
+    )
+    def test_top_level_flag_takes_both_strings(self, value, expected):
+        """``--context key=value`` passes strings, so both spellings are read as written."""
+        from gco.config.config_loader import parse_bool_flag
+
+        assert parse_bool_flag(value, "gco:control-plane-only") is expected
+
+    @pytest.mark.parametrize("value", ["yes", "", 1, None])
+    def test_top_level_flag_rejects_everything_else(self, value):
+        from gco.config.config_loader import parse_bool_flag
+
+        with pytest.raises(ConfigValidationError, match=r"^k must be true or false, got "):
+            parse_bool_flag(value, "k")
 
 
 class TestAnalyticsEnvironmentConfig:

@@ -290,13 +290,12 @@
 
     "_comment_storage": "Optional storage backends (disabled by default; flip enabled then 'gco stacks deploy-all').",
 
-    "_comment_fsx_lustre": "FSx for Lustre filesystem mounted into job pods. enabled: master toggle. storage_capacity_gib: provisioned size. deployment_type: SCRATCH_1, SCRATCH_2 (recommended), or PERSISTENT_*. file_system_type_version: Lustre version. per_unit_storage_throughput: only relevant for PERSISTENT_* (MB/s/TiB). data_compression_type: NONE or LZ4. import_path / export_path: optional S3 data-repo URIs. auto_import_policy: which S3 events trigger metadata sync (NONE, NEW, NEW_CHANGED, NEW_CHANGED_DELETED). See docs/CUSTOMIZATION.md (Configure FSx Storage) and https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html.",
+    "_comment_fsx_lustre": "FSx for Lustre filesystem mounted into job pods. enabled: master toggle (true/false). storage_capacity_gib: provisioned size, 1200, 2400, then multiples of 2400 (multiples of 3600 for SCRATCH_1). deployment_type: SCRATCH_1, SCRATCH_2 (default, recommended), PERSISTENT_1 or PERSISTENT_2. file_system_type_version: Lustre version 2.10, 2.12 or 2.15 (default; kernel 6.x clients need it; PERSISTENT_2 rejects 2.10). per_unit_storage_throughput: MB/s per TiB for the PERSISTENT types only (PERSISTENT_1: 50, 100 or 200, default 200; PERSISTENT_2: 125, 250, 500 or 1000, default 250); SCRATCH types take none, so it is left out here and ignored if set. data_compression_type: NONE or LZ4. import_path / export_path: optional s3:// data-repository URIs in one bucket (export needs import). auto_import_policy: which S3 events trigger metadata sync (NONE, NEW, NEW_CHANGED, NEW_CHANGED_DELETED). fsx_lustre_regions {<region>: {...}} overrides keys per Region. Every key is validated at synth. See docs/CUSTOMIZATION.md (Configure FSx Storage) and https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html.",
     "fsx_lustre": {
       "enabled": false,
       "storage_capacity_gib": 1200,
       "deployment_type": "SCRATCH_2",
       "file_system_type_version": "2.15",
-      "per_unit_storage_throughput": 200,
       "data_compression_type": "LZ4",
       "import_path": null,
       "export_path": null,

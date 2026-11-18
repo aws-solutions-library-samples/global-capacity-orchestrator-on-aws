@@ -35,6 +35,7 @@ from botocore.exceptions import ClientError
 from click.testing import CliRunner
 
 from cli.stacks import StackManager as _StackManager
+from tests._minimal_cdk_context import minimal_context
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,7 +73,9 @@ class _ContextApp:
 def config_loader() -> Any:
     from gco.config.config_loader import ConfigLoader
 
-    return ConfigLoader(_ContextApp({}))
+    # Validation always runs, so the loader starts from a valid context; the
+    # tests below swap in the context of the one validator they exercise.
+    return ConfigLoader(_ContextApp(minimal_context()))
 
 
 @pytest.fixture
@@ -95,7 +98,8 @@ def stack_manager(tmp_path: Path) -> Any:
 
 @pytest.mark.parametrize(
     "project_name",
-    [None, "GC0", "a", "1project", "project_name", "project.name"],
+    # None is absent (CDK normalizes JSON null), which selects the default.
+    ["", "GC0", "a", "1project", "project_name", "project.name"],
 )
 def test_project_name_validation_rejects_non_dns_prefixes(
     config_loader: Any,
@@ -230,75 +234,43 @@ def test_manifest_processor_worker_validation(
         config_loader.get_manifest_processor_config()
 
 
-def test_fsx_partial_regional_node_group_preserves_inherited_fields() -> None:
-    """A regional node-group patch must not erase global/default settings."""
+def test_fsx_node_groups_are_deprecated_and_never_returned() -> None:
+    """node_group was documented but never read: each occurrence warns and is dropped."""
     from gco.config.config_loader import ConfigLoader
 
     loader = ConfigLoader(
         _ContextApp(
-            {
-                "fsx_lustre": {
-                    "enabled": True,
-                    "node_group": {
-                        "instance_types": ["m6i.large"],
-                        "min_size": 2,
-                        "capacity_type": "SPOT",
-                        "labels": {"workload": "fsx"},
-                    },
-                },
-                "fsx_lustre_regions": {"eu-west-1": {"node_group": {"max_size": 4}}},
-            }
+            minimal_context(
+                fsx_lustre={"enabled": True, "node_group": {"min_size": 2}},
+                fsx_lustre_regions={"eu-west-1": {"node_group": {"max_size": 4}}},
+            )
         )
     )
 
-    node_group = loader.get_fsx_lustre_config("eu-west-1")["node_group"]
-    assert node_group == {
-        "instance_types": ["m6i.large"],
-        "min_size": 2,
-        "max_size": 4,
-        "desired_size": 1,
-        "ami_type": "AL2023_X86_64_STANDARD",
-        "capacity_type": "SPOT",
-        "disk_size": 100,
-        "labels": {"workload": "fsx"},
-    }
+    assert "node_group" not in loader.get_fsx_lustre_config("eu-west-1")
+    assert [w.split(" is deprecated")[0] for w in loader.warnings if "node_group" in w] == [
+        "fsx_lustre.node_group",
+        "fsx_lustre_regions.eu-west-1.node_group",
+    ]
 
 
 @pytest.mark.parametrize(
-    ("context", "expected_node_group"),
+    ("blocks", "message"),
     [
-        ({"fsx_lustre": {"node_group": "invalid"}}, "invalid"),
-        ({"fsx_lustre_regions": ["invalid"]}, None),
-        ({"fsx_lustre_regions": {"us-east-1": "invalid"}}, None),
+        ({"fsx_lustre_regions": ["invalid"]}, "fsx_lustre_regions must be an object"),
         (
-            {
-                "fsx_lustre": {"node_group": "invalid"},
-                "fsx_lustre_regions": {"us-east-1": {"node_group": {"max_size": 2}}},
-            },
-            {"max_size": 2},
+            {"fsx_lustre_regions": {"us-east-1": "invalid"}},
+            "fsx_lustre_regions.us-east-1 must be an object",
         ),
-        (
-            {"fsx_lustre_regions": {"us-east-1": {"node_group": "invalid"}}},
-            "invalid",
-        ),
+        ({"fsx_lustre": "invalid"}, "fsx_lustre must be an object"),
     ],
 )
-def test_fsx_non_mapping_overrides_have_explicit_fallback_behavior(
-    context: dict[str, Any],
-    expected_node_group: object,
-) -> None:
-    from gco.config.config_loader import ConfigLoader
+def test_fsx_non_mapping_blocks_are_rejected(blocks: dict[str, Any], message: str) -> None:
+    """A scalar or list where an FSx block belongs fails instead of reading as absent."""
+    from gco.config.config_loader import ConfigLoader, ConfigValidationError
 
-    result = ConfigLoader(_ContextApp(context)).get_fsx_lustre_config("us-east-1")
-    node_group = result["node_group"]
-    if expected_node_group is None:
-        assert node_group["ami_type"] == "AL2023_X86_64_STANDARD"
-        assert node_group["min_size"] == 0
-    elif isinstance(expected_node_group, dict):
-        assert node_group["max_size"] == expected_node_group["max_size"]
-        assert node_group["ami_type"] == "AL2023_X86_64_STANDARD"
-    else:
-        assert node_group == expected_node_group
+    with pytest.raises(ConfigValidationError, match=re.escape(message)):
+        ConfigLoader(_ContextApp(minimal_context(**blocks)))
 
 
 # ---------------------------------------------------------------------------
@@ -1991,24 +1963,25 @@ def test_monitoring_stack_api_without_proxy_still_monitors_rotation() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fsx_region_without_node_group_keeps_inherited_node_group() -> None:
+def test_fsx_region_overlay_inherits_the_global_block() -> None:
     from gco.config.config_loader import ConfigLoader
 
     inherited = ConfigLoader(
         _ContextApp(
-            {
-                "fsx_lustre": {"node_group": {"min_size": 2}},
-                "fsx_lustre_regions": {"us-east-1": {"enabled": True}},
-            }
+            minimal_context(
+                fsx_lustre={"storage_capacity_gib": 2400},
+                fsx_lustre_regions={"us-east-1": {"enabled": True}},
+            )
         )
     ).get_fsx_lustre_config("us-east-1")
     absent = ConfigLoader(
-        _ContextApp({"fsx_lustre": {"node_group": {"min_size": 3}}})
+        _ContextApp(minimal_context(fsx_lustre={"storage_capacity_gib": 4800}))
     ).get_fsx_lustre_config("us-east-1")
 
-    assert inherited["node_group"]["min_size"] == 2
+    assert inherited["storage_capacity_gib"] == 2400
     assert inherited["enabled"] is True
-    assert absent["node_group"]["min_size"] == 3
+    assert absent["storage_capacity_gib"] == 4800
+    assert absent["enabled"] is False
 
 
 def test_project_name_defaults_for_valid_non_mapping_json(

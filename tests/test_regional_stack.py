@@ -2590,6 +2590,61 @@ class TestRegionalStackFsxConfigurations:
                 },
             )
 
+    def test_fsx_persistent_2_without_throughput_gets_250(self):
+        """A config without per_unit_storage_throughput gets its type's default.
+
+        The stack used to fall back to 200 for every PERSISTENT type, a value
+        FSx rejects for PERSISTENT_2 (125, 250, 500 or 1000).
+        """
+
+        class Persistent2DefaultThroughputConfig(MockConfigLoader):
+            def get_fsx_lustre_config(self, region=None):
+                return {
+                    "enabled": True,
+                    "storage_capacity_gib": 1200,
+                    "deployment_type": "PERSISTENT_2",
+                    "data_compression_type": "LZ4",
+                    "import_path": None,
+                    "export_path": None,
+                    "file_system_type_version": "2.15",
+                }
+
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        app = cdk.App()
+        config = Persistent2DefaultThroughputConfig(app, fsx_enabled=True)
+
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                self._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+
+            stack = GCORegionalStack(
+                app,
+                "test-fsx-persistent-2-default-throughput",
+                config=config,
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106  # test fixture ARN with fake account ID, not a real secret
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+
+            template = assertions.Template.from_stack(stack)
+            template.has_resource_properties(
+                "AWS::FSx::FileSystem",
+                {
+                    "LustreConfiguration": assertions.Match.object_like(
+                        {"DeploymentType": "PERSISTENT_2", "PerUnitStorageThroughput": 250}
+                    ),
+                },
+            )
+
 
 class TestGlobalStackDynamoDBTables:
     """Tests for GlobalStack DynamoDB tables."""
