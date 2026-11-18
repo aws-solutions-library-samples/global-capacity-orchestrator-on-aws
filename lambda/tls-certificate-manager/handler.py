@@ -920,22 +920,34 @@ def _publish_expiry_metrics(
     config: ManagerConfig,
     certificate_expiries: dict[str, datetime],
     root_expiry: datetime,
+    *,
+    reconciled: bool = True,
 ) -> None:
+    """Publish the root's and each given Region's days to expiry.
+
+    The ``ReconciliationSuccess`` heartbeat is added only when ``reconciled``:
+    a run in which a Region failed publishes the expiries it has, and the
+    heartbeat alarm still counts the run as missed.
+    """
     now = _now()
-    metric_data = [
-        {
-            "MetricName": "ReconciliationSuccess",
-            "Dimensions": [{"Name": "Project", "Value": config.project_name}],
-            "Value": 1.0,
-            "Unit": "Count",
-        },
+    metric_data: list[dict[str, Any]] = []
+    if reconciled:
+        metric_data.append(
+            {
+                "MetricName": "ReconciliationSuccess",
+                "Dimensions": [{"Name": "Project", "Value": config.project_name}],
+                "Value": 1.0,
+                "Unit": "Count",
+            }
+        )
+    metric_data.append(
         {
             "MetricName": "RootCertificateDaysToExpiry",
             "Dimensions": [{"Name": "Project", "Value": config.project_name}],
             "Value": max(0.0, (root_expiry - now).total_seconds() / 86400),
             "Unit": "Count",
-        },
-    ]
+        }
+    )
     metric_data.extend(
         {
             "MetricName": "LeafCertificateDaysToExpiry",
@@ -961,22 +973,44 @@ def _reconcile(
     config: ManagerConfig,
     newly_retired: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    """Reconcile the root, every Region's leaf, retired Regions, and metrics.
+
+    Each Region is reconciled on its own: a failure is logged and the other
+    Regions are still renewed and their expiry published. Any failure then
+    raises one error naming every failed Region, without the
+    ``ReconciliationSuccess`` heartbeat and before the retired-Region cleanup,
+    which is left to a run (or a CloudFormation rollback) that succeeds.
+    """
     state, root_changed = _ensure_root(config)
     expiries: dict[str, datetime] = {}
     rotated_regions: list[str] = []
+    failures: dict[str, Exception] = {}
     for region in config.regions:
-        _, expiry, rotated = _ensure_certificate(config, state, region)
+        try:
+            _, expiry, rotated = _ensure_certificate(config, state, region)
+        except Exception as exc:  # renew the other Regions, raise once below
+            LOGGER.exception("Could not reconcile the backend leaf certificate in %s", region)
+            failures[region] = exc
+            continue
         expiries[region] = expiry
         if rotated:
             rotated_regions.append(region)
 
+    _, root_certificate = _validate_root_record(state["current"], "current")
+    root_expiry = _certificate_not_after(root_certificate)
+    if failures:
+        _publish_expiry_metrics(config, expiries, root_expiry, reconciled=False)
+        raise RuntimeError(
+            f"Backend TLS reconciliation failed in {len(failures)} of "
+            f"{len(config.regions)} region(s): "
+            + "; ".join(f"{region}: {exc}" for region, exc in failures.items())
+        ) from next(iter(failures.values()))
     cleaned_retired, pending_retired = _retry_retired_region_cleanup(
         config,
         state,
         newly_retired,
     )
-    _, root_certificate = _validate_root_record(state["current"], "current")
-    _publish_expiry_metrics(config, expiries, _certificate_not_after(root_certificate))
+    _publish_expiry_metrics(config, expiries, root_expiry)
     return {
         "RootChanged": root_changed,
         "RotatedRegions": rotated_regions,

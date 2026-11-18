@@ -2,8 +2,9 @@
 Extended tests for lambda/proxy-shared/proxy_utils.py.
 
 Covers the forward_request paths the base proxy suite doesn't reach:
-urllib3 TimeoutError → 504 response, MaxRetryError → 503 response,
-unknown exceptions → 500 without retry, retryable statuses that
+transport failures as urllib3 raises them with retries disabled (timeouts →
+504; refused, unresolvable, reset or truncated connections → 503; read-only
+methods retried), unknown exceptions → 500 without retry, retryable statuses that
 persist through every attempt, hop-by-hop header stripping in
 _build_success_response, and body encoding (None vs string). Also
 exercises get_secret_token's thread-safe caching and the stale-cache
@@ -14,9 +15,12 @@ balancer), never after a target's 503, an ALB 502/504, or a transport
 failure.
 """
 
+import hashlib
+import hmac
 import json
 import time
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlsplit
 
 import pytest
 import urllib3
@@ -112,6 +116,18 @@ def _load_balancer_503(headers=None, data=LOAD_BALANCER_503_PAGE):
     response.headers = dict(LOAD_BALANCER_503_HEADERS) if headers is None else headers
     response.data = data
     return response
+
+
+def _refused():
+    return urllib3.exceptions.NewConnectionError(
+        MagicMock(), "Failed to establish a new connection: [Errno 111] Connection refused"
+    )
+
+
+def _reset():
+    return urllib3.exceptions.ProtocolError(
+        "Connection aborted.", ConnectionResetError(104, "Connection reset by peer")
+    )
 
 
 def _target_response(status, data, headers=None):
@@ -241,13 +257,11 @@ class TestForwardRequestTimeout:
         assert attempt_timeouts == pytest.approx([1.0, 0.4])
 
     def test_connection_error_returns_503(self, proxy_module):
-        """MaxRetryError should result in 503 after retries."""
+        """A refused connection is retried, then a 503 after the attempt budget."""
         pu, _ = proxy_module
 
         mock_http = MagicMock()
-        mock_http.request.side_effect = urllib3.exceptions.MaxRetryError(
-            pool=None, url="https://example.com", reason="Connection refused"
-        )
+        mock_http.request.side_effect = _refused()
 
         with patch.object(pu, "_http", mock_http):
             result = pu.forward_request("https://example.com/api", "GET", {}, None)
@@ -255,6 +269,113 @@ class TestForwardRequestTimeout:
         assert result["statusCode"] == 503
         body = json.loads(result["body"])
         assert "Service unavailable" in body["error"]
+        assert mock_http.request.call_count == pu._MAX_RETRIES
+
+
+class TestTransportFailuresWithRetriesDisabled:
+    """The errors urllib3 raises from the backend pool, which has retries off (L7).
+
+    Before, only TimeoutError (and an impossible MaxRetryError) counted as a
+    transport failure: a reset or aborted connection was a 500 with no retry
+    even for GET, and a refused connection read as a 504 "Gateway timeout".
+    """
+
+    @pytest.mark.parametrize(
+        ("error", "status", "label"),
+        [
+            (_refused(), 503, "Service unavailable"),
+            (
+                urllib3.exceptions.NameResolutionError(
+                    "alb.example", MagicMock(), OSError("no such host")
+                ),
+                503,
+                "Service unavailable",
+            ),
+            (_reset(), 503, "Service unavailable"),
+            (
+                urllib3.exceptions.ProtocolError(
+                    "Connection aborted.",
+                    ConnectionError("Remote end closed connection without response"),
+                ),
+                503,
+                "Service unavailable",
+            ),
+            (
+                urllib3.exceptions.ProtocolError(
+                    "Connection broken: IncompleteRead(5 bytes read, 95 more expected)",
+                    ValueError("incomplete read"),
+                ),
+                503,
+                "Service unavailable",
+            ),
+            (
+                urllib3.exceptions.ConnectTimeoutError(MagicMock(), "Connection timed out"),
+                504,
+                "Gateway timeout",
+            ),
+            (
+                urllib3.exceptions.ReadTimeoutError(MagicMock(), "https://x", "Read timed out."),
+                504,
+                "Gateway timeout",
+            ),
+        ],
+    )
+    def test_read_only_requests_retry_then_map_by_failure_type(
+        self, proxy_module, error, status, label
+    ):
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = error
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
+
+        assert result["statusCode"] == status
+        assert json.loads(result["body"]) == {
+            "error": label,
+            "message": f"Upstream failed after {pu._MAX_RETRIES} attempt(s)",
+        }
+        assert mock_http.request.call_count == pu._MAX_RETRIES
+
+    def test_a_reset_connection_is_retried_to_success(self, proxy_module):
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [_reset(), _target_response(200, b'{"ok":true}')]
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
+
+        assert result["statusCode"] == 200
+        assert mock_http.request.call_count == 2
+
+    @pytest.mark.parametrize("error", [_reset(), _refused()])
+    def test_mutating_requests_report_a_dropped_connection_unreplayed(self, proxy_module, error):
+        """The write may have been applied, so it is a 503 after one attempt."""
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = error
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep") as sleep:
+            result = pu.forward_request("https://example.com/api", "POST", {}, "{}")
+
+        assert result["statusCode"] == 503
+        assert json.loads(result["body"])["message"] == "Upstream failed after 1 attempt(s)"
+        assert mock_http.request.call_count == 1
+        sleep.assert_not_called()
+
+    def test_the_last_failure_decides_the_status(self, proxy_module):
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [
+            _refused(),
+            _reset(),
+            urllib3.exceptions.ReadTimeoutError(MagicMock(), "https://x", "Read timed out."),
+        ]
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request("https://example.com/api", "GET", {}, None)
+
+        assert result["statusCode"] == 504
 
 
 class TestForwardRequestUnknownException:
@@ -500,11 +621,8 @@ class TestMutatingReplayAfterLoadBalancer503:
         ("error", "expected_status", "expected_error"),
         [
             (urllib3.exceptions.TimeoutError("read timed out"), 504, "Gateway timeout"),
-            (
-                urllib3.exceptions.MaxRetryError(pool=None, url="https://example.com"),
-                503,
-                "Service unavailable",
-            ),
+            (_refused(), 503, "Service unavailable"),
+            (_reset(), 503, "Service unavailable"),
         ],
     )
     def test_transport_failure_after_a_load_balancer_503_is_reported_not_masked(
@@ -865,6 +983,134 @@ class TestForwardRequestSuccess:
         assert 0 < request_timeout.total <= 5.0
 
 
+class _NonceCheckingBackend:
+    """The backend's HMAC check (gco/services/auth_middleware.py), in miniature.
+
+    A valid envelope consumes its nonce; a nonce seen before is refused with
+    the middleware's 403. ``answers`` are what the service behind the
+    middleware returns to successive authenticated requests.
+    """
+
+    def __init__(self, key: str, answers: list[MagicMock]) -> None:
+        self.key = key
+        self.answers = list(answers)
+        self.seen_nonces: list[str] = []
+        self.replays = 0
+
+    def request(self, method, url, headers, body, timeout):
+        parsed = urlsplit(url)
+        target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        canonical = "\n".join(
+            [
+                "v1",
+                headers["x-gco-timestamp"],
+                headers["x-gco-nonce"],
+                method,
+                target,
+                hashlib.sha256(body or b"").hexdigest(),
+            ]
+        )
+        expected = hmac.new(self.key.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+        assert hmac.compare_digest(expected, headers["x-gco-signature"])
+        if headers["x-gco-nonce"] in self.seen_nonces:
+            self.replays += 1
+            return _target_response(
+                403,
+                b'{"detail":"Forbidden - requests must come through authenticated API Gateway"}',
+            )
+        self.seen_nonces.append(headers["x-gco-nonce"])
+        return self.answers.pop(0)
+
+
+class TestReadOnlyRetriesSignAfresh:
+    """Each read-only retry carries a new HMAC envelope (finding L3).
+
+    The backend accepts a nonce once. Re-sending the first attempt's envelope
+    turned a retry that reached the same pod into "403 Forbidden - requests
+    must come through authenticated API Gateway" instead of the real answer.
+    """
+
+    def test_every_retry_carries_the_envelope_resign_headers_returns(self, proxy_module):
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [
+            _target_response(503, b'{"detail":"not ready"}'),
+            _target_response(502, b"bad gateway"),
+            _target_response(200, b'{"ok":true}'),
+        ]
+        fresh = iter(
+            [
+                {"x-gco-nonce": "n2", "x-gco-signature": "s2"},
+                {"x-gco-nonce": "n3", "x-gco-signature": "s3"},
+            ]
+        )
+        resign = MagicMock(side_effect=lambda: next(fresh))
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request(
+                "https://example.com/api",
+                "GET",
+                {"accept": "application/json", "x-gco-nonce": "n1", "x-gco-signature": "s1"},
+                None,
+                resign_headers=resign,
+            )
+
+        assert result["statusCode"] == 200
+        sent = [call.kwargs["headers"] for call in mock_http.request.call_args_list]
+        assert [headers["x-gco-nonce"] for headers in sent] == ["n1", "n2", "n3"]
+        assert [headers["x-gco-signature"] for headers in sent] == ["s1", "s2", "s3"]
+        assert all(headers["accept"] == "application/json" for headers in sent)
+        assert resign.call_count == 2
+
+    def test_retry_of_a_503_from_a_nonce_checking_backend_returns_the_real_answer(
+        self, proxy_module
+    ):
+        pu, _ = proxy_module
+        target_url = "https://example.com/api/v1/jobs?limit=5"
+        backend = _NonceCheckingBackend(
+            "signing-key",
+            [
+                _target_response(503, b'{"detail":"Manifest processor not ready"}'),
+                _target_response(200, b'{"jobs":[]}'),
+            ],
+        )
+
+        def sign():
+            return pu.build_signed_headers("signing-key", "GET", target_url, None)
+
+        with patch.object(pu, "_http", backend), patch.object(pu.time, "sleep"):
+            result = pu.forward_request(target_url, "GET", sign(), None, resign_headers=sign)
+
+        assert result["statusCode"] == 200
+        assert result["body"] == '{"jobs":[]}'
+        assert backend.replays == 0
+        assert len(set(backend.seen_nonces)) == 2
+
+    def test_mutating_replay_after_the_load_balancer_503_keeps_its_envelope(self, proxy_module):
+        """No target saw the first envelope, so the replay stays byte-identical."""
+        pu, _ = proxy_module
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [
+            _load_balancer_503(),
+            _target_response(201, b'{"id":"job-1"}'),
+        ]
+        resign = MagicMock()
+
+        with patch.object(pu, "_http", mock_http), patch.object(pu.time, "sleep"):
+            result = pu.forward_request(
+                "https://example.com/api",
+                "POST",
+                {"x-gco-nonce": "n1"},
+                "{}",
+                resign_headers=resign,
+            )
+
+        assert result["statusCode"] == 201
+        resign.assert_not_called()
+        first, second = mock_http.request.call_args_list
+        assert first.kwargs["headers"] == second.kwargs["headers"] == {"x-gco-nonce": "n1"}
+
+
 class TestBoundedEnvParsing:
     """Malformed or out-of-range tuning values fall back to the defaults."""
 
@@ -956,21 +1202,6 @@ class TestForwardRequestTlsAndTrust:
 
         assert result["statusCode"] == 502
         assert json.loads(result["body"]) == {"error": "Backend TLS verification failed"}
-        assert mock_http.request.call_count == 1
-
-    def test_tls_failure_wrapped_in_max_retry_error_is_a_502(self, proxy_module):
-        pu, _ = proxy_module
-        mock_http = MagicMock()
-        mock_http.request.side_effect = urllib3.exceptions.MaxRetryError(
-            pool=None,
-            url="https://example.com",
-            reason=urllib3.exceptions.SSLError("certificate verify failed"),
-        )
-
-        with patch.object(pu, "_http", mock_http):
-            result = pu.forward_request("https://example.com/api", "GET", {}, None)
-
-        assert result["statusCode"] == 502
         assert mock_http.request.call_count == 1
 
     def test_unavailable_trust_bundle_is_a_503_before_any_request(self, proxy_module):

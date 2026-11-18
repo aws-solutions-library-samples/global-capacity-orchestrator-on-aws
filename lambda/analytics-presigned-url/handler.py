@@ -8,13 +8,17 @@ Flow (happy path):
 1. Extract ``claims = event["requestContext"]["authorizer"]["claims"]`` and
    read ``cognito:username`` (falling back to ``username`` if the token
    shape doesn't namespace Cognito claims).
-2. Resolve the Studio ``DomainId`` from the ``STUDIO_DOMAIN_ID`` env var
-   (preferred) or by calling ``sagemaker:ListDomains`` as a fallback.
+2. Read the Studio ``DomainId`` from the ``STUDIO_DOMAIN_ID`` env var,
+   which the stack always sets; without it the request is an HTTP 404.
 3. ``sagemaker:DescribeUserProfile`` -- if the profile doesn't exist yet
    (``ValidationException`` / ``ResourceNotFound``), create it via
    ``sagemaker:CreateUserProfile``.  If the profile is still provisioning
-   (``Pending`` / ``Updating``), return HTTP 202 so the CLI can poll.
-   If the profile is ``Failed``, delete it and recreate.
+   (``Pending`` / ``Updating`` / ``Deleting``), return HTTP 202 so the CLI
+   can poll. If the profile is ``Failed``, delete it and recreate. A
+   profile this Lambda cannot recover (``Update_Failed``,
+   ``Delete_Failed``, or a ``Failed`` one whose delete is refused) is an
+   HTTP 409 ``UserProfileFailed`` instead of a 202 the CLI would poll
+   until it gives up.
 4. Once the profile is ``InService``, ensure the per-user EFS access
    point exists (lazy creation).
 5. ``sagemaker:CreatePresignedDomainUrl`` and return the URL (HTTP 200).
@@ -92,7 +96,14 @@ SESSION_EXPIRES_SECONDS = int(os.environ.get("SESSION_EXPIRES_SECONDS", "43200")
 
 _ERR_MISSING_CLAIM = "MissingCognitoClaim"
 _ERR_DOMAIN_NOT_FOUND = "SagemakerDomainNotFound"
+_ERR_PROFILE_FAILED = "UserProfileFailed"
 _ERR_GENERIC = "PresignedUrlGenerationFailed"
+
+#: Profile states a retry cannot fix: an update or a delete of the profile
+#: failed, so it is neither usable nor safe to recreate. They need an operator.
+_UNRECOVERABLE_PROFILE_STATUSES = frozenset({"Update_Failed", "Delete_Failed"})
+#: DescribeUserProfile / DeleteUserProfile error codes for a missing profile.
+_PROFILE_MISSING_CODES = frozenset({"ValidationException", "ResourceNotFound"})
 
 # POSIX id derivation constants. 2**31 - 19 keeps the result comfortably
 # within the 32-bit signed-int range EFS accepts; the 100000 offset pushes
@@ -191,27 +202,6 @@ def _format_error(status: int, token: str) -> dict[str, Any]:
 # ==========================================================================
 
 
-def _resolve_domain_id(domain_name: str) -> str | None:
-    """Return the Studio ``DomainId`` for ``domain_name`` or ``None``.
-
-    Paginates ``sagemaker:ListDomains`` by following ``NextToken``. A
-    ``None`` return signals the caller to emit HTTP 404 ``SagemakerDomainNotFound``.
-    """
-    next_token: str | None = None
-    while True:
-        kwargs: dict[str, Any] = {}
-        if next_token is not None:
-            kwargs["NextToken"] = next_token
-        response = sagemaker.list_domains(**kwargs)
-        for domain in response.get("Domains", []):
-            if domain.get("DomainName") == domain_name:
-                domain_id = domain.get("DomainId")
-                return str(domain_id) if domain_id is not None else None
-        next_token = response.get("NextToken")
-        if not next_token:
-            return None
-
-
 def _ensure_user_profile(domain_id: str, username: str, efs_id: str) -> str:
     """Ensure a ``sagemaker:UserProfile`` exists for ``username``.
 
@@ -220,9 +210,14 @@ def _ensure_user_profile(domain_id: str, username: str, efs_id: str) -> str:
     * ``"InService"`` -- profile is ready; caller can mint a presigned URL.
     * ``"Provisioning"`` -- profile was just created or is still starting;
       caller should return HTTP 202 so the CLI can poll.
+    * ``"Failed"`` -- profile is stuck in a state no poll will change
+      (``_UNRECOVERABLE_PROFILE_STATUSES``, or ``Failed`` with its delete
+      refused); caller should return an error.
 
     If the profile is in ``Failed`` state, it is deleted and recreated
-    so the next poll attempt finds a fresh ``Pending`` profile.
+    so the next poll attempt finds a fresh ``Pending`` profile. While the
+    profile still exists a create cannot succeed, so a refused delete is
+    reported rather than polled on.
     """
     try:
         resp = sagemaker.describe_user_profile(
@@ -233,6 +228,15 @@ def _ensure_user_profile(domain_id: str, username: str, efs_id: str) -> str:
 
         if status == "InService":
             return "InService"
+
+        if status in _UNRECOVERABLE_PROFILE_STATUSES:
+            logger.error(
+                "User profile %s is %s (%s); it needs an operator",
+                username,
+                status,
+                resp.get("FailureReason", "unknown"),
+            )
+            return "Failed"
 
         if status == "Failed":
             logger.warning(
@@ -246,19 +250,22 @@ def _ensure_user_profile(domain_id: str, username: str, efs_id: str) -> str:
                     UserProfileName=username,
                 )
             except ClientError as del_exc:
-                logger.warning("Could not delete failed profile %s: %s", username, del_exc)
+                code = del_exc.response.get("Error", {}).get("Code", "")
+                if code not in _PROFILE_MISSING_CODES:
+                    logger.error("Could not delete failed profile %s: %s", username, del_exc)
+                    return "Failed"
             # Create a fresh profile (may race with the delete; ResourceInUse
             # is caught below).
             _create_user_profile(domain_id, username, efs_id)
             return "Provisioning"
 
-        # Pending / Updating / any other transient state.
+        # Pending / Updating / Deleting: still converging.
         logger.info("User profile %s status=%s, still provisioning", username, status)
         return "Provisioning"
 
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
-        if code not in {"ValidationException", "ResourceNotFound"}:
+        if code not in _PROFILE_MISSING_CODES:
             raise
 
     # Profile doesn't exist -- create it.
@@ -357,6 +364,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     * **HTTP 202** with ``{"status": "provisioning"}`` when the user
       profile is still being created.  The CLI should retry after a
       few seconds.
+    * **HTTP 409** with ``{"error": "UserProfileFailed"}`` when the user
+      profile is stuck in a failed state no retry will change.
     * **HTTP 4xx / 5xx** with ``{"error": "<token>"}`` on failure.
 
     The Lambda never blocks waiting for profile provisioning.  The CLI
@@ -370,17 +379,16 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             logger.warning("Request missing Cognito username claim")
             return _format_error(401, _ERR_MISSING_CLAIM)
 
-        # Step 2: resolve the Studio DomainId.
-        domain_id = STUDIO_DOMAIN_ID if STUDIO_DOMAIN_ID else _resolve_domain_id("")
+        # Step 2: the Studio DomainId, which the stack always sets.
+        domain_id = STUDIO_DOMAIN_ID
         if not domain_id:
-            logger.error(
-                "SageMaker domain not found (STUDIO_DOMAIN_ID=%r)",
-                STUDIO_DOMAIN_ID,
-            )
+            logger.error("SageMaker domain not configured (STUDIO_DOMAIN_ID is empty)")
             return _format_error(404, _ERR_DOMAIN_NOT_FOUND)
 
         # Step 3: describe-or-create the user profile.
         profile_status = _ensure_user_profile(domain_id, username, STUDIO_EFS_ID)
+        if profile_status == "Failed":
+            return _format_error(409, _ERR_PROFILE_FAILED)
         if profile_status != "InService":
             return _format_provisioning()
 

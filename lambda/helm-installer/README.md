@@ -39,6 +39,10 @@ Create/update convergence and delete teardown use separate [CloudFormation](http
 
 Helm's explicit `release: not found` result is idempotent success; generic `not found` output is not. Every other uninstall error is returned as a CloudFormation failure so teardown cannot silently leave live releases or external resources behind. Transient failures can be retried by retrying stack deletion after the underlying Kubernetes condition is resolved.
 
+### Custom-resource cleanup before an uninstall
+
+KEDA, Kueue, Argo CD, Crossplane and the Slinky Slurm cluster (`CHART_CUSTOM_RESOURCE_API_GROUPS` in `handler.py`) have controllers that put finalizers on their custom resources. Before uninstalling one of them, on a stack delete or on a deploy with the chart disabled, the installer deletes every object of the chart's API groups and waits for the controller to clear the finalizers (if a delete stalls it strips them and retries once), so Helm never removes a controller whose objects still need it. The cleanup runs only when `helm status` finds GCO's release: a disabled chart goes through the uninstall on every deploy, and without GCO's release the objects of those groups belong to an installation GCO does not manage, so nothing is deleted. A `helm status` failure other than Helm's `release: not found` fails the uninstall. Argo CD's cleanup stays in its release namespace and skips cluster-scoped types, because GCO's Argo CD reconciles only that namespace and `argoproj.io` is also the group of Argo Workflows, Rollouts and Events.
+
 ## Packaging
 
 Runs as a container Lambda (see `Dockerfile`). The image includes `helm` and `kubectl` binaries on x86_64.

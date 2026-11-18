@@ -101,11 +101,6 @@ def handler_module(monkeypatch: pytest.MonkeyPatch):
 
     # Defaults for the "everything works" case. Individual tests override
     # these as needed.
-    sagemaker_mock.list_domains.return_value = {
-        "Domains": [
-            {"DomainName": "gco-analytics-us-east-2", "DomainId": _STUDIO_DOMAIN_ID},
-        ],
-    }
     sagemaker_mock.describe_user_profile.return_value = {
         "UserProfileName": "alice",
         "DomainId": _STUDIO_DOMAIN_ID,
@@ -313,23 +308,22 @@ class TestPresignedUrlErrorPaths:
         sagemaker_mock.list_domains.assert_not_called()
 
     def test_domain_not_found_returns_404(self, handler_module) -> None:
+        """Without STUDIO_DOMAIN_ID the request is a 404 with no SageMaker call.
+
+        The old ListDomains fallback looked for a domain named "", so it
+        could never find one; the stack always sets the ID.
+        """
         handler, sagemaker_mock, _ = handler_module
 
-        # Override the module-level STUDIO_DOMAIN_ID to empty so the handler
-        # falls back to _resolve_domain_id, which returns None when no
-        # matching domain is found.
         handler.STUDIO_DOMAIN_ID = ""
-        sagemaker_mock.list_domains.return_value = {
-            "Domains": [
-                {"DomainName": "some-other-domain", "DomainId": "d-xxxxxxxx"},
-            ],
-        }
 
         response = handler.lambda_handler(_make_event(), None)
 
         assert response["statusCode"] == 404
         body = json.loads(response["body"])
         assert body == {"error": "SagemakerDomainNotFound"}
+        sagemaker_mock.list_domains.assert_not_called()
+        sagemaker_mock.describe_user_profile.assert_not_called()
         sagemaker_mock.create_presigned_domain_url.assert_not_called()
 
     def test_create_presigned_url_raise_returns_500_with_opaque_token(self, handler_module) -> None:
@@ -449,11 +443,6 @@ class TestPresignedUrlResponseShapeProperty:
         # uses string interpolation on ``claims["cognito:username"]``
         # so we synthesize the matching AP record.
         username = claims["cognito:username"]
-        sagemaker_mock.list_domains.return_value = {
-            "Domains": [
-                {"DomainName": "gco-analytics-us-east-2", "DomainId": _STUDIO_DOMAIN_ID},
-            ],
-        }
         sagemaker_mock.describe_user_profile.return_value = {
             "UserProfileName": username,
             "DomainId": _STUDIO_DOMAIN_ID,
@@ -557,24 +546,6 @@ class TestParseClaimsShapes:
         assert handler._parse_claims(event) == {}
 
 
-class TestResolveDomainId:
-    def test_follows_pagination_to_the_matching_domain(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
-        sagemaker_mock.list_domains.side_effect = [
-            {"Domains": [{"DomainName": "other", "DomainId": "d-other"}], "NextToken": "p2"},
-            {"Domains": [{"DomainName": "gco-analytics", "DomainId": "d-target"}]},
-        ]
-
-        assert handler._resolve_domain_id("gco-analytics") == "d-target"
-        assert sagemaker_mock.list_domains.call_args_list[1].kwargs == {"NextToken": "p2"}
-
-    def test_matching_domain_without_an_id_is_treated_as_missing(self, handler_module) -> None:
-        handler, sagemaker_mock, _ = handler_module
-        sagemaker_mock.list_domains.return_value = {"Domains": [{"DomainName": "gco-analytics"}]}
-
-        assert handler._resolve_domain_id("gco-analytics") is None
-
-
 class TestEnsureUserProfileErrorCodes:
     def test_unexpected_describe_error_propagates(self, handler_module) -> None:
         handler, sagemaker_mock, _ = handler_module
@@ -586,20 +557,71 @@ class TestEnsureUserProfileErrorCodes:
             handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
         sagemaker_mock.create_user_profile.assert_not_called()
 
-    def test_failed_profile_that_cannot_be_deleted_is_still_recreated(self, handler_module) -> None:
+    @pytest.mark.parametrize("code", ["ResourceInUse", "AccessDeniedException"])
+    def test_failed_profile_that_cannot_be_deleted_is_reported(self, handler_module, code) -> None:
+        """A create cannot succeed while the profile exists (NEW-2).
+
+        Before, the refused delete was logged and the create's ResourceInUse
+        ignored, so the CLI was told "provisioning" until it gave up.
+        """
         handler, sagemaker_mock, _ = handler_module
         sagemaker_mock.describe_user_profile.return_value = {
             "Status": "Failed",
             "FailureReason": "quota",
         }
         sagemaker_mock.delete_user_profile.side_effect = ClientError(
-            {"Error": {"Code": "ResourceInUse", "Message": "busy"}}, "DeleteUserProfile"
+            {"Error": {"Code": code, "Message": "no"}}, "DeleteUserProfile"
+        )
+
+        status = handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
+
+        assert status == "Failed"
+        sagemaker_mock.create_user_profile.assert_not_called()
+
+    def test_failed_profile_already_gone_is_recreated(self, handler_module) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.describe_user_profile.return_value = {"Status": "Failed"}
+        sagemaker_mock.delete_user_profile.side_effect = ClientError(
+            {"Error": {"Code": "ResourceNotFound", "Message": "gone"}}, "DeleteUserProfile"
         )
 
         status = handler._ensure_user_profile(_STUDIO_DOMAIN_ID, "alice", _STUDIO_EFS_ID)
 
         assert status == "Provisioning"
         sagemaker_mock.create_user_profile.assert_called_once()
+
+    @pytest.mark.parametrize("status", ["Update_Failed", "Delete_Failed"])
+    def test_unrecoverable_profile_is_a_409_not_a_202(self, handler_module, status) -> None:
+        """Before: only ``Failed`` was handled, so these returned 202 on every
+        poll and the CLI timed out after 120 s with "Try again in a minute"."""
+        handler, sagemaker_mock, efs_mock = handler_module
+        sagemaker_mock.describe_user_profile.return_value = {
+            "UserProfileName": "alice",
+            "DomainId": _STUDIO_DOMAIN_ID,
+            "Status": status,
+            "FailureReason": "VPC quota",
+        }
+
+        response = handler.lambda_handler(_make_event(), None)
+
+        assert response["statusCode"] == 409
+        assert json.loads(response["body"]) == {"error": "UserProfileFailed"}
+        sagemaker_mock.delete_user_profile.assert_not_called()
+        sagemaker_mock.create_user_profile.assert_not_called()
+        sagemaker_mock.create_presigned_domain_url.assert_not_called()
+        efs_mock.describe_access_points.assert_not_called()
+
+    @pytest.mark.parametrize("status", ["Pending", "Updating", "Deleting"])
+    def test_converging_profile_keeps_polling(self, handler_module, status) -> None:
+        handler, sagemaker_mock, _ = handler_module
+        sagemaker_mock.describe_user_profile.return_value = {"Status": status}
+
+        response = handler.lambda_handler(_make_event(), None)
+
+        assert response["statusCode"] == 202
+        assert json.loads(response["body"]) == {"status": "provisioning"}
+        sagemaker_mock.delete_user_profile.assert_not_called()
+        sagemaker_mock.create_user_profile.assert_not_called()
 
     def test_concurrent_creation_is_tolerated(self, handler_module) -> None:
         handler, sagemaker_mock, _ = handler_module

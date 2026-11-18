@@ -17,10 +17,13 @@ tests running in the same pytest session.
 
 import json
 import logging
+import socket
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+import urllib3
 from botocore.credentials import Credentials
 
 from tests._lambda_imports import load_lambda_module
@@ -743,7 +746,9 @@ class TestUnexpectedRegionalFailures:
         "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
     }
 
-    def _query(self, region, endpoint, path, method="GET", body=None, query_params=None):
+    def _query(
+        self, region, endpoint, path, method="GET", body=None, query_params=None, deadline=None
+    ):
         if region == "us-west-2":
             raise RuntimeError("thread blew up")
         if path == "/api/v1/health":
@@ -804,3 +809,198 @@ class TestHandlerDiscoveryOutage:
         assert json.loads(result["body"]) == {
             "error": "Regional aggregation is temporarily unavailable"
         }
+
+
+class _SilentServer:
+    """A local TCP server that accepts connections and never answers."""
+
+    def __init__(self) -> None:
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.sock.settimeout(0.1)
+        self.port = self.sock.getsockname()[1]
+        self.accepted: list[socket.socket] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                connection, _ = self.sock.accept()
+            except TimeoutError:
+                continue
+            self.accepted.append(connection)
+
+    def __enter__(self) -> _SilentServer:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._thread.join()
+        for connection in self.accepted:
+            connection.close()
+        self.sock.close()
+
+
+class TestRegionalRequestBudget:
+    """Each regional request is sent once and ends before the invocation does (L5).
+
+    urllib3's default Retry(total=3) re-sent a timed-out GET or DELETE three
+    more times with a fresh 10-second timeout each, so a stalled Region took
+    about 40 seconds, the 29-second function timed out, and API Gateway failed
+    the whole aggregate instead of reporting one Region as an error. The bulk
+    DELETE was re-sent while the first was still running.
+    """
+
+    _ENDPOINTS = {
+        "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod",
+        "us-west-2": "https://west123.execute-api.us-west-2.amazonaws.com/prod",
+    }
+
+    @staticmethod
+    def _context(remaining_ms: int) -> MagicMock:
+        context = MagicMock()
+        context.get_remaining_time_in_millis.return_value = remaining_ms
+        return context
+
+    def test_the_pool_sends_a_timed_out_request_once(self):
+        with _SilentServer() as server:
+            with pytest.raises(urllib3.exceptions.ReadTimeoutError):
+                handler.http.request(
+                    "DELETE",
+                    f"http://127.0.0.1:{server.port}/api/v1/jobs",
+                    timeout=urllib3.Timeout(total=0.3),
+                )
+            time.sleep(0.2)
+            assert len(server.accepted) == 1
+
+    def test_regional_requests_end_before_the_invocation_does(self):
+        handler._cached_endpoints = dict(self._ENDPOINTS)
+        mock_http = MagicMock()
+        mock_http.request.return_value = MagicMock(
+            status=200, data=json.dumps({"jobs": [], "count": 0, "total": 0}).encode()
+        )
+        event = {"httpMethod": "GET", "path": "/api/v1/global/jobs"}
+
+        with patch.object(handler, "http", mock_http):
+            result = handler.lambda_handler(event, self._context(5_000))
+
+        assert result["statusCode"] == 200
+        budgets = [call.kwargs["timeout"].total for call in mock_http.request.call_args_list]
+        assert len(budgets) == 2
+        # 5 s remaining less the 2 s kept to assemble the response.
+        assert all(2.5 < budget <= 3.0 for budget in budgets)
+
+    def test_without_a_context_the_default_budget_applies(self):
+        handler._cached_endpoints = {"us-east-1": self._ENDPOINTS["us-east-1"]}
+        mock_http = MagicMock()
+        mock_http.request.return_value = MagicMock(status=200, data=b'{"status":"healthy"}')
+
+        with patch.object(handler, "http", mock_http):
+            handler.lambda_handler({"path": "/api/v1/global/health"}, None)
+
+        budget = mock_http.request.call_args.kwargs["timeout"].total
+        assert (
+            handler._DEFAULT_REQUEST_BUDGET_SECONDS - 1
+            < budget
+            <= handler._DEFAULT_REQUEST_BUDGET_SECONDS
+        )
+
+    def test_a_spent_budget_reports_every_region_without_sending(self):
+        handler._cached_endpoints = dict(self._ENDPOINTS)
+        mock_http = MagicMock()
+        event = {"httpMethod": "GET", "path": "/api/v1/global/status"}
+
+        with patch.object(handler, "http", mock_http):
+            result = handler.lambda_handler(event, self._context(1_500))
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert body["regions_successful"] == 0
+        assert body["errors"] == [
+            {"region": region, "error": "No time left to query the region"}
+            for region in sorted(self._ENDPOINTS)
+        ]
+        mock_http.request.assert_not_called()
+
+    def test_a_stalled_bulk_delete_is_one_error_per_region_not_a_failed_request(self):
+        handler._cached_endpoints = dict(self._ENDPOINTS)
+        mock_http = MagicMock()
+        mock_http.request.side_effect = urllib3.exceptions.ReadTimeoutError(
+            None, "https://east123.execute-api.us-east-1.amazonaws.com", "Read timed out."
+        )
+        event = {
+            "httpMethod": "DELETE",
+            "path": "/api/v1/global/jobs",
+            "body": json.dumps({"status": "failed", "dry_run": False}),
+        }
+
+        with patch.object(handler, "http", mock_http):
+            result = handler.lambda_handler(event, self._context(29_000))
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert [error["region"] for error in body["errors"]] == sorted(self._ENDPOINTS)
+        assert mock_http.request.call_count == len(self._ENDPOINTS)
+        assert {call.args[0] for call in mock_http.request.call_args_list} == {"DELETE"}
+
+
+class TestClientInputValidation:
+    """Malformed client input is a 400, not a 500 (L15)."""
+
+    @staticmethod
+    def _jobs(limit):
+        return {
+            "httpMethod": "GET",
+            "path": "/api/v1/global/jobs",
+            "queryStringParameters": {"limit": limit},
+        }
+
+    @pytest.mark.parametrize(
+        ("limit", "error"),
+        [
+            ("ten", "limit must be an integer"),
+            ("2.5", "limit must be an integer"),
+            ("", "limit must be an integer"),
+            ("0", "limit must be between 1 and 1000"),
+            ("-5", "limit must be between 1 and 1000"),
+            ("1001", "limit must be between 1 and 1000"),
+        ],
+    )
+    def test_invalid_limit_is_a_400_and_queries_nothing(self, limit, error):
+        with patch.object(handler, "aggregate_jobs") as aggregate:
+            result = handler.lambda_handler(self._jobs(limit), None)
+
+        assert result["statusCode"] == 400
+        assert json.loads(result["body"]) == {"error": error}
+        aggregate.assert_not_called()
+
+    def test_the_per_region_limit_never_exceeds_the_regional_ceiling(self):
+        """Doubling a limit above 500 used to send a value every Region refused."""
+        handler._cached_endpoints = {
+            "us-east-1": "https://east123.execute-api.us-east-1.amazonaws.com/prod"
+        }
+        mock_http = MagicMock()
+        mock_http.request.return_value = MagicMock(
+            status=200, data=json.dumps({"jobs": [], "count": 0, "total": 0}).encode()
+        )
+
+        with patch.object(handler, "http", mock_http):
+            result = handler.lambda_handler(self._jobs("1000"), None)
+
+        assert result["statusCode"] == 200
+        assert json.loads(result["body"])["limit"] == 1000
+        assert "limit=1000" in mock_http.request.call_args.args[1]
+
+    @pytest.mark.parametrize("body", ["[]", '"jobs"', "5", "null"])
+    def test_non_object_delete_body_is_a_400(self, body):
+        event = {"httpMethod": "DELETE", "path": "/api/v1/global/jobs", "body": body}
+
+        with patch.object(handler, "bulk_delete_jobs") as bulk_delete:
+            result = handler.lambda_handler(event, None)
+
+        assert result["statusCode"] == 400
+        assert json.loads(result["body"]) == {"error": "Request body must be a JSON object"}
+        bulk_delete.assert_not_called()

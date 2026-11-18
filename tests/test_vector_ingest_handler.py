@@ -7,6 +7,7 @@
 import hashlib
 import io
 import json
+import logging
 import re
 
 import pytest
@@ -23,10 +24,12 @@ class _FakeS3:
     def __init__(self, objects):
         self.objects = objects
         self.calls = []
+        self.bodies = []
 
     def get_object(self, Bucket, Key):
         self.calls.append((Bucket, Key))
-        return {"Body": io.BytesIO(self.objects[Key])}
+        self.bodies.append(io.BytesIO(self.objects[Key]))
+        return {"Body": self.bodies[-1], "ContentLength": len(self.objects[Key])}
 
 
 class _FakeDynamo:
@@ -279,6 +282,92 @@ class TestLambdaHandler:
         monkeypatch.delenv("CORPUS_PREFIX")
         with pytest.raises(RuntimeError, match="CORPUS_PREFIX"):
             handler.lambda_handler(_event(f"{_PREFIX}a.md"), context=None)
+
+
+class _Context:
+    """A Lambda context whose remaining time is read off a list, one per call."""
+
+    def __init__(self, *remaining_ms):
+        self.remaining = list(remaining_ms)
+
+    def get_remaining_time_in_millis(self):
+        return self.remaining.pop(0)
+
+
+def _summary_line(caplog):
+    (line,) = [r.getMessage() for r in caplog.records if "vector-ingest summary" in r.getMessage()]
+    return json.loads(line)
+
+
+class TestObjectLimits:
+    """Documents that cannot finish inside the 5-minute timeout (L12).
+
+    Before, nothing bounded an object: one Bedrock call and one PutItem per
+    chunk ran until Lambda killed the invocation, the summary line was never
+    logged, and both async retries started again from chunk 0.
+    """
+
+    def test_an_object_over_the_byte_limit_is_refused_unread(self, handler, monkeypatch, caplog):
+        monkeypatch.setattr(handler, "MAX_OBJECT_BYTES", 8)
+        key = f"{_PREFIX}big.md"
+        s3, dynamo, bedrock = _wire(handler, objects={key: b"123456789"})
+
+        with caplog.at_level(logging.INFO), pytest.raises(RuntimeError, match="1 object"):
+            handler.lambda_handler(_event(key), context=None)
+
+        (failure,) = _summary_line(caplog)["failures"]
+        assert failure["status"] == "too_large"
+        assert "is 9 bytes, over the 8-byte limit; split it" in failure["error"]
+        assert s3.bodies[0].closed
+        assert bedrock.bodies == []
+        assert dynamo.items == []
+
+    def test_a_document_over_the_chunk_limit_is_refused_before_bedrock(self, handler, caplog):
+        key = f"{_PREFIX}records.jsonl"
+        lines = "".join(f'{{"text": "record {index}"}}\n' for index in range(501))
+        _, dynamo, bedrock = _wire(handler, objects={key: lines.encode()})
+
+        with (
+            caplog.at_level(logging.INFO),
+            pytest.raises(RuntimeError, match=re.escape("records.jsonl")),
+        ):
+            handler.lambda_handler(_event(key), context=None)
+
+        (failure,) = _summary_line(caplog)["failures"]
+        assert failure["status"] == "too_large"
+        assert "501 chunks, over the 500-chunk limit" in failure["error"]
+        assert bedrock.bodies == []
+        assert dynamo.items == []
+
+    def test_a_document_at_the_chunk_limit_is_ingested(self, handler):
+        key = f"{_PREFIX}records.jsonl"
+        lines = "".join(f'{{"text": "record {index}"}}\n' for index in range(500))
+        _, dynamo, _ = _wire(handler, objects={key: lines.encode()})
+
+        summary = handler.lambda_handler(_event(key), context=_Context(*[60_000] * 500))
+
+        assert summary["ingested_chunks"] == 500
+        assert len(dynamo.items) == 500
+
+    def test_stops_before_the_timeout_and_still_logs_the_summary(self, handler, caplog):
+        key = f"{_PREFIX}long.txt"
+        content = ("y" * 1500 + "\n\n") * 3
+        _, dynamo, bedrock = _wire(handler, objects={key: content.encode()})
+        context = _Context(60_000, 31_000, 29_999)
+
+        with (
+            caplog.at_level(logging.INFO),
+            pytest.raises(RuntimeError, match=re.escape("long.txt")),
+        ):
+            handler.lambda_handler(_event(key), context=context)
+
+        (failure,) = _summary_line(caplog)["failures"]
+        assert failure["status"] == "out_of_time"
+        assert (
+            "stopped after 2 of 3 chunks with 29999 ms of the invocation left" in (failure["error"])
+        )
+        assert len(bedrock.bodies) == 2
+        assert len(dynamo.items) == 2
 
 
 class TestLazyClients:

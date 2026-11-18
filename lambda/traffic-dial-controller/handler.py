@@ -45,9 +45,10 @@ Control flow is phased:
         is load-bearing: passing an empty list would detach the region's ALB.
         ``monitor`` mode (the default) computes and publishes but never writes.
     Phase 6 — publication. Every decision is emitted to the
-        ``GCO/TrafficDial`` CloudWatch namespace and the full run is stored in
-        the ``/{project}/traffic-dial/state`` SSM parameter for
-        ``gco capacity traffic-dial show``.
+        ``GCO/TrafficDial`` CloudWatch namespace and the run is stored in the
+        ``/{project}/traffic-dial/state`` SSM parameter for
+        ``gco capacity traffic-dial show``, without the endpoint-group ARNs
+        and with error text bounded, as an Intelligent-Tiering parameter.
 
 Environment variables:
     LISTENER_ARN             Global Accelerator listener whose endpoint groups
@@ -100,6 +101,15 @@ DIAL_METRIC_NAMESPACE = "GCO/TrafficDial"
 
 #: CloudWatch PutMetricData batch bound (mirrors MetricsPublisher).
 METRIC_BATCH_SIZE = 20
+
+#: Parameter Store's value limit for an Advanced parameter. The state is
+#: written with Intelligent-Tiering, so it stays a Standard parameter (4 KB,
+#: no charge) until it outgrows that tier.
+SSM_ADVANCED_VALUE_MAX_BYTES = 8 * 1024
+
+#: Longest per-region error text kept in the stored state. The function log
+#: and its return value keep the whole text.
+STATE_ERROR_MAX_CHARS = 200
 
 DEFAULT_LOOKBACK_MINUTES = 15
 DEFAULT_MIN_DIAL_PERCENTAGE = 10
@@ -330,17 +340,55 @@ def publish_metrics(cloudwatch_client: Any, decisions: list[dict[str, Any]]) -> 
         logger.warning("Failed to publish traffic-dial metrics: %s", exc)
 
 
+def _stored_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Return the copy of the run summary stored for `traffic-dial show`.
+
+    Each decision drops ``endpoint_group_arn``: `show` reads the ARNs from
+    the endpoint-group registry, and at about 135 bytes each they made up
+    half the value, which passed the Standard tier's 4 KB at 14 Regions.
+    Error text is cut to ``STATE_ERROR_MAX_CHARS``. ``state`` itself, the
+    function's return value, is left whole.
+    """
+    decisions: list[dict[str, Any]] = []
+    for decision in state.get("decisions", []):
+        stored = {key: value for key, value in decision.items() if key != "endpoint_group_arn"}
+        error = stored.get("error")
+        if error is not None and len(error) > STATE_ERROR_MAX_CHARS:
+            stored["error"] = error[: STATE_ERROR_MAX_CHARS - 3] + "..."
+        decisions.append(stored)
+    return {**state, "decisions": decisions}
+
+
 def store_state(ssm_client: Any, project_name: str, state: dict[str, Any]) -> None:
-    """Persist the run summary for `gco capacity traffic-dial show`."""
+    """Persist the run summary for `gco capacity traffic-dial show`.
+
+    The compact copy from :func:`_stored_state` is written with
+    ``Tier="Intelligent-Tiering"``: Parameter Store keeps it a Standard
+    parameter up to 4 KB and makes it an Advanced one (8 KB, charged) above
+    that instead of refusing the write. A failed write is logged as an error
+    and not raised: the dials are already applied, and a raise would make
+    Lambda's asynchronous retries run the whole cycle again.
+    """
+    name = _state_parameter_name(project_name)
+    value = json.dumps(_stored_state(state), separators=(",", ":"))
     try:
         ssm_client.put_parameter(
-            Name=_state_parameter_name(project_name),
-            Value=json.dumps(state, separators=(",", ":")),
+            Name=name,
+            Value=value,
             Type="String",
+            Tier="Intelligent-Tiering",
             Overwrite=True,
         )
     except Exception as exc:  # state is advisory
-        logger.warning("Failed to store traffic-dial state: %s", exc)
+        logger.error(
+            "Failed to store traffic-dial state in %s (%d bytes; an Advanced parameter "
+            "holds at most %d): %s. `gco capacity traffic-dial show` keeps reporting "
+            "the previous run.",
+            name,
+            len(value.encode("utf-8")),
+            SSM_ADVANCED_VALUE_MAX_BYTES,
+            exc,
+        )
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:

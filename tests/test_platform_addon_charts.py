@@ -606,8 +606,13 @@ class TestHelmInstallerCleanup:
             "appprojects.argoproj.io",
         ]
         assert all("--wait=true" in command for command in deletes)
-        assert all("--all-namespaces" in command for command in deletes)
-        assert message == "Deleted and waited for 3 argocd custom resource type(s)"
+        # Only the release namespace: argoproj.io is also Argo Workflows',
+        # Rollouts' and Events' group, and GCO's Argo CD is namespaced.
+        assert all(command[-2:] == ["-n", "argocd"] for command in deletes)
+        assert all("--namespaced=false" not in command for command in commands)
+        assert (
+            message == "Deleted and waited for 3 argocd custom resource type(s) in namespace argocd"
+        )
 
     def test_a_failed_application_pass_keeps_the_projects(
         self, helm_handler: Any, monkeypatch: pytest.MonkeyPatch

@@ -103,7 +103,10 @@ Collection runs in phases:
    diffed against those received; only the gaps are re-requested, bounded to
    three total passes.
 4. **Per-region metrics.** Spot price and Capacity Block collection is
-   unchanged from the pre-pool poller.
+   unchanged from the pre-pool poller, except that both read every page
+   through botocore's paginators: the AZ count and mean price cover AZs
+   whose only entry is on a later page, and every offering is counted. A
+   failure on any page omits that metric instead of recording a partial one.
 
 The API also enforces an account-level limit on **distinct score
 configurations** in a rolling 24-hour window, refused with

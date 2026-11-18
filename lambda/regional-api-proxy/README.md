@@ -29,7 +29,7 @@ Regional [API Gateway](https://docs.aws.amazon.com/apigateway/latest/developergu
 7. Backend middleware validates freshness, integrity, and process-local nonce replay before serving the request.
 8. The Lambda returns the buffered upstream response to the caller.
 
-Only safe read-only methods (`GET`, `HEAD`, and `OPTIONS`) use bounded exponential backoff for 429/502/503/504 responses or transport timeouts. Mutating methods are attempted once so the proxy cannot duplicate a successful write whose response was lost, with one narrow exception: the ALB's own `503 Service Temporarily Unavailable` page. The load balancer serves that page when it has no target to hand the request to (no registered or healthy target, or the target optimizer refused it), a decision it makes before selecting a target, so the write provably never reached the backend and the proxy replays it within the same attempt budget and backoff. The proxy recognizes the page by its exact body and requires any `Server` header to be `awselb/2.0`; a target's 503 (JSON, with the service's own `Server` header), an ALB 502/504 (both produced after a target was selected), and any transport failure are still never replayed, and a transport failure after such a replay is reported as the result rather than masked by the earlier 503.
+Only safe read-only methods (`GET`, `HEAD`, and `OPTIONS`) use bounded exponential backoff for 429/502/503/504 responses or transport failures (a refused, reset or cut-short connection, or a timeout), and each retry is signed afresh because the backend refuses a reused nonce with 403. Mutating methods are attempted once so the proxy cannot duplicate a successful write whose response was lost, with one narrow exception: the ALB's own `503 Service Temporarily Unavailable` page. The load balancer serves that page when it has no target to hand the request to (no registered or healthy target, or the target optimizer refused it), a decision it makes before selecting a target, so the write provably never reached the backend and the proxy replays it within the same attempt budget and backoff. The proxy recognizes the page by its exact body and requires any `Server` header to be `awselb/2.0`; a target's 503 (JSON, with the service's own `Server` header), an ALB 502/504 (both produced after a target was selected), and any transport failure are still never replayed, and a transport failure after such a replay is reported as the result rather than masked by the earlier 503.
 
 ## Backend Discovery and Verification
 
@@ -74,7 +74,7 @@ Verified endpoints are cached for 60 seconds by default. `REGIONAL_ENDPOINT_CACH
 - Signing-key retrieval failure returns `503 Backend authentication is temporarily unavailable`.
 - Registry lookup, malformed endpoint, ELB API, or ownership verification failure returns `502 Regional backend is temporarily unavailable`.
 - Base64-encoded request bodies return `415`; the proxy does not reinterpret binary payloads.
-- Upstream status codes and bounded transport failures are returned by the shared forwarding utility.
+- Upstream status codes and bounded transport failures are returned by the shared forwarding utility: `503 Service unavailable` when the connection could not be opened or was dropped, `504 Gateway timeout` when the ALB did not answer in time.
 
 ## IAM Permissions
 

@@ -1295,8 +1295,9 @@ charts:
       crds:
         install: true
         # Upstream default: helm uninstall leaves the CRDs, so disabling Argo
-        # CD can never cascade-delete a CRD out from under the cluster. The
-        # installer deletes every argoproj.io object before it uninstalls.
+        # CD can never cascade-delete a CRD out from under the cluster. Before
+        # it uninstalls GCO's release, the installer deletes every
+        # argoproj.io object in this namespace.
         keep: true
       global:
         # The chart's per-component NetworkPolicies admit only pod sources on

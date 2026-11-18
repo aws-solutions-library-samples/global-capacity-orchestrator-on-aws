@@ -18,14 +18,16 @@ Environment variables:
     BACKEND_TLS_ROOT_CA_PARAMETER: SSM parameter containing public CA roots.
     BACKEND_TLS_ROOT_CA_REGION: Region containing the public trust parameter.
     PROXY_MAX_RETRIES: Max attempts per request (default: 3). Read-only
-        methods spend them on any retryable answer; mutating methods only on
-        the ALB's own 503 page, served before a target is selected.
+        methods spend them on any retryable answer, each retry signed afresh;
+        mutating methods only on the ALB's own 503 page, served before a
+        target is selected.
     PROXY_RETRY_BACKOFF_BASE: Base retry backoff in seconds (default: 0.3).
     SECRET_CACHE_TTL_SECONDS: Signing-key cache TTL in seconds (default: 300).
 """
 
 import json
 import os
+from functools import partial
 from typing import Any
 
 from proxy_utils import (
@@ -118,9 +120,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     # Only a short-lived HMAC envelope is transmitted. TLS independently
     # authenticates the ALB certificate and encrypts the complete request.
+    # Its nonce is single-use, so forward_request signs each retry afresh.
+    sign = partial(build_signed_headers, signing_key, http_method, target_url, body)
     headers = sanitize_request_headers(headers)
     headers.update(caller_identity_headers(event))
-    headers.update(build_signed_headers(signing_key, http_method, target_url, body))
+    headers.update(sign())
 
     return forward_request(
         target_url,
@@ -128,4 +132,5 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         headers,
         body,
         timeout=_get_request_timeout_seconds(context),
+        resign_headers=sign,
     )
