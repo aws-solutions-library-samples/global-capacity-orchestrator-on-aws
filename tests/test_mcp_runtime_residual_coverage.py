@@ -326,13 +326,14 @@ def test_run_mcp_main_orders_runtime_initialization_before_server_run() -> None:
         patch.object(
             run_mcp, "configure_audit_logging", side_effect=lambda: calls.append("output")
         ),
+        patch.object(run_mcp, "_configure_project_root", side_effect=lambda: calls.append("root")),
         patch.object(run_mcp, "emit_startup_log", side_effect=lambda: calls.append("audit")),
         patch.object(run_mcp, "assume_mcp_role", side_effect=lambda: calls.append("iam")),
         patch.object(run_mcp.mcp, "run", side_effect=lambda: calls.append("serve")),
     ):
         run_mcp.main()
 
-    assert calls == ["output", "audit", "iam", "serve"]
+    assert calls == ["output", "root", "audit", "iam", "serve"]
 
 
 def test_package_first_run_mcp_import_aliases_legacy_name_and_repairs_sys_path() -> None:
@@ -373,3 +374,62 @@ def test_server_integer_env_falls_back_for_non_numeric_value(
     """Malformed code-mode memory limits retain the bounded default."""
     monkeypatch.setenv("GCO_TEST_INT", "not-an-int")
     assert server._int_env("GCO_TEST_INT", 17) == 17
+
+
+def test_in_process_cli_config_reads_the_project_root_the_children_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With GCO_PROJECT_ROOT elsewhere, in-process code used project gco and default Regions.
+
+    The images tools, the gco:// cluster context and the deploy-all progress
+    total build the CLI's configuration in the server process, which read
+    cdk.json from the server's working directory instead of the root every
+    ``gco`` child runs from.
+    """
+    from resources import _eks
+    from tools import images as image_tools
+    from tools import stacks as stack_tools
+
+    from cli import config as cli_config
+
+    project = tmp_path / "acme-checkout"
+    project.mkdir()
+    (project / "cdk.json").write_text(
+        json.dumps(
+            {
+                "context": {
+                    "project_name": "acme",
+                    "deployment_regions": {
+                        "global": "eu-west-1",
+                        "regional": ["eu-west-1", "eu-central-1"],
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    server_cwd = tmp_path / "server-cwd"
+    server_cwd.mkdir()
+    monkeypatch.chdir(server_cwd)
+    for name in ("GCO_PROJECT_NAME", "GCO_GLOBAL_REGION", "AWS_DEFAULT_REGION"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(cli_runner, "PROJECT_ROOT", project)
+    monkeypatch.setattr(cli_config.Path, "home", lambda: tmp_path / "home")
+
+    try:
+        assert image_tools._get_manager()._repo_prefix == "gco"
+        run_mcp._configure_project_root()
+        manager = image_tools._get_manager()
+        assert (manager._repo_prefix, manager.region) == ("acme", "eu-west-1")
+        assert stack_tools._expected_stack_count_for_all() == 5
+
+        sts = SimpleNamespace(get_caller_identity=lambda: {"Account": "123456789012"})
+        session = SimpleNamespace(get_partition_for_region=lambda _region: "aws")
+        with (
+            patch.object(_eks.boto3, "client", return_value=sts),
+            patch.object(_eks.boto3.session, "Session", return_value=session),
+        ):
+            context = _eks.eks_context_for_region("eu-west-1")
+        assert context == "arn:aws:eks:eu-west-1:123456789012:cluster/acme-eu-west-1"
+    finally:
+        cli_config.set_project_root(None)

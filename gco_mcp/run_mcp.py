@@ -896,6 +896,20 @@ __all__ = [
 # =============================================================================
 
 
+def _configure_project_root() -> None:
+    """Make in-process CLI code read cdk.json from the root the gco children use.
+
+    The images tools and resources, the gco:// cluster context and the stack
+    progress totals build the CLI's configuration in this process, which
+    read cdk.json from the server's working directory: with
+    ``GCO_PROJECT_ROOT`` pointing elsewhere they used project ``gco`` and the
+    default Regions.
+    """
+    from cli.config import set_project_root
+
+    set_project_root(_cli_runner.PROJECT_ROOT)
+
+
 def _initialize_runtime() -> None:
     """Perform external startup effects exactly once per process invocation.
 
@@ -906,6 +920,7 @@ def _initialize_runtime() -> None:
     startup and role-assumption records are written.
     """
     configure_audit_logging()
+    _configure_project_root()
     emit_startup_log()
     assume_mcp_role()
 

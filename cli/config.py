@@ -25,10 +25,30 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+_project_root: Path | None = None
+"""Directory holding cdk.json and ``.gco.yaml``/``.gco.json``; ``None`` is the working directory."""
+
+
+def set_project_root(path: Path | None) -> None:
+    """Read cdk.json and the project config file from ``path``, not the working directory.
+
+    The CLI never calls this: it runs from the project directory. The MCP
+    server calls it with the directory its ``gco`` children run from
+    (``GCO_PROJECT_ROOT``, else the checkout), so tools and resources that
+    use this module in-process read the same project, Regions and ECR
+    namespace as those children. ``None`` restores the working directory.
+    """
+    global _project_root
+    _project_root = path
+
+
+def _project_dir() -> Path:
+    return _project_root if _project_root is not None else Path.cwd()
+
 
 def _load_cdk_json() -> dict[str, Any]:
     """Load deployment_regions from cdk.json if present."""
-    cdk_json_path = Path.cwd() / "cdk.json"
+    cdk_json_path = _project_dir() / "cdk.json"
     if cdk_json_path.exists():
         try:
             with open(cdk_json_path, encoding="utf-8") as f:
@@ -50,7 +70,7 @@ def _load_cdk_project_name() -> str | None:
     resources — otherwise a non-``gco`` deployment's stacks, EKS clusters, and
     DynamoDB tables are unreachable from the CLI.
     """
-    cdk_json_path = Path.cwd() / "cdk.json"
+    cdk_json_path = _project_dir() / "cdk.json"
     if cdk_json_path.exists():
         try:
             with open(cdk_json_path, encoding="utf-8") as f:
@@ -133,8 +153,8 @@ class GCOConfig:
         explicit_path = config_path is not None
         if config_path is None:
             default_paths = [
-                Path.cwd() / ".gco.yaml",
-                Path.cwd() / ".gco.json",
+                _project_dir() / ".gco.yaml",
+                _project_dir() / ".gco.json",
                 Path.home() / ".gco" / "config.yaml",
                 Path.home() / ".gco" / "config.json",
             ]
