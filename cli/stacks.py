@@ -3619,7 +3619,14 @@ class StackManager:
             )
         try:
             cfn.delete_stack(StackName=stack_id)
-        except Exception:
+        except Exception as exc:
+            # The caller's teardown barrier stops on this; say why.
+            if isinstance(exc, ClientError):
+                error = exc.response.get("Error", {})
+                reason = f"{error.get('Code') or 'ClientError'}: {error.get('Message') or exc}"
+            else:
+                reason = f"{type(exc).__name__}: {exc}"
+            print(f"  CloudFormation did not delete {stack_name}: {reason}")
             logger.debug("Direct CloudFormation delete failed for %s", stack_id, exc_info=True)
             return False
         return self._wait_for_stack_delete_convergence(
