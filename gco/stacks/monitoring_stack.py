@@ -30,15 +30,20 @@ Cross-Region Metrics:
     - Regional metrics: In each cluster's region
 
 Alarms:
-- High CPU/memory utilization on EKS clusters
-- Unhealthy hosts in ALB target groups
-- High response times
-- Manifest processing failures
-- Lambda errors and throttles
-- SQS message age (stuck jobs)
-- DynamoDB throttling and system errors
-- API Gateway 5XX errors
-- Secret rotation failures
+    CloudWatch evaluates an alarm only against metrics in its own Region, so
+    this stack creates alarms only for metrics published in the monitoring
+    Region, where the API Gateway, its Lambdas and the DynamoDB tables live
+    in the default topology:
+    - API Gateway 5XX errors and p99 latency
+    - Proxy Lambda errors and throttles, secret rotation failures
+    - DynamoDB jobs table throttling and system errors
+    - Composite: API Gateway and proxy Lambda errors together
+    When ``deployment_regions.api_gateway`` differs from the monitoring
+    Region, the API Gateway and Lambda alarms see no data.
+    Each workload Region's alarms (SQS message age and dead-letter messages,
+    EKS CPU/memory, manifest failures, and their composite) are created in
+    that Region's stack with its own alert topic; see
+    ``gco/stacks/regional_alarms.py``.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -2250,11 +2255,7 @@ class GCOMonitoringStack(Stack):
         self._create_global_accelerator_alarms()
         self._create_api_gateway_alarms()
         self._create_lambda_alarms()
-        self._create_sqs_alarms()
         self._create_dynamodb_alarms()
-        self._create_eks_alarms()
-        self._create_alb_alarms()
-        self._create_application_alarms()
 
     def _create_global_accelerator_alarms(self) -> None:
         """Create Global Accelerator alarms.
@@ -2386,54 +2387,6 @@ class GCOMonitoringStack(Stack):
         )
         rotation_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
-    def _create_sqs_alarms(self) -> None:
-        """Create SQS queue alarms"""
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            queue_name = regional_stack.job_queue.queue_name
-            dlq_name = regional_stack.job_dlq.queue_name
-            region_id = region.replace("-", "").title()
-
-            # Old message alarm (stuck jobs)
-            old_message_alarm = cloudwatch.Alarm(
-                self,
-                f"SqsOldMessageAlarm{region_id}",
-                alarm_description=f"SQS queue in {region} has old messages (potential stuck jobs)",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/SQS",
-                    metric_name="ApproximateAgeOfOldestMessage",
-                    dimensions_map={"QueueName": queue_name},
-                    statistic="Maximum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=3600,  # 1 hour
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            old_message_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-            # Dead letter queue alarm
-            dlq_alarm = cloudwatch.Alarm(
-                self,
-                f"SqsDlqAlarm{region_id}",
-                alarm_description=f"SQS dead letter queue in {region} has messages",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/SQS",
-                    metric_name="ApproximateNumberOfMessagesVisible",
-                    dimensions_map={"QueueName": dlq_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=1,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-                evaluation_periods=1,
-                datapoints_to_alarm=1,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            dlq_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
     def _create_dynamodb_alarms(self) -> None:
         """Create DynamoDB alarms for job queue, templates, and webhooks tables."""
         # Get table names from global stack
@@ -2484,164 +2437,13 @@ class GCOMonitoringStack(Stack):
         )
         jobs_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
-    def _create_eks_alarms(self) -> None:
-        """Create EKS cluster alarms"""
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            cluster_name = regional_stack.cluster.cluster_name
-            region_id = region.replace("-", "").title()
-
-            # High CPU utilization alarm (node-level metric)
-            high_cpu_alarm = cloudwatch.Alarm(
-                self,
-                f"EksHighCpuAlarm{region_id}",
-                alarm_description=f"EKS cluster {cluster_name} has high CPU utilization",
-                metric=cloudwatch.Metric(
-                    namespace="ContainerInsights",
-                    metric_name="node_cpu_utilization",
-                    dimensions_map={"ClusterName": cluster_name},
-                    statistic="Average",
-                    period=Duration.minutes(5),
-                ),
-                threshold=80,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=3,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            high_cpu_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-            # High memory utilization alarm (node-level metric)
-            high_memory_alarm = cloudwatch.Alarm(
-                self,
-                f"EksHighMemoryAlarm{region_id}",
-                alarm_description=f"EKS cluster {cluster_name} has high memory utilization",
-                metric=cloudwatch.Metric(
-                    namespace="ContainerInsights",
-                    metric_name="node_memory_utilization",
-                    dimensions_map={"ClusterName": cluster_name},
-                    statistic="Average",
-                    period=Duration.minutes(5),
-                ),
-                threshold=85,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=3,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            high_memory_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_alb_alarms(self) -> None:
-        """Create ALB alarms.
-
-        Status: no alarms created yet, even though we now have the ALB
-        ARN at deploy time via the GA registration custom resource (which
-        also feeds the dashboard widgets). Adding per-ALB alarms here is
-        a straightforward enhancement — derive the ``LoadBalancer``
-        dimension the same way ``_create_alb_widgets`` does
-        (``Fn.split(":loadbalancer/", alb_arn)[1]``) and wire it into
-        ``cloudwatch.Alarm`` constructs.
-
-        For now we rely on:
-        1. Dashboard widgets pinned to each platform ALB (see
-           ``_create_alb_widgets``)
-        2. EKS Container Insights alarms for pod/node health
-        3. API Gateway alarms for request-level monitoring
-        """
-        # TODO: Add UnHealthyHostCount / 5XXCount alarms using the ARN
-        # returned by regional_stack.ga_registration.get_att_string("AlbArn").
-        # The test suite explicitly documents that the ALB alarm count is
-        # currently zero (test_alb_unhealthy_hosts_alarm_skipped); update
-        # that test when adding real alarms.
-
-    def _create_application_alarms(self) -> None:
-        """Create application-specific alarms"""
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            cluster_name = regional_stack.cluster.cluster_name
-            region_id = region.replace("-", "").title()
-
-            # High manifest failure rate alarm
-            high_failure_rate_alarm = cloudwatch.Alarm(
-                self,
-                f"ManifestHighFailureRateAlarm{region_id}",
-                alarm_description=f"Manifest processor in {region} has high failure rate",
-                metric=cloudwatch.Metric(
-                    namespace="GCO/ManifestProcessor",
-                    metric_name="ManifestFailures",
-                    dimensions_map={"ClusterName": cluster_name, "Region": region},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=10,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            high_failure_rate_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
     def _create_composite_alarms(self) -> None:
-        """Create composite alarms for better signal-to-noise ratio"""
+        """Create the composite alarm for API Gateway and proxy Lambda errors.
 
-        # Store individual alarms for composite alarm references
-        regional_alarms: dict[str, list[cloudwatch.Alarm]] = {}
-
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            cluster_name = regional_stack.cluster.cluster_name
-            region_id = region.replace("-", "").title()
-            regional_alarms[region] = []
-
-            # Create regional health composite alarm
-            # Triggers when multiple issues occur in the same region
-            eks_cpu_alarm = cloudwatch.Alarm(
-                self,
-                f"CompositeEksCpu{region_id}",
-                metric=cloudwatch.Metric(
-                    namespace="ContainerInsights",
-                    metric_name="node_cpu_utilization",
-                    dimensions_map={"ClusterName": cluster_name},
-                    statistic="Average",
-                    period=Duration.minutes(5),
-                ),
-                threshold=90,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            regional_alarms[region].append(eks_cpu_alarm)
-
-            eks_memory_alarm = cloudwatch.Alarm(
-                self,
-                f"CompositeEksMemory{region_id}",
-                metric=cloudwatch.Metric(
-                    namespace="ContainerInsights",
-                    metric_name="node_memory_utilization",
-                    dimensions_map={"ClusterName": cluster_name},
-                    statistic="Average",
-                    period=Duration.minutes(5),
-                ),
-                threshold=90,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            regional_alarms[region].append(eks_memory_alarm)
-
-        # Create composite alarm for critical regional issues. Every region
-        # above appends exactly the CPU and memory alarms (two), so this
-        # always fires; no `len(alarms) >= 2` guard is needed here.
-        for region, alarms in regional_alarms.items():
-            region_id = region.replace("-", "").title()
-            composite_alarm = cloudwatch.CompositeAlarm(
-                self,
-                f"RegionalCriticalAlarm{region_id}",
-                alarm_description=f"Critical: Multiple issues detected in {region}",
-                alarm_rule=cloudwatch.AlarmRule.all_of(*alarms),
-            )
-            composite_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
+        Each Region's CPU-and-memory composite alarm lives in that Region's
+        stack (``gco/stacks/regional_alarms.py``): a composite alarm can only
+        combine alarms of its own Region.
+        """
         # API Gateway + Lambda composite alarm (only if api_gateway_stack is available)
         if self.api_gateway_stack and self.api_gateway_stack.proxy_lambda is not None:
             api_name = self.api_gateway_stack.api.rest_api_name

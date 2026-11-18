@@ -140,8 +140,8 @@ GCO deploys multiple stacks to configurable AWS Regions. Every configured Region
 |-------|---------------|---------|
 | `gco-global` | us-east-2 | Partition-wide state and SSM coordination; [Global Accelerator](https://docs.aws.amazon.com/global-accelerator/latest/dg/what-is-global-accelerator.html) in commercial `aws` only |
 | `gco-api-gateway` | us-east-2 | Edge-optimized workload + aggregate API in `aws`; regional aggregate-only API elsewhere |
-| `gco-regional-api-{region}` | workload Region | Aggregator bridge; optional direct access in `aws`, required workload ingress elsewhere |
-| `gco-monitoring` | us-east-2 | Cross-region CloudWatch dashboards and alarms |
+| `gco-regional-api-{region}` | workload Region | Aggregator bridge and region-pinned access; required workload ingress outside `aws` |
+| `gco-monitoring` | us-east-2 | Cross-region CloudWatch dashboard and the control-plane alarms (each regional stack has its own) |
 | `gco-analytics` | API Gateway region | Optional SageMaker Studio and [EMR Serverless](https://docs.aws.amazon.com/emr/latest/EMR-Serverless-UserGuide/emr-serverless.html) environment |
 | `gco-{region}` | (configurable) | Regional EKS clusters, internal ALBs, and workload infrastructure |
 

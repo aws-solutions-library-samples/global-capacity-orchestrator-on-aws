@@ -293,41 +293,17 @@ class TestMonitoringStackAlarms:
             },
         )
 
-    def test_sqs_old_message_alarm_exists(self, monitoring_stack):
-        """Test that SQS old message alarm is created for each region."""
-        template = assertions.Template.from_stack(monitoring_stack)
-        # CDK generates alarm names, so we just check for the metric properties
-        template.has_resource_properties(
-            "AWS::CloudWatch::Alarm",
-            {
-                "MetricName": "ApproximateAgeOfOldestMessage",
-                "Namespace": "AWS/SQS",
-            },
-        )
+    def test_workload_region_alarms_are_not_in_the_monitoring_stack(self, monitoring_stack):
+        """SQS, EKS and manifest alarms live in each regional stack.
 
-    def test_sqs_dlq_alarm_exists(self, monitoring_stack):
-        """Test that SQS DLQ alarm is created for each region."""
+        CloudWatch evaluates an alarm only against metrics in its own Region,
+        so ``gco/stacks/regional_alarms.py`` creates them there
+        (tests/test_regional_alarms.py).
+        """
         template = assertions.Template.from_stack(monitoring_stack)
-        # CDK generates alarm names, so we just check for the metric properties
-        template.has_resource_properties(
-            "AWS::CloudWatch::Alarm",
-            {
-                "MetricName": "ApproximateNumberOfMessagesVisible",
-                "Namespace": "AWS/SQS",
-            },
-        )
-
-    def test_eks_high_cpu_alarm_exists(self, monitoring_stack):
-        """Test that EKS high CPU alarm is created for each region."""
-        template = assertions.Template.from_stack(monitoring_stack)
-        # CDK generates alarm names, so we just check for the metric properties
-        template.has_resource_properties(
-            "AWS::CloudWatch::Alarm",
-            {
-                "MetricName": "node_cpu_utilization",
-                "Namespace": "ContainerInsights",
-            },
-        )
+        alarms = template.find_resources("AWS::CloudWatch::Alarm")
+        namespaces = {props["Properties"]["Namespace"] for props in alarms.values()}
+        assert namespaces == {"AWS/ApiGateway", "AWS/Lambda", "AWS/DynamoDB"}
 
     def test_alb_unhealthy_hosts_alarm_skipped(self, monitoring_stack):
         """Test that ALB unhealthy hosts alarm is NOT created (ALB names unknown at synth time)."""

@@ -1211,6 +1211,20 @@ class GCORegionalStack(Stack):
         # Create dedicated IAM role for MCP server
         self._create_mcp_role()
 
+        # CloudWatch alarms must live in the Region of their metrics, so this
+        # Region's queue, cluster and manifest-processor alarms (and their SNS
+        # topic) are created here rather than in the monitoring stack.
+        from gco.stacks.regional_alarms import RegionalAlarms
+
+        self.regional_alarms = RegionalAlarms(
+            self,
+            "RegionalAlarms",
+            region=self.deployment_region,
+            cluster_name=self.cluster.cluster_name,
+            job_queue=self.job_queue,
+            job_dlq=self.job_dlq,
+        )
+
         # Export cluster information
         self._create_outputs()
 

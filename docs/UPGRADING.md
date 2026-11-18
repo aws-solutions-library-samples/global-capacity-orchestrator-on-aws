@@ -28,6 +28,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Tenant write fence and MLflow over HTTPS](#tenant-write-fence-and-mlflow-over-https)
   - [vLLM endpoints deployed with MODEL](#vllm-endpoints-deployed-with-model)
   - [API calls need an IAM permission](#api-calls-need-an-iam-permission)
+  - [Workload alarms move to their Regions](#workload-alarms-move-to-their-regions)
 
 ## How an upgrade works
 
@@ -463,3 +464,21 @@ IAM-authorized route without an `execute-api:Invoke` permission of its own.
 - **The analytics `/studio/*` pages keep working.** Their requests carry no IAM
   identity, so the resource policy still admits `GET /studio/*`; the Cognito
   authorizer decides who signs in.
+
+### Workload alarms move to their Regions
+
+Earlier releases created every workload Region's SQS, EKS node and
+manifest-processor alarms in the monitoring stack. CloudWatch evaluates an
+alarm only against metrics in its own Region, so in any Region other than the
+monitoring Region those alarms never left `OK`.
+
+- **The alarms are recreated in each regional stack.** A redeploy adds them,
+  with the same metrics and thresholds, to every `<project>-<region>` stack and
+  then deletes the old copies from `<project>-monitoring`. Their names change
+  (CloudFormation generates them from the new stack), so update anything that
+  looks an alarm up by name.
+- **Each Region gets its own alert topic.** The new alarms notify an SNS topic
+  in the same Region, exported as the regional stack's `RegionalAlertTopicArn`
+  output. **Subscribe your on-call channel to it in every Region**; the
+  monitoring stack's `AlertTopicArn` keeps the API Gateway, Lambda and
+  DynamoDB alarms only.

@@ -1022,16 +1022,24 @@ monitoring region resolved in `app.py`) creates the observability surface:
 - **Dashboard** — one CloudWatch dashboard with per-region widgets for Global
   Accelerator, API Gateway, Lambda, SQS, DynamoDB, EKS, ALBs, the optional
   FSx/[Valkey](https://valkey.io/)/Aurora services, and custom application metrics.
-- **Alarms** — metric and composite alarms for EKS CPU/memory, ALB unhealthy
-  hosts, response time, manifest-processing failures, Lambda errors/throttles,
-  SQS message age (stuck jobs), DynamoDB throttling, API Gateway 5XX, and
-  secret-rotation failure.
-- **Alert delivery** — a single SNS topic (`alert_topic`) fed by the composite
-  alarms. **Subscribe your on-call channel to it** — an alarm with no
-  subscriber is silent (see the secret-rotation runbook).
+- **Alarms** — CloudWatch evaluates an alarm only against metrics in its own
+  Region, so the alarms live where their metrics are:
+  - the monitoring stack: API Gateway 5XX and p99 latency, proxy Lambda
+    errors/throttles, secret-rotation failure, DynamoDB jobs-table throttling
+    and system errors, and a composite of API Gateway and proxy errors. They
+    see data only while `deployment_regions.api_gateway` and
+    `deployment_regions.global` equal the monitoring Region (the default);
+  - each regional stack (`gco/stacks/regional_alarms.py`): SQS message age
+    (stuck jobs) and dead-letter messages, EKS node CPU/memory,
+    manifest-processing failures, and a composite of CPU and memory above 90%.
+- **Alert delivery** — one SNS topic per Region with alarms: the monitoring
+  stack's `AlertTopicArn` output and each regional stack's
+  `RegionalAlertTopicArn` output. **Subscribe your on-call channel to every
+  one of them** — an alarm with no subscriber is silent (see the
+  secret-rotation runbook).
 
-Shape is guarded by `tests/test_monitoring_stack.py` and
-`tests/test_regional_stack.py`.
+Shape is guarded by `tests/test_monitoring_stack.py`,
+`tests/test_regional_alarms.py` and `tests/test_regional_stack.py`.
 
 ### Custom metrics and health checks
 
@@ -1070,7 +1078,7 @@ Retention is bounded, not open-ended:
 
 `docs/RUNBOOKS.md` holds eleven step-by-step incident procedures (region
 unhealthy, DLQ filling, secret-rotation failure, cost spike, and more), and the
-alarms above page through the SNS alert topic. Keep one runbook per alarm so a
+alarms above page through the SNS alert topics. Keep one runbook per alarm so a
 page maps to an action.
 
 ## Code health
