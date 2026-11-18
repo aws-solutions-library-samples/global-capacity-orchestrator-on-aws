@@ -82,9 +82,10 @@ _TOOL_GATING_TABLE: dict[str, str] = {
     "create_reservation": FLAG_CAPACITY_PURCHASE,
     "cancel_reservation": FLAG_DESTRUCTIVE_OPERATIONS,
     "runai_capacity": FLAG_RUNAI_CAPACITY,
-    # gco_mcp/tools/models.py / storage.py — local model-data upload + deletion
+    # gco_mcp/tools/models.py / storage.py / inference.py — local data upload + deletion
     "models_upload": FLAG_MODEL_UPLOAD,
     "upload_to_regional_bucket": FLAG_MODEL_UPLOAD,
+    "populate_kv_cache": FLAG_MODEL_UPLOAD,
     "delete_model": FLAG_DESTRUCTIVE_OPERATIONS,
     # gco_mcp/tools/images.py — image-publish + destructive
     "images_build": FLAG_IMAGE_PUBLISH,

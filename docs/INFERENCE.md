@@ -786,7 +786,7 @@ The cold tier auto-targets the always-on general-purpose regional bucket (resolv
 gco inference populate-kv my-llm ./kv-warm-set/ --region us-east-1
 ```
 
-This writes the objects to exactly the prefix the endpoint's pods read from, so a `store`/`both` endpoint deployed with the cold tier enabled warm-starts its prefix cache from them. The endpoint must have the cold tier enabled (`--mooncake-cold-tier` at deploy, or `configure-store --cold-tier`) for its pods to consume the data. AI agents can do the same through the audited `populate_kv_cache` MCP tool.
+This writes the objects to exactly the prefix the endpoint's pods read from, so a `store`/`both` endpoint deployed with the cold tier enabled warm-starts its prefix cache from them. The endpoint must have the cold tier enabled (`--mooncake-cold-tier` at deploy, or `configure-store --cold-tier`) for its pods to consume the data. AI agents can do the same through the audited `populate_kv_cache` MCP tool, which registers only when the server runs with `GCO_ENABLE_MODEL_UPLOAD=true` and uploads only sources beneath `GCO_STORAGE_LOCAL_ROOT` (see [Feature Flags](../gco_mcp/README.md#feature-flags)).
 
 The cold tier is per-region: run `populate-kv` once for each region you want warmed (it resolves and writes to that region's own bucket). Writes never cross a region boundary, and cold-tier reads/writes are asynchronous — they never sit on the RDMA hot path.
 

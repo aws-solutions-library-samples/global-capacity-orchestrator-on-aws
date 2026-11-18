@@ -187,8 +187,9 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 156 read-only or low-risk
-        # tools (152 before hyperpod_status + hyperpod_preflight +
+        # The default registry intentionally contains 155 read-only or low-risk
+        # tools (156 before populate_kv_cache moved behind
+        # GCO_ENABLE_MODEL_UPLOAD; 152 before hyperpod_status + hyperpod_preflight +
         # find_training_plans + list_training_plans, which came with the
         # SageMaker HyperPod backend; 151 before slurm_backends, which came
         # with the AWS PCS backend; 144 before the seven Slurm tools
@@ -198,14 +199,14 @@ class TestToolRegistration:
         # 139 before the platform add-on status trio
         # eks_capabilities_status + gitops_status + crossplane_status; 138
         # before deps_scan; 134 before fleet_status; 125 before the cost
-        # allocation/k8s/report family added 9). Optional families add 60
+        # allocation/k8s/report family added 9). Optional families add 61
         # more when every flag is enabled: capacity purchase (2), image
-        # publish (3), destructive operations (16), model upload (2),
+        # publish (3), destructive operations (16), model upload (3),
         # infrastructure deploy (4), infrastructure destroy (2), local metrics
         # (1), semantic progress (1), local storage sync (1), config
         # management (11), Mission (10), Swarm (6), and NVIDIA Run:ai
         # capacity (1). The all-flags ceiling is therefore 216.
-        base_count = 156
+        base_count = 155
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -222,7 +223,8 @@ class TestToolRegistration:
             # prune and the Slurm scancel.
             expected += 16
         if "models_upload" in tool_names:
-            expected += 2  # central + regional upload tools share the model-upload gate
+            # central + regional + KV-cache upload tools share the model-upload gate
+            expected += 3
         if "deploy_stack" in tool_names:
             # deploy_stack + deploy_all + bootstrap_cdk + addons_install
             expected += 4
@@ -312,7 +314,6 @@ class TestToolRegistration:
             "set_mooncake_topology",
             "configure_mooncake_store",
             "mooncake_topology_status",
-            "populate_kv_cache",
             # ── Cost tracking ──
             # Read-only
             "cost_summary",
@@ -513,6 +514,7 @@ class TestToolRegistration:
         if "models_upload" in names:
             expected.add("models_upload")
             expected.add("upload_to_regional_bucket")
+            expected.add("populate_kv_cache")
         # Infrastructure-deploy gated tools register under
         # GCO_ENABLE_INFRASTRUCTURE_DEPLOY.
         if "deploy_stack" in names:

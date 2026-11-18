@@ -7,7 +7,8 @@ from typing import Any, Literal
 
 import cli_runner
 from audit import audit_logged
-from feature_flags import FLAG_DESTRUCTIVE_OPERATIONS, is_enabled
+from feature_flags import FLAG_DESTRUCTIVE_OPERATIONS, FLAG_MODEL_UPLOAD, is_enabled
+from local_data import resolve_local_path, stage_upload_path
 from server import mcp
 
 
@@ -375,31 +376,60 @@ def mooncake_topology_status(name: str) -> str:
     return cli_runner._run_cli("inference", "status", name)
 
 
-@mcp.tool(tags={"low-risk", "inference"})
-@audit_logged
-async def populate_kv_cache(endpoint_name: str, local_path: str, region: str) -> str:
-    """`gco inference populate-kv` — upload data into an endpoint's KV-cache cold tier.
+# Uploading host files to S3 is the same capability as upload_to_regional_bucket
+# (both run RegionalBucketManager.upload against the regional bucket), so the
+# tool sits behind the same flag and the same GCO_STORAGE_LOCAL_ROOT
+# confinement and descriptor-backed snapshot.
+if is_enabled(FLAG_MODEL_UPLOAD):
 
-    Uploads a local file or directory to the region's general-purpose bucket
-    under the cold-tier key prefix the endpoint reads from, pre-warming its
-    Mooncake KV-cache prefix cache. The endpoint must be deployed with the cold
-    tier enabled (deploy with --mooncake-cold-tier, or configure it via
-    configure-store) for its pods to read the uploaded data.
+    @mcp.tool(tags={"data-upload", "inference", "local-filesystem"})
+    @audit_logged
+    async def populate_kv_cache(endpoint_name: str, local_path: str, region: str) -> str:
+        """[gated by GCO_ENABLE_MODEL_UPLOAD] Upload data into an endpoint's KV-cache cold tier.
 
-    Args:
-        endpoint_name: Endpoint whose KV-cache cold tier receives the data.
-        local_path: Local file or directory to upload.
-        region: Region whose general-purpose bucket backs the cold tier.
-    """
-    return await asyncio.to_thread(
-        cli_runner._run_cli,
-        "inference",
-        "populate-kv",
-        endpoint_name,
-        local_path,
-        "-r",
-        region,
-    )
+        `gco inference populate-kv` — uploads a local file or directory to the
+        region's general-purpose bucket under the cold-tier key prefix the
+        endpoint reads from, pre-warming its Mooncake KV-cache prefix cache.
+        The endpoint must be deployed with the cold tier enabled (deploy with
+        --mooncake-cold-tier, or configure it via configure-store) for its pods
+        to read the uploaded data.
+
+        The source must resolve beneath ``GCO_STORAGE_LOCAL_ROOT``; relative
+        paths are interpreted relative to that root, never relative to the MCP
+        process working directory. The CLI receives a private descriptor-backed
+        snapshot; descendant links, special files, hard links, and filesystem
+        crossings fail closed.
+
+        Args:
+            endpoint_name: Endpoint whose KV-cache cold tier receives the data.
+            local_path: Root-relative local file or directory to upload.
+            region: Region whose general-purpose bucket backs the cold tier.
+        """
+        try:
+            local_contract = resolve_local_path(
+                local_path, require_exists=True, purpose="KV-cache upload"
+            )
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc), "code": "local_data_path_rejected"})
+
+        def _populate_from_staged_path() -> str:
+            with stage_upload_path(local_contract) as staged:
+                return cli_runner._run_cli(
+                    "inference",
+                    "populate-kv",
+                    endpoint_name,
+                    staged.argument,
+                    "-r",
+                    region,
+                    pass_fds=(staged.directory_fd,),
+                )
+
+        try:
+            # Stage inside the worker thread so a cancellation cannot unlink
+            # the snapshot while the CLI is still reading it.
+            return await asyncio.to_thread(_populate_from_staged_path)
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc), "code": "local_data_path_rejected"})
 
 
 if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
