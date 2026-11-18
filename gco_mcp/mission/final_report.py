@@ -335,6 +335,24 @@ def _build_followups_template(
         suggestions.append(
             "Resume the session with mission_resume once the manual intervention is complete."
         )
+    elif reason == "script_time_limit":
+        suggestions.append(
+            "The scripted strategy hit the sandbox's wall-clock cap "
+            "(GCO_MCP_CODE_MODE_MAX_DURATION_SECS, which includes time spent "
+            "in tool calls). Spread the work across iterations or raise the cap."
+        )
+    elif reason == "script_memory_limit":
+        suggestions.append(
+            "The scripted strategy hit the sandbox's memory cap "
+            "(GCO_MCP_CODE_MODE_MAX_MEMORY). Hold less data in the script or "
+            "raise the cap."
+        )
+    elif reason == "script_error":
+        suggestions.append(
+            "The scripted strategy raised an error. Read "
+            "sandbox_terminated_detail on the last iteration, fix the script, "
+            "and re-run."
+        )
     else:
         suggestions.append(
             "Inspect the iteration history for the last verdict and adjust "

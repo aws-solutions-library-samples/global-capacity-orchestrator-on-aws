@@ -7,7 +7,8 @@ from typing import Any, Literal
 
 import cli_runner
 from audit import audit_logged
-from feature_flags import FLAG_DESTRUCTIVE_OPERATIONS, is_enabled
+from feature_flags import FLAG_DESTRUCTIVE_OPERATIONS, FLAG_MODEL_UPLOAD, is_enabled
+from local_data import resolve_local_path, stage_upload_path
 from server import mcp
 
 
@@ -26,38 +27,6 @@ async def _ctx_warning(message: str) -> None:
         return
     with contextlib.suppress(Exception):
         await ctx.warning(message)
-
-
-#: Serving modes that split an endpoint into separate prefill and decode roles.
-#: These endpoints carry extra Kubernetes resources (per-role Deployments, a
-#: proxy, and a shared store dependency), so removing one is held behind the
-#: destructive-operations flag.
-_DISAGGREGATED_MODES = frozenset({"disaggregated", "both"})
-
-
-def _endpoint_is_disaggregated(name: str) -> bool:
-    """Return True when the named endpoint runs a split prefill/decode topology.
-
-    Reads the endpoint's persisted spec (read-only) and inspects its
-    ``mooncake`` block. A ``mode`` of ``disaggregated`` or ``both`` runs
-    separate prefill and decode roles. Anything else — a plain
-    single-Deployment endpoint, an endpoint without a ``mooncake`` block, or a
-    lookup that cannot be parsed — is treated as not disaggregated.
-    """
-    raw = cli_runner._run_cli("inference", "status", name)
-    try:
-        data = json.loads(raw)
-    except TypeError, ValueError:
-        return False
-    if not isinstance(data, dict):
-        return False
-    spec = data.get("spec")
-    if not isinstance(spec, dict):
-        return False
-    mooncake = spec.get("mooncake")
-    if not isinstance(mooncake, dict):
-        return False
-    return mooncake.get("mode") in _DISAGGREGATED_MODES
 
 
 @mcp.tool(tags={"low-risk", "inference"})
@@ -377,31 +346,60 @@ def mooncake_topology_status(name: str) -> str:
     return cli_runner._run_cli("inference", "status", name)
 
 
-@mcp.tool(tags={"low-risk", "inference"})
-@audit_logged
-async def populate_kv_cache(endpoint_name: str, local_path: str, region: str) -> str:
-    """`gco inference populate-kv` — upload data into an endpoint's KV-cache cold tier.
+# Uploading host files to S3 is the same capability as upload_to_regional_bucket
+# (both run RegionalBucketManager.upload against the regional bucket), so the
+# tool sits behind the same flag and the same GCO_STORAGE_LOCAL_ROOT
+# confinement and descriptor-backed snapshot.
+if is_enabled(FLAG_MODEL_UPLOAD):
 
-    Uploads a local file or directory to the region's general-purpose bucket
-    under the cold-tier key prefix the endpoint reads from, pre-warming its
-    Mooncake KV-cache prefix cache. The endpoint must be deployed with the cold
-    tier enabled (deploy with --mooncake-cold-tier, or configure it via
-    configure-store) for its pods to read the uploaded data.
+    @mcp.tool(tags={"data-upload", "inference", "local-filesystem"})
+    @audit_logged
+    async def populate_kv_cache(endpoint_name: str, local_path: str, region: str) -> str:
+        """[gated by GCO_ENABLE_MODEL_UPLOAD] Upload data into an endpoint's KV-cache cold tier.
 
-    Args:
-        endpoint_name: Endpoint whose KV-cache cold tier receives the data.
-        local_path: Local file or directory to upload.
-        region: Region whose general-purpose bucket backs the cold tier.
-    """
-    return await asyncio.to_thread(
-        cli_runner._run_cli,
-        "inference",
-        "populate-kv",
-        endpoint_name,
-        local_path,
-        "-r",
-        region,
-    )
+        `gco inference populate-kv` — uploads a local file or directory to the
+        region's general-purpose bucket under the cold-tier key prefix the
+        endpoint reads from, pre-warming its Mooncake KV-cache prefix cache.
+        The endpoint must be deployed with the cold tier enabled (deploy with
+        --mooncake-cold-tier, or configure it via configure-store) for its pods
+        to read the uploaded data.
+
+        The source must resolve beneath ``GCO_STORAGE_LOCAL_ROOT``; relative
+        paths are interpreted relative to that root, never relative to the MCP
+        process working directory. The CLI receives a private descriptor-backed
+        snapshot; descendant links, special files, hard links, and filesystem
+        crossings fail closed.
+
+        Args:
+            endpoint_name: Endpoint whose KV-cache cold tier receives the data.
+            local_path: Root-relative local file or directory to upload.
+            region: Region whose general-purpose bucket backs the cold tier.
+        """
+        try:
+            local_contract = resolve_local_path(
+                local_path, require_exists=True, purpose="KV-cache upload"
+            )
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc), "code": "local_data_path_rejected"})
+
+        def _populate_from_staged_path() -> str:
+            with stage_upload_path(local_contract) as staged:
+                return cli_runner._run_cli(
+                    "inference",
+                    "populate-kv",
+                    endpoint_name,
+                    staged.argument,
+                    "-r",
+                    region,
+                    pass_fds=(staged.directory_fd,),
+                )
+
+        try:
+            # Stage inside the worker thread so a cancellation cannot unlink
+            # the snapshot while the CLI is still reading it.
+            return await asyncio.to_thread(_populate_from_staged_path)
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc), "code": "local_data_path_rejected"})
 
 
 if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
@@ -413,24 +411,12 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
 
         Delete an inference endpoint. Cannot be undone — the endpoint, its
         DynamoDB record, and the underlying Kubernetes resources are removed.
-
-        Deleting a disaggregated (split prefill/decode) endpoint is refused at
-        invocation when GCO_ENABLE_DESTRUCTIVE_OPERATIONS is not enabled: the
-        request is rejected and no endpoint resource is removed.
+        A disaggregated (split prefill/decode) endpoint is deleted the same
+        way, including its per-role Deployments and proxy.
 
         Args:
             name: Endpoint name.
         """
-        if not is_enabled(FLAG_DESTRUCTIVE_OPERATIONS) and await asyncio.to_thread(
-            _endpoint_is_disaggregated, name
-        ):
-            message = (
-                f"Refusing to delete disaggregated endpoint {name!r}: destructive "
-                "operations are disabled. Set GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true "
-                "to allow this deletion."
-            )
-            await _ctx_warning(message)
-            return json.dumps({"error": message, "destructive_operations_disabled": True})
         await _ctx_warning(f"Deleting inference endpoint {name!r} — this cannot be undone.")
         return await asyncio.to_thread(cli_runner._run_cli, "inference", "delete", name, "-y")
 
@@ -494,7 +480,8 @@ def invoke_inference(
         name: Endpoint name (e.g. my-llm).
         prompt: Text prompt to send to the model.
         max_tokens: Maximum tokens to generate (default: 100).
-        api_path: Override the API sub-path (default: auto-detect from framework).
+        api_path: Override the API sub-path (default: auto-detect from
+            framework). A ``..`` segment is refused.
         region: Target region for the request (default: nearest via Global Accelerator).
 
     This MCP tool intentionally returns one buffered string because the MCP
@@ -502,6 +489,9 @@ def invoke_inference(
     supports response streaming; use ``gco inference invoke --stream`` when
     token-by-token output is required.
     """
+    rejected = cli_runner.reject_traversal_segments(api_path=api_path)
+    if rejected is not None:
+        return rejected
     args = ["inference", "invoke", name, "-p", prompt, "--max-tokens", str(max_tokens)]
     if api_path:
         args += ["--path", api_path]

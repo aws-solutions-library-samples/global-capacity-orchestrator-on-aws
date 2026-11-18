@@ -295,25 +295,30 @@ def make_stub_dispatcher() -> ToolDispatcher:
 
 
 def _build_sandbox_runner(session: Mapping[str, Any]) -> SandboxRunner | None:
-    """Wire a real sandbox runner when the session permits scripted strategies."""
+    """Wire a real sandbox runner when the session permits scripted strategies.
+
+    The runner builds a fresh :class:`MissionSandbox` for every script run
+    from the session the engine passes in, so the frozen ``mission``
+    namespace and the ``iteration_index`` on the script-call audit rows
+    describe the iteration that is running. One sandbox per engine used to
+    stamp every row with the index of the iteration the engine started at.
+    """
     if not session.get("allow_scripted_strategies"):
         return None
     try:
-        from mission.sandbox import MissionSandbox
+        from mission.sandbox import make_default_sandbox_runner
     except ImportError:
         return None
 
-    sandbox = MissionSandbox(
-        list(session.get("tool_allowlist") or []),
-        cast("SessionState", session),
-    )
+    runner = make_default_sandbox_runner(list(session.get("tool_allowlist") or []))
 
     async def _sandbox_runner(
         script: str,
         ctx_arg: Any,
         dispatcher: ToolDispatcher,
+        current_session: SessionState,
     ) -> tuple[dict[str, Any], list[ToolCallRecord]]:
-        obs, calls = await sandbox.run(script, ctx_arg, dispatcher)
+        obs, calls = await runner(script, ctx_arg, dispatcher, current_session)
         return obs, cast("list[ToolCallRecord]", calls)
 
     return _sandbox_runner

@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 import click
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -45,7 +46,8 @@ import run_mcp
 _captured = []
 
 
-def _fake_run_cli(*args):
+def _fake_run_cli(*args, **_kwargs):
+    # Keyword options (timeout_seconds, pass_fds, env) are not argv.
     _captured.append([str(a) for a in args])
     return "{}"
 
@@ -189,6 +191,115 @@ def _validate_argv(root: click.Command, argv: list[str]) -> list[str]:
         if name not in valid:
             problems.append(f"unknown option {name!r} for 'gco {path}'")
     return problems
+
+
+def _parse_cli_argv(argv: list[str]) -> click.Context:
+    """Parse one tool argv the way ``gco --output json <argv>`` would.
+
+    Walks the subcommand path and builds each context with ``make_context``,
+    so Click converts and validates every value (required options, choices,
+    ``click.Path(exists=True)``, extra arguments) without running a command
+    callback. Raises ``click.UsageError`` when the CLI would reject the argv.
+    """
+    from cli.main import cli
+
+    ctx = cli.make_context("gco", ["--output", "json", *argv])
+    node: click.Command = cli
+    index = 0
+    while isinstance(node, click.Group):
+        if index >= len(argv):
+            raise click.UsageError(f"incomplete command path {argv!r}", ctx=ctx)
+        name = argv[index]
+        sub = node.get_command(ctx, name)
+        if sub is None:
+            raise click.UsageError(f"no such command {name!r}", ctx=ctx)
+        index += 1
+        ctx = sub.make_context(name, argv[index:], parent=ctx)
+        node = sub
+    return ctx
+
+
+def _argv_built_by(tool: object, *args: object, **kwargs: object) -> list[str]:
+    """Run one MCP tool with ``cli_runner._run_cli`` captured; return its argv."""
+    import asyncio
+    import inspect
+    from unittest.mock import patch
+
+    sys.path.insert(0, str(PROJECT_ROOT / "gco_mcp"))
+    import cli_runner
+
+    captured: list[list[str]] = []
+
+    def fake_run_cli(*argv: str, **_kwargs: object) -> str:
+        captured.append(list(argv))
+        return "{}"
+
+    with patch.object(cli_runner, "_run_cli", fake_run_cli):
+        result = tool(*args, **kwargs)  # type: ignore[operator]
+        if inspect.iscoroutine(result):
+            asyncio.run(result)
+    assert len(captured) == 1, captured
+    return captured[0]
+
+
+_EXAMPLE_MANIFEST = str(PROJECT_ROOT / "examples" / "simple-job.yaml")
+
+
+def test_templates_create_passes_the_manifest_and_name_where_the_cli_expects_them() -> None:
+    """``gco templates create MANIFEST_PATH --name NAME``: the tool used to pass the
+    template name as the manifest path, so every call failed."""
+    sys.path.insert(0, str(PROJECT_ROOT / "gco_mcp"))
+    import run_mcp
+
+    argv = _argv_built_by(
+        run_mcp.templates_create,
+        "gpu-template",
+        _EXAMPLE_MANIFEST,
+        region="us-east-1",
+        description="GPU training template",
+    )
+
+    params = _parse_cli_argv(argv).params
+    assert params["manifest_path"] == _EXAMPLE_MANIFEST
+    assert params["name"] == "gpu-template"
+    assert params["region"] == "us-east-1"
+    assert params["description"] == "GPU training template"
+
+
+def test_analytics_user_add_passes_the_username_as_an_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``gco analytics users add --username NAME``: the tool used to pass the
+    username positionally, which the command rejects."""
+    monkeypatch.delenv("GCO_STUDIO_PASSWORD", raising=False)
+    sys.path.insert(0, str(PROJECT_ROOT / "gco_mcp"))
+    import run_mcp
+
+    argv = _argv_built_by(run_mcp.analytics_user_add, "alice", "alice@example.com")
+
+    params = _parse_cli_argv(argv).params
+    assert params["username"] == "alice"
+    assert params["email"] == "alice@example.com"
+    assert params["password"] is None
+    assert params["generate_password"] is False
+
+
+def test_files_access_points_passes_the_file_system_id_and_required_region() -> None:
+    """``gco files access-points FILE_SYSTEM_ID --region REGION``: the tool used to
+    omit the file system ID and to make the (required) region optional."""
+    import inspect
+
+    sys.path.insert(0, str(PROJECT_ROOT / "gco_mcp"))
+    import run_mcp
+
+    argv = _argv_built_by(run_mcp.files_access_points, "fs-0123456789abcdef0", "us-east-1")
+
+    params = _parse_cli_argv(argv).params
+    assert params["file_system_id"] == "fs-0123456789abcdef0"
+    assert params["region"] == "us-east-1"
+    signature = inspect.signature(run_mcp.files_access_points)
+    assert signature.parameters["file_system_id"].default is inspect.Parameter.empty
+    assert signature.parameters["region"].default is inspect.Parameter.empty
 
 
 def test_every_mcp_tool_builds_a_valid_cli_invocation() -> None:

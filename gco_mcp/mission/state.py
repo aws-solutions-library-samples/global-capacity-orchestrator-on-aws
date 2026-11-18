@@ -467,9 +467,7 @@ class DynamoDBBackend:
         table = self._get_table()
         table.put_item(Item=_to_dynamodb_item(strip_private_fields(session)))
 
-    def list_sessions(
-        self, filter: dict[str, Any] | None = None
-    ) -> list[dict[str, Any]]:  # pragma: no cover - DynamoDB
+    def list_sessions(self, filter: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Return summary dicts via the ``status-index`` GSI.
 
         When ``filter`` provides a ``status`` key, the call uses the GSI
@@ -477,19 +475,30 @@ class DynamoDBBackend:
         shape), this stub falls back to a table ``scan`` so that the
         method still returns the same summary shape as
         :meth:`FilesystemBackend.list_sessions`.
+
+        DynamoDB returns at most 1 MB per ``query`` / ``scan`` call, with a
+        ``LastEvaluatedKey`` when more remains, so both paths follow that key
+        (as ``ExclusiveStartKey``) until a page arrives without one.
         """
         from boto3.dynamodb.conditions import Key
 
         table = self._get_table()
+        request: dict[str, Any] = {}
+        read = table.scan
         if filter and "status" in filter:
-            response = table.query(
-                IndexName="status-index",
-                KeyConditionExpression=Key("status").eq(filter["status"]),
-            )
-            items = response.get("Items", [])
-        else:
-            response = table.scan()
-            items = response.get("Items", [])
+            read = table.query
+            request = {
+                "IndexName": "status-index",
+                "KeyConditionExpression": Key("status").eq(filter["status"]),
+            }
+        items: list[Any] = []
+        while True:
+            response = read(**request)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            request["ExclusiveStartKey"] = last_key
 
         return [
             {

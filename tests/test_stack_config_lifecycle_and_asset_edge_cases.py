@@ -6070,7 +6070,10 @@ def test_terminate_cdk_process_posix_graceful_exit(stack_manager: Any) -> None:
     ):
         stack_manager._terminate_cdk_process(process)
     killpg.assert_called_once()
-    process.wait.assert_called_once_with(timeout=30)
+    from cli.stacks import CDK_TERMINATE_GRACE_SECONDS
+
+    process.wait.assert_called_once_with(timeout=CDK_TERMINATE_GRACE_SECONDS)
+    assert CDK_TERMINATE_GRACE_SECONDS == 30
 
 
 def test_wait_for_delete_convergence_times_out_after_confirmed_delete_start(

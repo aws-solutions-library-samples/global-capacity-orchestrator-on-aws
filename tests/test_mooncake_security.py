@@ -18,12 +18,12 @@ guarantees that keep that surface closed:
   the offending rule and the default-deny policy is never read, modified, or
   deleted, so the namespace fails closed.
 - Deleting a split prefill/decode endpoint is held behind the
-  ``GCO_ENABLE_DESTRUCTIVE_OPERATIONS`` switch. With the switch off the deletion
-  is refused and nothing is removed.
+  ``GCO_ENABLE_DESTRUCTIVE_OPERATIONS`` switch: the deletion tool is registered
+  only when the switch is on, and then deletes it like any other endpoint.
 
 The monitor examples build an :class:`InferenceMonitor` with every Kubernetes
 client mocked and drive the security entry points directly. The deletion
-example exercises the audited tool surface with the destructive switch off.
+example exercises the audited tool surface registered with the switch on.
 """
 
 from __future__ import annotations
@@ -586,28 +586,27 @@ def _registered_tool_names(run_mcp) -> set[str]:
     return {t.name for t in tools}
 
 
-def test_deleting_split_endpoint_refused_when_destructive_switch_off():
-    """Deleting a split endpoint with the destructive switch off removes nothing.
+def test_split_endpoint_deletion_is_gated_only_by_registration():
+    """Deleting a split prefill/decode endpoint is held behind the destructive switch.
 
-    The audited deletion tool, invoked against a split prefill/decode endpoint
-    while ``GCO_ENABLE_DESTRUCTIVE_OPERATIONS`` is off, refuses the request: it
-    returns a disabled marker and the only command it runs is the read-only
-    status lookup — no deletion command is ever issued.
+    With ``GCO_ENABLE_DESTRUCTIVE_OPERATIONS`` off, ``delete_inference`` is not
+    registered, so no deletion can be requested at all (pinned for every
+    destructive tool in ``test_mcp_destructive_gating.py``). With it on, the
+    tool deletes a split endpoint the way ``gco inference delete`` does: one
+    delete command, with no status lookup and no second reading of the switch,
+    so flipping the variable after startup changes nothing. Registration is
+    the gate, as for every other destructive tool.
     """
     import os
 
     import run_mcp
 
-    # The gated deletion tool only exists when the switch is on at load time;
-    # the rejection path is its defense in depth for when the switch is flipped
-    # off afterward. Snapshot the registry so the gated tools this load adds can
-    # be removed precisely, leaving other modules an unpolluted registry.
+    # Snapshot the registry so the gated tools this load adds can be removed
+    # precisely, leaving other modules an unpolluted registry.
     before = _registered_tool_names(run_mcp)
     with patch.dict(os.environ, {"GCO_ENABLE_DESTRUCTIVE_OPERATIONS": "true"}):
         importlib.reload(run_mcp)
-
     try:
-        split_status = json.dumps({"spec": {"mooncake": {"mode": "disaggregated"}}})
         with (
             patch.dict(
                 os.environ,
@@ -618,16 +617,11 @@ def test_deleting_split_endpoint_refused_when_destructive_switch_off():
             ),
             patch("cli_runner._run_cli") as mock_run,
         ):
-            mock_run.return_value = split_status
+            mock_run.return_value = json.dumps({"deleted": "split-endpoint"})
             result = asyncio.run(run_mcp.delete_inference("split-endpoint"))
-
-        payload = json.loads(result)
-        assert payload.get("destructive_operations_disabled") is True
-
+        assert json.loads(result) == {"deleted": "split-endpoint"}
         invoked = [call.args for call in mock_run.call_args_list]
-        # The endpoint was inspected read-only; nothing was deleted.
-        assert ("inference", "status", "split-endpoint") in invoked
-        assert all("delete" not in args for args in invoked)
+        assert invoked == [("inference", "delete", "split-endpoint", "-y")]
     finally:
         # Remove exactly the tools this load added so the registry returns to
         # the state other test modules expect.

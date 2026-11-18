@@ -15,11 +15,20 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_deps_scan_is_registered_ungated() -> None:
-    """The tool registers unconditionally as a safe observability tool."""
+def test_deps_scan_is_registered_ungated_and_not_safe() -> None:
+    """The tool registers unconditionally, tagged as a mutating (low-risk) tool.
+
+    A full scan pip-installs the project's extras into the server's own
+    environment, so it must not carry the read-only ``safe`` tag: a swarm
+    uses that tag to decide which tools two children may share.
+    """
+    from mission import swarm
+
     tool = _run(run_mcp.mcp.get_tool("deps_scan"))
     assert tool is not None
-    assert {"safe", "observability"} <= set(tool.tags)
+    assert {"low-risk", "observability"} <= set(tool.tags)
+    assert "safe" not in tool.tags
+    assert not swarm._is_safe_tool("deps_scan", {"deps_scan": tool.tags})
 
 
 def test_full_scan_argv_and_timeout() -> None:

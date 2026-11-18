@@ -164,7 +164,9 @@ if is_enabled(FLAG_MISSION):
                 ``max_wall_clock_seconds``. Cost guardrails live
                 out-of-band via AWS Budgets and Cost Anomaly Detection.
             tool_allowlist: List of tool names the session may invoke.
-                Optional; omit it when ``allow_all_tools`` is set.
+                Optional; omit it when ``allow_all_tools`` is set. Naming a
+                ``mission_*`` control tool or a ``swarm_*`` tool is rejected
+                (``control_tool_not_allowed``).
             checkpoint_cadence: Optional cadence dict (default
                 ``{"kind": "every_iteration"}``).
             stagnation_threshold: Iterations of no progress before
@@ -177,7 +179,7 @@ if is_enabled(FLAG_MISSION):
                 scripted strategies (validated via the sandbox AST).
             allow_all_tools: When True (default ``False``), resolve the
                 session's allowlist to every currently-registered tool
-                minus the ``mission_*`` control tools, instead of an
+                minus the ``mission_*`` and ``swarm_*`` tools, instead of an
                 explicit ``tool_allowlist``. Mutually exclusive with a
                 non-empty ``tool_allowlist``.
 

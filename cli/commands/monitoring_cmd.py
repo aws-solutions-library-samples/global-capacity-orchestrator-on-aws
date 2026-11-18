@@ -334,7 +334,14 @@ def users_cmd(config: Any) -> None:
 @users_cmd.command("add")
 @click.option("--username", required=True, help="Grafana login for the new user.")
 @click.option("--email", help="Email address for the new user (optional).")
-@click.option("--password", help="Set this password. Mutually exclusive with --generate-password.")
+@click.option(
+    "--password",
+    envvar="GCO_GRAFANA_USER_PASSWORD",
+    help=(
+        "Set this password (also read from $GCO_GRAFANA_USER_PASSWORD, which keeps "
+        "it off the command line). Mutually exclusive with --generate-password."
+    ),
+)
 @click.option(
     "--generate-password",
     is_flag=True,
@@ -361,7 +368,9 @@ def users_add(
         formatter.print_error("--password and --generate-password are mutually exclusive")
         sys.exit(1)
     if not password and not generate_password:
-        formatter.print_error("Pass --password or --generate-password")
+        formatter.print_error(
+            "Pass --password (or set $GCO_GRAFANA_USER_PASSWORD) or --generate-password"
+        )
         sys.exit(1)
 
     final_password = password or _gen()

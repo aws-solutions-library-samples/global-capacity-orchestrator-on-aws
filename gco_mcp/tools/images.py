@@ -13,6 +13,7 @@ import asyncio
 import json
 from typing import Any
 
+import cli_runner
 from audit import audit_logged
 
 # FastMCP's Progress / Context dependencies inject real instances per
@@ -311,7 +312,8 @@ if is_enabled(FLAG_IMAGE_PUBLISH):
         `gco images build` — build a container image and push to ECR.
 
         Args:
-            context: Build context directory.
+            context: Build context directory, relative to the project root
+                (an absolute path must also be inside it).
             name: Image name (lowercase letters, digits, dashes; max 63 chars).
             tag: Image tag (defaults to git short SHA, else ``latest``).
             dockerfile: Path to the Dockerfile, relative to ``context``.
@@ -319,6 +321,9 @@ if is_enabled(FLAG_IMAGE_PUBLISH):
             retain: When True, mark the repository with ``gco:retain=true``
                 so it survives stack destroys.
         """
+        rejected = cli_runner.reject_paths_outside_project_root(context=context)
+        if rejected is not None:
+            return rejected
         argv = ["gco", "images", "build", context, "--name", name]
         if tag:
             argv += ["--tag", tag]

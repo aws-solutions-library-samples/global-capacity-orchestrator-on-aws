@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -127,8 +128,7 @@ class TestMCPStorageTools:
         asyncio.run(module.list_storage_buckets("ap-south-1"))
         asyncio.run(module.files_get("us-east-1"))
         asyncio.run(module.files_get("us-east-1", "fsx"))
-        asyncio.run(module.files_access_points())
-        asyncio.run(module.files_access_points("eu-central-1"))
+        asyncio.run(module.files_access_points("fs-0123456789abcdef0", "eu-central-1"))
 
         assert ("files", "ls", "-r", "us-west-2", "/outputs") in runner.calls
         assert ("files", "list") in runner.calls
@@ -136,7 +136,13 @@ class TestMCPStorageTools:
         assert ("storage", "list") in runner.calls
         assert ("storage", "list", "--region", "ap-south-1") in runner.calls
         assert ("files", "get", "us-east-1", "-t", "fsx") in runner.calls
-        assert ("files", "access-points", "-r", "eu-central-1") in runner.calls
+        assert (
+            "files",
+            "access-points",
+            "fs-0123456789abcdef0",
+            "-r",
+            "eu-central-1",
+        ) in runner.calls
         assert not hasattr(module, "upload_to_regional_bucket")
         assert not hasattr(module, "sync_storage_bucket")
 
@@ -373,9 +379,14 @@ class TestAsyncCliRunner:
         ):
             assert cli_runner._gco_executable() == "gco"
 
-    def test_sync_runner_rejects_traversal(self) -> None:
-        result = cli_runner._run_cli("storage", "sync", "../outside")
-        assert "path traversal" in json.loads(result)["error"]
+    def test_sync_runner_passes_dot_segments_through(self) -> None:
+        # Path checks live in the tools (local_data confinement for storage);
+        # the runner hands every argument to the CLI unchanged.
+        completed = subprocess.CompletedProcess([], 0, stdout='{"ok": true}', stderr="")
+        with patch("cli_runner.subprocess.run", return_value=completed) as run:
+            result = cli_runner._run_cli("storage", "sync", "../outside")
+        assert json.loads(result) == {"ok": True}
+        assert run.call_args.args[0][-1] == "../outside"
 
     @pytest.mark.parametrize(
         ("process", "expected"),
@@ -425,11 +436,15 @@ class TestAsyncCliRunner:
         assert payload["exit_code"] == 1
         assert "malformed or multiple" in payload["error"]
 
-    def test_async_runner_rejects_traversal_and_missing_cli(self) -> None:
-        assert (
-            "path traversal"
-            in json.loads(asyncio.run(cli_runner._run_cli_async("storage", "../outside")))["error"]
-        )
+    def test_async_runner_passes_dot_segments_through_and_reports_missing_cli(self) -> None:
+        async def passthrough() -> tuple[str, AsyncMock]:
+            spawn = AsyncMock(return_value=_FakeProcess(stdout=b'{"ok": true}'))
+            with patch("cli_runner.asyncio.create_subprocess_exec", spawn):
+                return await cli_runner._run_cli_async("storage", "../outside"), spawn
+
+        result, spawn = asyncio.run(passthrough())
+        assert json.loads(result) == {"ok": True}
+        assert spawn.call_args.args[-1] == "../outside"
 
         async def missing() -> str:
             with patch(

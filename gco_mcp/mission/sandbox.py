@@ -1118,7 +1118,8 @@ def validate_script_ast(script: str, allowlist: list[str]) -> None:
 # engine's ``_decide_phase`` can produce a deterministic ``terminate``
 # verdict with the partial observation attached.
 
-import copy  # noqa: E402 — runtime layer below; keep imports near their consumers
+import asyncio  # noqa: E402 — runtime layer below; keep imports near their consumers
+import copy  # noqa: E402
 import os  # noqa: E402
 import time  # noqa: E402
 from collections.abc import Awaitable, Callable  # noqa: E402
@@ -1127,6 +1128,7 @@ from types import MappingProxyType  # noqa: E402
 from typing import Any  # noqa: E402
 
 from . import audit as _audit  # noqa: E402
+from .types import VerdictReason  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Env helpers — module-level so the constants below are read once at import
@@ -1233,20 +1235,30 @@ class SandboxTerminated(Exception):
     cap fired before the script returned.
 
     ``cause`` is the underlying Monty exception's class name (e.g.
-    ``"MontyRuntimeError"``, ``"MontyTypingError"``) so callers can render
-    a stable structured-error envelope without holding a reference to
-    the original Monty exception object.
+    ``"MontyRuntimeError"``, ``"MontyTypingError"``), or ``"TimeoutError"``
+    when the host-side wall-clock cap fired, so callers can render a stable
+    structured-error envelope without holding a reference to the original
+    Monty exception object.
+
+    ``reason`` is the :data:`~mission.types.VerdictReason` the iteration
+    terminates with (``script_time_limit``, ``script_memory_limit`` or
+    ``script_error``) and ``detail`` the error the sandbox reported, at most
+    200 characters.
     """
 
     def __init__(
         self,
         cause: str,
         *,
+        reason: VerdictReason = "script_error",
+        detail: str | None = None,
         partial_observations: list[dict[str, Any]] | None = None,
         partial_events: list[dict[str, Any]] | None = None,
         partial_script_call_log: list[dict[str, Any]] | None = None,
     ) -> None:
         self.cause: str = cause
+        self.reason: VerdictReason = reason
+        self.detail: str = (detail if detail is not None else cause)[:200]
         # Defensive copies: callers occasionally inspect these lists
         # after the exception has propagated several frames up. A
         # shared reference would let a later mutation in the original
@@ -1263,6 +1275,33 @@ class SandboxTerminated(Exception):
         # observe / event lists above.
         self.partial_script_call_log: list[dict[str, Any]] = list(partial_script_call_log or [])
         super().__init__(f"sandbox terminated: {cause}")
+
+
+def _monty_termination(exc: Exception) -> tuple[VerdictReason, str]:
+    """Return the verdict reason and a short detail for a ``MontyError``.
+
+    Monty reports its own limits as the script's exception: a ``MemoryError``
+    for the memory cap and a ``TimeoutError`` whose message says the time
+    limit was exceeded. Anything else (an uncaught exception, a syntax or
+    type-check failure, a crashed worker) is a script error. The detail names
+    the script-side exception when Monty exposes one.
+    """
+    inner: BaseException | None = None
+    accessor = getattr(exc, "exception", None)
+    if callable(accessor):
+        try:
+            candidate = accessor()
+        except Exception:
+            candidate = None
+        if isinstance(candidate, BaseException):
+            inner = candidate
+    source: BaseException = inner if inner is not None else exc
+    detail = f"{type(source).__name__}: {source}"[:200]
+    if isinstance(inner, MemoryError):
+        return "script_memory_limit", detail
+    if isinstance(inner, TimeoutError) and "time limit exceeded" in str(inner):
+        return "script_time_limit", detail
+    return "script_error", detail
 
 
 # ---------------------------------------------------------------------------
@@ -1411,11 +1450,9 @@ def _make_tool_wrapper(
         # the dispatcher mutates the dict downstream.
         args = dict(kwargs)
         started = time.monotonic()
-        try:
-            result = await tool_dispatcher(tool_name, dict(args), ctx)
-        except Exception as exc:
+
+        def record_failure(error_message: str) -> None:
             duration_ms = max(int((time.monotonic() - started) * 1000), 0)
-            error_message = f"{type(exc).__name__}: {exc}"[:200]
             script_call_log.append(
                 {
                     "tool_name": tool_name,
@@ -1426,7 +1463,7 @@ def _make_tool_wrapper(
                     # Truncated to 200 chars to match the audit
                     # module's existing convention for error_message
                     # fields elsewhere in the engine.
-                    "error_message": error_message,
+                    "error_message": error_message[:200],
                 }
             )
             # Emit the via_script audit row before re-raising so the
@@ -1438,8 +1475,20 @@ def _make_tool_wrapper(
                 tool_name,
                 "failed",
                 duration_ms,
-                error_message=error_message,
+                error_message=error_message[:200],
             )
+
+        try:
+            result = await tool_dispatcher(tool_name, dict(args), ctx)
+        except asyncio.CancelledError:
+            # The script's wall-clock cap (or the caller) stopped the script
+            # while this call was in flight. Record it so the partial log
+            # shows every call the script started; the call itself may
+            # still complete in the background.
+            record_failure("CancelledError: the script stopped before this call returned")
+            raise
+        except Exception as exc:
+            record_failure(f"{type(exc).__name__}: {exc}")
             raise
         duration_ms = max(int((time.monotonic() - started) * 1000), 0)
         record: dict[str, Any] = {
@@ -1721,8 +1770,10 @@ class MissionSandbox:
         :class:`ToolCallRecord`-shaped dicts.
 
         On any ``MontyError`` from the provider — duration cap, memory
-        cap, runtime / typing / syntax error inside the script — the
-        method re-raises as :class:`SandboxTerminated` carrying the
+        cap, runtime / typing / syntax error inside the script — and when
+        the wall-clock cap expires (``_DURATION_LIMIT_SECS`` of elapsed
+        time, including time spent waiting on tool calls), the method
+        re-raises as :class:`SandboxTerminated` carrying the
         closure-captured partial observations and events. The engine's
         decide-phase pattern-matches on this exception and produces a
         ``terminate`` verdict for the iteration.
@@ -1845,12 +1896,32 @@ class MissionSandbox:
 
         phase_started_at = datetime.now(UTC).isoformat()
 
+        # Monty's ``max_feed_duration_secs`` counts only time spent inside the
+        # VM, so a script that loops over tool calls never reaches it. This
+        # host-side deadline makes the same limit a wall-clock cap that
+        # includes the time spent waiting on tool calls.
+        wall_clock_cap = asyncio.timeout(_DURATION_LIMIT_SECS)
         try:
-            await self._provider.run(
-                code=final_source,
-                inputs={},
-                external_functions=external_functions,
-            )
+            async with wall_clock_cap:
+                await self._provider.run(
+                    code=final_source,
+                    inputs={},
+                    external_functions=external_functions,
+                )
+        except TimeoutError as exc:
+            if not wall_clock_cap.expired():
+                raise
+            raise SandboxTerminated(
+                "TimeoutError",
+                reason="script_time_limit",
+                detail=(
+                    f"TimeoutError: script exceeded its {_DURATION_LIMIT_SECS:g}-second "
+                    "wall-clock cap"
+                ),
+                partial_observations=list(observe_log),
+                partial_events=list(event_log),
+                partial_script_call_log=list(script_call_log),
+            ) from exc
         except monty_error_cls as exc:
             # ``MontyError`` is the base of the limit / runtime /
             # typing / syntax error family. Catching the base class
@@ -1858,8 +1929,11 @@ class MissionSandbox:
             # adding a new error type still routes through
             # ``SandboxTerminated`` rather than escaping as an opaque
             # ``Exception``.
+            reason, detail = _monty_termination(exc)
             raise SandboxTerminated(
                 type(exc).__name__,
+                reason=reason,
+                detail=detail,
                 partial_observations=list(observe_log),
                 partial_events=list(event_log),
                 partial_script_call_log=list(script_call_log),
@@ -1891,33 +1965,37 @@ class MissionSandbox:
 
 def make_default_sandbox_runner(
     allowlist: list[str],
-    session: Any,
 ) -> Callable[
-    [str, Any, Callable[[str, dict[str, Any], Any], Awaitable[Any]]],
+    [str, Any, Callable[[str, dict[str, Any], Any], Awaitable[Any]], Any],
     Awaitable[tuple[dict[str, Any], list[dict[str, Any]]]],
 ]:
     """Build the default ``sandbox_runner`` callable for the engine.
 
     The :class:`MissionEngine` takes a callable matching the
-    ``SandboxRunner`` protocol (``(script, ctx, tool_dispatcher) ->
-    (observation_dict, script_call_log)``); this helper wraps a fresh
-    :class:`MissionSandbox` for a given session and returns the bound
-    :meth:`MissionSandbox.run` method so the engine can drive the
-    sandbox without depending on the sandbox class itself.
+    ``SandboxRunner`` protocol (``(script, ctx, tool_dispatcher, session)
+    -> (observation_dict, script_call_log)``); this helper returns one that
+    drives :class:`MissionSandbox` so the engine does not depend on the
+    sandbox class itself.
 
-    One sandbox per session: the constructor freezes a snapshot of the
-    session's directive, criteria, budget, and prior-iteration
-    summaries into the ``mission`` namespace, so reusing a runner
-    across sessions would leak stale state. The engine's normal
-    construction path therefore calls this factory once per
-    ``mission_start`` and pins the returned callable on the engine
-    instance for the session's lifetime.
+    One sandbox per iteration: every call builds a fresh
+    :class:`MissionSandbox` from the session the engine passes in (the
+    session as it stands while the iteration runs), so the frozen
+    ``mission`` namespace and the ``iteration_index`` on the
+    ``mission_script_call_event`` audit rows describe the running
+    iteration. ``allowlist`` is pinned when the runner is built.
     """
-    sandbox = MissionSandbox(
-        allowlist=allowlist,
-        session=session,
-    )
-    return sandbox.run
+    pinned_allowlist = list(allowlist)
+
+    async def run(
+        script: str,
+        ctx: Any | None,
+        tool_dispatcher: Callable[[str, dict[str, Any], Any], Awaitable[Any]],
+        session: Any,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        sandbox = MissionSandbox(allowlist=pinned_allowlist, session=session)
+        return await sandbox.run(script, ctx, tool_dispatcher)
+
+    return run
 
 
 # ---------------------------------------------------------------------------

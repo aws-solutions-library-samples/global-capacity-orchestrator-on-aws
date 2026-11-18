@@ -187,8 +187,9 @@ class TestToolRegistration:
 
     def test_tool_count(self):
         tools = asyncio.run(run_mcp.mcp._list_tools())
-        # The default registry intentionally contains 156 read-only or low-risk
-        # tools (152 before hyperpod_status + hyperpod_preflight +
+        # The default registry intentionally contains 155 read-only or low-risk
+        # tools (156 before populate_kv_cache moved behind
+        # GCO_ENABLE_MODEL_UPLOAD; 152 before hyperpod_status + hyperpod_preflight +
         # find_training_plans + list_training_plans, which came with the
         # SageMaker HyperPod backend; 151 before slurm_backends, which came
         # with the AWS PCS backend; 144 before the seven Slurm tools
@@ -198,14 +199,14 @@ class TestToolRegistration:
         # 139 before the platform add-on status trio
         # eks_capabilities_status + gitops_status + crossplane_status; 138
         # before deps_scan; 134 before fleet_status; 125 before the cost
-        # allocation/k8s/report family added 9). Optional families add 60
+        # allocation/k8s/report family added 9). Optional families add 61
         # more when every flag is enabled: capacity purchase (2), image
-        # publish (3), destructive operations (16), model upload (2),
+        # publish (3), destructive operations (16), model upload (3),
         # infrastructure deploy (4), infrastructure destroy (2), local metrics
         # (1), semantic progress (1), local storage sync (1), config
         # management (11), Mission (10), Swarm (6), and NVIDIA Run:ai
         # capacity (1). The all-flags ceiling is therefore 216.
-        base_count = 156
+        base_count = 155
         tool_names = [t.name for t in tools]
         expected = base_count
         if "reserve_capacity" in tool_names:
@@ -222,7 +223,8 @@ class TestToolRegistration:
             # prune and the Slurm scancel.
             expected += 16
         if "models_upload" in tool_names:
-            expected += 2  # central + regional upload tools share the model-upload gate
+            # central + regional + KV-cache upload tools share the model-upload gate
+            expected += 3
         if "deploy_stack" in tool_names:
             # deploy_stack + deploy_all + bootstrap_cdk + addons_install
             expected += 4
@@ -312,7 +314,6 @@ class TestToolRegistration:
             "set_mooncake_topology",
             "configure_mooncake_store",
             "mooncake_topology_status",
-            "populate_kv_cache",
             # ── Cost tracking ──
             # Read-only
             "cost_summary",
@@ -513,6 +514,7 @@ class TestToolRegistration:
         if "models_upload" in names:
             expected.add("models_upload")
             expected.add("upload_to_regional_bucket")
+            expected.add("populate_kv_cache")
         # Infrastructure-deploy gated tools register under
         # GCO_ENABLE_INFRASTRUCTURE_DEPLOY.
         if "deploy_stack" in names:
@@ -653,6 +655,23 @@ class TestJobTools:
             assert "ml-jobs" in cmd
             assert "-s" in cmd
             assert "running" in cmd
+
+    def test_list_jobs_status_values_match_the_cli(self):
+        # The schema and docstring offer exactly the values `gco jobs list
+        # --status` accepts; "completed" is not one of them.
+        from cli.main import cli
+
+        jobs_list = cli.commands["jobs"].commands["list"]
+        option = next(p for p in jobs_list.params if p.name == "status")
+        cli_values = set(option.type.choices)
+
+        tool = asyncio.run(run_mcp.mcp.get_tool("list_jobs"))
+        schema = tool.parameters["properties"]["status"]
+        offered = {
+            value for branch in schema.get("anyOf", [schema]) for value in branch.get("enum", [])
+        }
+        assert offered == cli_values
+        assert "completed" not in (tool.description or "")
 
     def test_submit_job_sqs(self):
         with patch("cli_runner.subprocess.run") as mock:
@@ -2542,9 +2561,8 @@ class TestTemplatesTools:
             cmd = mock.call_args[0][0]
             assert "templates" in cmd
             assert "create" in cmd
-            # Positional order: name then manifest path.
-            assert cmd[cmd.index("create") + 1] == "t1"
-            assert cmd[cmd.index("create") + 2] == "job.yaml"
+            # `gco templates create MANIFEST_PATH --name NAME`.
+            assert cmd[cmd.index("create") + 1 :] == ["job.yaml", "--name", "t1"]
             assert "-r" not in cmd
             assert "-d" not in cmd
 
@@ -2561,8 +2579,8 @@ class TestTemplatesTools:
             cmd = mock.call_args[0][0]
             assert "templates" in cmd
             assert "create" in cmd
-            assert "t1" in cmd
-            assert "job.yaml" in cmd
+            assert cmd[cmd.index("create") + 1] == "job.yaml"
+            assert cmd[cmd.index("--name") : cmd.index("--name") + 2] == ["--name", "t1"]
             assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
             assert cmd[cmd.index("-d") : cmd.index("-d") + 2] == ["-d", "GPU training template"]
 
@@ -2662,10 +2680,11 @@ class TestWebhooksTools:
             cmd = mock.call_args[0][0]
             assert "webhooks" in cmd
             assert "create" in cmd
-            assert cmd[cmd.index("--url") : cmd.index("--url") + 2] == [
-                "--url",
-                "https://example.com/hook",
-            ]
+            # The URL travels in the child's environment, not on argv.
+            assert "--url" not in cmd
+            assert "https://example.com/hook" not in cmd
+            env = mock.call_args.kwargs["env"]
+            assert env["GCO_WEBHOOK_URL"] == "https://example.com/hook"
             # One --event flag per entry.
             assert cmd.count("--event") == 1
             assert "job.completed" in cmd
@@ -2691,10 +2710,10 @@ class TestWebhooksTools:
             assert "job.completed" in cmd
             assert "job.failed" in cmd
             assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
-            assert cmd[cmd.index("--secret") : cmd.index("--secret") + 2] == [
-                "--secret",
-                "my-secret",
-            ]
+            # The secret travels in the child's environment, not on argv.
+            assert "--secret" not in cmd
+            assert "my-secret" not in cmd
+            assert mock.call_args.kwargs["env"]["GCO_WEBHOOK_SECRET"] == "my-secret"
 
 
 class TestDagTools:
@@ -2923,7 +2942,10 @@ class TestAnalyticsTools:
             assert "analytics" in cmd
             assert "users" in cmd
             assert "add" in cmd
-            assert "alice" in cmd
+            assert cmd[cmd.index("--username") : cmd.index("--username") + 2] == [
+                "--username",
+                "alice",
+            ]
             assert cmd[cmd.index("--email") : cmd.index("--email") + 2] == [
                 "--email",
                 "alice@example.com",
@@ -2974,24 +2996,20 @@ class TestStorageReadOnlyTools:
             assert cmd[cmd.index("-t") : cmd.index("-t") + 2] == ["-t", "efs"]
 
     @pytest.mark.asyncio
-    async def test_files_access_points_no_args(self):
+    async def test_files_access_points_passes_file_system_and_region(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
-            await run_mcp.files_access_points()
+            await run_mcp.files_access_points(
+                file_system_id="fs-0123456789abcdef0", region="us-east-1"
+            )
             cmd = mock.call_args[0][0]
-            assert "files" in cmd
-            assert "access-points" in cmd
-            assert "-r" not in cmd
-
-    @pytest.mark.asyncio
-    async def test_files_access_points_with_region(self):
-        with patch("cli_runner.subprocess.run") as mock:
-            mock.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
-            await run_mcp.files_access_points(region="us-east-1")
-            cmd = mock.call_args[0][0]
-            assert "files" in cmd
-            assert "access-points" in cmd
-            assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
+            assert cmd[cmd.index("files") :] == [
+                "files",
+                "access-points",
+                "fs-0123456789abcdef0",
+                "-r",
+                "us-east-1",
+            ]
 
 
 # =============================================================================

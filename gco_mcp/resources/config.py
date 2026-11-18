@@ -6,7 +6,7 @@ from server import mcp
 
 _FLAG_DESCRIPTIONS = {
     "GCO_ENABLE_CAPACITY_PURCHASE": "Enable cost-incurring capacity reservation tools.",
-    "GCO_ENABLE_MODEL_UPLOAD": "Enable local model-data uploads to central or regional S3.",
+    "GCO_ENABLE_MODEL_UPLOAD": "Enable local model-data and KV-cache uploads to central or regional S3.",
     "GCO_ENABLE_IMAGE_PUBLISH": "Enable image build, push, and mirror operations.",
     "GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "Enable infrastructure deployment tools.",
     "GCO_ENABLE_INFRASTRUCTURE_DESTROY": "Enable infrastructure destroy tools.",

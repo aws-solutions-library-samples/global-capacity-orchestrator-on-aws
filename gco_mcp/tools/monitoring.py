@@ -64,15 +64,19 @@ async def disable_monitoring() -> str:
 async def monitoring_user_add(username: str, password: str, email: str | None = None) -> str:
     """`gco monitoring users add` — create a Grafana user via the admin API.
 
+    The password reaches the CLI through ``$GCO_GRAFANA_USER_PASSWORD`` in the
+    child's environment, never on its command line.
+
     Args:
         username: Grafana login for the new user.
         password: Password to set for the new user.
         email: Optional email address for the new user.
     """
-    args = ["monitoring", "users", "add", "--username", username, "--password", password]
+    args = ["monitoring", "users", "add", "--username", username]
     if email:
         args += ["--email", email]
-    return await asyncio.to_thread(cli_runner._run_cli, *args)
+    env = {"GCO_GRAFANA_USER_PASSWORD": password}
+    return await asyncio.to_thread(cli_runner._run_cli, *args, env=env)
 
 
 # =============================================================================

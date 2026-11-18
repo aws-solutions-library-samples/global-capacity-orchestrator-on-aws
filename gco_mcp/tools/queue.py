@@ -43,6 +43,9 @@ async def queue_get(job_id: str, region: str | None = None) -> str:
         job_id: Job identifier.
         region: Region to query (any region works).
     """
+    rejected = cli_runner.reject_traversal_segments(job_id=job_id)
+    if rejected is not None:
+        return rejected
     args = ["queue", "get", job_id]
     if region:
         args += ["-r", region]
@@ -80,12 +83,16 @@ async def queue_submit(
     """`gco queue submit` — submit a job manifest to the global queue.
 
     Args:
-        manifest_path: Path to the job manifest YAML.
+        manifest_path: Path to the job manifest YAML, relative to the project
+            root (an absolute path must also be inside it).
         region: Target region for job execution.
         namespace: Kubernetes namespace (defaults to ``gco-jobs`` server-side).
         priority: Job priority (0-100, higher = more important).
         labels: Optional ``key=value`` labels to attach to the queued job.
     """
+    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    if rejected is not None:
+        return rejected
     args = ["queue", "submit", manifest_path, "-r", region]
     if namespace:
         args += ["-n", namespace]

@@ -2892,17 +2892,47 @@ class TestCdkWorkerCancellation:
         self,
         manager: Any,
     ) -> None:
-        first = MagicMock()
-        second = MagicMock()
+        first = MagicMock(pid=101)
+        second = MagicMock(pid=202)
         manager._active_cdk_processes = {101: first, 202: second}
         with patch.object(manager, "_terminate_cdk_process") as terminate:
             manager.cancel_active_cdk_processes()
 
         assert manager._cdk_cancel_event.is_set()
-        assert terminate.call_args_list == [
-            ((first,), {}),
-            ((second,), {}),
-        ]
+        # Terminated concurrently, so the call order is not fixed.
+        assert sorted(call.args[0].pid for call in terminate.call_args_list) == [101, 202]
+
+    def test_cancel_terminates_every_group_at_once(self, manager: Any) -> None:
+        """Stopping N parallel groups takes one grace window, not N of them.
+
+        Each fake termination blocks until every group's termination has
+        started. Terminating one group after another would never get the
+        second one going and the barrier would time out.
+        """
+        import threading
+
+        processes = {pid: MagicMock(pid=pid) for pid in (101, 202, 303)}
+        manager._active_cdk_processes = dict(processes)
+        barrier = threading.Barrier(len(processes), timeout=10)
+        terminated: list[int] = []
+
+        def blocking_terminate(process: Any) -> None:
+            barrier.wait()
+            terminated.append(process.pid)
+
+        with patch.object(manager, "_terminate_cdk_process", side_effect=blocking_terminate):
+            manager.cancel_active_cdk_processes()
+
+        assert sorted(terminated) == [101, 202, 303]
+        assert not barrier.broken
+
+    def test_cancel_with_no_registered_process_only_sets_the_event(self, manager: Any) -> None:
+        manager._active_cdk_processes = {}
+        with patch.object(manager, "_terminate_cdk_process") as terminate:
+            manager.cancel_active_cdk_processes()
+
+        assert manager._cdk_cancel_event.is_set()
+        terminate.assert_not_called()
 
     def test_windows_termination_targets_the_complete_process_tree(self, manager: Any) -> None:
         process = MagicMock(pid=4321)

@@ -72,7 +72,7 @@ An MCP (Model Context Protocol) server that exposes the Global Capacity Orchestr
 
 ## Overview
 
-The MCP server exposes 156 tools by default (up to 216 with all flags enabled) across the full lifecycle of accelerated-workload management:
+The MCP server exposes 155 tools by default (up to 216 with all flags enabled) across the full lifecycle of accelerated-workload management:
 
 - Submit and monitor jobs across regions
 - Deploy and manage inference endpoints with canary deployments
@@ -494,7 +494,7 @@ A handful of GCO MCP tools can incur AWS charges, mutate live infrastructure, de
 |------|---------|-------------|----------------|
 | `GCO_ENABLE_ALL_TOOLS` | `false` | All flagged tools below | Umbrella switch. Setting this to `true` enables every gated tool at once and overrides any per-flag value (even per-flag values explicitly set to `false`). Use sparingly — prefer per-flag opt-in for production clients. |
 | `GCO_ENABLE_CAPACITY_PURCHASE` | `false` | `reserve_capacity`, `create_reservation` | Reserve capacity that incurs AWS charges — either purchasing a fixed-term [Capacity Block](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) (`reserve_capacity`, not cancellable once committed) or creating an [On-Demand Capacity Reservation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-reservations.html) (`create_reservation`, billed until cancelled via `cancel_reservation`). |
-| `GCO_ENABLE_MODEL_UPLOAD` | `false` | `models_upload`, `upload_to_regional_bucket` | Uploads local model data to central or regional S3. Both tools require a source confined beneath `GCO_STORAGE_LOCAL_ROOT` and build a private descriptor-backed snapshot that rejects symlinks, special files, cross-filesystem entries, and pre-existing hard links; transfers can be many GB and incur network and storage costs. |
+| `GCO_ENABLE_MODEL_UPLOAD` | `false` | `models_upload`, `upload_to_regional_bucket`, `populate_kv_cache` | Uploads local model data to central or regional S3 (`populate_kv_cache` writes an endpoint's KV-cache cold-tier prefix in the regional bucket). Every tool requires a source confined beneath `GCO_STORAGE_LOCAL_ROOT` and builds a private descriptor-backed snapshot that rejects symlinks, special files, cross-filesystem entries, and pre-existing hard links; transfers can be many GB and incur network and storage costs. |
 | `GCO_ENABLE_IMAGE_PUBLISH` | `false` | `images_build`, `images_push`, `images_mirror` | Builds, publishes, and mirrors container images to ECR. `images_build` / `images_push` run a long-running build (FastMCP background task) and push binaries that get replicated across every deployed region; `images_mirror` copies third-party images (Volcano's docker.io images) into the project's `gco/*` ECR. |
 | `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` | `false` | `deploy_stack`, `deploy_all`, `bootstrap_cdk`, `addons_install` | Creates or updates [CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) stacks or starts Helm add-on re-convergence. A full `deploy_all` runs 30-60 minutes wall-clock and can provision EKS clusters, NodePools, and storage that incur ongoing charges. |
 | `GCO_ENABLE_INFRASTRUCTURE_DESTROY` | `false` | `destroy_stack`, `destroy_all` | Tears down CloudFormation stacks. Cancellation mid-flight can leave partial state behind that has to be cleaned up by hand. |
@@ -598,7 +598,7 @@ These environment variables tune the MCP server's behaviour but **do not gate an
 | Variable | Values | Default | What It Does |
 |----------|--------|---------|--------------|
 | `GCO_MCP_TOOL_SEARCH` | `off` \| `bm25` \| `regex` \| `code_mode` | `bm25` | Selects the catalog-replacement transform. `bm25` (default) replaces `list_tools()` with a BM25-ranked `search_tools` plus a small set of always-visible entry-point tools. `regex` swaps in a regex-based search. `code_mode` is experimental and exposes Code Mode meta-tools (`search` / `get_schemas` / `execute`). `off` returns the legacy full catalog. An unknown value falls back to `bm25`. |
-| `GCO_STORAGE_LOCAL_ROOT` | Directory path | — | Shared confinement root for `models_upload`, `upload_to_regional_bucket`, and `sync_storage_bucket`. Relative paths resolve beneath this root; lexical traversal and symlink escapes fail closed. Short uploads additionally use a same-filesystem descriptor-backed snapshot and reject descendant symlinks, special files, and pre-existing hard links. Required when model upload or local storage sync is enabled. POSIX hosts with `/dev/fd` only for short uploads. |
+| `GCO_STORAGE_LOCAL_ROOT` | Directory path | — | Shared confinement root for `models_upload`, `upload_to_regional_bucket`, `populate_kv_cache`, and `sync_storage_bucket`. Relative paths resolve beneath this root; lexical traversal and symlink escapes fail closed. Short uploads additionally use a same-filesystem descriptor-backed snapshot and reject descendant symlinks, special files, and pre-existing hard links. Required when model upload or local storage sync is enabled. POSIX hosts with `/dev/fd` only for short uploads. |
 | `GCO_METRICS_LOCAL_ROOT` | Directory path | — | Confinement root for `metrics_from_local_file`; required when `GCO_ENABLE_LOCAL_METRICS=true`. |
 | `GCO_TASK_STATUS_DIR` | Directory path | `~/.gco/tasks` | Private directory for bounded long-task status and log artifacts. |
 | `GCO_DISABLE_TASK_STATUS` | Boolean | `false` | Disable disk-backed long-task status/log emission when set to `1`, `true`, or `yes`. |
@@ -606,12 +606,15 @@ These environment variables tune the MCP server's behaviour but **do not gate an
 
 ### Breaking Changes in This Version
 
-Three tools that previously accepted broader access are now gated or additionally confined:
+These tools previously accepted broader access and are now gated or additionally confined:
 
 - `upload_to_regional_bucket` now requires `GCO_ENABLE_MODEL_UPLOAD=true` and a source beneath `GCO_STORAGE_LOCAL_ROOT`.
 - `models_upload` remains gated by `GCO_ENABLE_MODEL_UPLOAD` and now also requires a source beneath `GCO_STORAGE_LOCAL_ROOT`.
-- Both short-upload tools fail closed unless they can create a private descriptor-backed, same-filesystem snapshot. Descendant symlinks, special files, and pre-existing hard links are rejected rather than followed.
+- `populate_kv_cache` used to register by default and upload any host path. It now registers only with `GCO_ENABLE_MODEL_UPLOAD=true` and requires a source beneath `GCO_STORAGE_LOCAL_ROOT`, like `upload_to_regional_bucket`, which writes the same regional bucket.
+- The short-upload tools fail closed unless they can create a private descriptor-backed, same-filesystem snapshot. Descendant symlinks, special files, and pre-existing hard links are rejected rather than followed.
 - `delete_job` and `delete_inference` remain gated behind `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`.
+- Local path arguments must resolve inside the project root the server runs `gco` from (`GCO_PROJECT_ROOT`, else the checkout, else the server's working directory). This covers `manifest_path` (`submit_job_sqs`, `submit_job_api`, `check_job_policy`, `queue_submit`, `templates_create`, `dag_validate`, `dag_run`), `slurm_submit`'s `script_path`, `images_build`'s `context`, and the `deploy_*` tools' `outputs_file`. An absolute path anywhere on the host used to be accepted; it now returns `code: path_outside_project_root`. Move the files under the project, or point `GCO_PROJECT_ROOT` (or the client's `cwd`) at a directory that contains them. When the server runs from `/` with no checkout, every absolute path is inside that root, so set `GCO_PROJECT_ROOT` to get confinement.
+- Prompts, chat messages, and other free text containing `..` are no longer refused. A name or ID that the CLI puts into an API request path (jobs, pods, namespaces, templates, webhooks, queue jobs, and `invoke_inference`'s `api_path`) is still refused when it has a `..` segment (`code: path_traversal_segment`).
 
 If your client relied on uploads, set the model-upload gate and an absolute confinement root. If it relied on deletes, set the destructive-operations gate. A client that needs both can use:
 
@@ -723,7 +726,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `set_mooncake_topology` | Resize a disaggregated endpoint's prefill/decode replica counts | low-risk | — |
 | `configure_mooncake_store` | Update shared-store, cold-tier, offload, and buffer settings | low-risk | — |
 | `mooncake_topology_status` | Show a disaggregated endpoint's per-role topology status | safe | — |
-| `populate_kv_cache` | Upload data into an endpoint's Mooncake KV-cache cold tier | low-risk | — |
+| `populate_kv_cache` | Upload a confined local file or directory into an endpoint's Mooncake KV-cache cold tier | data-upload | `GCO_ENABLE_MODEL_UPLOAD` |
 | `delete_inference` | Delete an endpoint (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Cost Tracking
@@ -782,7 +785,7 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 | `list_file_systems` | List EFS and FSx file systems | safe | — |
 | `list_storage_buckets` | Discover user-facing GCO S3 buckets and their stable aliases | safe | — |
 | `files_get` | Get EFS or FSx file-system details for a region | safe | — |
-| `files_access_points` | List EFS access points | safe | — |
+| `files_access_points` | List the access points of one EFS file system (`file_system_id` and `region` are required) | safe | — |
 | `upload_to_regional_bucket` | Upload a confined local file or directory to a region's shared S3 bucket | data-upload | `GCO_ENABLE_MODEL_UPLOAD` |
 | `sync_storage_bucket` | Incrementally download from or upload to a GCO S3 bucket or prefix | low-risk | `GCO_ENABLE_LOCAL_STORAGE_SYNC` |
 
@@ -792,8 +795,9 @@ Each table lists the `Risk Tier` and `Gated By` columns alongside the descriptio
 SSM parameters and CloudFormation resources published by the deployment.
 Dedicated access-log buckets are intentionally excluded.
 
-Both short upload tools (`models_upload` and `upload_to_regional_bucket`) require
-`GCO_ENABLE_MODEL_UPLOAD=true` and `GCO_STORAGE_LOCAL_ROOT`. Their source path
+The short upload tools (`models_upload`, `upload_to_regional_bucket`, and
+`populate_kv_cache`) require `GCO_ENABLE_MODEL_UPLOAD=true` and
+`GCO_STORAGE_LOCAL_ROOT`. Their source path
 may be absolute or root-relative, but must already exist and resolve beneath
 that root; the wrapper passes the resolved absolute path to the CLI. Traversal,
 symlink escapes, special files, missing roots, and unsupported hosts fail
@@ -1059,7 +1063,7 @@ oversized status records fail closed.
 
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
-| `deps_scan` | Generate the monthly dependency-update report on demand (`gco deps scan`); `nodepools_only=true` runs just the accelerator-catalog / Karpenter NodePool freshness check | safe | — |
+| `deps_scan` | Generate the monthly dependency-update report on demand (`gco deps scan`); `nodepools_only=true` runs just the accelerator-catalog / Karpenter NodePool freshness check | low-risk | — |
 
 The full scan mirrors the `deps-scan` GitHub Actions workflow: it sweeps
 PyPI, npm, container registries, Helm repos, GitHub, and (when the server's
@@ -1068,7 +1072,10 @@ surfaces, returning the same Markdown report the rolling
 "[Automated] Dependency updates available" issue carries. It requires a GCO
 checkout, typically takes several minutes, and its Python surface
 pip-installs the project's extras into the server's active environment —
-exactly how CI runs it.
+exactly how CI runs it. Because that changes the server's environment, the
+tool is tagged `low-risk` rather than `safe`, so a swarm does not hand it to
+two children at once unless `allow_overlapping_mutating_tools` is set. The
+`nodepools_only` check installs nothing.
 
 ### Live State
 
@@ -1348,7 +1355,7 @@ gco_mcp/
     └── tasks.py           — tasks://gco/{task_id} (FastMCP background task status)
 ```
 
-Long-running tools (`deploy_stack`, `destroy_stack`, `images_build`, etc.) use the MCP tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663 — FastMCP's `fastmcp-tasks` package, registered in `server.py`) rather than an in-house operation registry. The shared `tools/_long_task.py` helper drives `asyncio.create_subprocess_exec`, streams progress messages back through the FastMCP `Progress` dependency, and converts mid-flight cancellation into a structured result (with a partial-CloudFormation-state disclaimer for stack ops).
+Long-running tools (`deploy_stack`, `destroy_stack`, `images_build`, etc.) use the MCP tasks extension (`io.modelcontextprotocol/tasks`, SEP-2663 — FastMCP's `fastmcp-tasks` package, registered in `server.py`) rather than an in-house operation registry. The shared `tools/_long_task.py` helper drives `asyncio.create_subprocess_exec`, streams progress messages back through the FastMCP `Progress` dependency, and converts mid-flight cancellation into a structured result (with a partial-CloudFormation-state disclaimer for stack ops). Cancelling sends SIGTERM to `gco` and gives it 45 seconds to exit before killing it. That is longer than the 30 seconds `gco` gives each CDK process group to exit (all groups of a parallel run at once), so a cancelled deploy or destroy stops CDK instead of leaving it running without a parent. The task's status file then records `state: cancelled` with `gco`'s exit code (143 once it has stopped CDK).
 
 Most operational tools shell out to the `gco` CLI, while discovery, introspection, task-observability, and Mission tools use their dedicated in-process backends. The CLI-backed approach:
 
@@ -1360,6 +1367,8 @@ Most operational tools shell out to the `gco` CLI, while discovery, introspectio
 ```text
 LLM ←→ MCP Protocol (stdio) ←→ run_mcp.py ←→ gco CLI ←→ AWS APIs
 ```
+
+Arguments reach the CLI as separate argv elements (no shell). Before the call, each tool checks the arguments that are paths: a local file or directory must resolve, symlinks included, inside the project root, and a name or ID that the CLI puts into an API request path must not contain a `..` segment. Free text such as prompts and chat messages is passed through unchanged. Secrets go through the child's environment instead of its command line, which every local user can read: `analytics_login_url` sets `GCO_STUDIO_PASSWORD`, `monitoring_user_add` sets `GCO_GRAFANA_USER_PASSWORD`, and `webhooks_create` sets `GCO_WEBHOOK_URL` and `GCO_WEBHOOK_SECRET` (webhook URLs often embed a token). The audit log redacts password, secret, token and key arguments and records a URL argument as its scheme and host only. See [How Tools Work](tools/README.md#how-tools-work).
 
 ## Examples
 
@@ -1504,7 +1513,7 @@ Here's a `~/.kiro/settings/mcp.json` that wires up the GCO MCP server alongside 
 
 If a tool you expect to see is missing from your client's tool list, check these in order:
 
-1. **Feature flag not set.** Many tools are disabled by default. The most common cause of a "missing" tool is that the feature flag gating it isn't set in the client's `env` block. See [Feature Flags](#feature-flags) for the flag-to-tool mapping. If you're looking for `delete_job`, `delete_inference`, or any other destructive operation, set `GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true`. For `deploy_stack` / `destroy_stack`, set `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` / `GCO_ENABLE_INFRASTRUCTURE_DESTROY`. For `reserve_capacity`, set `GCO_ENABLE_CAPACITY_PURCHASE`. For `models_upload`, set `GCO_ENABLE_MODEL_UPLOAD`. For `images_build` / `images_push`, set `GCO_ENABLE_IMAGE_PUBLISH`. For `sync_storage_bucket`, set `GCO_ENABLE_LOCAL_STORAGE_SYNC=true` and configure `GCO_STORAGE_LOCAL_ROOT`.
+1. **Feature flag not set.** Many tools are disabled by default. The most common cause of a "missing" tool is that the feature flag gating it isn't set in the client's `env` block. See [Feature Flags](#feature-flags) for the flag-to-tool mapping. If you're looking for `delete_job`, `delete_inference`, or any other destructive operation, set `GCO_ENABLE_DESTRUCTIVE_OPERATIONS=true`. For `deploy_stack` / `destroy_stack`, set `GCO_ENABLE_INFRASTRUCTURE_DEPLOY` / `GCO_ENABLE_INFRASTRUCTURE_DESTROY`. For `reserve_capacity`, set `GCO_ENABLE_CAPACITY_PURCHASE`. For `models_upload`, `upload_to_regional_bucket`, or `populate_kv_cache`, set `GCO_ENABLE_MODEL_UPLOAD` and configure `GCO_STORAGE_LOCAL_ROOT`. For `images_build` / `images_push`, set `GCO_ENABLE_IMAGE_PUBLISH`. For `sync_storage_bucket`, set `GCO_ENABLE_LOCAL_STORAGE_SYNC=true` and configure `GCO_STORAGE_LOCAL_ROOT`.
 2. **Tool search mode is hiding it.** The default `GCO_MCP_TOOL_SEARCH=bm25` replaces the full tool listing with a search-based catalog and a small set of always-visible entry-point tools (`find_examples`, `find_docs`, `list_jobs`, `submit_job_sqs`, `list_inference_endpoints`, `check_capacity`, `task_status`). Every other tool is reachable through the synthetic `search_tools` tool — ask your agent to call `search_tools` with a query that matches the tool you want, and it will surface the candidates. To disable the search catalog and see the full list directly, set `GCO_MCP_TOOL_SEARCH=off` (legacy listing).
 
 ### Tools returning errors
@@ -1512,6 +1521,7 @@ If a tool you expect to see is missing from your client's tool list, check these
 - Check AWS credentials: `aws sts get-caller-identity`
 - Verify infrastructure is deployed: `gco stacks list`
 - Check the tool's error message — it includes the CLI's stderr output
+- A failed call returns `{"error": ..., "exit_code": N}`. When the command printed a JSON document before exiting non-zero, as the status and preflight commands do when a check fails (`addons_status`, `eks_capabilities_status`, `hyperpod_status`, `hyperpod_preflight`, `analytics_doctor`), the parsed document is also under `output`, so the per-item results stay readable
 - That stderr never carries AWS SDK debug output: `GCO_VERBOSE=true` on the host adds GCO's debug lines and SDK info messages only, and the CLI's `--debug-aws` has no environment or config spelling, so a tool result cannot carry signing material or credentials (see [Verbose and debug output](../docs/CLI.md#verbose-and-debug-output))
 
 ### Timeout on long operations

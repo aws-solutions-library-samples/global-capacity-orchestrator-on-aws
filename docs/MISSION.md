@@ -721,7 +721,7 @@ Every Mission session carries a **tool allowlist** — the set of tool names the
 
 ### `--allow-all-tools` / `allow_all_tools`
 
-Enumerating every tool name is tedious when you simply want the loop to reach for whatever the server exposes. Both surfaces accept an all-tools option that resolves the session's allowlist to **every currently-registered tool** (minus the nine `mission_*` control tools — see [Risk-tier scope](#risk-tier-scope)) without naming each one:
+Enumerating every tool name is tedious when you simply want the loop to reach for whatever the server exposes. Both surfaces accept an all-tools option that resolves the session's allowlist to **every currently-registered tool** (minus the `mission_*` and `swarm_*` tools — see [Risk-tier scope](#risk-tier-scope)) without naming each one:
 
 | Surface | Input | Default |
 |---------|-------|---------|
@@ -787,7 +787,7 @@ The per-session option resolves its allowlist **from whatever is registered** �
 
 Every MCP tool carries a risk-tier tag (`safe`, `low-risk`, `destructive`, `infrastructure`, `cost-incurring`, `data-upload`, `image`). The all-tools option resolves to **all registered tools regardless of risk tier** — it does not stop at read-only `safe` tools. The blast-radius control is the **registration layer**, not this option: a destructive, infrastructure, or cost-incurring tool enters scope only if its gating feature flag was set when the server registered tools, in which case you have already opted into exposing it. Concretely, registering those higher-risk tools via their feature flags (including the `GCO_ENABLE_ALL_TOOLS` umbrella) brings them into scope of the all-tools expansion.
 
-The **only** names excluded from the expansion are the nine `mission_*` control tools (`mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`), so a Mission session can never recursively invoke the session-management tools that drive it. If you want a session bounded to read-only tools only, use an explicit `--tool-allowlist` of `safe`-tagged tools instead of `--allow-all-tools`.
+The **only** names excluded from the expansion are the `mission_*` tools and the `swarm_*` tools, so a Mission session can never recursively invoke the session-management tools that drive it. An explicit `--tool-allowlist` / `tool_allowlist` may not name them either: a list that names one of the nine `mission_*` control tools (`mission_start`, `mission_status`, `mission_iterate`, `mission_checkpoint`, `mission_complete`, `mission_abort`, `mission_resume`, `mission_history`, `mission_list`) or a `swarm_*` tool is rejected with `validation_error` / `control_tool_not_allowed` before a session is created. (`mission_memory_search`, which only reads Mission memory, may be named explicitly.) If you want a session bounded to read-only tools only, use an explicit `--tool-allowlist` of `safe`-tagged tools instead of `--allow-all-tools`.
 
 ## Sampling
 
@@ -842,6 +842,8 @@ Three top-level keys:
 The block is byte-capped at 4 KB. When a section overshoots (e.g. a probe returned an unusually large payload), the largest field is dropped first and the dropped key list is recorded under `_dropped_fields` so the operator can spot the gap. Top-level keys are sorted before emission so two callers with semantically-identical context produce a byte-identical prompt — the same property the determinism tests pin down for Observation summaries.
 
 What deliberately does **not** land in the block: spot prices and on-demand prices (large, AZ-fanout, cheap to fetch on demand from `spot_prices` once the model has picked an instance shape), capacity-block offerings (reachable through `reservation_check`), and anything timestamp-stamped to second precision (a wall-clock leak would break the byte-identical determinism property in `tests/test_mission_sampling.py`).
+
+Like every block of recorded data in the sampling prompt (criteria evidence, prior-mission memory, and the iteration summaries that carry tool output), the environment context sits between `<<<UNTRUSTED DATA environment_context>>>` and `<<<END UNTRUSTED DATA environment_context>>>` lines. Any `<<<` or `>>>` inside a block is written as a JSON escape, so data cannot close its block early, and the prompt preamble tells the model to treat framed text as information only and never follow instructions found in it.
 
 Failure semantics: every AWS probe is wrapped. A total credential failure or a missing checker returns `None` so the prompt omits the section entirely — the model just sees the same prompt shape it would have seen pre-environment-context. Per-region partial failures land as zeroed metrics rather than dropping the region, so the regions list is always honest.
 
@@ -918,12 +920,12 @@ Scripted strategies are opt-in via `--allow-scripted-strategies` on the CLI (or 
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `GCO_MCP_CODE_MODE_MAX_DURATION_SECS` | `30` | Cap on a single script's execution time, counted only while the sandbox runs (time spent waiting on tool calls is excluded). |
-| `GCO_MCP_CODE_MODE_MAX_MEMORY` | `268435456` (256 MiB) | Resident memory cap on the sandbox process. |
+| `GCO_MCP_CODE_MODE_MAX_DURATION_SECS` | `30` | Wall-clock cap on a single script run, including time spent waiting on tool calls. A tool call still waiting when the cap is reached is recorded as failed in the iteration's `script_call_log`; the call itself may still complete. |
+| `GCO_MCP_CODE_MODE_MAX_MEMORY` | `200000000` (200 MB) | Memory cap on the sandbox. |
 
 Inside the script, allowlisted tools are exposed as awaitable callables. A `mission` namespace exposes `mission.observe(key, value)` and `mission.event(name)` for incremental Observation building. Every in-script tool call goes through the standard MCP audit decorator and emits a follow-up Mission audit event with `via_script=true`.
 
-A script that exceeds either cap is terminated; partial observations recorded via `mission.observe(...)` are preserved, the iteration's verdict resolves to `terminate`, and the reason carries the loop-limit cap that fired.
+A script that exceeds either cap, or raises an error it does not catch, is stopped. Partial observations recorded via `mission.observe(...)` and the tool calls made so far are preserved, and the iteration's verdict resolves to `terminate` with a reason that says what stopped the script: `script_time_limit` (the duration cap), `script_memory_limit` (the memory cap), or `script_error` (an uncaught exception, a script the sandbox could not run, or a sandbox failure). The iteration record's `sandbox_terminated_detail` carries the error the sandbox reported, for example `KeyError: missing`.
 
 ## Loop Limits
 

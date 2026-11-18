@@ -192,7 +192,6 @@ from tools.inference import (  # noqa: E402, F401
     list_endpoint_models,
     list_inference_endpoints,
     mooncake_topology_status,
-    populate_kv_cache,
     promote_canary,
     remove_inference_region,
     rollback_canary,
@@ -337,7 +336,7 @@ with _contextlib.suppress(ImportError):
     from tools.jobs import delete_job
 
 with _contextlib.suppress(ImportError):
-    from tools.inference import delete_inference
+    from tools.inference import delete_inference  # noqa: F401
 
 with _contextlib.suppress(ImportError):
     from tools.templates import delete_template  # noqa: F401
@@ -373,6 +372,9 @@ with _contextlib.suppress(ImportError):
 
 with _contextlib.suppress(ImportError):
     from tools.storage import upload_to_regional_bucket  # noqa: F401
+
+with _contextlib.suppress(ImportError):
+    from tools.inference import populate_kv_cache  # noqa: F401
 
 # Local-metrics, local-storage, semantic-progress, and Mission tools also use
 # import-time gates. The imports are no-ops when disabled; the explicit reload
@@ -494,11 +496,6 @@ if _IS_RELOAD and _DESTRUCTIVE_FLAG_ON:
     _importlib.reload(_jobs_mod)
     delete_job = _jobs_mod.delete_job
 
-    from tools import inference as _inf_mod
-
-    _importlib.reload(_inf_mod)
-    delete_inference = _inf_mod.delete_inference
-
     from tools import templates as _tpl_mod
 
     _importlib.reload(_tpl_mod)
@@ -539,10 +536,18 @@ if _IS_RELOAD and _DESTRUCTIVE_FLAG_ON:
     _importlib.reload(_slurm_mod)
     globals()["slurm_cancel"] = _slurm_mod.slurm_cancel
 
-# tools.models is reloaded if either the destructive flag (delete_model)
-# or the model-upload flag (models_upload) is set, so do it once here
-# regardless of which (or both) flipped.
+# tools.models and tools.inference each hold one destructive tool
+# (delete_model / delete_inference) and one model-upload tool (models_upload /
+# populate_kv_cache), so reload each once here regardless of which (or both)
+# flipped.
 if _IS_RELOAD and (_DESTRUCTIVE_FLAG_ON or _MODEL_UPLOAD_FLAG_ON):
+    from tools import inference as _inf_mod
+
+    _importlib.reload(_inf_mod)
+    for _name in ("delete_inference", "populate_kv_cache"):
+        if hasattr(_inf_mod, _name):
+            globals()[_name] = getattr(_inf_mod, _name)
+
     from tools import models as _models_mod
 
     _importlib.reload(_models_mod)

@@ -121,7 +121,16 @@ def webhooks_get(config: Any, webhook_id: Any, region: Any) -> None:
 
 
 @webhooks.command("create")
-@click.option("--url", "-u", required=True, help="Webhook URL")
+@click.option(
+    "--url",
+    "-u",
+    required=True,
+    envvar="GCO_WEBHOOK_URL",
+    help=(
+        "Webhook URL (also read from $GCO_WEBHOOK_URL, which keeps a URL that "
+        "embeds a token off the command line)"
+    ),
+)
 @click.option(
     "--event",
     "-e",
@@ -131,7 +140,12 @@ def webhooks_get(config: Any, webhook_id: Any, region: Any) -> None:
     help="Events to subscribe to",
 )
 @click.option("--namespace", "-n", help="Filter events by namespace")
-@click.option("--secret", "-s", help="Secret for HMAC signature verification")
+@click.option(
+    "--secret",
+    "-s",
+    envvar="GCO_WEBHOOK_SECRET",
+    help="Secret for HMAC signature verification (also read from $GCO_WEBHOOK_SECRET)",
+)
 @click.option("--region", "-r", help="Region to use (any region works)")
 @pass_config
 def webhooks_create(

@@ -24,7 +24,8 @@ Cases:
 * ``--allow-all-tools`` against an empty registry emits
   ``allow_all_tools_empty_registry``, exits 1, and writes no session
   file or other state.
-* The explicit-list path without the flag is unchanged.
+* The explicit-list path without the flag is unchanged, except that it
+  rejects the loop-management (``mission_*`` control and ``swarm_*``) tools.
 """
 
 from __future__ import annotations
@@ -436,6 +437,46 @@ class TestMissionExplicitListUnchanged:
         assert result.exit_code == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
         session = _load_only_session(isolated_backend)
         assert session["tool_allowlist"] == ["find_examples"]
+
+    @pytest.mark.parametrize("control_tool", ["mission_start", "swarm_start"])
+    def test_start_explicit_list_naming_a_control_tool_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_backend: Path,
+        control_tool: str,
+    ) -> None:
+        """A session may not drive Mission or swarm sessions from its own loop."""
+        _enable_flag(monkeypatch)
+        _forbid_registry(monkeypatch)
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "mission",
+                "start",
+                "--directive",
+                "Stabilize the widget pipeline configuration.",
+                "--max-iterations",
+                "5",
+                "--max-wall-clock",
+                "60",
+                "--tool-allowlist",
+                "find_examples",
+                "--tool-allowlist",
+                control_tool,
+                "--with-defaults",
+            ],
+        )
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.stderr)
+        assert envelope["code"] == "validation_error"
+        assert envelope["details"] == {
+            "field": "tool_allowlist",
+            "tool_name": control_tool,
+            "reason": "control_tool_not_allowed",
+        }
+        assert _session_files(isolated_backend) == []
 
     def test_start_without_flag_and_without_list_is_rejected_empty(
         self,

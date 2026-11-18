@@ -1331,6 +1331,7 @@ def _isolated_inference_tool() -> Iterator[tuple[types.ModuleType, Mock, Mock]]:
         "feature_flags": _stub_module(
             "feature_flags",
             FLAG_DESTRUCTIVE_OPERATIONS="destructive",
+            FLAG_MODEL_UPLOAD="model-upload",
             is_enabled=lambda _flag: False,
         ),
         "fastmcp": _stub_module("fastmcp"),
