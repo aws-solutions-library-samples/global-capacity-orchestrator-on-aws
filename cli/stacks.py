@@ -961,7 +961,13 @@ def _atomic_copy_file(source: Path, target: Path) -> None:
 
 
 def _atomic_write_bytes(target: Path, content: bytes, *, mode: int | None = None) -> None:
-    """Atomically restore exact bytes without exposing a partial configuration."""
+    """Atomically restore exact bytes without exposing a partial configuration.
+
+    A symlinked ``target`` is resolved first, so the temporary file is created
+    next to the real file and replaces it. Replacing the link itself would turn
+    it into a regular file and leave the file it points at unchanged.
+    """
+    target = target.resolve()
     temporary = target.with_name(f".{target.name}.tmp-{uuid.uuid4().hex}")
     try:
         temporary.write_bytes(content)
@@ -1058,11 +1064,13 @@ def _config_mutation_lock(path: Path) -> Iterator[None]:
     """Serialize a complete read/modify/replace transaction for ``path``.
 
     POSIX locks the stable directory descriptor; Windows locks a persistent
-    sidecar in that directory. A thread-local held-set makes this context
-    reentrant, which is required by analytics teardown: it holds the
+    sidecar in that directory. The directory is the real file's, with symlinks
+    resolved, so a writer that reaches cdk.json through a link and one that
+    names its target take the same lock. A thread-local held-set makes this
+    context reentrant, which is required by analytics teardown: it holds the
     transaction across its temporary mutation and nested feature-toggle writes.
     """
-    lock_key = path.parent.resolve()
+    lock_key = path.resolve().parent
     with _CONFIG_THREAD_LOCKS_GUARD:
         thread_lock = _CONFIG_THREAD_LOCKS.setdefault(lock_key, RLock())
 

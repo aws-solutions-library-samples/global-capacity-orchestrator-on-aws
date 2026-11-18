@@ -5094,7 +5094,8 @@ and `gco stacks bedrock`) rewrites the whole file in one format: two-space
 indentation, keys in their existing order, non-ASCII text such as the
 comments' em dashes kept as UTF-8 rather than `\uXXXX` escapes, and one
 trailing newline. Code that writes cdk.json the same way can use
-`cli.stacks.serialize_cdk_json`.
+`cli.stacks.serialize_cdk_json`. When cdk.json is a symlink, the edit rewrites
+the file it points at and the link stays in place.
 
 #### `gco stacks list`
 

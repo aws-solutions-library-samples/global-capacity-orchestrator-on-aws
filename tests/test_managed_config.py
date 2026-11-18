@@ -345,6 +345,96 @@ class TestEngineWriteMechanics:
         add_deployment_region("us-west-2", config_path=cdk_json)
         assert stat.S_IMODE(cdk_json.stat().st_mode) == 0o600
 
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    def test_symlinked_config_updates_its_target(self, tmp_path: Path):
+        """An edit through a symlinked cdk.json rewrites the file it points at."""
+        real = tmp_path / "deployments" / "cdk.json"
+        real.parent.mkdir()
+        real.write_text(json.dumps(BASE_CONFIG, indent=2) + "\n", encoding="utf-8")
+        os.chmod(real, 0o640)
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        link = checkout / "cdk.json"
+        link.symlink_to(real)
+
+        report = add_deployment_region("us-west-2", config_path=link)
+
+        assert report.changed is True
+        assert link.is_symlink() and link.resolve() == real.resolve()
+        written = json.loads(real.read_text(encoding="utf-8"))
+        assert written["context"]["deployment_regions"]["regional"] == ["us-east-1", "us-west-2"]
+        assert stat.S_IMODE(real.stat().st_mode) == 0o640
+        assert sorted(path.name for path in checkout.iterdir()) == ["cdk.json"]
+        assert sorted(path.name for path in real.parent.iterdir()) == ["cdk.json"]
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    def test_symlinked_config_needs_a_writable_target_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The replacement is created next to the real file, so its directory decides."""
+        import cli.managed_config as managed_config
+
+        real = tmp_path / "deployments" / "cdk.json"
+        real.parent.mkdir()
+        real.write_text(json.dumps(BASE_CONFIG, indent=2) + "\n", encoding="utf-8")
+        link = tmp_path / "cdk.json"
+        link.symlink_to(real)
+        read_only = real.parent.resolve()
+        real_access = os.access
+        monkeypatch.setattr(
+            managed_config.os,
+            "access",
+            lambda path, mode: Path(path) != read_only and real_access(path, mode),
+        )
+
+        with pytest.raises(ManagedConfigError, match="directory is read-only"):
+            add_deployment_region("us-west-2", config_path=link)
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    def test_lock_key_is_the_real_files_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A link and its target are one cdk.json, so they take one lock."""
+        from cli import stacks
+
+        real = tmp_path / "deployments" / "cdk.json"
+        real.parent.mkdir()
+        real.write_text("{}", encoding="utf-8")
+        link = tmp_path / "cdk.json"
+        link.symlink_to(real)
+        keys: list[Path] = []
+
+        @contextlib.contextmanager
+        def record(lock_key: Path):
+            keys.append(lock_key)
+            yield
+
+        monkeypatch.setattr(stacks, "_config_process_lock", record)
+        with stacks._config_mutation_lock(link):
+            pass
+        with stacks._config_mutation_lock(real):
+            pass
+
+        assert keys == [real.parent.resolve(), real.parent.resolve()]
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    def test_atomic_restore_through_symlink_keeps_the_link(self, tmp_path: Path):
+        """The destroy-time byte restore writes the target, not over the link."""
+        from cli.stacks import _atomic_write_bytes
+
+        real = tmp_path / "deployments" / "cdk.json"
+        real.parent.mkdir()
+        real.write_bytes(b"{}\n")
+        link = tmp_path / "cdk.json"
+        link.symlink_to(real)
+
+        _atomic_write_bytes(link, b'{"context": {}}\n', mode=0o600)
+
+        assert link.is_symlink()
+        assert real.read_bytes() == b'{"context": {}}\n'
+        assert stat.S_IMODE(real.stat().st_mode) == 0o600
+        assert sorted(path.name for path in real.parent.iterdir()) == ["cdk.json"]
+
     def test_read_only_target_refused_with_guidance(self, cdk_json: Path):
         os.chmod(cdk_json, 0o444)
         try:

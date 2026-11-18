@@ -347,9 +347,15 @@ def _resolve_config_path(config_path: Path | str | None) -> Path:
 
 
 def _require_writable(path: Path) -> None:
-    """Refuse read-only targets (the installed-mode package-data case)."""
-    parent_writable = os.access(path.parent, os.W_OK)
-    file_writable = os.access(path, os.W_OK)
+    """Refuse read-only targets (the installed-mode package-data case).
+
+    The atomic write replaces the real file, symlinks resolved, from a
+    temporary file created next to it, so that file's directory is the one
+    that has to be writable.
+    """
+    real_path = path.resolve()
+    parent_writable = os.access(real_path.parent, os.W_OK)
+    file_writable = os.access(real_path, os.W_OK)
     if parent_writable and file_writable:
         return
     raise ManagedConfigError(

@@ -7,6 +7,7 @@ to use the same generic helpers still works.
 """
 
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -162,6 +163,24 @@ class TestGenericFeatureConfig:
         assert comment.encode("utf-8") in raw
         assert b"\\u2014" not in raw
         assert raw.endswith(b"}\n")
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    def test_update_feature_config_through_symlink_updates_target(self, tmp_path: Path):
+        """A symlinked cdk.json stays a link; the file it points at changes."""
+        from cli.stacks import _update_feature_config
+
+        real = tmp_path / "deployments" / "cdk.json"
+        real.parent.mkdir()
+        real.write_text(json.dumps({"context": {"valkey": {"enabled": False}}}), encoding="utf-8")
+        link = tmp_path / "checkout" / "cdk.json"
+        link.parent.mkdir()
+        link.symlink_to(real)
+        with patch("cli.stacks._find_cdk_json", return_value=link):
+            _update_feature_config("valkey", {"enabled": True}, {"enabled": False})
+
+        assert link.is_symlink()
+        assert json.loads(real.read_text(encoding="utf-8"))["context"]["valkey"]["enabled"]
+        assert sorted(path.name for path in link.parent.iterdir()) == ["cdk.json"]
 
     def test_update_feature_config_skips_none_values(self):
         from cli.stacks import _update_feature_config
