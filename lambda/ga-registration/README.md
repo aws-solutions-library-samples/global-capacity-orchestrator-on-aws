@@ -50,7 +50,12 @@ CloudFormation response with `AlbArn` and `AlbHostname` on success.
 ## IAM Permissions
 
 - `eks:DescribeCluster` on the EKS cluster
-- `sts:GetCallerIdentity` (for EKS token generation)
-- `elasticloadbalancing:DescribeLoadBalancers`, `elasticloadbalancing:DescribeTags`
-- `globalaccelerator:DescribeEndpointGroup`, `globalaccelerator:AddEndpoints`, `globalaccelerator:RemoveEndpoints`, `globalaccelerator:UpdateEndpointGroup`
-- `ssm:PutParameter`, `ssm:DeleteParameter` in the registry region
+- `sts:GetCallerIdentity` (a presigned URL for the EKS token; needs no IAM permission)
+- `elasticloadbalancing:DescribeLoadBalancers`, `elasticloadbalancing:DescribeTags` (no resource-level permissions, so `*`)
+- `globalaccelerator:DescribeEndpointGroup`, `globalaccelerator:AddEndpoints`, `globalaccelerator:RemoveEndpoints`, `globalaccelerator:UpdateEndpointGroup` on this Region's endpoint group, and `globalaccelerator:DescribeAccelerator` on its accelerator (only where Global Accelerator exists)
+- `ssm:PutParameter`, `ssm:DeleteParameter` on `/<project>/alb-hostname-<region>` in the registry region
+
+The delete guard (`on_delete_event`) holds the same Global Accelerator actions
+minus `AddEndpoints`, and `ssm:DeleteParameter` on the same parameter. The
+registration function reaches the EKS API through its own security group,
+which is the only source the cluster security group admits for it.

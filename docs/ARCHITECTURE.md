@@ -213,10 +213,10 @@ rendered as spec sheets and as the interaction diagram in
 
 - `gco-health-monitor-sa`: Read-only cluster health plus narrowly named self-healing resources
 - `gco-manifest-processor-sa`: Job-namespace Kubernetes writes and control-plane table access
-- `gco-inference-monitor-sa`: Inference-namespace reconciliation permissions
+- `gco-inference-monitor-sa`: Inference-namespace reconciliation permissions, and its own IAM role: read, update and delete on the inference endpoints table (no create; the CLI creates endpoints) and the regional bucket's `/name` discovery parameter for the Mooncake cold tier
 - `gco-inference-proxy-sa`: Exact AWS secret/endpoint-read access and no Kubernetes RBAC binding
 - `gco-cost-monitor-sa`: Cost report bucket write access only; no Kubernetes RBAC binding
-- `gco-service-account`: General job and inference workload identity
+- `gco-service-account`: General job and inference workload identity in `gco-jobs` and `gco-inference`. Its role has no access to the jobs or inference endpoints tables, so a submitted pod cannot rewrite queue or endpoint state
 
 ### 5. Lambda Layer
 
@@ -347,7 +347,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 - Private endpoint enabled
 - Public endpoint disabled by default
-- Cluster security group controls VPC access
+- Cluster security group admits the Kubernetes API (443) only from itself (nodes, the `--via-ssm auto` bastion), from the security groups of the kubectl-applier, Helm installer and GA registration Lambdas, and with HyperPod on from its node security group; no rule admits the VPC CIDR
 - Pod security controls and admission-time workload validation enforced
 
 **In-cluster network isolation** (`lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`, enforced on EKS Auto Mode by the network policy controller that `06-network-policy-controller.yaml` switches on — `cdk.json` `eks_cluster.network_policy_enforcement`, default `true` — and by Calico in the kind CI job):

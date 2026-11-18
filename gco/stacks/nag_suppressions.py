@@ -521,7 +521,6 @@ def add_iam_suppressions(
                 f"Resource::arn:<AWS::Partition>:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-job-templates/index/*",
                 f"Resource::arn:<AWS::Partition>:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-webhooks/index/*",
                 f"Resource::arn:<AWS::Partition>:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-jobs/index/*",
-                f"Resource::arn:<AWS::Partition>:dynamodb:{global_region}:<AWS::AccountId>:table/{project_name}-inference-endpoints/index/*",
             ]
         )
 
@@ -571,8 +570,8 @@ def add_iam_suppressions(
                     "Wildcard permissions are required for: (1) EKS cluster admin access to manage "
                     "dynamic Kubernetes resources, (2) Custom resource providers to invoke Lambda versions, "
                     "(3) SSM parameter access for cross-region coordination, (4) EKS addon management, "
-                    "(5) VPC Flow Logs to write to CloudWatch, (6) DynamoDB GSI access for job queue, "
-                    "templates, webhooks, and inference endpoints tables, (7) S3 access for model "
+                    "(5) VPC Flow Logs to write to CloudWatch, (6) DynamoDB GSI access for the job "
+                    "queue, templates, and webhooks tables, (7) S3 access for model "
                     "weights bucket (auto-generated name). All wildcards are scoped to specific "
                     "patterns. (8) KMS decrypt scoped to S3 via condition for model weights bucket."
                 ),

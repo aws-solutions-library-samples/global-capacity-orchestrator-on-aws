@@ -152,7 +152,8 @@ aws ssm get-parameter --name /gco/regional-shared-bucket/region --region us-east
 ```
 
 Pods do **not** need these parameters — the job-pod role carries no
-`ssm:GetParameter` grant. Pods read the ConfigMap instead.
+`ssm:GetParameter` grant. Pods read the ConfigMap instead. The `/name`
+read is granted to the inference monitor's own role only.
 
 ## ConfigMap schema
 
@@ -267,8 +268,8 @@ object itself defaults it to `false`.
 ### Regional job-pod role — unconditional RW
 
 Every `GCORegionalStack` attaches an inline IAM policy to the regional
-job-pod role (the role used by `gco-service-account` in `gco-jobs`,
-`gco-system`, and `gco-inference`) via
+job-pod role (the role used by `gco-service-account` in `gco-jobs` and
+`gco-inference`) via
 `_grant_regional_shared_bucket_to_service_account`. The policy has two
 statements, both **always present** — the grant runs unconditionally as
 part of provisioning the always-on bucket:
@@ -293,13 +294,19 @@ than the equivalent cluster-shared grant, which needs `Resource: "*"` on
 its KMS statement (constrained by `kms:ViaService`) because the global key
 ARN is not exported to the regional stack.
 
-### Relationship to the broader `gco-*` read grant
+### The job-pod role's other buckets
 
-The job-pod role separately carries a read-only statement over
-`arn:<partition>:s3:::gco-*` and `gco-*/*` (`s3:GetObject`,
-`s3:ListBucket`), used by inference init containers pulling model weights.
-That wildcard does match this bucket, but it grants **reads only** — the
-write path comes exclusively from the scoped grant above.
+The job-pod role reaches exactly three buckets: this region's
+`Regional_Shared_Bucket` (above), the
+[`Cluster_Shared_Bucket`](CLUSTER_SHARED_BUCKET.md#iam-grants) (read and
+write), and the model weights bucket, read-only (`s3:GetObject`,
+`s3:ListBucket`, and `kms:Decrypt` through S3 for that bucket alone), which
+inference init containers pull weights from. The model bucket's
+CloudFormation-generated name is read from `/<project>/model-bucket-name` in
+the global region at deploy time. No statement names a bucket by prefix, so
+the access-log, cost-report and analytics Studio buckets (and any bucket of
+your own whose name starts with the project name) are out of the pods'
+reach.
 
 ### Bucket policy
 
@@ -313,7 +320,6 @@ bucket.
 | Principal | Access | Gated on |
 |-----------|--------|----------|
 | Regional job-pod role (`gco-service-account`) | RW on this region's bucket | Always |
-| Regional job-pod role | Read on any `gco-*` bucket | Always |
 | Any other AWS principal | None | — |
 
 ## Reserved key prefixes

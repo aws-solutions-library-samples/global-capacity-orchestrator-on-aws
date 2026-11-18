@@ -813,8 +813,11 @@ aws logs tail "$LOG_GROUP" --since 24h --region "$REGION"
 4. For `DETECTION_FAILED`, fix the cause in IaC: verify the stack is in a state
    that supports drift detection, inspect the detector Lambda's role for the
    required CloudFormation read/drift actions, and resolve throttling or Lambda
-   timeout errors shown in its logs. Do not patch the role in the console and
-   leave that patch as new drift.
+   timeout errors shown in its logs. With `aurora_pgvector` enabled the run
+   reports the Aurora secret and its target attachment as failed checks by
+   design: the role cannot read secret values (see the
+   [drift-detection Lambda's permissions](../lambda/drift-detection/README.md#iam-permissions)).
+   Do not patch the role in the console and leave that patch as new drift.
 5. Run a fresh detection after remediation and require
    `DetectionStatus=DETECTION_COMPLETE` and `StackDriftStatus=IN_SYNC`:
 

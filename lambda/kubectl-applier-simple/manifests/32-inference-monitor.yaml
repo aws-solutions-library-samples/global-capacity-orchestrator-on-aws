@@ -114,7 +114,7 @@ spec:
             - name: REGION
               value: "{{REGION}}"
             - name: AWS_ROLE_ARN
-              value: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+              value: "{{INFERENCE_MONITOR_ROLE_ARN}}"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
             - name: INFERENCE_ENDPOINTS_TABLE_NAME

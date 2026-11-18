@@ -23,6 +23,7 @@ WRITE_VERBS = {"create", "update", "patch", "delete", "deletecollection"}
 
 ROLE_ANNOTATION = "eks.amazonaws.com/role-arn"
 SHARED_ROLE_ANNOTATION_VALUE = "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+INFERENCE_MONITOR_ROLE_ANNOTATION_VALUE = "{{INFERENCE_MONITOR_ROLE_ARN}}"
 MANIFEST_PROCESSOR_ROLE_ANNOTATION_VALUE = "{{MANIFEST_PROCESSOR_ROLE_ARN}}"
 INFERENCE_PROXY_ROLE_ANNOTATION_VALUE = "{{INFERENCE_PROXY_ROLE_ARN}}"
 HEALTH_ROLE_ANNOTATION_VALUE = "{{HEALTH_MONITOR_ROLE_ARN}}"
@@ -805,7 +806,7 @@ class TestDedicatedServiceAccounts:
         [
             ("gco-health-monitor-sa", HEALTH_ROLE_ANNOTATION_VALUE),
             ("gco-manifest-processor-sa", MANIFEST_PROCESSOR_ROLE_ANNOTATION_VALUE),
-            ("gco-inference-monitor-sa", SHARED_ROLE_ANNOTATION_VALUE),
+            ("gco-inference-monitor-sa", INFERENCE_MONITOR_ROLE_ANNOTATION_VALUE),
             ("gco-inference-proxy-sa", INFERENCE_PROXY_ROLE_ANNOTATION_VALUE),
         ],
     )
@@ -830,7 +831,9 @@ class TestDedicatedServiceAccounts:
 # Bug history: every IRSA annotation in the kubectl-applier manifests must
 # select a CDK role whose trust policy includes that ServiceAccount. The
 # health monitor intentionally uses a dedicated role so its narrowly-scoped
-# SSM write cannot be assumed by general platform/job workloads.
+# SSM write cannot be assumed by general platform/job workloads, and the
+# inference monitor has its own so job and model pods (which share
+# gco-service-account) cannot write the inference endpoints table.
 #
 # These tests pin every trust domain and prevent an annotation from drifting
 # away from its matching `service_account_names` list.
@@ -839,12 +842,8 @@ class TestDedicatedServiceAccounts:
 # SAs that the CDK stack declares as trusted for each IRSA role. Keep in
 # sync with gco/stacks/regional_stack.py::_create_service_account_role.
 CDK_TRUSTED_SAS_BY_ANNOTATION = {
-    SHARED_ROLE_ANNOTATION_VALUE: frozenset(
-        {
-            "gco-service-account",
-            "gco-inference-monitor-sa",
-        }
-    ),
+    SHARED_ROLE_ANNOTATION_VALUE: frozenset({"gco-service-account"}),
+    INFERENCE_MONITOR_ROLE_ANNOTATION_VALUE: frozenset({"gco-inference-monitor-sa"}),
     MANIFEST_PROCESSOR_ROLE_ANNOTATION_VALUE: frozenset({"gco-manifest-processor-sa"}),
     INFERENCE_PROXY_ROLE_ANNOTATION_VALUE: frozenset({"gco-inference-proxy-sa"}),
     HEALTH_ROLE_ANNOTATION_VALUE: frozenset({"gco-health-monitor-sa"}),

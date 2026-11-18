@@ -87,14 +87,17 @@ import yaml
 from aws_cdk import (
     Acknowledgment,
     Annotations,
+    CfnElement,
     CfnJson,
     CfnOutput,
+    CfnResource,
     CfnTag,
     CustomResource,
     Duration,
     Fn,
     RemovalPolicy,
     Stack,
+    Token,
     Validations,
 )
 from aws_cdk import aws_ec2 as ec2
@@ -764,6 +767,36 @@ _TRACING_EXPORT_NAG_REASON = (
     "statement is write-only and carries no other action."
 )
 
+
+def _s3_bucket_kms_conditions(*, region: str, bucket_arn: str, url_suffix: str) -> dict[str, Any]:
+    """KMS conditions confining a ``Resource: *`` key grant to S3's use for one bucket.
+
+    For a bucket whose key ARN this stack cannot see (it lives in another
+    stack): ``kms:ViaService`` admits only requests S3 makes in the bucket's
+    region, and ``kms:EncryptionContext:aws:s3:arn`` only those for this
+    bucket. S3 sends the bucket ARN as the context when the bucket uses an
+    S3 Bucket Key and the object ARN when it does not, so both forms match.
+    """
+    return {
+        "StringEquals": {"kms:ViaService": f"s3.{region}.{url_suffix}"},
+        "StringLike": {"kms:EncryptionContext:aws:s3:arn": [bucket_arn, f"{bucket_arn}/*"]},
+    }
+
+
+#: DynamoDB actions the inference monitor's role holds on the inference
+#: endpoints table: the API calls behind the ``InferenceEndpointStore`` methods
+#: ``gco/services/inference_monitor.py`` invokes (``list_endpoints`` scans,
+#: ``get_endpoint`` reads, the lifecycle/state/status writers are conditional
+#: updates and ``delete_endpoint`` is the final conditional delete). Endpoint
+#: creation is the CLI's (operator credentials), so there is no PutItem.
+#: tests/test_inference_monitor_role.py pins this tuple to those call sites.
+INFERENCE_MONITOR_TABLE_ACTIONS = (
+    "dynamodb:DeleteItem",
+    "dynamodb:GetItem",
+    "dynamodb:Scan",
+    "dynamodb:UpdateItem",
+)
+
 #: Namespaces whose pods GCO instruments itself (the traced API services in
 #: gco-system) or must never mutate (model pods in gco-inference).
 #: Application Signals auto-monitor in the CloudWatch Observability add-on
@@ -1146,6 +1179,7 @@ class GCORegionalStack(Stack):
         # replacements in the KubectlApplyManifests CustomResource).
         self.cluster_shared_identity = self._resolve_cluster_shared_bucket_from_ssm()
         self._grant_cluster_shared_bucket_to_job_role(self.cluster_shared_identity)
+        self._grant_model_bucket_read_to_job_role()
 
         # MLflow artifact storage: a dedicated OIDC-only IRSA role for the
         # tracking server's service account, scoped to the mlflow-artifacts/
@@ -1403,18 +1437,16 @@ class GCORegionalStack(Stack):
         replicate by the time any ``AwsCustomResource`` actually fires —
         the race disappears entirely.
 
-        This method creates the role with the statements we can compute
+        This method creates the role with the one statement we can compute
         without a cluster reference (EKS ``UpdateAddon`` / ``DescribeAddon``
-        scoped to this cluster, and SSM ``GetParameter`` for the endpoint
-        group ARN). ``iam:PassRole`` statements for individual addon
-        roles (EFS CSI, FSx CSI, CloudWatch Observability) are appended
-        by each ``_create_*_addon`` method after the corresponding IRSA
-        role has been created, so every PassRole ``resources=`` list
-        stays precise (no wildcards) and cdk-nag stays happy.
+        scoped to this cluster). Every other statement is appended next to
+        the custom resource that needs it, each on an exact ARN: an
+        ``ssm:GetParameter`` per global-region parameter a reader resolves
+        (``_grant_custom_resource_parameter_read``), and the ``iam:PassRole``
+        statements for individual addon roles (EFS CSI, FSx CSI, CloudWatch
+        Observability), appended by each ``_create_*_addon`` method after the
+        corresponding IRSA role has been created.
         """
-        project_name = self.config.get_project_name()
-        global_region = self.config.get_global_region()
-
         self.aws_custom_resource_role = iam.Role(
             self,
             "AwsCustomResourceRole",
@@ -1447,41 +1479,15 @@ class GCORegionalStack(Stack):
             )
         )
 
-        # SSM GetParameter — used by the GetEndpointGroupArn custom
-        # resource in _create_ga_registration_lambda to read the ARN of
-        # the Global Accelerator endpoint group published by the global
-        # stack during its deploy.
-        self.aws_custom_resource_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["ssm:GetParameter"],
-                resources=[
-                    f"arn:{self.partition}:ssm:{global_region}:{self.account}:"
-                    f"parameter/{project_name}/*"
-                ],
-            )
-        )
-
-        # cdk-nag suppressions: the two wildcard-bearing ARNs above are
-        # intentional and both scoped as tightly as AWS IAM permits.
-        #
-        # - The ``eks:UpdateAddon`` / ``eks:DescribeAddon`` statement uses
-        #   ``addon/<cluster>/*`` as its resource because the same shared
-        #   role is consumed by three different updateAddon custom
-        #   resources (EFS CSI, FSx CSI, CloudWatch Observability). Each
-        #   addon has its own ARN and we'd otherwise need three separate
-        #   statements that each grant access to a known addon name. The
-        #   wildcard is scoped to a single cluster in a single region in
-        #   a single account — it cannot be used against any addon
-        #   belonging to a different cluster or a different service.
-        #
-        # - The ``ssm:GetParameter`` statement uses
-        #   ``parameter/<project>/*`` because the exact parameter name
-        #   (``endpoint-group-<region>-arn``) is only known at Global
-        #   Accelerator registration time and the endpoint path
-        #   structure is ``<project>/<parameter>``. Scoping to the
-        #   project prefix restricts access to parameters owned by this
-        #   project only.
+        # cdk-nag: the ``eks:UpdateAddon`` / ``eks:DescribeAddon`` statement
+        # uses ``addon/<cluster>/*`` as its resource because the same shared
+        # role is consumed by three different updateAddon custom resources
+        # (EFS CSI, FSx CSI, CloudWatch Observability). Each addon has its
+        # own ARN and we'd otherwise need three separate statements that each
+        # grant access to a known addon name. The wildcard is scoped to a
+        # single cluster in a single region in a single account — it cannot
+        # be used against any addon belonging to a different cluster or a
+        # different service.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -1491,14 +1497,11 @@ class GCORegionalStack(Stack):
                     "id": "AwsSolutions-IAM5",
                     "reason": (
                         "Scoped to a single EKS cluster's addons "
-                        "(addon/<cluster>/*) and this project's SSM "
-                        "parameters (parameter/<project>/*). Both wildcards "
-                        "are as tight as AWS IAM permits: addon names and "
-                        "parameter names are not known at stack synthesis "
-                        "time because the addons are created later in the "
-                        "same stack and the GA endpoint group ARN is "
-                        "published by a separate stack during deploy. The "
-                        "shared role pattern itself is deliberate — see "
+                        "(addon/<cluster>/*): the three updateAddon custom "
+                        "resources share this role and the addons are created "
+                        "later in the same stack. Every SSM read on the role "
+                        "names its exact parameter ARN. The shared role pattern "
+                        "itself is deliberate — see "
                         "_create_aws_custom_resource_role docstring for why "
                         "we pre-create instead of letting CDK auto-generate "
                         "per-CR roles."
@@ -1506,11 +1509,29 @@ class GCORegionalStack(Stack):
                     "appliesTo": [
                         f"Resource::arn:<AWS::Partition>:eks:{self.deployment_region}"
                         f":<AWS::AccountId>:addon/{self.cluster_config.cluster_name}/*",
-                        f"Resource::arn:<AWS::Partition>:ssm:{global_region}"
-                        f":<AWS::AccountId>:parameter/{project_name}/*",
                     ],
                 },
             ],
+        )
+
+    def _grant_custom_resource_parameter_read(self, parameter_name: str) -> None:
+        """Let the shared custom-resource role read one global-region parameter.
+
+        Every ``AwsCustomResource`` that calls ``SSM getParameter`` runs as
+        ``aws_custom_resource_role`` and reads a parameter another stack
+        publishes in the global region under a name known at synthesis, so
+        each reader grants itself exactly that ARN instead of the role
+        holding a wildcard over the project's (or every) parameter.
+        """
+        self.aws_custom_resource_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:{self.partition}:ssm:{self.config.get_global_region()}:"
+                    f"{self.account}:parameter{parameter_name}"
+                ],
+            )
         )
 
     def _resolve_backend_tls_certificate_arn(self) -> str:
@@ -1519,13 +1540,14 @@ class GCORegionalStack(Stack):
         The certificate manager publishes one fixed ARN per workload region.
         The regional Ingress consumes the token directly, which creates a
         CloudFormation dependency ensuring the certificate exists before the
-        HTTPS listener is reconciled. The shared custom-resource role is
-        already restricted to this project's SSM namespace.
+        HTTPS listener is reconciled. The shared custom-resource role reads
+        exactly this parameter.
         """
         project_name = self.config.get_project_name()
         parameter_name = backend_tls_certificate_arn_parameter_name(
             project_name, self.deployment_region
         )
+        self._grant_custom_resource_parameter_read(parameter_name)
         reader = cr.AwsCustomResource(
             self,
             "GetBackendTlsCertificateArn",
@@ -1849,24 +1871,10 @@ class GCORegionalStack(Stack):
             secrets_encryption_key=self.eks_encryption_key,
         )
 
-        # The EKS cluster security group's auto-generated ingress rule allows
-        # 443 from the VPC CIDR, expressed as a CloudFormation token. cdk-nag's
-        # SG-ingress rules can't resolve the token and throw; scope the
-        # acknowledgment to the cluster construct so it can't mask an
-        # open-ingress finding elsewhere in the stack.
-        from gco.stacks.nag_suppressions import acknowledge_security_group_cidr_findings
-
-        acknowledge_security_group_cidr_findings(
-            self.cluster,
-            reason=(
-                "The EKS Auto Mode cluster security group allows HTTPS (443) "
-                "ingress from the VPC CIDR only, referenced via an "
-                "``Fn::GetAtt`` token that cdk-nag cannot resolve at synth "
-                "time. Ingress is restricted to intra-VPC traffic, the "
-                "tightest possible source for the Kubernetes API and webhook "
-                "endpoints."
-            ),
-        )
+        # Every ingress rule GCO adds to the EKS cluster security group names a
+        # source security group (the kubectl-applier, Helm installer and GA
+        # registration Lambdas', HyperPod's), never a CIDR, so cdk-nag's
+        # SG-ingress rules evaluate them and need no acknowledgment here.
 
         # Auto Mode comes with essential addons pre-configured:
         # - AWS Load Balancer Controller (for ALB/NLB integration)
@@ -2652,17 +2660,30 @@ class GCORegionalStack(Stack):
         processor role. Job and inference workload service accounts must never
         receive queue-table mutation privileges; only the platform API/worker
         identity can claim, fence, or transition centralized queue records.
+
+        The inference monitor has its own role for the same reason: it writes
+        the inference endpoints table, and every job and model pod runs as
+        ``gco-service-account``, so a shared role would let any of them
+        rewrite endpoint desired state.
         """
+        # User job and model pods: gco-service-account exists only in these
+        # two namespaces (01-serviceaccounts.yaml).
         self.service_account_role = GCORegionalStack._create_irsa_role(
             self,
             "ServiceAccountRole",
             oidc_provider_arn=self.oidc_provider.open_id_connect_provider_arn,
             oidc_issuer_url=self.cluster.cluster_open_id_connect_issuer_url,
-            service_account_names=[
-                "gco-service-account",
-                "gco-inference-monitor-sa",
-            ],
-            namespaces=["gco-system", "gco-jobs", "gco-inference"],
+            service_account_names=["gco-service-account"],
+            namespaces=["gco-jobs", "gco-inference"],
+        )
+
+        self.inference_monitor_role = GCORegionalStack._create_irsa_role(
+            self,
+            "InferenceMonitorRole",
+            oidc_provider_arn=self.oidc_provider.open_id_connect_provider_arn,
+            oidc_issuer_url=self.cluster.cluster_open_id_connect_issuer_url,
+            service_account_names=["gco-inference-monitor-sa"],
+            namespaces=["gco-system"],
         )
 
         self.manifest_processor_role = GCORegionalStack._create_irsa_role(
@@ -2926,23 +2947,15 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # The inference monitor still owns desired-state reconciliation, but
-        # this shared role intentionally has no jobs-table ARN.
-        self.service_account_role.add_to_policy(
+        # The inference monitor reconciles endpoint desired state. These are
+        # exactly the calls its InferenceEndpointStore methods make (scan the
+        # table, read one record, conditional updates and the final delete);
+        # creation belongs to the CLI, and the table has no secondary index.
+        self.inference_monitor_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=[
-                    "dynamodb:GetItem",
-                    "dynamodb:PutItem",
-                    "dynamodb:UpdateItem",
-                    "dynamodb:DeleteItem",
-                    "dynamodb:Query",
-                    "dynamodb:Scan",
-                ],
-                resources=[
-                    f"{manifest_table_prefix}-inference-endpoints",
-                    f"{manifest_table_prefix}-inference-endpoints/index/*",
-                ],
+                actions=list(INFERENCE_MONITOR_TABLE_ACTIONS),
+                resources=[f"{manifest_table_prefix}-inference-endpoints"],
             )
         )
         acknowledge_nag_findings(
@@ -2993,11 +3006,16 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
+                        "The workload role has three Resource:* statements. "
                         "cloudwatch:PutMetricData does not support resource-level "
-                        "scoping and requires Resource:*. The statement is "
-                        "constrained by a StringEquals condition to exactly one "
-                        "configured workload metric namespace, matching the "
-                        "namespace-conditioned metrics grants on the platform roles."
+                        "scoping; it is constrained by a StringEquals condition to "
+                        "exactly one configured workload metric namespace, matching "
+                        "the namespace-conditioned metrics grants on the platform "
+                        "roles. The two KMS statements cover the cluster-shared and "
+                        "model weights buckets, whose keys live in the global stack "
+                        "and are not exported: each is limited by kms:ViaService to "
+                        "S3 in the bucket's region and by kms:EncryptionContext:aws:s3:arn "
+                        "to that one bucket."
                     ),
                     "appliesTo": ["Resource::*"],
                 }
@@ -3043,34 +3061,12 @@ class GCORegionalStack(Stack):
                 )
             )
 
-        # Add S3 permissions for model weights bucket (used by inference init containers)
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "s3:GetObject",
-                    "s3:ListBucket",
-                ],
-                resources=[
-                    f"arn:{self.partition}:s3:::{project_name}-*",
-                    f"arn:{self.partition}:s3:::{project_name}-*/*",
-                ],
-            )
-        )
-
-        # KMS decrypt for model weights bucket (S3-scoped)
-        self.service_account_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["kms:Decrypt", "kms:GenerateDataKey"],
-                resources=[f"arn:{self.partition}:kms:*:{self.account}:key/*"],
-                conditions={
-                    "StringLike": {
-                        "kms:ViaService": f"s3.*.{self.url_suffix}",
-                    }
-                },
-            )
-        )
+        # S3 access is granted per bucket, never by name prefix: the model
+        # weights bucket (read, _grant_model_bucket_read_to_job_role), the
+        # cluster-shared bucket and this region's regional-shared bucket (read
+        # and write). Those are the buckets docs/ and examples/ point jobs and
+        # model pods at; every other <project>-* bucket (access logs, cost
+        # reports, the analytics Studio bucket) is out of the pods' reach.
 
         # Create KEDA operator IAM role for SQS access
         self._create_keda_operator_role()
@@ -3313,17 +3309,16 @@ class GCORegionalStack(Stack):
         )
         self._pod_identity_associations.append(inference_proxy_assoc)
 
-        # Inference monitor — reconciles endpoints with the shared platform
-        # role (its IRSA subject is already in that role's trust policy).
-        # Every other platform Deployment gets both credential paths; this one
-        # had only the IRSA annotation.
+        # Inference monitor — reconciles endpoints with its own role (endpoint
+        # table writes and the cold-tier bucket lookup), which no job or model
+        # pod can assume.
         inference_monitor_assoc = eks_l1.CfnPodIdentityAssociation(
             self,
             "PodIdentity-inference-monitor",
             cluster_name=self.cluster.cluster_name,
             namespace="gco-system",
             service_account="gco-inference-monitor-sa",
-            role_arn=self.service_account_role.role_arn,
+            role_arn=self.inference_monitor_role.role_arn,
         )
         self._pod_identity_associations.append(inference_monitor_assoc)
 
@@ -3412,14 +3407,13 @@ class GCORegionalStack(Stack):
             :class:`SharedBucketIdentity` with ``name``, ``arn``, and
             ``region`` populated as CDK tokens that resolve at deploy time.
         """
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
         global_region = self.config.get_global_region()
         cluster_shared_prefix = cluster_shared_ssm_parameter_prefix(self.config.get_project_name())
         resolved: dict[str, str] = {}
 
         for suffix in ("name", "arn", "region"):
             parameter_name = f"{cluster_shared_prefix}/{suffix}"
+            self._grant_custom_resource_parameter_read(parameter_name)
             read_cr = cr.AwsCustomResource(
                 self,
                 f"ReadClusterSharedBucket{suffix.capitalize()}",
@@ -3437,43 +3431,12 @@ class GCORegionalStack(Stack):
                     region=global_region,
                     physical_resource_id=cr.PhysicalResourceId.of(f"cluster-shared-{suffix}"),
                 ),
-                # Cross-region SSM GetParameter doesn't support resource-level
-                # scoping cleanly — the principal evaluating the call lives in
-                # this stack's region but the parameter lives in the global
-                # region. ANY_RESOURCE is the AWS-documented escape hatch; the
-                # resulting AwsSolutions-IAM5 nag finding is suppressed in a
-                # scoped add_resource_suppressions call below.
-                policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
-                    resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
-                ),
+                # The parameter's ARN is fully known (global region, this
+                # account, a literal name), so the shared role's grant above
+                # names it exactly; a cross-region read needs nothing more.
+                role=self.aws_custom_resource_role,
             )
-
-            # Scoped suppression: the CR policy is Resource::* because the
-            # SSM parameter lives in the global region (cross-region calls
-            # don't support resource-level scoping cleanly). The action is
-            # fixed to ssm:GetParameter and the parameter Name is fixed to
-            # a literal string, so the wildcard can only ever read one
-            # parameter.
-            acknowledge_nag_findings(
-                read_cr,
-                [
-                    {
-                        "id": "AwsSolutions-IAM5",
-                        "reason": (
-                            "Cross-region ssm:GetParameter for "
-                            f"{parameter_name} in the global region. The "
-                            "AwsCustomResource SDK-call policy is scoped to "
-                            "a single fixed action (ssm:GetParameter) with "
-                            "a fixed parameter Name — the Resource: * is "
-                            "the CDK-documented escape hatch because the "
-                            "parameter ARN is not known to the calling "
-                            "principal's region. Effective blast radius: "
-                            "one parameter."
-                        ),
-                        "appliesTo": ["Resource::*"],
-                    },
-                ],
-            )
+            read_cr.node.add_dependency(self.aws_custom_resource_role)
 
             resolved[suffix] = read_cr.get_response_field("Parameter.Value")
 
@@ -3487,20 +3450,22 @@ class GCORegionalStack(Stack):
         """Attach RW + KMS permissions on ``Cluster_Shared_Bucket`` to the job-pod role.
 
         Two ``iam.PolicyStatement``s are added to ``self.service_account_role``
-        (the EKS Pod Identity role used by every pod in ``gco-jobs``,
-        ``gco-system``, and ``gco-inference``):
+        (the role ``gco-service-account`` assumes in ``gco-jobs`` and
+        ``gco-inference``, through IRSA or EKS Pod Identity):
 
         1. S3 object + bucket-level actions (``GetObject``, ``PutObject``,
            ``DeleteObject``, ``ListBucket``, ``GetBucketLocation``) scoped
            to ``<shared.arn>`` and ``<shared.arn>/*`` — the literal ARN
            resolved from SSM (the bucket's name is CloudFormation-generated,
            so no prefix pattern is involved).
-        2. KMS ``Decrypt`` / ``GenerateDataKey`` scoped by the
-           ``kms:ViaService=s3.<shared.region>.<AWS::URLSuffix>`` condition —
+        2. KMS ``Decrypt`` / ``GenerateDataKey`` scoped by two conditions —
+           ``kms:ViaService=s3.<shared.region>.<AWS::URLSuffix>`` and
+           ``kms:EncryptionContext:aws:s3:arn`` naming the bucket (the context
+           S3 sends with a bucket key) or one of its objects (without one).
            ``resources=["*"]`` because the KMS key ARN is not known to this
            stack (it lives in the global region and is referenced indirectly
-           through the S3 service). The condition is what actually restricts
-           the grant to the cluster-shared bucket's key.
+           through the S3 service); the conditions restrict the grant to S3's
+           use of the cluster-shared bucket's key for this bucket alone.
 
         Runs unconditionally — the grant is
         present on every regional cluster whether or not analytics is
@@ -3527,11 +3492,9 @@ class GCORegionalStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["kms:Decrypt", "kms:GenerateDataKey"],
                 resources=["*"],
-                conditions={
-                    "StringEquals": {
-                        "kms:ViaService": f"s3.{shared.region}.{self.url_suffix}",
-                    }
-                },
+                conditions=_s3_bucket_kms_conditions(
+                    region=shared.region, bucket_arn=shared.arn, url_suffix=self.url_suffix
+                ),
             )
         )
 
@@ -3539,7 +3502,7 @@ class GCORegionalStack(Stack):
         # uses ``/*`` for object keys within the single resolved shared bucket.
         # KMS uses ``Resource::*`` because the global key ARN is not exported to
         # this stack; ``kms:ViaService`` confines its use to S3 in the bucket's
-        # region, while the S3 statements separately scope accessible objects.
+        # region and the encryption context to this bucket.
         acknowledge_nag_findings(
             self.service_account_role,
             [
@@ -3550,12 +3513,96 @@ class GCORegionalStack(Stack):
                         "an <arn>/* object-key suffix on the single shared bucket resolved "
                         "from SSM, and KMS Resource::* because the global key ARN is not "
                         "exported. KMS use is constrained by kms:ViaService to S3 in the "
-                        "bucket's region, and S3 access is separately limited to the "
-                        "allowed bucket ARNs."
+                        "bucket's region and by kms:EncryptionContext:aws:s3:arn to this "
+                        "bucket, and S3 access is separately limited to the bucket ARNs."
                     ),
                     "appliesTo": [
                         "Resource::*",
                         "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",
+                    ],
+                },
+            ],
+        )
+
+    def _grant_model_bucket_read_to_job_role(self) -> None:
+        """Let job and model pods read the model weights bucket, and only that bucket.
+
+        ``gco inference deploy --model-source`` adds a ``model-sync`` init
+        container that runs ``aws s3 sync`` from the model registry as the
+        pod's ``gco-service-account``. The bucket lives in ``GCOGlobalStack``
+        under a CloudFormation-generated name published at
+        ``/<project>/model-bucket-name`` in the global region, so it is read
+        back through the shared ``AwsCustomResource`` role like the
+        cluster-shared bucket's identity.
+
+        Two statements, read-only: ``s3:GetObject`` / ``s3:ListBucket`` on the
+        bucket and its objects, and ``kms:Decrypt`` through S3 in the global
+        region for this bucket's encryption context (its key is not exported).
+        """
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        project_name = self.config.get_project_name()
+        global_region = self.config.get_global_region()
+        parameter_name = f"/{project_name}/model-bucket-name"
+        self._grant_custom_resource_parameter_read(parameter_name)
+        reader = cr.AwsCustomResource(
+            self,
+            "ReadModelBucketName",
+            on_create=cr.AwsSdkCall(
+                service="SSM",
+                action="getParameter",
+                parameters={"Name": parameter_name},
+                region=global_region,
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{project_name}-model-bucket-name-{self.deployment_region}"
+                ),
+            ),
+            on_update=cr.AwsSdkCall(
+                service="SSM",
+                action="getParameter",
+                parameters={"Name": parameter_name},
+                region=global_region,
+            ),
+            role=self.aws_custom_resource_role,
+        )
+        reader.node.add_dependency(self.aws_custom_resource_role)
+        bucket_arn = f"arn:{self.partition}:s3:::{reader.get_response_field('Parameter.Value')}"
+
+        self.service_account_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["s3:GetObject", "s3:ListBucket"],
+                resources=[bucket_arn, f"{bucket_arn}/*"],
+            )
+        )
+        self.service_account_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["kms:Decrypt"],
+                resources=["*"],
+                conditions=_s3_bucket_kms_conditions(
+                    region=global_region, bucket_arn=bucket_arn, url_suffix=self.url_suffix
+                ),
+            )
+        )
+
+        reader_id = self.get_logical_id(
+            cast(CfnElement, reader.node.find_child("Resource").node.default_child)
+        )
+        acknowledge_nag_findings(
+            self.service_account_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The model weights read grant needs an <arn>/* object-key "
+                        "suffix on the single model bucket resolved from SSM; its KMS "
+                        "Resource::* is limited by kms:ViaService and the bucket's "
+                        "encryption context (the global key ARN is not exported)."
+                    ),
+                    "appliesTo": [
+                        "Resource::*",
+                        f"Resource::arn:<AWS::Partition>:s3:::<{reader_id}.Parameter.Value>/*",
                     ],
                 },
             ],
@@ -3977,11 +4024,11 @@ class GCORegionalStack(Stack):
         )
 
     def _grant_regional_shared_bucket_to_service_account(self) -> None:
-        """Attach RW + KMS + discovery permissions on the regional bucket to the pod role.
+        """Attach RW + KMS on the regional bucket to the pod role, discovery to the monitor.
 
-        Three ``iam.PolicyStatement``s are added to ``self.service_account_role``
-        (the EKS Pod Identity role used by every pod in ``gco-jobs``,
-        ``gco-system``, and ``gco-inference``):
+        Two ``iam.PolicyStatement``s are added to ``self.service_account_role``
+        (the role ``gco-service-account`` assumes in ``gco-jobs`` and
+        ``gco-inference``):
 
         1. S3 object + bucket-level actions (``GetObject``, ``PutObject``,
            ``DeleteObject``, ``ListBucket``, ``GetBucketLocation``) scoped to
@@ -3990,22 +4037,25 @@ class GCORegionalStack(Stack):
         2. KMS ``Decrypt`` / ``Encrypt`` / ``GenerateDataKey`` /
            ``DescribeKey`` scoped to the literal ``regional_shared_kms_key``
            ARN — and to no other key.
-        3. ``ssm:GetParameter`` on the literal ARN of the bucket's ``/name``
-           discovery parameter. The inference monitor runs under this role and
-           resolves the Mooncake cold-tier bucket from that parameter at
-           reconcile time (``_resolve_regional_shared_bucket``); without the
-           grant every cold-tier endpoint reads ``AccessDenied`` and the tier
-           is dropped.
+
+        One more goes to ``self.inference_monitor_role``: ``ssm:GetParameter``
+        on the literal ARN of the bucket's ``/name`` discovery parameter. The
+        monitor resolves the Mooncake cold-tier bucket from that parameter at
+        reconcile time (``_resolve_regional_shared_bucket``); without the grant
+        every cold-tier endpoint reads ``AccessDenied`` and the tier is
+        dropped. Pods read the bucket's name from the
+        ``gco-regional-shared-bucket`` ConfigMap instead, so the pod role has
+        no SSM grant.
 
         Because all three resources are local constructs in this stack, each
-        ARN is a concrete reference rather than a wildcard, so the role gains
+        ARN is a concrete reference rather than a wildcard, so the roles gain
         access to precisely this bucket, this key, and this parameter. The grant
         runs unconditionally as part of provisioning the always-on regional
         bucket.
         """
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        self.service_account_role.add_to_policy(
+        self.inference_monitor_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParameter"],
@@ -4135,20 +4185,16 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Add EKS permissions
+        # The handler's only EKS call is DescribeCluster (endpoint and CA for
+        # its kubeconfig); it authenticates to Kubernetes with a presigned
+        # sts:GetCallerIdentity URL, which needs no IAM permission, and its
+        # Kubernetes rights come from the access entry below. It assumes no
+        # other role.
         kubectl_lambda_role.add_to_policy(
             iam.PolicyStatement(
-                actions=[
-                    "eks:DescribeCluster",
-                    "eks:ListClusters",
-                ],
+                actions=["eks:DescribeCluster"],
                 resources=[self.cluster.cluster_arn],
             )
-        )
-
-        # Add permissions to assume cluster admin role
-        kubectl_lambda_role.add_to_policy(
-            iam.PolicyStatement(actions=["sts:AssumeRole"], resources=["*"])
         )
 
         # Allow the convergence apply tasks to record per-phase status to SSM
@@ -4227,8 +4273,9 @@ class GCORegionalStack(Stack):
         # invoked directly by the convergence state machine (the base and
         # post-Helm apply tasks), not through a CloudFormation custom resource.
 
-        # cdk-nag suppression: the kubectl-applier Lambda requires broad
-        # EKS and Kubernetes API access to apply arbitrary manifests.
+        # cdk-nag: the role's only Resource:* statement is the X-Ray
+        # write grant CDK adds for active tracing. Kubernetes access comes
+        # from the EKS access entry above, not from IAM.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -4237,11 +4284,12 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The kubectl-applier Lambda requires broad EKS and Kubernetes API "
-                        "access to apply arbitrary manifests (RBAC, ServiceAccounts, "
-                        "Deployments, Jobs, NetworkPolicies) across multiple namespaces. "
-                        "Resource: * is required because the set of Kubernetes resources "
-                        "is dynamic and not known at synth time."
+                        "The only Resource:* statement is xray:PutTraceSegments and "
+                        "xray:PutTelemetryRecords, which CDK adds for active Lambda "
+                        "tracing and X-Ray grants only on Resource:*. EKS access is "
+                        "DescribeCluster on this cluster's ARN, SSM writes are limited "
+                        "to /<project>/addons/*, and the Kubernetes permissions come "
+                        "from the cluster access entry rather than IAM."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
@@ -4325,6 +4373,7 @@ class GCORegionalStack(Stack):
             "{{REGION}}": self.deployment_region,
             "{{AUTH_SECRET_ARN}}": self.auth_secret_arn,
             "{{SERVICE_ACCOUNT_ROLE_ARN}}": self.service_account_role.role_arn,
+            "{{INFERENCE_MONITOR_ROLE_ARN}}": self.inference_monitor_role.role_arn,
             "{{MANIFEST_PROCESSOR_ROLE_ARN}}": self.manifest_processor_role.role_arn,
             "{{INFERENCE_PROXY_ROLE_ARN}}": self.inference_proxy_role.role_arn,
             "{{HEALTH_MONITOR_ROLE_ARN}}": self.health_monitor_role.role_arn,
@@ -4893,6 +4942,10 @@ class GCORegionalStack(Stack):
                 converge_trigger.node.add_dependency(access_entry)
         for assoc in self._pod_identity_associations:
             converge_trigger.node.add_dependency(assoc)
+        # The base pass rolls the inference monitor onto its own role; the
+        # role's policy (a separate resource the ARN token does not order)
+        # must exist before the new pods first reconcile.
+        converge_trigger.node.add_dependency(self.inference_monitor_role)
 
         # Deletion must run in the opposite safety order: synchronous Helm
         # teardown first (quiescing endpoint writers and removing Gateway
@@ -4910,6 +4963,23 @@ class GCORegionalStack(Stack):
                 helm_teardown.node.add_dependency(converge_trigger)
         elif ga_deregistration is not None:
             ga_deregistration.node.add_dependency(converge_trigger)
+
+    def _alb_hostname_parameter_arn(self) -> str:
+        """ARN of this Region's endpoint-registry parameter in the global region."""
+        return (
+            f"arn:{self.partition}:ssm:{self.config.get_global_region()}:{self.account}:"
+            f"parameter/{self.config.get_project_name()}/alb-hostname-{self.deployment_region}"
+        )
+
+    @staticmethod
+    def _global_accelerator_resource_arns(endpoint_group_arn: str) -> list[str]:
+        """The endpoint group and its accelerator, the GA resources one Region touches.
+
+        Endpoint-group actions authorize against the endpoint group's ARN and
+        DescribeAccelerator against the accelerator's, which is the endpoint
+        group ARN up to ``/listener/`` (the handler derives it the same way).
+        """
+        return [endpoint_group_arn, Fn.select(0, Fn.split("/listener/", endpoint_group_arn))]
 
     def _create_ga_registration_lambda(self) -> None:
         """Create the exact Gateway ALB discovery and endpoint-publication Lambda.
@@ -4957,30 +5027,13 @@ class GCORegionalStack(Stack):
                 resources=["*"],
             )
         )
-        if self.global_accelerator_enabled:
-            ga_registration_lambda.add_to_role_policy(
-                iam.PolicyStatement(
-                    effect=iam.Effect.ALLOW,
-                    actions=[
-                        "globalaccelerator:AddEndpoints",
-                        "globalaccelerator:RemoveEndpoints",
-                        "globalaccelerator:UpdateEndpointGroup",
-                        "globalaccelerator:DescribeEndpointGroup",
-                        # Registration and teardown both read the accelerator
-                        # status to poll for DEPLOYED after an endpoint change.
-                        "globalaccelerator:DescribeAccelerator",
-                    ],
-                    resources=["*"],
-                )
-            )
+        # The endpoint registry is one parameter per Region, written on
+        # registration and removed on cleanup; the handler never reads it.
         ga_registration_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=["ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter"],
-                resources=[
-                    f"arn:{self.partition}:ssm:{self.config.get_global_region()}:"
-                    f"{self.account}:parameter/{project_name}/*"
-                ],
+                actions=["ssm:PutParameter", "ssm:DeleteParameter"],
+                resources=[self._alb_hostname_parameter_arn()],
             )
         )
 
@@ -4999,9 +5052,11 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Allow Lambda to access EKS API
+        # Allow the Lambda (and only the Lambda) to reach the EKS API: its
+        # CDK-created security group is the source, like the kubectl-applier
+        # and Helm installer rules, not the whole VPC CIDR.
         self.cluster.cluster_security_group.add_ingress_rule(
-            peer=ec2.Peer.ipv4(self.vpc.vpc_cidr_block),
+            peer=ga_registration_lambda.connections.security_groups[0],
             connection=ec2.Port.tcp(443),
             description="Allow GA registration Lambda to access EKS API",
         )
@@ -5012,6 +5067,9 @@ class GCORegionalStack(Stack):
         self.endpoint_group_arn: str | None = None
         if self.global_accelerator_enabled:
             global_region = self.config.get_global_region()
+            self._grant_custom_resource_parameter_read(
+                f"/{project_name}/endpoint-group-{self.deployment_region}-arn"
+            )
             get_endpoint_group_arn = cr.AwsCustomResource(
                 self,
                 "GetEndpointGroupArn",
@@ -5038,12 +5096,27 @@ class GCORegionalStack(Stack):
             )
             get_endpoint_group_arn.node.add_dependency(self.aws_custom_resource_role)
             self.endpoint_group_arn = get_endpoint_group_arn.get_response_field("Parameter.Value")
+            ga_registration_lambda.add_to_role_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "globalaccelerator:AddEndpoints",
+                        "globalaccelerator:RemoveEndpoints",
+                        "globalaccelerator:UpdateEndpointGroup",
+                        "globalaccelerator:DescribeEndpointGroup",
+                        # Registration and teardown both read the accelerator
+                        # status to poll for DEPLOYED after an endpoint change.
+                        "globalaccelerator:DescribeAccelerator",
+                    ],
+                    resources=self._global_accelerator_resource_arns(self.endpoint_group_arn),
+                )
+            )
 
         # Invoked directly by the convergence state machine's final task.
         self.ga_registration_lambda = ga_registration_lambda
 
-        # cdk-nag suppression: the GA registration Lambda needs broad
-        # Global Accelerator and ELB Describe access with Resource: *.
+        # cdk-nag: ELB Describe access and the tracing grant are the role's
+        # only Resource:* statements.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -5052,10 +5125,13 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The endpoint-publication Lambda needs ELB Describe access to "
-                        "resolve the exact Gateway-owned ALB. In partitions with Global "
-                        "Accelerator it also needs the service's endpoint-group mutation "
-                        "APIs. These APIs do not support resource-level scoping."
+                        "The endpoint-publication Lambda needs "
+                        "elasticloadbalancing:DescribeLoadBalancers and DescribeTags to "
+                        "resolve the exact Gateway-owned ALB; neither supports "
+                        "resource-level permissions. The other Resource:* actions are "
+                        "the X-Ray writes CDK adds for active tracing. Global Accelerator "
+                        "access is limited to this Region's endpoint group and its "
+                        "accelerator, and SSM to this Region's endpoint-registry parameter."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
@@ -5091,7 +5167,7 @@ class GCORegionalStack(Stack):
             memory_size=256,
             tracing=lambda_.Tracing.ACTIVE,
         )
-        if self.global_accelerator_enabled:
+        if self.endpoint_group_arn is not None:
             ga_deregistration_lambda.add_to_role_policy(
                 iam.PolicyStatement(
                     effect=iam.Effect.ALLOW,
@@ -5101,7 +5177,7 @@ class GCORegionalStack(Stack):
                         "globalaccelerator:RemoveEndpoints",
                         "globalaccelerator:UpdateEndpointGroup",
                     ],
-                    resources=["*"],
+                    resources=self._global_accelerator_resource_arns(self.endpoint_group_arn),
                 )
             )
 
@@ -5109,10 +5185,7 @@ class GCORegionalStack(Stack):
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:DeleteParameter"],
-                resources=[
-                    f"arn:{self.partition}:ssm:{self.config.get_global_region()}:{self.account}:"
-                    f"parameter/{project_name}/alb-hostname-{self.deployment_region}"
-                ],
+                resources=[self._alb_hostname_parameter_arn()],
             )
         )
 
@@ -5156,9 +5229,7 @@ class GCORegionalStack(Stack):
         ga_deregistration.node.add_dependency(self.vpc)
         ga_deregistration.node.add_dependency(ga_deregistration_log_group)
 
-        # cdk-nag: the deregistration Lambda needs globalaccelerator Describe*/
-        # RemoveEndpoints with Resource: * (these Global Accelerator APIs do not
-        # support resource-level IAM scoping), mirroring the registration Lambda.
+        # cdk-nag: the tracing grant is the role's only Resource:* statement.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -5167,10 +5238,11 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "Where Global Accelerator is enabled, the delete guard needs its "
-                        "Describe and endpoint-group mutation APIs to release managed ENIs. "
-                        "Those APIs do not support resource-level IAM scoping; non-GA "
-                        "partitions receive no Global Accelerator actions."
+                        "The only Resource:* actions are the X-Ray writes CDK adds for "
+                        "active tracing. Where Global Accelerator is enabled, the delete "
+                        "guard's Global Accelerator actions are limited to this Region's "
+                        "endpoint group and its accelerator, and its SSM delete to this "
+                        "Region's endpoint-registry parameter."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
@@ -5888,10 +5960,12 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Add EKS permissions
+        # DescribeCluster (endpoint and CA for the kubeconfig) is the
+        # handler's only EKS call; Kubernetes rights come from the access
+        # entry below and the token is a presigned sts:GetCallerIdentity URL.
         helm_lambda_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["eks:DescribeCluster", "eks:ListClusters"],
+                actions=["eks:DescribeCluster"],
                 resources=[self.cluster.cluster_arn],
             )
         )
@@ -6297,11 +6371,12 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The Helm installer Lambda requires broad EKS and Kubernetes API "
-                        "access to install Helm charts (KEDA, NVIDIA DRA, etc.) that create "
-                        "CRDs, RBAC rules, and workloads across multiple namespaces. "
-                        "Resource: * is required because the set of Kubernetes resources "
-                        "is dynamic and not known at synth time."
+                        "The only Resource:* statement is xray:PutTraceSegments and "
+                        "xray:PutTelemetryRecords, which CDK adds for active Lambda "
+                        "tracing and X-Ray grants only on Resource:*. EKS access is "
+                        "DescribeCluster on this cluster's ARN, SSM writes are limited "
+                        "to /<project>/addons/*, and the Kubernetes permissions the "
+                        "charts need come from the cluster access entry rather than IAM."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
@@ -7602,18 +7677,30 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # CloudFormation drift APIs operate at the stack level; the API does
-        # not support resource-level ARN scoping for these actions, so we scope
-        # to this stack's ARN where supported and accept "*" where not.
+        # The documented drift-detection permissions ("Considerations when
+        # detecting drift"): the stack-level actions on this stack's own ARN,
+        # and the two actions without resource-level permissions on "*".
+        # CloudFormation also reads every resource with these credentials;
+        # those reads are attached once the stack's resources exist, below.
         drift_lambda_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=[
                     "cloudformation:DetectStackDrift",
-                    "cloudformation:DescribeStackDriftDetectionStatus",
+                    "cloudformation:DetectStackResourceDrift",
                     "cloudformation:DescribeStackResourceDrifts",
                     "cloudformation:DescribeStackResource",
                     "cloudformation:DescribeStackResources",
+                ],
+                resources=[self.stack_id],
+            )
+        )
+        drift_lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "cloudformation:DescribeStackDriftDetectionStatus",
+                    "cloudformation:BatchDescribeTypeConfigurations",
                 ],
                 resources=["*"],
             )
@@ -7716,21 +7803,98 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "CloudFormation drift detection APIs (DetectStackDrift, "
-                        "DescribeStackDriftDetectionStatus, "
-                        "DescribeStackResourceDrifts) cannot be scoped to a "
-                        "specific stack resource via IAM; the action-level "
-                        "scoping requires wildcard resources. The Lambda's "
-                        "environment pins it to a single stack name, so the "
-                        "effective blast radius is limited. The "
-                        "``kms:GenerateDataKey*`` action wildcard is the "
-                        "AWS-recommended grant for publishing to the "
-                        "KMS-encrypted drift-detection SNS topic."
+                        "cloudformation:DescribeStackDriftDetectionStatus and "
+                        "BatchDescribeTypeConfigurations support no resource-level "
+                        "permissions; every other CloudFormation action is on this "
+                        "stack's own ARN. The X-Ray writes CDK adds for active "
+                        "tracing need Resource:*. The ``kms:GenerateDataKey*`` "
+                        "action wildcard is the AWS-recommended grant for publishing "
+                        "to the KMS-encrypted drift-detection SNS topic."
                     ),
                     "appliesTo": [
                         "Resource::*",
                         "Action::kms:GenerateDataKey*",
                     ],
+                },
+            ],
+        )
+        self._grant_drift_detection_reads(drift_lambda_role)
+
+    def _grant_drift_detection_reads(self, role: iam.IRole) -> None:
+        """Attach the reads CloudFormation makes for every resource it checks.
+
+        Runs after the stack's other resources exist (drift detection is
+        built last but for the MCP role and outputs), walks them, and grants
+        the read-handler permissions of each resource type present
+        (``gco/stacks/drift_read_permissions.py``). Bucket, parameter and
+        function reads name this stack's own resources; the remaining
+        Describe/Get/List calls support no resource-level permissions (or
+        cover every resource of their type, like ``ec2:Describe*``) and are
+        read-only configuration reads.
+
+        A separate policy rather than the role's default one: the drift
+        Lambda depends on its role's default policy, and this policy names
+        that Lambda's own ARN.
+        """
+        from gco.stacks.drift_read_permissions import drift_read_actions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        cfn_resources = [c for c in self.node.find_all() if isinstance(c, CfnResource)]
+
+        def _arns(resource_type: str) -> list[str]:
+            return [
+                Token.as_string(c.get_att("Arn"))
+                for c in cfn_resources
+                if c.cfn_resource_type == resource_type
+            ]
+
+        def _parameter_arn(parameter: CfnResource) -> str:
+            scope = parameter.node.scope
+            if isinstance(scope, ssm.StringParameter):
+                return scope.parameter_arn
+            # The one L1 parameter, the EKS construct's kubectl-ready barrier,
+            # has no Name: CloudFormation generates one without a leading slash.
+            return (
+                f"arn:{self.partition}:ssm:{self.region}:{self.account}:parameter/{parameter.ref}"
+            )
+
+        parameter_arns = [
+            _parameter_arn(c) for c in cfn_resources if c.cfn_resource_type == "AWS::SSM::Parameter"
+        ]
+        actions = drift_read_actions(c.cfn_resource_type for c in cfn_resources)
+        statements = [
+            iam.PolicyStatement(actions=list(actions.unscoped), resources=["*"]),
+            iam.PolicyStatement(
+                actions=list(actions.function), resources=_arns("AWS::Lambda::Function")
+            ),
+        ]
+        bucket_arns = _arns("AWS::S3::Bucket")
+        if actions.bucket:
+            statements.append(
+                iam.PolicyStatement(actions=list(actions.bucket), resources=bucket_arns)
+            )
+        if actions.parameter:
+            statements.append(
+                iam.PolicyStatement(actions=list(actions.parameter), resources=parameter_arns)
+            )
+        read_policy = iam.Policy(
+            self, "DriftDetectionReadPolicy", roles=[role], statements=statements
+        )
+        acknowledge_nag_findings(
+            read_policy,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "Read-only Describe/Get/List calls CloudFormation makes, with the "
+                        "drift Lambda's credentials, to compare each resource type in "
+                        "this stack with its template (the types' registry read "
+                        "handlers). They support no resource-level permissions or are "
+                        "account-wide by nature. Bucket, parameter and function reads "
+                        "name this stack's own resources, and no secret value, KMS "
+                        "decrypt or role pass is granted."
+                    ),
+                    "appliesTo": ["Resource::*"],
                 },
             ],
         )

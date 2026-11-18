@@ -79,7 +79,8 @@ The handler's `_SUPPORTED_MANIFEST_KINDS` is the authoritative list:
 ## IAM Permissions
 
 - `eks:DescribeCluster` on the EKS cluster
-- `sts:GetCallerIdentity` (for EKS token generation)
+- `sts:GetCallerIdentity` (a presigned URL for the EKS token; needs no IAM permission)
+- `ssm:PutParameter` on `/<project>/addons/*` (per-phase apply status for `gco stacks addons status`)
 - Kubernetes RBAC: cluster-admin or equivalent for manifest application
 
 ## Dependencies

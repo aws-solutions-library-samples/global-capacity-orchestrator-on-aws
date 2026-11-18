@@ -227,10 +227,12 @@ Statement 2 — KMS access, scoped to S3:
 - `Resource`: `"*"` — the key lives in the global region and this stack
   never learns its ARN, so the statement cannot name it.
 - `Condition`: `StringEquals: { kms:ViaService:
-  s3.<global-region>.amazonaws.com }` — this is what actually scopes the
-  grant: the key can be exercised only through S3 in the global region,
-  never directly, and S3 only reaches for the key the bucket is encrypted
-  with.
+  s3.<global-region>.amazonaws.com }` and `StringLike: {
+  kms:EncryptionContext:aws:s3:arn: [<bucket arn>, <bucket arn>/*] }` —
+  this is what actually scopes the grant: the key can be exercised only
+  through S3 in the global region, never directly, and only for this
+  bucket's objects (S3 sends the bucket ARN as the encryption context when
+  the bucket uses an S3 Bucket Key, the object ARN otherwise).
 
 The grant is **role-side**: `Cluster_Shared_Bucket`'s bucket policy
 contains zero `Principal: "*"` Allow statements. Access is always
@@ -243,8 +245,9 @@ When `analytics_environment.enabled=true`, `GCOAnalyticsStack` runs
 `/gco/cluster-shared-bucket/arn` via `cr.AwsCustomResource` in the
 global region, then attaches an inline policy to
 `SageMaker_Execution_Role` with the **same two statements** as the
-regional role's grant. This is a role-side grant; the bucket policy is
-not modified.
+regional role's grant (its KMS statement carries the `kms:ViaService`
+condition only). This is a role-side grant; the bucket policy is not
+modified.
 
 When `analytics_environment.enabled=false`, the SageMaker role does
 not exist and no grant is attached. The regional job-pod grants are
