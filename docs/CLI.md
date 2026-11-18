@@ -5094,8 +5094,11 @@ Manage CDK infrastructure stacks.
 The commands that run the CDK CLI start it in its own process group. When
 `gco` receives SIGTERM while CDK runs (cancelling an MCP deploy or destroy task
 sends one), it terminates that process group, and every one a `--parallel` run
-started, before it exits with status 143. CloudFormation still completes or
-rolls back the stack operation that was already in progress.
+started, before it exits with status 143. Each group gets 30 seconds to exit
+before it is killed, and the groups of a `--parallel` run are stopped at the
+same time, so this takes at most about 30 seconds. The MCP server waits 45
+seconds before it kills `gco`. CloudFormation still completes or rolls back the
+stack operation that was already in progress.
 
 Every command here that edits cdk.json (the feature toggles such as
 `gco stacks fsx enable`, and the managed-config commands `gco stacks regions`

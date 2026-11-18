@@ -1496,6 +1496,16 @@ def cdk_asset_consumer(project_root: str | Path) -> Iterator[None]:
     )
 
 
+#: Seconds each CDK process group gets to exit after SIGTERM (``taskkill`` on
+#: Windows) before it is killed. Every active group is terminated at once, so a
+#: cancelled stack command spends at most this long stopping CDK. The MCP
+#: long-task runner waits longer than this before it kills ``gco`` itself
+#: (``_CANCEL_GRACE_SECONDS`` in ``gco_mcp/tools/_long_task.py``; a test pins the
+#: relation), so cancelling an MCP deploy/destroy task stops CDK instead of
+#: orphaning it.
+CDK_TERMINATE_GRACE_SECONDS = 30
+
+
 class StackOperationTerminated(SystemExit):
     """SIGTERM arrived while CDK was running; exits with status 143.
 
@@ -2215,7 +2225,7 @@ class StackManager:
 
             terminate_tree(force=False)
             try:
-                process.wait(timeout=30)
+                process.wait(timeout=CDK_TERMINATE_GRACE_SECONDS)
             except OSError, subprocess.TimeoutExpired:
                 terminate_tree(force=True)
                 if process.poll() is None:
@@ -2225,7 +2235,7 @@ class StackManager:
 
         try:
             os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=30)
+            process.wait(timeout=CDK_TERMINATE_GRACE_SECONDS)
         except OSError, subprocess.TimeoutExpired:
             if process.poll() is None:
                 try:
@@ -2234,12 +2244,29 @@ class StackManager:
                     process.wait()
 
     def cancel_active_cdk_processes(self) -> None:
-        """Prevent new CDK work and terminate every process group currently registered."""
+        """Prevent new CDK work and terminate every process group currently registered.
+
+        The groups are terminated concurrently, so stopping a parallel batch
+        takes one ``CDK_TERMINATE_GRACE_SECONDS`` window however many workers
+        were running, not one window per worker. That keeps the whole cleanup
+        inside the MCP runner's grace period before it kills ``gco``.
+        """
         self._cdk_cancel_event.set()
         with self._active_cdk_lock:
             processes = list(self._active_cdk_processes.values())
-        for process in processes:
-            self._terminate_cdk_process(process)
+        terminators = [
+            Thread(
+                target=self._terminate_cdk_process,
+                args=(process,),
+                name=f"gco-cdk-terminate-{process.pid}",
+                daemon=True,
+            )
+            for process in processes
+        ]
+        for terminator in terminators:
+            terminator.start()
+        for terminator in terminators:
+            terminator.join()
 
     def _run_cdk(
         self,
@@ -2258,7 +2285,7 @@ class StackManager:
             timeout: Wall-clock timeout in seconds. ``None`` (default) waits
                 forever — preserving the old behaviour for ``synth`` / ``list``.
                 When set, on timeout we send SIGTERM, give the CDK process up
-                to 30 seconds to exit cleanly, then SIGKILL, and finally
+                to ``CDK_TERMINATE_GRACE_SECONDS`` (30) to exit cleanly, then SIGKILL, and finally
                 re-raise ``subprocess.TimeoutExpired`` so callers can decide
                 how to handle a hung subprocess. ``deploy()`` and ``destroy()``
                 pass a per-stack budget so a wedged ``cdk destroy`` (e.g. its

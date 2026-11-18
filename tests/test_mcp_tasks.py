@@ -9,8 +9,9 @@ Covers four behaviours of the helper:
   ``(CREATE|UPDATE|DELETE)_COMPLETE`` line, and returns the success JSON
   on a clean exit;
 * the cancellation path — on ``asyncio.CancelledError`` the runner sends
-  ``SIGTERM``, waits up to 10 s for graceful shutdown, sends ``SIGKILL`` if
-  needed, and re-raises the cancellation;
+  ``SIGTERM``, waits up to ``_CANCEL_GRACE_SECONDS`` (45 s, longer than the
+  30 s gco gives CDK to stop) for graceful shutdown, sends ``SIGKILL`` if
+  needed, records ``state=cancelled``, and re-raises the cancellation;
 * the stack-op cancellation disclaimer — when ``is_stack_op=True`` the
   re-raised ``CancelledError`` carries the literal CFN partial-state
   disclaimer so operators know AWS state may be inconsistent;
@@ -22,6 +23,8 @@ Covers four behaviours of the helper:
 import asyncio
 import contextlib
 import json
+import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -122,10 +125,10 @@ async def test_run_long_task_lifecycle() -> None:
 
 # Cancellation test
 async def test_run_long_task_cancellation() -> None:
-    """An in-flight task that sleeps for a minute terminates within 11 s on cancel.
+    """An in-flight task that sleeps for a minute stops promptly on cancel.
 
-    The 11 s budget is the 10 s SIGTERM grace window the runner enforces
-    plus a small safety margin for scheduler jitter.
+    The child has no SIGTERM handler, so it exits as soon as the runner sends
+    SIGTERM; the runner never needs its SIGKILL fallback here.
     """
     progress = _FakeProgress()
     ctx = _FakeCtx()
@@ -583,6 +586,127 @@ async def test_run_long_task_failure_writes_failed_state_to_disk(tmp_path, monke
 
 
 # =============================================================================
+# Cancelling a stack task must give gco time to stop CDK
+# =============================================================================
+
+
+def test_cancel_grace_outlasts_the_cli_cdk_termination_window() -> None:
+    """The runner must not SIGKILL gco while gco is still stopping CDK.
+
+    CDK runs in its own session. On SIGTERM gco gives every CDK process group
+    ``CDK_TERMINATE_GRACE_SECONDS`` to exit and then exits 143; if the MCP
+    runner kills gco first, CDK keeps deploying or destroying with no parent.
+    The runner's window must therefore exceed the CLI's, with time left for
+    gco to unwind.
+    """
+    from tools import _long_task
+
+    from cli.stacks import CDK_TERMINATE_GRACE_SECONDS
+
+    assert _long_task._CANCEL_GRACE_SECONDS - CDK_TERMINATE_GRACE_SECONDS >= 10, (
+        f"MCP cancel grace {_long_task._CANCEL_GRACE_SECONDS}s must exceed the CLI's "
+        f"{CDK_TERMINATE_GRACE_SECONDS}s CDK termination window by at least 10s"
+    )
+
+
+# A stand-in for ``gco`` with the CLI's SIGTERM contract (cli/stacks.py): CDK
+# starts in its own session; the SIGTERM handler only raises, and the unwinding
+# code terminates the CDK process group, waits for it within the CLI's grace,
+# and exits 143. The CDK stand-in takes a moment to exit on SIGTERM, as a real
+# deploy does.
+_FAKE_GCO = """
+import os, signal, subprocess, sys
+pid_file, cdk_exit_delay, cli_grace = sys.argv[1], sys.argv[2], float(sys.argv[3])
+cdk_code = (
+    "import signal, sys, time\\n"
+    "def stop(signum, frame):\\n"
+    f"    time.sleep({cdk_exit_delay})\\n"
+    "    sys.exit(0)\\n"
+    "signal.signal(signal.SIGTERM, stop)\\n"
+    "time.sleep(120)\\n"
+)
+
+
+class Terminated(BaseException):
+    pass
+
+
+def terminated(signum, frame):
+    raise Terminated
+
+
+signal.signal(signal.SIGTERM, terminated)
+cdk = subprocess.Popen([sys.executable, "-c", cdk_code], start_new_session=True)
+try:
+    with open(pid_file, "w", encoding="utf-8") as handle:
+        handle.write(str(cdk.pid))
+    print("cdk started", flush=True)
+    cdk.wait()
+except Terminated:
+    os.killpg(cdk.pid, signal.SIGTERM)
+    try:
+        cdk.wait(timeout=cli_grace)
+    except subprocess.TimeoutExpired:
+        os.killpg(cdk.pid, signal.SIGKILL)
+        cdk.wait()
+    sys.exit(143)
+"""
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def test_cancelled_stack_task_lets_gco_stop_cdk_and_records_exit_143(
+    tmp_path, monkeypatch
+) -> None:
+    """End to end with real processes, on a scaled-down clock.
+
+    The windows keep the production ordering (CDK exit < CLI grace < MCP grace):
+    the CDK stand-in needs 1 s after SIGTERM, the fake gco allows it 3 s, and
+    the runner allows gco 6 s. After cancellation the CDK stand-in is gone and
+    the task record says ``cancelled`` with gco's own exit code 143, not a
+    SIGKILL (-9).
+    """
+    from tools import _long_task
+
+    monkeypatch.setenv("GCO_TASK_STATUS_DIR", str(tmp_path / "tasks"))
+    monkeypatch.delenv("GCO_DISABLE_TASK_STATUS", raising=False)
+    monkeypatch.setattr(_long_task, "_CANCEL_GRACE_SECONDS", 6)
+    script = tmp_path / "fake_gco.py"
+    script.write_text(_FAKE_GCO, encoding="utf-8")
+    pid_file = tmp_path / "cdk.pid"
+    argv = [sys.executable, str(script), str(pid_file), "1.0", "3.0"]
+
+    runner = asyncio.create_task(
+        _run_long_task(argv, ctx=_FakeCtx(), progress=_FakeProgress(), is_stack_op=True)
+    )
+    deadline = time.monotonic() + 30
+    while not (pid_file.exists() and pid_file.read_text(encoding="utf-8")):
+        assert time.monotonic() < deadline, "fake gco never started its CDK stand-in"
+        await asyncio.sleep(0.05)
+    cdk_pid = int(pid_file.read_text(encoding="utf-8"))
+
+    try:
+        runner.cancel()
+        with pytest.raises(asyncio.CancelledError, match="Partial CloudFormation state"):
+            await runner
+        assert not _process_exists(cdk_pid), "CDK stand-in outlived the cancelled task"
+    finally:
+        if _process_exists(cdk_pid):
+            os.killpg(cdk_pid, signal.SIGKILL)
+
+    records = [json.loads(path.read_text()) for path in (tmp_path / "tasks").glob("*.json")]
+    assert len(records) == 1
+    assert records[0]["state"] == "cancelled"
+    assert records[0]["exit_code"] == 143
+
+
+# =============================================================================
 # Long-running stack lifecycle tools — registration + argv kick-off
 # =============================================================================
 #
@@ -599,7 +723,6 @@ async def test_run_long_task_failure_writes_failed_state_to_disk(tmp_path, monke
 
 import importlib  # noqa: E402
 import logging  # noqa: E402
-import os  # noqa: E402
 
 import run_mcp  # noqa: E402
 
