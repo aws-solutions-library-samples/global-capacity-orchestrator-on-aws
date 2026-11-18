@@ -542,10 +542,24 @@ class TestInferenceMonitorRole:
             ("autoscaling", "horizontalpodautoscalers"),
             ("keda.sh", "scaledobjects"),
             ("networking.k8s.io", "ingresses"),
-            ("gateway.networking.k8s.io", "httproutes"),
             ("coordination.k8s.io", "leases"),
         }
         assert expected.issubset(resources), f"Missing resources: {expected - resources}"
+
+    def test_inference_monitor_has_no_gateway_api_grant(self, rbac_docs):
+        """The monitor calls no Gateway API: no release created a per-endpoint HTTPRoute.
+
+        The shared ``gco-system/gco-routes`` HTTPRoute is the applier's, and
+        the monitor's cleanup of HTTPRoutes no release created was removed,
+        so a leftover grant would be unused write access.
+        """
+        role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
+        gateway_rules = [
+            rule
+            for rule in role["rules"]
+            if "gateway.networking.k8s.io" in rule.get("apiGroups", [])
+        ]
+        assert gateway_rules == []
 
     @pytest.mark.parametrize(
         ("api_group", "resource"),
@@ -577,22 +591,14 @@ class TestInferenceMonitorRole:
                     f"inference-monitor rule for {rule_resources} must include patch"
                 )
 
-    @pytest.mark.parametrize(
-        ("api_group", "resource"),
-        [
-            ("networking.k8s.io", "ingresses"),
-            ("gateway.networking.k8s.io", "httproutes"),
-        ],
-    )
-    def test_inference_monitor_legacy_routes_have_exact_cleanup_verbs(
-        self, rbac_docs, api_group, resource
-    ):
-        """Legacy routes allow only deterministic get/provenance-patch/delete."""
+    def test_inference_monitor_legacy_ingresses_have_exact_cleanup_verbs(self, rbac_docs):
+        """Legacy Ingresses allow only deterministic get/provenance-patch/delete."""
         role = _find_doc(rbac_docs, "Role", "gco-inference-monitor-role")
         rules = [
             rule
             for rule in role["rules"]
-            if rule.get("apiGroups") == [api_group] and rule.get("resources") == [resource]
+            if rule.get("apiGroups") == ["networking.k8s.io"]
+            and rule.get("resources") == ["ingresses"]
         ]
         assert len(rules) == 1
         assert rules[0]["verbs"] == ["get", "patch", "delete"]
