@@ -25,6 +25,7 @@ from gco.models.inference_models import (
     RegionStatus,
     RegionSyncState,
 )
+from gco.services.inference_monitor import ForeignEndpointResourceError, ResourceCleanupResult
 from gco.services.inference_store import (
     InferenceEndpointStore,
     _deserialize_from_dynamo,
@@ -376,6 +377,17 @@ class TestSerializationHelpers:
         result = _deserialize_from_dynamo(item)
         assert result["spec"]["replicas"] == 2
         assert result["spec"]["items"] == [1, 2.5]
+
+
+def _serve_only(name, deployment):
+    """A ``read_namespaced_deployment`` stand-in: ``deployment`` at ``name``, 404 elsewhere."""
+
+    def read(resource_name, *_args, **_kwargs):
+        if resource_name == name:
+            return deployment
+        raise ApiException(status=404)
+
+    return read
 
 
 # =============================================================================
@@ -1502,7 +1514,7 @@ class TestInferenceMonitor:
         deployment = MagicMock()
         deployment.spec.replicas = 2
         deployment.status.ready_replicas = 2
-        monitor.apps_v1.read_namespaced_deployment.return_value = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = _serve_only("stop-ep", deployment)
         endpoint = {
             "endpoint_name": "stop-ep",
             "desired_state": "stopped",
@@ -1590,7 +1602,7 @@ class TestInferenceMonitor:
         deployment = MagicMock()
         deployment.spec.replicas = 2
         deployment.status.ready_replicas = 2
-        monitor.apps_v1.read_namespaced_deployment.return_value = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = _serve_only("stop-ep", deployment)
         endpoint = {
             "endpoint_name": "stop-ep",
             "desired_state": "stopped",
@@ -1636,7 +1648,7 @@ class TestInferenceMonitor:
         deployment = MagicMock()
         deployment.spec.replicas = 2
         deployment.status.ready_replicas = 1
-        monitor.apps_v1.read_namespaced_deployment.return_value = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = _serve_only("stop-ep", deployment)
         endpoint = {
             "endpoint_name": "stop-ep",
             "desired_state": "stopped",
@@ -1683,6 +1695,112 @@ class TestInferenceMonitor:
         )
         assert "sensitive" not in status_call.kwargs["error"]
 
+    @staticmethod
+    def _absent_autoscalers():
+        custom = MagicMock()
+        hpa = MagicMock()
+        custom.get_namespaced_custom_object.side_effect = ApiException(status=404)
+        hpa.read_namespaced_horizontal_pod_autoscaler.side_effect = ApiException(status=404)
+        return (
+            patch("gco.services.inference_monitor.client.CustomObjectsApi", return_value=custom),
+            patch("gco.services.inference_monitor.client.AutoscalingV2Api", return_value=hpa),
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_scales_the_canary_with_its_endpoint(self, monitor, mock_store):
+        """Finding I6: a stopped classic endpoint's canary releases its GPUs too."""
+        deployments = {}
+        for deployment_name, replicas, ready in (("ep", 2, 2), ("ep-canary", 1, 1)):
+            deployment = MagicMock()
+            deployment.spec.replicas = replicas
+            deployment.status.ready_replicas = ready
+            deployments[deployment_name] = deployment
+
+        def read_deployment(resource_name, *_args, **_kwargs):
+            if resource_name in deployments:
+                return deployments[resource_name]
+            raise ApiException(status=404)
+
+        monitor.apps_v1.read_namespaced_deployment.side_effect = read_deployment
+        endpoint = {
+            "endpoint_name": "ep",
+            "desired_state": "stopped",
+            "target_regions": ["us-east-1"],
+            "spec": {"image": "img:v1", "canary": {"image": "img:v2", "weight": 10}},
+        }
+        custom_patch, hpa_patch = self._absent_autoscalers()
+
+        with custom_patch, hpa_patch:
+            result = await monitor._reconcile_endpoint(endpoint)
+
+        assert result == {"action": "stop", "endpoint": "ep", "cleanup_complete": True}
+        assert [
+            (call_args.args[0], call_args.kwargs["body"])
+            for call_args in monitor.apps_v1.patch_namespaced_deployment.call_args_list
+        ] == [("ep", {"spec": {"replicas": 0}}), ("ep-canary", {"spec": {"replicas": 0}})]
+        mock_store.update_region_status.assert_called_once_with(
+            "ep", "us-east-1", "stopped", replicas_ready=0, replicas_desired=0
+        )
+
+    @pytest.mark.asyncio
+    async def test_stopping_status_counts_the_canary_replicas(self, monitor, mock_store):
+        deployments = {}
+        for deployment_name, replicas, ready in (("ep", 2, 2), ("ep-canary", 1, 1)):
+            deployment = MagicMock()
+            deployment.spec.replicas = replicas
+            deployment.status.ready_replicas = ready
+            deployments[deployment_name] = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = (
+            lambda resource_name, *_args, **_kwargs: deployments[resource_name]
+        )
+        monitor._delete_autoscalers = MagicMock(
+            return_value=ResourceCleanupResult(pending=("hpa/ep",))
+        )
+
+        await monitor._reconcile_endpoint(
+            {
+                "endpoint_name": "ep",
+                "desired_state": "stopped",
+                "target_regions": ["us-east-1"],
+                "spec": {"image": "img:v1"},
+            }
+        )
+
+        mock_store.update_region_status.assert_called_once_with(
+            "ep", "us-east-1", "stopping", replicas_ready=3, replicas_desired=3
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_leaves_another_endpoint_named_like_the_canary_alone(
+        self, monitor, mock_store
+    ):
+        primary = MagicMock()
+        primary.spec.replicas = 1
+        primary.status.ready_replicas = 1
+
+        def get_deployment(resource_name, _namespace):
+            if resource_name == "ep-canary":
+                raise ForeignEndpointResourceError("belongs to endpoint ep-canary")
+            return primary
+
+        monitor._get_deployment = MagicMock(side_effect=get_deployment)
+        custom_patch, hpa_patch = self._absent_autoscalers()
+
+        with custom_patch, hpa_patch:
+            await monitor._reconcile_endpoint(
+                {
+                    "endpoint_name": "ep",
+                    "desired_state": "stopped",
+                    "target_regions": ["us-east-1"],
+                    "spec": {"image": "img:v1"},
+                }
+            )
+
+        assert [
+            call_args.args[0]
+            for call_args in monitor.apps_v1.patch_namespaced_deployment.call_args_list
+        ] == ["ep"]
+
     # -- _reconcile_endpoint: deleted --
 
     @pytest.mark.asyncio
@@ -1697,7 +1815,9 @@ class TestInferenceMonitor:
         deployment = MagicMock()
         deployment.spec.replicas = 2
         deployment.status.ready_replicas = 1
-        monitor.apps_v1.read_namespaced_deployment.return_value = deployment
+        monitor.apps_v1.read_namespaced_deployment.side_effect = _serve_only(
+            "stale-owner", deployment
+        )
         endpoint = {
             "endpoint_name": "stale-owner",
             "desired_state": "stopped",

@@ -868,7 +868,7 @@ gco inference update-image my-llm -i vllm/vllm-openai:v0.32.0
 ### Stop and Start
 
 ```bash
-# Stop (removes any HPA/KEDA owner, then scales to zero)
+# Stop (removes any HPA/KEDA owner, then scales the endpoint and its canary to zero)
 gco inference stop my-llm -y
 
 # Start (restores static/HPA ownership from the saved configuration)

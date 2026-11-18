@@ -615,6 +615,8 @@ def inference_scale(config: Any, endpoint_name: Any, replicas: Any) -> None:
 def inference_stop(config: Any, endpoint_name: Any, yes: Any) -> None:
     """Stop an inference endpoint (scale to zero, keep config).
 
+    Every Deployment of the endpoint scales to zero, its canary included.
+
     Examples:
         gco inference stop my-llm -y
     """

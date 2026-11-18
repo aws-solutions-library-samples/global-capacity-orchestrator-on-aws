@@ -3250,7 +3250,12 @@ class InferenceMonitor:
         spec: dict[str, Any] | None = None,
         endpoint: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Remove every possible autoscaler owner before scaling all roles to zero."""
+        """Remove every possible autoscaler owner before scaling all roles to zero.
+
+        The roles are the Mooncake role Deployments and PD proxy, or a classic
+        endpoint's Deployment and its ``{name}-canary``; another endpoint's
+        Deployment at one of those names is left alone.
+        """
         mooncake_endpoint = isinstance(spec, dict) and isinstance(spec.get("mooncake"), dict)
         self._unready_since.pop(name, None)
         self._master_deferral_since.pop(name, None)
@@ -3268,9 +3273,13 @@ class InferenceMonitor:
             ),
             namespace,
         )
-        deployment_names = (*role_names, f"{name}-proxy") if mooncake_endpoint else (name,)
+        # A classic endpoint's canary serves the same model on its own GPU
+        # replicas, so a stop scales it too and counts it in the totals.
+        deployment_names = (
+            (*role_names, f"{name}-proxy") if mooncake_endpoint else (name, f"{name}-canary")
+        )
         deployments = {
-            deployment_name: self._get_deployment(deployment_name, namespace)
+            deployment_name: self._get_owned_deployment(deployment_name, namespace)
             for deployment_name in deployment_names
         }
         ready_replicas = sum(
@@ -3354,6 +3363,13 @@ class InferenceMonitor:
 
     def _deployment_exists(self, name: str, namespace: str) -> bool:
         return self._get_deployment(name, namespace) is not None
+
+    def _get_owned_deployment(self, name: str, namespace: str) -> V1Deployment | None:
+        """:meth:`_get_deployment`, reading another endpoint's Deployment as absent."""
+        try:
+            return self._get_deployment(name, namespace)
+        except ForeignEndpointResourceError:
+            return None
 
     def _get_deployment(self, name: str, namespace: str) -> V1Deployment | None:
         try:
@@ -5943,7 +5959,10 @@ class InferenceMonitor:
                 fallback_port=canary_spec.get("port", 8000),
             )
             current_image = self._get_deployment_image(deployment)
-            current_replicas = deployment.spec.replicas or 1
+            # A stopped endpoint's canary sits at 0 replicas; only an unset
+            # count means Kubernetes' default of 1.
+            live_replicas = deployment.spec.replicas
+            current_replicas = 1 if live_replicas is None else live_replicas
             ready_replicas = present(deployment.status, "deployment.status").ready_replicas or 0
             if current_image != canary_image:
                 self._update_deployment_image(canary_name, namespace, canary_image)
@@ -5976,10 +5995,7 @@ class InferenceMonitor:
         alone.
         """
         canary_name = f"{name}-canary"
-        try:
-            deployment = self._get_deployment(canary_name, namespace)
-        except ForeignEndpointResourceError:
-            deployment = None
+        deployment = self._get_owned_deployment(canary_name, namespace)
         if deployment is not None:
             self._assert_mutation_authority()
             try:

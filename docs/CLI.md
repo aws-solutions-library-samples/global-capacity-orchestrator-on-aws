@@ -2925,7 +2925,7 @@ gco inference scale my-llm --replicas 4
 
 #### `gco inference stop`
 
-Stop an inference endpoint (scales to zero, keeps configuration).
+Stop an inference endpoint (scales to zero, keeps configuration). Every Deployment of the endpoint scales to zero: the model Deployment and its canary, or the Mooncake roles and the prefill-decode proxy.
 
 ```bash
 gco inference stop ENDPOINT_NAME [OPTIONS]
