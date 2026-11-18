@@ -133,7 +133,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 
 | Tool | Description |
 |------|-------------|
-| `dag_run` | `gco dag run` — execute a DAG manifest end-to-end. |
+| `dag_run` | `gco dag run` — execute a DAG manifest end-to-end. long-running: the CLI waits for each step, so a run goes through `_run_long_task` (progress, task status, `task_tail`, background-task mode) and returns the task status; `dry_run` returns the CLI's validation document. |
 | `dag_validate` | `gco dag validate` — statically validate a DAG manifest. |
 
 ### `deps.py`
@@ -464,6 +464,15 @@ credentials: the server's credential variables are left out, and the child
 reads the role from a container credentials endpoint on `127.0.0.1` with
 private AWS config files that carry no credentials. A new spawn site must pass
 `env=child_environment(...)` and `stdin=DEVNULL` like the existing ones.
+
+`_run_cli` and `_run_cli_async` stop the CLI after two minutes. A command that
+takes longer needs a different path: the tools that copy local data to or from
+S3 (`models_upload`, `upload_to_regional_bucket`, `populate_kv_cache`,
+`sync_storage_bucket`) pass `timeout_seconds=cli_runner.TRANSFER_TIMEOUT_SECONDS`
+(one hour), and commands that wait on cloud work (`deploy_*`, `destroy_*`,
+`bootstrap_cdk`, `images_build`, `images_push`, `dag_run`) run through
+`_run_long_task`, which has no timeout, streams progress, records task status
+for `task_status` / `task_tail`, and stops the CLI when the call is cancelled.
 
 Most tools follow this `_run_cli` shell-out pattern. A few domains — notably the
 image-registry and image-mirror tools in `images.py` — instead wrap their CLI

@@ -1213,6 +1213,9 @@ class TestInfrastructureToolTaskMode:
             "task-protocol support can call it inline"
         )
 
+    def test_dag_run_task_mode_is_optional(self):
+        self._expect_optional_mode("dag_run")
+
     @patch.dict(os.environ, {"GCO_ENABLE_INFRASTRUCTURE_DEPLOY": "true"})
     def test_deploy_stack_task_mode_is_optional(self):
         importlib.reload(run_mcp)

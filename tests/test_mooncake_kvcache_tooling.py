@@ -487,6 +487,7 @@ class TestPopulateKvCacheTool:
                 {
                     "cmd": cmd,
                     "pass_fds": kwargs.get("pass_fds"),
+                    "timeout": kwargs.get("timeout"),
                     "listing": sorted(os.listdir(staged)),
                 }
             )
@@ -508,6 +509,8 @@ class TestPopulateKvCacheTool:
         assert cmd[index + 2].endswith("/kv-warm-set")
         assert cmd[index + 3 :] == ["-r", "us-east-1"]
         assert seen[0]["listing"] == ["block-0.bin"]
+        # An upload gets an hour, not the two-minute default.
+        assert seen[0]["timeout"] == 3600
         assert len(seen[0]["pass_fds"]) == 1
         # The private snapshot is removed once the CLI returns.
         assert not list(root.glob(".gco-mcp-upload-*"))
@@ -547,8 +550,10 @@ class TestPopulateKvCacheTool:
             "/dev/fd/97/warm.bin",
             "-r",
             "us-west-2",
+            timeout_seconds=module.cli_runner.TRANSFER_TIMEOUT_SECONDS,
             pass_fds=(97,),
         )
+        assert module.cli_runner.TRANSFER_TIMEOUT_SECONDS == 3600
         assert staged_contracts[0].resolved_path == (root / "warm.bin").resolve()
 
     def test_tool_refuses_a_path_outside_the_local_root(self, tmp_path):

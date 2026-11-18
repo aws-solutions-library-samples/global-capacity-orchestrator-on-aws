@@ -368,7 +368,7 @@ if is_enabled(FLAG_MODEL_UPLOAD):
         paths are interpreted relative to that root, never relative to the MCP
         process working directory. The CLI receives a private descriptor-backed
         snapshot; descendant links, special files, hard links, and filesystem
-        crossings fail closed.
+        crossings fail closed. The upload may run for up to an hour.
 
         Args:
             endpoint_name: Endpoint whose KV-cache cold tier receives the data.
@@ -391,6 +391,7 @@ if is_enabled(FLAG_MODEL_UPLOAD):
                     staged.argument,
                     "-r",
                     region,
+                    timeout_seconds=cli_runner.TRANSFER_TIMEOUT_SECONDS,
                     pass_fds=(staged.directory_fd,),
                 )
 

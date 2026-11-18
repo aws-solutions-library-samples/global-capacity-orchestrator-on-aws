@@ -48,6 +48,8 @@ class _FakeMCP:
 
 
 class _RunnerModule(ModuleType):
+    TRANSFER_TIMEOUT_SECONDS = 3600
+
     def __init__(self) -> None:
         super().__init__("cli_runner")
         self.calls: list[tuple[str, ...]] = []

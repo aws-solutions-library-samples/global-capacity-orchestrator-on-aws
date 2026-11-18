@@ -63,6 +63,12 @@ def _resolve_project_root() -> Path:
 
 PROJECT_ROOT = _resolve_project_root()
 
+TRANSFER_TIMEOUT_SECONDS = 3600
+"""Timeout for the tools that copy local data to S3 or back
+(``models_upload``, ``upload_to_regional_bucket``, ``populate_kv_cache`` and
+``sync_storage_bucket``). The two-minute default stopped an upload of more than
+about two minutes of data part-way, leaving an incomplete multipart upload."""
+
 
 def _gco_executable() -> str:
     """Resolve the ``gco`` CLI to invoke.
@@ -224,8 +230,8 @@ def _run_cli(
     arguments, such as prompts and JSON bodies, are passed through unchanged.
 
     ``timeout_seconds`` may be increased by wrappers for intentionally
-    long-running transfers while preserving the two-minute default for
-    normal tools. ``pass_fds`` is reserved for verified descriptor-backed
+    long-running transfers (:data:`TRANSFER_TIMEOUT_SECONDS`) while preserving
+    the two-minute default for normal tools. ``pass_fds`` is reserved for verified descriptor-backed
     local-data paths and is omitted from ``subprocess.run`` when empty for
     compatibility with platforms that do not support it.
 

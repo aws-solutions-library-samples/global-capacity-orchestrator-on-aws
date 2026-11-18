@@ -808,7 +808,8 @@ The short upload tools (`models_upload`, `upload_to_regional_bucket`, and
 may be absolute or root-relative, but must already exist and resolve beneath
 that root; the wrapper passes the resolved absolute path to the CLI. Traversal,
 symlink escapes, special files, missing roots, and unsupported hosts fail
-closed.
+closed. Each upload, like `sync_storage_bucket`, may run for up to an hour
+before the server stops the CLI.
 
 `sync_storage_bucket` is deliberately opt-in because it reads from or writes to
 the MCP host and upload mode writes S3. A bucket or local tree may also be
@@ -938,7 +939,7 @@ A region's Slurm cluster(s), reached through the GCO API's `/api/v1/slurm/*` rou
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
 | `dag_validate` | Validate a DAG manifest without submitting | safe | — |
-| `dag_run` | Submit a DAG pipeline for execution | low-risk | — |
+| `dag_run` | Run a DAG pipeline end-to-end (long-running: progress, task status, background-task mode; `dry_run` only validates) | low-risk | — |
 
 ### NodePools
 

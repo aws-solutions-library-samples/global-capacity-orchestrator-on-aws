@@ -149,7 +149,8 @@ if is_enabled(FLAG_MODEL_UPLOAD):
         paths such as ``model.bin`` and ``./datasets`` are interpreted relative
         to that root, never relative to the MCP process working directory. The
         CLI receives a private descriptor-backed snapshot; descendant links,
-        special files, hard links, and filesystem crossings fail closed.
+        special files, hard links, and filesystem crossings fail closed. The
+        upload may run for up to an hour.
 
         Args:
             local_path: Root-relative local file or directory to upload.
@@ -171,6 +172,7 @@ if is_enabled(FLAG_MODEL_UPLOAD):
                     region,
                     "--prefix",
                     prefix,
+                    timeout_seconds=cli_runner.TRANSFER_TIMEOUT_SECONDS,
                     pass_fds=(staged.directory_fd,),
                 )
 
@@ -278,6 +280,6 @@ if is_enabled(FLAG_LOCAL_STORAGE_SYNC):
         args += ["--", bucket_alias, local_contract.local_argument]
         return await cli_runner._run_cli_async(
             *args,
-            timeout_seconds=3600,
+            timeout_seconds=cli_runner.TRANSFER_TIMEOUT_SECONDS,
             terminate_grace_seconds=30,
         )

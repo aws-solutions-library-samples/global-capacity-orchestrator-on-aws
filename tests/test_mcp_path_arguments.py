@@ -98,7 +98,7 @@ class _Recorder:
 def cli(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
     recorder = _Recorder()
     monkeypatch.setattr(cli_runner, "_run_cli", recorder.sync)
-    for module in ("tools.images", "tools.stacks"):
+    for module in ("tools.dag", "tools.images", "tools.stacks"):
         monkeypatch.setattr(f"{module}._run_long_task", recorder.long_task)
     return recorder
 
