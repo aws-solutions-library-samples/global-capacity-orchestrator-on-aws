@@ -2066,6 +2066,14 @@ transition is therefore delivered at most once; during a failover (bounded by
 the 90-second lease duration) transitions may be dropped, never duplicated, so
 webhook consumers see one POST per event, not one per replica.
 
+The deliverer lists the Jobs once and then watches for changes from that
+point, resuming each watch request where the previous one stopped. Nothing is
+delivered until that first list succeeds; a failed list or watch is retried
+with backoff (1 second, doubling to at most 60 seconds). If the API server no
+longer holds the watch history (HTTP 410 Gone), the dispatcher lists the Jobs
+again and sends the transitions that happened in the gap, such as a Job that
+completed while the watch was down.
+
 ### Webhook Payload Format
 
 All webhook deliveries use the following JSON payload format:

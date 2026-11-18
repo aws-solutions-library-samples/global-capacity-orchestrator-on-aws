@@ -208,25 +208,31 @@ class TestDispatcherElection:
             assert dispatcher._initialize_job_cache.await_count == seeded, leader_lease
 
     @pytest.mark.asyncio
-    async def test_winning_the_lease_reseeds_the_cache_once(self):
+    async def test_winning_the_lease_discards_the_cache_once(self):
         dispatcher = _dispatcher(IDENTITY)
-        dispatcher._initialize_job_cache = AsyncMock()
+        dispatcher._resource_version = "5"
+        dispatcher._cache_seeded = True
 
         with patch(
             "gco.services.webhook_dispatcher.try_acquire_lease", return_value=True
         ) as acquire:
             assert await dispatcher._acquire_leadership() is True
+            # Won: the watcher must list (silently) before it delivers.
+            assert dispatcher._resource_version is None
+            assert dispatcher._cache_seeded is False
+            dispatcher._resource_version = "6"  # the watcher's seed
+            dispatcher._cache_seeded = True
             assert await dispatcher._acquire_leadership() is True
 
         acquire.assert_called_with(dispatcher.coordination_v1, IDENTITY, label="webhook")
-        # Seeded on acquisition, not on every renewal.
-        dispatcher._initialize_job_cache.assert_awaited_once()
+        # A renewal keeps the cache and the resume point.
+        assert dispatcher._resource_version == "6"
+        assert dispatcher._cache_seeded is True
         assert dispatcher.get_metrics()["leader"] is True
 
     @pytest.mark.asyncio
     async def test_losing_the_lease_stands_by_and_reseeds_on_the_next_win(self, caplog):
         dispatcher = _dispatcher(IDENTITY)
-        dispatcher._initialize_job_cache = AsyncMock()
 
         with (
             patch(
@@ -236,13 +242,16 @@ class TestDispatcherElection:
             caplog.at_level("INFO"),
         ):
             assert await dispatcher._acquire_leadership() is True
+            dispatcher._resource_version = "6"  # the watcher's seed
+            dispatcher._cache_seeded = True
             assert await dispatcher._acquire_leadership() is False
             assert dispatcher.get_metrics()["leader"] is False
             assert await dispatcher._acquire_leadership() is False
             assert await dispatcher._acquire_leadership() is True
 
         assert "lost the deliverer Lease" in caplog.text
-        assert dispatcher._initialize_job_cache.await_count == 2
+        assert dispatcher._resource_version is None
+        assert dispatcher._cache_seeded is False
 
     @pytest.mark.asyncio
     async def test_standby_never_watches_or_delivers(self):

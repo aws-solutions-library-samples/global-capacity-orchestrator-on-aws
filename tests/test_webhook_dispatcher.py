@@ -1334,6 +1334,8 @@ class TestSyncWatchJobs:
                     webhook_store=MagicMock(),
                 )
                 d._running = True
+                # As after a successful list: the watch resumes from here.
+                d._resource_version = "1"
                 return d
 
     def test_collects_events(self, dispatcher):
@@ -1346,11 +1348,27 @@ class TestSyncWatchJobs:
 
         with patch("gco.services.webhook_dispatcher.Watch") as MockWatch:
             MockWatch.return_value.stream.return_value = iter(events_iter)
+            MockWatch.return_value.resource_version = "9"
             result = dispatcher._sync_watch_jobs()
 
         assert len(result) == 2
         assert result[0] == ("ADDED", fake_job)
         assert result[1] == ("MODIFIED", fake_job)
+        stream_kwargs = MockWatch.return_value.stream.call_args.kwargs
+        assert stream_kwargs["resource_version"] == "1"
+        assert dispatcher._resource_version == "9"
+
+    def test_bookmark_is_not_an_event(self, dispatcher):
+        """A BOOKMARK only moves the resume point forward."""
+        with patch("gco.services.webhook_dispatcher.Watch") as MockWatch:
+            MockWatch.return_value.stream.return_value = iter(
+                [{"type": "BOOKMARK", "object": {"metadata": {"resourceVersion": "42"}}}]
+            )
+            MockWatch.return_value.resource_version = "42"
+            result = dispatcher._sync_watch_jobs()
+
+        assert result == []
+        assert dispatcher._resource_version == "42"
 
     def test_stops_when_not_running(self, dispatcher):
         """Test that watch stops when _running is set to False."""
@@ -1375,6 +1393,8 @@ class TestSyncWatchJobs:
             result = dispatcher._sync_watch_jobs()
 
         assert result == []
+        # Gone: the next loop pass lists again before watching.
+        assert dispatcher._resource_version is None
 
     def test_api_exception_other_raises(self, dispatcher):
         """Test that non-410 ApiException is re-raised."""
@@ -1401,9 +1421,11 @@ class TestSyncWatchJobs:
 
         with patch("gco.services.webhook_dispatcher.Watch") as MockWatch:
             MockWatch.return_value.stream.return_value = iter(events_iter)
+            MockWatch.return_value.resource_version = "11"
             result = dispatcher._sync_watch_jobs()
 
         assert len(result) == 10
+        assert dispatcher._resource_version == "11"
 
 
 class TestWatchJobsAsync:
@@ -1421,6 +1443,9 @@ class TestWatchJobsAsync:
                     region="r",
                     webhook_store=MagicMock(),
                 )
+                # Already listed, so each pass goes straight to the watch.
+                d._resource_version = "1"
+                d._cache_seeded = True
                 return d
 
     @pytest.mark.asyncio
@@ -1617,10 +1642,15 @@ class TestInitializeJobCache:
             job2,
         ]
 
-        await dispatcher._initialize_job_cache()
+        dispatcher.batch_v1.list_job_for_all_namespaces.return_value.metadata.resource_version = (
+            "77"
+        )
+
+        assert await dispatcher._initialize_job_cache() is True
 
         assert dispatcher._job_state_cache.get_state("uid-1") == "running"
         assert dispatcher._job_state_cache.get_state("uid-2") == "succeeded"
+        assert dispatcher._resource_version == "77"
 
     @pytest.mark.asyncio
     async def test_skips_system_namespaces(self, dispatcher):
@@ -1658,9 +1688,10 @@ class TestInitializeJobCache:
     async def test_handles_api_error(self, dispatcher):
         """API errors during cache init are caught and logged."""
         dispatcher.batch_v1.list_job_for_all_namespaces.side_effect = RuntimeError("API down")
-        # Should not raise
-        await dispatcher._initialize_job_cache()
+        # Should not raise; the failure is reported so nothing is delivered yet.
+        assert await dispatcher._initialize_job_cache() is False
         assert len(dispatcher._job_state_cache.job_states) == 0
+        assert dispatcher._resource_version is None
 
 
 class TestMainFunction:

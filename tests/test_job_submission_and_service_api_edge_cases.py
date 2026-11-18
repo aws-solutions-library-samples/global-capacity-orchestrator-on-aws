@@ -2009,6 +2009,9 @@ def _bare_dispatcher() -> Any:
     dispatcher._leader_lease = None
     dispatcher._standby_poll_seconds = 0
     dispatcher._is_leader = False
+    # As after a successful Job list: the watch resumes from this version.
+    dispatcher._resource_version = "1"
+    dispatcher._cache_seeded = True
     return dispatcher
 
 
