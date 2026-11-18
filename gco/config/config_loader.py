@@ -2688,13 +2688,15 @@ class ConfigLoader:
 
         Merges three cdk.json sections into a single runtime config:
 
-        - ``manifest_processor``: service-specific settings (replicas, image,
-          resource_limits, allowed_namespaces, validation_enabled,
-          max_request_body_bytes, yaml_max_depth)
-        - ``job_validation_policy``: shared validation policy (resource_quotas,
-          trusted_registries, trusted_dockerhub_orgs, manifest_security_policy,
-          allowed_kinds). Pulled in verbatim so the REST path reads the same
-          policy the SQS queue processor enforces.
+        - ``manifest_processor``: service-specific settings (replicas,
+          resource_limits, autoscaling, validation_enabled,
+          max_request_body_bytes, yaml_max_depth, the central queue worker)
+        - ``job_validation_policy``: shared validation policy
+          (allowed_namespaces, resource_quotas, trusted_registries,
+          trusted_dockerhub_orgs, manifest_security_policy, allowed_kinds).
+          Pulled in verbatim, with no defaults of its own: the stack and the
+          services read the same block, and an omitted trust list falls back
+          to the gco.job_admission defaults inside the services.
 
         There is no image setting: the regional stack builds the image from
         dockerfiles/Dockerfile.manifest-processor, pushes it to ECR, and
@@ -2714,34 +2716,12 @@ class ConfigLoader:
             "central_queue_reconcile_limit": 100,
             "central_queue_lease_seconds": 300,
             "central_queue_lease_renewal_seconds": 60,
-            # allowed_namespaces, resource_quotas, trusted_registries,
-            # trusted_dockerhub_orgs, manifest_security_policy, and
-            # allowed_kinds are merged in below from job_validation_policy.
-            "allowed_namespaces": ["gco-jobs"],
-            "resource_quotas": {
-                "max_cpu_per_manifest": "10",
-                "max_memory_per_manifest": "32Gi",
-                "max_gpu_per_manifest": 4,
-            },
-            "trusted_registries": [
-                "docker.io",
-                "gcr.io",
-                "quay.io",
-                "registry.k8s.io",
-                "k8s.gcr.io",
-                "public.ecr.aws",
-                "nvcr.io",
-                "gco",
-            ],
-            "trusted_dockerhub_orgs": [
-                "nvidia",
-                "pytorch",
-                "rayproject",
-                "tensorflow",
-                "huggingface",
-                "amazon",
-                "bitnami",
-            ],
+            # The job_validation_policy keys (allowed_namespaces,
+            # resource_quotas, trusted_registries, ...) are merged in below,
+            # as written: job_validation_policy requires the first two, and the
+            # trust lists' defaults live in gco.job_admission
+            # (DEFAULT_TRUSTED_REGISTRIES / DEFAULT_TRUSTED_DOCKERHUB_ORGS),
+            # which both services apply when the stack renders an empty list.
         }
         context_config = self.app.node.try_get_context("manifest_processor") or {}
 

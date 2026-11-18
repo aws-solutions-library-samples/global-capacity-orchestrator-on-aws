@@ -475,6 +475,25 @@ class TestPublicAccessCidrs:
         assert message.endswith(f"(invalid: {invalid})")
 
 
+class TestManifestProcessorPolicyDefaults:
+    """job_validation_policy has one source of defaults, not a second copy in the getter."""
+
+    def test_omitted_trust_lists_are_not_invented_by_the_getter(self, valid_context):
+        """The getter's lists (with "gco" as a registry, without vllm) never reached a service."""
+        mp_config = ConfigLoader(MockApp(valid_context)).get_manifest_processor_config()
+        assert "trusted_registries" not in mp_config
+        assert "trusted_dockerhub_orgs" not in mp_config
+
+    def test_the_policy_block_is_merged_as_written(self, valid_context):
+        valid_context["job_validation_policy"]["trusted_registries"] = ["registry.example.com"]
+        mp_config = ConfigLoader(MockApp(valid_context)).get_manifest_processor_config()
+        assert mp_config["trusted_registries"] == ["registry.example.com"]
+        assert (
+            mp_config["resource_quotas"]
+            == valid_context["job_validation_policy"]["resource_quotas"]
+        )
+
+
 class TestManifestProcessorImage:
     """manifest_processor.image was required but never read: deprecated, no longer required."""
 
