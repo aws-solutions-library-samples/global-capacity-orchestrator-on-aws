@@ -398,6 +398,46 @@ class TestGlobalAcceleratorValidation:
             ConfigLoader(app)
 
 
+class TestResourceQuota:
+    """resource_quota is merged over its defaults and validated by the loader too."""
+
+    def test_absent_block_is_the_default_quota(self, valid_context):
+        from gco.resource_governance import DEFAULT_RESOURCE_QUOTA
+
+        assert ConfigLoader(MockApp(valid_context)).get_resource_quota() == dict(
+            DEFAULT_RESOURCE_QUOTA
+        )
+
+    def test_partial_block_keeps_the_other_defaults(self, valid_context):
+        valid_context["resource_quota"] = {"max_cpu": "500", "_comment_max_cpu": "doc"}
+        quota = ConfigLoader(MockApp(valid_context)).get_resource_quota()
+        assert quota["max_cpu"] == "500"
+        assert "_comment_max_cpu" not in quota
+
+    @pytest.mark.parametrize(
+        ("block", "message"),
+        [
+            ({"max_cpus": "1"}, "has unknown key(s) ['max_cpus']"),
+            (
+                {"max_cpu": "lots"},
+                "resource_quota.max_cpu='lots' is not a valid Kubernetes quantity",
+            ),
+            ({"container_max_cpu": "500"}, "resource_quota.container_max_cpu='500' exceeds"),
+            ([], "'resource_quota' must be an object"),
+        ],
+    )
+    def test_invalid_blocks_fail_validation(self, valid_context, block, message):
+        valid_context["resource_quota"] = block
+        with pytest.raises(ConfigValidationError, match=re.escape(message)):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_the_stack_keeps_its_old_import(self):
+        from gco.resource_governance import validated_resource_quota
+        from gco.stacks.regional_stack import _validated_resource_quota
+
+        assert _validated_resource_quota is validated_resource_quota
+
+
 class TestGlobalAcceleratorName:
     """global_accelerator.name follows the CreateAccelerator naming rule."""
 

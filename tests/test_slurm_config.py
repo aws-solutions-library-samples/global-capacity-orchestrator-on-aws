@@ -1041,6 +1041,21 @@ def _loader(valid_cdk_context: dict[str, Any], **context: Any) -> ConfigLoader:
 
 
 class TestConfigLoaderWiring:
+    def test_partitions_are_checked_against_the_default_quota(
+        self, valid_cdk_context: dict[str, Any]
+    ) -> None:
+        """Without a resource_quota block the stack deploys the defaults (192 CPUs per
+        container), so a bigger partition must fail here, not sit PENDING forever."""
+        valid_cdk_context.pop("resource_quota", None)
+        slurm = {"enabled": True, "partitions": {"cpu": {"cpu": "256", "memory": "64Gi"}}}
+        with pytest.raises(
+            ConfigValidationError,
+            match=re.escape(
+                "helm.slurm.partitions.cpu.cpu='256' exceeds resource_quota.container_max_cpu='192'"
+            ),
+        ):
+            _loader(valid_cdk_context, helm={"slurm": slurm})
+
     def test_absent_block_reads_as_off(self, valid_cdk_context: dict[str, Any]) -> None:
         assert _loader(valid_cdk_context).get_slurm_config()["enabled"] is False
         assert (

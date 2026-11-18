@@ -89,7 +89,7 @@ from gco.pcs_config import (
     apply_pcs_overrides,
     validate_pcs_config,
 )
-from gco.resource_governance import parse_k8s_quantity
+from gco.resource_governance import parse_k8s_quantity, validated_resource_quota
 from gco.slurm_config import SlurmConfigError, validate_slurm_config
 from gco.stacks.constants import (
     CONTROL_PLANE_ONLY_CONTEXT_KEY,
@@ -912,7 +912,9 @@ class ConfigLoader:
         self._validate_eks_capabilities_config()
         # Validate the self-managed Argo CD block (helm.argocd)
         self._validate_argocd_config()
-        # Validate the Slurm cluster block (helm.slurm)
+        # Validate the gco-jobs quota (resource_quota), then the Slurm
+        # cluster block (helm.slurm), whose partitions must fit it
+        self.get_resource_quota()
         self._validate_slurm_config()
         # Validate the AWS PCS block (pcs / pcs_regions)
         self._validate_pcs_config()
@@ -1592,11 +1594,31 @@ class ConfigLoader:
         try:
             validate_slurm_config(
                 self._raw_slurm_config(),
-                resource_quota=self.app.node.try_get_context("resource_quota") or {},
+                resource_quota=self.get_resource_quota(),
                 observability_enabled=self.get_cluster_observability_enabled(),
                 fsx_enabled=self._slurm_fsx_available_everywhere(),
             )
         except SlurmConfigError as exc:
+            raise ConfigValidationError(str(exc)) from exc
+
+    def get_resource_quota(self) -> dict[str, str]:
+        """The ``resource_quota`` block merged over its defaults, validated.
+
+        The same merge the regional stack renders into the ``gco-jobs``
+        ResourceQuota and LimitRange (see
+        :func:`gco.resource_governance.validated_resource_quota`), so the
+        Slurm partitions are checked against what deploys even when cdk.json
+        leaves the block out.
+
+        Raises:
+            ConfigValidationError: If the block is not an object, names an
+                unknown key, holds a value that is not a Kubernetes quantity,
+                or a per-container ceiling exceeds its namespace ceiling.
+        """
+        raw = self.app.node.try_get_context("resource_quota")
+        try:
+            return validated_resource_quota({} if raw is None else raw)
+        except ValueError as exc:
             raise ConfigValidationError(str(exc)) from exc
 
     def get_slurm_config(self) -> dict[str, Any]:
@@ -1612,7 +1634,7 @@ class ConfigLoader:
         try:
             return validate_slurm_config(
                 self._raw_slurm_config(),
-                resource_quota=self.app.node.try_get_context("resource_quota") or {},
+                resource_quota=self.get_resource_quota(),
                 observability_enabled=self.get_cluster_observability_enabled(),
                 fsx_enabled=self._slurm_fsx_available_everywhere(),
             )
