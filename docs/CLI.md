@@ -545,7 +545,7 @@ Check and manage cluster capacity.
 | [`gco capacity cancel-reservation`](#gco-capacity-cancel-reservation) | Cancel an On-Demand Capacity Reservation and stop its charges. |
 | [`gco capacity instance-info`](#gco-capacity-instance-info) | Describe an instance type's compute characteristics, resolved live from `ec2:DescribeInstanceTypes` — vCPUs/cores/threads, memory, every accelerator class, EFA and network limits, local NVMe and EBS, purchase options, platform capabilities. |
 | [`gco capacity spot-prices`](#gco-capacity-spot-prices) | Get spot price history for an instance type in a region. |
-| [`gco capacity history`](#gco-capacity-history) | Query the historical capacity surface (optional global-stack add-on, on by default). |
+| [`gco capacity history`](#gco-capacity-history) | Query the historical capacity surface (optional global-stack add-on, on in the shipped cdk.json). |
 | [`gco capacity history show`](#gco-capacity-history-show) | Show the recorded capacity time-series for an instance type in a region. |
 | [`gco capacity history stats`](#gco-capacity-history-stats) | Show p25/p50/p75/min/max/stddev per metric over a time window. |
 | [`gco capacity history patterns`](#gco-capacity-history-patterns) | Show a day-of-week by hour heatmap of average spot scores. |
@@ -1076,7 +1076,7 @@ gco capacity spot-prices -i p4d.24xlarge -r us-west-2 -d 30
 
 #### `gco capacity history`
 
-Query the historical capacity surface, an optional add-on to the global stack (not a separate stack) that is enabled by default. Set `historical.enabled` to `false` in cdk.json to opt out. The poller writes time-series snapshots to DynamoDB; when none are available yet the subcommands print a clear notice.
+Query the historical capacity surface, an optional add-on to the global stack (not a separate stack) that the shipped cdk.json turns on (`historical.enabled: true`). Set `historical.enabled` to `false` in cdk.json to opt out; a cdk.json that leaves the key out deploys without it. The poller writes time-series snapshots to DynamoDB; when none are available yet the subcommands print a clear notice.
 
 Spot placement scores are collected per *instance pool* (a reviewed set of interchangeable types; the snapshot's `spot_pool` attribute names it) at each configured target capacity, because the underlying AWS API needs at least three instance types to return a meaningful score. Snapshots recorded before pooled collection used single-type requests whose scores are artificially depressed and are not comparable with pooled values; see the [capacity poller README](../lambda/capacity-poller/README.md#history-discontinuity).
 

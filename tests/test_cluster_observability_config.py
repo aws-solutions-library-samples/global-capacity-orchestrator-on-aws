@@ -160,8 +160,30 @@ def test_non_bool_enabled_is_rejected() -> None:
 
 
 def test_non_string_persistence_size_is_rejected() -> None:
-    with pytest.raises(ConfigValidationError, match="persistence_size must be a non-empty string"):
+    with pytest.raises(
+        ConfigValidationError, match="persistence_size must be a positive Kubernetes quantity"
+    ):
         _loader({"prometheus": {"persistence_size": 50}})
+
+
+@pytest.mark.parametrize("sub_block", ["grafana", "prometheus", "alertmanager", "mlflow"])
+@pytest.mark.parametrize("size", ["10GB", "10 Gi", "-1Gi", "0", "", "lots"])
+def test_volume_sizes_must_be_positive_quantities(sub_block: str, size: str) -> None:
+    """The sizes render into PVC requests; a typo used to fail the Helm install."""
+    with pytest.raises(
+        ConfigValidationError,
+        match=re.escape(
+            f"cluster_observability.{sub_block}.persistence_size must be a positive Kubernetes "
+            "quantity string"
+        ),
+    ):
+        _loader({sub_block: {"persistence_size": size}})
+
+
+@pytest.mark.parametrize("size", ["10Gi", "500Mi", "1Ti", "20G"])
+def test_volume_sizes_in_any_kubernetes_unit_are_accepted(size: str) -> None:
+    cfg = _loader({"prometheus": {"persistence_size": size}}).get_cluster_observability_config()
+    assert cfg["prometheus"]["persistence_size"] == size
 
 
 def test_empty_retention_is_rejected() -> None:
@@ -198,6 +220,38 @@ def test_non_string_rotation_schedule_is_rejected() -> None:
         ConfigValidationError, match="admin_password_rotation_schedule must be a 5-field cron"
     ):
         _loader({"grafana": {"admin_password_rotation_schedule": 12345}})
+
+
+@pytest.mark.parametrize(
+    ("mlflow", "message"),
+    [
+        (False, "cluster_observability.mlflow must be an object, got bool"),
+        (
+            {"enable": True},
+            "cluster_observability.mlflow contains unknown key(s): "
+            "cluster_observability.mlflow.enable",
+        ),
+        (
+            {"persistence_size": 10},
+            "cluster_observability.mlflow.persistence_size must be a positive Kubernetes "
+            "quantity string such as '10Gi', got 10 (it is not a string)",
+        ),
+        (
+            {"persistence_size": " "},
+            "cluster_observability.mlflow.persistence_size must be a positive Kubernetes",
+        ),
+    ],
+)
+def test_malformed_mlflow_sub_block_is_rejected(mlflow: object, message: str) -> None:
+    with pytest.raises(ConfigValidationError, match=re.escape(message)):
+        _loader({"mlflow": mlflow})
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_mlflow_flag_is_read_as_written(enabled: bool) -> None:
+    loader = _loader({"mlflow": {"enabled": enabled, "persistence_size": "20Gi"}})
+    assert loader.get_mlflow_enabled() is enabled
+    assert loader.get_cluster_observability_config()["mlflow"]["persistence_size"] == "20Gi"
 
 
 def test_wellformed_block_passes_validation() -> None:

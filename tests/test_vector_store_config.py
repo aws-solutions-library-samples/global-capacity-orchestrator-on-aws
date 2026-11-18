@@ -143,6 +143,10 @@ class TestValidation:
             {"embedding_model_id": ""},
             {"embedding_model_id": "   "},
             {"embedding_model_id": 7},
+            {"embedding_model_id": "amazon titan"},
+            {"embedding_model_id": "titan-embed-text-v2"},
+            {"embedding_model_id": "arn:aws:bedrock:us-east-1::foundation-model/amazon.x"},
+            {"embedding_model_id": "Amazon.Titan-Embed-Text-V2:0"},
             {"replica_regions": "us-east-1"},
             {"replica_regions": [1, 2]},
             {"replica_regions": ["not-a-region"]},
@@ -156,6 +160,19 @@ class TestValidation:
     def test_invalid_vector_store_raises(self, valid_cdk_context, vector_store):
         with pytest.raises(ConfigValidationError):
             _loader(valid_cdk_context, vector_store)
+
+    @pytest.mark.parametrize(
+        "model_id",
+        ["amazon.titan-embed-text-v2:0", "cohere.embed-english-v3", "amazon.titan-embed-image-v1"],
+    )
+    def test_foundation_model_ids_are_accepted(self, valid_cdk_context, model_id):
+        loader = _loader(valid_cdk_context, {"embedding_model_id": model_id})
+        assert loader.get_vector_store_config()["embedding_model_id"] == model_id
+
+    def test_a_padded_model_id_reaches_every_consumer_stripped(self, valid_cdk_context):
+        """The validator checked the stripped id while the stacks used the raw one."""
+        loader = _loader(valid_cdk_context, {"embedding_model_id": "  cohere.embed-english-v3 "})
+        assert loader.get_vector_store_config()["embedding_model_id"] == "cohere.embed-english-v3"
 
     def test_replica_in_the_global_region_is_rejected_with_reason(self, valid_cdk_context):
         with pytest.raises(ConfigValidationError) as excinfo:

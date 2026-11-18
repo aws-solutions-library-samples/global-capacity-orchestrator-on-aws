@@ -164,7 +164,6 @@
 
     "_comment_manifest_processor": "Authenticated API, direct manifest submission, and DynamoDB queue worker. replicas is the fixed Deployment size (each replica also runs the queue worker; claims are conditional so replicas compete safely). resource_limits are the application container's CPU/memory limits as Kubernetes quantities (at least the manifest's 500m / 1Gi requests). autoscaling is OFF by default: the API tier is I/O-bound, so CPU is a weak saturation signal; set autoscaling.enabled=true to ship a CPU HorizontalPodAutoscaler between replicas and max_replicas (1-100, >= replicas, default 6) at cpu_target_utilization_percentage (1-100, default 70) — the HPA then owns the replica count and the applier stops re-asserting it. central_queue_worker_enabled activates queued Jobs in each target region. Claims use unique pod owners, fencing generations, deterministic Kubernetes identities, and renewable leases; lease_renewal_seconds must be no more than half lease_seconds. poll_interval_seconds controls pickup cadence; batch_size bounds each pass; reconcile_limit bounds pending/running status checks. max_request_body_bytes is the hard request-size cap (1 MiB default). yaml_max_depth limits YAML nesting. See docs/CUSTOMIZATION.md.",
     "manifest_processor": {
-      "image": "gco/manifest-processor:latest",
       "replicas": 3,
       "resource_limits": {
         "cpu": "1000m",
@@ -290,13 +289,12 @@
 
     "_comment_storage": "Optional storage backends (disabled by default; flip enabled then 'gco stacks deploy-all').",
 
-    "_comment_fsx_lustre": "FSx for Lustre filesystem mounted into job pods. enabled: master toggle. storage_capacity_gib: provisioned size. deployment_type: SCRATCH_1, SCRATCH_2 (recommended), or PERSISTENT_*. file_system_type_version: Lustre version. per_unit_storage_throughput: only relevant for PERSISTENT_* (MB/s/TiB). data_compression_type: NONE or LZ4. import_path / export_path: optional S3 data-repo URIs. auto_import_policy: which S3 events trigger metadata sync (NONE, NEW, NEW_CHANGED, NEW_CHANGED_DELETED). See docs/CUSTOMIZATION.md (Configure FSx Storage) and https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html.",
+    "_comment_fsx_lustre": "FSx for Lustre filesystem mounted into job pods. enabled: master toggle (true/false). storage_capacity_gib: provisioned size, 1200, 2400, then multiples of 2400 (multiples of 3600 for SCRATCH_1). deployment_type: SCRATCH_1, SCRATCH_2 (default, recommended), PERSISTENT_1 or PERSISTENT_2. file_system_type_version: Lustre version 2.10, 2.12 or 2.15 (default; kernel 6.x clients need it; PERSISTENT_2 rejects 2.10). per_unit_storage_throughput: MB/s per TiB for the PERSISTENT types only (PERSISTENT_1: 50, 100 or 200, default 200; PERSISTENT_2: 125, 250, 500 or 1000, default 250); SCRATCH types take none, so it is left out here and ignored if set. data_compression_type: NONE or LZ4. import_path / export_path: optional s3:// data-repository URIs in one bucket (export needs import). auto_import_policy: which S3 events trigger metadata sync (NONE, NEW, NEW_CHANGED, NEW_CHANGED_DELETED). fsx_lustre_regions {<region>: {...}} overrides keys per Region. Every key is validated at synth. See docs/CUSTOMIZATION.md (Configure FSx Storage) and https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html.",
     "fsx_lustre": {
       "enabled": false,
       "storage_capacity_gib": 1200,
       "deployment_type": "SCRATCH_2",
       "file_system_type_version": "2.15",
-      "per_unit_storage_throughput": 200,
       "data_compression_type": "LZ4",
       "import_path": null,
       "export_path": null,
@@ -505,7 +503,7 @@
       "enabled": true,
       "schedule_hours": 24
     },
-    "_comment_historical": "Historical capacity surface - an OPTIONAL ADD-ON to the global stack (not a separate stack), enabled by default. When enabled, GCOGlobalStack adds a DynamoDB time-series table plus an EventBridge-scheduled Lambda that snapshots spot scores, prices, AZ coverage, and capacity-block availability. Set enabled=false to opt out. retention_days: DynamoDB TTL window for snapshots. poll_interval_minutes: schedule cadence. capacity_block_duration_hours: short Capacity Block probe duration (default 24 = 1 day, soonest-available). capacity_block_long_duration_hours: long Capacity Block probe duration in hours (default 1512 = 63 days) so history tracks extended-term block availability; set 0 to disable the long probe. spot_score_target_capacities: Spot Placement Score target capacities snapshotted per instance pool; a subset of the supported set 1/10/50 (capacity 1 keeps the original spot_score field, N>1 writes spot_score_at_N; see cli/capacity/history.py). watch_instance_types: instance types to snapshot. enabled_regions: regions to poll (empty = all deployed regions). Cost is ~0 within the Lambda free tier; see lambda/capacity-poller/README.md.",
+    "_comment_historical": "Historical capacity surface - an OPTIONAL ADD-ON to the global stack (not a separate stack), shipped enabled; leaving enabled out (or the whole block) turns it off. When enabled, GCOGlobalStack adds a DynamoDB time-series table plus an EventBridge-scheduled Lambda that snapshots spot scores, prices, AZ coverage, and capacity-block availability. Set enabled=false to opt out. retention_days: DynamoDB TTL window for snapshots. poll_interval_minutes: schedule cadence. capacity_block_duration_hours: short Capacity Block probe duration (default 24 = 1 day, soonest-available). capacity_block_long_duration_hours: long Capacity Block probe duration in hours (default 1512 = 63 days) so history tracks extended-term block availability; set 0 to disable the long probe. spot_score_target_capacities: Spot Placement Score target capacities snapshotted per instance pool; a subset of the supported set 1/10/50 (capacity 1 keeps the original spot_score field, N>1 writes spot_score_at_N; see cli/capacity/history.py). watch_instance_types: instance types to snapshot. enabled_regions: regions to poll (empty = all deployed regions). Cost is ~0 within the Lambda free tier; see lambda/capacity-poller/README.md.",
     "historical": {
       "enabled": true,
       "retention_days": 90,

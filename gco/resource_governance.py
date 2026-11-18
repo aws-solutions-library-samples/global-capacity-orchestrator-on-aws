@@ -84,3 +84,68 @@ DEFAULT_MANIFEST_RESOURCE_CAPS: Mapping[str, object] = MappingProxyType(
     }
 )
 """Default ``job_validation_policy.resource_quotas`` for submitted manifests."""
+
+
+#: (container ceiling, namespace ceiling) pairs the resource-quota invariant
+#: compares; every dimension a container can request must fit the namespace.
+RESOURCE_QUOTA_INVARIANTS = (
+    ("container_max_cpu", "max_cpu"),
+    ("container_max_memory", "max_memory"),
+    ("container_max_gpu", "max_gpu"),
+)
+
+
+def validated_resource_quota(raw: object) -> dict[str, str]:
+    """Merge the ``resource_quota`` context over defaults and validate it.
+
+    The values are substituted verbatim into the gco-jobs ResourceQuota and
+    LimitRange manifests, where a typo or an incoherent pair (a per-container
+    ceiling that exceeds the namespace ceiling) previously deployed silently
+    and only surfaced as pods being forbidden at admission — with the reason
+    visible in namespace events alone. Fail the synth instead.
+
+    The one merge both readers share: the regional stack renders the
+    result into the manifests, and ``ConfigLoader`` validates it and checks
+    the Slurm partitions against it, so an absent ``resource_quota`` is
+    checked against the defaults that deploy. ``_comment*`` keys are
+    documentation and are skipped.
+
+    Raises:
+        ValueError: If the context is not a mapping, carries an unknown key,
+            a value that does not parse as a Kubernetes quantity, or a
+            per-container ceiling exceeding its namespace ceiling.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"cdk.json context 'resource_quota' must be an object, got {type(raw).__name__}"
+        )
+    unknown = sorted(
+        str(key)
+        for key in raw
+        if key not in DEFAULT_RESOURCE_QUOTA and not str(key).startswith("_comment")
+    )
+    if unknown:
+        allowed = ", ".join(sorted(DEFAULT_RESOURCE_QUOTA))
+        raise ValueError(
+            f"cdk.json context 'resource_quota' has unknown key(s) {unknown}; allowed: {allowed}"
+        )
+    merged = {key: str(raw.get(key, default)) for key, default in DEFAULT_RESOURCE_QUOTA.items()}
+    parsed: dict[str, float] = {}
+    for key, value in merged.items():
+        try:
+            parsed[key] = parse_k8s_quantity(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"resource_quota.{key}={value!r} is not a valid Kubernetes quantity"
+            ) from exc
+        if parsed[key] < 0:
+            raise ValueError(f"resource_quota.{key}={value!r} must not be negative")
+    for container_key, namespace_key in RESOURCE_QUOTA_INVARIANTS:
+        if parsed[container_key] > parsed[namespace_key]:
+            raise ValueError(
+                f"resource_quota.{container_key}={merged[container_key]!r} exceeds "
+                f"resource_quota.{namespace_key}={merged[namespace_key]!r}: a container "
+                "that passes the LimitRange could never be admitted by the namespace "
+                "ResourceQuota"
+            )
+    return merged

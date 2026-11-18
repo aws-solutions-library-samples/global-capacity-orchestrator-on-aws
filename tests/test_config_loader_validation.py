@@ -360,7 +360,7 @@ class TestConfigLoaderValidation:
             }
         )
 
-        with pytest.raises(ConfigValidationError, match="Missing threshold configuration"):
+        with pytest.raises(ConfigValidationError, match=r"resource_thresholds\.\w+ is required"):
             ConfigLoader(app)
 
     def test_config_loader_validates_invalid_health_check_path(self):
@@ -459,7 +459,7 @@ class TestConfigLoaderValidation:
         )
 
         with pytest.raises(
-            ConfigValidationError, match="throttle_burst_limit should be greater than or equal"
+            ConfigValidationError, match="throttle_burst_limit must be greater than or equal"
         ):
             ConfigLoader(app)
 

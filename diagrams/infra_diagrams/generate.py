@@ -170,7 +170,6 @@ _BASE_CONTEXT: dict[str, Any] = {
         "pending_requested_gpus": -1,
     },
     "manifest_processor": {
-        "image": "gco/manifest-processor:latest",
         "replicas": 3,
         "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
     },

@@ -826,8 +826,8 @@ CONFIGS.extend(
                     "monitoring": "us-east-2",
                     "regional": ["us-east-1", "us-west-2"],
                 },
-                "fsx_lustre": {"enabled": True},
-                "fsx_lustre_regions": ["us-east-1"],
+                "fsx_lustre": {"enabled": False},
+                "fsx_lustre_regions": {"us-east-1": {"enabled": True}},
             },
         ),
         # Non-default project name: #139 made every physical name derive

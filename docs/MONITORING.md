@@ -60,8 +60,10 @@ cluster unless you opt out. The drivers, per region:
   database + dashboards (`10Gi`), and Alertmanager (`5Gi`). These are the
   standing cost: roughly the gp3 rate for ~65 GiB per region, plus snapshots if
   you enable them. Sizes are configurable under
-  `cluster_observability.{prometheus,grafana,alertmanager}.persistence_size`, and
-  Prometheus retention (default `15d`) bounds how much of the 50 GiB fills.
+  `cluster_observability.{prometheus,grafana,alertmanager,mlflow}.persistence_size`
+  as positive Kubernetes quantity strings (`"50Gi"`; `cdk synth` rejects
+  `"50GB"`), and Prometheus retention (default `15d`) bounds how much of the
+  50 GiB fills.
 - **Compute** — the component pods (Prometheus, Grafana, Alertmanager, operator,
   `kube-state-metrics`) plus a `node-exporter` and DCGM-exporter DaemonSet pod on
   each node. These are small (tens to low-hundreds of millicores) but scale with

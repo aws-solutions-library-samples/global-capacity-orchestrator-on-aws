@@ -92,6 +92,9 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [Customizing Suppressions](#customizing-suppressions)
   - [Adding New Suppressions](#adding-new-suppressions)
   - [Disabling Compliance Checks](#disabling-compliance-checks)
+- [How cdk.json Is Validated](#how-cdkjson-is-validated)
+  - [Blocks and keys](#blocks-and-keys)
+  - [Boolean flags](#boolean-flags)
 - [Configuration Best Practices](#configuration-best-practices)
   - [1. Use Configuration Files](#1-use-configuration-files)
   - [2. Environment-Specific Configuration](#2-environment-specific-configuration)
@@ -307,7 +310,7 @@ Changing `project_name` re-scopes all of the following (shown for
 | WAF WebACL + log groups | `acme-api-gateway-waf`, `/aws/apigateway/acme-global`, `aws-waf-logs-acme-api-gateway` |
 | CloudFormation exports | `acme-global-api-endpoint`, `acme-auth-secret-arn`, `acme-waf-webacl-arn`, … |
 | ECR image namespace | repos under `acme/*` (e.g. `acme/dockerhub/…`), ECR replication filter `acme/`, `gco images` / mirror namespace |
-| Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`) |
+| Global Accelerator (`aws` only) | `acme-accelerator` (defaults to `<project>-accelerator` when `global_accelerator.name` is unset in `cdk.json`; a set name must be 1–64 letters, digits, periods or hyphens, not starting or ending with a period or hyphen) |
 | API Gateway names | REST API `acme-global-api`, Studio Cognito authorizer `acme-studio-cognito-authorizer`, request validator `acme-studio-request-validator` |
 | [Valkey](https://valkey.io/) cache (opt-in) | ElastiCache serverless cache `acme-<region>` |
 | Analytics (opt-in) | Studio bucket `acme-analytics-studioonlybucket…` (CloudFormation-generated), SageMaker role `AmazonSageMaker-acme-analytics-exec-<region>`, Studio domain `acme-studio-<region>`, EMR app `acme-spark-<region>`, Cognito domain `acme-studio-<account>` |
@@ -319,18 +322,24 @@ separate Kubernetes API servers and never collide across deployments.
 
 ### `project_name` format
 
-Because the value flows into S3 bucket names and the Cognito domain prefix
-(both lowercase-only, length-limited), it is validated at synth time and must
-match:
+Because the value flows into S3 bucket names, the Cognito domain prefix and
+the ECR repository namespace (all lowercase-only, length-limited), it is
+validated at synth time and must match:
 
 ```text
-^[a-z][a-z0-9-]{1,30}$
+^(?=.{2,31}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$
 ```
 
-That is: start with a lowercase letter, then 2–31 total characters of lowercase
-letters, digits, or hyphens (e.g. `gco`, `gco-staging`, `acme`, `team-b-prod`).
-Uppercase, underscores, dots, a leading digit, or a leading/trailing hyphen are
-rejected up front with a clear error rather than failing mid-deploy.
+That is: 2–31 characters, starting with a lowercase letter, then lowercase
+letters and digits with single hyphens between them (e.g. `gco`, `gco-staging`,
+`acme`, `team-b-prod`). Uppercase, underscores, dots, a leading digit, a
+trailing hyphen, or two hyphens in a row are rejected up front with a clear
+error rather than failing mid-deploy. Earlier releases accepted a trailing
+hyphen and two hyphens in a row, but ECR refuses them in a repository path
+(`gco-/...`, `a--b/...`): the global stack's `<project_name>/` image
+replication rule, which exists whenever a workload Region differs from the
+global Region, failed to deploy, and so did `gco images` and the Volcano image
+mirror.
 
 Leaving `project_name` out of `cdk.json` selects the default `gco`; the rest of
 the file is validated the same way either way. An explicit value, including an
@@ -485,7 +494,10 @@ Edit `cdk.json` to change the endpoint access mode:
 }
 ```
 
-`public_access_cidrs` restricts who can reach the public endpoint. Leaving it
+`public_access_cidrs` restricts who can reach the public endpoint. It is a
+list of IPv4 CIDRs with an explicit prefix (`203.0.113.7/32`), even for one
+entry; anything else fails `cdk synth`, and EKS takes no IPv6 entries on the
+IPv4 clusters GCO creates. Leaving it
 empty means `0.0.0.0/0` — synthesis prints a loud warning naming that exposure
 rather than choosing it silently. Prefer the CLI, which refuses to widen
 access without an explicit allowlist and records the change atomically:
@@ -841,15 +853,20 @@ The health monitor compares cluster utilization against configurable thresholds 
 }
 ```
 
-| Threshold | Default | Description |
-|-----------|---------|-------------|
-| `cpu_threshold` | 80 | CPU utilization % (0-100, or -1 to disable) |
-| `memory_threshold` | 80 | Memory utilization % (0-100, or -1 to disable) |
-| `gpu_threshold` | -1 | GPU utilization % (0-100, or -1 to disable) |
-| `pending_pods_threshold` | 10 | Max pending pods before unhealthy (-1 to disable) |
-| `pending_requested_cpu_vcpus` | 100 | Max vCPUs requested by pending pods (-1 to disable) |
-| `pending_requested_memory_gb` | 200 | Max GB memory requested by pending pods (-1 to disable) |
-| `pending_requested_gpus` | -1 | Max GPUs requested by pending pods (-1 to disable) |
+| Threshold | Shipped value | If omitted | Description |
+|-----------|---------------|------------|-------------|
+| `cpu_threshold` | 80 | required | CPU utilization % (0-100, or -1 to disable) |
+| `memory_threshold` | 80 | required | Memory utilization % (0-100, or -1 to disable) |
+| `gpu_threshold` | -1 | required | GPU utilization % (0-100, or -1 to disable) |
+| `pending_pods_threshold` | 10 | 10 | Max pending pods before unhealthy (-1 to disable) |
+| `pending_requested_cpu_vcpus` | 100 | 100 | Max vCPUs requested by pending pods (-1 to disable) |
+| `pending_requested_memory_gb` | 200 | 200 | Max GB memory requested by pending pods (-1 to disable) |
+| `pending_requested_gpus` | -1 | 8 | Max GPUs requested by pending pods (-1 to disable) |
+
+The shipped value is what the committed `cdk.json` sets. A file that leaves a
+`pending_*` key out gets the value in the "If omitted" column, which is also
+what the health monitor uses without its environment variable; keep
+`pending_requested_gpus` at `-1` to leave the pending-GPU check off.
 
 Set a threshold to `-1` to disable that check entirely. GPU thresholds are disabled by default because inference endpoints naturally saturate GPU resources and should not trigger unhealthy status.
 
@@ -1757,12 +1774,28 @@ Edit `cdk.json` to customize FSx storage settings:
       "storage_capacity_gib": 1200,
       "deployment_type": "SCRATCH_2",
       "file_system_type_version": "2.15",
-      "data_compression_type": "LZ4",
-      "per_unit_storage_throughput": 200
+      "data_compression_type": "LZ4"
     }
   }
 }
 ```
+
+Every key is optional, an omitted key keeps its default, and every value is
+validated at synth, so a value FSx for Lustre would reject fails `cdk synth`
+with the key's full path instead of failing the deploy.
+
+| Key | Default | Accepted values |
+|-----|---------|-----------------|
+| `enabled` | `false` | `true` / `false` ([JSON booleans](#boolean-flags)) |
+| `storage_capacity_gib` | `1200` | 1200, 2400, then multiples of 2400 GiB (multiples of 3600 for `SCRATCH_1`) |
+| `deployment_type` | `SCRATCH_2` | `SCRATCH_1`, `SCRATCH_2`, `PERSISTENT_1`, `PERSISTENT_2` |
+| `file_system_type_version` | `2.15` | `2.10`, `2.12`, `2.15` (`PERSISTENT_2` does not support `2.10`) |
+| `per_unit_storage_throughput` | `200` for `PERSISTENT_1`, `250` for `PERSISTENT_2` | `PERSISTENT_1`: 50, 100, 200; `PERSISTENT_2`: 125, 250, 500, 1000 (MB/s per TiB). The `SCRATCH` types take no throughput setting; a value set for them is ignored |
+| `data_compression_type` | `LZ4` | `LZ4`, `NONE` |
+| `import_path` / `export_path` | `null` | `s3://bucket[/prefix]`; an export path needs an import path in the same bucket |
+| `auto_import_policy` | `NEW_CHANGED_DELETED` | `NONE`, `NEW`, `NEW_CHANGED`, `NEW_CHANGED_DELETED` (used only with an import path) |
+
+The values follow the [`AWS::FSx::FileSystem` `LustreConfiguration` reference](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-fsx-filesystem-lustreconfiguration.html) for the SSD storage GCO creates.
 
 **Deployment Types:**
 
@@ -1771,15 +1804,15 @@ Edit `cdk.json` to customize FSx storage settings:
 - `PERSISTENT_1`: Persistent storage with data replication
 - `PERSISTENT_2`: Latest persistent storage with higher throughput
 
-**File System Type Version:**
+**Per-Region settings:** `fsx_lustre_regions` holds an object per Region whose
+keys override the global block for that Region only, for example
+`"fsx_lustre_regions": {"us-west-2": {"enabled": true}}`. `gco stacks fsx enable
+-r <region>` writes such an entry.
 
-- `2.15`: Latest version, recommended (default)
-- `2.12`: Compatible with kernel 6.x
-
-**Storage Capacity:**
-
-- Minimum: 1200 GiB for SCRATCH_2
-- Must be in increments of 2400 GiB for SCRATCH_2
+**Removed setting:** earlier releases documented an `fsx_lustre.node_group`
+block, but nothing ever read it: FSx workloads run on the EKS Auto Mode node
+pools. A `node_group` key still validates, with a deprecation warning, and has
+no effect; delete it.
 
 ### Using FSx in Jobs
 
@@ -1861,10 +1894,13 @@ Or edit `cdk.json` directly:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `false` | Enable/disable Valkey cache |
-| `max_data_storage_gb` | 5 | Maximum data storage in GB (auto-scales from 1 GB) |
-| `max_ecpu_per_second` | 5000 | Maximum ElastiCache Processing Units per second |
-| `snapshot_retention_limit` | 1 | Number of daily snapshots to retain |
+| `enabled` | `false` | Enable/disable Valkey cache (`true` / `false`, [JSON booleans](#boolean-flags)) |
+| `max_data_storage_gb` | 5 | Maximum data storage in GB, an integer of at least 1 (auto-scales from 1 GB) |
+| `max_ecpu_per_second` | 5000 | Maximum ElastiCache Processing Units per second, an integer of at least 1000 (the cache's floor) |
+| `snapshot_retention_limit` | 1 | Number of daily snapshots to retain, an integer of at least 0 |
+
+Values of the wrong type, below their floor, and unknown keys fail `cdk synth`
+with the key's full path.
 
 After enabling, redeploy the regional stack:
 
@@ -1939,11 +1975,14 @@ Or edit `cdk.json` directly:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `false` | Enable/disable Aurora pgvector |
-| `min_acu` | 0 | Minimum Aurora Capacity Units (0 = scale to zero / auto-pause) |
-| `max_acu` | 16 | Maximum Aurora Capacity Units |
-| `backup_retention_days` | 7 | Number of days to retain automated backups |
-| `deletion_protection` | `false` | Enable deletion protection (recommended for production) |
+| `enabled` | `false` | Enable/disable Aurora pgvector (`true` / `false`, [JSON booleans](#boolean-flags)) |
+| `min_acu` | 0 | Minimum Aurora Capacity Units, 0-256 in steps of 0.5 (0 = scale to zero / auto-pause) |
+| `max_acu` | 16 | Maximum Aurora Capacity Units, 1-256 in steps of 0.5 and at least `min_acu` |
+| `backup_retention_days` | 7 | Number of days to retain automated backups, 1-35 |
+| `deletion_protection` | `false` | Enable deletion protection (recommended for production; `true` / `false`, [JSON booleans](#boolean-flags)) |
+
+Values outside these ranges, of the wrong type, and unknown keys fail `cdk
+synth` with the key's full path.
 
 Set `min_acu` to `0.5` or higher to disable auto-pause and keep the cluster always warm.
 
@@ -2078,7 +2117,7 @@ searches answer a "still building" hint until it is ACTIVE.
 | `enabled` | `false` | Provision the table, index, ingest pipeline, and regional wiring |
 | `dimensions` | `1024` | Embedding width. **One-way door**: immutable after index creation and must match the embedding model's output width |
 | `distance_function` | `COSINE` | Similarity metric (`COSINE` or `EUCLIDEAN`); immutable after index creation |
-| `embedding_model_id` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for ingest and queries. Deliberately independent of mission memory's `bedrock.embedding_model_id` |
+| `embedding_model_id` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for ingest and queries, as a foundation-model id (`provider.model[:version]`; the stacks grant `bedrock:InvokeModel` on `foundation-model/<id>`). Deliberately independent of mission memory's `bedrock.embedding_model_id` |
 | `replica_regions` | `[]` | Regions to replicate into. Empty means "follow `deployment_regions.regional`", minus the global region (the primary) |
 | `corpus_prefix` | `vector-corpus/` | S3 key prefix on the cluster-shared bucket watched by the ingest Lambda |
 
@@ -2478,6 +2517,65 @@ def nag_validation_plugins(scope, *, verbose=True):
 cdk.Validations.of(app).add_plugins(*nag_validation_plugins(app, verbose=True))
 ```
 
+## How cdk.json Is Validated
+
+`cdk synth`, and every `gco stacks` command that synthesizes, validates the
+whole `context` block before it builds a stack, so a value AWS would reject
+fails with the key's full path (`fsx_lustre_regions.us-west-2.enabled`)
+instead of failing halfway through a deploy.
+
+### Blocks and keys
+
+- A block such as `cluster_observability` must be a JSON object. Earlier
+  releases read a scalar such as `"cluster_observability": false` as a
+  missing block, so its defaults applied and observability stayed on; now the
+  synth fails. Write `{"enabled": false}` instead.
+- A key that a block does not define fails the synth with its full path and
+  the keys the block accepts, so a typo such as
+  `cost_monitoring.reports.interval` is caught instead of silently keeping the
+  default. `_comment*` keys are allowed in every block.
+- A key that no longer takes effect still validates, with a warning that
+  names it and says what to do; nothing reads its value. These are
+  `alb_config`, `fsx_lustre.node_group`, `manifest_processor.image` (the
+  stack builds that image itself),
+  `global_accelerator.health_check_grace_period` and
+  `global_accelerator.health_check_timeout`.
+- The per-Region overlays (`fsx_lustre_regions`, `pcs_regions`,
+  `hyperpod_regions`) are keyed by Region name. A name that is not an AWS
+  Region fails; a real Region that is not in `deployment_regions.regional`
+  draws a warning, because no stack reads it until the Region is added (which
+  is how a Region is staged).
+- A top-level key in GCO's `snake_case` style that GCO does not read draws a
+  warning, because it is most likely a misspelt block. Keys of the CDK itself
+  (`@aws-cdk/...`, `aws:cdk:...`) are not checked.
+- Numbers must be numbers: `true` is not accepted where an integer belongs.
+  `tags` values must be strings, and `kubernetes_version` is a quoted
+  `"<major>.<minor>"` string such as `"1.37"` (a JSON number `1.30` would read
+  as `1.3`).
+
+### Boolean flags
+
+Write flags such as `enabled` as JSON booleans, `true` or `false`, without
+quotes. Earlier releases read the `enabled` flags of `fsx_lustre` (and its
+`fsx_lustre_regions` overlays), `valkey`, `aurora_pgvector` and
+`cluster_observability.mlflow` by truthiness, so a quoted `"false"`, like
+every non-empty string, turned the feature on. So that an upgrade never turns
+off a feature that has been running:
+
+- `"true"` in any case still reads as `true`, with a deprecation warning.
+- Any other string there, `"false"` included, fails validation with a message
+  that says how earlier releases read it. Write `true` to keep the feature, or
+  `false` to remove it. For these storage features `false` deletes the
+  resource and its data (the file system, the cache, the database cluster,
+  the MLflow run-metadata volume), so back up first (see
+  [UPGRADING.md](UPGRADING.md#2-back-up-regional-data-to-the-cluster-shared-bucket)).
+- Numbers, `null` and other types fail validation.
+
+`aurora_pgvector.deletion_protection` follows the same rule; a string there
+always failed the synth, so nothing has been running on one. Top-level keys
+that the CLI passes as `cdk --context key=value` strings, such as
+`gco:control-plane-only`, accept both `"true"` and `"false"`.
+
 ## Configuration Best Practices
 
 ### 1. Use Configuration Files
@@ -2494,13 +2592,15 @@ Store configuration in `cdk.json` context:
       "monitoring": "us-east-2",
       "regional": ["us-east-1"]
     },
-    "enable_monitoring": true,
-    "enable_gpu": true,
-    "gpu_instance_families": ["g5", "g4dn"],
-    "max_gpu_nodes": 10
+    "cluster_observability": {"enabled": true},
+    "fsx_lustre": {"enabled": false},
+    "tags": {"Project": "gco", "Environment": "dev"}
   }
 }
 ```
+
+Every block is checked at synth, so a misspelt key fails or warns instead of
+being ignored; see [How cdk.json Is Validated](#how-cdkjson-is-validated).
 
 ### 2. Environment-Specific Configuration
 

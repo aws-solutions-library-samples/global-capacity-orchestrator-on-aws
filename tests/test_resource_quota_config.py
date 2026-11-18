@@ -300,6 +300,10 @@ class TestManifestTemplatePlaceholderCoverage:
         # post-helm-kueue-hyperpod-queue.yaml (the agent image and the Kueue
         # quotas) are rendered by compute_hyperpod_replacements.
         Path("gco/hyperpod_config.py"),
+        # The {{GATEWAY_*}} tokens of post-helm-gateway.yaml (the platform ALB
+        # target-group health check, cdk.json gateway_health_check) are
+        # rendered by compute_gateway_health_check_replacements.
+        Path("gco/gateway_health_check_config.py"),
     )
 
     # Placeholders that are intentionally only provided for specific

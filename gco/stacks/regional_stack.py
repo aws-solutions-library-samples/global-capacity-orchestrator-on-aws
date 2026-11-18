@@ -136,6 +136,7 @@ from gco.eks_capabilities_config import (
     kro_kubernetes_username,
     normalize_eks_capabilities_config,
 )
+from gco.fsx_lustre_config import default_per_unit_storage_throughput
 from gco.gateway_health_check_config import (
     GATEWAY_HEALTH_CHECK_CONTEXT_KEY,
     compute_gateway_health_check_replacements,
@@ -151,6 +152,7 @@ from gco.inference_proxy_config import (
 )
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.pcs_config import compute_pcs_replacements, pcs_enabled, validate_pcs_config
+from gco.resource_governance import validated_resource_quota
 from gco.service_images import discover_service_dockerfiles, service_dockerfile
 from gco.slurm_config import (
     SLURM_ACCOUNTING_BACKUP_PREFIX,
@@ -166,7 +168,6 @@ from gco.stacks.aws_load_balancer_controller_policy import (
 from gco.stacks.constants import (
     AURORA_POSTGRES_VERSION,
     DEFAULT_MANIFEST_RESOURCE_CAPS,
-    DEFAULT_RESOURCE_QUOTA,
     EKS_ADDON_CLOUDWATCH_OBSERVABILITY,
     EKS_ADDON_EFS_CSI_DRIVER,
     EKS_ADDON_FSX_CSI_DRIVER,
@@ -539,59 +540,9 @@ _GA_REMOVAL_POLL_ATTEMPTS = 40
 _GA_REGISTRATION_POLL_ATTEMPTS = 60
 
 
-#: (container ceiling, namespace ceiling) pairs the resource-quota invariant
-#: compares; every dimension a container can request must fit the namespace.
-_RESOURCE_QUOTA_INVARIANTS = (
-    ("container_max_cpu", "max_cpu"),
-    ("container_max_memory", "max_memory"),
-    ("container_max_gpu", "max_gpu"),
-)
-
-
-def _validated_resource_quota(raw: object) -> dict[str, str]:
-    """Merge the ``resource_quota`` context over defaults and validate it.
-
-    The values are substituted verbatim into the gco-jobs ResourceQuota and
-    LimitRange manifests, where a typo or an incoherent pair (a per-container
-    ceiling that exceeds the namespace ceiling) previously deployed silently
-    and only surfaced as pods being forbidden at admission — with the reason
-    visible in namespace events alone. Fail the synth instead.
-
-    Raises:
-        ValueError: If the context is not a mapping, carries an unknown key,
-            a value that does not parse as a Kubernetes quantity, or a
-            per-container ceiling exceeding its namespace ceiling.
-    """
-    if not isinstance(raw, dict):
-        raise ValueError(
-            f"cdk.json context 'resource_quota' must be an object, got {type(raw).__name__}"
-        )
-    unknown = sorted(set(raw) - set(DEFAULT_RESOURCE_QUOTA))
-    if unknown:
-        allowed = ", ".join(sorted(DEFAULT_RESOURCE_QUOTA))
-        raise ValueError(
-            f"cdk.json context 'resource_quota' has unknown key(s) {unknown}; allowed: {allowed}"
-        )
-    merged = {key: str(raw.get(key, default)) for key, default in DEFAULT_RESOURCE_QUOTA.items()}
-    parsed: dict[str, float] = {}
-    for key, value in merged.items():
-        try:
-            parsed[key] = parse_k8s_quantity(value)
-        except ValueError as exc:
-            raise ValueError(
-                f"resource_quota.{key}={value!r} is not a valid Kubernetes quantity"
-            ) from exc
-        if parsed[key] < 0:
-            raise ValueError(f"resource_quota.{key}={value!r} must not be negative")
-    for container_key, namespace_key in _RESOURCE_QUOTA_INVARIANTS:
-        if parsed[container_key] > parsed[namespace_key]:
-            raise ValueError(
-                f"resource_quota.{container_key}={merged[container_key]!r} exceeds "
-                f"resource_quota.{namespace_key}={merged[namespace_key]!r}: a container "
-                "that passes the LimitRange could never be admitted by the namespace "
-                "ResourceQuota"
-            )
-    return merged
+#: Kept importable under its old name; the merge and its checks live in
+#: gco/resource_governance.py, which ConfigLoader shares.
+_validated_resource_quota = validated_resource_quota
 
 
 #: (per-manifest cap, container ceiling, namespace ceiling) triples for the
@@ -7022,10 +6973,16 @@ class GCORegionalStack(Stack):
             "dataCompressionType": fsx_config.get("data_compression_type", "LZ4"),
         }
 
-        # Add throughput for PERSISTENT types
+        # Add throughput for PERSISTENT types. The loader resolves it per type
+        # (PERSISTENT_1 200, PERSISTENT_2 250); a config double without the
+        # key gets the same per-type default, never PERSISTENT_1's 200 for
+        # PERSISTENT_2, which FSx rejects.
         if deployment_type.startswith("PERSISTENT"):
-            lustre_config["perUnitStorageThroughput"] = fsx_config.get(
-                "per_unit_storage_throughput", 200
+            throughput = fsx_config.get("per_unit_storage_throughput")
+            lustre_config["perUnitStorageThroughput"] = (
+                throughput
+                if throughput is not None
+                else default_per_unit_storage_throughput(deployment_type)
             )
 
         # Add S3 import/export if configured

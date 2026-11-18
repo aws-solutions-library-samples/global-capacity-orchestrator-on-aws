@@ -2,8 +2,9 @@
 
 The capacity poller is the data-collection half of the **Historical Capacity
 Surface** - an **optional add-on to the GCO global stack** (not a separate
-stack). It is **enabled by default** (`historical.enabled: true` in `cdk.json`);
-set that flag to `false` to opt out.
+stack). The shipped `cdk.json` turns it on (`historical.enabled: true`); set
+that flag to `false` to opt out. A `cdk.json` without a `historical` block, or
+whose block leaves out `enabled`, deploys without it.
 
 On a fixed [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html) schedule (every 15 minutes by default) it snapshots
 capacity signals for a watched set of instance types across the enabled regions
@@ -38,7 +39,7 @@ All knobs live under the `historical` block in `cdk.json`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `enabled` | `true` | Deploy the add-on (table + poller + schedule). |
+| `enabled` | `true` in the shipped `cdk.json`, `false` when omitted | Deploy the add-on (table + poller + schedule). |
 | `retention_days` | `90` | DynamoDB TTL window for snapshots. |
 | `poll_interval_minutes` | `15` | EventBridge schedule cadence. |
 | `capacity_block_duration_hours` | `24` | Short [Capacity Block](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) probe duration (soonest-available, 1-day block). |
