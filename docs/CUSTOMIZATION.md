@@ -494,7 +494,10 @@ Edit `cdk.json` to change the endpoint access mode:
 }
 ```
 
-`public_access_cidrs` restricts who can reach the public endpoint. Leaving it
+`public_access_cidrs` restricts who can reach the public endpoint. It is a
+list of IPv4 CIDRs with an explicit prefix (`203.0.113.7/32`), even for one
+entry; anything else fails `cdk synth`, and EKS takes no IPv6 entries on the
+IPv4 clusters GCO creates. Leaving it
 empty means `0.0.0.0/0` — synthesis prints a loud warning naming that exposure
 rather than choosing it silently. Prefer the CLI, which refuses to widen
 access without an explicit allowlist and records the change atomically:

@@ -396,6 +396,40 @@ class TestGlobalAcceleratorValidation:
             ConfigLoader(app)
 
 
+class TestPublicAccessCidrs:
+    """eks_cluster.public_access_cidrs is a list of IPv4 CIDRs."""
+
+    @pytest.mark.parametrize("cidrs", [[], ["203.0.113.7/32"], ["0.0.0.0/0", "10.1.0.0/16"]])
+    def test_lists_of_cidrs_are_accepted(self, valid_context, cidrs):
+        valid_context["eks_cluster"] = {
+            "endpoint_access": "PUBLIC_AND_PRIVATE",
+            "public_access_cidrs": cidrs,
+        }
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_eks_cluster_config()["public_access_cidrs"] == cidrs
+
+    @pytest.mark.parametrize(
+        ("cidrs", "invalid"),
+        [
+            ("203.0.113.7/32", "'203.0.113.7/32'"),
+            (["203.0.113.7"], "'203.0.113.7'"),
+            (["203.0.113.0/33"], "'203.0.113.0/33'"),
+            (["300.0.0.0/8"], "'300.0.0.0/8'"),
+            (["2001:db8::/32"], "'2001:db8::/32'"),
+            ([24], "24"),
+            ({"cidr": "10.0.0.0/8"}, "{'cidr': '10.0.0.0/8'}"),
+        ],
+    )
+    def test_anything_else_fails_at_synth(self, valid_context, cidrs, invalid):
+        """A string used to be split into one-character "CIDRs"."""
+        valid_context["eks_cluster"] = {"public_access_cidrs": cidrs}
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(valid_context))
+        message = str(raised.value)
+        assert message.startswith("eks_cluster.public_access_cidrs must be a list of IPv4 CIDR")
+        assert message.endswith(f"(invalid: {invalid})")
+
+
 class TestManifestProcessorImage:
     """manifest_processor.image was required but never read: deprecated, no longer required."""
 

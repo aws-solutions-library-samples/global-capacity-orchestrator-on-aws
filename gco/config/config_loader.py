@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import logging
 import math
@@ -709,6 +710,17 @@ def parse_block_flag(
         f"{problem} Earlier releases read an empty string here as false, so this setting "
         "has been off. Write false to keep it off, or true to turn it on."
     )
+
+
+def _is_ipv4_cidr(value: object) -> bool:
+    """Whether ``value`` is an IPv4 CIDR string with an explicit prefix (``a.b.c.d/n``)."""
+    if not isinstance(value, str) or "/" not in value:
+        return False
+    try:
+        ipaddress.IPv4Network(value, strict=False)
+    except ValueError:
+        return False
+    return True
 
 
 def _check_block_keys(path: str, block: Mapping[str, Any], allowed: Iterable[str]) -> None:
@@ -1454,7 +1466,31 @@ class ConfigLoader:
                 "eks_cluster.network_policy_enforcement must be a boolean, got "
                 f"{eks_config['network_policy_enforcement']!r}"
             )
+        if "public_access_cidrs" in eks_config:
+            self._validate_public_access_cidrs(eks_config["public_access_cidrs"])
         self._validate_vpc_endpoints_config()
+
+    @staticmethod
+    def _validate_public_access_cidrs(cidrs: object) -> None:
+        """``eks_cluster.public_access_cidrs`` must be a list of IPv4 CIDR strings.
+
+        The regional stack passes each entry to the EKS public-endpoint
+        allowlist. A single string used to be iterated character by
+        character, so ``"203.0.113.7/32"`` became the "CIDRs" ``"2"``,
+        ``"0"``, ``"3"``, ... and the deploy failed (or allowed the wrong
+        sources); the CLI (``gco stacks eks endpoint set --cidr``) has always
+        written a list.
+        """
+        entries = cidrs if isinstance(cidrs, list) else None
+        invalid = (
+            [cidrs] if entries is None else [cidr for cidr in entries if not _is_ipv4_cidr(cidr)]
+        )
+        if invalid:
+            raise ConfigValidationError(
+                "eks_cluster.public_access_cidrs must be a list of IPv4 CIDR strings such "
+                f'as ["203.0.113.0/24"], got {cidrs!r} (invalid: '
+                f"{', '.join(repr(cidr) for cidr in invalid)})"
+            )
 
     def _validate_vpc_endpoints_config(self) -> None:
         """Validate the optional ``vpc_endpoints`` block.
