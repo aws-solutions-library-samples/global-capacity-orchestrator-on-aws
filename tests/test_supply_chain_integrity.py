@@ -2166,6 +2166,93 @@ def test_release_stages_never_cancel_each_other() -> None:
         assert group not in groups.values(), path.name
 
 
+def _run_agent_version_check(
+    tmp_path: Path, pins: dict[str, str], versions: dict[str, str], failing_pin: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """Run unit:cli:autopilot's version-check loop against fake agent CLIs."""
+    run = _workflow_job_step(
+        ".github/workflows/unit-tests.yml",
+        "unit-cli-autopilot",
+        "Install every pinned agent CLI and re-resolve",
+    )["run"]
+    assert run.startswith("set -euo pipefail\n")
+    start = run.index("for pair in ")
+    loop = run[start : run.index("\ndone\n", start) + len("\ndone\n")]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    lookup = "\n".join(
+        f'  {engine}) echo "{pin}" ;;' for engine, pin in pins.items() if engine != failing_pin
+    )
+    (bin_dir / "python3").write_text(
+        f'#!/bin/bash\ncase "$4" in\n{lookup}\n  *) exit 2 ;;\nesac\n', encoding="utf-8"
+    )
+    for binary, version in versions.items():
+        (bin_dir / binary).write_text(f'#!/bin/bash\necho "{version}"\n', encoding="utf-8")
+    for tool in bin_dir.iterdir():
+        tool.chmod(0o755)
+    return subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + loop],
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+_AGENT_PINS = {"claude-code": "2.1.316", "codex": "0.166.0", "opencode": "1.19.5"}
+_AGENT_VERSIONS = {
+    "claude": "2.1.316 (Claude Code)",
+    "codex": "codex-cli 0.166.0",
+    "opencode": "1.19.5",
+}
+
+
+def test_agent_version_check_passes_only_on_the_pinned_versions(tmp_path: Path) -> None:
+    passing = _run_agent_version_check(tmp_path / "ok", _AGENT_PINS, _AGENT_VERSIONS)
+    assert passing.returncode == 0, passing.stderr
+
+    drifted = _run_agent_version_check(
+        tmp_path / "drift", _AGENT_PINS, {**_AGENT_VERSIONS, "codex": "codex-cli 0.167.0"}
+    )
+    assert drifted.returncode == 1
+    assert "codex --version reported 'codex-cli 0.167.0', not the pinned 0.166.0" in drifted.stderr
+
+
+@pytest.mark.parametrize("pins", [{**_AGENT_PINS, "codex": ""}, _AGENT_PINS])
+def test_agent_version_check_fails_when_a_pin_cannot_be_read(
+    tmp_path: Path, pins: dict[str, str]
+) -> None:
+    """A failed or empty pin lookup fails the check instead of matching every version.
+
+    The step grepped each ``--version`` for ``"$(... pin ...)"``; when the lookup
+    failed, the pattern was empty and grep matched anything.
+    """
+    failing = "" if pins["codex"] == "" else "codex"
+    result = _run_agent_version_check(tmp_path, pins, _AGENT_VERSIONS, failing_pin=failing)
+    assert result.returncode != 0
+    assert "--version reported" not in result.stderr
+
+
+def test_no_ci_step_greps_for_an_inline_command_substitution() -> None:
+    """``grep PATTERN`` where PATTERN is ``"$(cmd)"`` passes on any input when cmd fails.
+
+    The substitution's exit status is lost inside the argument list, even
+    under ``set -e``, and an empty pattern matches every line. Read the value
+    into a variable (which ``set -e`` does check) and test it is non-empty.
+    """
+    sources = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    sources += sorted((ROOT / ".github" / "actions").glob("*/action.yml"))
+    offenders: list[str] = []
+    for path in sources:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_id, job in (document.get("jobs") or {"runs": document.get("runs") or {}}).items():
+            for step in job.get("steps") or []:
+                run = re.sub(r"\\\n\s*", " ", step.get("run") or "")
+                if re.search(r'\bgrep\b[^\n|;&]*"\$\(', run):
+                    offenders.append(f"{path.relative_to(ROOT)}:{job_id}:{step.get('name')}")
+    assert not offenders, offenders
+
+
 def test_model_sync_uses_an_immutable_official_aws_cli_image() -> None:
     source = _read("gco/services/inference_monitor.py")
     module = ast.parse(source)

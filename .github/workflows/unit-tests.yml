@@ -834,6 +834,7 @@ jobs:
         # Execute the exact lazy-install commands production Autopilot uses,
         # then prove each real binary and installed-plan state.
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           import subprocess
 
@@ -847,12 +848,19 @@ jobs:
           subprocess.run(codex_install_command(), check=True)
           subprocess.run(opencode_install_command(), check=True)
           PY
-          claude --version | grep -qF \
-            "$(python3 .github/scripts/autopilot_ci_contract.py pin)"
-          codex --version | grep -qF \
-            "$(python3 .github/scripts/autopilot_ci_contract.py pin --engine codex)"
-          opencode --version | grep -qF \
-            "$(python3 .github/scripts/autopilot_ci_contract.py pin --engine opencode)"
+          # Each pin and each reported version is read into a variable first.
+          # As an inline "$(...)" grep pattern, a failed pin lookup expanded to
+          # "", and the empty pattern matched any version, so the check passed.
+          for pair in claude-code:claude codex:codex opencode:opencode; do
+            engine="${pair%%:*}" binary="${pair#*:}"
+            pin="$(python3 .github/scripts/autopilot_ci_contract.py pin --engine "$engine")"
+            test -n "$pin"
+            reported="$("$binary" --version)"
+            if ! grep -qF -- "$pin" <<< "$reported"; then
+              echo "${binary} --version reported '${reported}', not the pinned ${pin}" >&2
+              exit 1
+            fi
+          done
           # Parse the exact session-precedence and resume spellings production
           # uses for OpenCode (root TUI and `run`), and confirm the utility
           # subcommands still reject them — the reason autopilot withholds the
