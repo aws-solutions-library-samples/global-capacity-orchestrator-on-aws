@@ -585,6 +585,88 @@ class TestInferenceEndpointStore:
         ep = store.get_endpoint("rs-err")
         assert ep["region_status"]["us-east-1"]["error"] == "OOMKilled"
 
+    @staticmethod
+    def _remove_west_then_delete(store, name):
+        """Remove us-west-2 (acknowledged), then delete; return (lifecycle, generation)."""
+        ep = store.create_endpoint(name, {"image": "img"}, ["us-east-1", "us-west-2"])
+        lifecycle = ep["lifecycle_id"]
+        generations = {**ep["region_generations"], "us-west-2": "west-removed"}
+        ep = store.update_target_regions(
+            name,
+            ["us-east-1"],
+            ["us-east-1", "us-west-2"],
+            generations,
+            expected_lifecycle_id=lifecycle,
+            expected_updated_at=ep["updated_at"],
+        )
+        assert ep["cleanup_regions"] == ["us-east-1", "us-west-2"]
+        # The removed Region's terminal removal acknowledgement.
+        assert store.update_region_status(
+            name,
+            "us-west-2",
+            "deleted",
+            extra={"absence_observations": 2},
+            expected_lifecycle_id=lifecycle,
+            expected_region_generation="west-removed",
+        )
+        deleted = store.update_desired_state(name, "deleted", expected_lifecycle_id=lifecycle)
+        assert "us-west-2" in deleted["deletion_regions"]
+        return lifecycle, deleted["deletion_generation"]
+
+    def test_region_removed_before_delete_acknowledges_the_deletion(self, store):
+        """Finding I1: a removal acknowledgement does not block the deletion's own writes."""
+        lifecycle, generation = self._remove_west_then_delete(store, "rm-ep")
+
+        for observations, state in ((1, "deleting"), (2, "deleted")):
+            assert store.update_region_status(
+                "rm-ep",
+                "us-west-2",
+                state,
+                extra={"absence_observations": observations},
+                expected_lifecycle_id=lifecycle,
+                expected_deletion_generation=generation,
+            )
+        # This generation's own terminal acknowledgement stays final.
+        assert not store.update_region_status(
+            "rm-ep",
+            "us-west-2",
+            "error",
+            error="stale leader",
+            expected_lifecycle_id=lifecycle,
+            expected_deletion_generation=generation,
+        )
+        status = store.get_endpoint("rm-ep", consistent_read=True)["region_status"]["us-west-2"]
+        assert (status["state"], status["deletion_generation"]) == ("deleted", generation)
+        assert status["absence_observations"] == 2
+
+    def test_endpoint_deleted_after_a_region_removal_is_purged(self, store):
+        """Finding I1, end to end: both Regions' monitors acknowledge and the record goes."""
+        import asyncio
+
+        from gco.services import inference_monitor as im
+
+        self._remove_west_then_delete(store, "rm-ep")
+
+        def monitor(region):
+            with (
+                patch.object(im.config, "load_incluster_config"),
+                patch.object(im.client, "AppsV1Api"),
+                patch.object(im.client, "CoreV1Api"),
+                patch.object(im.client, "NetworkingV1Api"),
+                patch.object(im.client, "DiscoveryV1Api"),
+            ):
+                built = im.InferenceMonitor("cluster", region, store)
+            # Nothing of the endpoint is left in either cluster.
+            built._delete_resources = MagicMock(return_value=im.ResourceCleanupResult())
+            return built
+
+        east, west = monitor("us-east-1"), monitor("us-west-2")
+        for _ in range(3):
+            asyncio.run(east.reconcile())
+            asyncio.run(west.reconcile())
+
+        assert store.get_endpoint("rm-ep", consistent_read=True) is None
+
     # -- delete_endpoint --
 
     def test_delete_endpoint_success(self, store):

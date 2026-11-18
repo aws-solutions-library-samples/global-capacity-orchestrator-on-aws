@@ -473,11 +473,17 @@ class InferenceEndpointStore:
             condition += " AND region_generations.#r = :expected_region_generation"
             values[":expected_region_generation"] = expected_region_generation
         if expected_deletion_generation is not None:
+            # Only this generation's own terminal acknowledgement is final. A
+            # Region removed before the delete holds a terminal acknowledgement
+            # of its removal (state "deleted", no deletion generation) and
+            # still has to acknowledge the deletion, or the purge never runs.
             condition += (
                 " AND desired_state = :deleted "
                 "AND deletion_generation = :expected_deletion_generation "
                 "AND (attribute_not_exists(region_status.#r.#state) "
-                "OR region_status.#r.#state <> :terminal_deleted)"
+                "OR region_status.#r.#state <> :terminal_deleted "
+                "OR attribute_not_exists(region_status.#r.deletion_generation) "
+                "OR region_status.#r.deletion_generation <> :expected_deletion_generation)"
             )
             names["#state"] = "state"
             values[":deleted"] = "deleted"
