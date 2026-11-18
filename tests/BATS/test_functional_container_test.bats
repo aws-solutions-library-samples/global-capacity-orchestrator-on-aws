@@ -207,7 +207,8 @@ FAKE_CURL
     [ "$status" -eq 1 ]
     [[ "$output" == *"::error::svc-fn: SIGTERM shutdown: expected exit 0, got 143"* ]]
 
-    # inference-monitor has no SIGTERM handler today, so its job expects 143.
+    # A non-zero contract is accepted when asked for: 143 is what a process
+    # without a SIGTERM handler exits with (every service job expects 0).
     : > "$DOCKER_CALLS"
     : > "$CURL_CALLS"
     run_functional FAKE_EXIT_CODE=143 -- --expect-stop-exit 143
