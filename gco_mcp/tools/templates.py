@@ -57,7 +57,9 @@ async def templates_create(
         region: Region to use (any region works).
         description: Optional human-readable description.
     """
-    args = ["templates", "create", name, manifest_path]
+    # The CLI takes the manifest as its only positional argument and the
+    # template name as --name.
+    args = ["templates", "create", manifest_path, "--name", name]
     if region:
         args += ["-r", region]
     if description:

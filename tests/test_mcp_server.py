@@ -2544,9 +2544,8 @@ class TestTemplatesTools:
             cmd = mock.call_args[0][0]
             assert "templates" in cmd
             assert "create" in cmd
-            # Positional order: name then manifest path.
-            assert cmd[cmd.index("create") + 1] == "t1"
-            assert cmd[cmd.index("create") + 2] == "job.yaml"
+            # `gco templates create MANIFEST_PATH --name NAME`.
+            assert cmd[cmd.index("create") + 1 :] == ["job.yaml", "--name", "t1"]
             assert "-r" not in cmd
             assert "-d" not in cmd
 
@@ -2563,8 +2562,8 @@ class TestTemplatesTools:
             cmd = mock.call_args[0][0]
             assert "templates" in cmd
             assert "create" in cmd
-            assert "t1" in cmd
-            assert "job.yaml" in cmd
+            assert cmd[cmd.index("create") + 1] == "job.yaml"
+            assert cmd[cmd.index("--name") : cmd.index("--name") + 2] == ["--name", "t1"]
             assert cmd[cmd.index("-r") : cmd.index("-r") + 2] == ["-r", "us-east-1"]
             assert cmd[cmd.index("-d") : cmd.index("-d") + 2] == ["-d", "GPU training template"]
 

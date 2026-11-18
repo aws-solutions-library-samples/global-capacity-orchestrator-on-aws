@@ -191,6 +191,79 @@ def _validate_argv(root: click.Command, argv: list[str]) -> list[str]:
     return problems
 
 
+def _parse_cli_argv(argv: list[str]) -> click.Context:
+    """Parse one tool argv the way ``gco --output json <argv>`` would.
+
+    Walks the subcommand path and builds each context with ``make_context``,
+    so Click converts and validates every value (required options, choices,
+    ``click.Path(exists=True)``, extra arguments) without running a command
+    callback. Raises ``click.UsageError`` when the CLI would reject the argv.
+    """
+    from cli.main import cli
+
+    ctx = cli.make_context("gco", ["--output", "json", *argv])
+    node: click.Command = cli
+    index = 0
+    while isinstance(node, click.Group):
+        if index >= len(argv):
+            raise click.UsageError(f"incomplete command path {argv!r}", ctx=ctx)
+        name = argv[index]
+        sub = node.get_command(ctx, name)
+        if sub is None:
+            raise click.UsageError(f"no such command {name!r}", ctx=ctx)
+        index += 1
+        ctx = sub.make_context(name, argv[index:], parent=ctx)
+        node = sub
+    return ctx
+
+
+def _argv_built_by(tool: object, *args: object, **kwargs: object) -> list[str]:
+    """Run one MCP tool with ``cli_runner._run_cli`` captured; return its argv."""
+    import asyncio
+    import inspect
+    from unittest.mock import patch
+
+    sys.path.insert(0, str(PROJECT_ROOT / "gco_mcp"))
+    import cli_runner
+
+    captured: list[list[str]] = []
+
+    def fake_run_cli(*argv: str, **_kwargs: object) -> str:
+        captured.append(list(argv))
+        return "{}"
+
+    with patch.object(cli_runner, "_run_cli", fake_run_cli):
+        result = tool(*args, **kwargs)  # type: ignore[operator]
+        if inspect.iscoroutine(result):
+            asyncio.run(result)
+    assert len(captured) == 1, captured
+    return captured[0]
+
+
+_EXAMPLE_MANIFEST = str(PROJECT_ROOT / "examples" / "simple-job.yaml")
+
+
+def test_templates_create_passes_the_manifest_and_name_where_the_cli_expects_them() -> None:
+    """``gco templates create MANIFEST_PATH --name NAME``: the tool used to pass the
+    template name as the manifest path, so every call failed."""
+    sys.path.insert(0, str(PROJECT_ROOT / "gco_mcp"))
+    import run_mcp
+
+    argv = _argv_built_by(
+        run_mcp.templates_create,
+        "gpu-template",
+        _EXAMPLE_MANIFEST,
+        region="us-east-1",
+        description="GPU training template",
+    )
+
+    params = _parse_cli_argv(argv).params
+    assert params["manifest_path"] == _EXAMPLE_MANIFEST
+    assert params["name"] == "gpu-template"
+    assert params["region"] == "us-east-1"
+    assert params["description"] == "GPU training template"
+
+
 def test_every_mcp_tool_builds_a_valid_cli_invocation() -> None:
     from cli.main import cli
 
