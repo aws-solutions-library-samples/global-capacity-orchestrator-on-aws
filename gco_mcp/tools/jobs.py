@@ -30,14 +30,17 @@ async def _ctx_warning(message: str) -> None:
 @mcp.tool(tags={"safe", "jobs"})
 @audit_logged
 def list_jobs(
-    region: str | None = None, namespace: str | None = None, status: str | None = None
+    region: str | None = None,
+    namespace: str | None = None,
+    status: Literal["pending", "running", "succeeded", "failed"] | None = None,
 ) -> str:
     """List jobs across GCO clusters.
 
     Args:
         region: AWS region (e.g. us-east-1). If omitted, lists across all regions.
         namespace: Filter by Kubernetes namespace.
-        status: Filter by job status (pending, running, completed, succeeded, failed).
+        status: Filter by job status: pending, running, succeeded, or failed
+            (the values ``gco jobs list --status`` accepts).
     """
     args = ["jobs", "list"]
     if region:

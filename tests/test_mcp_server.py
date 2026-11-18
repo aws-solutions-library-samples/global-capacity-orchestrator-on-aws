@@ -656,6 +656,23 @@ class TestJobTools:
             assert "-s" in cmd
             assert "running" in cmd
 
+    def test_list_jobs_status_values_match_the_cli(self):
+        # The schema and docstring offer exactly the values `gco jobs list
+        # --status` accepts; "completed" is not one of them.
+        from cli.main import cli
+
+        jobs_list = cli.commands["jobs"].commands["list"]
+        option = next(p for p in jobs_list.params if p.name == "status")
+        cli_values = set(option.type.choices)
+
+        tool = asyncio.run(run_mcp.mcp.get_tool("list_jobs"))
+        schema = tool.parameters["properties"]["status"]
+        offered = {
+            value for branch in schema.get("anyOf", [schema]) for value in branch.get("enum", [])
+        }
+        assert offered == cli_values
+        assert "completed" not in (tool.description or "")
+
     def test_submit_job_sqs(self):
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout='{"status":"queued"}', stderr="")
