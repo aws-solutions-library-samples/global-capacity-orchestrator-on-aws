@@ -1662,68 +1662,11 @@ jobs:
         # what Docker 29's containerd image store needs (kind#4224).
         run: python3 .github/scripts/preload_kind_images.py --cluster gco-ci --image busybox:1.38.0
       - name: Install Calico for NetworkPolicy enforcement
-        # kind's default kindnet does not enforce NetworkPolicy. Calico does,
-        # so 03-network-policies.yaml is actually exercised here.
-        #
-        # Use `rollout status` rather than `kubectl wait --for=condition=Ready
-        # pods -l …` because wait returns "no matching resources found" if
-        # the pods haven't been scheduled yet by the apiserver — a race that
-        # fires within a second of the apply. rollout status waits for the
-        # workload to exist first, then waits for it to become Ready.
-        #
-        # The rollout wait is wrapped in a retry loop because calico-node
-        # readiness is a known CI flake: the DaemonSet pod pulls its image
-        # from quay.io and runs the install-cni / mount-bpffs init containers,
-        # which can exceed a single timeout window under runner image-pull
-        # latency or resource contention. The apply is idempotent, so each
-        # attempt re-applies (a no-op once the objects exist) and re-waits;
-        # transient slowness converges on a later attempt. On the final
-        # failure we dump pod/event diagnostics so a genuine (non-transient)
-        # break is debuggable from the log rather than just "timed out".
-        #
-        # Budget: 3 attempts x (4m node + 2m controllers) = 18m worst case,
-        # inside the job's 40m timeout-minutes.
-        run: |
-          set -euo pipefail
-          calico_manifest="${RUNNER_TEMP}/calico.yaml"
-          curl --fail --show-error --location \
-            --connect-timeout 15 --max-time 60 \
-            --retry 3 --retry-all-errors --retry-max-time 180 \
-            --remove-on-error \
-            --output "${calico_manifest}" \
-            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
-          kubectl apply -f "${calico_manifest}"
-
-          attempts=3
-          for i in $(seq 1 "${attempts}"); do
-            echo "::group::Calico rollout attempt ${i}/${attempts}"
-            # Re-apply is idempotent; nudges anything that failed to schedule.
-            kubectl apply -f "${calico_manifest}"
-            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
-               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
-              echo "Calico is ready."
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "Calico not ready on attempt ${i}/${attempts}."
-            echo "::endgroup::"
-            if [ "${i}" -lt "${attempts}" ]; then
-              echo "Retrying in 15s..."
-              sleep 15
-            fi
-          done
-
-          echo "::error::Calico did not become ready after ${attempts} attempts."
-          echo "===== Diagnostics: calico pods ====="
-          kubectl -n kube-system get pods -l k8s-app=calico-node -o wide || true
-          kubectl -n kube-system get pods -l k8s-app=calico-kube-controllers -o wide || true
-          echo "===== Diagnostics: describe calico-node ====="
-          kubectl -n kube-system describe daemonset/calico-node || true
-          kubectl -n kube-system describe pods -l k8s-app=calico-node || true
-          echo "===== Diagnostics: recent kube-system events ====="
-          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
-          exit 1
+        # kind's default kindnet does not enforce NetworkPolicy; Calico does.
+        # The one script every kind job shares downloads the pinned manifest
+        # (CALICO_VERSION / CALICO_SHA256 in this workflow's env), checks it,
+        # applies it, waits with retries and prints diagnostics on failure.
+        run: bash .github/scripts/install-calico.sh
       - name: Install Metrics Server for HPA reconciliation
         # Production uses the EKS managed metrics-server add-on. kind needs the
         # upstream component plus insecure kubelet TLS because its node serving
@@ -3525,45 +3468,11 @@ jobs:
           python3 .github/scripts/preload_kind_images.py --cluster gco-cost-pipeline \
             --pinned "${CI_S3_EMULATOR_IMAGE}=${CI_S3_LOCAL_IMAGE}"
       - name: Install Calico for NetworkPolicy enforcement
-        # Mirrors the proven step in integration:kind:cluster-e2e, including
-        # the retry loop: calico-node readiness is a known CI flake because
-        # it pulls from quay.io and runs install-cni / mount-bpffs init
-        # containers, which can exceed one timeout window under runner
-        # image-pull latency. The apply is idempotent, so each attempt
-        # re-applies and re-waits.
-        run: |
-          set -euo pipefail
-          calico_manifest="${RUNNER_TEMP}/calico.yaml"
-          curl --fail --show-error --location \
-            --connect-timeout 15 --max-time 60 \
-            --retry 3 --retry-all-errors --retry-max-time 180 \
-            --remove-on-error \
-            --output "${calico_manifest}" \
-            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
-          kubectl apply -f "${calico_manifest}"
-
-          attempts=3
-          for i in $(seq 1 "${attempts}"); do
-            echo "::group::Calico rollout attempt ${i}/${attempts}"
-            kubectl apply -f "${calico_manifest}"
-            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
-               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
-              echo "Calico is ready."
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "Calico not ready on attempt ${i}/${attempts}."
-            echo "::endgroup::"
-            if [ "${i}" -lt "${attempts}" ]; then
-              sleep 15
-            fi
-          done
-
-          echo "::error::Calico did not become ready after ${attempts} attempts."
-          kubectl -n kube-system get pods -o wide || true
-          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
-          exit 1
+        # kind's default kindnet does not enforce NetworkPolicy; Calico does.
+        # The one script every kind job shares downloads the pinned manifest
+        # (CALICO_VERSION / CALICO_SHA256 in this workflow's env), checks it,
+        # applies it, waits with retries and prints diagnostics on failure.
+        run: bash .github/scripts/install-calico.sh
       - name: Set up Buildx (enables shared GHA layer cache)
         uses: ./.github/actions/setup-buildx-with-retry
       - name: Build cost-monitor image
@@ -4731,45 +4640,11 @@ jobs:
           # installs Calico and waits via rollout status.
           wait: "0s"
       - name: Install Calico for NetworkPolicy enforcement
-        # Mirrors the proven step in integration:kind:cluster-e2e, including
-        # the retry loop: calico-node readiness is a known CI flake because
-        # it pulls from quay.io and runs install-cni / mount-bpffs init
-        # containers, which can exceed one timeout window under runner
-        # image-pull latency. The apply is idempotent, so each attempt
-        # re-applies and re-waits.
-        run: |
-          set -euo pipefail
-          calico_manifest="${RUNNER_TEMP}/calico.yaml"
-          curl --fail --show-error --location \
-            --connect-timeout 15 --max-time 60 \
-            --retry 3 --retry-all-errors --retry-max-time 180 \
-            --remove-on-error \
-            --output "${calico_manifest}" \
-            "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-          echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -
-          kubectl apply -f "${calico_manifest}"
-
-          attempts=3
-          for i in $(seq 1 "${attempts}"); do
-            echo "::group::Calico rollout attempt ${i}/${attempts}"
-            kubectl apply -f "${calico_manifest}"
-            if kubectl -n kube-system rollout status daemonset/calico-node --timeout=4m \
-               && kubectl -n kube-system rollout status deployment/calico-kube-controllers --timeout=2m; then
-              echo "Calico is ready."
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "Calico not ready on attempt ${i}/${attempts}."
-            echo "::endgroup::"
-            if [ "${i}" -lt "${attempts}" ]; then
-              sleep 15
-            fi
-          done
-
-          echo "::error::Calico did not become ready after ${attempts} attempts."
-          kubectl -n kube-system get pods -o wide || true
-          kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -50 || true
-          exit 1
+        # kind's default kindnet does not enforce NetworkPolicy; Calico does.
+        # The one script every kind job shares downloads the pinned manifest
+        # (CALICO_VERSION / CALICO_SHA256 in this workflow's env), checks it,
+        # applies it, waits with retries and prints diagnostics on failure.
+        run: bash .github/scripts/install-calico.sh
       - name: Apply platform namespaces + RBAC
         # 01-serviceaccounts / 02-rbac carry {{...ROLE_ARN}} IRSA annotation
         # tokens; annotations are opaque strings to the apiserver, so the

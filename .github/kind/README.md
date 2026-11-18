@@ -22,7 +22,7 @@ Enforcement also decides whether a whole class of bug is visible at all. The off
 
 ## Usage
 
-Used by the `integration:kind:cluster-e2e`, `integration:kind:cost-pipeline` and `integration:kind:examples-smoke` jobs in `.github/workflows/integration-tests.yml`:
+Used by the `integration:kind:cluster-e2e`, `integration:kind:cost-pipeline` and `integration:kind:examples-smoke` jobs in `.github/workflows/integration-tests.yml`, each of which then installs Calico with `.github/scripts/install-calico.sh` (the authenticated manifest download, a retried rollout wait, and diagnostics on failure):
 
 ```yaml
 - name: Create kind cluster

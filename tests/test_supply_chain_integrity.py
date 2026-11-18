@@ -169,14 +169,6 @@ def test_downloaded_release_assets_have_committed_checksums(
         ),
         (
             ".github/workflows/integration-tests.yml",
-            "Install Calico for NetworkPolicy enforcement",
-            'CALICO_VERSION: "v3.33.0"',
-            'CALICO_SHA256: "2de8f47595fb9c41b3f47d7b767a1f8e72ecf84057af834738ff12689a234da5"',
-            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
-            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
-        ),
-        (
-            ".github/workflows/integration-tests.yml",
             "Install Metrics Server for HPA reconciliation",
             'METRICS_SERVER_VERSION: "v0.9.1"',
             'METRICS_SERVER_SHA256: "3c7f57cdbee0f57fb0259a150e8f6d6cb4f29d72d1aa5dce8803151dd6d4c2a1"',
@@ -472,12 +464,6 @@ def test_workflows_do_not_execute_mutable_remote_installers() -> None:
         ),
         (
             "integration-kind-cluster-e2e",
-            "Install Calico for NetworkPolicy enforcement",
-            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
-            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
-        ),
-        (
-            "integration-kind-cluster-e2e",
             "Install Metrics Server for HPA reconciliation",
             "metrics-server/releases/download/${METRICS_SERVER_VERSION}/components.yaml",
             'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -',
@@ -489,22 +475,10 @@ def test_workflows_do_not_execute_mutable_remote_installers() -> None:
             'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
         ),
         (
-            "integration-kind-cost-pipeline",
-            "Install Calico for NetworkPolicy enforcement",
-            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
-            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
-        ),
-        (
             "integration-kind-examples-smoke",
             "Install Helm",
             "helm-${HELM_VERSION}-linux-amd64.tar.gz",
             'echo "${HELM_SHA256}  ${archive}" | sha256sum -c -',
-        ),
-        (
-            "integration-kind-examples-smoke",
-            "Install Calico for NetworkPolicy enforcement",
-            "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml",
-            'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -',
         ),
         (
             "integration-kind-platform-addons",
@@ -1461,9 +1435,10 @@ def test_kind_manifests_are_authenticated_before_local_apply() -> None:
         r"kubectl\s+apply\s+-f\s+(?:\\\s*)?[\"']?https://",
         workflow,
     )
-    assert 'kubectl apply -f "${calico_manifest}"' in workflow
+    calico = _read(".github/scripts/install-calico.sh")
+    assert 'kubectl apply -f "${calico_manifest}"' in calico
     assert 'kubectl apply -f "${metrics_manifest}"' in workflow
-    assert 'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -' in workflow
+    assert 'echo "${CALICO_SHA256}  ${calico_manifest}" | sha256sum -c -' in calico
     assert 'echo "${METRICS_SERVER_SHA256}  ${metrics_manifest}" | sha256sum -c -' in workflow
     # Piping curl into kubectl would evade the URL regex above while skipping
     # the checksum; every downloaded manifest lands in a file first.
@@ -2806,6 +2781,12 @@ def test_repeated_workflow_pins_agree_across_jobs() -> None:
     )
 
 
+def _installs_calico(step: dict) -> bool:
+    """The step installs Calico: the shared script, or an inline download."""
+    run = step.get("run") or ""
+    return "install-calico.sh" in run or "projectcalico/calico" in run
+
+
 def test_every_calico_installing_job_pins_version_and_checksum() -> None:
     """Every job that installs Calico must resolve both of its pins.
 
@@ -2822,7 +2803,7 @@ def test_every_calico_installing_job_pins_version_and_checksum() -> None:
     installing_jobs = [
         name
         for name, job in workflow["jobs"].items()
-        if any("projectcalico/calico" in (step.get("run") or "") for step in job.get("steps") or [])
+        if any(_installs_calico(step) for step in job.get("steps") or [])
     ]
     assert installing_jobs, "no job installs Calico — has the CNI setup moved?"
 
@@ -2868,7 +2849,7 @@ def test_kind_clusters_without_a_default_cni_install_one() -> None:
         )
         if not uses_calico_config:
             continue
-        assert any("projectcalico/calico" in (step.get("run") or "") for step in steps), (
+        assert any(_installs_calico(step) for step in steps), (
             f"{job_name} creates a kind cluster with the default CNI disabled "
             "but never installs Calico"
         )
@@ -3059,3 +3040,43 @@ def test_cve_scan_job_installs_nothing_trivy_does_not_need() -> None:
     for step in job["steps"]:
         assert "pip install" not in (step.get("run") or ""), step.get("name")
         assert not str(step.get("uses", "")).startswith("actions/setup-python@")
+
+
+def test_every_kind_calico_install_runs_the_one_script() -> None:
+    """Finding C18: the Calico install was copied into three kind jobs and
+    the copies diverged (two lost the calico-node describe diagnostics and
+    the retry log line). All three now run .github/scripts/install-calico.sh,
+    which keeps the authenticated download, the retried rollout wait and the
+    fullest diagnostics (tests/BATS/test_install_calico.bats runs it)."""
+    workflow_text = _read(".github/workflows/integration-tests.yml")
+    workflow = yaml.safe_load(workflow_text)
+    steps = {
+        job_id: step
+        for job_id, job in workflow["jobs"].items()
+        for step in job.get("steps") or []
+        if step.get("name") == "Install Calico for NetworkPolicy enforcement"
+    }
+    assert set(steps) == {
+        "integration-kind-cluster-e2e",
+        "integration-kind-cost-pipeline",
+        "integration-kind-examples-smoke",
+    }
+    for job_id, step in steps.items():
+        assert step["run"].strip() == "bash .github/scripts/install-calico.sh", job_id
+    # The pins stay the workflow-level env the script reads.
+    assert re.fullmatch(r"v\d+\.\d+\.\d+", workflow["env"]["CALICO_VERSION"])
+    assert re.fullmatch(r"[0-9a-f]{64}", workflow["env"]["CALICO_SHA256"])
+    assert "projectcalico/calico/" not in workflow_text
+    script = _read(".github/scripts/install-calico.sh")
+    download = script[script.index("curl --fail") : script.index("sha256sum -c -")]
+    for option in ("--connect-timeout 15", "--max-time 60", "--retry 3", "--retry-all-errors"):
+        assert option in download, option
+    assert "projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml" in download
+    for diagnostic in (
+        "get pods -o wide",
+        "describe daemonset/calico-node",
+        "describe pods -l k8s-app=calico-node",
+        "get events --sort-by=.lastTimestamp",
+    ):
+        assert diagnostic in script, diagnostic
+    assert 'echo "Retrying in ${delay}s..."' in script
