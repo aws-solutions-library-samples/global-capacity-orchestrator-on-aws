@@ -647,6 +647,17 @@ class TestAutofixPredicate:
         assert out is not crit
         assert out["expression"] == "obs['metrics']['val_loss'] < 0.1"
 
+    def test_single_level_attribute_rewritten_to_subscript(self) -> None:
+        """``obs.events`` is rejected by the validator, so it is rewritten too."""
+        crit = {
+            "criterion_id": "events",
+            "kind": "predicate",
+            "required": True,
+            "expression": "len(obs.events) > 0",
+        }
+        out = criteria_scaffold._autofix_predicate(crit)
+        assert out["expression"] == "len(obs['events']) > 0"
+
     def test_mixed_subscript_then_attribute_rewritten(self) -> None:
         """``obs.tool_results[0].score`` -> ``obs['tool_results'][0]['score']``."""
         crit = {

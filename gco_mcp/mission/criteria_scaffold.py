@@ -432,15 +432,19 @@ def build_scaffold_prompt(
         "  ``.startswith(prefix[, start[, end]])``\n"
         "Operators: arithmetic, comparisons (<, <=, >, >=, ==, !=,\n"
         "  is, is not, in, not in), boolean (and, or, not), ternary\n"
-        "  (a if b else c).\n"
+        "  (a if b else c). ``**`` needs a constant exponent of at most\n"
+        "  64; ``*`` on a value that may be a list or string needs an\n"
+        "  int literal of at most 1000; ``%`` is modulo only (wrap the\n"
+        "  left side in ``int()`` or ``float()``).\n"
         "Containers: list/tuple/dict/set literals, list / set / dict\n"
         "  / generator comprehensions (the comprehension target may\n"
         "  not shadow ``obs`` or any callable name).\n"
         "Subscripts: ``obs['key']``, ``obs['k']['nested']``,\n"
         "  ``obs['list'][0]``, etc.\n"
-        "Attribute access: ONLY single-level on ``obs`` (e.g. ``obs.events``\n"
-        "  for read-only access; subscript form is preferred). Nested\n"
-        "  walks like ``obs.a.b`` are rejected — use ``obs['a']['b']``.\n"
+        "Attribute access: none. Read data with subscripts\n"
+        "  (``obs['events']``, ``obs['a']['b']``); ``obs.events`` and\n"
+        "  ``obs.a.b`` are rejected. The only bare attribute allowed is a\n"
+        "  read-only method passed as a callback, e.g. ``key=obs.get``.\n"
         "\n"
         "Method calls outside the eight pure-accessor names are\n"
         "rejected (no ``.append``, ``.update``, ``.pop``, ``.count``,\n"
@@ -636,10 +640,10 @@ def _normalize_metric_path(criterion: dict[str, Any]) -> dict[str, Any]:
 class _AttributeToSubscriptRewriter(ast.NodeTransformer):
     """Rewrite ``obs.<attr>`` chains as ``obs['<attr>']`` chains.
 
-    The predicate validator accepts a single-level attribute read on
-    ``obs`` (``obs.tool_results``) but rejects nested attribute walks
-    (``obs.metrics.val_loss``) and method-style calls
-    (``obs.x.any()``, ``obs.get('x')``). Models routinely emit those
+    The predicate validator rejects attribute reads on ``obs`` other
+    than its read-only methods (``obs.tool_results``), nested attribute
+    walks (``obs.metrics.val_loss``) and method calls on them
+    (``obs.x.any()``). Models routinely emit those
     shapes because they are the obvious Pythonic idioms. This
     transformer rewrites the *attribute-walk* shapes mechanically;
     method-call shapes that need creative rewriting are left alone so

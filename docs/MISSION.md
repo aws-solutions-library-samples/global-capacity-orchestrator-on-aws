@@ -18,6 +18,7 @@ Mission is GCO's goal-directed iteration loop. The operator declares a directive
   - [Allowed names](#allowed-names)
   - [Allowed method calls](#allowed-method-calls)
   - [Allowed operators and constructs](#allowed-operators-and-constructs)
+  - [Size bounds](#size-bounds)
   - [Rejected outright](#rejected-outright)
   - [Why the eval is safe](#why-the-eval-is-safe)
 - [Reading Metrics with Reader Tools](#reading-metrics-with-reader-tools)
@@ -332,7 +333,7 @@ These eight methods land in this list because they are pure read-only accessors 
 
 ### Allowed operators and constructs
 
-- Arithmetic: `+ - * / // % ** @`
+- Arithmetic: `+ - * / // % ** @`, with `**`, `*` and `%` bounded (see [Size bounds](#size-bounds))
 - Unary: `+ - not ~`
 - Comparisons: `< <= > >= == != is is not in not in`
 - Boolean: `and or`
@@ -340,9 +341,24 @@ These eight methods land in this list because they are pure read-only accessors 
 - Containers: list / tuple / dict / set literals
 - Comprehensions: list / set / dict / generator (target names cannot shadow `obs` or any allowed callable)
 - Calls: bare-name calls to one of the twelve stdlib callables, or read-only method calls from the eight-method allowlist above.
-- Attribute access: only `obs.<attr>` (one level deep). Attribute names cannot start with `__`. Anything more elaborate (chained walks, attributes on a subscript) is rejected — use subscripting for nested data.
+- Attribute access: only an uncalled read-only method of `obs` (`obs.get`, `obs.keys`, ...), for example `sorted(xs, key=obs.get)`. `obs` is a dict, so any other attribute is missing or a mutating method; `obs.events`, chained walks and attributes on a subscript are rejected. Read data with subscripts (`obs["events"]`, `obs["a"]["b"]`).
 - Subscripts: any `value[...]` chain whose ultimate base is an allowed name. Slices with step (`xs[::2]`) are allowed; the slice values themselves go through the same allowlist check.
 - f-strings: allowed; embedded expressions re-enter the same allowlist check.
+
+### Size bounds
+
+Predicates are evaluated inside the MCP server process with no time or memory limit, so the validator rejects operators that turn a few characters of source into an unbounded amount of work:
+
+| Rule | Example rejected | Reason token |
+|------|------------------|--------------|
+| The source is at most 4096 characters. | a 5000-character expression | `source_too_long` |
+| The syntax tree is at most 100 levels deep. | `1 + 1 + ... + 1` with 200 terms | `expression_too_deep` |
+| `**` needs a numeric constant exponent of at most 64 in absolute value, and its base may not contain `**` or a `*` repetition. | `10 ** 10 ** 8`, `2 ** obs["n"]`, `int("9" * 1000) ** 64` | `exponent_not_bounded` |
+| `*` with an operand that may be a list or string needs a float literal, or an int literal from 0 to 1000 whose other operand contains no repetition. Two numbers (constants, `len`, `abs`, `int`, `float`, `bool`, one-argument `sum`, and arithmetic on those) multiply freely. | `"x" * 10 ** 12`, `"x" * 1000 * 1000`, `[["x"] * 1000] * 1000` | `repetition_not_bounded` |
+| `%` is modulo only: its left operand must be a number in the same sense. Wrap an observation value in `int()` or `float()`. | `"%0999999999d" % 1`, `obs["step"] % 10` | `string_formatting_not_allowed` |
+| An f-string format specification must be literal text whose numbers (width, precision) are at most 1000. | `f"{1:>999999999}"`, `f"{x:{width}}"` | `format_spec_not_bounded` |
+
+These rules bound what one operator can produce. They do not bound everything: nested comprehensions, or an expression over a very large observation, still cost time that grows with the nesting and the data, because evaluation is not isolated in a separate process. Keep predicates to a thin check over the fields you need.
 
 ### Rejected outright
 
@@ -356,6 +372,7 @@ These eight methods land in this list because they are pure read-only accessors 
 | `obs.__class__` | `dunder_attribute` |
 | `obs[(0).__class__]` | `attribute_target_not_allowed` |
 | `obs.a.b` (chained attribute access) | `attribute_target_not_allowed` |
+| `obs.events`, `sorted(xs, key=obs.update)` (attribute of `obs` that is not a read-only method) | `attribute_not_allowed` |
 | `obs["xs"].append(1)` (mutating method) | `call_target_method_not_allowed` |
 | `obs["xs"].count(0)` (read-only method outside the eight-method allowlist) | `call_target_method_not_allowed` |
 | `getattr(obs, "x").get("y")` (receiver contains the forbidden `getattr` call) | `call_target_not_allowed` |
@@ -366,6 +383,7 @@ These eight methods land in this list because they are pure read-only accessors 
 | any name starting with `__` | `dunder_name` |
 | any string constant starting with `"__"` | `dunder_string` |
 | comprehension target shadowing `obs` or an allowed callable | `comprehension_target_shadows_allowlist` |
+| anything outside the [size bounds](#size-bounds) | `source_too_long`, `expression_too_deep`, `exponent_not_bounded`, `repetition_not_bounded`, `string_formatting_not_allowed`, `format_spec_not_bounded` |
 
 Violations raise `PredicateRejected` at session-start time, **before** the expression is ever evaluated. The error envelope carries the `reason` token plus the offending node's `lineno` and `col_offset` so the operator can fix the file.
 
@@ -391,6 +409,11 @@ not obs["errors"]
 __import__("os").system("rm -rf /")  # → call_target_not_allowed
 obs.__class__  # → dunder_attribute
 obs.metrics.loss  # → attribute_target_not_allowed (chained attribute)
+obs.metrics  # → attribute_not_allowed (use obs["metrics"])
+sorted(obs["xs"], key=obs.update)  # → attribute_not_allowed (mutating method as a callback)
+10 ** 10 ** 8 > 0  # → exponent_not_bounded
+len("x" * 10 ** 12) > 0  # → repetition_not_bounded
+"%0999999999d" % 1  # → string_formatting_not_allowed
 obs["xs"].append(1)  # → call_target_method_not_allowed
 obs["xs"].count(0)  # → call_target_method_not_allowed
 [x for x in obs["xs"] for x in [1, 2]]  # → comprehension_target_shadows_allowlist
