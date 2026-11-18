@@ -1850,6 +1850,15 @@ def fsx_status(config: Any, region: Any) -> None:
         sys.exit(1)
 
 
+#: Per-unit storage throughput (MB/s per TiB) FSx for Lustre accepts for each
+#: SSD deployment type, with the value ``fsx enable`` writes by default.
+#: SCRATCH file systems take none.
+_FSX_THROUGHPUT_CHOICES: dict[str, tuple[tuple[int, ...], int]] = {
+    "PERSISTENT_1": ((50, 100, 200), 200),
+    "PERSISTENT_2": ((125, 250, 500, 1000), 250),
+}
+
+
 @fsx_cmd.command("enable")
 @click.option("--region", "-r", help="Enable FSx for specific region only")
 @click.option("--storage-capacity", "-s", default=1200, help="Storage capacity in GiB (min 1200)")
@@ -1860,7 +1869,17 @@ def fsx_status(config: Any, region: Any) -> None:
     default="SCRATCH_2",
     help="FSx deployment type",
 )
-@click.option("--throughput", "-t", default=200, help="Per-unit storage throughput (MB/s)")
+@click.option(
+    "--throughput",
+    "-t",
+    type=int,
+    default=None,
+    help=(
+        "Per-unit storage throughput in MB/s per TiB, PERSISTENT types only: 50, 100 or "
+        "200 for PERSISTENT_1 (default 200); 125, 250, 500 or 1000 for PERSISTENT_2 "
+        "(default 250)"
+    ),
+)
 @click.option("--compression", "-c", type=click.Choice(["LZ4", "NONE"]), default="LZ4")
 @click.option("--import-path", help="S3 path for data import (s3://bucket/prefix)")
 @click.option("--export-path", help="S3 path for data export (s3://bucket/prefix)")
@@ -1882,10 +1901,16 @@ def fsx_enable(
     FSx for Lustre provides high-performance parallel file system storage
     ideal for ML training workloads requiring high throughput and low latency.
 
+    --throughput sets the per-unit storage throughput of a PERSISTENT file
+    system, which each type limits to its own values (PERSISTENT_2 rejects
+    PERSISTENT_1's 200). SCRATCH file systems have no such setting, so none
+    is written for them and the option is refused.
+
     Examples:
         gco stacks fsx enable
         gco stacks fsx enable --region us-east-1
         gco stacks fsx enable --storage-capacity 2400 --deployment-type PERSISTENT_2
+        gco stacks fsx enable -d PERSISTENT_2 --throughput 500
         gco stacks fsx enable -r us-west-2 --import-path s3://my-bucket/training-data
     """
     from ..stacks import update_fsx_config
@@ -1896,13 +1921,34 @@ def fsx_enable(
         formatter.print_error("Storage capacity must be at least 1200 GiB")
         sys.exit(1)
 
+    choices = _FSX_THROUGHPUT_CHOICES.get(deployment_type)
+    if choices is None:
+        if throughput is not None:
+            formatter.print_error(
+                "--throughput applies only to PERSISTENT_1 and PERSISTENT_2; "
+                f"{deployment_type} file systems have no per-unit storage throughput"
+            )
+            sys.exit(1)
+    else:
+        allowed, default_throughput = choices
+        if throughput is None:
+            throughput = default_throughput
+        elif throughput not in allowed:
+            accepted = ", ".join(str(value) for value in allowed[:-1])
+            formatter.print_error(
+                f"{deployment_type} accepts {accepted} or {allowed[-1]} MB/s per TiB, "
+                f"not {throughput}"
+            )
+            sys.exit(1)
+
     scope = f"region {region}" if region else "all regions (global)"
 
     if not yes:
         formatter.print_info(f"FSx for Lustre configuration for {scope}:")
         formatter.print_info(f"  Storage Capacity: {storage_capacity} GiB")
         formatter.print_info(f"  Deployment Type: {deployment_type}")
-        formatter.print_info(f"  Throughput: {throughput} MB/s per TiB")
+        if throughput is not None:
+            formatter.print_info(f"  Throughput: {throughput} MB/s per TiB")
         formatter.print_info(f"  Compression: {compression}")
         if import_path:
             formatter.print_info(f"  Import Path: {import_path}")

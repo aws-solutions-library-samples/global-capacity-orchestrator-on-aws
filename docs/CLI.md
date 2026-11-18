@@ -5552,8 +5552,16 @@ gco stacks fsx COMMAND [OPTIONS]
 ```bash
 gco stacks fsx status
 gco stacks fsx enable --storage-capacity 1200 -y
+gco stacks fsx enable -d PERSISTENT_2 --throughput 500 -y
 gco stacks fsx disable -y
 ```
+
+`enable --throughput` (`-t`) sets the per-unit storage throughput, in MB/s per
+TiB, of a PERSISTENT file system, and only the values FSx for Lustre accepts for
+the deployment type pass: 50, 100 or 200 for `PERSISTENT_1` (default 200), and
+125, 250, 500 or 1000 for `PERSISTENT_2` (default 250). `SCRATCH_1` and
+`SCRATCH_2` file systems have no such setting, so `enable` writes none for them
+and refuses `--throughput`.
 
 #### `gco stacks valkey`
 

@@ -1519,3 +1519,50 @@ def test_destroy_all_keep_control_plane_reports_a_failed_monitoring_detach(
     )
     assert "failed to destroy" not in result.output
     assert "stack(s) failed" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("deployment_type", "expected"),
+    [("PERSISTENT_1", 200), ("PERSISTENT_2", 250), ("SCRATCH_1", None), ("SCRATCH_2", None)],
+)
+def test_fsx_enable_writes_a_throughput_the_deployment_type_accepts(
+    runner: CliRunner, deployment_type: str, expected: int | None
+) -> None:
+    """PERSISTENT_2 rejects 200 MB/s/TiB, and SCRATCH file systems take no throughput."""
+    with patch("cli.stacks.update_fsx_config") as update:
+        result = _invoke(
+            runner,
+            stacks,
+            ["fsx", "enable", "--deployment-type", deployment_type],
+            input_text="y\n",
+        )
+
+    assert result.exit_code == 0, result.output
+    assert update.call_args.args[0]["per_unit_storage_throughput"] == expected
+    if expected is None:
+        assert "Throughput" not in result.output
+    else:
+        assert f"Throughput: {expected} MB/s per TiB" in result.output
+
+
+@pytest.mark.parametrize(
+    ("deployment_type", "throughput", "message"),
+    [
+        ("PERSISTENT_2", "200", "PERSISTENT_2 accepts 125, 250, 500 or 1000 MB/s per TiB, not 200"),
+        ("PERSISTENT_1", "125", "PERSISTENT_1 accepts 50, 100 or 200 MB/s per TiB, not 125"),
+        ("SCRATCH_2", "200", "--throughput applies only to PERSISTENT_1 and PERSISTENT_2"),
+    ],
+)
+def test_fsx_enable_rejects_a_throughput_the_deployment_type_refuses(
+    runner: CliRunner, deployment_type: str, throughput: str, message: str
+) -> None:
+    with patch("cli.stacks.update_fsx_config") as update:
+        result = _invoke(
+            runner,
+            stacks,
+            ["fsx", "enable", "-y", "--deployment-type", deployment_type, "-t", throughput],
+        )
+
+    assert result.exit_code == 1, result.output
+    assert message in result.output
+    update.assert_not_called()
