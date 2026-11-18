@@ -12,20 +12,33 @@ writer through a ``coordination.k8s.io`` Lease with the same rules:
 * Acquisition is a read followed by ``replace`` carrying the read's
   ``resourceVersion``; Kubernetes rejects a racing writer with HTTP 409, and
   the loser simply does not act this cycle.
-* A holder whose ``renewTime`` is older than ``leaseDurationSeconds`` — or that
-  never recorded one — is treated as gone and may be replaced.
-* Every API or RBAC failure returns ``False``. Losing the side effect for one
-  cycle is always safer than performing it twice.
+* Another replica's hold expires when this replica has seen its Lease record
+  stay unchanged for ``leaseDurationSeconds``, timed on this replica's own
+  monotonic clock (client-go's ``leaderelection`` works the same way). The
+  holder's ``renewTime`` is never compared with the local wall clock, so a
+  clock that runs ahead cannot take a Lease that is still being renewed. A
+  holder that never recorded a ``renewTime`` cannot be renewing and may be
+  replaced at once.
+* Every API or RBAC failure returns :attr:`LeaseOutcome.NOT_HELD`. Losing the
+  side effect for one cycle is always safer than performing it twice.
 
-Callers re-run :func:`try_acquire_lease` on every cycle; a ``True`` result is
-a renewal for the current holder and an acquisition for a new one.
+A :class:`LeaseElector` remembers its observations between attempts, so each
+caller keeps one per Lease and calls :meth:`LeaseElector.try_acquire` on every
+cycle. The outcome says whether the attempt renewed a hold this replica
+already had or acquired the Lease anew; an acquisition can follow another
+replica's tenure that this one never saw, so a caller that caches state
+derived from its duty rebuilds it on :attr:`LeaseOutcome.ACQUIRED`.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from kubernetes.client.exceptions import ApiException
@@ -66,83 +79,130 @@ def lease_duration_from_env(value: str | None, *, label: str) -> int:
     return configured
 
 
-def try_acquire_lease(
-    coordination_v1: Any,
-    identity: LeaseIdentity,
-    *,
-    label: str,
-    request_timeout: tuple[int, int] = LEASE_REQUEST_TIMEOUT,
-) -> bool:
-    """Acquire or renew ``identity`` for its holder; ``False`` means do not act.
+class LeaseOutcome(StrEnum):
+    """What one election attempt did."""
+
+    #: This replica became the holder: the Lease was free, expired, or held
+    #: by another replica since this one last held it.
+    ACQUIRED = "acquired"
+    #: This replica already held the Lease and extended its hold.
+    RENEWED = "renewed"
+    #: Another replica holds the Lease, a racing writer won, or the attempt failed.
+    NOT_HELD = "not-held"
+
+    @property
+    def held(self) -> bool:
+        """Whether this replica holds the Lease after the attempt."""
+        return self is not LeaseOutcome.NOT_HELD
+
+
+def _lease_record(spec: Any) -> tuple[Any, ...]:
+    """The fields a holder rewrites on every renewal, for change detection."""
+    return (
+        spec.holder_identity,
+        spec.acquire_time,
+        spec.renew_time,
+        spec.lease_transitions,
+        spec.lease_duration_seconds,
+    )
+
+
+class LeaseElector:
+    """This replica's side of one Lease election, remembered between attempts.
 
     ``label`` names the elected duty in log lines (for example ``"ALB-sync"``
     or ``"webhook"``) so two elections in one process stay distinguishable.
+    ``clock`` is the monotonic clock that times how long another holder's
+    record has stayed unchanged.
     """
-    observed_at = datetime.now(UTC)
 
-    try:
-        lease = coordination_v1.read_namespaced_lease(
-            identity.name,
-            identity.namespace,
-            _request_timeout=request_timeout,
-        )
-        spec = lease.spec
-        current_holder = spec.holder_identity
-        renew_time = spec.renew_time
-        lease_duration = spec.lease_duration_seconds or identity.duration_seconds
+    def __init__(
+        self,
+        identity: LeaseIdentity,
+        *,
+        label: str,
+        request_timeout: tuple[int, int] = LEASE_REQUEST_TIMEOUT,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.identity = identity
+        self.label = label
+        self.request_timeout = request_timeout
+        self._clock = clock
+        # The Lease record as last read or written, and when (on ``clock``).
+        self._observed_record: tuple[Any, ...] | None = None
+        self._observed_at = 0.0
+        # Attempts run in worker threads; one at a time per elector.
+        self._lock = threading.Lock()
 
-        expired = False
-        if current_holder:
-            if renew_time is None:
-                # A holder without a renewal timestamp cannot prove it still
-                # owns the lease. Treat it as expired so the named Lease
-                # cannot remain wedged indefinitely.
-                expired = True
-            else:
-                if renew_time.tzinfo is None:
-                    renew_time = renew_time.replace(tzinfo=UTC)
-                expired = (observed_at - renew_time).total_seconds() >= lease_duration
+    def try_acquire(self, coordination_v1: Any) -> LeaseOutcome:
+        """Acquire or renew the Lease for this replica's holder identity."""
+        with self._lock:
+            return self._try_acquire(coordination_v1)
 
-        if current_holder not in (None, "", identity.holder) and not expired:
-            return False
+    def _observe(self, spec: Any) -> None:
+        record = _lease_record(spec)
+        if record != self._observed_record:
+            self._observed_record = record
+            self._observed_at = self._clock()
 
-        acquiring = current_holder != identity.holder
-        renewed_at = datetime.now(UTC)
-        if acquiring:
-            spec.holder_identity = identity.holder
-            spec.acquire_time = renewed_at
-            spec.lease_transitions = (spec.lease_transitions or 0) + 1
-        spec.lease_duration_seconds = identity.duration_seconds
-        spec.renew_time = renewed_at
-
+    def _try_acquire(self, coordination_v1: Any) -> LeaseOutcome:
+        identity = self.identity
+        label = self.label
         try:
-            coordination_v1.replace_namespaced_lease(
+            lease = coordination_v1.read_namespaced_lease(
                 identity.name,
                 identity.namespace,
-                lease,
-                _request_timeout=request_timeout,
+                _request_timeout=self.request_timeout,
             )
+            spec = lease.spec
+            self._observe(spec)
+            current_holder = spec.holder_identity
+            lease_duration = spec.lease_duration_seconds or identity.duration_seconds
+
+            if current_holder not in (None, "", identity.holder):
+                unchanged_for = self._clock() - self._observed_at
+                if spec.renew_time is not None and unchanged_for < lease_duration:
+                    return LeaseOutcome.NOT_HELD
+
+            acquiring = current_holder != identity.holder
+            renewed_at = datetime.now(UTC)
+            if acquiring:
+                spec.holder_identity = identity.holder
+                spec.acquire_time = renewed_at
+                spec.lease_transitions = (spec.lease_transitions or 0) + 1
+            spec.lease_duration_seconds = identity.duration_seconds
+            spec.renew_time = renewed_at
+
+            try:
+                coordination_v1.replace_namespaced_lease(
+                    identity.name,
+                    identity.namespace,
+                    lease,
+                    _request_timeout=self.request_timeout,
+                )
+            except ApiException as exc:
+                if exc.status == 409:
+                    logger.debug("Lost %s Lease race to another replica", label)
+                    return LeaseOutcome.NOT_HELD
+                raise
+            self._observe(spec)
+
+            if acquiring:
+                logger.info("Acquired %s leader Lease as %s", label, identity.holder)
+                return LeaseOutcome.ACQUIRED
+            return LeaseOutcome.RENEWED
+
         except ApiException as exc:
-            if exc.status == 409:
-                logger.debug("Lost %s Lease race to another replica", label)
-                return False
-            raise
-
-        if acquiring:
-            logger.info("Acquired %s leader Lease as %s", label, identity.holder)
-        return True
-
-    except ApiException as exc:
-        if exc.status == 404:
-            logger.warning(
-                "%s Lease %s/%s is missing; the elected duty is disabled until it is restored",
-                label,
-                identity.namespace,
-                identity.name,
-            )
-        else:
+            if exc.status == 404:
+                logger.warning(
+                    "%s Lease %s/%s is missing; the elected duty is disabled until it is restored",
+                    label,
+                    identity.namespace,
+                    identity.name,
+                )
+            else:
+                logger.warning("%s Lease check failed (non-fatal): %s", label, exc)
+            return LeaseOutcome.NOT_HELD
+        except Exception as exc:
             logger.warning("%s Lease check failed (non-fatal): %s", label, exc)
-        return False
-    except Exception as exc:
-        logger.warning("%s Lease check failed (non-fatal): %s", label, exc)
-        return False
+            return LeaseOutcome.NOT_HELD

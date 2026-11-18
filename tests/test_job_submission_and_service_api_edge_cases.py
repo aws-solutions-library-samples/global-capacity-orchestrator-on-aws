@@ -1652,8 +1652,13 @@ async def test_manifest_api_readiness_health_status_and_policy_edges(
     assert error.value.status_code == 503
 
 
+#: Monotonic clock for the ALB-sync elector of ``_new_health_monitor``.
+_LEASE_CLOCK = [0.0]
+
+
 def _new_health_monitor() -> Any:
     from gco.services.health_monitor import HealthMonitor
+    from gco.services.leader_lease import LeaseElector, LeaseIdentity
 
     monitor = object.__new__(HealthMonitor)
     monitor.cluster_id = "cluster"
@@ -1663,6 +1668,11 @@ def _new_health_monitor() -> Any:
     monitor._alb_sync_lease_namespace = "gco-system"
     monitor._alb_sync_lease_duration = 90
     monitor._alb_sync_holder = "pod-a"
+    monitor._alb_sync_elector = LeaseElector(
+        LeaseIdentity("lease", "gco-system", "pod-a", 90),
+        label="ALB-sync",
+        clock=lambda: _LEASE_CLOCK[0],
+    )
     monitor._alb_sync_interval = 300
     monitor._last_alb_sync = None
     monitor.core_v1 = MagicMock()
@@ -1758,6 +1768,11 @@ def test_health_monitor_lease_acquires_unowned_missing_or_naive_expired(
         lease_transitions=0,
     )
     monitor.coordination_v1.read_namespaced_lease.return_value = SimpleNamespace(spec=spec)
+    if renew_time is not None:
+        # A renewing holder expires only after a full lease of unchanged
+        # observations on this replica's clock.
+        assert monitor._try_acquire_alb_sync_lease() is False
+        _LEASE_CLOCK[0] += 90
     assert monitor._try_acquire_alb_sync_lease() is True
     assert spec.holder_identity == "pod-a"
 
@@ -2007,6 +2022,7 @@ def _bare_dispatcher() -> Any:
     # logs it and sleeps, and ``_watch_jobs`` spins forever — the tests below
     # only terminate because the loop reaches ``_process_job_event``.
     dispatcher._leader_lease = None
+    dispatcher._leader_elector = None
     dispatcher._standby_poll_seconds = 0
     dispatcher._is_leader = False
     # As after a successful Job list: the watch resumes from this version.

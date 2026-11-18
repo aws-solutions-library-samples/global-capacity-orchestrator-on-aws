@@ -17,6 +17,7 @@ merging into it.
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -30,7 +31,7 @@ from kubernetes.client.models import V1JobList
 from urllib3.exceptions import ProtocolError
 
 from gco.services import webhook_dispatcher as wd
-from gco.services.leader_lease import LEASE_MIN_DURATION_SECONDS, LeaseIdentity
+from gco.services.leader_lease import LEASE_MIN_DURATION_SECONDS, LeaseIdentity, LeaseOutcome
 
 _STATUS = {
     "running": {"active": 1},
@@ -353,8 +354,10 @@ class TestNoDeliveryBeforeASeed:
             if len(sleeps) == 5:
                 dispatcher._running = False
 
+        assert dispatcher._leader_elector is not None
+        outcomes = itertools.chain([LeaseOutcome.ACQUIRED], itertools.repeat(LeaseOutcome.RENEWED))
         with (
-            patch.object(wd, "try_acquire_lease", return_value=True),
+            patch.object(dispatcher._leader_elector, "try_acquire", side_effect=outcomes),
             patch.object(wd.asyncio, "sleep", fake_sleep),
         ):
             await dispatcher._watch_jobs()

@@ -692,10 +692,20 @@ class TestSyncAlbRegistration:
 
     def test_expired_lease_is_claimed_with_optimistic_replace(self, monitor):
         """An expired holder is replaced using the read object's resourceVersion."""
+        from gco.services.leader_lease import LeaseElector
+
+        now = [0.0]
+        monitor._alb_sync_elector = LeaseElector(
+            monitor._alb_sync_elector.identity, label="ALB-sync", clock=lambda: now[0]
+        )
         lease = monitor.coordination_v1.read_namespaced_lease.return_value
         lease.spec.holder_identity = "dead-health-monitor-pod"
         lease.spec.renew_time = datetime.now(UTC) - timedelta(minutes=5)
 
+        # Expiry is timed on this replica's clock from when it first saw the
+        # record, not from the holder's renewTime.
+        assert monitor._try_acquire_alb_sync_lease() is False
+        now[0] += monitor._alb_sync_lease_duration
         assert monitor._try_acquire_alb_sync_lease() is True
         assert lease.spec.holder_identity == monitor._alb_sync_holder
         monitor.coordination_v1.replace_namespaced_lease.assert_called_once()

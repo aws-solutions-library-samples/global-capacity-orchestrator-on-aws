@@ -42,8 +42,8 @@ from gco.models import HealthStatus, RequestedResources, ResourceThresholds, Res
 from gco.services.leader_lease import (
     LEASE_MIN_DURATION_SECONDS,
     LEASE_REQUEST_TIMEOUT,
+    LeaseElector,
     LeaseIdentity,
-    try_acquire_lease,
 )
 from gco.services.structured_logging import configure_structured_logging
 
@@ -144,6 +144,16 @@ class HealthMonitor:
             os.environ.get("POD_NAME")
             or os.environ.get("HOSTNAME")
             or f"health-monitor-{os.getpid()}"
+        )
+        self._alb_sync_elector = LeaseElector(
+            LeaseIdentity(
+                name=self._alb_sync_lease_name,
+                namespace=self._alb_sync_lease_namespace,
+                holder=self._alb_sync_holder,
+                duration_seconds=self._alb_sync_lease_duration,
+            ),
+            label="ALB-sync",
+            request_timeout=_ALB_SYNC_K8S_TIMEOUT,
         )
 
     async def get_cluster_metrics(self) -> tuple[ResourceUtilization, int, int, RequestedResources]:
@@ -568,22 +578,13 @@ class HealthMonitor:
         """Acquire or renew the single-writer Lease for ALB self-healing.
 
         Shared election rules live in :mod:`gco.services.leader_lease`:
-        optimistic ``replace`` (a racing writer gets HTTP 409), expired or
-        timestamp-less holders may be replaced, and every API or RBAC failure
-        returns ``False`` — losing self-healing is safer than allowing two
-        replicas to mutate the cross-region SSM parameter.
+        optimistic ``replace`` (a racing writer gets HTTP 409), a holder whose
+        record this replica has seen unchanged for the lease duration (or
+        that never recorded a renewal) may be replaced, and every API or RBAC
+        failure returns ``False`` — losing self-healing is safer than allowing
+        two replicas to mutate the cross-region SSM parameter.
         """
-        return try_acquire_lease(
-            self.coordination_v1,
-            LeaseIdentity(
-                name=self._alb_sync_lease_name,
-                namespace=self._alb_sync_lease_namespace,
-                holder=self._alb_sync_holder,
-                duration_seconds=self._alb_sync_lease_duration,
-            ),
-            label="ALB-sync",
-            request_timeout=_ALB_SYNC_K8S_TIMEOUT,
-        )
+        return self._alb_sync_elector.try_acquire(self.coordination_v1).held
 
     async def sync_alb_registration(self) -> None:
         """Run ALB self-healing without blocking FastAPI's event loop."""

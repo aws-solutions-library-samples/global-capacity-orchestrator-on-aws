@@ -93,9 +93,10 @@ from kubernetes.watch import Watch
 
 from gco.k8s_objects import present
 from gco.services.leader_lease import (
+    LeaseElector,
     LeaseIdentity,
+    LeaseOutcome,
     lease_duration_from_env,
-    try_acquire_lease,
 )
 from gco.services.template_store import WebhookStore, get_webhook_store
 
@@ -387,6 +388,9 @@ class WebhookDispatcher:
 
         # Leader election (None = this process is the only deliverer)
         self._leader_lease = leader_lease
+        self._leader_elector = (
+            LeaseElector(leader_lease, label="webhook") if leader_lease is not None else None
+        )
         self._standby_poll_seconds = standby_poll_seconds
         self._is_leader = False
 
@@ -818,20 +822,20 @@ class WebhookDispatcher:
         the watcher seeds it again from a list before it delivers anything,
         so the new leader does not replay transitions the old one already
         delivered, and anything that happened while nobody held the Lease is
-        deliberately dropped rather than duplicated.
+        deliberately dropped rather than duplicated. That includes a win this
+        replica's own state did not see coming: if it stalled past the lease
+        duration, another replica may have held the Lease and delivered in
+        between, and the election reports that as an acquisition rather than
+        a renewal.
         """
-        if self._leader_lease is None:
+        if self._leader_elector is None:
             return True
-        held = await asyncio.to_thread(
-            try_acquire_lease,
-            self.coordination_v1,
-            self._leader_lease,
-            label="webhook",
-        )
-        if held and not self._is_leader:
+        outcome = await asyncio.to_thread(self._leader_elector.try_acquire, self.coordination_v1)
+        held = outcome.held
+        if outcome is LeaseOutcome.ACQUIRED or (held and not self._is_leader):
             logger.info(
                 "Webhook dispatcher %s became the deliverer; re-seeding job state cache",
-                self._leader_lease.holder,
+                self._leader_elector.identity.holder,
             )
             self._resource_version = None
             self._cache_seeded = False
