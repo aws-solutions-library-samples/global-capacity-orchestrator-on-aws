@@ -177,7 +177,7 @@ class TestDeploymentRegionsValidation:
         app = MockApp(base_context)
         with pytest.raises(
             ConfigValidationError,
-            match=rf"Invalid {field} region 'invalid-region'",
+            match=rf"deployment_regions\.{field} is not a valid region: 'invalid-region'",
         ):
             ConfigLoader(app)
 

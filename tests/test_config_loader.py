@@ -87,9 +87,7 @@ def valid_context():
         "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 85, "gpu_threshold": 90},
         "global_accelerator": {
             "name": "gco-accelerator",
-            "health_check_grace_period": 30,
             "health_check_interval": 30,
-            "health_check_timeout": 5,
             "health_check_path": "/api/v1/health",
         },
         "alb_config": {
@@ -150,7 +148,9 @@ class TestConfigLoaderValidation:
         """Non-object Region configuration fails with an actionable error."""
         valid_context["deployment_regions"] = ["us-east-1"]
         app = MockApp(valid_context)
-        with pytest.raises(ConfigValidationError, match="must be a non-empty object"):
+        with pytest.raises(
+            ConfigValidationError, match=re.escape("deployment_regions must be an object, got list")
+        ):
             ConfigLoader(app)
 
     def test_empty_context_is_validated(self):
@@ -229,7 +229,7 @@ class TestRegionValidation:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match=rf"Invalid {field} region 'invalid-region'",
+            match=rf"deployment_regions\.{field} is not a valid region: 'invalid-region'",
         ):
             ConfigLoader(app)
 
@@ -306,7 +306,7 @@ class TestResourceThresholdsValidation:
         del valid_context["resource_thresholds"]["gpu_threshold"]
         app = MockApp(valid_context)
         with pytest.raises(
-            ConfigValidationError, match="Missing threshold configuration: gpu_threshold"
+            ConfigValidationError, match=r"resource_thresholds\.gpu_threshold is required"
         ):
             ConfigLoader(app)
 
@@ -429,7 +429,7 @@ class TestTrafficDialValidation:
         valid_context["global_accelerator"]["traffic_dial"] = 5
         with pytest.raises(
             ConfigValidationError,
-            match=re.escape("global_accelerator.traffic_dial must be a mapping"),
+            match=re.escape("global_accelerator.traffic_dial must be an object, got int: 5"),
         ):
             ConfigLoader(MockApp(valid_context))
 
@@ -513,7 +513,7 @@ class TestApiGatewayValidation:
         valid_context["api_gateway"]["throttle_burst_limit"] = 500
         app = MockApp(valid_context)
         with pytest.raises(
-            ConfigValidationError, match="throttle_burst_limit should be greater than or equal"
+            ConfigValidationError, match="throttle_burst_limit must be greater than or equal"
         ):
             ConfigLoader(app)
 
@@ -800,8 +800,14 @@ class TestManifestProcessorSizingConfig:
         with pytest.raises(ConfigValidationError) as exc_info:
             ConfigLoader(MockApp(valid_context))
         message = str(exc_info.value)
-        assert "manifest_processor.autoscaling contains unknown key(s): min_replicas" in message
-        assert "cpu_target_utilization_percentage, enabled, max_replicas" in message
+        assert (
+            "manifest_processor.autoscaling contains unknown key(s): "
+            "manifest_processor.autoscaling.min_replicas" in message
+        )
+        assert (
+            "manifest_processor.autoscaling.cpu_target_utilization_percentage, "
+            "manifest_processor.autoscaling.enabled, manifest_processor.autoscaling.max_replicas"
+        ) in message
 
     @pytest.mark.parametrize("value", [None, "true", 1, 0])
     def test_autoscaling_enabled_must_be_a_boolean(self, valid_context, value):
@@ -919,8 +925,10 @@ class TestNetworkPostureConfig:
         valid_context["vpc_endpoints"] = {"gateways": ["s3"]}
         with pytest.raises(ConfigValidationError) as exc_info:
             ConfigLoader(MockApp(valid_context))
-        assert "vpc_endpoints contains unknown key(s): gateways" in str(exc_info.value)
-        assert "allowed keys: gateway, interface" in str(exc_info.value)
+        assert "vpc_endpoints contains unknown key(s): vpc_endpoints.gateways" in str(
+            exc_info.value
+        )
+        assert "allowed keys: vpc_endpoints.gateway, vpc_endpoints.interface" in str(exc_info.value)
 
     @pytest.mark.parametrize(
         ("key", "value"),
@@ -1443,7 +1451,7 @@ class TestConfigValidationEdgeCases:
         valid_context["manifest_processor"]["replicas"] = 0
         app = MockApp(valid_context)
         with pytest.raises(
-            ConfigValidationError, match="manifest_processor replicas must be a positive integer"
+            ConfigValidationError, match=r"manifest_processor\.replicas must be a positive integer"
         ):
             ConfigLoader(app)
 
@@ -1550,9 +1558,7 @@ class TestConfigValidationEdgeCases:
         """Test that missing API Gateway field raises error."""
         del valid_context["api_gateway"]["log_level"]
         app = MockApp(valid_context)
-        with pytest.raises(
-            ConfigValidationError, match="Missing api_gateway configuration: log_level"
-        ):
+        with pytest.raises(ConfigValidationError, match=r"api_gateway\.log_level is required"):
             ConfigLoader(app)
 
     def test_optional_pending_thresholds_negative(self, valid_context):
@@ -1605,7 +1611,7 @@ class TestConfigValidationEdgeCases:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="Missing manifest_processor configuration: replicas",
+            match=r"manifest_processor\.replicas is required",
         ):
             ConfigLoader(app)
 
@@ -1617,7 +1623,7 @@ class TestConfigValidationEdgeCases:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="Missing job_validation_policy configuration: allowed_namespaces",
+            match=r"job_validation_policy\.allowed_namespaces is required",
         ):
             ConfigLoader(app)
 
@@ -1629,7 +1635,7 @@ class TestConfigValidationEdgeCases:
         app = MockApp(valid_context)
         with pytest.raises(
             ConfigValidationError,
-            match="Missing job_validation_policy configuration: resource_quotas",
+            match=r"job_validation_policy\.resource_quotas is required",
         ):
             ConfigLoader(app)
 
@@ -1899,6 +1905,150 @@ class TestAuroraPgvectorConfigValidation:
         valid_context["aurora_pgvector"] = block
         with pytest.raises(ConfigValidationError, match=message):
             ConfigLoader(MockApp(valid_context))
+
+
+class TestBlockShapes:
+    """Every block is an object of known keys, checked before anything reads it."""
+
+    @pytest.mark.parametrize(
+        ("mutate", "message"),
+        [
+            (
+                lambda c: c.__setitem__("cluster_observability", False),
+                "cluster_observability must be an object, got bool: False",
+            ),
+            (
+                lambda c: c.__setitem__("cost_monitoring", False),
+                "cost_monitoring must be an object, got bool: False",
+            ),
+            (
+                lambda c: c.__setitem__("mission_memory", False),
+                "mission_memory must be an object, got bool: False",
+            ),
+            (
+                lambda c: c.__setitem__("cost_monitoring", {"reports": 30}),
+                "cost_monitoring.reports must be an object, got int: 30",
+            ),
+            (
+                lambda c: c.__setitem__("cluster_observability", {"grafana": "x"}),
+                "cluster_observability.grafana must be an object, got str: 'x'",
+            ),
+            (
+                lambda c: c.__setitem__("helm", {"volcano": True}),
+                "helm.volcano must be an object, got bool: True",
+            ),
+            (
+                lambda c: c.__setitem__("resource_thresholds", 80),
+                "resource_thresholds must be an object, got int: 80",
+            ),
+        ],
+    )
+    def test_a_scalar_where_a_block_belongs_is_rejected(self, valid_context, mutate, message):
+        """These used to read as absent blocks (defaults on) or crash later."""
+        mutate(valid_context)
+        with pytest.raises(ConfigValidationError, match=re.escape(message)):
+            ConfigLoader(MockApp(valid_context))
+
+    @pytest.mark.parametrize(
+        ("mutate", "unknown"),
+        [
+            (
+                lambda c: c.__setitem__("queue_processor", {"enable": False}),
+                "queue_processor.enable",
+            ),
+            (
+                lambda c: c.__setitem__("helm", {"volcano": {"enabled": True, "version": "1"}}),
+                "helm.volcano.version",
+            ),
+            (lambda c: c.__setitem__("helm", {"volcanoo": {"enabled": True}}), "helm.volcanoo"),
+            (
+                lambda c: c.__setitem__("cost_monitoring", {"reports": {"interval": 5}}),
+                "cost_monitoring.reports.interval",
+            ),
+            (
+                lambda c: c["api_gateway"].__setitem__("throttle_limit", 5),
+                "api_gateway.throttle_limit",
+            ),
+        ],
+    )
+    def test_unknown_keys_fail_with_their_full_path(self, valid_context, mutate, unknown):
+        mutate(valid_context)
+        with pytest.raises(ConfigValidationError, match=re.escape(f"unknown key(s): {unknown};")):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_comment_keys_and_null_blocks_are_allowed(self, valid_context):
+        valid_context["queue_processor"] = {"_comment_enabled": "doc", "enabled": True}
+        valid_context["cost_monitoring"] = None
+        valid_context["helm"] = {"_comment": "charts", "kueue": {"enabled": False}}
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_cost_monitoring_config()["enabled"] is True
+
+    def test_tag_values_must_be_strings(self, valid_context):
+        valid_context["tags"] = {"Environment": "test", "CostCenter": 42}
+        with pytest.raises(
+            ConfigValidationError, match=re.escape("tags.CostCenter must be a string, got 42")
+        ):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_tags_must_be_an_object(self, valid_context):
+        valid_context["tags"] = ["Environment=test"]
+        with pytest.raises(ConfigValidationError, match=re.escape("tags must be an object")):
+            ConfigLoader(MockApp(valid_context))
+
+    def test_legacy_global_accelerator_keys_are_deprecated(self, valid_context):
+        valid_context["global_accelerator"].update(
+            {"health_check_grace_period": 30, "health_check_timeout": 5}
+        )
+        config = ConfigLoader(MockApp(valid_context))
+        assert [w.split(" is deprecated")[0] for w in config.warnings if "global_acc" in w] == [
+            "global_accelerator.health_check_grace_period",
+            "global_accelerator.health_check_timeout",
+        ]
+
+    def test_unknown_top_level_keys_in_gco_style_warn(self, valid_context):
+        valid_context.update(
+            {
+                "cluster_observabilty": {"enabled": False},
+                "@aws-cdk/core:newStyleStackSynthesis": True,
+                "aws:cdk:enable-path-metadata": True,
+                "availability-zones:account=123456789012:region=us-east-1": ["us-east-1a"],
+                "acknowledged-issue-numbers": [1],
+                "_comment_top": "doc",
+                "feature_enabled_overrides": "valkey",
+            }
+        )
+        config = ConfigLoader(MockApp(valid_context))
+        unknown = [w for w in config.warnings if "is not a GCO cdk.json key" in w]
+        assert unknown == [
+            "cluster_observabilty is not a GCO cdk.json key and is ignored; check its "
+            "spelling against docs/CUSTOMIZATION.md."
+        ]
+
+    def test_a_node_without_get_all_context_skips_the_top_level_check(self, valid_context):
+        class _BareNode:
+            def __init__(self, context: dict) -> None:
+                self._context = context
+
+            def try_get_context(self, key: str):
+                return self._context.get(key)
+
+        class _BareApp:
+            def __init__(self, context: dict) -> None:
+                self.node = _BareNode(context)
+
+        valid_context["cluster_observabilty"] = {}
+        config = ConfigLoader(_BareApp(valid_context))
+        assert not [w for w in config.warnings if "is not a GCO cdk.json key" in w]
+
+    def test_every_key_of_the_shipped_cdk_json_is_known(self):
+        """The committed file draws no unknown-key warning and no deprecation."""
+        import json
+        from pathlib import Path
+
+        context = json.loads(
+            (Path(__file__).resolve().parents[1] / "cdk.json").read_text(encoding="utf-8")
+        )["context"]
+        assert ConfigLoader(MockApp(context)).warnings == []
 
 
 def _stateful_flag_context(valid_context: dict, block: str, value: object) -> dict:
@@ -2209,19 +2359,14 @@ class TestAnalyticsEnvironmentConfig:
         ):
             ConfigLoader(app)
 
-    def test_non_dict_analytics_environment_context_uses_defaults(self):
-        """Non-dict analytics_environment context value → falls back to defaults."""
+    def test_non_dict_analytics_environment_context_is_rejected(self):
+        """A scalar where the block belongs fails instead of reading as the defaults."""
         app = MockApp({**minimal_context(), "analytics_environment": "invalid"})
-        config = ConfigLoader(app)
-        analytics_config = config.get_analytics_config()
-
-        assert analytics_config["enabled"] is False
-        assert config.get_analytics_enabled() is False
-        assert analytics_config["cognito"] == {
-            "domain_prefix": None,
-            "removal_policy": "destroy",
-        }
-        assert analytics_config["efs"] == {"removal_policy": "destroy"}
+        with pytest.raises(
+            ConfigValidationError,
+            match=re.escape("analytics_environment must be an object, got str: 'invalid'"),
+        ):
+            ConfigLoader(app)
 
 
 class TestAnalyticsConstants:
@@ -2373,8 +2518,11 @@ class TestTracingConfig:
             ConfigLoader(MockApp(valid_context))
 
         message = str(exc_info.value)
-        assert "tracing contains unknown key(s): sampling_ratio" in message
-        assert "allowed keys: enable_transaction_search, enabled, sample_ratio" in message
+        assert "tracing contains unknown key(s): tracing.sampling_ratio" in message
+        assert (
+            "allowed keys: tracing.enable_transaction_search, tracing.enabled, tracing.sample_ratio"
+            in message
+        )
 
     @pytest.mark.parametrize(
         ("enabled", "transaction_search", "expected"),
@@ -2438,7 +2586,7 @@ class TestTracingConfig:
         valid_context["tracing_overrides"] = '{"sampling": 1}'
         with pytest.raises(ConfigValidationError) as exc_info:
             ConfigLoader(MockApp(valid_context))
-        assert "tracing (after tracing_overrides) contains unknown key(s): sampling" in str(
+        assert "tracing (after tracing_overrides) contains unknown key(s): tracing.sampling" in str(
             exc_info.value
         )
 

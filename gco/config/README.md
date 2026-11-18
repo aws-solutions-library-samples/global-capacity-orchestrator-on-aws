@@ -42,6 +42,14 @@ A block that no longer takes effect (`DEPRECATED_CONTEXT_KEYS`, for example
 the block and what to do instead. Warnings are logged at `WARNING`, which
 `cdk synth` prints, and collected in `ConfigLoader.warnings`.
 
+Before any getter reads a block, `_validate_block_shapes` checks every block in
+`BLOCK_KEYS` (the blocks whose own validator does not already do so): a block
+present in cdk.json must be an object, a key outside its set fails with the
+full path, and `_comment*` keys are always allowed. `DEPRECATED_BLOCK_KEYS`
+lists the keys inside blocks that warn and are ignored. A top-level key in
+GCO's `snake_case` style that is neither a block nor in `OTHER_CONTEXT_KEYS`
+draws a warning.
+
 ## Source Files
 
 | File | Description |

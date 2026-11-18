@@ -93,6 +93,7 @@ This guide shows you how to customize Global Capacity Orchestrator (GCO) for you
   - [Adding New Suppressions](#adding-new-suppressions)
   - [Disabling Compliance Checks](#disabling-compliance-checks)
 - [How cdk.json Is Validated](#how-cdkjson-is-validated)
+  - [Blocks and keys](#blocks-and-keys)
   - [Boolean flags](#boolean-flags)
 - [Configuration Best Practices](#configuration-best-practices)
   - [1. Use Configuration Files](#1-use-configuration-files)
@@ -2509,6 +2510,27 @@ whole `context` block before it builds a stack, so a value AWS would reject
 fails with the key's full path (`fsx_lustre_regions.us-west-2.enabled`)
 instead of failing halfway through a deploy.
 
+### Blocks and keys
+
+- A block such as `cluster_observability` must be a JSON object. Earlier
+  releases read a scalar such as `"cluster_observability": false` as a
+  missing block, so its defaults applied and observability stayed on; now the
+  synth fails. Write `{"enabled": false}` instead.
+- A key that a block does not define fails the synth with its full path and
+  the keys the block accepts, so a typo such as
+  `cost_monitoring.reports.interval` is caught instead of silently keeping the
+  default. `_comment*` keys are allowed in every block.
+- A key that no longer takes effect still validates, with a warning that
+  names it and says what to do; nothing reads its value. These are
+  `alb_config`, `fsx_lustre.node_group`,
+  `global_accelerator.health_check_grace_period` and
+  `global_accelerator.health_check_timeout`.
+- A top-level key in GCO's `snake_case` style that GCO does not read draws a
+  warning, because it is most likely a misspelt block. Keys of the CDK itself
+  (`@aws-cdk/...`, `aws:cdk:...`) are not checked.
+- Numbers must be numbers: `true` is not accepted where an integer belongs.
+  `tags` values must be strings.
+
 ### Boolean flags
 
 Write flags such as `enabled` as JSON booleans, `true` or `false`, without
@@ -2548,13 +2570,15 @@ Store configuration in `cdk.json` context:
       "monitoring": "us-east-2",
       "regional": ["us-east-1"]
     },
-    "enable_monitoring": true,
-    "enable_gpu": true,
-    "gpu_instance_families": ["g5", "g4dn"],
-    "max_gpu_nodes": 10
+    "cluster_observability": {"enabled": true},
+    "fsx_lustre": {"enabled": false},
+    "tags": {"Project": "gco", "Environment": "dev"}
   }
 }
 ```
+
+Every block is checked at synth, so a misspelt key fails or warns instead of
+being ignored; see [How cdk.json Is Validated](#how-cdkjson-is-validated).
 
 ### 2. Environment-Specific Configuration
 

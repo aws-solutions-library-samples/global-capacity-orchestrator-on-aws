@@ -1046,7 +1046,8 @@ class TestConfigLoaderWiring:
         assert (
             _loader(valid_cdk_context, helm={"volcano": {}}).get_slurm_config()["enabled"] is False
         )
-        assert _loader(valid_cdk_context, helm=[]).get_slurm_config()["enabled"] is False
+        with pytest.raises(ConfigValidationError, match=r"helm must be an object, got list"):
+            _loader(valid_cdk_context, helm=[])
 
     def test_valid_block_is_returned_with_defaults(self, valid_cdk_context: dict[str, Any]) -> None:
         loader = _loader(

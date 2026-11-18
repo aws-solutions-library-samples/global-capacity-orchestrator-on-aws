@@ -46,6 +46,7 @@ from gco.eks_capabilities_config import (
     parse_eks_capabilities_overrides,
     validate_eks_capabilities_config,
 )
+from gco.enablement_overrides import HELM_CHART_CONFIG_KEYS
 from gco.fsx_lustre_config import (
     FSX_AUTO_IMPORT_POLICIES,
     FSX_CAPACITY_INCREMENT_GIB,
@@ -115,6 +116,260 @@ DEPRECATED_CONTEXT_KEYS: dict[str, str] = {
         "that have always been deployed."
     ),
 }
+
+#: Keys inside known blocks that no longer take effect, by full path, each
+#: with what to do instead. Like :data:`DEPRECATED_CONTEXT_KEYS` they still
+#: validate, with a warning, and nothing reads them.
+DEPRECATED_BLOCK_KEYS: dict[str, str] = {
+    "global_accelerator.health_check_grace_period": (
+        "Global Accelerator endpoint groups have no grace period, so it never took "
+        "effect. Remove it from cdk.json."
+    ),
+    "global_accelerator.health_check_timeout": (
+        "Global Accelerator endpoint groups have no probe timeout setting, so it never "
+        "took effect. Remove it from cdk.json."
+    ),
+}
+
+#: The charts of the ``helm`` block that take nothing but ``enabled``.
+#: ``helm.argocd`` and ``helm.slurm`` have their own validators
+#: (gco/argocd_config.py, gco/slurm_config.py).
+_SIMPLE_HELM_CHARTS = HELM_CHART_CONFIG_KEYS - {"argocd", "slurm"}
+
+#: Every key each cdk.json block may hold, for the blocks whose own validator
+#: does not reject unknown keys already (``fsx_lustre``, ``valkey``,
+#: ``aurora_pgvector``, ``tracing``, ``gateway_health_check``,
+#: ``inference_proxy``, ``vpc_endpoints``, ``eks_capabilities``, ``pcs``,
+#: ``hyperpod``, ``helm.argocd``, ``helm.slurm`` and
+#: ``job_validation_policy.manifest_security_policy`` do). A dotted path is a
+#: sub-block, listed after its parent. Each block must be an object when
+#: present, a key outside its set fails validation with the full path, and
+#: ``_comment*`` keys are always allowed. ``inference_monitor`` is read by
+#: the inference monitor's own manifest and is not listed.
+BLOCK_KEYS: dict[str, frozenset[str]] = {
+    "deployment_regions": frozenset({"global", "api_gateway", "monitoring", "regional"}),
+    "bedrock": frozenset(
+        {
+            "mission_default_model_id",
+            "capacity_advisor_default_model_id",
+            "claude_code_default_model_id",
+            "codex_default_model_id",
+            "codex",
+            "opencode_default_model_id",
+            "embedding_model_id",
+            "generation_reasoning",
+            # Retired keys gco/bedrock.py reports with rename instructions.
+            "default_model_id",
+            "thinking",
+        }
+    ),
+    "bedrock.codex": frozenset({"reasoning_effort"}),
+    "bedrock.generation_reasoning": frozenset({"effort"}),
+    "eks_cluster": frozenset(
+        {"endpoint_access", "public_access_cidrs", "developer_access", "network_policy_enforcement"}
+    ),
+    "global_accelerator": frozenset(
+        {
+            "name",
+            "health_check_interval",
+            "health_check_threshold",
+            "health_check_path",
+            "client_affinity",
+            "traffic_dial",
+            # Deprecated (DEPRECATED_BLOCK_KEYS): warned about and ignored.
+            "health_check_grace_period",
+            "health_check_timeout",
+        }
+    ),
+    "global_accelerator.traffic_dial": frozenset(
+        {
+            "enabled",
+            "mode",
+            "interval_minutes",
+            "lookback_minutes",
+            "min_dial_percentage",
+            "max_step_percentage",
+            "full_health_percentage",
+        }
+    ),
+    "backend_tls": frozenset(
+        {
+            "root_generation",
+            "root_validity_days",
+            "root_rotate_before_days",
+            "root_activation_delay_hours",
+            "root_overlap_days",
+            "leaf_validity_days",
+            "leaf_rotate_before_days",
+            "rotation_schedule_hours",
+            "trust_cache_ttl_seconds",
+            "trust_cache_max_stale_seconds",
+        }
+    ),
+    "api_gateway": frozenset(
+        {
+            "throttle_rate_limit",
+            "throttle_burst_limit",
+            "log_level",
+            "metrics_enabled",
+            "tracing_enabled",
+            "regional_api_enabled",
+        }
+    ),
+    "waf": frozenset({"per_ip_rate_limit"}),
+    "manifest_processor": frozenset(
+        {
+            "image",
+            "replicas",
+            "resource_limits",
+            "autoscaling",
+            "validation_enabled",
+            "max_request_body_bytes",
+            "yaml_max_depth",
+            "central_queue_worker_enabled",
+            "central_queue_poll_interval_seconds",
+            "central_queue_batch_size",
+            "central_queue_reconcile_limit",
+            "central_queue_lease_seconds",
+            "central_queue_lease_renewal_seconds",
+        }
+    ),
+    "manifest_processor.resource_limits": frozenset({"cpu", "memory"}),
+    "queue_processor": frozenset(
+        {
+            "enabled",
+            "polling_interval",
+            "max_concurrent_jobs",
+            "messages_per_job",
+            "successful_jobs_history",
+            "failed_jobs_history",
+        }
+    ),
+    "job_validation_policy": frozenset(
+        {
+            "allowed_namespaces",
+            "resource_quotas",
+            "require_accelerator_toleration",
+            "trusted_registries",
+            "trusted_dockerhub_orgs",
+            "manifest_security_policy",
+            "allowed_kinds",
+        }
+    ),
+    "job_validation_policy.resource_quotas": frozenset(
+        {"max_cpu_per_manifest", "max_memory_per_manifest", "max_gpu_per_manifest"}
+    ),
+    "resource_thresholds": frozenset(
+        {
+            "cpu_threshold",
+            "memory_threshold",
+            "gpu_threshold",
+            "pending_pods_threshold",
+            "pending_requested_cpu_vcpus",
+            "pending_requested_memory_gb",
+            "pending_requested_gpus",
+        }
+    ),
+    "images": frozenset({"removal_policy", "empty_on_delete", "lifecycle", "replication"}),
+    "images.lifecycle": frozenset({"keep_tagged", "expire_untagged_days"}),
+    "images.replication": frozenset({"enabled", "destinations"}),
+    "volcano_image_mirror": frozenset({"enabled", "ecr_namespace"}),
+    "s3_access_logs": frozenset({"retention_days"}),
+    "workload_metrics": frozenset({"cloudwatch_namespace"}),
+    "regional_shared_bucket": frozenset({"removal_policy"}),
+    "mission_memory": frozenset(
+        {"enabled", "retention_days", "dimensions", "distance_function", "top_k"}
+    ),
+    "vector_store": frozenset(
+        {
+            "enabled",
+            "dimensions",
+            "distance_function",
+            "embedding_model_id",
+            "replica_regions",
+            "corpus_prefix",
+        }
+    ),
+    "analytics_environment": frozenset(
+        {"enabled", "hyperpod", "canvas", "cognito", "efs", "studio"}
+    ),
+    "analytics_environment.hyperpod": frozenset({"enabled"}),
+    "analytics_environment.canvas": frozenset({"enabled"}),
+    "analytics_environment.cognito": frozenset({"domain_prefix", "removal_policy"}),
+    "analytics_environment.efs": frozenset({"removal_policy"}),
+    "analytics_environment.studio": frozenset({"user_profile_name_prefix"}),
+    "cluster_observability": frozenset(
+        {"enabled", "grafana", "prometheus", "alertmanager", "mlflow"}
+    ),
+    "cluster_observability.grafana": frozenset(
+        {"persistence_size", "admin_user", "admin_password_rotation_schedule"}
+    ),
+    "cluster_observability.prometheus": frozenset({"persistence_size", "retention"}),
+    "cluster_observability.alertmanager": frozenset({"enabled", "persistence_size"}),
+    "cost_monitoring": frozenset({"enabled", "reports", "athena"}),
+    "cost_monitoring.reports": frozenset(
+        {"interval_minutes", "retention_days", "transition_to_infrequent_access_days"}
+    ),
+    "cost_monitoring.athena": frozenset({"query_results_retention_days"}),
+    "helm": HELM_CHART_CONFIG_KEYS,
+    **{f"helm.{chart}": frozenset({"enabled"}) for chart in sorted(_SIMPLE_HELM_CHARTS)},
+    "mcp_server": frozenset({"enabled"}),
+    "drift_detection": frozenset({"enabled", "schedule_hours"}),
+    "historical": frozenset(
+        {
+            "enabled",
+            "retention_days",
+            "poll_interval_minutes",
+            "capacity_block_duration_hours",
+            "capacity_block_long_duration_hours",
+            "spot_score_target_capacities",
+            "watch_instance_types",
+            "enabled_regions",
+        }
+    ),
+}
+
+#: Top-level context keys GCO reads besides the blocks above: scalars, blocks
+#: with their own validators, per-Region overlays, and the run-scoped keys the
+#: CLI and the release harnesses pass with ``--context``. A key in GCO's
+#: ``snake_case`` style outside this set and the blocks above draws a warning
+#: (it is most likely a typo) and is ignored. Keys CDK owns (``@aws-cdk/...``
+#: feature flags, ``aws:cdk:...``, lookups such as ``availability-zones:...``)
+#: and ``_comment*`` keys never match that style.
+OTHER_CONTEXT_KEYS = frozenset(
+    {
+        "project_name",
+        "kubernetes_version",
+        "tags",
+        "vpc_endpoint_cidrs",
+        "vpc_endpoints",
+        "inference_proxy",
+        "gateway_health_check",
+        "inference_monitor",
+        "eks_capabilities",
+        "eks_capabilities_overrides",
+        "fsx_lustre",
+        "fsx_lustre_regions",
+        "valkey",
+        "aurora_pgvector",
+        "tracing",
+        "tracing_overrides",
+        "pcs",
+        "pcs_regions",
+        "pcs_overrides",
+        "hyperpod",
+        "hyperpod_regions",
+        "hyperpod_overrides",
+        "resource_quota",
+        "feature_enabled_overrides",
+        "helm_enabled_overrides",
+        "gco_live_validation_disable_efs_automatic_backups",
+        "gco_live_validation_retain_provider_log_groups",
+    }
+)
+
+#: The style of GCO's own context keys (see :data:`OTHER_CONTEXT_KEYS`).
+_GCO_CONTEXT_KEY_STYLE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 #: ``manifest_processor.autoscaling`` defaults. Off: the API tier is I/O-bound
 #: (Kubernetes round trips), so CPU is a weak saturation signal; an operator who
@@ -302,12 +557,16 @@ def resolve_tracing_config(raw: object, overrides: object = None) -> dict[str, A
     parsed_overrides = parse_tracing_overrides(overrides)
     merged = _deep_merge(_deep_merge(TRACING_DEFAULTS, block), parsed_overrides)
 
-    unknown = sorted(str(key) for key in merged if key not in TRACING_DEFAULTS)
+    unknown = sorted(
+        str(key) for key in merged if key not in TRACING_DEFAULTS and not is_comment_key(key)
+    )
     if unknown:
         source = f" (after {TRACING_OVERRIDES_CONTEXT_KEY})" if parsed_overrides else ""
         raise ConfigValidationError(
-            f"{TRACING_CONTEXT_KEY}{source} contains unknown key(s): {', '.join(unknown)}; "
-            f"allowed keys: {', '.join(sorted(TRACING_DEFAULTS))}"
+            f"{TRACING_CONTEXT_KEY}{source} contains unknown key(s): "
+            + ", ".join(f"{TRACING_CONTEXT_KEY}.{key}" for key in unknown)
+            + "; allowed keys: "
+            + ", ".join(f"{TRACING_CONTEXT_KEY}.{key}" for key in sorted(TRACING_DEFAULTS))
         )
     for flag in ("enabled", "enable_transaction_search"):
         if type(merged[flag]) is not bool:
@@ -517,6 +776,61 @@ class ConfigLoader:
             self.warnings.append(message)
             logger.warning("%s", message)
 
+    def _context_at(self, path: str) -> object:
+        """The raw value at a dotted cdk.json path (``None`` when any part is absent)."""
+        head, *rest = path.split(".")
+        value: object = self.app.node.try_get_context(head)
+        for part in rest:
+            value = value.get(part) if isinstance(value, dict) else None
+        return value
+
+    def _validate_block_shapes(self) -> None:
+        """Check the shape of every block in :data:`BLOCK_KEYS` before anything reads it.
+
+        A block present in cdk.json must be an object holding only its known
+        keys; the error names the full path. Earlier releases read a scalar
+        such as ``"cluster_observability": false`` as an absent block, so its
+        defaults (observability on) applied, and crashed on others, such as
+        ``"cost_monitoring": {"reports": 30}``. ``tags`` must map tag names to
+        strings. A deprecated key (:data:`DEPRECATED_BLOCK_KEYS`) and an
+        unknown top-level key in GCO's style draw a warning.
+
+        Raises:
+            ConfigValidationError: If a block is not an object, holds an
+                unknown key, or a tag value is not a string.
+        """
+        for path, allowed in BLOCK_KEYS.items():
+            raw = self._context_at(path)
+            if raw is not None:
+                _check_block_keys(path, _object_or_empty(path, raw), allowed)
+        for path, advice in DEPRECATED_BLOCK_KEYS.items():
+            parent, _, key = path.rpartition(".")
+            block = self._context_at(parent)
+            if isinstance(block, dict) and key in block:
+                self._warn(f"{path} is deprecated and ignored: {advice}")
+        for name, value in _object_or_empty("tags", self.app.node.try_get_context("tags")).items():
+            if not isinstance(value, str):
+                raise ConfigValidationError(f"tags.{name} must be a string, got {value!r}")
+        self._warn_unknown_context_keys()
+
+    def _warn_unknown_context_keys(self) -> None:
+        """Warn about each top-level key in GCO's style that GCO does not read.
+
+        Such a key is most likely a misspelt block (``cluster_observabilty``),
+        whose settings would silently not apply. Only a warning: the CDK CLI
+        and other tools may add context of their own.
+        """
+        get_all_context = getattr(self.app.node, "get_all_context", None)
+        if not callable(get_all_context):
+            return
+        known = BLOCK_KEYS.keys() | OTHER_CONTEXT_KEYS | DEPRECATED_CONTEXT_KEYS.keys()
+        for key in sorted(str(name) for name in get_all_context()):
+            if _GCO_CONTEXT_KEY_STYLE.fullmatch(key) and key not in known:
+                self._warn(
+                    f"{key} is not a GCO cdk.json key and is ignored; check its spelling "
+                    "against docs/CUSTOMIZATION.md."
+                )
+
     def _warn_deprecated_blocks(self) -> None:
         """Warn about each deprecated top-level block present in the context.
 
@@ -536,6 +850,9 @@ class ConfigLoader:
         every check below, so a cdk.json without it synthesized whatever the
         other blocks said.
         """
+        # Block shapes first, so no getter below reads a scalar as a block
+        self._validate_block_shapes()
+
         # Validate required fields exist
         required_fields = [
             "kubernetes_version",
@@ -665,7 +982,8 @@ class ConfigLoader:
                 region = deployment_regions[field]
                 if not isinstance(region, str) or region not in self.VALID_REGIONS:
                     raise ValueError(
-                        f"Invalid {field} region {region!r}; expected an AWS region with a "
+                        f"deployment_regions.{field} is not a valid region: {region!r}; "
+                        "expected an AWS region with a "
                         "CloudFormation endpoint known to the installed SDK"
                     )
             regional = validated_regional_deployment_regions(
@@ -690,12 +1008,14 @@ class ConfigLoader:
         required_thresholds = ["cpu_threshold", "memory_threshold", "gpu_threshold"]
         for threshold in required_thresholds:
             if threshold not in thresholds_config:
-                raise ConfigValidationError(f"Missing threshold configuration: {threshold}")
+                raise ConfigValidationError(f"resource_thresholds.{threshold} is required")
 
             value = thresholds_config[threshold]
-            if not isinstance(value, int) or (value != -1 and not 0 <= value <= 100):
+            # type() rather than isinstance(): a boolean is not a threshold.
+            if type(value) is not int or (value != -1 and not 0 <= value <= 100):
                 raise ConfigValidationError(
-                    f"{threshold} must be an integer between 0 and 100 (or -1 to disable), got {value}"
+                    f"resource_thresholds.{threshold} must be an integer between 0 and 100 "
+                    f"(or -1 to disable), got {value!r}"
                 )
 
         # Validate optional thresholds if present
@@ -707,9 +1027,10 @@ class ConfigLoader:
         ]:
             if opt_threshold in thresholds_config:
                 value = thresholds_config[opt_threshold]
-                if not isinstance(value, int) or (value != -1 and value < 0):
+                if type(value) is not int or (value != -1 and value < 0):
                     raise ConfigValidationError(
-                        f"{opt_threshold} must be a non-negative integer (or -1 to disable), got {value}"
+                        f"resource_thresholds.{opt_threshold} must be a non-negative integer "
+                        f"(or -1 to disable), got {value!r}"
                     )
 
     #: Health-check probe intervals Global Accelerator accepts. The API
@@ -773,13 +1094,16 @@ class ConfigLoader:
 
         path = ga_config["health_check_path"]
         if not isinstance(path, str) or not path.startswith("/"):
-            raise ConfigValidationError("health_check_path must start with '/'")
+            raise ConfigValidationError(
+                f"global_accelerator.health_check_path must start with '/', got {path!r}"
+            )
 
         allowed_affinity = {"NONE", "SOURCE_IP"}
         affinity = ga_config["client_affinity"]
         if not isinstance(affinity, str) or affinity.upper() not in allowed_affinity:
             raise ConfigValidationError(
-                f"client_affinity must be one of {sorted(allowed_affinity)}, got {affinity!r}"
+                f"global_accelerator.client_affinity must be one of {sorted(allowed_affinity)}, "
+                f"got {affinity!r}"
             )
 
         self._validate_traffic_dial_config(ga_config["traffic_dial"])
@@ -798,12 +1122,6 @@ class ConfigLoader:
         - ``full_health_percentage``: 1-100; the healthy fraction (percent)
           at or above which a region is restored toward 100.
         """
-        if not isinstance(dial_config, dict):
-            raise ConfigValidationError(
-                "global_accelerator.traffic_dial must be a mapping, got "
-                f"{type(dial_config).__name__}: {dial_config!r}"
-            )
-
         enabled = dial_config["enabled"]
         if not isinstance(enabled, bool):
             raise ConfigValidationError(
@@ -934,11 +1252,14 @@ class ConfigLoader:
         ]
         for field in required_fields:
             if field not in mp_config:
-                raise ConfigValidationError(f"Missing manifest_processor configuration: {field}")
+                raise ConfigValidationError(f"manifest_processor.{field} is required")
 
-        # Validate replicas
-        if not isinstance(mp_config["replicas"], int) or mp_config["replicas"] <= 0:
-            raise ConfigValidationError("manifest_processor replicas must be a positive integer")
+        # Validate replicas (type(), not isinstance(): a boolean is not a count)
+        if type(mp_config["replicas"]) is not int or mp_config["replicas"] <= 0:
+            raise ConfigValidationError(
+                "manifest_processor.replicas must be a positive integer, got "
+                f"{mp_config['replicas']!r}"
+            )
 
         try:
             validated_request_body_limit(
@@ -959,13 +1280,9 @@ class ConfigLoader:
                 "job_validation_policy configuration is required (shared between "
                 "manifest_processor and queue_processor)"
             )
-        if not isinstance(policy, dict):
-            raise ConfigValidationError("job_validation_policy must be an object")
         for policy_field in ("allowed_namespaces", "resource_quotas"):
             if policy_field not in policy:
-                raise ConfigValidationError(
-                    f"Missing job_validation_policy configuration: {policy_field}"
-                )
+                raise ConfigValidationError(f"job_validation_policy.{policy_field} is required")
 
         try:
             validate_manifest_security_policy(policy.get("manifest_security_policy", {}))
@@ -986,7 +1303,7 @@ class ConfigLoader:
         resource_limits = mp_config["resource_limits"]
         if "cpu" not in resource_limits or "memory" not in resource_limits:
             raise ConfigValidationError(
-                "manifest_processor resource_limits must contain 'cpu' and 'memory'"
+                "manifest_processor.resource_limits must contain 'cpu' and 'memory'"
             )
         for resource, request in _MANIFEST_PROCESSOR_CONTAINER_REQUESTS.items():
             quantity = resource_limits[resource]
@@ -1014,16 +1331,9 @@ class ConfigLoader:
             autoscaling = {}
         if not isinstance(autoscaling, dict):
             raise ConfigValidationError("manifest_processor.autoscaling must be an object")
-        unknown_autoscaling = sorted(
-            str(key) for key in autoscaling if key not in _MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS
+        _check_block_keys(
+            "manifest_processor.autoscaling", autoscaling, _MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS
         )
-        if unknown_autoscaling:
-            raise ConfigValidationError(
-                "manifest_processor.autoscaling contains unknown key(s): "
-                + ", ".join(unknown_autoscaling)
-                + "; allowed keys: "
-                + ", ".join(sorted(_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS))
-            )
         merged_autoscaling = {**_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS, **autoscaling}
         if type(merged_autoscaling["enabled"]) is not bool:
             raise ConfigValidationError("manifest_processor.autoscaling.enabled must be a boolean")
@@ -1063,25 +1373,28 @@ class ConfigLoader:
         ]
         for field in required_fields:
             if field not in api_gw_config:
-                raise ConfigValidationError(f"Missing api_gateway configuration: {field}")
+                raise ConfigValidationError(f"api_gateway.{field} is required")
 
-        # Validate throttle limits
+        # Validate throttle limits (type(), not isinstance(): a boolean is
+        # not a request rate)
         throttle_rate = api_gw_config["throttle_rate_limit"]
         throttle_burst = api_gw_config["throttle_burst_limit"]
 
-        if not isinstance(throttle_rate, int) or throttle_rate <= 0:
+        if type(throttle_rate) is not int or throttle_rate <= 0:
             raise ConfigValidationError(
-                f"throttle_rate_limit must be a positive integer, got {throttle_rate}"
+                f"api_gateway.throttle_rate_limit must be a positive integer, got {throttle_rate!r}"
             )
 
-        if not isinstance(throttle_burst, int) or throttle_burst <= 0:
+        if type(throttle_burst) is not int or throttle_burst <= 0:
             raise ConfigValidationError(
-                f"throttle_burst_limit must be a positive integer, got {throttle_burst}"
+                "api_gateway.throttle_burst_limit must be a positive integer, got "
+                f"{throttle_burst!r}"
             )
 
         if throttle_burst < throttle_rate:
             raise ConfigValidationError(
-                "throttle_burst_limit should be greater than or equal to throttle_rate_limit"
+                "api_gateway.throttle_burst_limit must be greater than or equal to "
+                "api_gateway.throttle_rate_limit"
             )
 
         # Validate log level
@@ -1089,20 +1402,13 @@ class ConfigLoader:
         log_level = api_gw_config["log_level"]
         if log_level not in valid_log_levels:
             raise ConfigValidationError(
-                f"log_level must be one of {valid_log_levels}, got {log_level}"
+                f"api_gateway.log_level must be one of {valid_log_levels}, got {log_level!r}"
             )
 
         # Validate boolean flags
-        if not isinstance(api_gw_config["metrics_enabled"], bool):
-            raise ConfigValidationError("metrics_enabled must be a boolean")
-
-        if not isinstance(api_gw_config["tracing_enabled"], bool):
-            raise ConfigValidationError("tracing_enabled must be a boolean")
-
-        if "regional_api_enabled" in api_gw_config and not isinstance(
-            api_gw_config["regional_api_enabled"], bool
-        ):
-            raise ConfigValidationError("regional_api_enabled must be a boolean")
+        for flag in ("metrics_enabled", "tracing_enabled", "regional_api_enabled"):
+            if flag in api_gw_config and not isinstance(api_gw_config[flag], bool):
+                raise ConfigValidationError(f"api_gateway.{flag} must be a boolean")
 
     def _validate_eks_cluster_config(self) -> None:
         """Validate EKS cluster configuration"""
@@ -1113,7 +1419,7 @@ class ConfigLoader:
             valid_access_modes = ["PRIVATE", "PUBLIC_AND_PRIVATE"]
             if eks_config["endpoint_access"] not in valid_access_modes:
                 raise ConfigValidationError(
-                    f"endpoint_access must be one of {valid_access_modes}, "
+                    f"eks_cluster.endpoint_access must be one of {valid_access_modes}, "
                     f"got {eks_config['endpoint_access']}"
                 )
         # The NetworkPolicy enforcement switch renders straight into a
@@ -1144,14 +1450,7 @@ class ConfigLoader:
             return
         if not isinstance(raw, dict):
             raise ConfigValidationError("vpc_endpoints must be an object")
-        unknown = sorted(str(key) for key in raw if key not in _VPC_ENDPOINTS_DEFAULTS)
-        if unknown:
-            raise ConfigValidationError(
-                "vpc_endpoints contains unknown key(s): "
-                + ", ".join(unknown)
-                + "; allowed keys: "
-                + ", ".join(sorted(_VPC_ENDPOINTS_DEFAULTS))
-            )
+        _check_block_keys("vpc_endpoints", raw, _VPC_ENDPOINTS_DEFAULTS)
         for key, allowed in (
             ("gateway", VPC_GATEWAY_ENDPOINT_SERVICES),
             ("interface", VPC_INTERFACE_ENDPOINT_SERVICES),
@@ -2133,19 +2432,17 @@ class ConfigLoader:
                 "full_health_percentage": 95,
             },
         }
-        configured = self.app.node.try_get_context("global_accelerator") or {}
-        if not isinstance(configured, dict):
-            raise ConfigValidationError("global_accelerator must be a mapping")
+        configured = _object_or_empty(
+            "global_accelerator", self.app.node.try_get_context("global_accelerator")
+        )
         merged: dict[str, Any] = {**default_config, **configured}
 
         # Deep-merge the nested sub-block so a partial override does not drop
-        # the other defaults in the same sub-block. A non-mapping override is
-        # deliberately left in place for the validator to reject with a
-        # precise message.
-        override = configured.get("traffic_dial")
-        if isinstance(override, dict):
-            default_sub = cast(dict[str, Any], default_config["traffic_dial"])
-            merged["traffic_dial"] = {**default_sub, **override}
+        # the other defaults in the same sub-block.
+        merged["traffic_dial"] = {
+            **cast(dict[str, Any], default_config["traffic_dial"]),
+            **_object_or_empty("global_accelerator.traffic_dial", configured.get("traffic_dial")),
+        }
 
         return merged
 

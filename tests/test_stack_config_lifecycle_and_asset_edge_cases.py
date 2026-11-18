@@ -190,7 +190,7 @@ def test_capacity_history_checks_every_enabled_region(config_loader: Any) -> Non
 @pytest.mark.parametrize(
     ("key", "getter", "message"),
     [
-        ("global_accelerator", "get_global_accelerator_config", "must be a mapping"),
+        ("global_accelerator", "get_global_accelerator_config", "must be an object"),
         ("backend_tls", "get_backend_tls_config", "must be a mapping"),
     ],
 )

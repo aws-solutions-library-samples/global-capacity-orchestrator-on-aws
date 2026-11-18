@@ -486,9 +486,15 @@ def _loader(valid_cdk_context: dict[str, Any], helm: object = None) -> ConfigLoa
 class TestConfigLoaderWiring:
     def test_absent_block_reads_as_off(self, valid_cdk_context: dict[str, Any]) -> None:
         assert _loader(valid_cdk_context).get_argocd_config() == ac.ARGOCD_DEFAULTS
-        # A helm block without argocd (or a non-object helm) is the same.
+        # A helm block without argocd is the same.
         assert _loader(valid_cdk_context, {"volcano": {}}).get_argocd_config()["enabled"] is False
-        assert _loader(valid_cdk_context, []).get_argocd_config()["enabled"] is False
+
+    def test_non_object_helm_block_is_rejected(self, valid_cdk_context: dict[str, Any]) -> None:
+        """A list where the helm block belongs used to read as absent."""
+        from gco.config.config_loader import ConfigValidationError
+
+        with pytest.raises(ConfigValidationError, match=r"helm must be an object, got list"):
+            _loader(valid_cdk_context, [])
 
     def test_valid_block_is_returned_with_defaults(self, valid_cdk_context: dict[str, Any]) -> None:
         loader = _loader(valid_cdk_context, {"argocd": {"enabled": True}})
