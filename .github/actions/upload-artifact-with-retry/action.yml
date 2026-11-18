@@ -1,6 +1,7 @@
 name: "Upload Artifact (with retry)"
 description: |
-  Wraps `actions/upload-artifact@v7.0.1` with retry-on-failure. The GitHub Actions
+  Wraps `actions/upload-artifact` (the release pinned below) with
+  retry-on-failure. The GitHub Actions
   artifact backend occasionally returns 5xx or 403s during the finalize step,
   even after the bytes are fully uploaded. Those errors are transient — a
   retry typically succeeds within seconds — but the default `upload-artifact`
@@ -8,7 +9,7 @@ description: |
   upload step up to 3 times with a 30-second backoff so a flaky finalize
   doesn't fail an otherwise-green CI run.
 
-  Behaviour matches `actions/upload-artifact@v7.0.1` for every successful path;
+  Behaviour matches the pinned `actions/upload-artifact` for every successful path;
   the only observable difference is on transient failures.
 
 inputs:

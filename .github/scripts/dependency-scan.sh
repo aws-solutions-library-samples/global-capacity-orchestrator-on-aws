@@ -2461,8 +2461,10 @@ if [ -n "$NPM_MANAGEMENT_PROBLEMS" ]; then
 fi
 
 # Every tool pinned in more than one workflow (or more than one job) must
-# agree. CALICO_* and METRICS_SERVER_* are here because the kind jobs install
-# them per job — two jobs on different Calico builds would enforce
+# agree. CALICO_* and METRICS_SERVER_* are here because a job-level copy
+# would shadow the one declaration the kind jobs share (kind and Calico live
+# in integration-tests.yml's workflow-level env) — two jobs on different
+# Calico builds would enforce
 # NetworkPolicy with two different engines, and a version/checksum pair that
 # disagrees fails the download as what looks like a flake. The PR-time half of
 # this contract lives in

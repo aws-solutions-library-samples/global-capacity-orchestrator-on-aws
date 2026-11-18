@@ -2914,3 +2914,62 @@ def test_pre_commit_comments_name_real_ci_jobs() -> None:
     mentioned = set(re.findall(r"\b(lint:[a-z0-9:-]+) job\b", _read(".pre-commit-config.yaml")))
     assert mentioned, "the mypy hook's comment names the CI job that checks gco/stacks/"
     assert mentioned <= names, sorted(mentioned - names)
+
+
+def test_queue_processor_docs_name_the_floci_emulator_not_moto() -> None:
+    """integration:docker:queue-processor consumes from the Floci service
+    container; four job descriptions still said it ran against moto's SQS
+    server (finding C15)."""
+    workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
+    services = workflow["jobs"]["integration-docker-queue-processor"]["services"]
+    assert services["floci"]["image"].startswith("floci/floci:")
+    for relative in (
+        ".github/CI.md",
+        ".github/workflows/README.md",
+        ".github/scripts/README.md",
+        ".github/workflows/integration-tests.yml",
+    ):
+        assert not re.search(r"moto[- ]SQS", _read(relative), re.IGNORECASE), relative
+
+
+def test_composite_action_descriptions_never_name_a_stale_pin() -> None:
+    """A composite action's description named an older release of the action
+    it wraps than the one its steps pin (finding C15: build-push-action
+    v7.3.0 against v7.4.0, setup-buildx-action v4.2.0 against v4.4.1,
+    upload-artifact v7.0.1 against v7.0.2). A description may name the action
+    without a version; a version it names must be the pinned one."""
+    pinned_use = re.compile(r"uses:\s*([\w.-]+/[\w.-]+)@[0-9a-f]{40}\s+#\s*(v\d+(?:\.\d+)*)")
+    checked = 0
+    for action in sorted((ROOT / ".github/actions").glob("*/action.yml")):
+        text = action.read_text(encoding="utf-8")
+        description = yaml.safe_load(text)["description"]
+        for repository, version in set(pinned_use.findall(text)):
+            named = re.findall(rf"{re.escape(repository)}@(v\d+(?:\.\d+)*)", description)
+            assert set(named) <= {version}, (
+                f"{action.parent.name}: {repository} {named} != {version}"
+            )
+            checked += 1
+    assert checked >= 3
+
+
+def test_ci_md_names_every_permission_beyond_contents_read() -> None:
+    """The permissions bullet in .github/CI.md listed some grants and not
+    others (finding C15: cve-scan's issues: write, pr-type-label's
+    pull-requests: write and CodeQL's security-events: write were missing).
+    Every grant beyond contents: read must be named with its workflow."""
+    bullet = next(
+        line for line in _read(".github/CI.md").splitlines() if line.startswith("- `permissions:`")
+    )
+    missing = []
+    for workflow_path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        grants = [workflow.get("permissions") or {}]
+        grants += [job.get("permissions") or {} for job in (workflow.get("jobs") or {}).values()]
+        for grant in grants:
+            for scope, level in grant.items():
+                if (scope, level) == ("contents", "read") or level == "none":
+                    continue
+                if f"`{workflow_path.name}`" not in bullet or f"`{scope}: {level}`" not in bullet:
+                    missing.append(f"{workflow_path.name}: {scope}: {level}")
+    assert not missing, missing
+
