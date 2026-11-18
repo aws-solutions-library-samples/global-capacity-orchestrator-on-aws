@@ -2117,7 +2117,7 @@ searches answer a "still building" hint until it is ACTIVE.
 | `enabled` | `false` | Provision the table, index, ingest pipeline, and regional wiring |
 | `dimensions` | `1024` | Embedding width. **One-way door**: immutable after index creation and must match the embedding model's output width |
 | `distance_function` | `COSINE` | Similarity metric (`COSINE` or `EUCLIDEAN`); immutable after index creation |
-| `embedding_model_id` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for ingest and queries. Deliberately independent of mission memory's `bedrock.embedding_model_id` |
+| `embedding_model_id` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for ingest and queries, as a foundation-model id (`provider.model[:version]`; the stacks grant `bedrock:InvokeModel` on `foundation-model/<id>`). Deliberately independent of mission memory's `bedrock.embedding_model_id` |
 | `replica_regions` | `[]` | Regions to replicate into. Empty means "follow `deployment_regions.regional`", minus the global region (the primary) |
 | `corpus_prefix` | `vector-corpus/` | S3 key prefix on the cluster-shared bucket watched by the ingest Lambda |
 

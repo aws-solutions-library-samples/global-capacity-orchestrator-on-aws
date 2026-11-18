@@ -2303,6 +2303,12 @@ class ConfigLoader:
                     f"{distance!r}. This is immutable after index creation."
                 )
 
+    #: A Bedrock foundation-model id (``provider.model[:version]``), the shape
+    #: the ``foundation-model/<id>`` resource ARN and InvokeModel's modelId take.
+    BEDROCK_FOUNDATION_MODEL_ID_PATTERN = re.compile(
+        r"[a-z0-9-]{1,63}\.[a-z0-9-]{1,63}(?:[.:][a-z0-9-]{1,63})*"
+    )
+
     def _validate_vector_store_config(self) -> None:
         """Validate the optional ``vector_store`` block in cdk.json.
 
@@ -2362,9 +2368,14 @@ class ConfigLoader:
                 )
         if "embedding_model_id" in vector_store_ctx:
             model_id = vector_store_ctx["embedding_model_id"]
-            if not isinstance(model_id, str) or not model_id.strip():
+            if not isinstance(
+                model_id, str
+            ) or not self.BEDROCK_FOUNDATION_MODEL_ID_PATTERN.fullmatch(model_id.strip()):
                 raise ConfigValidationError(
-                    f"vector_store.embedding_model_id must be a non-empty string, got {model_id!r}"
+                    "vector_store.embedding_model_id must be a Bedrock foundation-model id such "
+                    f"as 'amazon.titan-embed-text-v2:0', got {model_id!r}; the stacks grant "
+                    "bedrock:InvokeModel on foundation-model/<id> and the ingest Lambda "
+                    "invokes it by that id"
                 )
         if "replica_regions" in vector_store_ctx:
             replica_regions = vector_store_ctx["replica_regions"]
@@ -3656,6 +3667,10 @@ class ConfigLoader:
         vector_store_ctx = self.app.node.try_get_context("vector_store")
         vector_store_config = vector_store_ctx if isinstance(vector_store_ctx, dict) else {}
         merged = {**default_config, **vector_store_config}
+        # The validator checks the stripped id, so every consumer (IAM
+        # resources, the ingest Lambda's environment, the job config) gets
+        # the same stripped value, as gco.bedrock does for its own ids.
+        merged["embedding_model_id"] = str(merged["embedding_model_id"]).strip()
         if self._feature_override_enabled("vector_store"):
             merged["enabled"] = True
         return merged
