@@ -59,16 +59,6 @@ _PARTIAL_STATE_DISCLAIMER = (
 )
 
 
-def _argv_has_traversal(argv: Sequence[str]) -> tuple[int, str] | None:
-    """Return the first non-flag argv element containing a ``..`` segment."""
-    for index, value in enumerate(argv):
-        if value.startswith("-"):
-            continue
-        if ".." in value.split("/") or ".." in value.split("\\"):
-            return index, value[:100]
-    return None
-
-
 def _bounded_text(value: str, max_bytes: int) -> str:
     """Return UTF-8 text within ``max_bytes`` with an explicit marker."""
     encoded = value.encode("utf-8", errors="replace")
@@ -195,12 +185,12 @@ async def _run_long_task(
     drains are coordinated concurrently, so a drain error is surfaced promptly
     instead of allowing an unread pipe to deadlock the child. Every exception
     after spawn terminates/reaps the process and stamps terminal disk status.
+    Callers check their own path arguments before calling this (see
+    ``cli_runner.reject_paths_outside_project_root`` and
+    ``cli_runner.reject_traversal_segments``); argv is otherwise passed
+    through unchanged.
     """
     logical_argv = list(argv)
-    hit = _argv_has_traversal(logical_argv)
-    if hit is not None:
-        index, value = hit
-        return json.dumps({"error": "path_traversal_detected", "argv_index": index, "value": value})
 
     protocol_task_id = _try_get_task_id(ctx)
     if len(logical_argv) >= 3 and logical_argv[0] == "gco":

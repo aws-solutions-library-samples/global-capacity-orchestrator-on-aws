@@ -522,7 +522,8 @@ def invoke_inference(
         name: Endpoint name (e.g. my-llm).
         prompt: Text prompt to send to the model.
         max_tokens: Maximum tokens to generate (default: 100).
-        api_path: Override the API sub-path (default: auto-detect from framework).
+        api_path: Override the API sub-path (default: auto-detect from
+            framework). A ``..`` segment is refused.
         region: Target region for the request (default: nearest via Global Accelerator).
 
     This MCP tool intentionally returns one buffered string because the MCP
@@ -530,6 +531,9 @@ def invoke_inference(
     supports response streaming; use ``gco inference invoke --stream`` when
     token-by-token output is required.
     """
+    rejected = cli_runner.reject_traversal_segments(api_path=api_path)
+    if rejected is not None:
+        return rejected
     args = ["inference", "invoke", name, "-p", prompt, "--max-tokens", str(max_tokens)]
     if api_path:
         args += ["--path", api_path]

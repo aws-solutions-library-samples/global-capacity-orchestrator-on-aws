@@ -419,9 +419,27 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 Every tool follows the same pattern:
 
 1. Decorated with `@mcp.tool()` (registers with FastMCP) and `@audit_logged` (structured audit logging)
-2. Builds a CLI argument list from the tool's parameters
+2. Checks its path arguments (see below) and builds a CLI argument list from the tool's parameters
 3. Calls `cli_runner._run_cli(*args)` which shells out to `gco --output json ...`
 4. Returns the JSON string result to the LLM
+
+The runners pass every argument to the CLI unchanged, so each tool checks the
+arguments that are paths before it calls them:
+
+- A local file or directory the CLI opens (`manifest_path`, `script_path`,
+  `context`, `outputs_file`) goes through
+  `cli_runner.reject_paths_outside_project_root(...)`. The path is resolved
+  against the project root the CLI runs from, symlinks included, and must stay
+  inside it (`code: path_outside_project_root`).
+- A name or ID the CLI puts into an API request path (job, pod and namespace
+  names, template names, webhook and queue job IDs, `invoke_inference`'s
+  `api_path`) goes through `cli_runner.reject_traversal_segments(...)`, which
+  refuses a `..` segment (`code: path_traversal_segment`). The HTTP client
+  removes dot segments before sending, so such a value would reach another
+  API route.
+
+Prompts, chat messages, JSON bodies, descriptions, and other free text are not
+checked.
 
 Most tools follow this `_run_cli` shell-out pattern. A few domains — notably the
 image-registry and image-mirror tools in `images.py` — instead wrap their CLI
@@ -435,6 +453,7 @@ JSON string. The image-mirror tools (`images_mirror_plan`, `images_mirror_status
 
 1. Add the function to the appropriate domain file (or create a new one)
 2. Decorate with `@mcp.tool()` and `@audit_logged`
-3. Call `cli_runner._run_cli(...)` with the correct CLI arguments
-4. Register the module in `tools/__init__.py` if it's a new file
-5. Add tests in `tests/test_mcp_server.py` and `tests/test_mcp_integration.py`
+3. Check local path and request-path arguments as described in [How Tools Work](#how-tools-work)
+4. Call `cli_runner._run_cli(...)` with the correct CLI arguments
+5. Register the module in `tools/__init__.py` if it's a new file
+6. Add tests in `tests/test_mcp_server.py` and `tests/test_mcp_integration.py`

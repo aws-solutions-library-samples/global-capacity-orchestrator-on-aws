@@ -613,6 +613,8 @@ These tools previously accepted broader access and are now gated or additionally
 - `populate_kv_cache` used to register by default and upload any host path. It now registers only with `GCO_ENABLE_MODEL_UPLOAD=true` and requires a source beneath `GCO_STORAGE_LOCAL_ROOT`, like `upload_to_regional_bucket`, which writes the same regional bucket.
 - The short-upload tools fail closed unless they can create a private descriptor-backed, same-filesystem snapshot. Descendant symlinks, special files, and pre-existing hard links are rejected rather than followed.
 - `delete_job` and `delete_inference` remain gated behind `GCO_ENABLE_DESTRUCTIVE_OPERATIONS`.
+- Local path arguments must resolve inside the project root the server runs `gco` from (`GCO_PROJECT_ROOT`, else the checkout, else the server's working directory). This covers `manifest_path` (`submit_job_sqs`, `submit_job_api`, `check_job_policy`, `queue_submit`, `templates_create`, `dag_validate`, `dag_run`), `slurm_submit`'s `script_path`, `images_build`'s `context`, and the `deploy_*` tools' `outputs_file`. An absolute path anywhere on the host used to be accepted; it now returns `code: path_outside_project_root`. Move the files under the project, or point `GCO_PROJECT_ROOT` (or the client's `cwd`) at a directory that contains them. When the server runs from `/` with no checkout, every absolute path is inside that root, so set `GCO_PROJECT_ROOT` to get confinement.
+- Prompts, chat messages, and other free text containing `..` are no longer refused. A name or ID that the CLI puts into an API request path (jobs, pods, namespaces, templates, webhooks, queue jobs, and `invoke_inference`'s `api_path`) is still refused when it has a `..` segment (`code: path_traversal_segment`).
 
 If your client relied on uploads, set the model-upload gate and an absolute confinement root. If it relied on deletes, set the destructive-operations gate. A client that needs both can use:
 
@@ -1362,6 +1364,8 @@ Most operational tools shell out to the `gco` CLI, while discovery, introspectio
 ```text
 LLM ←→ MCP Protocol (stdio) ←→ run_mcp.py ←→ gco CLI ←→ AWS APIs
 ```
+
+Arguments reach the CLI as separate argv elements (no shell). Before the call, each tool checks the arguments that are paths: a local file or directory must resolve, symlinks included, inside the project root, and a name or ID that the CLI puts into an API request path must not contain a `..` segment. Free text such as prompts and chat messages is passed through unchanged. See [How Tools Work](tools/README.md#how-tools-work).
 
 ## Examples
 

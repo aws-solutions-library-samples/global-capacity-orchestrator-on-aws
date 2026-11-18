@@ -94,7 +94,14 @@ def _isolated_tool_module(
     stage_upload_path = Mock()
     load_cdk_json = Mock(return_value={"regional": []})
 
-    cli_runner = _stub_module("cli_runner", _run_cli=run_cli)
+    # The path checks are pinned in test_mcp_path_arguments.py; here they
+    # accept every value so the argv matrices stay about argv shape.
+    cli_runner = _stub_module(
+        "cli_runner",
+        _run_cli=run_cli,
+        reject_paths_outside_project_root=Mock(return_value=None),
+        reject_traversal_segments=Mock(return_value=None),
+    )
     audit = _stub_module("audit", audit_logged=lambda function: function)
     server = _stub_module("server", mcp=_McpStub())
     feature_flags = _stub_module(

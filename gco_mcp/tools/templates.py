@@ -30,6 +30,9 @@ async def templates_get(name: str, region: str | None = None) -> str:
         name: Template name.
         region: Region to query (any region works).
     """
+    rejected = cli_runner.reject_traversal_segments(name=name)
+    if rejected is not None:
+        return rejected
     args = ["templates", "get", name]
     if region:
         args += ["-r", region]
@@ -53,10 +56,14 @@ async def templates_create(
 
     Args:
         name: Template name.
-        manifest_path: Path to the source manifest YAML.
+        manifest_path: Path to the source manifest YAML, relative to the
+            project root (an absolute path must also be inside it).
         region: Region to use (any region works).
         description: Optional human-readable description.
     """
+    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    if rejected is not None:
+        return rejected
     # The CLI takes the manifest as its only positional argument and the
     # template name as --name.
     args = ["templates", "create", manifest_path, "--name", name]
@@ -85,6 +92,9 @@ async def templates_run(
         namespace: Override the Kubernetes namespace (default: gco-jobs).
         params: Parameter overrides as ``key=value`` strings (one ``-p`` each).
     """
+    rejected = cli_runner.reject_traversal_segments(template_name=template_name)
+    if rejected is not None:
+        return rejected
     args = ["templates", "run", template_name, "--name", job_name, "-r", region]
     if namespace:
         args += ["--namespace", namespace]
@@ -129,6 +139,9 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
             name: Template name.
             region: Region to use (any region works).
         """
+        rejected = cli_runner.reject_traversal_segments(name=name)
+        if rejected is not None:
+            return rejected
         await _ctx_warning(f"Deleting template {name!r} — this cannot be undone.")
         args = ["templates", "delete", name, "-y"]
         if region:

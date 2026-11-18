@@ -408,11 +408,15 @@ if is_enabled(FLAG_INFRASTRUCTURE_DEPLOY):
         Args:
             stack_name: Stack to deploy (e.g. ``gco-us-east-1``).
             yes: Skip approval prompts (passes ``-y``). Defaults to True.
-            outputs_file: Optional path to write stack outputs JSON.
+            outputs_file: Optional path to write stack outputs JSON, relative
+                to the project root (an absolute path must also be inside it).
             tags: Optional list of ``key=value`` tag strings applied to the stack.
             skip_pcs_preflight: Deploy without the AWS PCS preflight.
             skip_hyperpod_preflight: Deploy without the SageMaker HyperPod preflight.
         """
+        rejected = cli_runner.reject_paths_outside_project_root(outputs_file=outputs_file)
+        if rejected is not None:
+            return rejected
         argv = [
             "gco",
             "stacks",
@@ -470,13 +474,17 @@ if is_enabled(FLAG_INFRASTRUCTURE_DEPLOY):
 
         Args:
             yes: Skip approval prompts (passes ``-y``). Defaults to True.
-            outputs_file: Optional path to write stack outputs JSON.
+            outputs_file: Optional path to write stack outputs JSON, relative
+                to the project root (an absolute path must also be inside it).
             tags: Optional list of ``key=value`` tag strings applied to every stack.
             parallel: Deploy regional stacks concurrently when True.
             max_workers: Cap on parallel deployments when ``parallel=True``.
             skip_pcs_preflight: Deploy without the AWS PCS preflight.
             skip_hyperpod_preflight: Deploy without the SageMaker HyperPod preflight.
         """
+        rejected = cli_runner.reject_paths_outside_project_root(outputs_file=outputs_file)
+        if rejected is not None:
+            return rejected
         argv = [
             "gco",
             "stacks",

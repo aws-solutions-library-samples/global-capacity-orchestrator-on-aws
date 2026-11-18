@@ -63,13 +63,17 @@ def submit_job_sqs(
     """Submit a job via SQS queue (recommended for production).
 
     Args:
-        manifest_path: Path to the YAML manifest file (relative to project root).
+        manifest_path: Path to the YAML manifest file, relative to the
+            project root (an absolute path must also be inside it).
         region: Target AWS region for the SQS queue.
         namespace: Override the namespace in the manifest.
         priority: Job priority (0-100, higher = more important).
         sandbox: "isolated" runs every pod in an AWS Nitro Sandbox (EKS 1.36+,
             CPU only; see docs/NITRO_SANDBOXES.md).
     """
+    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    if rejected is not None:
+        return rejected
     args = ["jobs", "submit-sqs", manifest_path, "-r", region]
     if namespace:
         args += ["-n", namespace]
@@ -90,11 +94,15 @@ def submit_job_api(
     """Submit a job via the authenticated API Gateway (SigV4).
 
     Args:
-        manifest_path: Path to the YAML manifest file.
+        manifest_path: Path to the YAML manifest file, relative to the
+            project root (an absolute path must also be inside it).
         namespace: Override the namespace in the manifest.
         sandbox: "isolated" runs every pod in an AWS Nitro Sandbox (EKS 1.36+,
             CPU only; see docs/NITRO_SANDBOXES.md).
     """
+    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    if rejected is not None:
+        return rejected
     args = ["jobs", "submit", manifest_path]
     if namespace:
         args += ["-n", namespace]
@@ -131,6 +139,9 @@ def get_job(job_name: str, region: str, namespace: str = "gco-jobs") -> str:
         region: AWS region where the job is running.
         namespace: Kubernetes namespace.
     """
+    rejected = cli_runner.reject_traversal_segments(job_name=job_name, namespace=namespace)
+    if rejected is not None:
+        return rejected
     return cli_runner._run_cli("jobs", "get", job_name, "-r", region, "-n", namespace)
 
 
@@ -145,6 +156,9 @@ def get_job_logs(job_name: str, region: str, namespace: str = "gco-jobs", tail: 
         namespace: Kubernetes namespace.
         tail: Number of log lines to return.
     """
+    rejected = cli_runner.reject_traversal_segments(job_name=job_name, namespace=namespace)
+    if rejected is not None:
+        return rejected
     return cli_runner._run_cli(
         "jobs", "logs", job_name, "-r", region, "-n", namespace, "--tail", str(tail)
     )
@@ -165,6 +179,9 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
             region: AWS region.
             namespace: Kubernetes namespace.
         """
+        rejected = cli_runner.reject_traversal_segments(job_name=job_name, namespace=namespace)
+        if rejected is not None:
+            return rejected
         await _ctx_warning(
             f"Deleting job {job_name!r} in {region}/{namespace} — this cannot be undone."
         )
@@ -193,6 +210,9 @@ def get_job_events(job_name: str, region: str, namespace: str = "gco-jobs") -> s
         region: AWS region.
         namespace: Kubernetes namespace.
     """
+    rejected = cli_runner.reject_traversal_segments(job_name=job_name, namespace=namespace)
+    if rejected is not None:
+        return rejected
     return cli_runner._run_cli("jobs", "events", job_name, "-r", region, "-n", namespace)
 
 
@@ -223,6 +243,9 @@ def get_job_pods(job_name: str, region: str, namespace: str = "gco-jobs") -> str
         region: AWS region where the job is running.
         namespace: Kubernetes namespace.
     """
+    rejected = cli_runner.reject_traversal_segments(job_name=job_name, namespace=namespace)
+    if rejected is not None:
+        return rejected
     return cli_runner._run_cli("jobs", "pods", job_name, "-r", region, "-n", namespace)
 
 
@@ -246,6 +269,11 @@ def get_pod_logs(
         tail: Maximum number of log lines to return.
         container: Container name for a multi-container pod.
     """
+    rejected = cli_runner.reject_traversal_segments(
+        job_name=job_name, pod_name=pod_name, namespace=namespace
+    )
+    if rejected is not None:
+        return rejected
     args = [
         "jobs",
         "pod-logs",
@@ -275,6 +303,9 @@ def get_job_metrics(job_name: str, region: str, namespace: str = "gco-jobs") -> 
         region: AWS region where the job is running.
         namespace: Kubernetes namespace.
     """
+    rejected = cli_runner.reject_traversal_segments(job_name=job_name, namespace=namespace)
+    if rejected is not None:
+        return rejected
     return cli_runner._run_cli("jobs", "metrics", job_name, "-r", region, "-n", namespace)
 
 
@@ -288,6 +319,9 @@ def retry_job(job_name: str, region: str, namespace: str = "gco-jobs") -> str:
         region: AWS region where the job ran.
         namespace: Kubernetes namespace.
     """
+    rejected = cli_runner.reject_traversal_segments(job_name=job_name, namespace=namespace)
+    if rejected is not None:
+        return rejected
     return cli_runner._run_cli("jobs", "retry", job_name, "-r", region, "-n", namespace, "--yes")
 
 
@@ -360,7 +394,9 @@ def check_job_policy(
     of its policy, so a reject here is a strong signal, not a verdict.
 
     Args:
-        manifest_path: Path to a manifest file or a directory of them.
+        manifest_path: Path to a manifest file or a directory of them,
+            relative to the project root (an absolute path must also be
+            inside it).
         regions: Regions to check. Omit for every configured region.
         namespace: Namespace to assume for manifests that don't declare one.
         offline: Read cdk.json instead of calling AWS. Needs no credentials,
@@ -368,6 +404,9 @@ def check_job_policy(
             a deployed region trusts ECR registries cdk.json never mentions --
             so an image rejection may be a false positive.
     """
+    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    if rejected is not None:
+        return rejected
     args = ["jobs", "check-policy", manifest_path]
     for region in regions or []:
         args += ["-r", region]

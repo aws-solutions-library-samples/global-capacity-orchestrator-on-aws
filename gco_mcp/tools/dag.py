@@ -13,8 +13,12 @@ async def dag_validate(manifest_path: str) -> str:
     """`gco dag validate` — statically validate a DAG manifest.
 
     Args:
-        manifest_path: Path to the DAG manifest file.
+        manifest_path: Path to the DAG manifest file, relative to the project
+            root (an absolute path must also be inside it).
     """
+    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    if rejected is not None:
+        return rejected
     return await asyncio.to_thread(cli_runner._run_cli, "dag", "validate", manifest_path)
 
 
@@ -29,10 +33,14 @@ async def dag_run(manifest_path: str, region: str, dry_run: bool = False) -> str
     """`gco dag run` — execute a DAG manifest end-to-end.
 
     Args:
-        manifest_path: Path to the DAG manifest file.
+        manifest_path: Path to the DAG manifest file, relative to the project
+            root (an absolute path must also be inside it).
         region: Target region for the DAG run.
         dry_run: When True, validate and plan without submitting jobs.
     """
+    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    if rejected is not None:
+        return rejected
     args = ["dag", "run", manifest_path, "-r", region]
     if dry_run:
         args.append("--dry-run")

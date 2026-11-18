@@ -103,6 +103,71 @@ def _validated_cli_json_output(output: str) -> str:
     return output
 
 
+def reject_paths_outside_project_root(**paths: str | None) -> str | None:
+    """Return an error envelope if a local path argument escapes the project root.
+
+    Every ``gco`` subprocess runs from :data:`PROJECT_ROOT`, and the tools'
+    local path arguments (manifests, batch scripts, build contexts, CDK
+    outputs files) are meant to name files in that project. Each value is
+    resolved the way the CLI will open it: a relative path against the
+    project root, ``~`` not expanded, and symlinks followed. A value that
+    resolves outside the root, whether absolute, through ``..`` or through a
+    symlink, is rejected. ``None`` or empty values are skipped. Only path
+    parameters belong here: prompts, JSON payloads, and other free text are
+    passed to the CLI unchanged.
+
+    Returns ``None`` when every path is confined, otherwise a JSON error
+    envelope with ``code: path_outside_project_root`` naming the parameter.
+    """
+    root = Path(os.path.realpath(PROJECT_ROOT))
+    for name, value in paths.items():
+        if not value:
+            continue
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved: Path | None = Path(os.path.realpath(candidate))
+        except OSError, ValueError:
+            resolved = None  # e.g. an embedded NUL byte: not a usable path
+        if resolved is None or not resolved.is_relative_to(root):
+            return json.dumps(
+                {
+                    "error": f"{name} must be inside the project root {root}: {value}",
+                    "code": "path_outside_project_root",
+                    "parameter": name,
+                }
+            )
+    return None
+
+
+def reject_traversal_segments(**values: str | None) -> str | None:
+    """Return an error envelope if a value bound for an API request path has a ``..`` segment.
+
+    Several ``gco`` commands put a name or ID straight into the path of a GCO
+    API request (``/api/v1/jobs/{namespace}/{name}``, templates, webhooks,
+    queue and Slurm job IDs) and ``gco inference invoke --path`` appends its
+    value to the endpoint's path. The HTTP client removes ``..`` segments
+    before sending, and SigV4 signs the normalized path, so such a value would
+    reach a different API route than the one the tool names. Values with a
+    ``..`` segment (split on ``/`` or ``\\``) are rejected; ``None`` or empty
+    values are skipped.
+
+    Returns ``None`` when every value is clean, otherwise a JSON error
+    envelope with ``code: path_traversal_segment`` naming the parameter.
+    """
+    for name, value in values.items():
+        if value and ".." in value.replace("\\", "/").split("/"):
+            return json.dumps(
+                {
+                    "error": f"{name} must not contain a '..' path segment: {value}",
+                    "code": "path_traversal_segment",
+                    "parameter": name,
+                }
+            )
+    return None
+
+
 def _run_cli(
     *args: str,
     timeout_seconds: int = 120,
@@ -112,20 +177,18 @@ def _run_cli(
 
     All args are passed as separate list elements to subprocess (shell=False),
     so shell metacharacters in user-provided values are treated as literals
-    and cannot cause command injection. Path arguments are validated to prevent
-    traversal outside the project root. ``timeout_seconds`` may be increased by
-    wrappers for intentionally long-running transfers while preserving the
-    two-minute default for normal tools. ``pass_fds`` is reserved for verified
-    descriptor-backed local-data paths and is omitted from ``subprocess.run``
-    when empty for compatibility with platforms that do not support it.
-    """
-    # Validate any path-like arguments to prevent directory traversal.
-    for arg in args:
-        if arg.startswith("-"):
-            continue  # flag, not a path
-        if ".." in arg.split("/"):
-            return json.dumps({"error": f"Invalid argument: path traversal not allowed: {arg}"})
+    and cannot cause command injection. Tools check their own path arguments
+    before calling this: local paths with
+    :func:`reject_paths_outside_project_root`, and names or IDs the CLI puts
+    into an API request path with :func:`reject_traversal_segments`. Other
+    arguments, such as prompts and JSON bodies, are passed through unchanged.
 
+    ``timeout_seconds`` may be increased by wrappers for intentionally
+    long-running transfers while preserving the two-minute default for
+    normal tools. ``pass_fds`` is reserved for verified descriptor-backed
+    local-data paths and is omitted from ``subprocess.run`` when empty for
+    compatibility with platforms that do not support it.
+    """
     cmd = [_gco_executable(), "--output", "json", *args]
     try:
         if pass_fds:
@@ -186,13 +249,11 @@ async def _run_cli_async(
     timeout_seconds: int = 120,
     terminate_grace_seconds: float = 5,
 ) -> str:
-    """Run ``gco`` asynchronously and terminate it on timeout or cancellation."""
-    for arg in args:
-        if arg.startswith("-"):
-            continue
-        if ".." in arg.split("/"):
-            return json.dumps({"error": f"Invalid argument: path traversal not allowed: {arg}"})
+    """Run ``gco`` asynchronously and terminate it on timeout or cancellation.
 
+    Like :func:`_run_cli`, arguments are passed through unchanged; callers
+    check their own path arguments first.
+    """
     cmd = [_gco_executable(), "--output", "json", *args]
     try:
         process = await asyncio.create_subprocess_exec(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; args are validated and passed as literal argv elements

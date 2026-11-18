@@ -15,9 +15,10 @@ Covers four behaviours of the helper:
 * the stack-op cancellation disclaimer — when ``is_stack_op=True`` the
   re-raised ``CancelledError`` carries the literal CFN partial-state
   disclaimer so operators know AWS state may be inconsistent;
-* path-traversal rejection — any non-flag argv element containing a ``..``
-  segment short-circuits before ``asyncio.create_subprocess_exec`` is
-  called, returning a structured error JSON.
+* argv pass-through — the runner does not filter arguments: the tools check
+  their own path arguments (see ``cli_runner.reject_paths_outside_project_root``
+  and ``cli_runner.reject_traversal_segments``), so a ``..`` in free text
+  reaches the subprocess unchanged.
 """
 
 import asyncio
@@ -177,32 +178,24 @@ async def test_run_long_task_cancellation_includes_disclaimer() -> None:
     assert "stack_status" in msg, msg
 
 
-# Path-traversal rejection test
-async def test_run_long_task_rejects_path_traversal() -> None:
-    """A ``..`` segment in any non-flag argv element short-circuits before spawn.
+# Argv pass-through test
+async def test_run_long_task_passes_dot_segments_through() -> None:
+    """The runner spawns argv unchanged, ``..`` segments included.
 
-    Patches ``asyncio.create_subprocess_exec`` inside the ``_long_task``
-    module so we can confirm the runner never reaches the spawn call. The
-    structured error JSON also pinpoints which argv index tripped the
-    check.
+    Path arguments are checked by the tools before they call the runner, so
+    the runner itself no longer refuses an argv element such as a tag value
+    that happens to contain ``../``.
     """
     progress = _FakeProgress()
     ctx = _FakeCtx()
-    argv = [sys.executable, "../etc/passwd"]
+    script = "import sys; print(sys.argv[1])"
+    argv = [sys.executable, "-c", script, "note=see ../README"]
 
-    with patch(
-        "tools._long_task.asyncio.create_subprocess_exec",
-        new_callable=AsyncMock,
-    ) as mock_spawn:
-        result = await _run_long_task(argv, ctx=ctx, progress=progress, is_stack_op=False)
-        assert mock_spawn.call_count == 0, "subprocess must not be spawned for traversal argv"
+    result = await _run_long_task(argv, ctx=ctx, progress=progress, is_stack_op=False)
 
     parsed = json.loads(result)
-    assert parsed == {
-        "error": "path_traversal_detected",
-        "argv_index": 1,
-        "value": "../etc/passwd",
-    }
+    assert parsed["status"] == "ok", parsed
+    assert any("note=see ../README" in m for m in progress.messages), progress.messages
 
 
 # Failure surfacing — non-zero exit raises ToolError with structured payload
@@ -845,7 +838,7 @@ class TestInfrastructureDeployTools:
                 run_mcp.deploy_stack(
                     stack_name="gco-global",
                     yes=False,
-                    outputs_file="/tmp/out.json",
+                    outputs_file="out.json",
                     tags=["Environment=prod", "Owner=ml"],
                     ctx=_FakeCtx(),
                     progress=_FakeProgress(),
@@ -855,7 +848,7 @@ class TestInfrastructureDeployTools:
         # ``yes=False`` skips the -y flag.
         assert "-y" not in argv
         assert "--outputs-file" in argv
-        assert "/tmp/out.json" in argv
+        assert "out.json" in argv
         # Each tag becomes a ``--tag value`` pair.
         tag_indices = [i for i, v in enumerate(argv) if v == "--tag"]
         assert len(tag_indices) == 2

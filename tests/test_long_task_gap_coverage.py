@@ -152,13 +152,7 @@ class _FakeProcess:
             raise self.kill_error
 
 
-class TestArgumentAndTextGuards:
-    def test_traversal_skips_flags_and_detects_backslash_segment(self) -> None:
-        assert long_task._argv_has_traversal(["--cache=../outside", "safe"]) is None
-        value = "root\\..\\" + "x" * 150
-
-        assert long_task._argv_has_traversal(["gco", "--flag", value]) == (2, value[:100])
-
+class TestTextGuards:
     def test_bounded_text_handles_normal_tiny_and_split_utf8_budgets(self) -> None:
         assert long_task._bounded_text("short", 10) == "short"
         assert long_task._bounded_text("abcdef", 3) == "..."

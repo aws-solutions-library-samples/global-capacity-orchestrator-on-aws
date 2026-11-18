@@ -755,12 +755,19 @@ class TestCliRunner:
         assert payload["exit_code"] == 1
         assert "empty stdout" in payload["error"]
 
-    def test_run_cli_rejects_path_traversal(self) -> None:
+    def test_run_cli_passes_dot_segments_through(self) -> None:
+        # Tools check their own path arguments; the runner no longer refuses
+        # free text such as a prompt that mentions ``src/../lib``.
         import cli_runner
 
-        output = cli_runner._run_cli("foo/../bar")
-        payload = json.loads(output)
-        assert "path traversal" in payload["error"]
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = '{"ok": true}'
+        result.stderr = ""
+        with patch.object(cli_runner.subprocess, "run", return_value=result) as run:
+            output = cli_runner._run_cli("inference", "invoke", "m", "-p", "Compare src/../lib")
+        assert json.loads(output) == {"ok": True}
+        assert run.call_args.args[0][-1] == "Compare src/../lib"
 
     def test_run_cli_handles_timeout(self) -> None:
         import subprocess as _subprocess

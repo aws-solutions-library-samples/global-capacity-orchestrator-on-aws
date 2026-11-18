@@ -111,6 +111,9 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
             name: Webhook identifier.
             region: Region to use (any region works).
         """
+        rejected = cli_runner.reject_traversal_segments(name=name)
+        if rejected is not None:
+            return rejected
         await _ctx_warning(f"Deleting webhook {name!r} — this cannot be undone.")
         args = ["webhooks", "delete", name, "-y"]
         if region:
