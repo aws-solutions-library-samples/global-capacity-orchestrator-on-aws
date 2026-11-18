@@ -139,6 +139,38 @@ class LeaseElector:
         with self._lock:
             return self._try_acquire(coordination_v1)
 
+    def release(self, coordination_v1: Any) -> bool:
+        """Give the Lease up if this replica holds it; ``True`` when it was released.
+
+        Clears the holder (as client-go's ``ReleaseOnCancel`` does), so another
+        replica acquires on its next attempt instead of waiting out the lease
+        duration. Never touches a Lease another replica holds, and every
+        failure (a racing write included) only means the Lease expires on
+        its own.
+        """
+        with self._lock:
+            identity = self.identity
+            try:
+                lease = coordination_v1.read_namespaced_lease(
+                    identity.name, identity.namespace, _request_timeout=self.request_timeout
+                )
+                spec = lease.spec
+                if spec.holder_identity != identity.holder:
+                    return False
+                spec.holder_identity = None
+                spec.renew_time = datetime.now(UTC)
+                coordination_v1.replace_namespaced_lease(
+                    identity.name, identity.namespace, lease, _request_timeout=self.request_timeout
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not release the %s Lease (it will expire): %s", self.label, exc
+                )
+                return False
+            self._observe(spec)
+            logger.info("Released %s leader Lease held by %s", self.label, identity.holder)
+            return True
+
     def _observe(self, spec: Any) -> None:
         record = _lease_record(spec)
         if record != self._observed_record:

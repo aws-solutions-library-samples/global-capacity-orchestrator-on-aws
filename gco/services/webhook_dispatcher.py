@@ -956,7 +956,7 @@ class WebhookDispatcher:
         self._watch_task = asyncio.create_task(self._watch_jobs())
 
     async def stop(self) -> None:
-        """Stop the webhook dispatcher."""
+        """Stop the webhook dispatcher and hand the deliverer Lease back."""
         logger.info("Stopping webhook dispatcher")
         self._running = False
 
@@ -965,6 +965,15 @@ class WebhookDispatcher:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._watch_task
             self._watch_task = None
+
+        if self._leader_elector is not None and self._is_leader:
+            # Released, the standby takes over on its next poll instead of
+            # waiting out the lease duration with nobody delivering. The
+            # elector serializes this behind any Lease call still running.
+            await asyncio.to_thread(self._leader_elector.release, self.coordination_v1)
+            self._is_leader = False
+            self._resource_version = None
+            self._cache_seeded = False
 
     async def _initialize_job_cache(self, *, deliver_changes: bool = False) -> bool:
         """List the watched Jobs, rebuild the state cache, and record where to watch from.

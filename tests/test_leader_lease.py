@@ -243,6 +243,71 @@ class TestLeaseElector:
         assert "ALB-sync Lease check failed (non-fatal): socket closed" in caplog.text
 
 
+class TestLeaseRelease:
+    def test_the_holder_releases_and_a_standby_takes_over_at_once(self):
+        coordination = FakeCoordination()
+        clock = FakeClock()
+        leader = _elector(clock=clock)
+        standby = LeaseElector(
+            LeaseIdentity(IDENTITY.name, IDENTITY.namespace, "health-monitor-xyz", 90),
+            label="webhook",
+            clock=clock,
+        )
+        assert leader.try_acquire(coordination) is LeaseOutcome.ACQUIRED
+        assert standby.try_acquire(coordination) is LeaseOutcome.NOT_HELD
+
+        assert leader.release(coordination) is True
+
+        assert coordination.lease.spec.holder_identity is None
+        # No lease duration to wait out: the standby wins on its next attempt.
+        assert standby.try_acquire(coordination) is LeaseOutcome.ACQUIRED
+
+    def test_another_replicas_hold_is_never_released(self):
+        lease = _lease("other-replica", datetime.now(UTC))
+        api = _api(lease)
+
+        assert _elector().release(api) is False
+
+        api.replace_namespaced_lease.assert_not_called()
+        assert lease.spec.holder_identity == "other-replica"
+
+    @pytest.mark.parametrize("failing_call", ["read_namespaced_lease", "replace_namespaced_lease"])
+    def test_a_failed_release_is_non_fatal(self, failing_call, caplog):
+        api = _api(_lease(IDENTITY.holder, datetime.now(UTC)))
+        getattr(api, failing_call).side_effect = ApiException(status=409)
+
+        with caplog.at_level("WARNING"):
+            assert _elector().release(api) is False
+        assert "Could not release the webhook Lease" in caplog.text
+
+
+class TestDispatcherReleasesOnStop:
+    @pytest.mark.asyncio
+    async def test_a_deliverer_releases_the_lease_when_it_stops(self):
+        dispatcher = _dispatcher(IDENTITY)
+        coordination = FakeCoordination()
+        dispatcher.coordination_v1 = coordination
+        dispatcher._watch_jobs = AsyncMock()
+        assert await dispatcher._acquire_leadership() is True
+
+        await dispatcher.start()
+        await dispatcher.stop()
+
+        assert coordination.lease.spec.holder_identity is None
+        assert dispatcher.get_metrics()["leader"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_standby_or_lease_free_dispatcher_releases_nothing(self):
+        for leader_lease in (IDENTITY, None):
+            dispatcher = _dispatcher(leader_lease)
+            dispatcher._initialize_job_cache = AsyncMock(return_value=True)
+            dispatcher._watch_jobs = AsyncMock()
+            await dispatcher.start()
+            with patch.object(LeaseElector, "release") as release:
+                await dispatcher.stop()
+            release.assert_not_called()
+
+
 class TestLeaseDurationFromEnv:
     def test_configured_value_is_kept_when_above_the_floor(self):
         assert lease_duration_from_env("120", label="WEBHOOK_LEASE_DURATION") == 120

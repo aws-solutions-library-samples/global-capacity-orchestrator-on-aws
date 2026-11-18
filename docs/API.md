@@ -2069,7 +2069,10 @@ deliverer through the pre-created `gco-health-monitor-webhooks` Lease in
 that wins it re-seeds its view of current job states before delivering. Each
 transition is therefore delivered at most once; during a failover (bounded by
 the 90-second lease duration) transitions may be dropped, never duplicated, so
-webhook consumers see one POST per event, not one per replica.
+webhook consumers see one POST per event, not one per replica. A deliverer
+that shuts down cleanly (a rollout or scale-down) hands the Lease back, so the
+standby takes over on its next check; after a crash the standby takes over
+once the Lease has gone unrenewed for the 90-second lease duration.
 
 The deliverer lists the Jobs once and then watches for changes from that
 point, resuming each watch request where the previous one stopped. Nothing is
