@@ -58,8 +58,9 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       # One reconcile pass may be mid-flight when SIGTERM arrives; the handler
-      # in main() finishes the cycle before exiting, and a pass is bounded by
-      # the Kubernetes/DynamoDB request timeouts (30s each).
+      # in main() lets it finish the endpoint it is reconciling (each
+      # Kubernetes/DynamoDB call is bounded at 30s) and start no other, then
+      # releases the leader Lease so the standby takes over at once.
       terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true

@@ -70,6 +70,7 @@ from gco.models.inference_models import (
 )
 from gco.services.inference_store import InferenceEndpointStore, endpoint_object_names
 from gco.services.k8s_client import BoundedApiClient, k8s_api_timeout_from_env
+from gco.services.leader_lease import LEASE_REQUEST_TIMEOUT
 from gco.services.structured_logging import configure_structured_logging
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -553,6 +554,10 @@ _LEADER_EPOCH_ANNOTATION = "gco.io/leader-epoch"
 # Every Kubernetes call is bounded by K8S_API_TIMEOUT (30 s; urllib3 retries a
 # timed-out read up to three times), so one hung call stays within it.
 PASS_STALL_INTERVALS = 10
+
+# How long a leader pass pauses between two endpoints so the event loop can run
+# the SIGTERM handler (see InferenceMonitor._stop_requested_at_safe_point).
+_SAFE_POINT_PAUSE_SECONDS = 0.001
 
 # The endpoint an object belongs to, on the metadata of every object the
 # monitor creates (never on a pod template, where adding it would roll pods).
@@ -1591,6 +1596,10 @@ class InferenceMonitor:
         # Last progress of the running leader pass (see _pass_stall_seconds).
         self._pass_progress_at = self._last_loop_completed_at
 
+        # Set by stop(): the running pass starts no further endpoint and the
+        # pause between passes ends at once. start() makes a fresh one.
+        self._stopping = asyncio.Event()
+
     # ------------------------------------------------------------------
     # Reconciliation loop
     # ------------------------------------------------------------------
@@ -1601,6 +1610,7 @@ class InferenceMonitor:
             logger.warning("Inference monitor already running")
             return
         self._running = True
+        self._stopping = asyncio.Event()
         logger.info(
             "Starting inference monitor for %s in %s (interval=%ds)",
             self.cluster_id,
@@ -1613,24 +1623,47 @@ class InferenceMonitor:
         self._lease_name = lease_name
         self._lease_holder = pod_name
 
-        while self._running:
-            try:
-                if self._try_acquire_lease(lease_name, pod_name):
-                    with self._renewing_leadership():
-                        await self.reconcile()
-                else:
-                    logger.debug("Not the leader, waiting...")
-            except ReconcileFencedError as error:
-                logger.warning("Reconciliation stopped after authority loss: %s", error)
-            except Exception as error:
-                logger.error("Reconciliation error: %s", error, exc_info=True)
-                self._errors_count += 1
-            self._last_loop_completed_at = time.monotonic()
-            try:
-                await asyncio.sleep(self.reconcile_interval)
-            except Exception as error:
-                logger.error("Sleep interrupted: %s", error)
-                break
+        try:
+            while self._running:
+                try:
+                    if self._try_acquire_lease(lease_name, pod_name):
+                        with self._renewing_leadership():
+                            await self.reconcile()
+                    else:
+                        logger.debug("Not the leader, waiting...")
+                except ReconcileFencedError as error:
+                    logger.warning("Reconciliation stopped after authority loss: %s", error)
+                except Exception as error:
+                    logger.error("Reconciliation error: %s", error, exc_info=True)
+                    self._errors_count += 1
+                self._last_loop_completed_at = time.monotonic()
+                try:
+                    await self._pause_between_passes()
+                except Exception as error:
+                    logger.error("Sleep interrupted: %s", error)
+                    break
+        finally:
+            # No pass is running any more: hand the Lease over now instead of
+            # leaving the standby to wait for it to expire.
+            self._release_lease()
+
+    async def _pause_between_passes(self) -> None:
+        """Wait one reconcile interval, or only until stop() is called."""
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stopping.wait(), timeout=self.reconcile_interval)
+
+    async def _stop_requested_at_safe_point(self) -> bool:
+        """Let the event loop run, then report whether stop() has been called.
+
+        A pass makes its Kubernetes and DynamoDB calls synchronously, so the
+        SIGTERM handler, which the event loop runs as a callback, can run only
+        where the pass yields: here, between two endpoints. The pause is above
+        zero so the loop handles a signal that arrived during the previous
+        endpoint before the pass resumes; once it has, the pass starts no
+        further endpoint.
+        """
+        await asyncio.sleep(_SAFE_POINT_PAUSE_SECONDS)
+        return self._stopping.is_set()
 
     @staticmethod
     def _lease_annotations(lease: Any) -> dict[str, str]:
@@ -1838,10 +1871,52 @@ class InferenceMonitor:
             self._leadership_lost.set()
             raise ReconcileFencedError("leader Lease holder or epoch changed")
 
+    def _release_lease(self) -> None:
+        """Give up the leader Lease this process holds, so the standby takes over at once.
+
+        Called with no pass running. Only the holder and epoch this process
+        owns are released, by clearing the holder in a compare-and-swap replace
+        of the Lease as read (as client-go's ``ReleaseOnCancel`` and
+        :meth:`gco.services.leader_lease.LeaseElector.release` do). A Lease
+        another replica holds is left alone, and any failure only means the
+        Lease expires on its own. No mutation follows a release: leadership
+        counts as lost until the next acquisition.
+        """
+        lease_name, holder, epoch = self._lease_name, self._lease_holder, self._leader_epoch
+        if not (lease_name and holder and epoch):
+            return
+        self._leadership_lost.set()
+        self._leader_epoch = None
+        coordination_v1 = client.CoordinationV1Api(self.api_client)
+        try:
+            lease = coordination_v1.read_namespaced_lease(
+                lease_name, self.namespace, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
+            spec = present(lease.spec, "lease.spec")
+            if (
+                spec.holder_identity != holder
+                or self._lease_annotations(lease).get(_LEADER_EPOCH_ANNOTATION) != epoch
+            ):
+                return
+            spec.holder_identity = None
+            spec.renew_time = datetime.now(UTC)
+            coordination_v1.replace_namespaced_lease(
+                lease_name, self.namespace, lease, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
+        except Exception as error:
+            logger.warning("Could not release the leader Lease (it will expire): %s", error)
+            return
+        logger.info("Released leader Lease %s held by %s", lease_name, holder)
+
     def stop(self) -> None:
-        """Stop the reconciliation loop and prevent additional mutations."""
+        """Stop the reconciliation loop and prevent additional mutations.
+
+        A running pass starts no further endpoint, the pause between passes
+        ends, and start() then releases the leader Lease and returns.
+        """
         self._running = False
         self._leadership_lost.set()
+        self._stopping.set()
         logger.info("Inference monitor stopped")
 
     @staticmethod
@@ -2294,6 +2369,9 @@ class InferenceMonitor:
 
         for endpoint in endpoints:
             name = endpoint.get("endpoint_name", "unknown")
+            if await self._stop_requested_at_safe_point():
+                logger.info("Shutting down: pass ends before endpoint %s", name)
+                return actions
             self._mark_pass_progress()
             try:
                 action = await self._reconcile_endpoint(endpoint)
@@ -2328,6 +2406,9 @@ class InferenceMonitor:
         for endpoint in endpoints:
             if endpoint.get("desired_state") != "deleted":
                 continue
+            if await self._stop_requested_at_safe_point():
+                logger.info("Shutting down: pass ends before the remaining purges")
+                return actions
             self._mark_pass_progress()
             ep_name = endpoint.get("endpoint_name")
             if not isinstance(ep_name, str):
@@ -7611,9 +7692,10 @@ async def main() -> None:
     # container, and PID 1 receives no kernel-default signal handling — so
     # without an explicit handler SIGTERM was silently ignored, every pod
     # rotation burned the full terminationGracePeriodSeconds, and the kubelet
-    # SIGKILLed the monitor mid-reconcile (exit 137). The handler flips the
-    # same stop flag the reconcile loop already honors, so shutdown waits for
-    # the in-flight cycle and exits 0 within one reconcile interval.
+    # SIGKILLed the monitor mid-reconcile (exit 137). The handler stops the
+    # monitor: a pass in progress finishes the endpoint it is reconciling and
+    # starts no other, the monitor releases its leader Lease so the standby
+    # takes over on its next attempt, and the process exits 0.
     shutdown_requested = asyncio.Event()
     loop = asyncio.get_running_loop()
 

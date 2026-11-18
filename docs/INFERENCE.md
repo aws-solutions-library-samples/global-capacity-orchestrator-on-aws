@@ -215,7 +215,11 @@ the monitor makes is bounded by `K8S_API_TIMEOUT` (default 30 seconds per
 attempt), and a pass that finishes no endpoint for ten reconcile intervals
 (150 seconds at the default 15) stops renewing the Lease, so a wedged leader
 hands over to the standby within one more Lease duration instead of holding
-leadership for as long as it hangs.
+leadership for as long as it hangs. When the leader pod is stopped (a rollout
+or a node drain sends SIGTERM), a pass in progress finishes the endpoint it is
+reconciling and starts no other, and the monitor then releases the Lease, so
+the standby takes over on its next attempt (within one reconcile interval)
+instead of waiting for the Lease to expire.
 
 Separately, the health monitor verifies that the ALB hostname stored in SSM
 matches the `gco-system/gco-gateway` Gateway status address. If cluster

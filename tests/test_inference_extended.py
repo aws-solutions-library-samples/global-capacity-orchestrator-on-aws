@@ -763,7 +763,7 @@ class TestStartStop:
 
         call_count = 0
 
-        async def fake_sleep(seconds):
+        async def fake_pause():
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
@@ -771,7 +771,7 @@ class TestStartStop:
 
         with (
             patch.object(monitor, "_try_acquire_lease", return_value=True),
-            patch("gco.services.inference_monitor.asyncio.sleep", side_effect=fake_sleep),
+            patch.object(monitor, "_pause_between_passes", side_effect=fake_pause),
         ):
             await monitor.start()
 
@@ -788,7 +788,7 @@ class TestStartStop:
         async def bad_reconcile():
             raise RuntimeError("unexpected crash")
 
-        async def fake_sleep(seconds):
+        async def fake_pause():
             nonlocal call_count
             call_count += 1
             if call_count >= 1:
@@ -797,7 +797,7 @@ class TestStartStop:
         with (
             patch.object(monitor, "_try_acquire_lease", return_value=True),
             patch.object(monitor, "reconcile", side_effect=bad_reconcile),
-            patch("gco.services.inference_monitor.asyncio.sleep", side_effect=fake_sleep),
+            patch.object(monitor, "_pause_between_passes", side_effect=fake_pause),
         ):
             await monitor.start()
 
@@ -809,12 +809,12 @@ class TestStartStop:
         mock_store.list_endpoints.return_value = []
         monitor = _make_monitor(mock_store)
 
-        async def fail_sleep(seconds):
+        async def fail_pause():
             raise Exception("interrupted")
 
         with (
             patch.object(monitor, "_try_acquire_lease", return_value=True),
-            patch("gco.services.inference_monitor.asyncio.sleep", side_effect=fail_sleep),
+            patch.object(monitor, "_pause_between_passes", side_effect=fail_pause),
         ):
             await monitor.start()
 

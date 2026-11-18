@@ -204,12 +204,12 @@ def test_inference_monitor_resets_loop_staleness_after_each_iteration():
     monitor._try_acquire_lease = MagicMock(return_value=False)
     clock = iter([250.0, 251.0])
 
-    async def stop_after_first_sleep(_interval):
+    async def stop_after_first_pause():
         monitor._running = False
 
     with (
         patch("gco.services.inference_monitor.time") as fake_time,
-        patch("gco.services.inference_monitor.asyncio.sleep", side_effect=stop_after_first_sleep),
+        patch.object(monitor, "_pause_between_passes", side_effect=stop_after_first_pause),
     ):
         fake_time.monotonic.side_effect = lambda: next(clock)
         monitor._last_loop_completed_at = 100.0

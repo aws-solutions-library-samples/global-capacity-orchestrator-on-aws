@@ -220,8 +220,9 @@ async def test_monitor_start_breaks_when_reconcile_sleep_is_interrupted() -> Non
 
     with (
         patch.object(monitor, "_try_acquire_lease", return_value=False),
-        patch(
-            "gco.services.inference_monitor.asyncio.sleep",
+        patch.object(
+            monitor,
+            "_pause_between_passes",
             AsyncMock(side_effect=RuntimeError("event loop closing")),
         ),
     ):
@@ -1530,8 +1531,9 @@ async def test_monitor_loop_treats_authority_loss_as_leadership_handoff() -> Non
             "reconcile",
             AsyncMock(side_effect=ReconcileFencedError("lease changed")),
         ) as reconcile,
-        patch(
-            "gco.services.inference_monitor.asyncio.sleep",
+        patch.object(
+            monitor,
+            "_pause_between_passes",
             AsyncMock(side_effect=RuntimeError("stop loop")),
         ),
     ):
