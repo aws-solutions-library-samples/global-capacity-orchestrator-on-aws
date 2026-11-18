@@ -430,7 +430,10 @@ arguments that are paths before it calls them:
   `context`, `outputs_file`) goes through
   `cli_runner.reject_paths_outside_project_root(...)`. The path is resolved
   against the project root the CLI runs from, symlinks included, and must stay
-  inside it (`code: path_outside_project_root`).
+  inside it (`code: path_outside_project_root`). A file that names other files
+  gets the same check for each of them: `dag_validate` and `dag_run` read the
+  DAG file and check every `steps[].manifest`, reported as
+  `parameter: steps[<i>].manifest`.
 - A name or ID the CLI puts into an API request path (job, pod and namespace
   names, template names, webhook and queue job IDs, `invoke_inference`'s
   `api_path`) goes through `cli_runner.reject_traversal_segments(...)`, which

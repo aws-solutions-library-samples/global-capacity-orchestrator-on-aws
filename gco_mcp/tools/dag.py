@@ -6,9 +6,11 @@ status on disk, cancellation) instead of the CLI runner's two-minute timeout.
 """
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import cli_runner
+import yaml
 from audit import audit_logged
 
 # FastMCP's Progress / Context dependencies inject real instances per
@@ -26,6 +28,38 @@ from tools._long_task import _run_long_task
 _TASK_CONFIG_OPTIONAL = TaskConfig(mode="optional")
 
 
+def _reject_paths_outside_project_root(manifest_path: str) -> str | None:
+    """Confine ``manifest_path`` and every step manifest the DAG file names.
+
+    ``gco dag validate`` checks that each ``steps[].manifest`` exists and
+    ``gco dag run`` submits it, both relative to the project root the CLI
+    runs from. Only the DAG file itself used to be confined, so a confined
+    DAG could still name, test for or submit any file on the host. Each step
+    manifest gets the same check as ``manifest_path``, reported as
+    ``steps[<i>].manifest``. A DAG file that cannot be read or parsed is left
+    to the CLI, which reports it.
+    """
+    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    if rejected is not None:
+        return rejected
+    path = Path(manifest_path)
+    if not path.is_absolute():
+        path = cli_runner.PROJECT_ROOT / path
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError, UnicodeDecodeError, yaml.YAMLError:
+        return None
+    steps = document.get("steps") if isinstance(document, dict) else None
+    if not isinstance(steps, list):
+        return None
+    references = {
+        f"steps[{index}].manifest": step["manifest"]
+        for index, step in enumerate(steps)
+        if isinstance(step, dict) and isinstance(step.get("manifest"), str)
+    }
+    return cli_runner.reject_paths_outside_project_root(**references)
+
+
 @mcp.tool(tags={"safe", "dag"})
 @audit_logged
 async def dag_validate(manifest_path: str) -> str:
@@ -33,9 +67,10 @@ async def dag_validate(manifest_path: str) -> str:
 
     Args:
         manifest_path: Path to the DAG manifest file, relative to the project
-            root (an absolute path must also be inside it).
+            root (an absolute path must also be inside it). Every step
+            manifest it names must be inside the project root too.
     """
-    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    rejected = _reject_paths_outside_project_root(manifest_path)
     if rejected is not None:
         return rejected
     return await asyncio.to_thread(cli_runner._run_cli, "dag", "validate", manifest_path)
@@ -69,11 +104,12 @@ async def dag_run(
 
     Args:
         manifest_path: Path to the DAG manifest file, relative to the project
-            root (an absolute path must also be inside it).
+            root (an absolute path must also be inside it). Every step
+            manifest it names must be inside the project root too.
         region: Target region for the DAG run.
         dry_run: When True, validate and plan without submitting jobs.
     """
-    rejected = cli_runner.reject_paths_outside_project_root(manifest_path=manifest_path)
+    rejected = _reject_paths_outside_project_root(manifest_path)
     if rejected is not None:
         return rejected
     if dry_run:
