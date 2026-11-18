@@ -4228,20 +4228,16 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Add EKS permissions
+        # The handler's only EKS call is DescribeCluster (endpoint and CA for
+        # its kubeconfig); it authenticates to Kubernetes with a presigned
+        # sts:GetCallerIdentity URL, which needs no IAM permission, and its
+        # Kubernetes rights come from the access entry below. It assumes no
+        # other role.
         kubectl_lambda_role.add_to_policy(
             iam.PolicyStatement(
-                actions=[
-                    "eks:DescribeCluster",
-                    "eks:ListClusters",
-                ],
+                actions=["eks:DescribeCluster"],
                 resources=[self.cluster.cluster_arn],
             )
-        )
-
-        # Add permissions to assume cluster admin role
-        kubectl_lambda_role.add_to_policy(
-            iam.PolicyStatement(actions=["sts:AssumeRole"], resources=["*"])
         )
 
         # Allow the convergence apply tasks to record per-phase status to SSM
@@ -4320,8 +4316,9 @@ class GCORegionalStack(Stack):
         # invoked directly by the convergence state machine (the base and
         # post-Helm apply tasks), not through a CloudFormation custom resource.
 
-        # cdk-nag suppression: the kubectl-applier Lambda requires broad
-        # EKS and Kubernetes API access to apply arbitrary manifests.
+        # cdk-nag: the role's only Resource:* statement is the X-Ray
+        # write grant CDK adds for active tracing. Kubernetes access comes
+        # from the EKS access entry above, not from IAM.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -4330,11 +4327,12 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The kubectl-applier Lambda requires broad EKS and Kubernetes API "
-                        "access to apply arbitrary manifests (RBAC, ServiceAccounts, "
-                        "Deployments, Jobs, NetworkPolicies) across multiple namespaces. "
-                        "Resource: * is required because the set of Kubernetes resources "
-                        "is dynamic and not known at synth time."
+                        "The only Resource:* statement is xray:PutTraceSegments and "
+                        "xray:PutTelemetryRecords, which CDK adds for active Lambda "
+                        "tracing and X-Ray grants only on Resource:*. EKS access is "
+                        "DescribeCluster on this cluster's ARN, SSM writes are limited "
+                        "to /<project>/addons/*, and the Kubernetes permissions come "
+                        "from the cluster access entry rather than IAM."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
@@ -5986,10 +5984,12 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Add EKS permissions
+        # DescribeCluster (endpoint and CA for the kubeconfig) is the
+        # handler's only EKS call; Kubernetes rights come from the access
+        # entry below and the token is a presigned sts:GetCallerIdentity URL.
         helm_lambda_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["eks:DescribeCluster", "eks:ListClusters"],
+                actions=["eks:DescribeCluster"],
                 resources=[self.cluster.cluster_arn],
             )
         )
@@ -6395,11 +6395,12 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The Helm installer Lambda requires broad EKS and Kubernetes API "
-                        "access to install Helm charts (KEDA, NVIDIA DRA, etc.) that create "
-                        "CRDs, RBAC rules, and workloads across multiple namespaces. "
-                        "Resource: * is required because the set of Kubernetes resources "
-                        "is dynamic and not known at synth time."
+                        "The only Resource:* statement is xray:PutTraceSegments and "
+                        "xray:PutTelemetryRecords, which CDK adds for active Lambda "
+                        "tracing and X-Ray grants only on Resource:*. EKS access is "
+                        "DescribeCluster on this cluster's ARN, SSM writes are limited "
+                        "to /<project>/addons/*, and the Kubernetes permissions the "
+                        "charts need come from the cluster access entry rather than IAM."
                     ),
                     "appliesTo": ["Resource::*"],
                 },

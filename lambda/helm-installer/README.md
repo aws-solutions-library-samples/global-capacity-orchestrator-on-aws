@@ -108,7 +108,8 @@ Helm's server-side apply never conflicts with the autoscaler's field ownership
 ## IAM Permissions
 
 - `eks:DescribeCluster` on the EKS cluster
-- `sts:GetCallerIdentity` (for EKS token generation)
+- `sts:GetCallerIdentity` (a presigned URL for the EKS token; needs no IAM permission)
+- `ssm:PutParameter` on `/<project>/addons/*` (per-chart status for `gco stacks addons status`)
 - Kubernetes RBAC: cluster-admin or equivalent for Helm operations
 - `states:StartExecution`/`states:DescribeExecution` on the teardown state machine
 - `states:ListExecutions` on the one regional install state machine
