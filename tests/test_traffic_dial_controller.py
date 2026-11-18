@@ -329,6 +329,173 @@ class TestAwsHelpers:
         with caplog.at_level(logging.WARNING):
             handler.store_state(ssm, "gco", {"decisions": []})
         assert "Failed to store traffic-dial state" in caplog.text
+        assert caplog.records[-1].levelno == logging.ERROR
+        assert "(16 bytes; an Advanced parameter holds at most 8192)" in caplog.text
+        assert "keeps reporting the previous run" in caplog.text
+
+
+#: A real endpoint-group ARN's shape (134 characters).
+_REAL_GROUP_ARN = (
+    "arn:aws:globalaccelerator::123456789012:accelerator/1234abcd-abcd-1234-abcd-"
+    "1234abcdefgh/listener/0123vxyz/endpoint-group/098765zyxwvu"
+)
+_FOURTEEN_REGIONS = [
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-south-1",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ca-central-1",
+    "eu-central-1",
+    "eu-north-1",
+    "eu-west-1",
+    "eu-west-2",
+    "sa-east-1",
+    "us-east-1",
+    "us-east-2",
+    "us-west-2",
+]
+
+
+class _TieredParameterStore:
+    """``put_parameter`` with Parameter Store's per-tier value limits.
+
+    Without a ``Tier`` the account's default, Standard, applies (4 KB).
+    Intelligent-Tiering makes a larger value an Advanced parameter (8 KB).
+    """
+
+    def __init__(self):
+        self.values: dict[str, str] = {}
+        self.tiers: dict[str, str] = {}
+
+    def put_parameter(self, *, Name, Value, Type, Overwrite, Tier="Standard"):  # boto3 kwargs
+        size = len(Value.encode("utf-8"))
+        tier = Tier
+        if Tier == "Intelligent-Tiering":
+            tier = "Standard" if size <= 4096 else "Advanced"
+        limit = 4096 if tier == "Standard" else 8192
+        if size > limit:
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "ValidationException",
+                        "Message": f"{tier} tier parameters support a maximum parameter "
+                        f"value of {limit} characters.",
+                    }
+                },
+                "PutParameter",
+            )
+        self.values[Name] = Value
+        self.tiers[Name] = tier
+        return {"Tier": tier, "Version": 1}
+
+
+def _summary(regions, *, error=None):
+    decisions = []
+    for region in regions:
+        decision = {
+            "region": region,
+            "endpoint_group_arn": _REAL_GROUP_ARN,
+            "current_dial": 100,
+            "healthy_percent": 99.87,
+            "target_dial": 100,
+            "new_dial": 100,
+            "reason": "healthy",
+            "applied": False,
+        }
+        if error is not None:
+            decision["error"] = error
+        decisions.append(decision)
+    return {
+        "mode": "enforce",
+        "timestamp": "2026-11-17T18:00:00.123456+00:00",
+        "accelerator_status": "DEPLOYED",
+        "decisions": decisions,
+        "updates_applied": 0,
+        "errors": 0 if error is None else len(regions),
+    }
+
+
+class TestStoredState:
+    """The run summary must still reach SSM at real multi-Region sizes (L11).
+
+    Before, the whole summary went to a Standard parameter: 14 Regions with
+    their endpoint-group ARNs are 4277 bytes, over the 4 KB limit, and the
+    refusal was logged as a warning, so `traffic-dial show` silently kept
+    reporting an old run.
+    """
+
+    def test_fourteen_regions_fit_a_standard_parameter(self, dial_module, caplog):
+        handler, _ = dial_module
+        ssm = _TieredParameterStore()
+        summary = _summary(_FOURTEEN_REGIONS)
+
+        with caplog.at_level(logging.WARNING):
+            handler.store_state(ssm, "gco", summary)
+
+        assert "Failed to store" not in caplog.text
+        assert ssm.tiers["/gco/traffic-dial/state"] == "Standard"
+        stored = json.loads(ssm.values["/gco/traffic-dial/state"])
+        # Every field `gco capacity traffic-dial show` reads is kept
+        # (cli/capacity/traffic_dial.py get_status, cli/commands/capacity_cmd.py).
+        assert stored["mode"] == "enforce"
+        assert stored["timestamp"] == summary["timestamp"]
+        assert [d["region"] for d in stored["decisions"]] == _FOURTEEN_REGIONS
+        assert {d["reason"] for d in stored["decisions"]} == {"healthy"}
+        assert {d["healthy_percent"] for d in stored["decisions"]} == {99.87}
+        assert all("endpoint_group_arn" not in d for d in stored["decisions"])
+        # The function's return value keeps the ARNs.
+        assert summary["decisions"][0]["endpoint_group_arn"] == _REAL_GROUP_ARN
+
+    def test_failed_regions_overflow_into_an_advanced_parameter(self, dial_module, caplog):
+        handler, _ = dial_module
+        ssm = _TieredParameterStore()
+        long_error = (
+            "An error occurred (AccessDeniedException) when calling the UpdateEndpointGroup "
+            "operation: User: arn:aws:sts::123456789012:assumed-role/gco-dial/gco is not "
+            f"authorized to perform: globalaccelerator:UpdateEndpointGroup on {_REAL_GROUP_ARN}"
+        ) * 2
+        summary = _summary(_FOURTEEN_REGIONS, error=long_error)
+
+        with caplog.at_level(logging.WARNING):
+            handler.store_state(ssm, "gco", summary)
+
+        assert "Failed to store" not in caplog.text
+        assert ssm.tiers["/gco/traffic-dial/state"] == "Advanced"
+        stored = json.loads(ssm.values["/gco/traffic-dial/state"])
+        errors = {d["error"] for d in stored["decisions"]}
+        assert errors == {long_error[:197] + "..."}
+        assert len(errors.pop()) == handler.STATE_ERROR_MAX_CHARS
+        assert summary["decisions"][0]["error"] == long_error
+
+    def test_short_error_text_is_stored_whole(self, dial_module):
+        handler, _ = dial_module
+        ssm = _TieredParameterStore()
+
+        handler.store_state(ssm, "gco", _summary(["us-east-1"], error="throttled"))
+
+        stored = json.loads(ssm.values["/gco/traffic-dial/state"])
+        assert stored["decisions"][0]["error"] == "throttled"
+
+    def test_a_state_too_large_for_any_tier_is_an_error_with_its_size(self, dial_module, caplog):
+        handler, _ = dial_module
+        ssm = _TieredParameterStore()
+        regions = [f"zz-test-{index}" for index in range(30)]
+
+        with caplog.at_level(logging.WARNING):
+            handler.store_state(ssm, "gco", _summary(regions, error="x" * 300))
+
+        assert ssm.values == {}
+        record = caplog.records[-1]
+        assert record.levelno == logging.ERROR
+        size = len(
+            json.dumps(
+                handler._stored_state(_summary(regions, error="x" * 300)), separators=(",", ":")
+            ).encode()
+        )
+        assert size > 8192
+        assert f"({size} bytes; an Advanced parameter holds at most 8192)" in caplog.text
+        assert "ValidationException" in caplog.text
 
 
 class TestLambdaHandler:
