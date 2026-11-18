@@ -1271,6 +1271,85 @@ def test_new_role_deployment_is_created_with_the_mooncake_digest(
     assert ENDPOINT_TLS_PROXY_DIGEST_ANNOTATION in annotations
 
 
+def _role_spec(role: str, image: str) -> dict[str, Any]:
+    mooncake: dict[str, Any] = (
+        {"mode": "store", "store": {"enabled": True}}
+        if role == "single"
+        else {"mode": "disaggregated", "topology": {"prefill": 1, "decode": 1}}
+    )
+    return {"image": image, "port": 8000, "mooncake": mooncake}
+
+
+@pytest.mark.parametrize(
+    ("role", "deploy_name"),
+    [("prefill", "chat-prefill"), ("decode", "chat-decode"), ("single", "chat")],
+)
+def test_role_deployment_rolls_onto_an_updated_image(
+    monitor: InferenceMonitor, role: str, deploy_name: str
+) -> None:
+    """Finding I7: ``update-image`` reaches the prefill, decode and store role pods."""
+    new_image = "vllm/vllm-openai:v0.7.0"
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {
+            deploy_name: _role_deployment_with_sidecar(
+                deploy_name, extra_annotations={MOONCAKE_CONFIG_DIGEST_ANNOTATION: "d" * 64}
+            )
+        }
+    )
+
+    monitor._ensure_role_deployment(
+        "chat", NAMESPACE, _role_spec(role, new_image), role, config_digest="d" * 64
+    )
+
+    # Only the model container's image, at the observed resourceVersion.
+    assert _deployment_patch(monitor, deploy_name) == {
+        "metadata": {"resourceVersion": "7"},
+        "spec": {"template": {"spec": {"containers": [{"name": "inference", "image": new_image}]}}},
+    }
+
+
+def test_role_image_update_pulls_the_regional_replica(monitor: InferenceMonitor) -> None:
+    spec = _role_spec("prefill", "123456789012.dkr.ecr.us-west-2.amazonaws.com/vllm:v0.7.0")
+    regional = "123456789012.dkr.ecr.us-east-1.amazonaws.com/vllm:v0.7.0"
+    spec["region_image_uris"] = {REGION: regional}
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
+        {"chat-prefill": _role_deployment_with_sidecar("chat-prefill")}
+    )
+
+    monitor._ensure_role_deployment("chat", NAMESPACE, spec, "prefill")
+
+    [container] = _deployment_patch(monitor, "chat-prefill")["spec"]["template"]["spec"][
+        "containers"
+    ]
+    assert container == {"name": "inference", "image": regional}
+
+
+@pytest.mark.parametrize("pending", ["sidecar", "mooncake-config"])
+def test_role_image_update_waits_for_another_template_change(
+    monitor: InferenceMonitor, pending: str
+) -> None:
+    """One pod-template change per pass: the image follows on the next pass."""
+    live = (
+        _live_deployment("chat-prefill", containers=[_model_container(8000)])
+        if pending == "sidecar"
+        else _role_deployment_with_sidecar("chat-prefill")
+    )
+    monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name({"chat-prefill": live})
+
+    monitor._ensure_role_deployment(
+        "chat",
+        NAMESPACE,
+        _role_spec("prefill", "vllm/vllm-openai:v0.7.0"),
+        "prefill",
+        config_digest="e" * 64,
+    )
+
+    [patched] = monitor.apps_v1.patch_namespaced_deployment.call_args_list
+    template = _wire(patched.kwargs["body"])["spec"]["template"]
+    containers = template.get("spec", {}).get("containers", [])
+    assert all(container["name"] != "inference" for container in containers)
+
+
 def test_existing_canary_is_moved_onto_tls_with_its_endpoint_program(
     monitor: InferenceMonitor,
 ) -> None:

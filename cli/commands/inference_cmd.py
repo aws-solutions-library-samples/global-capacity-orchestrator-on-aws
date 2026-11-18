@@ -917,7 +917,9 @@ def inference_delete(
 def inference_update_image(config: Any, endpoint_name: Any, image: Any) -> None:
     """Update the container image for an inference endpoint.
 
-    Triggers a rolling update across all target regions.
+    Triggers a rolling update across all target regions. On a Mooncake
+    endpoint the prefill, decode and store-role pods roll onto the new image;
+    the prefill-decode proxy keeps its own proxy image.
 
     Examples:
         gco inference update-image my-llm -i vllm/vllm-openai:v0.32.0

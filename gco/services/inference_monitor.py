@@ -2816,6 +2816,10 @@ class InferenceMonitor:
         manually stopped zero target is seeded to the role minimum before its
         autoscaler is reapplied. Static roles always converge to topology.
 
+        An existing role whose model container runs another image than the
+        spec's (``gco inference update-image``) is patched onto it with the
+        same compare-and-swap the classic Deployment uses.
+
         Args:
             config_digest: Digest of the ``mooncake.json`` the role must run
                 with (see :func:`mooncake_config_digest`). A new Deployment is
@@ -2841,10 +2845,30 @@ class InferenceMonitor:
             config_map_name=_tls_proxy_config_map_name(name),
             fallback_port=spec.get("port", 8000),
         )
-        # One compare-and-swap per pass: the sidecar patch above already moved
-        # the resourceVersion, so a config digest change waits for the next pass.
-        if config_digest is not None and not sidecar_patched:
-            self._converge_mooncake_config_digest(deploy_name, ns, deployment, config_digest)
+        # One pod-template change per pass: the sidecar patch above already
+        # moved the resourceVersion, so a config digest change waits for the
+        # next pass, and an image change waits for both.
+        template_patched = sidecar_patched
+        if config_digest is not None and not template_patched:
+            template_patched = self._converge_mooncake_config_digest(
+                deploy_name, ns, deployment, config_digest
+            )
+        current_image = self._get_deployment_image(deployment)
+        desired_image = self._resolve_image_for_region(spec) if spec.get("image") else ""
+        if (
+            not template_patched
+            and current_image
+            and desired_image
+            and current_image != desired_image
+        ):
+            logger.info(
+                "Updating role deployment %s/%s image: %s → %s",
+                ns,
+                deploy_name,
+                current_image,
+                desired_image,
+            )
+            self._update_deployment_image(deploy_name, ns, desired_image)
 
         autoscaling = mooncake.get("autoscaling") or {}
         role_autoscaling = autoscaling.get(role)

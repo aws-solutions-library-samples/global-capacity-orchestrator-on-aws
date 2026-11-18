@@ -3014,7 +3014,7 @@ gco inference delete my-llm -y
 
 #### `gco inference update-image`
 
-Update the container image for an endpoint. Triggers a rolling update across all target regions.
+Update the container image for an endpoint. Triggers a rolling update across all target regions. On a Mooncake endpoint the prefill, decode and store-role pods roll onto the new image, one pod-template change per reconcile pass (a pending TLS sidecar or `mooncake.json` change lands first); the prefill-decode proxy keeps its own `mooncake.proxy.image`.
 
 ```bash
 gco inference update-image ENDPOINT_NAME [OPTIONS]
