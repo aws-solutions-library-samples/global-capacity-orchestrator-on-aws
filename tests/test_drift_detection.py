@@ -98,24 +98,36 @@ def _find_drift_rule(template: assertions.Template) -> dict:
     return matches[0]
 
 
+#: The CloudFormation permissions drift detection documents as required
+#: ("Considerations when detecting drift"), plus the two calls the Lambda makes.
+_REQUIRED_DRIFT_ACTIONS = {
+    "cloudformation:DetectStackDrift",
+    "cloudformation:DetectStackResourceDrift",
+    "cloudformation:BatchDescribeTypeConfigurations",
+    "cloudformation:DescribeStackDriftDetectionStatus",
+    "cloudformation:DescribeStackResourceDrifts",
+}
+
+
 def _find_drift_iam_policy(template: assertions.Template) -> dict:
-    """Return the IAM managed policy containing the CloudFormation drift actions."""
+    """Return the IAM policy whose statements hold the CloudFormation drift actions.
+
+    They span two statements: the stack actions on the stack's own ARN, and
+    the two actions without resource-level permissions on ``*``.
+    """
     policies = template.find_resources("AWS::IAM::Policy")
-    required_actions = {
-        "cloudformation:DetectStackDrift",
-        "cloudformation:DescribeStackDriftDetectionStatus",
-        "cloudformation:DescribeStackResourceDrifts",
-    }
+    required_actions = _REQUIRED_DRIFT_ACTIONS
     matches = []
     for policy in policies.values():
         doc = policy.get("Properties", {}).get("PolicyDocument", {})
+        granted: set[str] = set()
         for stmt in doc.get("Statement", []):
             actions = stmt.get("Action", [])
             if isinstance(actions, str):
                 actions = [actions]
-            if required_actions.issubset(set(actions)):
-                matches.append(policy)
-                break
+            granted.update(actions)
+        if required_actions.issubset(granted):
+            matches.append(policy)
     assert matches, (
         "No IAM policy found containing the required CloudFormation drift actions "
         f"{required_actions!r}"
@@ -202,11 +214,7 @@ class TestDriftDetection:
         policy = _find_drift_iam_policy(template)
         statements = policy["Properties"]["PolicyDocument"]["Statement"]
 
-        required = {
-            "cloudformation:DetectStackDrift",
-            "cloudformation:DescribeStackDriftDetectionStatus",
-            "cloudformation:DescribeStackResourceDrifts",
-        }
+        required = _REQUIRED_DRIFT_ACTIONS
         found = set()
         for stmt in statements:
             if stmt.get("Effect") != "Allow":

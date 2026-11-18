@@ -90,12 +90,14 @@ from aws_cdk import (
     CfnElement,
     CfnJson,
     CfnOutput,
+    CfnResource,
     CfnTag,
     CustomResource,
     Duration,
     Fn,
     RemovalPolicy,
     Stack,
+    Token,
     Validations,
 )
 from aws_cdk import aws_ec2 as ec2
@@ -7663,18 +7665,30 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # CloudFormation drift APIs operate at the stack level; the API does
-        # not support resource-level ARN scoping for these actions, so we scope
-        # to this stack's ARN where supported and accept "*" where not.
+        # The documented drift-detection permissions ("Considerations when
+        # detecting drift"): the stack-level actions on this stack's own ARN,
+        # and the two actions without resource-level permissions on "*".
+        # CloudFormation also reads every resource with these credentials;
+        # those reads are attached once the stack's resources exist, below.
         drift_lambda_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=[
                     "cloudformation:DetectStackDrift",
-                    "cloudformation:DescribeStackDriftDetectionStatus",
+                    "cloudformation:DetectStackResourceDrift",
                     "cloudformation:DescribeStackResourceDrifts",
                     "cloudformation:DescribeStackResource",
                     "cloudformation:DescribeStackResources",
+                ],
+                resources=[self.stack_id],
+            )
+        )
+        drift_lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "cloudformation:DescribeStackDriftDetectionStatus",
+                    "cloudformation:BatchDescribeTypeConfigurations",
                 ],
                 resources=["*"],
             )
@@ -7777,21 +7791,98 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "CloudFormation drift detection APIs (DetectStackDrift, "
-                        "DescribeStackDriftDetectionStatus, "
-                        "DescribeStackResourceDrifts) cannot be scoped to a "
-                        "specific stack resource via IAM; the action-level "
-                        "scoping requires wildcard resources. The Lambda's "
-                        "environment pins it to a single stack name, so the "
-                        "effective blast radius is limited. The "
-                        "``kms:GenerateDataKey*`` action wildcard is the "
-                        "AWS-recommended grant for publishing to the "
-                        "KMS-encrypted drift-detection SNS topic."
+                        "cloudformation:DescribeStackDriftDetectionStatus and "
+                        "BatchDescribeTypeConfigurations support no resource-level "
+                        "permissions; every other CloudFormation action is on this "
+                        "stack's own ARN. The X-Ray writes CDK adds for active "
+                        "tracing need Resource:*. The ``kms:GenerateDataKey*`` "
+                        "action wildcard is the AWS-recommended grant for publishing "
+                        "to the KMS-encrypted drift-detection SNS topic."
                     ),
                     "appliesTo": [
                         "Resource::*",
                         "Action::kms:GenerateDataKey*",
                     ],
+                },
+            ],
+        )
+        self._grant_drift_detection_reads(drift_lambda_role)
+
+    def _grant_drift_detection_reads(self, role: iam.IRole) -> None:
+        """Attach the reads CloudFormation makes for every resource it checks.
+
+        Runs after the stack's other resources exist (drift detection is
+        built last but for the MCP role and outputs), walks them, and grants
+        the read-handler permissions of each resource type present
+        (``gco/stacks/drift_read_permissions.py``). Bucket, parameter and
+        function reads name this stack's own resources; the remaining
+        Describe/Get/List calls support no resource-level permissions (or
+        cover every resource of their type, like ``ec2:Describe*``) and are
+        read-only configuration reads.
+
+        A separate policy rather than the role's default one: the drift
+        Lambda depends on its role's default policy, and this policy names
+        that Lambda's own ARN.
+        """
+        from gco.stacks.drift_read_permissions import drift_read_actions
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        cfn_resources = [c for c in self.node.find_all() if isinstance(c, CfnResource)]
+
+        def _arns(resource_type: str) -> list[str]:
+            return [
+                Token.as_string(c.get_att("Arn"))
+                for c in cfn_resources
+                if c.cfn_resource_type == resource_type
+            ]
+
+        def _parameter_arn(parameter: CfnResource) -> str:
+            scope = parameter.node.scope
+            if isinstance(scope, ssm.StringParameter):
+                return scope.parameter_arn
+            # The one L1 parameter, the EKS construct's kubectl-ready barrier,
+            # has no Name: CloudFormation generates one without a leading slash.
+            return (
+                f"arn:{self.partition}:ssm:{self.region}:{self.account}:parameter/{parameter.ref}"
+            )
+
+        parameter_arns = [
+            _parameter_arn(c) for c in cfn_resources if c.cfn_resource_type == "AWS::SSM::Parameter"
+        ]
+        actions = drift_read_actions(c.cfn_resource_type for c in cfn_resources)
+        statements = [
+            iam.PolicyStatement(actions=list(actions.unscoped), resources=["*"]),
+            iam.PolicyStatement(
+                actions=list(actions.function), resources=_arns("AWS::Lambda::Function")
+            ),
+        ]
+        bucket_arns = _arns("AWS::S3::Bucket")
+        if actions.bucket:
+            statements.append(
+                iam.PolicyStatement(actions=list(actions.bucket), resources=bucket_arns)
+            )
+        if actions.parameter:
+            statements.append(
+                iam.PolicyStatement(actions=list(actions.parameter), resources=parameter_arns)
+            )
+        read_policy = iam.Policy(
+            self, "DriftDetectionReadPolicy", roles=[role], statements=statements
+        )
+        acknowledge_nag_findings(
+            read_policy,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "Read-only Describe/Get/List calls CloudFormation makes, with the "
+                        "drift Lambda's credentials, to compare each resource type in "
+                        "this stack with its template (the types' registry read "
+                        "handlers). They support no resource-level permissions or are "
+                        "account-wide by nature. Bucket, parameter and function reads "
+                        "name this stack's own resources, and no secret value, KMS "
+                        "decrypt or role pass is granted."
+                    ),
+                    "appliesTo": ["Resource::*"],
                 },
             ],
         )

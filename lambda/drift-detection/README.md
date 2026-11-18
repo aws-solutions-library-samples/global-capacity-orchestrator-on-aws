@@ -8,6 +8,7 @@ alert when detection fails or managed resources differ from the template.
 - [Flow](#flow)
 - [Environment](#environment)
 - [Alert Behavior](#alert-behavior)
+- [IAM Permissions](#iam-permissions)
 - [Operational Notes](#operational-notes)
 - [Source](#source)
 
@@ -40,6 +41,31 @@ ID, resource type, and drift status, and list apart (`not_checked_resources`)
 the resources drift detection did not check, such as types it does not
 support. SNS subjects are truncated defensively to the service's 100-character
 limit.
+
+## IAM Permissions
+
+CloudFormation runs drift detection with the caller's credentials, so the
+function's role carries what the
+[drift detection considerations](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-stack-drift.html#drift-considerations)
+list:
+
+- `cloudformation:DetectStackDrift`, `DetectStackResourceDrift`,
+  `DescribeStackResourceDrifts`, `DescribeStackResource` and
+  `DescribeStackResources` on its own stack's ARN, and
+  `DescribeStackDriftDetectionStatus` and `BatchDescribeTypeConfigurations`
+  (no resource-level permissions) on `*`.
+- A separate `DriftDetectionReadPolicy` with the read permissions of every
+  resource type in the stack, from each type's CloudFormation registry read
+  handler (`gco/stacks/drift_read_permissions.py`). S3, SSM parameter and
+  Lambda reads name the stack's own buckets, parameters and functions; the
+  other Describe/Get/List calls are on `*`.
+- `sns:Publish` to the alert topic and use of its KMS key.
+
+No secret value is readable: with `aurora_pgvector` enabled, CloudFormation
+cannot compare the Aurora secret and its target attachment (their read
+handlers call `secretsmanager:GetSecretValue`), so the run ends
+`DETECTION_FAILED` while every other resource is still compared. Grant the
+role `secretsmanager:GetSecretValue` on that secret if you want them checked.
 
 ## Operational Notes
 

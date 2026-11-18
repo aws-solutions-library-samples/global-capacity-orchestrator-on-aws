@@ -14,12 +14,19 @@ grant that used to be broader than its code path:
   endpoint-registry parameter and its endpoint group and accelerator (they
   could put/delete every ``/<project>/`` parameter and call Global Accelerator
   on ``*``), and the EKS cluster security group admits the registration
-  Lambda by its own security group rather than the whole VPC CIDR.
+  Lambda by its own security group rather than the whole VPC CIDR;
+* the drift detection role holds what CloudFormation's drift detection needs
+  (it lacked ``DetectStackResourceDrift``, ``BatchDescribeTypeConfigurations``
+  and every resource read, so each run ended ``DETECTION_FAILED``): the stack
+  actions on this stack's ARN, and the read-handler permissions of every
+  resource type the stack contains, with bucket, parameter and function reads
+  on this stack's own resources and no secret value, decrypt or role pass.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from unittest.mock import MagicMock, patch
 
 import aws_cdk as cdk
@@ -32,13 +39,12 @@ from tests._cdk_app_builder import PROJECT_ROOT, load_context, offline_image_ass
 LAMBDA_DIR = PROJECT_ROOT / "lambda"
 
 
-@pytest.fixture(scope="module")
-def resources() -> dict:
+def _synth_regional(overrides: dict | None = None) -> dict:
     from cli.stacks import cdk_asset_consumer
     from gco.config.config_loader import ConfigLoader
     from gco.stacks.regional_stack import GCORegionalStack
 
-    app = cdk.App(context=load_context())
+    app = cdk.App(context=load_context(overrides))
     with cdk_asset_consumer(PROJECT_ROOT), offline_image_assets():
         stack = GCORegionalStack(
             app,
@@ -51,6 +57,24 @@ def resources() -> dict:
             env=cdk.Environment(account="123456789012", region="us-east-1"),
         )
         return assertions.Template.from_stack(stack).to_json()["Resources"]
+
+
+@pytest.fixture(scope="module")
+def resources() -> dict:
+    return _synth_regional()
+
+
+@pytest.fixture(scope="module")
+def all_features_resources() -> dict:
+    """Every optional regional data service on, so their types are in the template."""
+    return _synth_regional(
+        {
+            "fsx_lustre": {"enabled": True},
+            "valkey": {"enabled": True},
+            "aurora_pgvector": {"enabled": True},
+            "vector_store": {"enabled": True},
+        }
+    )
 
 
 def _as_list(value: object) -> list:
@@ -283,3 +307,117 @@ def test_partitions_without_global_accelerator_grant_no_ga_action():
     for prefix in ("GaRegistrationFunction", "GaDeregistrationFunction"):
         actions = {a for a, _ in _grants(_statements(no_ga, _role_id(no_ga, prefix)))}
         assert actions and not [a for a in actions if a.startswith("globalaccelerator:")]
+
+
+def _drift_statements(resources: dict) -> list[dict]:
+    return _statements(resources, _role_id(resources, "DriftDetectionLambdaRole"))
+
+
+def test_drift_role_holds_the_documented_cloudformation_actions(resources):
+    grants = _grants([s for s in _drift_statements(resources) if "Condition" not in s])
+    stack_actions = {
+        "cloudformation:DetectStackDrift",
+        "cloudformation:DetectStackResourceDrift",
+        "cloudformation:DescribeStackResourceDrifts",
+        "cloudformation:DescribeStackResource",
+        "cloudformation:DescribeStackResources",
+    }
+    assert _pairs(stack_actions, [{"Ref": "AWS::StackId"}]) <= grants
+    assert (
+        _pairs(
+            {
+                "cloudformation:DescribeStackDriftDetectionStatus",
+                "cloudformation:BatchDescribeTypeConfigurations",
+            },
+            ["*"],
+        )
+        <= grants
+    )
+    assert not [
+        a
+        for a, r in grants
+        if a.startswith("cloudformation:") and a in stack_actions and r == '"*"'
+    ]
+
+
+@pytest.mark.parametrize("fixture", ["resources", "all_features_resources"])
+def test_drift_role_can_read_every_resource_in_the_stack(request, fixture):
+    from gco.stacks.drift_read_permissions import DRIFT_READ_ACTIONS, is_unchecked_type
+
+    resources = request.getfixturevalue(fixture)
+    grants = _grants(_drift_statements(resources))
+    granted_actions = {a for a, _ in grants}
+
+    types = {r["Type"] for r in resources.values()}
+    unmapped = sorted(t for t in types if not is_unchecked_type(t) and t not in DRIFT_READ_ACTIONS)
+    assert not unmapped, f"add these types to gco/stacks/drift_read_permissions.py: {unmapped}"
+    for resource_type in types - {t for t in types if is_unchecked_type(t)}:
+        missing = set(DRIFT_READ_ACTIONS[resource_type]) - granted_actions
+        assert not missing, (resource_type, missing)
+
+    def _resources_for(action: str) -> set[str]:
+        return {r for a, r in grants if a == action}
+
+    functions = {
+        json.dumps({"Fn::GetAtt": [lid, "Arn"]}, sort_keys=True)
+        for lid, r in resources.items()
+        if r["Type"] == "AWS::Lambda::Function"
+    }
+    assert any(lid.startswith("DriftDetectionFunction") for lid in resources)
+    assert _resources_for("lambda:GetFunction") == functions
+    buckets = {
+        json.dumps({"Fn::GetAtt": [lid, "Arn"]}, sort_keys=True)
+        for lid, r in resources.items()
+        if r["Type"] == "AWS::S3::Bucket"
+    }
+    assert _resources_for("s3:ListBucket") == buckets
+    assert _resources_for("s3:GetBucketPolicy") == buckets
+    parameters = sorted(lid for lid, r in resources.items() if r["Type"] == "AWS::SSM::Parameter")
+    granted_parameters = sorted(
+        ref
+        for resource in _resources_for("ssm:GetParameters")
+        for part in json.loads(resource)["Fn::Join"][1]
+        if isinstance(part, dict) and (ref := part.get("Ref")) and ref != "AWS::Partition"
+    )
+    assert granted_parameters == parameters
+
+    for action in ("secretsmanager:GetSecretValue", "iam:PassRole"):
+        assert action not in granted_actions
+    # The only Decrypt is the topic key's, for publishing the alert.
+    [topic_key] = [
+        lid
+        for lid, r in resources.items()
+        if lid.startswith("DriftDetectionTopicKey") and r["Type"] == "AWS::KMS::Key"
+    ]
+    assert _resources_for("kms:Decrypt") == {
+        json.dumps({"Fn::GetAtt": [topic_key, "Arn"]}, sort_keys=True)
+    }
+
+
+@pytest.mark.parametrize("fixture", ["resources", "all_features_resources"])
+def test_drift_role_inline_policies_fit_the_iam_limit(request, fixture):
+    """IAM caps a role's inline policies at 10,240 characters in total."""
+    resources = request.getfixturevalue(fixture)
+    role_id = _role_id(resources, "DriftDetectionLambdaRole")
+    documents = [
+        r["Properties"]["PolicyDocument"]
+        for r in resources.values()
+        if r["Type"] == "AWS::IAM::Policy" and {"Ref": role_id} in r["Properties"]["Roles"]
+    ]
+    # Every token stands in for an ARN of at most 140 characters once resolved.
+    rendered = re.sub(
+        r'\{"(Fn::GetAtt|Ref|Fn::Join)":.*?\]\]?\}',
+        "x" * 140,
+        json.dumps(documents, separators=(",", ":")),
+    )
+    assert len(rendered) < 10_240
+
+
+def test_unmapped_types_are_refused():
+    from gco.stacks.drift_read_permissions import drift_read_actions
+
+    with pytest.raises(KeyError):
+        drift_read_actions(["AWS::Example::Unknown"])
+    actions = drift_read_actions(["Custom::AWS", "AWS::CDK::Metadata", "AWS::SQS::Queue"])
+    assert actions.unscoped == ("sqs:GetQueueAttributes", "sqs:ListQueueTags")
+    assert actions.bucket == actions.parameter == actions.function == ()
