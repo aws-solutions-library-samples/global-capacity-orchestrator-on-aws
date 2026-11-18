@@ -18,7 +18,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from kubernetes.client import ApiClient, V1Job
+from kubernetes.client import ApiClient, V1Job, V1Pod
 from kubernetes.client.rest import ApiException
 
 from tests._auth import bypass_backend_auth
@@ -189,6 +189,57 @@ class TestGetJobPodsEndpoint:
                 assert data["job_name"] == "test-job"
                 assert data["count"] == 1
                 assert "pods" in data
+
+    def test_get_job_pods_reports_when_each_container_started_and_exited(
+        self, mock_manifest_processor
+    ):
+        """A finished container's start and exit times reach the JSON response."""
+        pod = V1Pod.from_dict(
+            {
+                "metadata": {"name": "test-job-abc123", "namespace": "default", "uid": "u-1"},
+                "spec": {"nodeName": "node-1", "containers": [{"name": "main", "image": "t:1"}]},
+                "status": {
+                    "phase": "Failed",
+                    "containerStatuses": [
+                        {
+                            "name": "main",
+                            "ready": False,
+                            "restartCount": 0,
+                            "image": "t:1",
+                            "imageID": "t@sha256:0",
+                            "state": {
+                                "terminated": {
+                                    "exitCode": 1,
+                                    "reason": "Error",
+                                    "startedAt": "2026-11-17T20:21:02Z",
+                                    "finishedAt": "2026-11-17T20:25:46Z",
+                                }
+                            },
+                        }
+                    ],
+                },
+            }
+        )
+        mock_manifest_processor.core_v1.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        with patch(
+            "gco.services.manifest_api.create_manifest_processor_from_env",
+            return_value=mock_manifest_processor,
+        ):
+            from fastapi.testclient import TestClient
+
+            from gco.services.manifest_api import app
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get("/api/v1/jobs/default/test-job/pods", headers=_AUTH_HEADERS)
+
+        assert response.status_code == 200
+        (container,) = response.json()["pods"][0]["status"]["containerStatuses"]
+        assert container["state"] == "terminated"
+        assert container["exitCode"] == 1
+        assert container["startedAt"] == "2026-11-17T20:21:02+00:00"
+        assert container["finishedAt"] == "2026-11-17T20:25:46+00:00"
+        assert container["lastState"] is None
 
     def test_get_job_pods_disallowed_namespace(self, mock_manifest_processor):
         """Test getting job pods from disallowed namespace returns 403."""

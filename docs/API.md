@@ -1103,7 +1103,8 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
             "restartCount": 0,
             "image": "pytorch:latest",
             "state": "running",
-            "startedAt": "2024-01-15T10:00:10Z"
+            "startedAt": "2024-01-15T10:00:10+00:00",
+            "lastState": null
           }
         ],
         "initContainerStatuses": [],
@@ -1149,6 +1150,55 @@ denormalized so a caller iterating pods does not have to join. It is `null` for
 a pod that has not been scheduled; that pod then appears in
 `scheduling.unscheduled` with the scheduler's reason. `scheduling` has the same
 shape and meaning as on [Get Job](#get-job).
+
+Each entry of `status.containerStatuses` and `status.initContainerStatuses`
+carries `name`, `ready`, `restartCount` and `image`, the container's current
+`state` with that state's fields, and `lastState`:
+
+| `state` | Fields |
+|---------|--------|
+| `running` | `startedAt` |
+| `waiting` | `reason` (`ContainerCreating`, `ImagePullBackOff`, `CrashLoopBackOff`, …) and `message` |
+| `terminated` | `exitCode`, `reason` (`Completed`, `Error`, `OOMKilled`, …), `signal`, `message`, `startedAt` and `finishedAt` |
+
+`startedAt` and `finishedAt` are the container's own start and exit times,
+read from the pod status (`state.terminated.startedAt` and
+`state.terminated.finishedAt` in `kubectl get pod -o json`). Use `finishedAt`
+to order the container's exit against the Node and NodeClaim events on
+[Get Job Events](#get-job-events): an event later than `finishedAt` happened
+after the container exited, so it did not cause the exit. `signal` is the
+signal number that ended the container when the runtime reports one, which is
+rare (a SIGKILL usually shows only as `exitCode` 137). `message` is the
+termination message: the contents of the container's `terminationMessagePath`
+file, or the end of its log under `terminationMessagePolicy:
+FallbackToLogsOnError`. The kubelet truncates it to 4096 bytes. Fields
+Kubernetes did not set are `null`.
+
+`lastState` is the container's previous termination, in the same shape as a
+`terminated` state, when the kubelet has restarted it in place
+(`restartCount` above 0, which a Job's pod reaches under `restartPolicy:
+OnFailure`). It is `null` when the container has not restarted. A waiting
+container reports neither `startedAt` nor `finishedAt`.
+
+```json
+{
+  "name": "main",
+  "ready": false,
+  "restartCount": 0,
+  "image": "pytorch:latest",
+  "state": "terminated",
+  "exitCode": 1,
+  "reason": "Error",
+  "signal": null,
+  "message": null,
+  "startedAt": "2026-11-17T20:21:02+00:00",
+  "finishedAt": "2026-11-17T20:25:46+00:00",
+  "lastState": null
+}
+```
+
+Timestamps are ISO 8601 with an explicit UTC offset (`+00:00`). They are the
+same instants `kubectl` prints with a `Z` suffix.
 
 A pod in the middle of an eviction is still listed while its grace period
 runs, with `metadata.deletionTimestamp` set and, when a disruption is what is

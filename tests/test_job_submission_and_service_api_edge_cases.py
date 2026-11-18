@@ -2237,8 +2237,8 @@ def test_api_shared_condition_and_container_state_fallthroughs() -> None:
     pod.status.container_statuses = states
     parsed = _parse_pod_to_dict(pod)
     assert parsed["status"]["containerStatuses"] == [
-        {"name": "none", "ready": False, "restartCount": 0, "image": "x"},
-        {"name": "empty", "ready": False, "restartCount": 0, "image": "x"},
+        {"name": "none", "ready": False, "restartCount": 0, "image": "x", "lastState": None},
+        {"name": "empty", "ready": False, "restartCount": 0, "image": "x", "lastState": None},
     ]
 
 

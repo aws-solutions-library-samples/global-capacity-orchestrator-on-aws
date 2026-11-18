@@ -19,7 +19,7 @@ from http import HTTPStatus
 from typing import Any, cast
 
 from fastapi import HTTPException
-from kubernetes.client.models import CoreV1Event, V1Job, V1Pod
+from kubernetes.client.models import CoreV1Event, V1ContainerStateTerminated, V1Job, V1Pod
 from pydantic import BaseModel, Field
 
 from gco.hyperpod_config import (
@@ -368,43 +368,101 @@ def _parse_job_to_dict(job: V1Job) -> dict[str, Any]:
     }
 
 
+def _timestamp_or_none(value: Any) -> str | None:
+    """``value`` in ISO 8601 when it is a datetime, otherwise ``None``."""
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
+def _terminated_state_fields(terminated: Any) -> dict[str, Any]:
+    """A terminated container state, flattened the way the pods routes report it.
+
+    ``startedAt`` and ``finishedAt`` are the container's own start and exit
+    times. ``finishedAt`` lets a caller order the container's exit against the
+    Node and NodeClaim events on ``GET .../events``: an event later than
+    ``finishedAt`` happened after the container exited, so it cannot have
+    caused the exit. ``signal`` is the signal that ended the container when
+    the runtime reports one, and ``message`` is the termination message (the
+    container's ``terminationMessagePath`` file, or its log tail under
+    ``FallbackToLogsOnError``), which the kubelet caps at 4096 bytes.
+
+    The new fields are kept only when they have the expected type, so a
+    partially populated object cannot put an unserializable value in the
+    response.
+    """
+    signal = getattr(terminated, "signal", None)
+    message = getattr(terminated, "message", None)
+    return {
+        "state": "terminated",
+        "exitCode": terminated.exit_code,
+        "reason": terminated.reason,
+        "signal": signal if isinstance(signal, int) and not isinstance(signal, bool) else None,
+        "message": message if isinstance(message, str) else None,
+        "startedAt": _timestamp_or_none(getattr(terminated, "started_at", None)),
+        "finishedAt": _timestamp_or_none(getattr(terminated, "finished_at", None)),
+    }
+
+
+def _container_state_fields(state: Any) -> dict[str, Any]:
+    """A container's current state: ``running``, ``waiting``, or ``terminated``."""
+    if not state:
+        return {}
+    if state.running:
+        return {"state": "running", "startedAt": _timestamp_or_none(state.running.started_at)}
+    if state.waiting:
+        message = getattr(state.waiting, "message", None)
+        return {
+            "state": "waiting",
+            "reason": state.waiting.reason,
+            "message": message if isinstance(message, str) else None,
+        }
+    if state.terminated:
+        return _terminated_state_fields(state.terminated)
+    return {}
+
+
+def _last_termination(container_status: Any) -> dict[str, Any] | None:
+    """The previous termination of a container that has restarted in place.
+
+    The kubelet fills ``lastState.terminated`` when it restarts a container
+    in place (``restartCount`` above 0; a Job's pod gets there under
+    ``restartPolicy: OnFailure``), so the exit that the restart replaced in
+    ``state`` is still visible here. ``None`` when the container has not
+    restarted.
+    """
+    terminated = getattr(getattr(container_status, "last_state", None), "terminated", None)
+    if not isinstance(terminated, V1ContainerStateTerminated):
+        return None
+    return _terminated_state_fields(terminated)
+
+
+def _container_status_to_dict(cs: Any) -> dict[str, Any]:
+    """One entry of ``containerStatuses`` or ``initContainerStatuses``."""
+    container_status: dict[str, Any] = {
+        "name": cs.name,
+        "ready": cs.ready,
+        "restartCount": cs.restart_count,
+        "image": cs.image,
+    }
+    container_status.update(_container_state_fields(cs.state))
+    container_status["lastState"] = _last_termination(cs)
+    return container_status
+
+
 def _parse_pod_to_dict(pod: V1Pod) -> dict[str, Any]:
-    """Parse a Kubernetes Pod object to a dictionary."""
+    """Parse a Kubernetes Pod object to a dictionary.
+
+    Each container status reports its current state flattened (``state`` plus
+    that state's fields) and, in ``lastState``, its previous termination when
+    it has restarted. Init containers are reported the same way.
+    """
     metadata = present(pod.metadata, "pod.metadata")
     status = present(pod.status, "pod.status")
     spec = present(pod.spec, "pod.spec")
 
-    container_statuses = []
-    for cs in status.container_statuses or []:
-        container_status: dict[str, Any] = {
-            "name": cs.name,
-            "ready": cs.ready,
-            "restartCount": cs.restart_count,
-            "image": cs.image,
-        }
-        if cs.state:
-            if cs.state.running:
-                container_status["state"] = "running"
-                container_status["startedAt"] = (
-                    cs.state.running.started_at.isoformat() if cs.state.running.started_at else None
-                )
-            elif cs.state.waiting:
-                container_status["state"] = "waiting"
-                container_status["reason"] = cs.state.waiting.reason
-            elif cs.state.terminated:
-                container_status["state"] = "terminated"
-                container_status["exitCode"] = cs.state.terminated.exit_code
-                container_status["reason"] = cs.state.terminated.reason
-        container_statuses.append(container_status)
-
-    init_container_statuses = []
-    for cs in status.init_container_statuses or []:
-        init_status = {
-            "name": cs.name,
-            "ready": cs.ready,
-            "restartCount": cs.restart_count,
-        }
-        init_container_statuses.append(init_status)
+    container_statuses = [_container_status_to_dict(cs) for cs in status.container_statuses or []]
+    init_container_statuses = [
+        _container_status_to_dict(cs) for cs in status.init_container_statuses or []
+    ]
 
     # A pod being deleted carries deletionTimestamp for its grace period and,
     # when a disruption (eviction, preemption, taint) is what is deleting it,

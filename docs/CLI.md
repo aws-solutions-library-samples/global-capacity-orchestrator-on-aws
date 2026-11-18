@@ -3701,7 +3701,9 @@ A pod with a `deletionTimestamp` shows `Terminating` whatever phase it still
 reports, as `kubectl` does, and a pod a disruption is deleting is called out
 with its `DisruptionTarget` reason (`EvictionByEvictionAPI` for a Karpenter /
 EKS Auto Mode drain). `--output json` adds a per-pod `node` block, each pod's
-`metadata.deletionTimestamp` and `status.disruptionTarget`, and a job-wide
+`metadata.deletionTimestamp` and `status.disruptionTarget`, each container's
+state (for an exited container, `exitCode`, `reason`, `startedAt` and
+`finishedAt`) and previous termination (`lastState`), and a job-wide
 `scheduling` block; see [Get Job Pods](API.md#get-job-pods).
 
 #### `gco jobs metrics`

@@ -208,6 +208,16 @@ def get_job_pods(job_name: str, region: str, namespace: str = "gco-jobs") -> str
     (``EvictionByEvictionAPI`` for a Karpenter / EKS Auto Mode drain) — use
     ``get_job_events`` for the node-level cause.
 
+    Each entry of ``status.containerStatuses`` (and ``initContainerStatuses``)
+    has a ``state`` of ``running`` (with ``startedAt``), ``waiting`` (with
+    ``reason`` and ``message``), or ``terminated`` (with ``exitCode``,
+    ``reason``, ``signal``, ``message``, ``startedAt`` and ``finishedAt``).
+    ``finishedAt`` is when the container exited: an event from
+    ``get_job_events`` later than it happened after the exit and did not cause
+    it. ``lastState`` holds the previous termination, in the ``terminated``
+    shape, of a container the kubelet restarted in place, and is null
+    otherwise.
+
     Args:
         job_name: Name of the owning Kubernetes Job.
         region: AWS region where the job is running.
