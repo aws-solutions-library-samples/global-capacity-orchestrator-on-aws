@@ -3035,3 +3035,119 @@ class TestMutationResults:
             result = runner.invoke(cli, ["inference", command, "ep"], input="y\n")
         assert result.exit_code == 0, result.output
         getattr(mgr, method).assert_called_once_with("ep")
+
+
+# =============================================================================
+# deploy option validation (finding CM7)
+# =============================================================================
+
+
+class TestDeployOptionValidation:
+    def _deploy(self, runner, *extra):
+        mgr = MagicMock()
+        mgr.deploy.return_value = {
+            "endpoint_name": "ep",
+            "target_regions": ["us-east-1"],
+            "ingress_path": "/inference/ep",
+        }
+        with patch("cli.inference.get_inference_manager", return_value=mgr):
+            result = runner.invoke(cli, ["inference", "deploy", "ep", "-i", "img:v1", *extra])
+        return result, mgr
+
+    @pytest.mark.parametrize(
+        ("extra", "option", "fragment"),
+        [
+            (["--autoscale-metric", "cpu:70%"], "'--autoscale-metric'", "'cpu:70%'"),
+            (["--autoscale-metric", "cpu:"], "'--autoscale-metric'", "'cpu:'"),
+            (["--autoscale-metric", "cpu:0"], "'--autoscale-metric'", "'cpu:0'"),
+            (["--autoscale-metric", "qps:10"], "'--autoscale-metric'", "gpu_memory"),
+            (["-e", "MODEL"], "'--env' / '-e'", "'MODEL'"),
+            (["-e", "=value"], "'--env' / '-e'", "'=value'"),
+            (["-l", "team"], "'--label' / '-l'", "'team'"),
+            (["--node-selector", "inf2"], "'--node-selector'", "'inf2'"),
+            (["--min-replicas", "0", "--autoscale-metric", "cpu"], "'--min-replicas'", "0"),
+            (["--max-replicas", "0", "--autoscale-metric", "cpu"], "'--max-replicas'", "0"),
+        ],
+        ids=[
+            "percent-sign",
+            "empty-target",
+            "zero-target",
+            "unknown-metric",
+            "env-without-value",
+            "env-without-key",
+            "label-without-value",
+            "selector-without-value",
+            "zero-min",
+            "zero-max",
+        ],
+    )
+    def test_a_malformed_value_is_a_usage_error(self, runner, extra, option, fragment):
+        result, mgr = self._deploy(runner, *extra)
+        assert result.exit_code == 2, result.output
+        assert isinstance(result.exception, SystemExit)
+        assert f"Invalid value for {option}" in result.output
+        assert fragment in result.output
+        mgr.deploy.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "extra",
+        [["--min-replicas", "2", "--max-replicas", "8"], ["--max-replicas", "3"]],
+        ids=["min-and-max", "max-only"],
+    )
+    def test_bounds_without_a_metric_are_refused(self, runner, extra):
+        result, mgr = self._deploy(runner, *extra)
+        assert result.exit_code == 2, result.output
+        assert "--autoscale-metric" in result.output
+        assert "--replicas" in result.output
+        mgr.deploy.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("extra", "fragment"),
+        [
+            (["--min-replicas", "5", "--max-replicas", "2"], "--max-replicas (2)"),
+            (["--min-replicas", "12"], "--max-replicas (10, the default)"),
+        ],
+        ids=["explicit", "default-max"],
+    )
+    def test_a_maximum_below_the_minimum_is_refused(self, runner, extra, fragment):
+        result, mgr = self._deploy(runner, *extra, "--autoscale-metric", "cpu")
+        assert result.exit_code == 2, result.output
+        assert fragment in result.output
+        mgr.deploy.assert_not_called()
+
+    def test_well_formed_values_reach_the_manager(self, runner):
+        result, mgr = self._deploy(
+            runner,
+            "-e",
+            "EMPTY=",
+            "-e",
+            "URL=http://example.com/?a=b",
+            "-l",
+            "team=ml",
+            "--node-selector",
+            "eks.amazonaws.com/instance-family=inf2",
+            "--autoscale-metric",
+            "gpu_memory:60",
+            "--autoscale-metric",
+            "cpu:150",
+            "--max-replicas",
+            "3",
+        )
+        assert result.exit_code == 0, result.output
+        kwargs = mgr.deploy.call_args.kwargs
+        assert kwargs["env"] == {"EMPTY": "", "URL": "http://example.com/?a=b"}
+        assert kwargs["labels"] == {"team": "ml"}
+        assert kwargs["node_selector"] == {"eks.amazonaws.com/instance-family": "inf2"}
+        assert kwargs["autoscaling"] == {
+            "enabled": True,
+            "min_replicas": 1,
+            "max_replicas": 3,
+            "metrics": [{"type": "gpu_memory", "target": 60}, {"type": "cpu", "target": 150}],
+        }
+
+    def test_no_flags_send_no_maps_and_no_autoscaling(self, runner):
+        result, mgr = self._deploy(runner)
+        assert result.exit_code == 0, result.output
+        kwargs = mgr.deploy.call_args.kwargs
+        assert (kwargs["env"], kwargs["labels"], kwargs["node_selector"]) == (None, None, None)
+        assert kwargs["autoscaling"] is None
