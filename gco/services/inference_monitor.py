@@ -1035,6 +1035,15 @@ def build_pd_proxy_config(mooncake: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _pd_proxy_replicas(mooncake: Mapping[str, Any]) -> int:
+    """The prefill-decode proxy's replica count: ``mooncake.proxy.replicas``, at least one."""
+    proxy = mooncake.get("proxy")
+    replicas = proxy.get("replicas", 1) if isinstance(proxy, dict) else 1
+    if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas < 1:
+        return 1
+    return replicas
+
+
 def _role_service_url(name: str, ns: str, role: str) -> str:
     """Return the verified-HTTPS URL the PD proxy uses for one role Service.
 
@@ -2971,6 +2980,15 @@ class InferenceMonitor:
         ready = int(getattr(status, "ready_replicas", 0) or 0) if status else 0
         return ready, desired, restarted
 
+    @staticmethod
+    def _deployment_replicas(deployment: Any, configured: int) -> tuple[int, int]:
+        """Ready and desired replicas of ``deployment`` (``configured`` without a spec count)."""
+        status = getattr(deployment, "status", None) if deployment else None
+        ready = int(getattr(status, "ready_replicas", 0) or 0) if status else 0
+        deployment_spec = getattr(deployment, "spec", None) if deployment else None
+        observed_desired = getattr(deployment_spec, "replicas", None)
+        return ready, int(observed_desired) if observed_desired is not None else configured
+
     def _report_role_status(
         self,
         name: str,
@@ -2984,7 +3002,9 @@ class InferenceMonitor:
         """Write the role-keyed region status for a Mooncake endpoint.
 
         For split topologies the status carries a ``roles`` map of observed and
-        desired replica counts per role; for store-bearing endpoints it carries
+        desired replica counts per role and a ``proxy`` entry with the same
+        counts for the prefill-decode proxy, the only way requests reach the
+        roles; for store-bearing endpoints it carries
         a ``store`` sub-status with the master's readiness and address. The flat
         ``replicas_ready`` / ``replicas_desired`` fields are also populated with
         the totals so consumers that only read the flat shape still see motion.
@@ -3002,8 +3022,8 @@ class InferenceMonitor:
 
         Returns:
             The reported endpoint state: ``"running"`` once every desired role
-            replica (and, when applicable, the master) is Ready, otherwise
-            ``"creating"``.
+            replica (and, when applicable, the proxy's configured replicas and
+            the master) is Ready, otherwise ``"creating"``.
         """
         mode = mooncake.get("mode")
         roles = self._desired_roles(mode)
@@ -3017,15 +3037,9 @@ class InferenceMonitor:
             for role in ("prefill", "decode"):
                 if role not in roles:
                     continue
-                deploy_name = f"{name}-{role}"
                 configured_floor = self._replica_count_for_role(mooncake, role)
-                dep = self._get_deployment(deploy_name, ns)
-                status = getattr(dep, "status", None) if dep else None
-                ready = int(getattr(status, "ready_replicas", 0) or 0) if status else 0
-                deployment_spec = getattr(dep, "spec", None) if dep else None
-                observed_desired = getattr(deployment_spec, "replicas", None)
-                desired = (
-                    int(observed_desired) if observed_desired is not None else configured_floor
+                ready, desired = self._deployment_replicas(
+                    self._get_deployment(f"{name}-{role}", ns), configured_floor
                 )
                 roles_block[role] = {"ready": ready, "desired": desired}
                 total_ready += ready
@@ -3033,15 +3047,21 @@ class InferenceMonitor:
                 if ready < configured_floor:
                     all_ready = False
             extra["roles"] = roles_block
+            # Requests reach a split endpoint only through its prefill-decode
+            # proxy, so Ready roles alone do not make it serve.
+            proxy_floor = _pd_proxy_replicas(mooncake)
+            proxy_ready, proxy_desired = self._deployment_replicas(
+                self._get_deployment(f"{name}-proxy", ns), proxy_floor
+            )
+            extra["proxy"] = {"ready": proxy_ready, "desired": proxy_desired}
+            if proxy_ready < proxy_floor:
+                all_ready = False
         else:
             # Store mode runs a single kv_both Deployment under the endpoint name.
             configured_floor = self._replica_count_for_role(mooncake, "single")
-            dep = self._get_deployment(name, ns)
-            status = getattr(dep, "status", None) if dep else None
-            ready = int(getattr(status, "ready_replicas", 0) or 0) if status else 0
-            deployment_spec = getattr(dep, "spec", None) if dep else None
-            observed_desired = getattr(deployment_spec, "replicas", None)
-            desired = int(observed_desired) if observed_desired is not None else configured_floor
+            ready, desired = self._deployment_replicas(
+                self._get_deployment(name, ns), configured_floor
+            )
             total_ready += ready
             total_desired += desired
             if ready < configured_floor:
@@ -5173,9 +5193,7 @@ class InferenceMonitor:
         )
 
         # The proxy fronts at least one replica; a spec may ask for more.
-        replicas = proxy.get("replicas", 1)
-        if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas < 1:
-            replicas = 1
+        replicas = _pd_proxy_replicas(mooncake)
 
         labels = {
             "app": proxy_name,

@@ -749,7 +749,7 @@ def test_report_role_status_marks_underready_split_topology_creating() -> None:
     store = MagicMock()
     monitor = _make_monitor(store)
     monitor._get_deployment = MagicMock(  # type: ignore[method-assign]
-        side_effect=[_deployment(replicas=2, ready=1), None]
+        side_effect=[_deployment(replicas=2, ready=1), None, _deployment()]
     )
     mooncake = {
         "mode": "disaggregated",
@@ -1717,7 +1717,10 @@ def test_role_status_handles_omitted_split_role_and_underready_store() -> None:
         )
         == "running"
     )
-    split._get_deployment.assert_called_once_with("ep-prefill", NAMESPACE)
+    assert split._get_deployment.call_args_list == [
+        call("ep-prefill", NAMESPACE),
+        call("ep-proxy", NAMESPACE),
+    ]
 
     store_backend = MagicMock()
     store_monitor = _make_monitor(store_backend)
