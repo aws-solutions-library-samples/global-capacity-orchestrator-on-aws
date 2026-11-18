@@ -435,22 +435,6 @@ def _load_inference_tools(*, model_upload: bool) -> tuple[ModuleType, _Recording
     return module, recorder
 
 
-def _require_dev_fd_directory_access(root: Path) -> None:
-    """Skip only when this POSIX host cannot traverse an open directory fd."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(root, flags)
-    probe = root / ".dev-fd-probe"
-    probe.write_bytes(b"probe")
-    try:
-        try:
-            os.stat(f"/dev/fd/{descriptor}/{probe.name}", follow_symlinks=False)
-        except OSError as exc:
-            pytest.skip(f"/dev/fd directory traversal is unavailable: {exc}")
-    finally:
-        probe.unlink(missing_ok=True)
-        os.close(descriptor)
-
-
 class TestPopulateKvCacheTool:
     def test_tool_is_absent_without_the_model_upload_flag(self):
         module, recorder = _load_inference_tools(model_upload=False)
@@ -477,7 +461,6 @@ class TestPopulateKvCacheTool:
         root = tmp_path / "root"
         source = root / "kv-warm-set"
         source.mkdir(parents=True)
-        _require_dev_fd_directory_access(root)
         (source / "block-0.bin").write_bytes(b"kv")
         seen: list[dict[str, Any]] = []
 
@@ -505,7 +488,9 @@ class TestPopulateKvCacheTool:
         index = cmd.index("populate-kv")
         assert cmd[index - 1] == "inference"
         assert cmd[index + 1] == "llama"
-        assert cmd[index + 2].startswith("/dev/fd/")
+        # /dev/fd/<n>/kv-warm-set on Linux, the snapshot's path elsewhere.
+        assert cmd[index + 2].startswith(("/dev/fd/", str(root.resolve())))
+        assert ".gco-mcp-upload-" in cmd[index + 2] or cmd[index + 2].startswith("/dev/fd/")
         assert cmd[index + 2].endswith("/kv-warm-set")
         assert cmd[index + 3 :] == ["-r", "us-east-1"]
         assert seen[0]["listing"] == ["block-0.bin"]
@@ -613,7 +598,6 @@ class TestPopulateKvCacheTool:
         module, _ = _load_inference_tools(model_upload=True)
         root = tmp_path / "root"
         root.mkdir()
-        _require_dev_fd_directory_access(root)
         (root / "d.bin").write_bytes(b"kv")
 
         with (

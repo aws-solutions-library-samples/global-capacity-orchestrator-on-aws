@@ -366,9 +366,10 @@ if is_enabled(FLAG_MODEL_UPLOAD):
 
         The source must resolve beneath ``GCO_STORAGE_LOCAL_ROOT``; relative
         paths are interpreted relative to that root, never relative to the MCP
-        process working directory. The CLI receives a private descriptor-backed
-        snapshot; descendant links, special files, hard links, and filesystem
-        crossings fail closed. The upload may run for up to an hour.
+        process working directory. The CLI receives a private hard-link
+        snapshot built with descriptor-relative no-follow opens; descendant
+        links, special files, hard links, and filesystem crossings fail closed.
+        The upload may run for up to an hour.
 
         Args:
             endpoint_name: Endpoint whose KV-cache cold tier receives the data.

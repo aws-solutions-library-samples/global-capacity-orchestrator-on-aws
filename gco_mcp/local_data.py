@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import secrets
 import shutil
 import stat
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -24,6 +26,12 @@ from pathlib import Path
 
 _LOCAL_ROOT_ENV = "GCO_STORAGE_LOCAL_ROOT"
 _UPLOAD_STAGE_PREFIX = ".gco-mcp-upload-"
+_STAGE_NAME_RE = re.compile(r"\.gco-mcp-upload-(?:(?P<pid>[1-9][0-9]{0,9})-)?[0-9a-f]{32}")
+"""Snapshot directory names: ``<prefix><pid>-<hex>``, or ``<prefix><hex>`` as
+created before the owning process ID was part of the name."""
+_LEGACY_STAGE_MAX_AGE_SECONDS = 2 * 60 * 60
+"""Age after which a snapshot without a process ID in its name is stale. The
+servers that created such names stopped an upload after two minutes."""
 
 
 @dataclass(frozen=True)
@@ -42,7 +50,11 @@ class LocalPathContract:
 
 @dataclass(frozen=True)
 class StagedUpload:
-    """Descriptor-backed upload argument valid for the context lifetime."""
+    """Upload argument for the CLI, valid for the context lifetime.
+
+    ``argument`` is ``/dev/fd/<directory_fd>/<name>`` where the host can walk
+    an open directory through ``/dev/fd`` (Linux), else the snapshot's path.
+    """
 
     argument: str
     directory_fd: int
@@ -297,11 +309,54 @@ def _stage_directory(
         raise ValueError(f"Upload entry must be a regular file or directory: {name}")
 
 
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError, OverflowError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _remove_stale_stages(root_fd: int) -> None:
+    """Delete snapshot directories that an interrupted upload left behind.
+
+    A server killed mid-upload never runs the cleanup in
+    :func:`stage_upload_path`, and the hard links in its snapshot gave every
+    source file a second link, so each later upload of those files was
+    refused as hard-linked. A snapshot is stale when the process named in it
+    no longer exists (never this process's own, which another upload may be
+    using), or, for a name without a process ID, when it is older than
+    :data:`_LEGACY_STAGE_MAX_AGE_SECONDS`. Only directories owned by this
+    user with exactly the snapshot name format are removed.
+    """
+    euid = os.geteuid()
+    for name in os.listdir(root_fd):
+        match = _STAGE_NAME_RE.fullmatch(name)
+        if match is None:
+            continue
+        try:
+            metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != euid:
+            continue
+        pid = match.group("pid")
+        if pid is None:
+            stale = time.time() - metadata.st_mtime > _LEGACY_STAGE_MAX_AGE_SECONDS
+        else:
+            stale = int(pid) != os.getpid() and not _process_exists(int(pid))
+        if stale:
+            with suppress(OSError):
+                shutil.rmtree(name, dir_fd=root_fd)
+
+
 def _create_stage_directory(root_fd: int) -> tuple[str, int]:
     """Create one unpredictable private staging directory under the root."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     for _ in range(10):
-        name = f"{_UPLOAD_STAGE_PREFIX}{secrets.token_hex(16)}"
+        name = f"{_UPLOAD_STAGE_PREFIX}{os.getpid()}-{secrets.token_hex(16)}"
         try:
             os.mkdir(name, mode=0o700, dir_fd=root_fd)
         except FileExistsError:
@@ -310,24 +365,82 @@ def _create_stage_directory(root_fd: int) -> tuple[str, int]:
     raise OSError("Unable to allocate a private upload staging directory")
 
 
+def _descriptor_argument(stage_fd: int, name: str, expected: os.stat_result) -> str | None:
+    """Return ``/dev/fd/<stage_fd>/<name>`` when it reaches the staged entry.
+
+    Linux resolves ``/dev/fd/<n>`` to the open directory, so a CLI that
+    inherits the descriptor reads the snapshot even if its path is renamed.
+    macOS has no such traversal (``ENOENT``); the caller then passes a path.
+    """
+    argument = f"/dev/fd/{stage_fd}/{name}"
+    try:
+        metadata = os.stat(argument, follow_symlinks=False)
+    except OSError:
+        return None
+    if _file_identity(metadata) != _file_identity(expected):
+        raise ValueError("Secure upload staging produced an invalid source")
+    return argument
+
+
+def _require_unmodifiable_by_others(root: Path) -> None:
+    """Refuse when another user could rename an entry on the path to ``root``.
+
+    With a path argument the CLI resolves the snapshot by name, so the root
+    and every directory above it must be owned by this user or the superuser
+    and not be group- or world-writable (unless sticky, like ``/tmp``).
+    Otherwise another user could swap the snapshot between staging and use.
+    """
+    owners = {0, os.geteuid()}
+    for directory in (root, *root.parents):
+        metadata = os.stat(directory)
+        shared = metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        if metadata.st_uid not in owners or (shared and not metadata.st_mode & stat.S_ISVTX):
+            raise ValueError(
+                "Upload staging on this host hands the CLI a path, so other users must not "
+                f"be able to modify {directory} (it must be owned by you or root and not be "
+                "group- or world-writable unless sticky)"
+            )
+
+
+def _path_argument(
+    contract: LocalPathContract,
+    stage_name: str,
+    stage_fd: int,
+    name: str,
+    expected: os.stat_result,
+) -> str:
+    """Return the snapshot entry's path after checking it reaches the snapshot."""
+    _require_unmodifiable_by_others(contract.root)
+    stage_path = contract.root / stage_name
+    argument = str(stage_path / name)
+    if _file_identity(os.stat(stage_path, follow_symlinks=False)) != _file_identity(
+        os.fstat(stage_fd)
+    ) or _file_identity(os.stat(argument, follow_symlinks=False)) != _file_identity(expected):
+        raise ValueError("Upload staging directory changed while staging")
+    return argument
+
+
 @contextmanager
 def stage_upload_path(contract: LocalPathContract) -> Iterator[StagedUpload]:
     """Yield a private no-follow snapshot suitable for a short CLI upload.
 
     The snapshot contains only directories and hard links to regular,
-    single-link files discovered through descriptor-relative no-follow opens.
-    The CLI receives ``/dev/fd/<dirfd>/<name>`` and that directory descriptor is
-    explicitly inherited by its subprocess, closing validation/use path races.
+    single-link files discovered through descriptor-relative no-follow opens,
+    in a ``0700`` directory under the root. Where the host can walk an open
+    directory through ``/dev/fd`` (Linux), the CLI receives
+    ``/dev/fd/<dirfd>/<name>`` and inherits that descriptor, closing
+    validation/use path races. Elsewhere (macOS) it receives the snapshot's
+    path, which is only accepted when other users cannot modify the root or
+    the directories above it. Snapshots left behind by an interrupted upload
+    are removed first, so their hard links do not block this one.
     """
-    if not Path("/dev/fd").is_dir():
-        raise ValueError("Secure upload staging requires /dev/fd support")
-
     root_fd = _verified_root_fd(contract)
     stage_name: str | None = None
     stage_fd: int | None = None
     source_fd: int | None = None
     source_parent_fd: int | None = None
     try:
+        _remove_stale_stages(root_fd)
         source_fd, source_parent_fd, source_name = _open_source(root_fd, contract)
         source_stat = os.fstat(source_fd)
         _verify_source_identity(contract, source_stat)
@@ -364,10 +477,12 @@ def stage_upload_path(contract: LocalPathContract) -> Iterator[StagedUpload]:
             finally:
                 os.close(destination_fd)
 
-        argument = f"/dev/fd/{stage_fd}/{target_name}"
-        staged_stat = os.stat(argument, follow_symlinks=False)
+        staged_stat = os.stat(target_name, dir_fd=stage_fd, follow_symlinks=False)
         if not (stat.S_ISREG(staged_stat.st_mode) or stat.S_ISDIR(staged_stat.st_mode)):
             raise ValueError("Secure upload staging produced an invalid source")
+        argument = _descriptor_argument(stage_fd, target_name, staged_stat)
+        if argument is None:
+            argument = _path_argument(contract, stage_name, stage_fd, target_name, staged_stat)
         yield StagedUpload(argument=argument, directory_fd=stage_fd)
     finally:
         if source_fd is not None:
