@@ -1682,7 +1682,6 @@ class TestDestroyCloudFormationConvergence:
         stacks = ["gco-global", "gco-api-gateway", "gco-us-east-1"]
         with (
             patch.object(manager, "list_stacks", return_value=stacks),
-            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(manager, "cleanup_orphaned_bastions"),
             patch.object(manager, "_cleanup_backup_vault"),
             patch.object(manager, "_start_eks_sg_watchdog", side_effect=start_watchdog),
@@ -1725,7 +1724,6 @@ class TestDestroyCloudFormationConvergence:
         stacks = ["gco-global", "gco-api-gateway", "gco-us-east-1"]
         with (
             patch.object(manager, "list_stacks", return_value=stacks),
-            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(manager, "cleanup_orphaned_bastions"),
             patch.object(manager, "_cleanup_backup_vault"),
             patch.object(manager, "_start_eks_sg_watchdog", side_effect=start_watchdog),
@@ -1766,7 +1764,6 @@ class TestDestroyCloudFormationConvergence:
         ]
         with (
             patch.object(manager, "list_stacks", return_value=stacks),
-            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(manager, "cleanup_orphaned_bastions"),
             patch.object(manager, "_cleanup_backup_vault"),
             patch.object(manager, "_start_eks_sg_watchdog", side_effect=start_watchdog),

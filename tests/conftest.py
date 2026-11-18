@@ -336,8 +336,8 @@ def _no_real_mission_memory():
 # ============================================================================
 #
 # ``StackManager.destroy_orchestrated`` runs a set of boto3/AWS-CLI-backed
-# sweeps around the stack deletions: the image-registry preflight, the
-# ephemeral-bastion sweep (EC2 TerminateInstances), the backup-vault purge
+# sweeps around the stack deletions: the ephemeral-bastion sweep (EC2
+# TerminateInstances), the backup-vault purge
 # (Backup StopBackupJob and DeleteRecoveryPoint), the EKS security-group
 # watchdog and its final pass, the implicit log-group sweep (CloudWatch
 # DeleteLogGroup on every Lambda/EKS/Container Insights group the stacks
@@ -357,7 +357,6 @@ def _no_real_mission_memory():
 # methods was called still patch it locally, so their patch nests over this
 # one and wins.
 _DESTROY_CLEANUP_STUBS: dict[str, object] = {
-    "_image_registry_destroy_preflight": True,
     "cleanup_orphaned_bastions": 0,
     # The orchestrator reads the outcome (``resource_status``) to decide
     # whether a failed global-stack delete is retried, so stub a real one.
@@ -388,9 +387,6 @@ _DESTROY_CLEANUP_STUBS: dict[str, object] = {
 # a module-level test function name, or a test module name (its file stem);
 # a test unions the helpers of every key that applies to it.
 _DESTROY_CLEANUP_OWNERS: dict[str, frozenset[str]] = {
-    "TestImageRegistryDestroyPreflight": frozenset({"_image_registry_destroy_preflight"}),
-    # Drives destroy() into the real preflight against a cdk.json it writes.
-    "test_stacks_image_registry_destroy": frozenset({"_image_registry_destroy_preflight"}),
     "TestCleanupOrphanedBastions": frozenset({"cleanup_orphaned_bastions"}),
     "test_cleanup_orphaned_bastions_filters_stacks_and_parallelizes": frozenset(
         {"cleanup_orphaned_bastions"}

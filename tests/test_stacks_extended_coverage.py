@@ -4,12 +4,6 @@ Extended unit coverage for ``cli/stacks.py``.
 Targets the long tail of destroy-flow helpers and supporting AWS
 plumbing that the existing test suite doesn't reach:
 
-* ``_read_images_config`` — the cdk.json parser used by the destroy
-  preflight, including the missing-file and parse-error fallbacks.
-* ``_build_image_registry_inventory`` — aggregation of repo / tag /
-  size / reference counts via a mocked ``ImageManager``.
-* ``_image_registry_destroy_preflight`` — every refusal/confirmation
-  branch.
 * ``_stack_exists_in_cloudformation`` and ``_cloudformation_delete_stack``
   — the boto3-shaped helpers used to delete by-name when CDK can't.
 * ``_get_destroy_region`` — the deploy-region lookup.
@@ -40,7 +34,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
-from click import Abort
 
 
 @pytest.fixture
@@ -89,280 +82,6 @@ def test_conftest_aws_stubs_cover_this_modules_managers(manager: Any) -> None:
     ):
         assert isinstance(getattr(stacks.StackManager, helper), MagicMock), helper
     assert manager._cleanup_cluster_volumes() == {"deleted": [], "surviving": [], "errors": []}
-
-
-# ---------------------------------------------------------------------------
-# _read_images_config
-# ---------------------------------------------------------------------------
-
-
-class TestReadImagesConfig:
-    def test_no_cdk_json_returns_defaults(self, manager: Any) -> None:
-        with patch("cli.stacks._find_cdk_json", return_value=None):
-            result = manager._read_images_config()
-        assert result == {"removal_policy": "retain", "empty_on_delete": False}
-
-    def test_unparseable_cdk_json_returns_defaults(self, manager: Any, tmp_path: Any) -> None:
-        bad = tmp_path / "cdk.json"
-        bad.write_text("{ not valid")
-        with patch("cli.stacks._find_cdk_json", return_value=str(bad)):
-            result = manager._read_images_config()
-        assert result == {"removal_policy": "retain", "empty_on_delete": False}
-
-    def test_destroy_policy_round_trips(self, manager: Any, tmp_path: Any) -> None:
-        good = tmp_path / "cdk.json"
-        good.write_text(
-            json.dumps(
-                {
-                    "context": {
-                        "images": {
-                            "removal_policy": "destroy",
-                            "empty_on_delete": True,
-                        }
-                    }
-                }
-            )
-        )
-        with patch("cli.stacks._find_cdk_json", return_value=str(good)):
-            result = manager._read_images_config()
-        assert result == {"removal_policy": "destroy", "empty_on_delete": True}
-
-    def test_unknown_policy_coerced_to_retain(self, manager: Any, tmp_path: Any) -> None:
-        bad_policy = tmp_path / "cdk.json"
-        bad_policy.write_text(json.dumps({"context": {"images": {"removal_policy": "shred"}}}))
-        with patch("cli.stacks._find_cdk_json", return_value=str(bad_policy)):
-            result = manager._read_images_config()
-        assert result["removal_policy"] == "retain"
-
-
-# ---------------------------------------------------------------------------
-# _build_image_registry_inventory
-# ---------------------------------------------------------------------------
-
-
-class TestBuildImageRegistryInventory:
-    def test_aggregates_repos_and_tags(self, manager: Any) -> None:
-        fake_mgr = MagicMock()
-        fake_mgr.list_repos.return_value = [
-            {"name": "gco/svc-a"},
-            {"name": "gco/svc-b"},
-            {"name": "other/skipped"},
-        ]
-        fake_mgr.list_tags.side_effect = [
-            [
-                {"size_bytes": 100},
-                {"size_bytes": 200},
-            ],
-            [{"size_bytes": 300}],
-        ]
-        fake_mgr._collect_inference_image_refs.return_value = {"a", "b"}
-        fake_mgr._collect_recent_job_image_refs.return_value = {"x"}
-        with patch("cli.images.ImageManager", return_value=fake_mgr):
-            inventory = manager._build_image_registry_inventory()
-        assert inventory["repo_count"] == 3
-        assert inventory["tag_count"] == 3
-        assert inventory["total_bytes"] == 600
-        assert inventory["endpoint_refs"] == 2
-        assert inventory["job_refs"] == 1
-
-    def test_inference_ref_failure_does_not_break(self, manager: Any) -> None:
-        fake_mgr = MagicMock()
-        fake_mgr.list_repos.return_value = [{"name": "gco/svc"}]
-        fake_mgr.list_tags.return_value = []
-        fake_mgr._collect_inference_image_refs.side_effect = RuntimeError("boom")
-        fake_mgr._collect_recent_job_image_refs.side_effect = RuntimeError("boom")
-        with patch("cli.images.ImageManager", return_value=fake_mgr):
-            inventory = manager._build_image_registry_inventory()
-        assert inventory["endpoint_refs"] == 0
-        assert inventory["job_refs"] == 0
-
-    def test_list_tags_failure_skips_repo(self, manager: Any) -> None:
-        fake_mgr = MagicMock()
-        fake_mgr.list_repos.return_value = [
-            {"name": "gco/a"},
-            {"name": "gco/b"},
-        ]
-        fake_mgr.list_tags.side_effect = [RuntimeError("denied"), [{"size_bytes": 7}]]
-        fake_mgr._collect_inference_image_refs.return_value = set()
-        fake_mgr._collect_recent_job_image_refs.return_value = set()
-        with patch("cli.images.ImageManager", return_value=fake_mgr):
-            inventory = manager._build_image_registry_inventory()
-        assert inventory["tag_count"] == 1
-        assert inventory["total_bytes"] == 7
-
-    def test_list_repos_failure_returns_partial(self, manager: Any) -> None:
-        fake_mgr = MagicMock()
-        fake_mgr.list_repos.side_effect = RuntimeError("denied")
-        with patch("cli.images.ImageManager", return_value=fake_mgr):
-            inventory = manager._build_image_registry_inventory()
-        assert inventory["repo_count"] == 0
-
-
-# ---------------------------------------------------------------------------
-# _image_registry_destroy_preflight
-# ---------------------------------------------------------------------------
-
-
-class TestImageRegistryDestroyPreflight:
-    def test_retain_policy_short_circuits(self, manager: Any) -> None:
-        with patch.object(
-            manager,
-            "_read_images_config",
-            return_value={"removal_policy": "retain", "empty_on_delete": False},
-        ):
-            assert manager._image_registry_destroy_preflight(force=False) is True
-
-    def test_destroy_without_empty_refuses(self, manager: Any, capsys: Any) -> None:
-        with patch.object(
-            manager,
-            "_read_images_config",
-            return_value={"removal_policy": "destroy", "empty_on_delete": False},
-        ):
-            assert manager._image_registry_destroy_preflight(force=False) is False
-        captured = capsys.readouterr().out
-        assert "gco images cleanup --all" in captured
-
-    def test_destroy_with_empty_force_proceeds(self, manager: Any, capsys: Any) -> None:
-        inventory = {
-            "repo_count": 2,
-            "tag_count": 5,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-        ):
-            assert manager._image_registry_destroy_preflight(force=True) is True
-        captured = capsys.readouterr().out
-        assert "Image registry inventory" in captured
-
-    def test_destroy_non_tty_proceeds_without_prompt(self, manager: Any) -> None:
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-            patch("cli.stacks.sys.stdin") as mock_stdin,
-        ):
-            mock_stdin.isatty.return_value = False
-            assert manager._image_registry_destroy_preflight(force=False) is True
-
-    def test_destroy_tty_prompt_yes(self, manager: Any) -> None:
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-            patch("cli.stacks.sys.stdin") as mock_stdin,
-            patch("cli.stacks.confirm", return_value=True),
-        ):
-            mock_stdin.isatty.return_value = True
-            assert manager._image_registry_destroy_preflight(force=False) is True
-
-    def test_destroy_tty_prompt_no(self, manager: Any, capsys: Any) -> None:
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-            patch("cli.stacks.sys.stdin") as mock_stdin,
-            patch("cli.stacks.confirm", return_value=False),
-        ):
-            mock_stdin.isatty.return_value = True
-            assert manager._image_registry_destroy_preflight(force=False) is False
-        assert "Aborted" in capsys.readouterr().out
-
-    def test_destroy_tty_prompt_eof_aborts(self, manager: Any, capsys: Any) -> None:
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        with (
-            patch.object(
-                manager,
-                "_read_images_config",
-                return_value={"removal_policy": "destroy", "empty_on_delete": True},
-            ),
-            patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-            patch("cli.stacks.sys.stdin") as mock_stdin,
-            patch("cli.stacks.confirm", side_effect=Abort),
-        ):
-            mock_stdin.isatty.return_value = True
-            assert manager._image_registry_destroy_preflight(force=False) is False
-        assert "Aborted" in capsys.readouterr().out
-
-    def test_destroy_tty_machine_mode_keeps_inventory_and_prompt_on_stderr(
-        self,
-        manager: Any,
-        capsys: Any,
-    ) -> None:
-        import cli.output as output_module
-
-        inventory = {
-            "repo_count": 1,
-            "tag_count": 1,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        token = output_module._structured_emissions_var.set([])
-        try:
-            with (
-                patch.object(
-                    manager,
-                    "_read_images_config",
-                    return_value={"removal_policy": "destroy", "empty_on_delete": True},
-                ),
-                patch.object(manager, "_build_image_registry_inventory", return_value=inventory),
-                patch("cli.stacks.sys.stdin") as mock_stdin,
-                patch("cli.output.click.confirm", return_value=False) as click_confirm,
-            ):
-                mock_stdin.isatty.return_value = True
-                assert manager._image_registry_destroy_preflight(force=False) is False
-        finally:
-            output_module._structured_emissions_var.reset(token)
-
-        captured = capsys.readouterr()
-        assert captured.out == ""
-        assert "Image registry inventory" in captured.err
-        assert "Aborted" in captured.err
-        assert click_confirm.call_args.kwargs["err"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -2516,7 +2235,6 @@ class TestStrictOrchestrationPreflight:
         with (
             patch.object(manager, "list_stacks", return_value=stacks),
             patch.object(manager, "_resolve_strict_teardown_resources") as resolve,
-            patch.object(manager, "_image_registry_destroy_preflight") as image_preflight,
             patch.object(manager, "cleanup_orphaned_bastions") as bastions,
             pytest.raises(RuntimeError, match="target map is incomplete"),
         ):
@@ -2529,7 +2247,6 @@ class TestStrictOrchestrationPreflight:
             )
 
         resolve.assert_not_called()
-        image_preflight.assert_not_called()
         bastions.assert_not_called()
 
     def test_authoritative_absence_rejects_same_name_replacement(self, manager: Any) -> None:
@@ -2650,7 +2367,6 @@ class TestStrictTeardownHelpers:
                 "_resolve_strict_teardown_resources",
                 return_value={self._STACK_NAME: details},
             ),
-            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(manager, "cleanup_orphaned_bastions", return_value=1) as bastions,
             patch.object(manager, "_cleanup_backup_vault", return_value={"errors": []}),
             patch.object(manager, "destroy", return_value=True),
@@ -2710,7 +2426,6 @@ class TestStrictTeardownHelpers:
                 "_resolve_strict_teardown_resources",
                 return_value={self._STACK_NAME: details},
             ),
-            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(
                 manager,
                 "cleanup_orphaned_bastions",

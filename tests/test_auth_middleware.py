@@ -190,6 +190,20 @@ class TestUnauthenticatedPaths:
         assert "/metrics" in UNAUTHENTICATED_PATHS
         assert "/api/v1/health" in UNAUTHENTICATED_PATHS
 
+    def test_unauthenticated_paths_is_the_shared_fastapi_free_set(self):
+        """The middleware re-exports the set ConfigLoader checks GA's health path against."""
+        import subprocess
+        import sys
+
+        from gco import unauthenticated_paths
+
+        assert UNAUTHENTICATED_PATHS is unauthenticated_paths.UNAUTHENTICATED_PATHS
+        probe = (
+            "import sys, gco.unauthenticated_paths, gco.config.config_loader; "
+            "sys.exit(int(bool({'fastapi', 'starlette'} & set(sys.modules))))"
+        )
+        assert subprocess.run([sys.executable, "-c", probe], check=False).returncode == 0
+
     def test_api_health_bypasses_auth(self, app_with_middleware):
         """Test /api/v1/health bypasses authentication for GA health checks."""
         with (

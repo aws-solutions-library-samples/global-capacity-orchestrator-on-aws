@@ -319,6 +319,22 @@ class TestGlobalAcceleratorValidation:
         ga_config = config.get_global_accelerator_config()
         assert ga_config["name"] == "gco-accelerator"
 
+    @pytest.mark.parametrize("path", ["/api/v1/jobs", "/health", "/api/v1/health/", "/"])
+    def test_health_check_path_that_needs_authentication_fails(self, valid_context, path):
+        """A probe of an authenticated path gets 401, so GA would mark every Region unhealthy."""
+        valid_context["global_accelerator"]["health_check_path"] = path
+        with pytest.raises(ConfigValidationError) as raised:
+            ConfigLoader(MockApp(valid_context))
+        message = str(raised.value)
+        assert message.startswith(f"global_accelerator.health_check_path {path!r} needs request")
+        assert "/api/v1/health, /healthz, /metrics, /readyz" in message
+
+    @pytest.mark.parametrize("path", ["/healthz", "/readyz", "/api/v1/health?source=ga"])
+    def test_health_check_path_the_services_answer_unauthenticated(self, valid_context, path):
+        valid_context["global_accelerator"]["health_check_path"] = path
+        config = ConfigLoader(MockApp(valid_context))
+        assert config.get_global_accelerator_config()["health_check_path"] == path
+
     def test_invalid_health_check_path(self, valid_context):
         """Test health check path not starting with / raises error."""
         valid_context["global_accelerator"]["health_check_path"] = "api/health"
@@ -2221,6 +2237,39 @@ class TestBlockShapes:
             "global_accelerator.health_check_grace_period",
             "global_accelerator.health_check_timeout",
         ]
+
+    def test_images_destroy_and_lifecycle_keys_are_deprecated(self, valid_context):
+        """No stack creates or deletes the image repositories, so these never took effect."""
+        valid_context["images"] = {
+            "removal_policy": "destroy",
+            "empty_on_delete": True,
+            "lifecycle": {"keep_tagged": 20, "expire_untagged_days": 7},
+            "replication": {"enabled": True},
+        }
+        config = ConfigLoader(MockApp(valid_context))
+        deprecated = {w.split(" is deprecated")[0]: w for w in config.warnings if "images." in w}
+        assert sorted(deprecated) == [
+            "images.empty_on_delete",
+            "images.lifecycle",
+            "images.removal_policy",
+        ]
+        assert "gco images delete-repo <name> --force -y" in deprecated["images.removal_policy"]
+        assert "gco images lifecycle set" in deprecated["images.lifecycle"]
+
+    @pytest.mark.parametrize(
+        "images",
+        [
+            {"removal_policy": "shred"},
+            {"empty_on_delete": "false"},
+            {"lifecycle": "keep 20"},
+            {"lifecycle": {"keep_everything": True}},
+        ],
+    )
+    def test_deprecated_images_values_are_not_validated(self, valid_context, images):
+        """Ignored keys cannot fail the synth, whatever they hold."""
+        valid_context["images"] = images
+        config = ConfigLoader(MockApp(valid_context))
+        assert any(" is deprecated and ignored" in w for w in config.warnings)
 
     def test_unknown_top_level_keys_in_gco_style_warn(self, valid_context):
         valid_context.update(

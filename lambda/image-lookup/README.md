@@ -18,9 +18,13 @@ the deploy with `RepositoryAlreadyExistsException`.
 
 ## Trigger
 
-[CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) custom resource — invoked by the [CDK](https://docs.aws.amazon.com/cdk/v2/guide/home.html) `Provider`
-framework whenever the global stack creates, updates, or tears down an
-image registry repository.
+[CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html) custom resource handler. The global stack provisions the
+function and exports its ARN, but no stack declares a custom resource backed
+by it and no CLI command invokes it: `gco images init` / `build` / `push` /
+`mirror` create the `<project_name>/*` repositories through the ECR API, and
+no stack deletes them, so they survive a destroy. The cdk.json
+`images.removal_policy` and `images.empty_on_delete` settings, which this
+handler's delete path would have applied, are deprecated and ignored.
 
 ## How It Works
 

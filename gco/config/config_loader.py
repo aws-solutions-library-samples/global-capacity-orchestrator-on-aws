@@ -102,6 +102,7 @@ from gco.stacks.constants import (
     validated_regional_deployment_regions,
     validated_request_body_limit,
 )
+from gco.unauthenticated_paths import UNAUTHENTICATED_PATHS
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,22 @@ DEPRECATED_BLOCK_KEYS: dict[str, str] = {
     "global_accelerator.health_check_timeout": (
         "Global Accelerator endpoint groups have no probe timeout setting, so it never "
         "took effect. Remove it from cdk.json."
+    ),
+    "images.removal_policy": (
+        "no stack creates the <project_name>/* ECR repositories (the gco CLI creates them "
+        "through the ECR API), so destroying the stacks has never deleted them, whatever "
+        "this says. Remove it from cdk.json; delete a repository with "
+        "'gco images delete-repo <name> --force -y'."
+    ),
+    "images.empty_on_delete": (
+        "no stack deletes the <project_name>/* ECR repositories, so it never took effect "
+        "(it only gated a check before 'gco stacks destroy', which is gone). Remove it from "
+        "cdk.json; empty and delete a repository with 'gco images delete-repo <name> --force -y'."
+    ),
+    "images.lifecycle": (
+        "nothing applies it: 'gco images init' gives each new repository its own policy "
+        "(keep the 20 newest tagged images, expire untagged ones after 7 days). Remove it "
+        "from cdk.json; change a repository's policy with 'gco images lifecycle set'."
     ),
 }
 
@@ -277,8 +294,15 @@ BLOCK_KEYS: dict[str, frozenset[str]] = {
             "pending_requested_gpus",
         }
     ),
-    "images": frozenset({"removal_policy", "empty_on_delete", "lifecycle", "replication"}),
-    "images.lifecycle": frozenset({"keep_tagged", "expire_untagged_days"}),
+    "images": frozenset(
+        {
+            "replication",
+            # Deprecated (DEPRECATED_BLOCK_KEYS): warned about and ignored.
+            "removal_policy",
+            "empty_on_delete",
+            "lifecycle",
+        }
+    ),
     "images.replication": frozenset({"enabled", "destinations"}),
     "volcano_image_mirror": frozenset({"enabled", "ecr_namespace"}),
     "s3_access_logs": frozenset({"retention_days"}),
@@ -770,6 +794,85 @@ def _require_choice(path: str, value: object, choices: Iterable[str]) -> str:
     return value
 
 
+#: ``helm`` charts whose ``enabled`` toggle the regional stack ignores: the
+#: mandatory platform components, which always install. Lockstep with
+#: ``gco.stacks.regional_stack._MANDATORY_CHART_KEYS``.
+_MANDATORY_HELM_CHARTS = frozenset({"aws_load_balancer_controller", "keda"})
+
+#: What switching a ``helm`` chart off deletes besides its Helm release, for
+#: the charts whose uninstall first deletes custom resources cluster-wide
+#: (``CHART_CUSTOM_RESOURCE_API_GROUPS`` in lambda/helm-installer/handler.py).
+#: ``helm.argocd`` and ``helm.slurm`` never read a string as true, so their
+#: messages need none.
+_HELM_CHART_OFF_DELETES: dict[str, str] = {
+    "kueue": "every Kueue queue and workload object",
+    "crossplane": "every Crossplane composite resource with the resources it composed",
+}
+
+#: Enabled flags inside cdk.json blocks that the regional and global stacks
+#: read from the raw context instead of through a ConfigLoader getter, each
+#: with what switching it off deletes (``None``: nothing that holds data), for
+#: :func:`parse_block_flag`'s message. ConfigLoader validates each one and the
+#: stacks read each one with :func:`read_block_flag`, so both read a value the
+#: same way. Earlier releases read all of them by truthiness.
+STACK_BLOCK_FLAGS: dict[str, str | None] = {
+    "images.replication.enabled": None,
+    "queue_processor.enabled": None,
+    "drift_detection.enabled": "the drift-detection SNS topic and its subscriptions",
+    "mcp_server.enabled": None,
+    "volcano_image_mirror.enabled": None,
+    **{
+        f"helm.{chart}.enabled": (
+            f"the {chart} Helm release and {_HELM_CHART_OFF_DELETES[chart]}"
+            if chart in _HELM_CHART_OFF_DELETES
+            else f"the {chart} Helm release"
+        )
+        for chart in sorted(HELM_CHART_CONFIG_KEYS - _MANDATORY_HELM_CHARTS)
+    },
+}
+
+#: Flags of :data:`STACK_BLOCK_FLAGS` whose blocks have their own validators
+#: (gco/argocd_config.py, gco/slurm_config.py), which have always required a
+#: JSON boolean: a string there failed the synth instead of reading as true.
+_OWN_VALIDATOR_STACK_BLOCK_FLAGS = frozenset({"helm.argocd.enabled", "helm.slurm.enabled"})
+
+
+def _reported_by_config_loader(_message: str) -> None:
+    """The ``warn`` of the stacks' reads: ConfigLoader has reported the same value."""
+
+
+def read_block_flag(
+    block: object,
+    path: str,
+    *,
+    default: bool,
+    warn: Callable[[str], None] = _reported_by_config_loader,
+) -> bool:
+    """Read the :data:`STACK_BLOCK_FLAGS` flag at cdk.json ``path`` from its raw block.
+
+    ``block`` is the raw value at the parent path (``None`` when absent). An
+    absent block or key reads as ``default``; a present value goes through
+    :func:`parse_block_flag` with the arguments the loader validates it with.
+    The stacks keep the default ``warn``, because ConfigLoader has already
+    warned about a deprecated ``"true"`` string.
+
+    Raises:
+        ConfigValidationError: If ``block`` is not an object, or the flag is
+            neither a JSON boolean nor the string ``"true"``.
+    """
+    parent, _, key = path.rpartition(".")
+    fields = _object_or_empty(parent, block)
+    if key not in fields:
+        return default
+    return parse_block_flag(
+        fields[key],
+        path,
+        warn,
+        off_deletes=STACK_BLOCK_FLAGS[path],
+        read_by_truthiness=path not in _OWN_VALIDATOR_STACK_BLOCK_FLAGS,
+    )
+
+
 class ConfigLoader:
     """
     Loads and validates configuration from CDK context (cdk.json)
@@ -831,6 +934,28 @@ class ConfigLoader:
                 raise ConfigValidationError(f"tags.{name} must be a string, got {value!r}")
         self._warn_unknown_context_keys()
 
+    def _validate_stack_block_flags(self) -> None:
+        """Validate the enabled flags the stacks read from the raw context.
+
+        These are the :data:`STACK_BLOCK_FLAGS`: ``images.replication``,
+        ``queue_processor``, ``drift_detection``, ``mcp_server``,
+        ``volcano_image_mirror`` and the optional ``helm`` charts. Earlier
+        releases read them by truthiness, so
+        a string is never reinterpreted (:func:`parse_block_flag`): ``"true"``
+        reads as true with a deprecation warning, and every other string fails
+        with what to write instead. ``helm.argocd.enabled`` and
+        ``helm.slurm.enabled`` are left to their blocks' own validators, which
+        have always required a JSON boolean.
+
+        Raises:
+            ConfigValidationError: If one of the flags is neither a JSON
+                boolean nor the string ``"true"``.
+        """
+        for path in STACK_BLOCK_FLAGS:
+            if path not in _OWN_VALIDATOR_STACK_BLOCK_FLAGS:
+                parent = path.rpartition(".")[0]
+                read_block_flag(self._context_at(parent), path, default=False, warn=self._warn)
+
     def _warn_unknown_context_keys(self) -> None:
         """Warn about each top-level key in GCO's style that GCO does not read.
 
@@ -870,6 +995,8 @@ class ConfigLoader:
         """
         # Block shapes first, so no getter below reads a scalar as a block
         self._validate_block_shapes()
+        # The enabled flags the regional stack reads from the raw context
+        self._validate_stack_block_flags()
 
         # Validate required fields exist
         required_fields = [
@@ -1134,7 +1261,11 @@ class ConfigLoader:
           Global Accelerator API accepts (UpdateEndpointGroup rejects others).
         - ``health_check_threshold``: integer 1-10 (the API ThresholdCount
           range).
-        - ``health_check_path``: must start with ``/``.
+        - ``health_check_path``: must start with ``/`` and, without its query
+          string, be one of the paths the services answer without
+          authentication (:data:`gco.unauthenticated_paths.UNAUTHENTICATED_PATHS`):
+          a probe of any other path gets an authentication error, so Global
+          Accelerator would mark every Region unhealthy.
         - ``client_affinity``: NONE or SOURCE_IP, case-insensitive.
         - ``traffic_dial``: see :meth:`_validate_traffic_dial_config`.
 
@@ -1183,6 +1314,15 @@ class ConfigLoader:
         if not isinstance(path, str) or not path.startswith("/"):
             raise ConfigValidationError(
                 f"global_accelerator.health_check_path must start with '/', got {path!r}"
+            )
+        if path.partition("?")[0] not in UNAUTHENTICATED_PATHS:
+            raise ConfigValidationError(
+                f"global_accelerator.health_check_path {path!r} needs request authentication, "
+                "which a Global Accelerator health check cannot send, so every check would "
+                "fail and every Region would be marked unhealthy. Use a path the services "
+                "answer without authentication: "
+                + ", ".join(sorted(UNAUTHENTICATED_PATHS))
+                + " (the default is /api/v1/health)."
             )
 
         allowed_affinity = {"NONE", "SOURCE_IP"}

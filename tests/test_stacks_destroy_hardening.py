@@ -1665,7 +1665,6 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
 
         base_patches = [
             patch.object(StackManager, "list_stacks", return_value=stacks),
-            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(StackManager, "cleanup_orphaned_bastions", return_value=0),
             patch.object(
                 StackManager,
@@ -1827,7 +1826,6 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
 
         with (
             patch.object(StackManager, "list_stacks", return_value=["gco-global", "gco-us-east-1"]),
-            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(StackManager, "cleanup_orphaned_bastions", return_value=0),
             patch.object(StackManager, "_cleanup_backup_vault", return_value={"errors": []}),
             patch.object(StackManager, "_start_eks_sg_watchdog", return_value=MagicMock()),
@@ -1876,7 +1874,6 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
 
         with (
             patch.object(StackManager, "list_stacks", return_value=["gco-global", "gco-us-east-1"]),
-            patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(StackManager, "cleanup_orphaned_bastions", return_value=0),
             patch.object(StackManager, "_cleanup_backup_vault", return_value={"errors": []}),
             patch.object(StackManager, "_start_eks_sg_watchdog", return_value=MagicMock()),
@@ -2000,8 +1997,8 @@ class TestKeepControlPlaneTeardown:
 
     The global, API Gateway and monitoring stacks stay, the monitoring stack is
     first updated in place so it stops referencing the regional stacks, and the
-    sweeps that only make sense for a full teardown (image-registry preflight,
-    backup-vault purge, bastion IAM retirement, traffic-dial purge) never run.
+    sweeps that only make sense for a full teardown (backup-vault purge,
+    bastion IAM retirement, traffic-dial purge) never run.
     """
 
     _ALL_STACKS = [
@@ -2030,9 +2027,6 @@ class TestKeepControlPlaneTeardown:
         with ExitStack() as stack:
             stack.enter_context(
                 patch.object(StackManager, "list_stacks", return_value=list(self._ALL_STACKS))
-            )
-            preflight = stack.enter_context(
-                patch.object(StackManager, "_image_registry_destroy_preflight", return_value=True)
             )
             detach = stack.enter_context(
                 patch.object(
@@ -2085,7 +2079,6 @@ class TestKeepControlPlaneTeardown:
                 on_cleanup_complete=lambda name, details: cleanups.append((name, details)),
             )
         mocks = {
-            "preflight": preflight,
             "detach": detach,
             "bastions": bastions,
             "vault": vault,
@@ -2104,7 +2097,6 @@ class TestKeepControlPlaneTeardown:
         assert destroyed == ["gco-regional-api-us-east-1", "gco-us-east-1"]
         assert sorted(successful) == ["gco-regional-api-us-east-1", "gco-us-east-1"]
         mocks["detach"].assert_called_once_with()
-        mocks["preflight"].assert_not_called()
         mocks["vault"].assert_not_called()
         mocks["bastion_iam"].assert_not_called()
         mocks["dial"].assert_not_called()

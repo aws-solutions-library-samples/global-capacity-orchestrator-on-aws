@@ -5649,6 +5649,13 @@ the deployment type pass: 50, 100 or 200 for `PERSISTENT_1` (default 200), and
 `SCRATCH_2` file systems have no such setting, so `enable` writes none for them
 and refuses `--throughput`.
 
+`enable` writes the configuration its summary shows: an option you leave out
+is removed from the block it writes (`fsx_lustre`, or the Region's
+`fsx_lustre_regions` entry with `-r`), so an import path, export path or
+throughput written by an earlier run does not carry over, and the deprecated
+`node_group` key is removed. A key removed from a Region's entry falls back
+to the global block.
+
 #### `gco stacks valkey`
 
 Manage Valkey Serverless cache.

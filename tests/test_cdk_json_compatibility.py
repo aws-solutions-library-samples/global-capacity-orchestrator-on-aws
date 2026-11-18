@@ -51,4 +51,10 @@ def test_v8_23_0_deprecations_are_the_expected_keys() -> None:
     """Pins which v8.23.0 keys are deprecated, so a new deprecation is a reviewed change."""
     config = ConfigLoader(cdk.App(context=_context(FIXTURES / "v8.23.0.json")))
     deprecated = {warning.split(" is deprecated and ignored")[0] for warning in config.warnings}
-    assert deprecated == {"alb_config", "manifest_processor.image"}
+    assert deprecated == {
+        "alb_config",
+        "manifest_processor.image",
+        "images.removal_policy",
+        "images.empty_on_delete",
+        "images.lifecycle",
+    }

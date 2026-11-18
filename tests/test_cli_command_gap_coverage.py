@@ -844,6 +844,7 @@ def test_fsx_enable_confirmation_displays_and_persists_all_options(
             "auto_import_policy": "NEW_CHANGED_DELETED",
         },
         "us-west-2",
+        remove=["node_group"],
     )
 
 

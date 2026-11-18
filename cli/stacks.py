@@ -52,7 +52,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Collection, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -64,7 +64,6 @@ from types import FrameType
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypedDict
 
 from botocore.exceptions import ClientError
-from click import Abort
 
 from gco.lambda_shared_sources import LAMBDA_SHARED_SOURCE_TARGETS
 from gco.stacks.constants import (
@@ -74,8 +73,6 @@ from gco.stacks.constants import (
     validated_deployment_partition,
     validated_regional_deployment_regions,
 )
-
-from .output import confirm, interactive_echo
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-11-18T16:59:04Z
@@ -3055,19 +3052,6 @@ class StackManager:
         if strict_identity and authorize_stack is None:
             raise RuntimeError("Identity-fenced teardown requires an exact stack authorizer")
 
-        # Image-registry pre-destroy guards. Only fires for the global
-        # stack (where the registry lives) and only when the operator
-        # has explicitly chosen ``removal_policy: "destroy"``. The
-        # default ``retain`` posture is a no-op here. See
-        # ``_image_registry_destroy_preflight`` for the exact rules.
-        if (
-            stack_name is not None
-            and stack_name.endswith("-global")
-            and not all_stacks
-            and not self._image_registry_destroy_preflight(force=force)
-        ):
-            return False
-
         # Strict callers never enter CDK's name-based destroy or toggle-based
         # recovery paths. Analytics may first require one strict prepared
         # change set on the exact API stack to remove cross-stack imports.
@@ -3257,154 +3241,6 @@ class StackManager:
             return False
 
         return cdk_succeeded
-
-    # ------------------------------------------------------------------
-    # Image registry pre-destroy guards
-    # ------------------------------------------------------------------
-    def _read_images_config(self) -> dict[str, Any]:
-        """Read the ``images`` block from cdk.json with defaults applied.
-
-        Mirrors the parser in ``gco/stacks/global_stack.py`` so the CLI
-        can reason about the same fields without importing the CDK
-        module (which pulls aws_cdk and the full constructs surface).
-        Defaults stay aligned with the global-stack parser; any value
-        that fails validation (e.g. an unexpected ``removal_policy``)
-        is silently coerced to ``"retain"`` here so the CLI never blocks
-        on a typo — the actual deploy-time validation is the global
-        stack's responsibility.
-        """
-        import json
-
-        cdk_json_path = _find_cdk_json()
-        if not cdk_json_path:
-            return {
-                "removal_policy": "retain",
-                "empty_on_delete": False,
-            }
-        try:
-            with open(cdk_json_path, encoding="utf-8") as f:
-                ctx = json.load(f).get("context", {}) or {}
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.debug("Failed to read cdk.json for images config: %s", exc)
-            return {"removal_policy": "retain", "empty_on_delete": False}
-
-        raw = ctx.get("images") or {}
-        removal_policy = str(raw.get("removal_policy", "retain")).strip().lower()
-        if removal_policy not in ("retain", "destroy"):
-            removal_policy = "retain"
-        return {
-            "removal_policy": removal_policy,
-            "empty_on_delete": bool(raw.get("empty_on_delete", False)),
-        }
-
-    def _build_image_registry_inventory(self) -> dict[str, Any]:
-        """Aggregate repo / tag / size / reference counts for the registry.
-
-        Returns a dict shape suitable for printing to the operator. Best
-        effort: a missing ImageManager dependency or an AWS error
-        produces a partially-populated dict rather than raising.
-        """
-        inventory: dict[str, Any] = {
-            "repo_count": 0,
-            "tag_count": 0,
-            "total_bytes": 0,
-            "endpoint_refs": 0,
-            "job_refs": 0,
-        }
-        try:
-            from cli.images import ImageManager
-        except Exception as exc:
-            logger.debug("ImageManager import failed during preflight: %s", exc)
-            return inventory
-
-        try:
-            manager = ImageManager(config=self.config)
-            repos = manager.list_repos()
-            inventory["repo_count"] = len(repos)
-            # Repos this deployment owns live under ``<project_name>/`` (#139).
-            repo_prefix = f"{self.config.project_name}/"
-            for repo in repos:
-                repo_name = repo.get("name", "")
-                if not repo_name.startswith(repo_prefix):
-                    continue
-                short = repo_name.removeprefix(repo_prefix)
-                try:
-                    tags = manager.list_tags(short)
-                except Exception as exc:
-                    logger.debug("list_tags failed for %s: %s", repo_name, exc)
-                    continue
-                inventory["tag_count"] += len(tags)
-                for row in tags:
-                    size = row.get("size_bytes")
-                    if isinstance(size, int):
-                        inventory["total_bytes"] += size
-            try:
-                inventory["endpoint_refs"] = len(manager._collect_inference_image_refs())
-            except Exception as exc:
-                logger.debug("inference ref collection failed: %s", exc)
-            try:
-                inventory["job_refs"] = len(manager._collect_recent_job_image_refs())
-            except Exception as exc:
-                logger.debug("job ref collection failed: %s", exc)
-        except Exception as exc:
-            logger.debug("Image registry inventory failed: %s", exc)
-        return inventory
-
-    def _image_registry_destroy_preflight(self, *, force: bool) -> bool:
-        """Validate the image-registry destroy posture before invoking CFN.
-
-        Two rules:
-
-          1. ``removal_policy: "destroy"`` AND ``empty_on_delete: false``
-             → refuse with the literal helpful-error message pointing
-             the operator at ``gco images cleanup --all`` or at flipping
-             ``empty_on_delete: true``.
-
-          2. ``removal_policy: "destroy"`` AND ``empty_on_delete: true``
-             → print the inventory summary first. On a TTY the operator
-             is also prompted for confirmation; non-TTY runs proceed
-             (the operator presumably passed ``-y`` or is automating).
-
-        Returns True when the destroy may proceed, False when it has
-        been refused or declined.
-        """
-        cfg = self._read_images_config()
-        if cfg["removal_policy"] != "destroy":
-            return True
-
-        if not cfg["empty_on_delete"]:
-            print(
-                f"Repos under {self.config.project_name}/* are not empty and "
-                "empty_on_delete is false. Run 'gco images cleanup --all' "
-                "first, or set images.empty_on_delete: true in cdk.json."
-            )
-            return False
-
-        inventory = self._build_image_registry_inventory()
-        gib = inventory["total_bytes"] / (1024**3) if inventory["total_bytes"] else 0.0
-        interactive_echo("Image registry inventory before destroy:")
-        interactive_echo(f"  repos:            {inventory['repo_count']}")
-        interactive_echo(f"  tags:             {inventory['tag_count']}")
-        interactive_echo(f"  total size:       {gib:.2f} GiB")
-        interactive_echo(f"  referencing endpoints: {inventory['endpoint_refs']}")
-        interactive_echo(f"  recent job refs:  {inventory['job_refs']}")
-
-        # Already confirmed via -y, or non-interactive — proceed.
-        if force or not sys.stdin.isatty():
-            return True
-
-        try:
-            if confirm(
-                f"Destroy {self.config.project_name}-global and delete every "
-                f"{self.config.project_name}/* repo?",
-                default=False,
-            ):
-                return True
-        except Abort:
-            interactive_echo("Aborted.")
-            return False
-        interactive_echo("Aborted.")
-        return False
 
     @staticmethod
     def _stack_missing(exc: ClientError) -> bool:
@@ -5588,9 +5424,6 @@ class StackManager:
         def record_cleanup(name: str, details: dict[str, Any]) -> None:
             if on_cleanup_complete is not None:
                 on_cleanup_complete(name, details)
-
-        if not keep_control_plane and not self._image_registry_destroy_preflight(force=force):
-            return False, [], list(stacks)
 
         bastion_targets = {
             name: details for name, details in strict_resources.items() if details.get("vpc_id")
@@ -7866,14 +7699,17 @@ def get_fsx_config(region: str | None = None) -> dict[str, Any]:
     return _get_feature_config("fsx_lustre", _FSX_DEFAULTS, region)
 
 
-def update_fsx_config(settings: dict[str, Any], region: str | None = None) -> None:
+def update_fsx_config(
+    settings: dict[str, Any], region: str | None = None, *, remove: Iterable[str] = ()
+) -> None:
     """Update FSx for Lustre configuration in cdk.json.
 
     Args:
         settings: FSx settings to update
         region: Optional region for region-specific config. If None, updates global config.
+        remove: Keys to delete from the block written (see :func:`_update_feature_config`).
     """
-    _update_feature_config("fsx_lustre", settings, _FSX_DEFAULTS, region)
+    _update_feature_config("fsx_lustre", settings, _FSX_DEFAULTS, region, remove=remove)
 
 
 _PCS_DEFAULTS: dict[str, Any] = {
@@ -7995,14 +7831,23 @@ def _update_feature_config(
     settings: dict[str, Any],
     default_config: dict[str, Any],
     region: str | None = None,
+    *,
+    remove: Iterable[str] = (),
 ) -> None:
     """Update configuration for a toggleable feature in cdk.json.
+
+    A ``None`` in ``settings`` leaves that key as it is (``enabled`` excepted,
+    which is always written); a key in ``remove`` is deleted from the block
+    written, unless ``settings`` gives it a value. Deleting a key from a
+    region's overlay makes the region inherit the global block's value.
 
     Args:
         feature_key: The cdk.json context key (e.g. "valkey", "aurora_pgvector").
         settings: Settings to update.
         default_config: Default configuration values when the key is missing.
         region: Optional region for region-specific config.
+        remove: Keys to delete: settings a command leaves unset, so a value
+            written earlier does not linger, and deprecated keys.
     """
     cdk_json_path = _find_cdk_json()
     if not cdk_json_path:
@@ -8014,24 +7859,17 @@ def _update_feature_config(
         with open(cdk_json_path, encoding="utf-8") as f:
             cdk_config = json.load(f)
 
-        if "context" not in cdk_config:
-            cdk_config["context"] = {}
-
+        context = cdk_config.setdefault("context", {})
         if region:
-            region_key = f"{feature_key}_regions"
-            if region_key not in cdk_config["context"]:
-                cdk_config["context"][region_key] = {}
-            if region not in cdk_config["context"][region_key]:
-                cdk_config["context"][region_key][region] = {}
-            for key, value in settings.items():
-                if value is not None or key == "enabled":
-                    cdk_config["context"][region_key][region][key] = value
+            block = context.setdefault(f"{feature_key}_regions", {}).setdefault(region, {})
         else:
-            if feature_key not in cdk_config["context"]:
-                cdk_config["context"][feature_key] = {**default_config}
-            for key, value in settings.items():
-                if value is not None or key == "enabled":
-                    cdk_config["context"][feature_key][key] = value
+            block = context.setdefault(feature_key, {**default_config})
+        for key, value in settings.items():
+            if value is not None or key == "enabled":
+                block[key] = value
+        for key in remove:
+            if settings.get(key) is None:
+                block.pop(key, None)
 
         _atomic_write_bytes(
             cdk_json_path,

@@ -1030,7 +1030,6 @@ class TestOrchestrationStateMachines:
         with (
             patch.object(manager, "list_stacks", return_value=[STACK_NAME]),
             patch.object(manager, "_resolve_strict_teardown_resources", return_value={}),
-            patch.object(manager, "_image_registry_destroy_preflight", return_value=True),
             patch.object(manager, "cleanup_orphaned_bastions", return_value=0),
             patch.object(
                 manager,

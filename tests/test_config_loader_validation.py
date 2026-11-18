@@ -75,7 +75,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,
@@ -137,7 +137,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,
@@ -187,7 +187,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,
@@ -236,7 +236,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,
@@ -285,7 +285,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,
@@ -333,7 +333,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,
@@ -431,7 +431,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,
@@ -482,7 +482,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,
@@ -531,7 +531,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,
@@ -580,7 +580,7 @@ class TestConfigLoaderValidation:
                     "health_check_grace_period": 30,
                     "health_check_interval": 30,
                     "health_check_timeout": 5,
-                    "health_check_path": "/health",
+                    "health_check_path": "/api/v1/health",
                 },
                 "alb_config": {
                     "health_check_interval": 30,

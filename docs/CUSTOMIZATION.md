@@ -922,7 +922,7 @@ Global Accelerator uses HTTP health checks to determine if a region is healthy. 
 
 | Setting | Default | Description |
 |---|---|---|
-| `health_check_path` | `/api/v1/health` | HTTPS path GA uses to check ALB health. Must be in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` |
+| `health_check_path` | `/api/v1/health` | HTTPS path GA uses to check ALB health. Must be one of the paths the services answer without authentication (`UNAUTHENTICATED_PATHS` in `gco/unauthenticated_paths.py`: `/api/v1/health`, `/healthz`, `/readyz`, `/metrics`), optionally with a query string; any other path fails at synth |
 | `health_check_interval` | `30` | Seconds between health checks. The Global Accelerator API accepts only `10` or `30`; anything else fails at synth |
 | `health_check_threshold` | `3` | Consecutive health checks (1-10) before an endpoint flips healthy/unhealthy |
 | `client_affinity` | `NONE` | Listener client affinity. `NONE` spreads connections across endpoints for even load distribution; `SOURCE_IP` pins each client IP to the same endpoint for session stickiness |
@@ -935,7 +935,7 @@ them from existing configs at your convenience.
 
 The `/api/v1/health` endpoint returns 200 when the cluster is within resource thresholds and 503 when overloaded. This enables intelligent routing — GA automatically routes traffic away from overloaded regions.
 
-The health check path must be listed in `UNAUTHENTICATED_PATHS` in `gco/services/auth_middleware.py` so Global Accelerator can probe it without a per-request HMAC envelope. A CI test (`tests/test_health_check_coverage.py`) validates this automatically.
+The health check path must be listed in `UNAUTHENTICATED_PATHS` in `gco/unauthenticated_paths.py` (which the auth middleware in `gco/services/auth_middleware.py` applies) so Global Accelerator can probe it without a per-request HMAC envelope. Every other path answers the probe with an authentication error, which would mark every Region unhealthy, so the synth rejects it. A CI test (`tests/test_health_check_coverage.py`) also checks the ALB target-group paths.
 
 #### Client Affinity
 
@@ -1807,12 +1807,14 @@ The values follow the [`AWS::FSx::FileSystem` `LustreConfiguration` reference](h
 **Per-Region settings:** `fsx_lustre_regions` holds an object per Region whose
 keys override the global block for that Region only, for example
 `"fsx_lustre_regions": {"us-west-2": {"enabled": true}}`. `gco stacks fsx enable
--r <region>` writes such an entry.
+-r <region>` writes such an entry. `gco stacks fsx enable` writes the settings
+it shows and removes the ones you leave out (an earlier import path, export
+path or throughput, and the deprecated `node_group`) from the block it writes.
 
 **Removed setting:** earlier releases documented an `fsx_lustre.node_group`
 block, but nothing ever read it: FSx workloads run on the EKS Auto Mode node
 pools. A `node_group` key still validates, with a deprecation warning, and has
-no effect; delete it.
+no effect; delete it (`gco stacks fsx enable` removes it).
 
 ### Using FSx in Jobs
 
@@ -2538,8 +2540,12 @@ instead of failing halfway through a deploy.
   names it and says what to do; nothing reads its value. These are
   `alb_config`, `fsx_lustre.node_group`, `manifest_processor.image` (the
   stack builds that image itself),
-  `global_accelerator.health_check_grace_period` and
-  `global_accelerator.health_check_timeout`.
+  `global_accelerator.health_check_grace_period`,
+  `global_accelerator.health_check_timeout`, and `images.removal_policy`,
+  `images.empty_on_delete` and `images.lifecycle` (no stack creates or
+  deletes the `<project_name>/*` ECR repositories: the gco CLI creates them,
+  they survive a destroy, and `gco images init` applies its own lifecycle
+  policy).
 - The per-Region overlays (`fsx_lustre_regions`, `pcs_regions`,
   `hyperpod_regions`) are keyed by Region name. A name that is not an AWS
   Region fails; a real Region that is not in `deployment_regions.regional`
@@ -2557,24 +2563,36 @@ instead of failing halfway through a deploy.
 
 Write flags such as `enabled` as JSON booleans, `true` or `false`, without
 quotes. Earlier releases read the `enabled` flags of `fsx_lustre` (and its
-`fsx_lustre_regions` overlays), `valkey`, `aurora_pgvector` and
-`cluster_observability.mlflow` by truthiness, so a quoted `"false"`, like
-every non-empty string, turned the feature on. So that an upgrade never turns
-off a feature that has been running:
+`fsx_lustre_regions` overlays), `valkey`, `aurora_pgvector`,
+`cluster_observability.mlflow`, `queue_processor`, `drift_detection`,
+`mcp_server`, `volcano_image_mirror`, `images.replication` and the `helm`
+charts by truthiness, so a quoted `"false"`, like every non-empty string,
+turned the feature on. So that an upgrade never turns off a feature that has
+been running:
 
 - `"true"` in any case still reads as `true`, with a deprecation warning.
 - Any other string there, `"false"` included, fails validation with a message
   that says how earlier releases read it. Write `true` to keep the feature, or
-  `false` to remove it. For these storage features `false` deletes the
+  `false` to remove it. For the storage features `false` deletes the
   resource and its data (the file system, the cache, the database cluster,
   the MLflow run-metadata volume), so back up first (see
   [UPGRADING.md](UPGRADING.md#2-back-up-regional-data-to-the-cluster-shared-bucket)).
+  For a `helm` chart `false` uninstalls it, and for Kueue and Crossplane the
+  uninstall first deletes their custom resources across the cluster (Kueue's
+  queues and workload objects; Crossplane's composite resources and what they
+  composed). For `drift_detection` it deletes the alert topic and its
+  subscriptions.
 - Numbers, `null` and other types fail validation.
 
 `aurora_pgvector.deletion_protection` follows the same rule; a string there
-always failed the synth, so nothing has been running on one. Top-level keys
-that the CLI passes as `cdk --context key=value` strings, such as
-`gco:control-plane-only`, accept both `"true"` and `"false"`.
+always failed the synth, so nothing has been running on one.
+`helm.argocd.enabled` and `helm.slurm.enabled` take only JSON booleans, as
+they always did. The toggles of the mandatory charts
+(`helm.keda`, `helm.aws_load_balancer_controller`) are not read. Top-level
+keys that the CLI or the release harnesses pass as `cdk --context key=value`
+strings, such as `gco:control-plane-only` and
+`gco_live_validation_disable_efs_automatic_backups`, accept both `"true"` and
+`"false"`.
 
 ## Configuration Best Practices
 
@@ -2938,7 +2956,7 @@ Queue-processor-specific settings live in `cdk.json` under `queue_processor`. Va
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `true` | Set to `false` to disable the built-in consumer entirely |
+| `enabled` | `true` | Set to `false` to disable the built-in consumer entirely ([JSON boolean](#boolean-flags)) |
 | `polling_interval` | `10` | How often KEDA checks the SQS queue for new messages (seconds) |
 | `max_concurrent_jobs` | `10` | Maximum consumer pods running in parallel |
 | `messages_per_job` | `1` | KEDA target queue messages per active consumer Job (`queueLength`); each built-in worker still receives one message |
