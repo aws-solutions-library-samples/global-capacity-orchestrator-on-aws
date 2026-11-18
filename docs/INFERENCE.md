@@ -219,7 +219,13 @@ leadership for as long as it hangs. When the leader pod is stopped (a rollout
 or a node drain sends SIGTERM), a pass in progress finishes the endpoint it is
 reconciling and starts no other, and the monitor then releases the Lease, so
 the standby takes over on its next attempt (within one reconcile interval)
-instead of waiting for the Lease to expire.
+instead of waiting for the Lease to expire. The monitor's liveness probe fails
+once its loop has shown no progress (a finished iteration, leader or standby,
+or a step of a running pass) for the stall deadline plus one Lease duration
+(195 seconds at the default interval), so the kubelet restarts a wedged
+leader after the standby has taken over; a healthy standby stays live. The
+monitor exports both numbers as the `seconds_since_last_progress` and
+`liveness_window_seconds` gauges.
 
 Separately, the health monitor verifies that the ALB hostname stored in SSM
 matches the `gco-system/gco-gateway` Gateway status address. If cluster

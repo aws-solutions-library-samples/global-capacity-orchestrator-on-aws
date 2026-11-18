@@ -555,6 +555,10 @@ _LEADER_EPOCH_ANNOTATION = "gco.io/leader-epoch"
 # timed-out read up to three times), so one hung call stays within it.
 PASS_STALL_INTERVALS = 10
 
+# Reconcile intervals the leader Lease lasts without a renewal (45 s at the
+# default 15 s interval).
+LEASE_DURATION_INTERVALS = 3
+
 # How long a leader pass pauses between two endpoints so the event loop can run
 # the SIGTERM handler (see InferenceMonitor._stop_requested_at_safe_point).
 _SAFE_POINT_PAUSE_SECONDS = 0.001
@@ -1583,15 +1587,24 @@ class InferenceMonitor:
         # the Lease, so it expires and a standby takes over instead of this
         # process holding leadership for as long as the pass hangs.
         self._pass_stall_seconds = PASS_STALL_INTERVALS * max(1.0, float(reconcile_interval))
+        # A process whose loop has shown no progress (a finished iteration,
+        # leader or standby, or a step of a running pass) for longer than this
+        # is wedged, and its liveness probe fails. It is the stall deadline
+        # plus one Lease duration, so a wedged leader's standby has taken over
+        # before the kubelet restarts it (195 s at the default 15 s interval).
+        self._liveness_window_seconds = self._pass_stall_seconds + (
+            LEASE_DURATION_INTERVALS * max(1.0, float(reconcile_interval))
+        )
 
         # Metrics
         self._reconcile_count = 0
         self._errors_count = 0
         # Monotonic stamp of the last completed loop iteration (leader pass or
-        # standby lease check). Exported as seconds_since_last_pass so a loop
-        # that is wedged — not crashed, which the probes would catch — is
-        # visible; initialised at construction so the gauge exists before the
-        # first iteration and grows if the loop never starts.
+        # standby lease check). Exported as seconds_since_last_pass, and with
+        # the last pass step as seconds_since_last_progress, which the liveness
+        # probe reads, so a loop that is wedged rather than crashed restarts;
+        # initialised at construction so the gauges exist before the first
+        # iteration and grow if the loop never starts.
         self._last_loop_completed_at = time.monotonic()
         # Last progress of the running leader pass (see _pass_stall_seconds).
         self._pass_progress_at = self._last_loop_completed_at
@@ -1679,7 +1692,7 @@ class InferenceMonitor:
             renew_time = renew_time.replace(tzinfo=UTC)
         duration = getattr(lease.spec, "lease_duration_seconds", None)
         if not isinstance(duration, int) or isinstance(duration, bool) or duration <= 0:
-            duration = self.reconcile_interval * 3
+            duration = self.reconcile_interval * LEASE_DURATION_INTERVALS
         return bool((now - renew_time).total_seconds() >= int(duration))
 
     def _stamp_lease_epoch(self, lease: Any, epoch: str) -> None:
@@ -1695,7 +1708,7 @@ class InferenceMonitor:
         """Acquire/renew a Lease and establish one stable acquisition epoch."""
         coordination_v1 = client.CoordinationV1Api(self.api_client)
         now = datetime.now(UTC)
-        lease_duration = self.reconcile_interval * 3
+        lease_duration = self.reconcile_interval * LEASE_DURATION_INTERVALS
         try:
             lease = coordination_v1.read_namespaced_lease(
                 lease_name, self.namespace, _request_timeout=self._k8s_timeout
@@ -7637,13 +7650,25 @@ class InferenceMonitor:
     # ------------------------------------------------------------------
 
     def get_metrics(self) -> dict[str, Any]:
+        """The monitor's counters, exported as gauges at every scrape.
+
+        ``seconds_since_last_progress`` counts from the later of the last
+        finished loop iteration and the last step of a running pass, so a
+        standby (whose iterations keep finishing) and a long pass that keeps
+        progressing both stay below ``liveness_window_seconds``; the liveness
+        probe in ``32-inference-monitor.yaml`` fails once it is above.
+        """
+        now = time.monotonic()
         return {
             "cluster_id": self.cluster_id,
             "region": self.region,
             "running": self._running,
             "reconcile_count": self._reconcile_count,
             "errors_count": self._errors_count,
-            "seconds_since_last_pass": time.monotonic() - self._last_loop_completed_at,
+            "seconds_since_last_pass": now - self._last_loop_completed_at,
+            "seconds_since_last_progress": now
+            - max(self._last_loop_completed_at, self._pass_progress_at),
+            "liveness_window_seconds": self._liveness_window_seconds,
         }
 
 
