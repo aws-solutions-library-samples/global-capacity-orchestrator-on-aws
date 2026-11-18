@@ -5,10 +5,16 @@ One real synthesis of ``GCORegionalStack`` from the checked-in ``cdk.json``
 grant that used to be broader than its code path:
 
 * the kubectl-applier and Helm installer roles hold no ``sts:AssumeRole`` on
-  ``*`` and no ``eks:ListClusters``; their handlers call neither.
+  ``*`` and no ``eks:ListClusters``; their handlers call neither;
+* the role every ``AwsCustomResource`` runs as reads exactly the SSM
+  parameters those custom resources name (it used to hold ``ssm:GetParameter``
+  on ``*`` through the cluster-shared readers' ``ANY_RESOURCE`` policies, and
+  on ``parameter/<project>/*``).
 """
 
 from __future__ import annotations
+
+import json
 
 import aws_cdk as cdk
 import pytest
@@ -96,3 +102,34 @@ def test_manifest_and_chart_lambdas_hold_only_what_their_handlers_call(
     source = (LAMBDA_DIR / handler).read_text(encoding="utf-8")
     assert "assume_role" not in source
     assert "list_clusters" not in source
+
+
+def test_custom_resource_role_reads_exactly_the_parameters_its_readers_name(resources):
+    role_id = _role_id(resources, "AwsCustomResourceRole")
+    statements = _statements(resources, role_id)
+    granted = sorted(
+        json.dumps(resource, sort_keys=True)
+        for s in statements
+        if "ssm:GetParameter" in _as_list(s["Action"])
+        for resource in _as_list(s["Resource"])
+    )
+    creates = [r["Properties"]["Create"] for r in resources.values() if r["Type"] == "Custom::AWS"]
+    # Calls rendered with tokens (the addon updates) are joins; none reads SSM.
+    assert not [c for c in creates if not isinstance(c, str) and "getParameter" in json.dumps(c)]
+    read = sorted(
+        json.dumps(
+            f"arn:aws:ssm:{call['region']}:123456789012:parameter{call['parameters']['Name']}"
+        )
+        for create in creates
+        if isinstance(create, str)
+        for call in [json.loads(create)]
+        if (call["service"], call["action"]) == ("SSM", "getParameter")
+    )
+    assert len(read) == 6  # endpoint group, backend TLS, 3 cluster-shared, model bucket
+    assert granted == read
+    # No custom resource brings its own (ANY_RESOURCE) policy any more.
+    assert not [
+        lid
+        for lid, r in resources.items()
+        if r["Type"] == "AWS::IAM::Policy" and "CustomResourcePolicy" in lid
+    ]

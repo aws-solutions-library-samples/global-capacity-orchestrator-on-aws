@@ -1424,18 +1424,16 @@ class GCORegionalStack(Stack):
         replicate by the time any ``AwsCustomResource`` actually fires —
         the race disappears entirely.
 
-        This method creates the role with the statements we can compute
+        This method creates the role with the one statement we can compute
         without a cluster reference (EKS ``UpdateAddon`` / ``DescribeAddon``
-        scoped to this cluster, and SSM ``GetParameter`` for the endpoint
-        group ARN). ``iam:PassRole`` statements for individual addon
-        roles (EFS CSI, FSx CSI, CloudWatch Observability) are appended
-        by each ``_create_*_addon`` method after the corresponding IRSA
-        role has been created, so every PassRole ``resources=`` list
-        stays precise (no wildcards) and cdk-nag stays happy.
+        scoped to this cluster). Every other statement is appended next to
+        the custom resource that needs it, each on an exact ARN: an
+        ``ssm:GetParameter`` per global-region parameter a reader resolves
+        (``_grant_custom_resource_parameter_read``), and the ``iam:PassRole``
+        statements for individual addon roles (EFS CSI, FSx CSI, CloudWatch
+        Observability), appended by each ``_create_*_addon`` method after the
+        corresponding IRSA role has been created.
         """
-        project_name = self.config.get_project_name()
-        global_region = self.config.get_global_region()
-
         self.aws_custom_resource_role = iam.Role(
             self,
             "AwsCustomResourceRole",
@@ -1468,41 +1466,15 @@ class GCORegionalStack(Stack):
             )
         )
 
-        # SSM GetParameter — used by the GetEndpointGroupArn custom
-        # resource in _create_ga_registration_lambda to read the ARN of
-        # the Global Accelerator endpoint group published by the global
-        # stack during its deploy.
-        self.aws_custom_resource_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["ssm:GetParameter"],
-                resources=[
-                    f"arn:{self.partition}:ssm:{global_region}:{self.account}:"
-                    f"parameter/{project_name}/*"
-                ],
-            )
-        )
-
-        # cdk-nag suppressions: the two wildcard-bearing ARNs above are
-        # intentional and both scoped as tightly as AWS IAM permits.
-        #
-        # - The ``eks:UpdateAddon`` / ``eks:DescribeAddon`` statement uses
-        #   ``addon/<cluster>/*`` as its resource because the same shared
-        #   role is consumed by three different updateAddon custom
-        #   resources (EFS CSI, FSx CSI, CloudWatch Observability). Each
-        #   addon has its own ARN and we'd otherwise need three separate
-        #   statements that each grant access to a known addon name. The
-        #   wildcard is scoped to a single cluster in a single region in
-        #   a single account — it cannot be used against any addon
-        #   belonging to a different cluster or a different service.
-        #
-        # - The ``ssm:GetParameter`` statement uses
-        #   ``parameter/<project>/*`` because the exact parameter name
-        #   (``endpoint-group-<region>-arn``) is only known at Global
-        #   Accelerator registration time and the endpoint path
-        #   structure is ``<project>/<parameter>``. Scoping to the
-        #   project prefix restricts access to parameters owned by this
-        #   project only.
+        # cdk-nag: the ``eks:UpdateAddon`` / ``eks:DescribeAddon`` statement
+        # uses ``addon/<cluster>/*`` as its resource because the same shared
+        # role is consumed by three different updateAddon custom resources
+        # (EFS CSI, FSx CSI, CloudWatch Observability). Each addon has its
+        # own ARN and we'd otherwise need three separate statements that each
+        # grant access to a known addon name. The wildcard is scoped to a
+        # single cluster in a single region in a single account — it cannot
+        # be used against any addon belonging to a different cluster or a
+        # different service.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -1512,14 +1484,11 @@ class GCORegionalStack(Stack):
                     "id": "AwsSolutions-IAM5",
                     "reason": (
                         "Scoped to a single EKS cluster's addons "
-                        "(addon/<cluster>/*) and this project's SSM "
-                        "parameters (parameter/<project>/*). Both wildcards "
-                        "are as tight as AWS IAM permits: addon names and "
-                        "parameter names are not known at stack synthesis "
-                        "time because the addons are created later in the "
-                        "same stack and the GA endpoint group ARN is "
-                        "published by a separate stack during deploy. The "
-                        "shared role pattern itself is deliberate — see "
+                        "(addon/<cluster>/*): the three updateAddon custom "
+                        "resources share this role and the addons are created "
+                        "later in the same stack. Every SSM read on the role "
+                        "names its exact parameter ARN. The shared role pattern "
+                        "itself is deliberate — see "
                         "_create_aws_custom_resource_role docstring for why "
                         "we pre-create instead of letting CDK auto-generate "
                         "per-CR roles."
@@ -1527,11 +1496,29 @@ class GCORegionalStack(Stack):
                     "appliesTo": [
                         f"Resource::arn:<AWS::Partition>:eks:{self.deployment_region}"
                         f":<AWS::AccountId>:addon/{self.cluster_config.cluster_name}/*",
-                        f"Resource::arn:<AWS::Partition>:ssm:{global_region}"
-                        f":<AWS::AccountId>:parameter/{project_name}/*",
                     ],
                 },
             ],
+        )
+
+    def _grant_custom_resource_parameter_read(self, parameter_name: str) -> None:
+        """Let the shared custom-resource role read one global-region parameter.
+
+        Every ``AwsCustomResource`` that calls ``SSM getParameter`` runs as
+        ``aws_custom_resource_role`` and reads a parameter another stack
+        publishes in the global region under a name known at synthesis, so
+        each reader grants itself exactly that ARN instead of the role
+        holding a wildcard over the project's (or every) parameter.
+        """
+        self.aws_custom_resource_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:{self.partition}:ssm:{self.config.get_global_region()}:"
+                    f"{self.account}:parameter{parameter_name}"
+                ],
+            )
         )
 
     def _resolve_backend_tls_certificate_arn(self) -> str:
@@ -1540,13 +1527,14 @@ class GCORegionalStack(Stack):
         The certificate manager publishes one fixed ARN per workload region.
         The regional Ingress consumes the token directly, which creates a
         CloudFormation dependency ensuring the certificate exists before the
-        HTTPS listener is reconciled. The shared custom-resource role is
-        already restricted to this project's SSM namespace.
+        HTTPS listener is reconciled. The shared custom-resource role reads
+        exactly this parameter.
         """
         project_name = self.config.get_project_name()
         parameter_name = backend_tls_certificate_arn_parameter_name(
             project_name, self.deployment_region
         )
+        self._grant_custom_resource_parameter_read(parameter_name)
         reader = cr.AwsCustomResource(
             self,
             "GetBackendTlsCertificateArn",
@@ -3419,14 +3407,13 @@ class GCORegionalStack(Stack):
             :class:`SharedBucketIdentity` with ``name``, ``arn``, and
             ``region`` populated as CDK tokens that resolve at deploy time.
         """
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
         global_region = self.config.get_global_region()
         cluster_shared_prefix = cluster_shared_ssm_parameter_prefix(self.config.get_project_name())
         resolved: dict[str, str] = {}
 
         for suffix in ("name", "arn", "region"):
             parameter_name = f"{cluster_shared_prefix}/{suffix}"
+            self._grant_custom_resource_parameter_read(parameter_name)
             read_cr = cr.AwsCustomResource(
                 self,
                 f"ReadClusterSharedBucket{suffix.capitalize()}",
@@ -3444,43 +3431,12 @@ class GCORegionalStack(Stack):
                     region=global_region,
                     physical_resource_id=cr.PhysicalResourceId.of(f"cluster-shared-{suffix}"),
                 ),
-                # Cross-region SSM GetParameter doesn't support resource-level
-                # scoping cleanly — the principal evaluating the call lives in
-                # this stack's region but the parameter lives in the global
-                # region. ANY_RESOURCE is the AWS-documented escape hatch; the
-                # resulting AwsSolutions-IAM5 nag finding is suppressed in a
-                # scoped add_resource_suppressions call below.
-                policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
-                    resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
-                ),
+                # The parameter's ARN is fully known (global region, this
+                # account, a literal name), so the shared role's grant above
+                # names it exactly; a cross-region read needs nothing more.
+                role=self.aws_custom_resource_role,
             )
-
-            # Scoped suppression: the CR policy is Resource::* because the
-            # SSM parameter lives in the global region (cross-region calls
-            # don't support resource-level scoping cleanly). The action is
-            # fixed to ssm:GetParameter and the parameter Name is fixed to
-            # a literal string, so the wildcard can only ever read one
-            # parameter.
-            acknowledge_nag_findings(
-                read_cr,
-                [
-                    {
-                        "id": "AwsSolutions-IAM5",
-                        "reason": (
-                            "Cross-region ssm:GetParameter for "
-                            f"{parameter_name} in the global region. The "
-                            "AwsCustomResource SDK-call policy is scoped to "
-                            "a single fixed action (ssm:GetParameter) with "
-                            "a fixed parameter Name — the Resource: * is "
-                            "the CDK-documented escape hatch because the "
-                            "parameter ARN is not known to the calling "
-                            "principal's region. Effective blast radius: "
-                            "one parameter."
-                        ),
-                        "appliesTo": ["Resource::*"],
-                    },
-                ],
-            )
+            read_cr.node.add_dependency(self.aws_custom_resource_role)
 
             resolved[suffix] = read_cr.get_response_field("Parameter.Value")
 
@@ -3588,6 +3544,7 @@ class GCORegionalStack(Stack):
         project_name = self.config.get_project_name()
         global_region = self.config.get_global_region()
         parameter_name = f"/{project_name}/model-bucket-name"
+        self._grant_custom_resource_parameter_read(parameter_name)
         reader = cr.AwsCustomResource(
             self,
             "ReadModelBucketName",
@@ -5108,6 +5065,9 @@ class GCORegionalStack(Stack):
         self.endpoint_group_arn: str | None = None
         if self.global_accelerator_enabled:
             global_region = self.config.get_global_region()
+            self._grant_custom_resource_parameter_read(
+                f"/{project_name}/endpoint-group-{self.deployment_region}-arn"
+            )
             get_endpoint_group_arn = cr.AwsCustomResource(
                 self,
                 "GetEndpointGroupArn",
