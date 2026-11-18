@@ -121,6 +121,11 @@ DEPRECATED_CONTEXT_KEYS: dict[str, str] = {
 #: with what to do instead. Like :data:`DEPRECATED_CONTEXT_KEYS` they still
 #: validate, with a warning, and nothing reads them.
 DEPRECATED_BLOCK_KEYS: dict[str, str] = {
+    "manifest_processor.image": (
+        "nothing reads it: the regional stack builds the manifest processor image from "
+        "dockerfiles/Dockerfile.manifest-processor and deploys it from ECR. Remove it "
+        "from cdk.json."
+    ),
     "global_accelerator.health_check_grace_period": (
         "Global Accelerator endpoint groups have no grace period, so it never took "
         "effect. Remove it from cdk.json."
@@ -219,7 +224,7 @@ BLOCK_KEYS: dict[str, frozenset[str]] = {
     "waf": frozenset({"per_ip_rate_limit"}),
     "manifest_processor": frozenset(
         {
-            "image",
+            "image",  # deprecated (DEPRECATED_BLOCK_KEYS)
             "replicas",
             "resource_limits",
             "autoscaling",
@@ -1265,12 +1270,7 @@ class ConfigLoader:
         if not mp_config:
             raise ConfigValidationError("manifest_processor configuration is required")
 
-        required_fields = [
-            "image",
-            "replicas",
-            "resource_limits",
-        ]
-        for field in required_fields:
+        for field in ("replicas", "resource_limits"):
             if field not in mp_config:
                 raise ConfigValidationError(f"manifest_processor.{field} is required")
 
@@ -2592,13 +2592,13 @@ class ConfigLoader:
           allowed_kinds). Pulled in verbatim so the REST path reads the same
           policy the SQS queue processor enforces.
 
-        Note: The 'image' field is a placeholder default. In practice, the actual
-        image is built from dockerfiles/Dockerfile.manifest-processor and pushed
-        to ECR during CDK deployment. The {{MANIFEST_PROCESSOR_IMAGE}} placeholder
-        in manifests is replaced with the ECR image URI.
+        There is no image setting: the regional stack builds the image from
+        dockerfiles/Dockerfile.manifest-processor, pushes it to ECR, and
+        replaces the {{MANIFEST_PROCESSOR_IMAGE}} placeholder in the manifests
+        with its URI. A ``manifest_processor.image`` key, which earlier
+        releases required but never read, is reported as deprecated.
         """
         default_config = {
-            "image": "gco/manifest-processor:latest",  # Placeholder, replaced by ECR image
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
             "autoscaling": dict(_MANIFEST_PROCESSOR_AUTOSCALING_DEFAULTS),

@@ -57,7 +57,6 @@ def minimal_context() -> dict:
         "kubernetes_version": "1.37",
         "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 80, "gpu_threshold": -1},
         "manifest_processor": {
-            "image": "gco/manifest-processor:latest",
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
         },
@@ -101,7 +100,6 @@ def valid_context():
             "tls_proxy_cpu_target_utilization_percentage": 70,
         },
         "manifest_processor": {
-            "image": "gco/manifest-processor:latest",
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
             "validation_enabled": True,
@@ -396,6 +394,26 @@ class TestGlobalAcceleratorValidation:
         app = MockApp(valid_context)
         with pytest.raises(ConfigValidationError, match="client_affinity must be one of"):
             ConfigLoader(app)
+
+
+class TestManifestProcessorImage:
+    """manifest_processor.image was required but never read: deprecated, no longer required."""
+
+    def test_absent_image_is_valid(self, valid_context):
+        assert "image" not in valid_context["manifest_processor"]
+        config = ConfigLoader(MockApp(valid_context))
+        assert not [w for w in config.warnings if "manifest_processor.image" in w]
+        assert "image" not in config.get_manifest_processor_config()
+
+    def test_an_image_key_warns_and_is_ignored(self, valid_context):
+        valid_context["manifest_processor"]["image"] = "example.com/anything:1"
+        config = ConfigLoader(MockApp(valid_context))
+        assert [w for w in config.warnings if w.startswith("manifest_processor.image")] == [
+            "manifest_processor.image is deprecated and ignored: nothing reads it: the regional "
+            "stack builds the manifest processor image from "
+            "dockerfiles/Dockerfile.manifest-processor and deploys it from ECR. Remove it from "
+            "cdk.json."
+        ]
 
 
 class TestPendingThresholdDefaults:

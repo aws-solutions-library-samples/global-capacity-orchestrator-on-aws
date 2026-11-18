@@ -2533,7 +2533,8 @@ instead of failing halfway through a deploy.
   default. `_comment*` keys are allowed in every block.
 - A key that no longer takes effect still validates, with a warning that
   names it and says what to do; nothing reads its value. These are
-  `alb_config`, `fsx_lustre.node_group`,
+  `alb_config`, `fsx_lustre.node_group`, `manifest_processor.image` (the
+  stack builds that image itself),
   `global_accelerator.health_check_grace_period` and
   `global_accelerator.health_check_timeout`.
 - A top-level key in GCO's `snake_case` style that GCO does not read draws a

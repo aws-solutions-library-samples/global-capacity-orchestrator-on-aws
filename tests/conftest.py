@@ -688,7 +688,6 @@ def valid_cdk_context():
             "unhealthy_threshold": 2,
         },
         "manifest_processor": {
-            "image": "gco/manifest-processor:latest",
             "replicas": 3,
             "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
         },

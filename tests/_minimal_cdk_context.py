@@ -20,7 +20,6 @@ _MINIMAL_CONTEXT: dict[str, Any] = {
     "kubernetes_version": "1.37",
     "resource_thresholds": {"cpu_threshold": 80, "memory_threshold": 80, "gpu_threshold": -1},
     "manifest_processor": {
-        "image": "gco/manifest-processor:latest",
         "replicas": 3,
         "resource_limits": {"cpu": "1000m", "memory": "2Gi"},
     },
