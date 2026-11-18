@@ -206,6 +206,15 @@ reconciles images and replica counts, and reports per-region readiness or
 errors to DynamoDB. When `model_source` is set, the Deployment includes an init
 container that syncs model weights from S3 to regional EFS.
 
+One monitor pod per Region reconciles at a time, holding the
+`inference-monitor-leader` Lease (three reconcile intervals long, renewed every
+interval while a pass runs); the other replica stands by. Every Kubernetes call
+the monitor makes is bounded by `K8S_API_TIMEOUT` (default 30 seconds per
+attempt), and a pass that finishes no endpoint for ten reconcile intervals
+(150 seconds at the default 15) stops renewing the Lease, so a wedged leader
+hands over to the standby within one more Lease duration instead of holding
+leadership for as long as it hangs.
+
 Separately, the health monitor verifies that the ALB hostname stored in SSM
 matches the `gco-system/gco-gateway` Gateway status address. If cluster
 recreation changes the ALB, SSM is refreshed so the regional VPC proxy and

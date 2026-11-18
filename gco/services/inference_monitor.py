@@ -570,6 +570,12 @@ _LIFECYCLE_ANNOTATION = "gco.io/lifecycle-id"
 _REGION_GENERATION_ANNOTATION = "gco.io/region-generation"
 _LEADER_EPOCH_ANNOTATION = "gco.io/leader-epoch"
 
+# Reconcile intervals a leader pass may go without finishing an endpoint before
+# the monitor stops renewing its Lease (150 s at the default 15 s interval).
+# Every Kubernetes call is bounded by K8S_API_TIMEOUT (30 s; urllib3 retries a
+# timed-out read up to three times), so one hung call stays within it.
+PASS_STALL_INTERVALS = 10
+
 # The endpoint an object belongs to, on the metadata of every object the
 # monitor creates (never on a pod template, where adding it would roll pods).
 # Object names are derived from endpoint names without reserved suffixes, so
@@ -1524,6 +1530,12 @@ class InferenceMonitor:
         # tell whether an unlabelled object's name is another endpoint's too.
         self._endpoint_names: frozenset[str] = frozenset()
 
+        # A leader pass that finishes no endpoint for this long is wedged (a
+        # call that never returns, say). The renewal thread then stops renewing
+        # the Lease, so it expires and a standby takes over instead of this
+        # process holding leadership for as long as the pass hangs.
+        self._pass_stall_seconds = PASS_STALL_INTERVALS * max(1.0, float(reconcile_interval))
+
         # Metrics
         self._reconcile_count = 0
         self._errors_count = 0
@@ -1533,6 +1545,8 @@ class InferenceMonitor:
         # visible; initialised at construction so the gauge exists before the
         # first iteration and grows if the loop never starts.
         self._last_loop_completed_at = time.monotonic()
+        # Last progress of the running leader pass (see _pass_stall_seconds).
+        self._pass_progress_at = self._last_loop_completed_at
 
     # ------------------------------------------------------------------
     # Reconciliation loop
@@ -1607,7 +1621,9 @@ class InferenceMonitor:
         now = datetime.now(UTC)
         lease_duration = self.reconcile_interval * 3
         try:
-            lease = coordination_v1.read_namespaced_lease(lease_name, self.namespace)
+            lease = coordination_v1.read_namespaced_lease(
+                lease_name, self.namespace, _request_timeout=self._k8s_timeout
+            )
             spec = present(lease.spec, "lease.spec")
             current_holder = spec.holder_identity
             expired = self._lease_is_expired(lease, now)
@@ -1638,7 +1654,9 @@ class InferenceMonitor:
             spec.renew_time = now
             spec.lease_duration_seconds = lease_duration
             self._stamp_lease_epoch(lease, epoch)
-            coordination_v1.replace_namespaced_lease(lease_name, self.namespace, lease)
+            coordination_v1.replace_namespaced_lease(
+                lease_name, self.namespace, lease, _request_timeout=self._k8s_timeout
+            )
             self._lease_name = lease_name
             self._lease_holder = holder
             self._leadership_lost.clear()
@@ -1661,7 +1679,9 @@ class InferenceMonitor:
                     ),
                 )
                 try:
-                    coordination_v1.create_namespaced_lease(self.namespace, lease)
+                    coordination_v1.create_namespaced_lease(
+                        self.namespace, lease, _request_timeout=self._k8s_timeout
+                    )
                 except ApiException:
                     return False
                 self._leader_epoch = epoch
@@ -1688,7 +1708,9 @@ class InferenceMonitor:
         coordination_v1 = client.CoordinationV1Api()
         now = datetime.now(UTC)
         try:
-            lease = coordination_v1.read_namespaced_lease(lease_name, self.namespace)
+            lease = coordination_v1.read_namespaced_lease(
+                lease_name, self.namespace, _request_timeout=self._k8s_timeout
+            )
             spec = present(lease.spec, "lease.spec")
             if (
                 spec.holder_identity != holder
@@ -1697,15 +1719,37 @@ class InferenceMonitor:
             ):
                 return False
             spec.renew_time = now
-            coordination_v1.replace_namespaced_lease(lease_name, self.namespace, lease)
+            coordination_v1.replace_namespaced_lease(
+                lease_name, self.namespace, lease, _request_timeout=self._k8s_timeout
+            )
             return True
         except Exception:
             logger.warning("Leader Lease renewal failed", exc_info=True)
             return False
 
+    def _mark_pass_progress(self) -> None:
+        """Record that the running leader pass is still making progress."""
+        self._pass_progress_at = time.monotonic()
+
     def _lease_renewal_loop(self, stop_event: threading.Event) -> None:
+        """Renew the Lease each interval while the pass progresses.
+
+        Once the pass has made no progress for ``_pass_stall_seconds`` the
+        loop stops renewing and marks leadership lost: the Lease expires and a
+        standby takes over, and a pass that later resumes is fenced at its next
+        mutation.
+        """
         interval = max(1.0, float(self.reconcile_interval))
         while not stop_event.wait(interval):
+            stalled_for = time.monotonic() - self._pass_progress_at
+            if stalled_for > self._pass_stall_seconds:
+                logger.error(
+                    "Reconcile pass made no progress for %.0fs; no longer renewing the "
+                    "leader Lease so a standby can take over",
+                    stalled_for,
+                )
+                self._leadership_lost.set()
+                return
             if not self._renew_current_lease():
                 self._leadership_lost.set()
                 return
@@ -1713,6 +1757,7 @@ class InferenceMonitor:
     @contextlib.contextmanager
     def _renewing_leadership(self) -> Iterator[None]:
         """Renew the Lease outside the asyncio loop while one pass is running."""
+        self._mark_pass_progress()
         stop_event = threading.Event()
         renewal = threading.Thread(
             target=self._lease_renewal_loop,
@@ -1736,7 +1781,9 @@ class InferenceMonitor:
             return
         coordination_v1 = client.CoordinationV1Api()
         try:
-            lease = coordination_v1.read_namespaced_lease(self._lease_name, self.namespace)
+            lease = coordination_v1.read_namespaced_lease(
+                self._lease_name, self.namespace, _request_timeout=self._k8s_timeout
+            )
         except Exception as error:
             self._leadership_lost.set()
             raise ReconcileFencedError("leader Lease could not be verified") from error
@@ -2167,6 +2214,7 @@ class InferenceMonitor:
 
         for endpoint in endpoints:
             name = endpoint.get("endpoint_name", "unknown")
+            self._mark_pass_progress()
             try:
                 action = await self._reconcile_endpoint(endpoint)
                 if action:
@@ -2200,6 +2248,7 @@ class InferenceMonitor:
         for endpoint in endpoints:
             if endpoint.get("desired_state") != "deleted":
                 continue
+            self._mark_pass_progress()
             ep_name = endpoint.get("endpoint_name")
             if not isinstance(ep_name, str):
                 continue
@@ -7130,7 +7179,9 @@ class InferenceMonitor:
         autoscaling_v2 = client.AutoscalingV2Api()
         self._assert_mutation_authority()
         try:
-            autoscaling_v2.create_namespaced_horizontal_pod_autoscaler(namespace, hpa)
+            autoscaling_v2.create_namespaced_horizontal_pod_autoscaler(
+                namespace, hpa, _request_timeout=self._k8s_timeout
+            )
             self._confirm_created_resource(
                 kind="hpa",
                 resource_name=hpa_name,
@@ -7203,6 +7254,7 @@ class InferenceMonitor:
             hpa = autoscaling_v2.read_namespaced_horizontal_pod_autoscaler(
                 hpa_name,
                 namespace,
+                _request_timeout=self._k8s_timeout,
             )
         except ApiException as error:
             if error.status == 404:

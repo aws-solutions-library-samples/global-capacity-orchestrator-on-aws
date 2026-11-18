@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,7 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from kubernetes.client.rest import ApiException
 
+import gco.services.inference_monitor as inference_monitor
 from gco.services.inference_monitor import (
+    PASS_STALL_INTERVALS,
     InferenceMonitor,
     ReconcileAuthority,
     ReconcileFencedError,
@@ -81,6 +86,123 @@ def _resource(
     }
 
 
+class _Ticks:
+    """A stop event whose ``wait`` returns at once: ``count`` intervals pass, then it is set."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+
+    def wait(self, _timeout: float) -> bool:
+        self.count -= 1
+        return self.count < 0
+
+
+class TestWedgedPassReleasesLeadership:
+    """Finding I9: a pass that stops progressing must not hold the Lease forever."""
+
+    def test_stall_deadline_is_ten_reconcile_intervals(self) -> None:
+        monitor = _monitor()
+
+        assert monitor._pass_stall_seconds == PASS_STALL_INTERVALS * 5 == 50
+
+    def test_renewal_stops_once_the_pass_makes_no_progress(self) -> None:
+        monitor = _monitor()
+        monitor._lease_name, monitor._lease_holder, monitor._leader_epoch = (
+            "leader",
+            "pod-a",
+            "epoch-a",
+        )
+        monitor._pass_progress_at = time.monotonic() - monitor._pass_stall_seconds - 1
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.return_value = _lease()
+
+        with patch(
+            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=coordination
+        ):
+            monitor._lease_renewal_loop(_Ticks(3))  # type: ignore[arg-type]
+
+        coordination.replace_namespaced_lease.assert_not_called()
+        assert monitor._leadership_lost.is_set()
+        with pytest.raises(ReconcileFencedError, match="Lease was lost"):
+            monitor._assert_current_leadership()
+
+    def test_renewal_continues_while_the_pass_progresses(self) -> None:
+        monitor = _monitor()
+        monitor._lease_name, monitor._lease_holder, monitor._leader_epoch = (
+            "leader",
+            "pod-a",
+            "epoch-a",
+        )
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.return_value = _lease()
+
+        with patch(
+            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=coordination
+        ):
+            with monitor._renewing_leadership():
+                pass  # the pass starts with fresh progress
+            monitor._lease_renewal_loop(_Ticks(2))  # type: ignore[arg-type]
+
+        assert coordination.replace_namespaced_lease.call_count == 2
+        assert not monitor._leadership_lost.is_set()
+
+    @pytest.mark.asyncio
+    async def test_every_endpoint_and_purge_step_marks_progress(self) -> None:
+        store = MagicMock()
+        store.list_endpoints.return_value = [
+            {"endpoint_name": "a", "desired_state": "running"},
+            {"endpoint_name": "b", "desired_state": "deleted"},
+        ]
+        store.get_endpoint.return_value = None
+        monitor = _monitor(store)
+        monitor._reconcile_endpoint = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        monitor._mark_pass_progress = MagicMock()  # type: ignore[method-assign]
+
+        await monitor.reconcile()
+
+        # One per reconciled endpoint, one per deleted endpoint's purge check.
+        assert monitor._mark_pass_progress.call_count == 3
+
+    def test_lease_calls_are_bounded_by_the_api_timeout(self) -> None:
+        monitor = _monitor()
+        timeout = monitor._k8s_timeout
+        coordination = MagicMock()
+        coordination.read_namespaced_lease.return_value = _lease()
+        with patch(
+            "gco.services.inference_monitor.client.CoordinationV1Api", return_value=coordination
+        ):
+            assert monitor._try_acquire_lease("leader", "pod-a") is True
+            assert monitor._renew_current_lease() is True
+            monitor._assert_current_leadership()
+            coordination.read_namespaced_lease.side_effect = ApiException(status=404)
+            monitor._leader_epoch = None
+            assert monitor._try_acquire_lease("leader", "pod-a") is True
+
+        calls = [
+            *coordination.read_namespaced_lease.call_args_list,
+            *coordination.replace_namespaced_lease.call_args_list,
+            *coordination.create_namespaced_lease.call_args_list,
+        ]
+        assert len(calls) == 7
+        assert all(call.kwargs.get("_request_timeout") == timeout for call in calls)
+
+    def test_every_namespaced_kubernetes_call_names_a_timeout(self) -> None:
+        """No call in the monitor may block forever: the client sets no default timeout."""
+        source = Path(inference_monitor.__file__).read_text(encoding="utf-8")
+        verbs = ("read_", "create_", "replace_", "patch_", "delete_", "list_", "get_namespaced")
+        unbounded = [
+            f"{node.lineno}:{node.func.attr}"
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr.startswith(verbs)
+            and "namespaced" in node.func.attr
+            and "_request_timeout" not in {keyword.arg for keyword in node.keywords}
+        ]
+
+        assert unbounded == []
+
+
 class TestLeaseEpochFencing:
     def test_same_holder_adopts_persisted_epoch_after_local_restart(self) -> None:
         monitor = _monitor()
@@ -99,7 +221,7 @@ class TestLeaseEpochFencing:
         assert lease.metadata.annotations["gco.io/leader-epoch"] == "persisted"
         token.assert_not_called()
         coordination.replace_namespaced_lease.assert_called_once_with(
-            "leader", "gco-inference", lease
+            "leader", "gco-inference", lease, _request_timeout=monitor._k8s_timeout
         )
 
     def test_same_holder_with_different_local_epoch_loses_authority(self) -> None:
@@ -174,7 +296,7 @@ class TestLeaseEpochFencing:
             assert monitor._renew_current_lease() is True
         assert lease.spec.renew_time >= old
         coordination.replace_namespaced_lease.assert_called_once_with(
-            "leader", "gco-inference", lease
+            "leader", "gco-inference", lease, _request_timeout=monitor._k8s_timeout
         )
 
     @pytest.mark.parametrize("operation", ["read", "replace"])
