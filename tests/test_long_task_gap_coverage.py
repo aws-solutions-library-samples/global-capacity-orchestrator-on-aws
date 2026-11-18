@@ -329,6 +329,7 @@ class TestMockedRunnerLifecycle:
         }
         assert observed["argv"] == ("/fake/gco", "--output", "table", "images")
         assert observed["kwargs"] == {
+            "stdin": asyncio.subprocess.DEVNULL,
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
             "cwd": str(long_task.cli_runner.PROJECT_ROOT),

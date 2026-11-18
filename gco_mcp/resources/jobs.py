@@ -59,6 +59,7 @@ def _job_resource_for_region(region: str, job_name: str) -> str:
                 "--context",
                 context_arn,
             ],
+            stdin=cli_runner.subprocess.DEVNULL,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             timeout=_KUBECTL_TIMEOUT_SECONDS,

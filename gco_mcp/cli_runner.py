@@ -239,6 +239,7 @@ def _run_cli(
         if pass_fds:
             result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; validated literal argv
                 cmd,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
@@ -250,6 +251,7 @@ def _run_cli(
         else:
             result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; validated literal argv
                 cmd,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
@@ -304,6 +306,7 @@ async def _run_cli_async(
     try:
         process = await asyncio.create_subprocess_exec(  # nosemgrep: dangerous-subprocess-use-audit - shell=False; args are validated and passed as literal argv elements
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(PROJECT_ROOT),

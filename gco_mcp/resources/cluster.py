@@ -52,6 +52,7 @@ def _pending_pods(region: str) -> dict[str, Any]:
                 "--context",
                 context_arn,
             ],
+            stdin=cli_runner.subprocess.DEVNULL,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             timeout=_KUBECTL_TIMEOUT_SECONDS,

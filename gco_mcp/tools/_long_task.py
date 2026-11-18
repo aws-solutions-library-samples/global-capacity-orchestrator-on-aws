@@ -324,6 +324,7 @@ async def _run_long_task(
 
         process = await asyncio.create_subprocess_exec(
             *spawn_argv,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cli_runner.PROJECT_ROOT),

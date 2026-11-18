@@ -1,6 +1,8 @@
 """Analytics environment MCP tools (read-only)."""
 
 import asyncio
+import json
+import os
 
 import cli_runner
 from audit import audit_logged
@@ -34,12 +36,22 @@ async def analytics_login_url(username: str, password: str | None = None) -> str
     SRP-authenticates the user against Cognito and prints the presigned Studio
     URL. The password is read from ``$GCO_STUDIO_PASSWORD`` when not passed here.
     A password passed here reaches the CLI through that variable in the
-    child's environment, never on its command line.
+    child's environment, never on its command line. With neither, the tool
+    returns ``code: password_required`` without running the CLI, whose
+    password prompt the MCP server cannot answer.
 
     Args:
         username: Cognito username to sign in with.
         password: Cognito password. Omit to use ``$GCO_STUDIO_PASSWORD``.
     """
+    if not password and not os.environ.get("GCO_STUDIO_PASSWORD"):
+        return json.dumps(
+            {
+                "error": "analytics_login_url needs a password: pass password, or set "
+                "GCO_STUDIO_PASSWORD in the MCP server's environment.",
+                "code": "password_required",
+            }
+        )
     args = ["analytics", "studio", "login", "--username", username]
     env = {"GCO_STUDIO_PASSWORD": password} if password else None
     return await asyncio.to_thread(cli_runner._run_cli, *args, env=env)
