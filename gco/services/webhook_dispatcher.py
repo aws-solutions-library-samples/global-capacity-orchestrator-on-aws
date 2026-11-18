@@ -563,8 +563,10 @@ class WebhookDispatcher:
             if not isinstance(raw_url, str):
                 validation_error = "Webhook URL must be a string"
             else:
-                target, validation_error = _resolve_webhook_target(
-                    raw_url, self.allowed_domains or None
+                # getaddrinfo blocks; off the loop it cannot stall the probes
+                # and other deliveries that share it.
+                target, validation_error = await asyncio.to_thread(
+                    _resolve_webhook_target, raw_url, self.allowed_domains or None
                 )
             if target is None:
                 last_error = f"URL validation failed: {validation_error}"
@@ -702,14 +704,17 @@ class WebhookDispatcher:
         namespace = metadata.namespace
         payload = self._build_payload(event, job)
 
-        # Get webhooks subscribed to this event
+        # Get webhooks subscribed to this event. The store is a blocking
+        # (cross-region) DynamoDB client, so both reads run off the loop.
         try:
             # Get webhooks for this specific namespace
-            namespace_webhooks = self.webhook_store.get_webhooks_for_event(
-                event.value, namespace=namespace
+            namespace_webhooks = await asyncio.to_thread(
+                self.webhook_store.get_webhooks_for_event, event.value, namespace=namespace
             )
             # Get global webhooks (no namespace filter)
-            global_webhooks = self.webhook_store.get_webhooks_for_event(event.value, namespace=None)
+            global_webhooks = await asyncio.to_thread(
+                self.webhook_store.get_webhooks_for_event, event.value, namespace=None
+            )
 
             # Combine and deduplicate
             all_webhooks = {w["id"]: w for w in namespace_webhooks}

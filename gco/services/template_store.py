@@ -323,7 +323,18 @@ class WebhookStore:
             or os.getenv("GLOBAL_REGION")
             or os.getenv("AWS_REGION", "us-east-1")
         )
-        self._dynamodb = boto3.resource("dynamodb", region_name=self.region)
+        # Bounded like JobStore: delivery lookups run inside the health API,
+        # where botocore's defaults (60 s timeouts, legacy retries) would hold
+        # a delivery for minutes on an unreachable endpoint.
+        self._dynamodb = boto3.resource(
+            "dynamodb",
+            region_name=self.region,
+            config=Config(
+                connect_timeout=3,
+                read_timeout=10,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+        )
         self._table = self._dynamodb.Table(self.table_name)
 
     def list_webhooks(

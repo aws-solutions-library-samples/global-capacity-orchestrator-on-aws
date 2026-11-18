@@ -29,6 +29,7 @@ from datetime import datetime
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 logging.basicConfig(
@@ -47,9 +48,19 @@ class MetricsPublisher:
         self.cluster_name = cluster_name
         self.region = region
 
-        # Initialize CloudWatch client
+        # Initialize CloudWatch client. Publishing runs beside the services'
+        # request handling, so a call gives up in seconds rather than after
+        # botocore's 60 s timeouts and legacy retries.
         try:
-            self.cloudwatch = boto3.client("cloudwatch", region_name=region)
+            self.cloudwatch = boto3.client(
+                "cloudwatch",
+                region_name=region,
+                config=Config(
+                    connect_timeout=3,
+                    read_timeout=10,
+                    retries={"max_attempts": 3, "mode": "standard"},
+                ),
+            )
         except Exception as e:
             logger.error(f"Failed to initialize CloudWatch client: {e}")
             raise

@@ -1906,6 +1906,53 @@ async def test_health_api_background_monitor_wait_publish_failure_and_cancel_pat
 
 
 @pytest.mark.asyncio
+async def test_health_api_publishes_cloudwatch_metrics_off_the_event_loop() -> None:
+    """put_metric_data is a blocking HTTPS call; the probes share this loop."""
+    import gco.services.health_api as api
+
+    status = MagicMock()
+    status.status = "healthy"
+    status.get_threshold_violations.return_value = []
+    monitor = MagicMock()
+    monitor.get_health_status = AsyncMock(return_value=status)
+    monitor.sync_alb_registration = AsyncMock()
+    metrics = MagicMock()
+    metrics.publish_resource_utilization.side_effect = lambda **_kwargs: time.sleep(0.4)
+    metrics.publish_health_status.side_effect = lambda **_kwargs: time.sleep(0.4)
+    api.health_monitor = monitor
+    api.health_metrics = metrics
+    gaps: list[float] = []
+    published = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def heartbeat() -> None:
+        last = time.monotonic()
+        while not published.is_set():
+            await real_sleep(0.02)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    async def end_after_one_pass(_seconds: float) -> None:
+        published.set()
+        raise asyncio.CancelledError
+
+    try:
+        beating = asyncio.create_task(heartbeat())
+        await real_sleep(0.05)
+        with patch.object(api.asyncio, "sleep", side_effect=end_after_one_pass):
+            await api.background_health_monitor()
+        await beating
+    finally:
+        api.health_monitor = None
+        api.health_metrics = None
+
+    metrics.publish_resource_utilization.assert_called_once()
+    metrics.publish_health_status.assert_called_once()
+    assert max(gaps) < 0.3
+
+
+@pytest.mark.asyncio
 async def test_health_api_uncached_health_and_dispatcher_status_metrics() -> None:
     import gco.services.health_api as api
     from gco.models import HealthStatus, RequestedResources, ResourceThresholds, ResourceUtilization

@@ -167,10 +167,13 @@ async def background_health_monitor() -> None:
             # Periodically sync ALB hostname in SSM (self-healing)
             await health_monitor.sync_alb_registration()
 
-            # Publish metrics to CloudWatch for dashboard visibility
+            # Publish metrics to CloudWatch for dashboard visibility. The
+            # boto3 calls block, so they run off the loop that serves the
+            # probes and the API.
             if health_metrics and current_health_status:
                 try:
-                    health_metrics.publish_resource_utilization(
+                    await asyncio.to_thread(
+                        health_metrics.publish_resource_utilization,
                         cpu_percent=current_health_status.resource_utilization.cpu,
                         memory_percent=current_health_status.resource_utilization.memory,
                         gpu_percent=current_health_status.resource_utilization.gpu,
@@ -182,7 +185,8 @@ async def background_health_monitor() -> None:
                         if hasattr(current_health_status, "get_threshold_violations")
                         else []
                     )
-                    health_metrics.publish_health_status(
+                    await asyncio.to_thread(
+                        health_metrics.publish_health_status,
                         is_healthy=(current_health_status.status == "healthy"),
                         threshold_violations=threshold_violations,
                     )

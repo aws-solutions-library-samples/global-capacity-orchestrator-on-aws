@@ -1319,6 +1319,75 @@ class TestDeliverWebhookEdgeCases:
         assert all(f"Host: hooks.example:{port}\r\n" in request for request in requests)
 
 
+async def _max_loop_stall(work) -> float:
+    """Run ``work`` beside a 20 ms heartbeat; return the longest gap between beats."""
+    import time
+
+    gaps: list[float] = []
+    stop = asyncio.Event()
+
+    async def heartbeat():
+        last = time.monotonic()
+        while not stop.is_set():
+            await asyncio.sleep(0.02)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    beating = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0.05)
+    try:
+        await work
+    finally:
+        stop.set()
+        await beating
+    return max(gaps)
+
+
+class TestBlockingCallsStayOffTheEventLoop:
+    """The dispatcher shares the health API's event loop with its probes."""
+
+    @pytest.fixture
+    def dispatcher(self):
+        with patch("gco.services.webhook_dispatcher.config") as mock_config:
+            mock_config.ConfigException = Exception
+            mock_config.load_incluster_config.side_effect = Exception()
+            with patch("gco.services.webhook_dispatcher.client"):
+                return WebhookDispatcher(
+                    cluster_id="c", region="r", webhook_store=MagicMock(), max_retries=1
+                )
+
+    @pytest.mark.asyncio
+    async def test_webhook_lookup_and_dns_do_not_stall_the_loop(self, dispatcher):
+        import time
+
+        def slow_lookup(event, namespace=None):
+            time.sleep(0.4)  # a cross-region DynamoDB query
+            return [{"id": "w1", "url": "https://hooks.example/x", "events": [event]}]
+
+        def slow_getaddrinfo(*_args, **_kwargs):
+            time.sleep(0.4)  # a slow authoritative DNS server
+            raise socket.gaierror("timeout")
+
+        dispatcher.webhook_store.get_webhooks_for_event.side_effect = slow_lookup
+        job = MagicMock()
+        job.metadata.namespace = "gco-jobs"
+        job.metadata.name = "j"
+        job.status.conditions = []
+        job.status.active = 1
+        job.status.succeeded = 0
+        job.status.failed = 0
+        job.status.start_time = None
+        job.status.completion_time = None
+
+        with patch("gco.services.webhook_dispatcher.socket.getaddrinfo", slow_getaddrinfo):
+            stall = await _max_loop_stall(dispatcher._dispatch_event(WebhookEvent.JOB_STARTED, job))
+
+        assert dispatcher.webhook_store.get_webhooks_for_event.call_count == 2
+        assert dispatcher.get_metrics()["deliveries_failed"] == 1
+        assert stall < 0.3
+
+
 class TestDispatchEventEdgeCases:
     """Tests for _dispatch_event error handling and filtering."""
 

@@ -264,6 +264,15 @@ class TestWebhookStore:
             store = WebhookStore()
             assert store.table_name == "gco-webhooks"
 
+    def test_dynamodb_calls_have_bounded_timeouts_and_retries(self):
+        """Delivery lookups run inside the health API; botocore's 60 s defaults do not."""
+        with patch("boto3.resource") as resource:
+            WebhookStore(table_name="t", region="us-east-1")
+        client_config = resource.call_args.kwargs["config"]
+        assert client_config.connect_timeout == 3
+        assert client_config.read_timeout == 10
+        assert client_config.retries == {"max_attempts": 3, "mode": "standard"}
+
     def test_list_webhooks_empty(self, webhook_store, mock_dynamodb):
         """Test listing webhooks when none exist."""
         mock_dynamodb.scan.return_value = {"Items": []}
