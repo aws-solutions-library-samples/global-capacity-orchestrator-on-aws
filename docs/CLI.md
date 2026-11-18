@@ -1311,7 +1311,7 @@ gco cluster tunnel [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
-| `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included (see [Route selection](#route-selection)). |
+| `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. An existing instance must carry the cluster security group (`ClusterSecurityGroupId` stack output) or one that group admits on 443; the cluster security group admits no VPC CIDR. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included (see [Route selection](#route-selection)). |
 | `--local-port` | Local port to bind for the API tunnel (default `8443`). |
 | `--print` | Print the tunnel + `kubectl` connection plan instead of opening the tunnel. |
 | `--bastion-ttl-minutes` | Self-terminate backstop for an `--via-ssm auto` bastion (default `120`). |
@@ -1335,7 +1335,7 @@ way, and prints a `Route:` line naming it:
 
 | Endpoint access | No `--via-ssm` | `--via-ssm INSTANCE_ID` or `auto` |
 |---|---|---|
-| `PRIVATE` (default) | Prints the tunnel options and tries the kubeconfig endpoint directly, for callers already inside the VPC | SSM tunnel to the private endpoint |
+| `PRIVATE` (default) | Prints the tunnel options and tries the kubeconfig endpoint directly, for callers already inside the VPC whose security group the cluster security group admits on 443 | SSM tunnel to the private endpoint |
 | `PUBLIC_AND_PRIVATE` | The public endpoint, directly | SSM tunnel to the private endpoint |
 | Public only (not a mode GCO deploys) | The public endpoint, directly | Fails: there is no private endpoint to reach |
 

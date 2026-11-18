@@ -167,7 +167,11 @@ gco monitoring open --region us-east-1 --via-ssm auto
 the cluster's API endpoint on a local port, then runs `kubectl port-forward`
 against `https://127.0.0.1:8443` with the real endpoint as the TLS server name.
 It requires the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
-locally and an SSM-managed instance in the VPC that can reach the endpoint.
+locally and an SSM-managed instance in the VPC that can reach the endpoint:
+the EKS cluster security group admits HTTPS only from itself and from the
+security groups of GCO's own Lambdas, so the instance must carry the cluster
+security group (the `ClusterSecurityGroupId` stack output) or a security group
+you add to it as an ingress source on 443.
 
 `--via-ssm auto` provisions that instance for you: a minimal `t3.micro` (with
 automatic fallback through `t3a.micro`, `t3.small`, then `t2.micro` when the

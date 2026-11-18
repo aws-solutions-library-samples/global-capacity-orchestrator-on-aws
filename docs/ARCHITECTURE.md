@@ -347,7 +347,7 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 
 - Private endpoint enabled
 - Public endpoint disabled by default
-- Cluster security group controls VPC access
+- Cluster security group admits the Kubernetes API (443) only from itself (nodes, the `--via-ssm auto` bastion), from the security groups of the kubectl-applier, Helm installer and GA registration Lambdas, and with HyperPod on from its node security group; no rule admits the VPC CIDR
 - Pod security controls and admission-time workload validation enforced
 
 **In-cluster network isolation** (`lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`, enforced on EKS Auto Mode by the network policy controller that `06-network-policy-controller.yaml` switches on — `cdk.json` `eks_cluster.network_policy_enforcement`, default `true` — and by Calico in the kind CI job):

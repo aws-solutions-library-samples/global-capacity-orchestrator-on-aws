@@ -1857,24 +1857,10 @@ class GCORegionalStack(Stack):
             secrets_encryption_key=self.eks_encryption_key,
         )
 
-        # The EKS cluster security group's auto-generated ingress rule allows
-        # 443 from the VPC CIDR, expressed as a CloudFormation token. cdk-nag's
-        # SG-ingress rules can't resolve the token and throw; scope the
-        # acknowledgment to the cluster construct so it can't mask an
-        # open-ingress finding elsewhere in the stack.
-        from gco.stacks.nag_suppressions import acknowledge_security_group_cidr_findings
-
-        acknowledge_security_group_cidr_findings(
-            self.cluster,
-            reason=(
-                "The EKS Auto Mode cluster security group allows HTTPS (443) "
-                "ingress from the VPC CIDR only, referenced via an "
-                "``Fn::GetAtt`` token that cdk-nag cannot resolve at synth "
-                "time. Ingress is restricted to intra-VPC traffic, the "
-                "tightest possible source for the Kubernetes API and webhook "
-                "endpoints."
-            ),
-        )
+        # Every ingress rule GCO adds to the EKS cluster security group names a
+        # source security group (the kubectl-applier, Helm installer and GA
+        # registration Lambdas', HyperPod's), never a CIDR, so cdk-nag's
+        # SG-ingress rules evaluate them and need no acknowledgment here.
 
         # Auto Mode comes with essential addons pre-configured:
         # - AWS Load Balancer Controller (for ALB/NLB integration)
@@ -4964,6 +4950,23 @@ class GCORegionalStack(Stack):
         elif ga_deregistration is not None:
             ga_deregistration.node.add_dependency(converge_trigger)
 
+    def _alb_hostname_parameter_arn(self) -> str:
+        """ARN of this Region's endpoint-registry parameter in the global region."""
+        return (
+            f"arn:{self.partition}:ssm:{self.config.get_global_region()}:{self.account}:"
+            f"parameter/{self.config.get_project_name()}/alb-hostname-{self.deployment_region}"
+        )
+
+    @staticmethod
+    def _global_accelerator_resource_arns(endpoint_group_arn: str) -> list[str]:
+        """The endpoint group and its accelerator, the GA resources one Region touches.
+
+        Endpoint-group actions authorize against the endpoint group's ARN and
+        DescribeAccelerator against the accelerator's, which is the endpoint
+        group ARN up to ``/listener/`` (the handler derives it the same way).
+        """
+        return [endpoint_group_arn, Fn.select(0, Fn.split("/listener/", endpoint_group_arn))]
+
     def _create_ga_registration_lambda(self) -> None:
         """Create the exact Gateway ALB discovery and endpoint-publication Lambda.
 
@@ -5010,30 +5013,13 @@ class GCORegionalStack(Stack):
                 resources=["*"],
             )
         )
-        if self.global_accelerator_enabled:
-            ga_registration_lambda.add_to_role_policy(
-                iam.PolicyStatement(
-                    effect=iam.Effect.ALLOW,
-                    actions=[
-                        "globalaccelerator:AddEndpoints",
-                        "globalaccelerator:RemoveEndpoints",
-                        "globalaccelerator:UpdateEndpointGroup",
-                        "globalaccelerator:DescribeEndpointGroup",
-                        # Registration and teardown both read the accelerator
-                        # status to poll for DEPLOYED after an endpoint change.
-                        "globalaccelerator:DescribeAccelerator",
-                    ],
-                    resources=["*"],
-                )
-            )
+        # The endpoint registry is one parameter per Region, written on
+        # registration and removed on cleanup; the handler never reads it.
         ga_registration_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=["ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter"],
-                resources=[
-                    f"arn:{self.partition}:ssm:{self.config.get_global_region()}:"
-                    f"{self.account}:parameter/{project_name}/*"
-                ],
+                actions=["ssm:PutParameter", "ssm:DeleteParameter"],
+                resources=[self._alb_hostname_parameter_arn()],
             )
         )
 
@@ -5052,9 +5038,11 @@ class GCORegionalStack(Stack):
             ],
         )
 
-        # Allow Lambda to access EKS API
+        # Allow the Lambda (and only the Lambda) to reach the EKS API: its
+        # CDK-created security group is the source, like the kubectl-applier
+        # and Helm installer rules, not the whole VPC CIDR.
         self.cluster.cluster_security_group.add_ingress_rule(
-            peer=ec2.Peer.ipv4(self.vpc.vpc_cidr_block),
+            peer=ga_registration_lambda.connections.security_groups[0],
             connection=ec2.Port.tcp(443),
             description="Allow GA registration Lambda to access EKS API",
         )
@@ -5094,12 +5082,27 @@ class GCORegionalStack(Stack):
             )
             get_endpoint_group_arn.node.add_dependency(self.aws_custom_resource_role)
             self.endpoint_group_arn = get_endpoint_group_arn.get_response_field("Parameter.Value")
+            ga_registration_lambda.add_to_role_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "globalaccelerator:AddEndpoints",
+                        "globalaccelerator:RemoveEndpoints",
+                        "globalaccelerator:UpdateEndpointGroup",
+                        "globalaccelerator:DescribeEndpointGroup",
+                        # Registration and teardown both read the accelerator
+                        # status to poll for DEPLOYED after an endpoint change.
+                        "globalaccelerator:DescribeAccelerator",
+                    ],
+                    resources=self._global_accelerator_resource_arns(self.endpoint_group_arn),
+                )
+            )
 
         # Invoked directly by the convergence state machine's final task.
         self.ga_registration_lambda = ga_registration_lambda
 
-        # cdk-nag suppression: the GA registration Lambda needs broad
-        # Global Accelerator and ELB Describe access with Resource: *.
+        # cdk-nag: ELB Describe access and the tracing grant are the role's
+        # only Resource:* statements.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -5108,10 +5111,13 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The endpoint-publication Lambda needs ELB Describe access to "
-                        "resolve the exact Gateway-owned ALB. In partitions with Global "
-                        "Accelerator it also needs the service's endpoint-group mutation "
-                        "APIs. These APIs do not support resource-level scoping."
+                        "The endpoint-publication Lambda needs "
+                        "elasticloadbalancing:DescribeLoadBalancers and DescribeTags to "
+                        "resolve the exact Gateway-owned ALB; neither supports "
+                        "resource-level permissions. The other Resource:* actions are "
+                        "the X-Ray writes CDK adds for active tracing. Global Accelerator "
+                        "access is limited to this Region's endpoint group and its "
+                        "accelerator, and SSM to this Region's endpoint-registry parameter."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
@@ -5147,7 +5153,7 @@ class GCORegionalStack(Stack):
             memory_size=256,
             tracing=lambda_.Tracing.ACTIVE,
         )
-        if self.global_accelerator_enabled:
+        if self.endpoint_group_arn is not None:
             ga_deregistration_lambda.add_to_role_policy(
                 iam.PolicyStatement(
                     effect=iam.Effect.ALLOW,
@@ -5157,7 +5163,7 @@ class GCORegionalStack(Stack):
                         "globalaccelerator:RemoveEndpoints",
                         "globalaccelerator:UpdateEndpointGroup",
                     ],
-                    resources=["*"],
+                    resources=self._global_accelerator_resource_arns(self.endpoint_group_arn),
                 )
             )
 
@@ -5165,10 +5171,7 @@ class GCORegionalStack(Stack):
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:DeleteParameter"],
-                resources=[
-                    f"arn:{self.partition}:ssm:{self.config.get_global_region()}:{self.account}:"
-                    f"parameter/{project_name}/alb-hostname-{self.deployment_region}"
-                ],
+                resources=[self._alb_hostname_parameter_arn()],
             )
         )
 
@@ -5212,9 +5215,7 @@ class GCORegionalStack(Stack):
         ga_deregistration.node.add_dependency(self.vpc)
         ga_deregistration.node.add_dependency(ga_deregistration_log_group)
 
-        # cdk-nag: the deregistration Lambda needs globalaccelerator Describe*/
-        # RemoveEndpoints with Resource: * (these Global Accelerator APIs do not
-        # support resource-level IAM scoping), mirroring the registration Lambda.
+        # cdk-nag: the tracing grant is the role's only Resource:* statement.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -5223,10 +5224,11 @@ class GCORegionalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "Where Global Accelerator is enabled, the delete guard needs its "
-                        "Describe and endpoint-group mutation APIs to release managed ENIs. "
-                        "Those APIs do not support resource-level IAM scoping; non-GA "
-                        "partitions receive no Global Accelerator actions."
+                        "The only Resource:* actions are the X-Ray writes CDK adds for "
+                        "active tracing. Where Global Accelerator is enabled, the delete "
+                        "guard's Global Accelerator actions are limited to this Region's "
+                        "endpoint group and its accelerator, and its SSM delete to this "
+                        "Region's endpoint-registry parameter."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
