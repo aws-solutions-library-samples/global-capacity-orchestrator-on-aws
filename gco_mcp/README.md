@@ -1521,6 +1521,7 @@ If a tool you expect to see is missing from your client's tool list, check these
 - Check AWS credentials: `aws sts get-caller-identity`
 - Verify infrastructure is deployed: `gco stacks list`
 - Check the tool's error message — it includes the CLI's stderr output
+- A failed call returns `{"error": ..., "exit_code": N}`. When the command printed a JSON document before exiting non-zero, as the status and preflight commands do when a check fails (`addons_status`, `eks_capabilities_status`, `hyperpod_status`, `hyperpod_preflight`, `analytics_doctor`), the parsed document is also under `output`, so the per-item results stay readable
 - That stderr never carries AWS SDK debug output: `GCO_VERBOSE=true` on the host adds GCO's debug lines and SDK info messages only, and the CLI's `--debug-aws` has no environment or config spelling, so a tool result cannot carry signing material or credentials (see [Verbose and debug output](../docs/CLI.md#verbose-and-debug-output))
 
 ### Timeout on long operations

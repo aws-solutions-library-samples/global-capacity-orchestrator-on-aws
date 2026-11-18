@@ -16,6 +16,7 @@ import sys
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 
 def _resolve_project_root() -> Path:
@@ -79,6 +80,22 @@ def _gco_executable() -> str:
     return shutil.which("gco") or "gco"
 
 
+class _NotJson(Exception):
+    """Raised by :func:`_strict_json` for anything but one standard JSON value."""
+
+
+def _strict_json(text: str) -> Any:
+    """Parse ``text`` as exactly one standard JSON value (no NaN/Infinity)."""
+
+    def reject_nonstandard_constant(token: str) -> None:
+        raise ValueError(f"non-standard JSON constant: {token}")
+
+    try:
+        return json.loads(text, parse_constant=reject_nonstandard_constant)
+    except json.JSONDecodeError, ValueError:
+        raise _NotJson from None
+
+
 def _validated_cli_json_output(output: str) -> str:
     """Return one strict JSON value or a fail-closed MCP error envelope."""
     if not output:
@@ -88,13 +105,9 @@ def _validated_cli_json_output(output: str) -> str:
                 "exit_code": 1,
             }
         )
-
-    def reject_nonstandard_constant(token: str) -> None:
-        raise ValueError(f"non-standard JSON constant: {token}")
-
     try:
-        json.loads(output, parse_constant=reject_nonstandard_constant)
-    except json.JSONDecodeError, ValueError:
+        _strict_json(output)
+    except _NotJson:
         return json.dumps(
             {
                 "error": "gco CLI returned malformed or multiple JSON documents",
@@ -102,6 +115,29 @@ def _validated_cli_json_output(output: str) -> str:
             }
         )
     return output
+
+
+def _failure_envelope(stdout: str, stderr: str, exit_code: int) -> str:
+    """Return the error envelope for a ``gco`` run that exited non-zero.
+
+    ``error`` is stderr, else stdout. Several status commands report failing
+    checks as data: they print one JSON document (add-on rows, capability or
+    HyperPod status, a preflight or doctor summary) and exit 1. When stdout
+    is such a document it is also returned, parsed, under ``output``, so the
+    caller gets the structured result instead of JSON text inside ``error``;
+    with stderr empty, ``error`` then names the exit status.
+    """
+    try:
+        document = _strict_json(stdout)
+    except _NotJson:
+        return json.dumps({"error": stderr or stdout, "exit_code": exit_code})
+    return json.dumps(
+        {
+            "error": stderr or f"gco exited with status {exit_code}",
+            "exit_code": exit_code,
+            "output": document,
+        }
+    )
 
 
 def reject_paths_outside_project_root(**paths: str | None) -> str | None:
@@ -223,8 +259,7 @@ def _run_cli(
             )
         output = result.stdout.strip()
         if result.returncode != 0:
-            error = result.stderr.strip() or output
-            return json.dumps({"error": error, "exit_code": result.returncode})
+            return _failure_envelope(output, result.stderr.strip(), result.returncode)
         return _validated_cli_json_output(output)
     except subprocess.TimeoutExpired:
         return json.dumps({"error": f"Command timed out after {timeout_seconds} seconds"})
@@ -302,6 +337,6 @@ async def _run_cli_async(
 
     output = stdout_bytes.decode(errors="replace").strip()
     if process.returncode != 0:
-        error = stderr_bytes.decode(errors="replace").strip() or output
-        return json.dumps({"error": error, "exit_code": process.returncode})
+        stderr = stderr_bytes.decode(errors="replace").strip()
+        return _failure_envelope(output, stderr, process.returncode or 1)
     return _validated_cli_json_output(output)

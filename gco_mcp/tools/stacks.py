@@ -174,6 +174,10 @@ async def stack_synth(stack_name: str | None = None, quiet: bool = True) -> str:
 async def addons_status(region: str | None = None, all_regions: bool = False) -> str:
     """`gco stacks addons status` — show per-chart Helm add-on status from SSM.
 
+    Returns the ``{region, name, status, message}`` rows. When a Region
+    cannot be read or any add-on is not healthy, the result is an error
+    envelope (``error``, ``exit_code``) with the rows under ``output``.
+
     Args:
         region: Region to inspect. Omit for the first deployment region.
         all_regions: Inspect every configured deployment region.
@@ -208,7 +212,8 @@ async def eks_capabilities_status(region: str | None = None, all_regions: bool =
     Reports, per AWS-managed capability type (ACK, kro), whether cdk.json
     ``eks_capabilities`` enables it for the region, whether it is attached to
     the cluster, its status/version, and any drift between configuration and
-    the cluster.
+    the cluster. When a Region drifts or cannot be described, the result is
+    an error envelope with the status document(s) under ``output``.
 
     Args:
         region: Region to inspect. Omit for the first deployment region.
@@ -231,7 +236,9 @@ async def hyperpod_status(region: str | None = None, all_regions: bool = False) 
     recovery, zone, instance groups, Kueue quotas, removal policy) and, when
     the regional stack is deployed with HyperPod on, the cluster SageMaker
     describes under the stack's published name: its status and every
-    instance group's current and target counts. See docs/HYPERPOD.md.
+    instance group's current and target counts. See docs/HYPERPOD.md. When
+    the cluster is not healthy, the result is an error envelope with the
+    status document(s) under ``output``.
 
     Args:
         region: Region to inspect. Omit for the first deployment region.
@@ -257,7 +264,9 @@ async def hyperpod_preflight(region: str | None = None, all_regions: bool = Fals
     deployed) is ACTIVE with access entries, and the cluster name is free or
     already this project's. An AWS error while checking is a warning; only a
     fact that would break the deploy fails. ``deploy_stack`` and
-    ``deploy_all`` run the same checks unless told to skip them.
+    ``deploy_all`` run the same checks unless told to skip them. When a
+    check fails, the result is an error envelope with the summary under
+    ``output``.
 
     Args:
         region: Region to check. Omit for the first deployment region.
