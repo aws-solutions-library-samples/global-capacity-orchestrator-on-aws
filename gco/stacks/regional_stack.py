@@ -127,6 +127,9 @@ from gco.config.config_loader import (
     TRACING_CONTEXT_KEY,
     TRACING_OVERRIDES_CONTEXT_KEY,
     ConfigLoader,
+    ConfigValidationError,
+    parse_bool_flag,
+    read_block_flag,
     resolve_tracing_config,
 )
 from gco.eks_capabilities_config import (
@@ -459,18 +462,22 @@ _LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT = "gco_live_validation_disable_efs_
 
 
 def _explicit_context_bool(raw: object, *, key: str) -> bool:
-    """Parse an optional CDK context boolean without truthy-string ambiguity."""
+    """Parse an optional top-level CDK context flag (``--context key=true``).
+
+    Absent reads as false. Otherwise :func:`parse_bool_flag` decides: a JSON
+    boolean, or ``"true"`` / ``"false"`` in any case (surrounding whitespace
+    is ignored, as it always was here). Its error is re-raised as the
+    ``ValueError`` the stack's other context checks raise.
+
+    Raises:
+        ValueError: If ``raw`` is neither a boolean nor one of the two strings.
+    """
     if raw is None:
         return False
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        normalized = raw.strip().casefold()
-        if normalized == "true":
-            return True
-        if normalized == "false":
-            return False
-    raise ValueError(f"{key} must be true or false")
+    try:
+        return parse_bool_flag(raw.strip() if isinstance(raw, str) else raw, key)
+    except ConfigValidationError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 #: Every cdk.json helm-block key _get_enabled_charts understands. Kept in
@@ -654,13 +661,17 @@ def _helm_chart_enabled(
     context override forces on, and otherwise the cdk.json toggle decides
     (missing key defaults to enabled, matching the historical behavior —
     except the opt-in add-ons in ``_OFF_BY_DEFAULT_CHART_KEYS``, which
-    default to disabled).
+    default to disabled). The toggle is read strictly
+    (:func:`~gco.config.config_loader.read_block_flag`): ``"true"`` reads as
+    true and every other string fails, because ``bool("false")`` is true.
     """
     if config_key in _MANDATORY_CHART_KEYS or config_key in overrides:
         return True
     default = config_key not in _OFF_BY_DEFAULT_CHART_KEYS
     chart_config = helm_config.get(config_key, {})
-    return bool(chart_config.get("enabled", default)) if isinstance(chart_config, dict) else default
+    if not isinstance(chart_config, dict):
+        return default
+    return read_block_flag(chart_config, f"helm.{config_key}.enabled", default=default)
 
 
 def _compute_kubectl_scheduler_replacements(
@@ -1622,8 +1633,9 @@ class GCORegionalStack(Stack):
         # the regional SQS queue. It can be disabled in cdk.json if users want
         # to implement their own consumer. When disabled, the post-helm-sqs-consumer.yaml
         # manifest is skipped (unreplaced template variables cause it to be skipped).
-        queue_processor_config = self.node.try_get_context("queue_processor") or {}
-        self.queue_processor_enabled = queue_processor_config.get("enabled", True)
+        self.queue_processor_enabled = read_block_flag(
+            self.node.try_get_context("queue_processor"), "queue_processor.enabled", default=True
+        )
 
         if self.queue_processor_enabled:
             self.queue_processor_image = self._service_image_asset(
@@ -5376,7 +5388,7 @@ class GCORegionalStack(Stack):
         # replication rule, and trusted-registry allow-list (#139). Defaults to
         # ``<project_name>/dockerhub`` — ``gco/dockerhub`` for the stock project.
         project_prefix = f"{self.config.get_project_name()}/"
-        enabled = bool(raw.get("enabled", False))
+        enabled = read_block_flag(raw, "volcano_image_mirror.enabled", default=False)
         ecr_namespace = (
             str(raw.get("ecr_namespace", f"{project_prefix}dockerhub")).strip().strip("/")
         )
@@ -7555,7 +7567,7 @@ class GCORegionalStack(Stack):
         no resources are created.
         """
         drift_config = self.node.try_get_context("drift_detection") or {}
-        if not drift_config.get("enabled", True):
+        if not read_block_flag(drift_config, "drift_detection.enabled", default=True):
             return
 
         schedule_hours = int(drift_config.get("schedule_hours", 24))
@@ -7754,8 +7766,9 @@ class GCORegionalStack(Stack):
         Operators can disable this component entirely by setting
         ``mcp_server.enabled`` to ``false`` in cdk.json.
         """
-        mcp_config = self.node.try_get_context("mcp_server") or {}
-        if not mcp_config.get("enabled", True):
+        if not read_block_flag(
+            self.node.try_get_context("mcp_server"), "mcp_server.enabled", default=True
+        ):
             return
 
         project_name = self.config.get_project_name()

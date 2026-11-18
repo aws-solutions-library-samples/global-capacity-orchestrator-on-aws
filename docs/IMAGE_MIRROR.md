@@ -180,7 +180,7 @@ Via MCP, `images_mirror_status` returns the same presence check (`all_mirrored` 
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `enabled` | `true` | Turns the mirror (and the Volcano `image_registry` override + deploy auto-mirror) on. **On by default**; set to `false` to disable. |
+| `enabled` | `true` in the shipped `cdk.json`, `false` when omitted | Turns the mirror (and the Volcano `image_registry` override + deploy auto-mirror) on. **On in the shipped `cdk.json`**; set to `false` to disable. A [JSON boolean](CUSTOMIZATION.md#boolean-flags): a quoted `"false"` fails validation, because earlier releases read it as on. |
 | `ecr_namespace` | `gco/dockerhub` | Destination namespace under the account's ECR registry. Must start with `gco/`. |
 
 **Source map:**

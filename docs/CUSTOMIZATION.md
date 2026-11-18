@@ -2557,24 +2557,34 @@ instead of failing halfway through a deploy.
 
 Write flags such as `enabled` as JSON booleans, `true` or `false`, without
 quotes. Earlier releases read the `enabled` flags of `fsx_lustre` (and its
-`fsx_lustre_regions` overlays), `valkey`, `aurora_pgvector` and
-`cluster_observability.mlflow` by truthiness, so a quoted `"false"`, like
-every non-empty string, turned the feature on. So that an upgrade never turns
-off a feature that has been running:
+`fsx_lustre_regions` overlays), `valkey`, `aurora_pgvector`,
+`cluster_observability.mlflow`, `queue_processor`, `drift_detection`,
+`mcp_server`, `volcano_image_mirror` and the `helm` charts by truthiness, so a
+quoted `"false"`, like every non-empty string, turned the feature on. So that
+an upgrade never turns off a feature that has been running:
 
 - `"true"` in any case still reads as `true`, with a deprecation warning.
 - Any other string there, `"false"` included, fails validation with a message
   that says how earlier releases read it. Write `true` to keep the feature, or
-  `false` to remove it. For these storage features `false` deletes the
+  `false` to remove it. For the storage features `false` deletes the
   resource and its data (the file system, the cache, the database cluster,
   the MLflow run-metadata volume), so back up first (see
   [UPGRADING.md](UPGRADING.md#2-back-up-regional-data-to-the-cluster-shared-bucket)).
+  For a `helm` chart `false` uninstalls it, and for Kueue and Crossplane the
+  uninstall first deletes their custom resources across the cluster (Kueue's
+  queues and workload objects; Crossplane's composite resources and what they
+  composed). For `drift_detection` it deletes the alert topic and its
+  subscriptions.
 - Numbers, `null` and other types fail validation.
 
-`aurora_pgvector.deletion_protection` follows the same rule; a string there
-always failed the synth, so nothing has been running on one. Top-level keys
-that the CLI passes as `cdk --context key=value` strings, such as
-`gco:control-plane-only`, accept both `"true"` and `"false"`.
+`aurora_pgvector.deletion_protection`, `helm.argocd.enabled` and
+`helm.slurm.enabled` follow the same rule; a string there always failed the
+synth, so nothing has been running on one. The toggles of the mandatory charts
+(`helm.keda`, `helm.aws_load_balancer_controller`) are not read. Top-level
+keys that the CLI or the release harnesses pass as `cdk --context key=value`
+strings, such as `gco:control-plane-only` and
+`gco_live_validation_disable_efs_automatic_backups`, accept both `"true"` and
+`"false"`.
 
 ## Configuration Best Practices
 
@@ -2938,7 +2948,7 @@ Queue-processor-specific settings live in `cdk.json` under `queue_processor`. Va
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `true` | Set to `false` to disable the built-in consumer entirely |
+| `enabled` | `true` | Set to `false` to disable the built-in consumer entirely ([JSON boolean](#boolean-flags)) |
 | `polling_interval` | `10` | How often KEDA checks the SQS queue for new messages (seconds) |
 | `max_concurrent_jobs` | `10` | Maximum consumer pods running in parallel |
 | `messages_per_job` | `1` | KEDA target queue messages per active consumer Job (`queueLength`); each built-in worker still receives one message |
