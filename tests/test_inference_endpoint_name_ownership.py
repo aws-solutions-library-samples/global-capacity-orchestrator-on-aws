@@ -318,6 +318,132 @@ def test_deleting_an_endpoint_leaves_the_other_endpoints_objects_and_completes()
 
 
 # ---------------------------------------------------------------------------
+# Ingresses older releases created are removed with the endpoint (finding I5)
+# ---------------------------------------------------------------------------
+
+
+def _legacy_ingress(name: str, app: str, *, role: str | None = None) -> client.V1Ingress:
+    """An Ingress as releases up to v4.1.0 created it: monitor labels, no lifecycle."""
+    labels = {"app": app, **LEGACY_LABELS}
+    if role is not None:
+        labels["gco.io/role"] = role
+    return client.V1Ingress(
+        metadata=client.V1ObjectMeta(
+            name=name, namespace=NAMESPACE, labels=labels, uid=f"uid-{name}", resource_version="4"
+        )
+    )
+
+
+class _IngressApi:
+    """Ingress reads, metadata patches and UID-preconditioned deletes over live objects."""
+
+    def __init__(self, monitor: InferenceMonitor, *ingresses: client.V1Ingress) -> None:
+        self.live = {ingress.metadata.name: ingress for ingress in ingresses}
+        self.read_names: list[str] = []
+        self.deleted: list[str] = []
+        networking = monitor.networking_v1
+        networking.read_namespaced_ingress.side_effect = self.read
+        networking.patch_namespaced_ingress.side_effect = self.patch
+        networking.delete_namespaced_ingress.side_effect = self.delete
+
+    def read(self, name: str, namespace: str, **_kwargs: Any) -> client.V1Ingress:
+        assert namespace == NAMESPACE
+        self.read_names.append(name)
+        if name not in self.live:
+            raise ApiException(status=404)
+        return self.live[name]
+
+    def patch(self, name: str, namespace: str, *, body: Any, **_kwargs: Any) -> None:
+        claimed = self.live[name].model_copy(deep=True)
+        metadata = body["metadata"]
+        assert metadata["resourceVersion"] == claimed.metadata.resource_version
+        claimed.metadata.annotations = dict(metadata["annotations"])
+        claimed.metadata.labels = {**claimed.metadata.labels, **metadata.get("labels", {})}
+        claimed.metadata.resource_version = str(int(claimed.metadata.resource_version) + 1)
+        self.live[name] = claimed
+
+    def delete(self, name: str, namespace: str, *, body: Any, **_kwargs: Any) -> None:
+        current = self.live[name]
+        assert body.preconditions.uid == current.metadata.uid
+        assert body.preconditions.resource_version == current.metadata.resource_version
+        del self.live[name]
+        self.deleted.append(name)
+
+
+def _delete_with_everything_else_absent(monitor: InferenceMonitor, name: str) -> Any:
+    """Run the endpoint cleanup with every kind but Ingresses already absent."""
+    not_found = ApiException(status=404)
+    monitor.discovery_v1 = MagicMock()
+    for read in (
+        monitor.apps_v1.read_namespaced_deployment,
+        monitor.core_v1.read_namespaced_service,
+        monitor.core_v1.read_namespaced_config_map,
+        monitor.core_v1.read_namespaced_secret,
+    ):
+        read.side_effect = not_found
+    for listing in (
+        monitor.apps_v1.list_namespaced_replica_set,
+        monitor.core_v1.list_namespaced_pod,
+        monitor.core_v1.list_namespaced_endpoints,
+        monitor.discovery_v1.list_namespaced_endpoint_slice,
+    ):
+        listing.return_value = MagicMock(items=[])
+    hpa = MagicMock()
+    hpa.read_namespaced_horizontal_pod_autoscaler.side_effect = not_found
+    custom = MagicMock()
+    custom.get_namespaced_custom_object.side_effect = not_found
+    with (
+        patch("gco.services.inference_monitor.client.AutoscalingV2Api", return_value=hpa),
+        patch("gco.services.inference_monitor.client.CustomObjectsApi", return_value=custom),
+    ):
+        return monitor._delete_resources(name, NAMESPACE, expected_lifecycle_id=f"life-{name}")
+
+
+def test_deleting_an_endpoint_removes_the_ingresses_older_releases_created() -> None:
+    monitor = _monitor(_record("llama", deleting=True))
+    ingresses = _IngressApi(
+        monitor,
+        _legacy_ingress("inference-llama", "llama"),
+        _legacy_ingress("inference-llama-proxy", "llama-proxy", role="proxy"),
+    )
+
+    result = _delete_with_everything_else_absent(monitor, "llama")
+
+    assert result.complete is True, result
+    assert ingresses.deleted == ["inference-llama", "inference-llama-proxy"]
+    # No release ever created an Ingress under the endpoint's object names.
+    assert set(ingresses.read_names) == {"inference-llama", "inference-llama-proxy"}
+
+
+def test_legacy_ingress_of_an_endpoint_named_like_another_kinds_object_is_removed() -> None:
+    """``inference-llama`` names that endpoint's Deployment, never an Ingress of it."""
+    monitor = _monitor(_record("llama", deleting=True), _record("inference-llama"))
+    ingresses = _IngressApi(monitor, _legacy_ingress("inference-llama", "llama"))
+
+    result = _delete_with_everything_else_absent(monitor, "llama")
+
+    assert result.complete is True, result
+    assert ingresses.deleted == ["inference-llama"]
+
+
+def test_unlabelled_legacy_ingress_another_endpoint_also_derives_is_left_alone() -> None:
+    """``inference-foo-proxy`` is foo's PD-proxy Ingress or the Ingress of ``foo-proxy``."""
+    monitor = _monitor(_record("foo", deleting=True), _record("foo-proxy"))
+    ingresses = _IngressApi(
+        monitor,
+        _legacy_ingress("inference-foo", "foo"),
+        _legacy_ingress("inference-foo-proxy", "foo-proxy"),
+    )
+
+    result = _delete_with_everything_else_absent(monitor, "foo")
+
+    assert result.complete is True, result
+    assert ingresses.deleted == ["inference-foo"]
+    monitor.networking_v1.patch_namespaced_ingress.assert_called_once()
+    assert "inference-foo-proxy" in ingresses.live
+
+
+# ---------------------------------------------------------------------------
 # Creating an object never takes over another endpoint's object
 # ---------------------------------------------------------------------------
 
@@ -379,12 +505,14 @@ def test_derived_names_are_exactly_the_monitor_inventory() -> None:
         *inventory.horizontal_pod_autoscalers,
         *inventory.scaled_objects,
         *inventory.config_maps,
-        *inventory.legacy_ingresses,
         *inventory.legacy_http_routes,
         inventory.generated_admin_secret,
     }
 
     assert endpoint_object_names("llama") == names
+    # The Ingresses of releases up to v4.1.0 are a kind no current object
+    # shares; their names are compared among legacy Ingress names only.
+    assert inventory.legacy_ingresses == ("inference-llama", "inference-llama-proxy")
 
 
 @pytest.mark.parametrize(

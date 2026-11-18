@@ -807,11 +807,13 @@ class TestInferenceMonitor:
         monitor.core_v1.delete_namespaced_service.assert_any_call(
             "ep", "ns", body=ANY, _request_timeout=30
         )
-        # Legacy per-endpoint routing objects are removed during terminal proof;
-        # the shared platform route has a different fixed name and is untouched.
-        monitor.networking_v1.delete_namespaced_ingress.assert_any_call(
-            "ep", "ns", body=ANY, _request_timeout=30
-        )
+        # The Ingresses releases up to v4.1.0 created are removed during terminal
+        # proof; the shared platform route has a different fixed name and is untouched.
+        for ingress_name in ("inference-ep", "inference-ep-proxy"):
+            monitor.networking_v1.delete_namespaced_ingress.assert_any_call(
+                ingress_name, "ns", body=ANY, _request_timeout=30
+            )
+        assert observed_ingresses == {"inference-ep", "inference-ep-proxy"}
         monitor.networking_v1.create_namespaced_ingress.assert_not_called()
 
     def test_delete_resources_tears_down_mooncake_topology(self, monitor):

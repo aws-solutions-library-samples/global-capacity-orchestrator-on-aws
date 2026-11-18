@@ -13,7 +13,9 @@ The monitor:
   pod; model Services publish only that sidecar's port 8443
 - Leaves public routing on the shared ``gco-system/gco-gateway`` HTTPRoute:
   ``/inference`` -> ``gco-system/inference-proxy``
-- Removes legacy endpoint-specific Ingresses so upgrades cannot retain a bypass
+- Deletes the per-endpoint Ingresses releases up to v4.1.0 created
+  (``inference-{name}``, ``inference-{name}-proxy``) together with the
+  endpoint's other objects, when it is deleted or leaves a Region
 - Updates existing deployments when spec changes
 - Scales deployments up/down
 - Tears down resources when endpoints are deleted
@@ -583,6 +585,18 @@ PASS_STALL_INTERVALS = 10
 # endpoint named ``llama-canary``; the label tells them apart.
 ENDPOINT_NAME_LABEL = "gco.io/endpoint"
 _LABEL_VALUE_PATTERN = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
+
+
+def _legacy_ingress_names(endpoint_name: str) -> tuple[str, str]:
+    """The ALB Ingresses releases up to v4.1.0 created for ``endpoint_name``.
+
+    ``inference-{name}`` routed the endpoint (a canary shared it through
+    weighted actions), and from v3.0.0 ``inference-{name}-proxy`` routed a
+    disaggregated endpoint's prefill-decode proxy. Later releases route every
+    endpoint through the shared ``gco-system/inference-proxy`` and create no
+    Ingress; endpoint cleanup still deletes these two.
+    """
+    return f"inference-{endpoint_name}", f"inference-{endpoint_name}-proxy"
 
 
 class ReconcileFencedError(RuntimeError):
@@ -1940,12 +1954,27 @@ class InferenceMonitor:
         labels = cls._object_labels(resource)
         return labels.get("project") == "gco" and labels.get("gco.io/type") == "inference"
 
-    def _name_derived_by_another_endpoint(self, resource_name: str, endpoint_name: str) -> bool:
-        """Whether another endpoint record also derives ``resource_name`` from its name."""
-        return any(
-            other != endpoint_name and resource_name in endpoint_object_names(other)
-            for other in getattr(self, "_endpoint_names", ())
-        )
+    def _name_derived_by_another_endpoint(
+        self, resource_name: str, endpoint_name: str, kind: str
+    ) -> bool:
+        """Whether another endpoint record also derives ``resource_name`` for ``kind``.
+
+        A legacy Ingress name is compared with the other endpoints' legacy
+        Ingress names only: ``inference-llama`` is the Ingress of ``llama`` and
+        the Deployment of an endpoint named ``inference-llama``, which are
+        different objects.
+        """
+        for other in getattr(self, "_endpoint_names", ()):
+            if other == endpoint_name:
+                continue
+            derived = (
+                frozenset(_legacy_ingress_names(other))
+                if kind == "ingress"
+                else endpoint_object_names(other)
+            )
+            if resource_name in derived:
+                return True
+        return False
 
     def _owned_labels(self, labels: Mapping[str, str]) -> dict[str, str]:
         """``labels`` plus :data:`ENDPOINT_NAME_LABEL` for the endpoint being reconciled.
@@ -2023,7 +2052,7 @@ class InferenceMonitor:
         if (
             owner is None
             and observed_lifecycle != authority.lifecycle_id
-            and self._name_derived_by_another_endpoint(resource_name, authority.endpoint_name)
+            and self._name_derived_by_another_endpoint(resource_name, authority.endpoint_name, kind)
         ):
             # Created before the label existed by another lifecycle: a stale
             # incarnation of this endpoint, or the object of the other endpoint
@@ -5069,7 +5098,6 @@ class InferenceMonitor:
         pods. The shared HTTPRoute attached to ``gco-system/gco-gateway`` sends
         ``/inference`` to ``gco-system/inference-proxy``; that authenticated
         platform proxy then reaches this internal ClusterIP Service.
-        Endpoint-specific Ingresses are removed as an unsafe legacy path.
 
         Every hop is verified HTTPS: the router binds pod loopback behind the
         pod's ``endpoint-tls-proxy`` sidecar (the Service publishes only that
@@ -5087,9 +5115,10 @@ class InferenceMonitor:
 
         Creation is idempotent at the API boundary: an already-present
         Deployment is merge-patched to the desired shape and an already-present
-        ClusterIP Service is moved to the TLS port if it predates it, while
-        historical direct Ingresses are deleted if present. No endpoint Gateway
-        or HTTPRoute is created.
+        ClusterIP Service is moved to the TLS port if it predates it. No
+        endpoint Ingress, Gateway or HTTPRoute is created; the Ingresses older
+        releases created are deleted with the endpoint (see
+        :func:`_legacy_ingress_names`).
 
         Args:
             name: The endpoint name.
@@ -6151,7 +6180,7 @@ class InferenceMonitor:
                 f"{name}-pd-proxy",
                 _tls_proxy_config_map_name(name),
             ),
-            legacy_ingresses=(name, f"{name}-canary", f"{name}-proxy"),
+            legacy_ingresses=_legacy_ingress_names(name),
             legacy_http_routes=(name, f"{name}-canary", f"{name}-proxy"),
             generated_admin_secret=f"{name}-admin",
         )

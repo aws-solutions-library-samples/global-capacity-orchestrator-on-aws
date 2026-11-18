@@ -1528,12 +1528,12 @@ def test_active_cleanup_request_budget_is_explicit_and_bounded() -> None:
             custom,
         )
     )
-    # Read-before-delete avoids 28 unnecessary delete calls on an already
-    # absent pass. The fixed 33 requests still cover every parent (including
+    # Read-before-delete avoids 27 unnecessary delete calls on an already
+    # absent pass. The fixed 32 requests still cover every parent (including
     # the TLS sidecar program ConfigMap), generated child, and legacy route
     # exactly once; future expansion must update this reviewed bound rather
     # than introducing an unbounded hot loop.
-    assert request_count == 33
+    assert request_count == 32
 
 
 class TestKubernetesLifecycleFencing:
