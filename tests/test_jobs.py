@@ -2280,6 +2280,27 @@ class TestTrainJobLifecycleFallbacks:
         assert kwargs["job_name"] == "train-demo-node-0"
         assert kwargs["pod_name"] == "train-demo-node-0-0-fghij"
 
+    def test_logs_container_reaches_the_api_and_the_trainjob_pod(self):
+        manager = self._manager()
+        manager._aws_client.get_job_logs.return_value = "sidecar output"
+
+        assert (
+            manager.get_job_logs("train-demo", "gco-jobs", "us-east-1", container="sidecar")
+            == "sidecar output"
+        )
+        assert manager._aws_client.get_job_logs.call_args.kwargs["container"] == "sidecar"
+
+        manager._aws_client.get_job_logs.side_effect = RuntimeError(
+            "Job 'train-demo' not found in namespace 'gco-jobs'"
+        )
+        manager._aws_client.get_job_pods.return_value = self._rank_pods()
+        manager._aws_client.get_pod_logs.return_value = {"logs": "rank0 sidecar"}
+
+        logs = manager.get_job_logs("train-demo", "gco-jobs", "us-east-1", container="sidecar")
+
+        assert logs == "rank0 sidecar"
+        assert manager._aws_client.get_pod_logs.call_args.kwargs["container"] == "sidecar"
+
     def test_logs_node_flag_selects_the_matching_rank_pod(self):
         manager = self._manager()
         manager._aws_client.get_job_logs.side_effect = RuntimeError(

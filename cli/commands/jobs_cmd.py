@@ -709,7 +709,11 @@ def get_job(config: Any, job_name: Any, namespace: Any, region: Any) -> None:
 @click.option(
     "--since", "-s", default=24, type=int, help="Hours to look back in CloudWatch (default: 24)"
 )
-@click.option("--container", "-c", help="Container name (for multi-container pods)")
+@click.option(
+    "--container",
+    "-c",
+    help="Container to read in a multi-container pod (default: the pod's first container)",
+)
 @click.option(
     "--node",
     default=0,
@@ -748,7 +752,13 @@ def get_logs(
 
     try:
         logs = job_manager.get_job_logs(
-            job_name, namespace, region, tail_lines=tail, since_hours=since, node=node
+            job_name,
+            namespace,
+            region,
+            tail_lines=tail,
+            since_hours=since,
+            node=node,
+            container=container,
         )
         print(logs)
     except Exception as e:

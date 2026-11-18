@@ -861,7 +861,12 @@ class GCOAWSClient:
         return result
 
     def get_job_logs(
-        self, job_name: str, namespace: str, region: str | None = None, tail_lines: int = 100
+        self,
+        job_name: str,
+        namespace: str,
+        region: str | None = None,
+        tail_lines: int = 100,
+        container: str | None = None,
     ) -> str:
         """
         Get logs from a job.
@@ -871,13 +876,18 @@ class GCOAWSClient:
             namespace: Namespace of the job
             region: Region where the job is running
             tail_lines: Number of lines to return from the end
+            container: Container to read (multi-container pods); the API
+                reads the pod's first container when omitted
 
         Returns:
             Log content as string
         """
+        query = f"tail={tail_lines}"
+        if container:
+            query += f"&container={quote(container, safe='')}"
         response = self.make_authenticated_request(
             method="GET",
-            path=f"/api/v1/jobs/{namespace}/{job_name}/logs?tail={tail_lines}",
+            path=f"/api/v1/jobs/{namespace}/{job_name}/logs?{query}",
             target_region=region,
         )
 

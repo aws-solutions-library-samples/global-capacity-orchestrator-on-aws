@@ -3570,7 +3570,7 @@ gco jobs logs JOB_NAME [OPTIONS]
 | `--namespace` | `-n` | Job namespace |
 | `--tail` | `-t` | Number of lines to show (default: 100) |
 | `--since` | `-s` | Hours to look back in CloudWatch (default: 24) |
-| `--container` | `-c` | Container name (for multi-container pods) |
+| `--container` | `-c` | Container to read in a multi-container pod (default: the pod's first container) |
 | `--node` | | Node rank to fetch for a distributed TrainJob (default: 0) |
 
 Kubeflow TrainJobs are resolved automatically: logs come from the

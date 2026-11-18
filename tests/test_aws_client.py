@@ -3218,3 +3218,35 @@ class TestDecodeLogPayload:
                         region="us-east-1",
                     )
                     assert result == {"error": "pod not found"}
+
+
+class TestJobLogsContainerQuery:
+    """``get_job_logs`` sends ``container`` to the API, URL-encoded."""
+
+    @staticmethod
+    def _client():
+        from cli.aws_client import GCOAWSClient
+
+        with patch("cli.aws_client.get_config") as mock_config, patch("boto3.Session"):
+            mock_config.return_value = MagicMock(cache_ttl_seconds=300)
+            client = GCOAWSClient()
+        response = MagicMock(ok=True)
+        response.json.return_value = {"logs": "line\n"}
+        client.make_authenticated_request = MagicMock(return_value=response)
+        return client
+
+    def test_container_is_added_to_the_query(self):
+        client = self._client()
+
+        assert client.get_job_logs("train", "gco-jobs", "us-east-1", 20, "side car") == "line\n"
+
+        path = client.make_authenticated_request.call_args.kwargs["path"]
+        assert path == "/api/v1/jobs/gco-jobs/train/logs?tail=20&container=side%20car"
+
+    def test_no_container_sends_only_tail(self):
+        client = self._client()
+
+        client.get_job_logs("train", "gco-jobs", "us-east-1", 20)
+
+        path = client.make_authenticated_request.call_args.kwargs["path"]
+        assert path == "/api/v1/jobs/gco-jobs/train/logs?tail=20"

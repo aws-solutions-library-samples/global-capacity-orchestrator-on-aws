@@ -1288,7 +1288,19 @@ class TestRenderingAndConfirmations:
             tail_lines=12,
             since_hours=48,
             node=3,
+            container=None,
         )
+
+    def test_logs_forwards_container(self) -> None:
+        manager = MagicMock()
+        manager.get_job_logs.return_value = "sidecar line"
+        result, _, _ = _invoke(
+            ["jobs", "logs", "trainer", "-r", "us-east-1", "--container", "sidecar"],
+            manager,
+        )
+        assert result.exit_code == 0, result.output
+        assert manager.get_job_logs.call_args.kwargs["container"] == "sidecar"
+        assert "sidecar line" in result.output
 
     @pytest.mark.parametrize(
         ("args", "method"),

@@ -841,6 +841,7 @@ class JobManager:
         follow: bool = False,
         since_hours: int = 24,
         node: int = 0,
+        container: str | None = None,
     ) -> str:
         """
         Get logs from a job.
@@ -861,6 +862,9 @@ class JobManager:
             follow: Stream logs (not implemented yet)
             since_hours: Hours to look back in CloudWatch (default 24)
             node: Node rank to fetch for a distributed TrainJob (default 0)
+            container: Container to read in a multi-container pod, on the
+                Kubernetes path and the TrainJob path alike; None reads the
+                pod's first container there
 
         Returns:
             Log content as string
@@ -876,6 +880,7 @@ class JobManager:
                 namespace=namespace,
                 region=target_region,
                 tail_lines=tail_lines,
+                container=container,
             )
         except RuntimeError as e:
             error_msg = str(e)
@@ -890,6 +895,7 @@ class JobManager:
                         region=target_region,
                         node=node,
                         tail_lines=tail_lines,
+                        container=container,
                     )
                 except Exception as tj_err:
                     logger.debug("TrainJob logs fallback failed: %s", tj_err)
@@ -923,6 +929,7 @@ class JobManager:
         region: str,
         node: int,
         tail_lines: int,
+        container: str | None = None,
     ) -> str:
         """Fetch logs from the rank-``node`` pod of a TrainJob.
 
@@ -972,6 +979,7 @@ class JobManager:
             namespace=namespace,
             region=region,
             tail_lines=tail_lines,
+            container=container,
         )
         return str(response.get("logs", ""))
 
