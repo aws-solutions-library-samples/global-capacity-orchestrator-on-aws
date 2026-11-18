@@ -203,9 +203,25 @@ def _validate_repo_server(repo_server: Mapping[str, Any]) -> None:
 
 
 def is_git_repository_url(value: str) -> bool:
-    """True for the Git URL shapes Argo CD clones (https://, ssh://, scp-style, ``.git``)."""
+    """True for the Git URL shapes the error message names: https://, ssh:// or scp-style git@.
+
+    A ``.git`` suffix alone is not enough: ``http://`` (cleartext) and
+    ``file://`` (a path inside the repo-server pod) URLs ending in ``.git``
+    used to pass although the message said they would not.
+    """
     url = value.strip()
-    return url.startswith(("https://", "ssh://", "git@")) or url.endswith(".git")
+    return url.startswith(("https://", "ssh://", "git@"))
+
+
+def yaml_double_quoted_text(value: str) -> str:
+    """``value`` escaped for the inside of a YAML double-quoted scalar.
+
+    The GitOps manifest quotes its placeholders (``repoURL: "{{...}}"``), so a
+    value is inserted between the quotes. JSON's string escapes are valid
+    YAML double-quoted escapes, so a ``"`` or ``\\`` in a revision or path
+    no longer ends the scalar early and breaks the rendered YAML.
+    """
+    return json.dumps(value, ensure_ascii=False)[1:-1]
 
 
 def repository_allowed(repo_url: str, source_repos: list[str]) -> bool:
@@ -409,10 +425,10 @@ def compute_argocd_replacements(
     gitops = config["gitops"]
     replacements.update(
         {
-            "{{ARGOCD_GITOPS_REPO_URL}}": str(gitops["repo_url"]).strip(),
-            "{{ARGOCD_GITOPS_REVISION}}": str(gitops["revision"]).strip(),
-            "{{ARGOCD_GITOPS_PATH}}": render_gitops_path(
-                str(gitops["path"]), region=region, cluster_name=cluster_name
+            "{{ARGOCD_GITOPS_REPO_URL}}": yaml_double_quoted_text(str(gitops["repo_url"]).strip()),
+            "{{ARGOCD_GITOPS_REVISION}}": yaml_double_quoted_text(str(gitops["revision"]).strip()),
+            "{{ARGOCD_GITOPS_PATH}}": yaml_double_quoted_text(
+                render_gitops_path(str(gitops["path"]), region=region, cluster_name=cluster_name)
             ),
             "{{ARGOCD_GITOPS_SYNC_POLICY}}": json.dumps(
                 sync_policy_document(str(gitops["sync_policy"]))
