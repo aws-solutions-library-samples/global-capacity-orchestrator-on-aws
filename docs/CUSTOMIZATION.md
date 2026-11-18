@@ -1807,12 +1807,14 @@ The values follow the [`AWS::FSx::FileSystem` `LustreConfiguration` reference](h
 **Per-Region settings:** `fsx_lustre_regions` holds an object per Region whose
 keys override the global block for that Region only, for example
 `"fsx_lustre_regions": {"us-west-2": {"enabled": true}}`. `gco stacks fsx enable
--r <region>` writes such an entry.
+-r <region>` writes such an entry. `gco stacks fsx enable` writes the settings
+it shows and removes the ones you leave out (an earlier import path, export
+path or throughput, and the deprecated `node_group`) from the block it writes.
 
 **Removed setting:** earlier releases documented an `fsx_lustre.node_group`
 block, but nothing ever read it: FSx workloads run on the EKS Auto Mode node
 pools. A `node_group` key still validates, with a deprecation warning, and has
-no effect; delete it.
+no effect; delete it (`gco stacks fsx enable` removes it).
 
 ### Using FSx in Jobs
 

@@ -52,7 +52,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Collection, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -7699,14 +7699,17 @@ def get_fsx_config(region: str | None = None) -> dict[str, Any]:
     return _get_feature_config("fsx_lustre", _FSX_DEFAULTS, region)
 
 
-def update_fsx_config(settings: dict[str, Any], region: str | None = None) -> None:
+def update_fsx_config(
+    settings: dict[str, Any], region: str | None = None, *, remove: Iterable[str] = ()
+) -> None:
     """Update FSx for Lustre configuration in cdk.json.
 
     Args:
         settings: FSx settings to update
         region: Optional region for region-specific config. If None, updates global config.
+        remove: Keys to delete from the block written (see :func:`_update_feature_config`).
     """
-    _update_feature_config("fsx_lustre", settings, _FSX_DEFAULTS, region)
+    _update_feature_config("fsx_lustre", settings, _FSX_DEFAULTS, region, remove=remove)
 
 
 _PCS_DEFAULTS: dict[str, Any] = {
@@ -7828,14 +7831,23 @@ def _update_feature_config(
     settings: dict[str, Any],
     default_config: dict[str, Any],
     region: str | None = None,
+    *,
+    remove: Iterable[str] = (),
 ) -> None:
     """Update configuration for a toggleable feature in cdk.json.
+
+    A ``None`` in ``settings`` leaves that key as it is (``enabled`` excepted,
+    which is always written); a key in ``remove`` is deleted from the block
+    written, unless ``settings`` gives it a value. Deleting a key from a
+    region's overlay makes the region inherit the global block's value.
 
     Args:
         feature_key: The cdk.json context key (e.g. "valkey", "aurora_pgvector").
         settings: Settings to update.
         default_config: Default configuration values when the key is missing.
         region: Optional region for region-specific config.
+        remove: Keys to delete: settings a command leaves unset, so a value
+            written earlier does not linger, and deprecated keys.
     """
     cdk_json_path = _find_cdk_json()
     if not cdk_json_path:
@@ -7847,24 +7859,17 @@ def _update_feature_config(
         with open(cdk_json_path, encoding="utf-8") as f:
             cdk_config = json.load(f)
 
-        if "context" not in cdk_config:
-            cdk_config["context"] = {}
-
+        context = cdk_config.setdefault("context", {})
         if region:
-            region_key = f"{feature_key}_regions"
-            if region_key not in cdk_config["context"]:
-                cdk_config["context"][region_key] = {}
-            if region not in cdk_config["context"][region_key]:
-                cdk_config["context"][region_key][region] = {}
-            for key, value in settings.items():
-                if value is not None or key == "enabled":
-                    cdk_config["context"][region_key][region][key] = value
+            block = context.setdefault(f"{feature_key}_regions", {}).setdefault(region, {})
         else:
-            if feature_key not in cdk_config["context"]:
-                cdk_config["context"][feature_key] = {**default_config}
-            for key, value in settings.items():
-                if value is not None or key == "enabled":
-                    cdk_config["context"][feature_key][key] = value
+            block = context.setdefault(feature_key, {**default_config})
+        for key, value in settings.items():
+            if value is not None or key == "enabled":
+                block[key] = value
+        for key in remove:
+            if settings.get(key) is None:
+                block.pop(key, None)
 
         _atomic_write_bytes(
             cdk_json_path,

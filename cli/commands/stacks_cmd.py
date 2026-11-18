@@ -1931,6 +1931,10 @@ def fsx_enable(
     PERSISTENT_1's 200). SCRATCH file systems have no such setting, so none
     is written for them and the option is refused.
 
+    The command writes the configuration it shows: an option you leave out
+    is removed from the block, so an import path, export path or throughput
+    from an earlier run does not carry over.
+
     Examples:
         gco stacks fsx enable
         gco stacks fsx enable --region us-east-1
@@ -1993,7 +1997,12 @@ def fsx_enable(
             "auto_import_policy": "NEW_CHANGED_DELETED" if import_path else None,
         }
 
-        update_fsx_config(fsx_settings, region)
+        # The options left out are removed, so the block holds what the
+        # summary above showed: an import path, export path or PERSISTENT
+        # throughput written by an earlier run does not linger, and the
+        # deprecated node_group key goes.
+        unset = [key for key, value in fsx_settings.items() if value is None]
+        update_fsx_config(fsx_settings, region, remove=[*unset, "node_group"])
         formatter.print_success(f"FSx for Lustre enabled in cdk.json for {scope}")
         if region:
             formatter.print_info(

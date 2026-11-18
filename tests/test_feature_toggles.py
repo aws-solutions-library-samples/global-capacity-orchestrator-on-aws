@@ -182,6 +182,52 @@ class TestGenericFeatureConfig:
         assert json.loads(real.read_text(encoding="utf-8"))["context"]["valkey"]["enabled"]
         assert sorted(path.name for path in link.parent.iterdir()) == ["cdk.json"]
 
+    def test_update_feature_config_removes_keys(self, tmp_path: Path):
+        """A key in ``remove`` is deleted unless the same call gives it a value."""
+        from cli.stacks import _update_feature_config
+
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(
+            json.dumps(
+                {"context": {"my_feature": {"enabled": True, "stale": 1, "old": 2, "kept": 3}}}
+            )
+        )
+        with patch("cli.stacks._find_cdk_json", return_value=cdk_path):
+            _update_feature_config(
+                "my_feature",
+                {"enabled": True, "stale": None, "kept": 4},
+                {"enabled": False},
+                remove=["stale", "old", "kept", "never_there"],
+            )
+
+        assert json.loads(cdk_path.read_text())["context"]["my_feature"] == {
+            "enabled": True,
+            "kept": 4,
+        }
+
+    def test_update_feature_config_removes_keys_from_the_region_overlay_only(self, tmp_path: Path):
+        from cli.stacks import _update_feature_config
+
+        cdk_path = tmp_path / "cdk.json"
+        cdk_path.write_text(
+            json.dumps(
+                {
+                    "context": {
+                        "my_feature": {"enabled": False, "path": "global"},
+                        "my_feature_regions": {"us-west-2": {"enabled": True, "path": "region"}},
+                    }
+                }
+            )
+        )
+        with patch("cli.stacks._find_cdk_json", return_value=cdk_path):
+            _update_feature_config(
+                "my_feature", {"enabled": True}, {"enabled": False}, "us-west-2", remove=["path"]
+            )
+
+        context = json.loads(cdk_path.read_text())["context"]
+        assert context["my_feature_regions"] == {"us-west-2": {"enabled": True}}
+        assert context["my_feature"] == {"enabled": False, "path": "global"}
+
     def test_update_feature_config_skips_none_values(self):
         from cli.stacks import _update_feature_config
 
@@ -479,3 +525,71 @@ class TestFsxRefactored:
                 global_result = get_fsx_config()
                 assert global_result["storage_capacity_gib"] == 1200
                 assert global_result["is_region_specific"] is False
+
+
+class TestFsxEnableWritesWhatItShows:
+    """``gco stacks fsx enable`` removes the settings it was not given.
+
+    It used to skip every option left out, so an import path, export path or
+    PERSISTENT throughput from an earlier run stayed in cdk.json although the
+    confirmation summary did not show it, and the deprecated ``node_group``
+    stayed too.
+    """
+
+    _STALE = {
+        "enabled": False,
+        "storage_capacity_gib": 2400,
+        "deployment_type": "PERSISTENT_2",
+        "per_unit_storage_throughput": 500,
+        "data_compression_type": "LZ4",
+        "import_path": "s3://example-bucket/in",
+        "export_path": "s3://example-bucket/out",
+        "auto_import_policy": "NEW",
+        "node_group": {"instance_types": ["m5.large"]},
+    }
+
+    @staticmethod
+    def _enable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *args: str) -> dict:
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(cli, ["stacks", "fsx", "enable", "-y", *args])
+        assert result.exit_code == 0, result.output
+        return json.loads((tmp_path / "cdk.json").read_text(encoding="utf-8"))["context"]
+
+    def test_the_global_block_holds_exactly_the_shown_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "cdk.json").write_text(json.dumps({"context": {"fsx_lustre": self._STALE}}))
+        context = self._enable(tmp_path, monkeypatch, "-d", "SCRATCH_2")
+        assert context["fsx_lustre"] == {
+            "enabled": True,
+            "storage_capacity_gib": 1200,
+            "deployment_type": "SCRATCH_2",
+            "data_compression_type": "LZ4",
+        }
+
+    def test_a_region_entry_drops_its_stale_settings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / "cdk.json").write_text(
+            json.dumps(
+                {
+                    "context": {
+                        "fsx_lustre": {"enabled": False},
+                        "fsx_lustre_regions": {"us-west-2": self._STALE},
+                    }
+                }
+            )
+        )
+        context = self._enable(tmp_path, monkeypatch, "-r", "us-west-2", "-d", "PERSISTENT_1")
+        assert context["fsx_lustre_regions"]["us-west-2"] == {
+            "enabled": True,
+            "storage_capacity_gib": 1200,
+            "deployment_type": "PERSISTENT_1",
+            "per_unit_storage_throughput": 200,
+            "data_compression_type": "LZ4",
+        }
+        assert context["fsx_lustre"] == {"enabled": False}
