@@ -3238,7 +3238,7 @@ gco inference set-topology my-llm --prefill 3 --decode 6
 
 #### `gco inference configure-store`
 
-Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. Settings merge onto the endpoint's existing store block and re-trigger reconciliation, so changing one field leaves the others intact. The monitor re-renders the endpoint's `mooncake.json` and rolls its role pods onto it (the connectors read the file at start-up), so expect one rolling restart per change.
+Update the shared KV-cache store on a Mooncake `store`/`both` endpoint. Settings merge onto the endpoint's existing store block and re-trigger reconciliation, so changing one field leaves the others intact. The monitor re-renders the endpoint's `mooncake.json` and rolls its role pods onto it (the connectors read the file at start-up), so expect one rolling restart per change. At least one option is required: without one the command changes nothing and exits with status 1.
 
 ```bash
 gco inference configure-store ENDPOINT_NAME [OPTIONS]

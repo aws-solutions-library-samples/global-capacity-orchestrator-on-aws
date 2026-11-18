@@ -1876,7 +1876,8 @@ def inference_configure_store(
     Merges the given settings into the endpoint's existing KV-cache store
     configuration and re-triggers reconciliation so each region's monitor picks
     up the change. Enabling the cold tier also enables the shared store it
-    extends. Use 'gco inference populate-kv' to pre-warm the cold tier.
+    extends. At least one setting is required; without one nothing is changed.
+    Use 'gco inference populate-kv' to pre-warm the cold tier.
 
     Examples:
         gco inference configure-store my-llm --cold-tier
@@ -1885,6 +1886,17 @@ def inference_configure_store(
     from ..inference import get_inference_manager
 
     formatter = get_output_formatter(config)
+
+    # With no setting to change, write nothing: merging no flags onto the
+    # current block and writing it back would redeploy the endpoint.
+    settings = (enabled, cold_tier, offload, global_segment_size, local_buffer_size)
+    if all(setting is None for setting in settings):
+        formatter.print_error(
+            "No store settings given. Pass --cold-tier, --offload, "
+            "--global-segment-size, --local-buffer-size, or --enable-store; "
+            "nothing was changed."
+        )
+        sys.exit(1)
 
     try:
         manager = get_inference_manager(config)
@@ -1913,13 +1925,6 @@ def inference_configure_store(
             store_config["global_segment_size"] = global_segment_size
         if local_buffer_size is not None:
             store_config["local_buffer_size"] = local_buffer_size
-
-        if not store_config:
-            formatter.print_error(
-                "No store settings given. Pass --cold-tier, --offload, "
-                "--global-segment-size, --local-buffer-size, or --enable-store."
-            )
-            sys.exit(1)
 
         result = manager.configure_store(endpoint_name, store_config)
         if result:

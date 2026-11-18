@@ -2657,6 +2657,19 @@ class TestInferenceConfigureStore:
         assert "No store settings given" in result.output
         mock_mgr.configure_store.assert_not_called()
 
+    def test_configure_store_without_settings_leaves_a_configured_store_alone(self, runner):
+        """Finding CM17: no flags re-wrote the current store block and redeployed."""
+        mock_mgr = MagicMock()
+        mock_mgr.get_endpoint.return_value = self._endpoint({"enabled": True, "offload": "cpu"})
+        with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["inference", "configure-store", "ep"])
+
+        assert result.exit_code == 1
+        assert "No store settings given" in result.output
+        assert "nothing was changed" in result.output
+        mock_mgr.configure_store.assert_not_called()
+        mock_mgr.get_endpoint.assert_not_called()
+
     def test_configure_store_tolerates_malformed_stored_spec(self, runner):
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = {
