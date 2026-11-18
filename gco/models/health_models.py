@@ -11,6 +11,7 @@ cluster health status for load balancer health checks and monitoring.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
@@ -49,10 +50,17 @@ class ResourceUtilization:
     """
     Current resource utilization metrics for a cluster.
 
+    Each value is a percentage of what the nodes report as allocatable, and
+    it can exceed 100: CPU and memory usage include the system-reserved share
+    that allocatable leaves out, and GPU requests can briefly outnumber the
+    allocatable GPUs (while a device plugin restarts, for example). Such
+    over-commit is a real cluster state, so it is accepted and compared with
+    the thresholds like any other value rather than rejected as invalid.
+
     Attributes:
-        cpu: CPU utilization percentage (0.0-100.0)
-        memory: Memory utilization percentage (0.0-100.0)
-        gpu: GPU utilization percentage (0.0-100.0)
+        cpu: CPU utilization percentage (0.0 or more)
+        memory: Memory utilization percentage (0.0 or more)
+        gpu: GPU utilization percentage (0.0 or more)
     """
 
     cpu: float
@@ -62,9 +70,9 @@ class ResourceUtilization:
     def __post_init__(self) -> None:
         """Validate utilization values"""
         for field_name, value in [("cpu", self.cpu), ("memory", self.memory), ("gpu", self.gpu)]:
-            if not isinstance(value, (int, float)) or not 0.0 <= value <= 100.0:
+            if not isinstance(value, (int, float)) or not 0.0 <= value < math.inf:
                 raise ValueError(
-                    f"{field_name} must be a number between 0.0 and 100.0, got {value}"
+                    f"{field_name} must be a finite, non-negative percentage, got {value}"
                 )
 
 

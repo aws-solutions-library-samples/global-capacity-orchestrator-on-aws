@@ -79,10 +79,9 @@ class TestResourceUtilizationExtended:
         with pytest.raises(ValueError, match="gpu"):
             ResourceUtilization(cpu=50.0, memory=50.0, gpu=-1.0)
 
-    def test_invalid_gpu_over_100(self):
-        """Test that GPU over 100 raises error."""
-        with pytest.raises(ValueError, match="gpu"):
-            ResourceUtilization(cpu=50.0, memory=50.0, gpu=101.0)
+    def test_gpu_over_100_is_accepted(self):
+        """Running pods can hold more GPUs than nodes report allocatable."""
+        assert ResourceUtilization(cpu=50.0, memory=50.0, gpu=101.0).gpu == 101.0
 
     def test_invalid_cpu_type(self):
         """Test that invalid CPU type raises error."""
