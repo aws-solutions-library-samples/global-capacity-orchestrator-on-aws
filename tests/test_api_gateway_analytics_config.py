@@ -39,9 +39,6 @@ STUB_USER_POOL_ID = "us-east-2_STUBPOOL01"
 STUB_USER_POOL_ARN = (
     f"arn:aws:cognito-idp:{STUB_REGION}:{STUB_ACCOUNT}:userpool/{STUB_USER_POOL_ID}"
 )
-STUB_CLIENT_ID = "1abcdefghijklmnopqrstu234"
-STUB_STUDIO_DOMAIN = "gco-analytics-us-east-2"
-STUB_CALLBACK_URL = "https://example.execute-api.us-east-2.amazonaws.com/prod/studio/callback"
 
 
 def _synth_absent() -> assertions.Template:
@@ -88,10 +85,7 @@ def _synth_present() -> assertions.Template:
 
     analytics_config = AnalyticsApiConfig(
         user_pool_arn=STUB_USER_POOL_ARN,
-        user_pool_client_id=STUB_CLIENT_ID,
         presigned_url_lambda=stub_lambda,
-        studio_domain_name=STUB_STUDIO_DOMAIN,
-        callback_url=STUB_CALLBACK_URL,
     )
     stack.set_analytics_config(analytics_config)
 
@@ -286,10 +280,7 @@ class TestSetAnalyticsConfigMutator:
         )
         cfg = AnalyticsApiConfig(
             user_pool_arn=STUB_USER_POOL_ARN,
-            user_pool_client_id=STUB_CLIENT_ID,
             presigned_url_lambda=stub_lambda,
-            studio_domain_name=STUB_STUDIO_DOMAIN,
-            callback_url=STUB_CALLBACK_URL,
         )
         stack.set_analytics_config(cfg)
         with pytest.raises(RuntimeError, match="already has an analytics_config"):

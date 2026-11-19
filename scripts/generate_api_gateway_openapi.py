@@ -924,10 +924,7 @@ def synthesize(project_root: Path) -> dict[str, dict[str, Any]]:
                     f"arn:aws:cognito-idp:{regions['api_gateway']}:{PLACEHOLDER_ACCOUNT}"
                     ":userpool/studio-user-pool"
                 ),
-                user_pool_client_id="<studio-user-pool-client>",
                 presigned_url_lambda=stand_in,
-                studio_domain_name=f"{project}-analytics",
-                callback_url="https://<api-id>.execute-api.<region>.amazonaws.com/prod/studio/callback",
             )
         )
         without_analytics = global_stack("variant-without-analytics", accelerator=True)

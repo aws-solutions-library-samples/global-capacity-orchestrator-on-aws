@@ -111,30 +111,15 @@ class AnalyticsApiConfig:
 
     Attributes:
         user_pool_arn: Full ARN of the Cognito user pool that authenticates
-            Studio logins. Shape:
+            Studio logins (the ``/studio/login`` authorizer). Shape:
             ``arn:aws:cognito-idp:<region>:<account>:userpool/<pool-id>``.
-        user_pool_client_id: Client id of the Studio user-pool client
-            (SRP auth). Used by the CLI's ``gco analytics studio login``
-            flow and surfaced to API Gateway outputs for discoverability.
         presigned_url_lambda: The ``analytics-presigned-url`` Lambda
             function created by ``GCOAnalyticsStack._create_presigned_url_lambda``.
             Consumed by the ``/studio/login`` ``LambdaIntegration``.
-        studio_domain_name: SageMaker Studio domain name. Carried through
-            as context for the Lambda integration; the Lambda itself also
-            reads this value from its ``STUDIO_DOMAIN_NAME`` environment
-            variable set by the analytics stack.
-        callback_url: Concrete OAuth redirect target
-            (``https://<api>/prod/studio/callback``) used when the
-            Cognito hosted UI is enabled. The ``/studio/callback`` route
-            is wired as a stub here so the URL is reachable immediately
-            after deploy.
     """
 
     user_pool_arn: str
-    user_pool_client_id: str
     presigned_url_lambda: lambda_.IFunction
-    studio_domain_name: str
-    callback_url: str
 
 
 class GCOApiGatewayGlobalStack(Stack):

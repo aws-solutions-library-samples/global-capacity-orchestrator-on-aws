@@ -770,19 +770,6 @@ def add_monitoring_suppressions(stack: Stack) -> None:
                     "KMS encryption can be enabled if required for PCI compliance."
                 ),
             ),
-            # CloudWatch Log Group encryption
-            NagSuppression(
-                id="HIPAA.Security-CloudWatchLogGroupEncrypted",
-                reason="CloudWatch Logs are encrypted by default with AWS-managed keys.",
-            ),
-            NagSuppression(
-                id="NIST.800.53.R5-CloudWatchLogGroupEncrypted",
-                reason="CloudWatch Logs are encrypted by default with AWS-managed keys.",
-            ),
-            NagSuppression(
-                id="PCI.DSS.321-CloudWatchLogGroupEncrypted",
-                reason="CloudWatch Logs are encrypted by default with AWS-managed keys.",
-            ),
             # The composite alarm's inputs, which carry no action of their own,
             # are acknowledged on each input (gco/stacks/control_plane_alarms.py).
         ],

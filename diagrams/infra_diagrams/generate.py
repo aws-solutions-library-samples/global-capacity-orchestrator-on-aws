@@ -379,13 +379,7 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
         api_gateway_stack.set_analytics_config(
             AnalyticsApiConfig(
                 user_pool_arn=analytics_stack.cognito_pool.user_pool_arn,
-                user_pool_client_id=analytics_stack.cognito_client.user_pool_client_id,
                 presigned_url_lambda=analytics_stack.presigned_url_lambda,
-                studio_domain_name=analytics_stack.studio_domain.domain_name or "",
-                callback_url=(
-                    f"https://{api_gateway_stack.api.rest_api_id}.execute-api."
-                    f"{regions['api_gateway']}.{api_gateway_stack.url_suffix}/prod/studio/callback"
-                ),
             )
         )
         api_gateway_stack.add_stack_dependency(analytics_stack)

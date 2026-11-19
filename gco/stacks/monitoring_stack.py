@@ -4,10 +4,10 @@ Monitoring stack for GCO (Global Capacity Orchestrator on AWS) - Cross-region mo
 This stack creates centralized monitoring resources for all GCO deployments:
 - CloudWatch Dashboard with comprehensive widgets for all regions
 - SNS topic for alerting
-- CloudWatch Alarms for critical metrics
-- Log groups for application logs
-- Anomaly detection for traffic patterns
-- Composite alarms for better signal-to-noise
+- CloudWatch Alarms for the control-plane metrics in this Region, including
+  a composite alarm for better signal-to-noise
+- With cost monitoring on, the cost report bucket, Glue database and table, and
+  Athena workgroup
 
 Dashboard Sections:
 - Global Accelerator: Flow counts, processed bytes
@@ -60,7 +60,6 @@ from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_glue as glue
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_kms as kms
-from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sns as sns
 from aws_cdk import aws_ssm as ssm
@@ -188,9 +187,6 @@ class GCOMonitoringStack(Stack):
 
         # Create the alarms whose metrics are in this stack's Region
         self._create_alarms()
-
-        # Create custom metrics
-        self._create_custom_metrics()
 
         # Export monitoring resources
         self._create_outputs()
@@ -756,7 +752,7 @@ class GCOMonitoringStack(Stack):
             )
         )
 
-        # Flow count with anomaly detection
+        # New flows per period
         flow_count_widget = cloudwatch.GraphWidget(
             title="Global Accelerator - New Flows",
             left=[
@@ -2275,30 +2271,6 @@ class GCOMonitoringStack(Stack):
                 table_name=self.global_stack.jobs_table.table_name,
                 region=global_region,
                 topic=self.alert_topic,
-            )
-
-    def _create_custom_metrics(self) -> None:
-        """Create custom metric filters and log groups"""
-        for regional_stack in self.regional_stacks:
-            region = regional_stack.deployment_region
-            region_id = region.replace("-", "").title()
-
-            # Health monitor log group
-            # log_group_name intentionally omitted - let CDK generate unique name
-            logs.LogGroup(
-                self,
-                f"HealthMonitorLogGroup{region_id}",
-                retention=logs.RetentionDays.ONE_MONTH,
-                removal_policy=RemovalPolicy.DESTROY,
-            )
-
-            # Manifest processor log group
-            # log_group_name intentionally omitted - let CDK generate unique name
-            logs.LogGroup(
-                self,
-                f"ManifestProcessorLogGroup{region_id}",
-                retention=logs.RetentionDays.ONE_MONTH,
-                removal_policy=RemovalPolicy.DESTROY,
             )
 
     def _create_outputs(self) -> None:

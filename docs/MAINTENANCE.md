@@ -1073,7 +1073,6 @@ Services emit structured JSON (`gco/services/structured_logging.py`, tunable via
 request each line also carries `trace_id`, `span_id`, and `trace_sampled`.
 Retention is bounded, not open-ended:
 
-- Monitoring log groups use `RetentionDays.ONE_MONTH` (`monitoring_stack.py`).
 - S3 access logs expire per `s3_access_logs.retention_days` in `cdk.json`
   (default 90 days).
 - Capacity-history rows carry a DynamoDB TTL (default 90 days).

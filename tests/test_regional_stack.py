@@ -530,8 +530,8 @@ class TestMonitoringStackMethods:
         # Should have multiple alarms
         template.has_resource("AWS::CloudWatch::Alarm", {})
 
-    def test_monitoring_stack_creates_log_groups(self):
-        """Test that MonitoringStack creates log groups."""
+    def test_monitoring_stack_creates_no_log_groups(self):
+        """MonitoringStack creates no log group (nothing wrote to the old ones)."""
         from gco.stacks.monitoring_stack import GCOMonitoringStack
 
         app = cdk.App()
@@ -548,8 +548,9 @@ class TestMonitoringStackMethods:
         )
 
         template = assertions.Template.from_stack(stack)
-        # Should have log groups for health monitor and manifest processor
-        template.has_resource("AWS::Logs::LogGroup", {})
+        # No log group: the services log through Container Insights in their
+        # own Region (tests/test_monitoring_stack.py).
+        template.resource_count_is("AWS::Logs::LogGroup", 0)
 
 
 class TestConfigLoaderValidation:
