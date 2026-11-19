@@ -2595,7 +2595,11 @@ architecture and lifecycle policy options.
 #### `gco images init`
 
 Create a project repository with the default lifecycle policy applied
-(keep 20 tagged images, expire untagged after 7 days).
+(keep 20 tagged images, expire untagged after 7 days). `NAME` (here and in the
+other `gco images` commands) is a lowercase letter, then lowercase letters and
+digits joined by single dashes, at most 63 characters: it becomes the
+`<project>/NAME` repository, and ECR rejects a name that ends in a dash or
+holds two in a row.
 
 ```bash
 gco images init NAME [OPTIONS]

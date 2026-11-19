@@ -314,7 +314,8 @@ if is_enabled(FLAG_IMAGE_PUBLISH):
         Args:
             context: Build context directory, relative to the project root
                 (an absolute path must also be inside it).
-            name: Image name (lowercase letters, digits, dashes; max 63 chars).
+            name: Image name (lowercase letters and digits joined by single dashes,
+                starting with a letter; max 63 chars).
             tag: Image tag (defaults to git short SHA, else ``latest``).
             dockerfile: Path to the Dockerfile, relative to ``context``.
             platform: ``--platform`` argument for the build.
@@ -348,7 +349,8 @@ if is_enabled(FLAG_IMAGE_PUBLISH):
         `gco images push` — push an already-built local image to the project ECR repo.
 
         Args:
-            name: Image name (lowercase letters, digits, dashes; max 63 chars).
+            name: Image name (lowercase letters and digits joined by single dashes,
+                starting with a letter; max 63 chars).
             tag: Image tag.
             local_image: Source image reference on the local container runtime.
             retain: When True, mark the repository with ``gco:retain=true``

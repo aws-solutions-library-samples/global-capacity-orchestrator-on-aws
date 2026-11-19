@@ -33,6 +33,7 @@ from cli.images import (
     ImageManager,
     _rewrite_image_uri_for_region,
 )
+from gco.service_images import IMAGE_NAME_RE
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -61,14 +62,32 @@ def manager(mock_config: Any) -> ImageManager:
 # ---------------------------------------------------------------------------
 
 
-@given(name=st.from_regex(r"^[a-z][a-z0-9-]{0,62}$", fullmatch=True))
+@given(
+    name=st.from_regex(r"[a-z][a-z0-9]{0,8}(?:-[a-z0-9]{1,8}){0,6}", fullmatch=True).filter(
+        lambda candidate: len(candidate) <= 63
+    )
+)
 @settings(
     max_examples=200, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
 )
 def test_image_name_validation_round_trip(name: str, manager: ImageManager) -> None:
     """Every name matching ``_NAME_RE`` must round-trip through ``_validate_name``."""
-    assert _NAME_RE.match(name)
+    assert _NAME_RE.fullmatch(name)
     assert manager._validate_name(name) == name
+
+
+def test_image_names_follow_the_service_image_rule() -> None:
+    """IMAGES-NAME: one rule for user and service image names."""
+    assert _NAME_RE is IMAGE_NAME_RE
+
+
+@pytest.mark.parametrize("name", ["app-", "a-", "my--app", "-app", "app\n", "a" * 64])
+def test_validate_name_rejects_what_ecr_cannot_store(manager: ImageManager, name: str) -> None:
+    """A trailing or doubled dash used to pass (``[a-z0-9-]{0,62}``), and a
+    trailing newline slipped past ``match`` with ``$``; ECR rejects those
+    repository names, so the create or push failed later."""
+    with pytest.raises(ValueError, match="joined by single dashes"):
+        manager._validate_name(name)
 
 
 @given(tag=st.from_regex(r"^[a-zA-Z0-9_][a-zA-Z0-9_.\-]{0,127}$", fullmatch=True))

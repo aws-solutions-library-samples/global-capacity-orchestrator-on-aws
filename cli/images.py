@@ -38,7 +38,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from gco.service_images import discover_service_dockerfiles
+from gco.service_images import IMAGE_NAME_RE, discover_service_dockerfiles
 
 from ._container_runtime import detect_container_runtime
 from ._image_uri import (
@@ -68,11 +68,12 @@ logger = logging.getLogger(__name__)
 
 # Image name and tag validation regexes.
 #
-# Names: short, dns-friendly. Lowercase letter start, lowercase
-# alphanumerics and dashes after, max 63 characters total. The regex
-# also accepts a single character (``^[a-z]$``) — any longer name
-# requires a closing alphanumeric so dangling dashes are rejected.
-_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+# Names become ``<project>/<name>`` ECR repository suffixes, so they follow the
+# rule gco/service_images.py applies to the service images: a lowercase letter,
+# then lowercase letters and digits joined by single dashes, at most 63
+# characters. ECR rejects a path segment that ends in a dash or holds two in a
+# row.
+_NAME_RE = IMAGE_NAME_RE
 
 # Tags: docker reference grammar. First character must be alnum or
 # underscore; subsequent characters allow dot, dash, underscore.
@@ -197,10 +198,11 @@ class ImageManager:
 
     def _validate_name(self, name: str) -> str:
         """Validate an image name against ``_NAME_RE``."""
-        if not _NAME_RE.match(name):
+        if not _NAME_RE.fullmatch(name):
             raise ValueError(
-                f"Invalid image name: {name!r}. Expected lowercase letters, "
-                "digits, and dashes; must start with a letter; max 63 chars."
+                f"Invalid image name: {name!r}. Expected lowercase letters and digits "
+                "joined by single dashes; must start with a letter and end with a "
+                "letter or digit; max 63 chars."
             )
         return name
 
