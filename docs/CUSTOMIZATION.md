@@ -3069,6 +3069,8 @@ The checks enforced on both paths are:
 - `runAsUser: 0` (`block_run_as_root`, off by default)
 - Image registry allowlist (`trusted_registries`, `trusted_dockerhub_orgs`)
 - Resource caps (CPU, memory, GPU summed across all container kinds)
+- Accelerator tolerations (`require_accelerator_toleration`)
+- Manifest nesting depth (`manifest_processor.yaml_max_depth`, default 50; the queue processor receives the REST Deployment's value)
 
 See [Security Policy Configuration](#security-policy-configuration) for the full reference and JSON examples.
 
