@@ -161,7 +161,7 @@ Distributed training on Spot is a cost/interruption trade:
 kubectl get clustertrainingruntime
 ```
 
-Platform operators can add custom runtimes (different base images, initContainers, node selectors) by applying additional `ClusterTrainingRuntime` objects; user-facing TrainJobs stay unchanged. Runtime pod templates ship with `automountServiceAccountToken: false` — training pods get no Kubernetes API token unless a TrainJob opts back in through a runtime patch. They also carry a `kubernetes.io/arch: amd64` node selector, because the pinned `pytorch/pytorch` image is published for linux/amd64 only; a TrainJob whose image also has an arm64 build can change the selector through a runtime patch.
+Platform operators can add custom runtimes (different base images, initContainers, node selectors) by applying additional `ClusterTrainingRuntime` objects; user-facing TrainJobs stay unchanged. The shipped runtime's pod template sets `automountServiceAccountToken: false`, so training pods get no Kubernetes API token. Only the runtime decides this: a runtime patch's pod spec has no `automountServiceAccountToken` field (the API server drops one), so a TrainJob cannot turn the token on, and the job API, which adds `automountServiceAccountToken: false` to other workloads, leaves TrainJobs as submitted. A runtime you add should set it too. The shipped pod template also carries a `kubernetes.io/arch: amd64` node selector, because the pinned `pytorch/pytorch` image is published for linux/amd64 only; a TrainJob whose image also has an arm64 build can change the selector through a runtime patch.
 
 ## Troubleshooting
 

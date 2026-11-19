@@ -750,14 +750,13 @@ def _inject_security_defaults(manifest: dict[str, Any]) -> dict[str, Any]:
     via SQS get the same SA-token-theft protection as those submitted via
     the REST API.
 
-    For a TrainJob the default is injected into every pod spec embedded in
-    ``runtimePatches`` (live references into the manifest, so setdefault
-    mutates it in place); the base pod template comes from the shipped
-    ClusterTrainingRuntime, which already disables the token.
+    A TrainJob is left as it is: its pod template comes from the runtime, and
+    a runtime patch's pod spec has no ``automountServiceAccountToken`` (Kubeflow
+    Trainer 2.3.0's TrainJob CRD), so the API server would drop an injected
+    one. The shipped ``torch-distributed`` ClusterTrainingRuntime sets it to
+    false (docs/DISTRIBUTED_TRAINING.md, Runtimes).
     """
     if manifest.get("kind") == "TrainJob":
-        for embedded in extract_trainjob_pod_specs(manifest).embedded:
-            embedded.setdefault("automountServiceAccountToken", False)
         return manifest
     pod_spec = _extract_pod_spec(manifest)
     if pod_spec is not None:

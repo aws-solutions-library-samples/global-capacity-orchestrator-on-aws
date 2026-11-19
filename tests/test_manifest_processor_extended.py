@@ -2402,8 +2402,7 @@ class TestTrainJobValidation:
 
     def test_container_security_context_is_not_a_pod_spec_view(self, manifest_processor):
         """A container's own securityContext marks the container, not a pod
-        spec: the patch pod spec is the only view, and the injected pod-level
-        default never lands in a container."""
+        spec: the patch pod spec is the only view."""
         from gco.job_admission import extract_trainjob_pod_specs
 
         pod_spec = {
@@ -2420,10 +2419,6 @@ class TestTrainJobValidation:
         }
         manifest = _trainjob_manifest(runtime_patches=[_runtime_patch_with_pod_spec(pod_spec)])
         assert extract_trainjob_pod_specs(manifest).embedded == [pod_spec]
-        manifest_processor._inject_security_defaults(manifest)
-        assert pod_spec["automountServiceAccountToken"] is False
-        assert "automountServiceAccountToken" not in pod_spec["containers"][0]
-        assert "automountServiceAccountToken" not in pod_spec["initContainers"][0]
 
     def test_privileged_container_in_runtime_patch_rejected(self, manifest_processor):
         manifest = _trainjob_manifest(
@@ -2542,19 +2537,22 @@ class TestTrainJobValidation:
         is_valid, error = manifest_processor.validate_manifest(manifest)
         assert is_valid, error
 
-    def test_inject_security_defaults_reaches_embedded_pod_specs(self, manifest_processor):
-        """automountServiceAccountToken: false lands in every runtimePatches
-        pod spec (by mutation) without inventing fields elsewhere in the spec."""
+    def test_inject_security_defaults_leaves_a_trainjob_alone(self, manifest_processor):
+        """No ``automountServiceAccountToken`` is injected into a runtime patch.
+
+        Kubeflow Trainer 2.3.0's runtime-patch pod spec has no such field, so
+        the API server dropped the injected ``false`` and the TrainJob kept
+        whatever its runtime's pod template sets (the shipped
+        ``torch-distributed`` runtime sets ``false``).
+        """
+        import copy
+
         pod_spec = {"containers": [{"name": "worker", "image": "python:3.14-slim"}]}
         manifest = _trainjob_manifest(runtime_patches=[_runtime_patch_with_pod_spec(pod_spec)])
+        before = copy.deepcopy(manifest)
 
-        manifest_processor._inject_security_defaults(manifest)
-
-        embedded = manifest["spec"]["runtimePatches"][0]["trainingRuntimeSpec"]["template"]["spec"][
-            "replicatedJobs"
-        ][0]["template"]["spec"]["template"]["spec"]
-        assert embedded["automountServiceAccountToken"] is False
-        assert "automountServiceAccountToken" not in manifest["spec"]["trainer"]
+        assert manifest_processor._inject_security_defaults(manifest) is manifest
+        assert manifest == before
 
     def test_inject_security_defaults_respects_explicit_user_choice(self, manifest_processor):
         manifest = _trainjob_manifest(

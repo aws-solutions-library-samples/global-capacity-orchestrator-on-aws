@@ -18,8 +18,9 @@
 # .github/scripts/validate_helm_charts.py, which fails CI on any other
 # drift):
 #   - automountServiceAccountToken: false — the same security default both
-#     submission paths inject into user Jobs; training pods get no API
-#     token unless a TrainJob opts back in via runtimePatches.
+#     submission paths inject into user Jobs. Training pods get it from here
+#     alone: a runtime patch's pod spec has no such field, so neither the
+#     submission paths nor a TrainJob can set it.
 #   - containers[node].securityContext.allowPrivilegeEscalation: false —
 #     NoNewPrivs for every training pod; the platform's manifest policy
 #     already rejects an explicit `true`, this closes the implicit default.
