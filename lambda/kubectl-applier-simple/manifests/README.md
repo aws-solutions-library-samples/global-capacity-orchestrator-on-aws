@@ -96,8 +96,8 @@ change is required to add a new CRD-dependent resource, just use the prefix.
 | `20-storage-efs.yaml` | EFS `StorageClass` + PVCs in all namespaces (dynamic provisioning) |
 | `21-storage-fsx.yaml` | FSx Lustre `StorageClass` + PVs + PVCs — **pruned when FSx is disabled** |
 | `22-storage-cluster-shared-bucket.yaml` | `gco-cluster-shared-bucket` `ConfigMap` (name/ARN/region) in all namespaces — always present |
-| `23-storage-valkey.yaml` | Valkey endpoint `ConfigMap` in all namespaces — **pruned when Valkey is disabled** |
-| `24-storage-aurora-pgvector.yaml` | `gco-aurora-pgvector` `ConfigMap` (endpoint/port/secret/db) in all namespaces — **pruned when Aurora pgvector is disabled** |
+| `23-storage-valkey.yaml` | Valkey endpoint `ConfigMap` in `gco-jobs`, the one namespace whose egress reaches it (copies earlier releases put in `gco-system`/`gco-inference` are swept) — **pruned when Valkey is disabled** |
+| `24-storage-aurora-pgvector.yaml` | `gco-aurora-pgvector` `ConfigMap` (endpoint/port/secret/db) in `gco-jobs`, the one namespace whose egress reaches it (copies earlier releases put in `gco-system`/`gco-inference` are swept) — **pruned when Aurora pgvector is disabled** |
 | `25-storage-observability-gp3.yaml` | `gco-observability-gp3` `StorageClass` backing Prometheus/Grafana/Alertmanager PVCs — **pruned when observability is disabled** |
 | `26-storage-vector-store.yaml` | `gco-vector-store` `ConfigMap` (table/index/embedding-model/region) in all namespaces, pointing pods at their local global-table replica — **pruned when the vector store is disabled** |
 | `27-storage-regional-shared-bucket.yaml` | `gco-regional-shared-bucket` `ConfigMap` (name/ARN/region) in all namespaces, pointing pods at their own region's always-on general-purpose bucket — always present |

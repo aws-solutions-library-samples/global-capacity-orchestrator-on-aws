@@ -2,46 +2,19 @@
 # ARN, region, and service account role ARN to pods via configMapKeyRef.
 # Only applied when Aurora pgvector is enabled (cdk.json aurora_pgvector.enabled = true).
 # The handler automatically skips this file when placeholders are unreplaced.
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gco-aurora-pgvector
-  namespace: gco-system
-  labels:
-    app: gco
-    project: gco
-data:
-  endpoint: "{{AURORA_PGVECTOR_ENDPOINT}}"
-  reader_endpoint: "{{AURORA_PGVECTOR_READER_ENDPOINT}}"
-  port: "{{AURORA_PGVECTOR_PORT}}"
-  secret_arn: "{{AURORA_PGVECTOR_SECRET_ARN}}"
-  database: "gco_vectors"
-  region: "{{REGION}}"
-  role_arn: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
+#
+# Published in gco-jobs only: its allow-vpc-egress rule (03-network-policies
+# .yaml) is the one path to the cluster's in-VPC endpoints. gco-system and
+# gco-inference egress stops at DNS, HTTPS and the Pod Identity Agent, so a pod
+# there that read this ConfigMap could never connect; no platform service uses
+# Aurora. Releases that published copies in those two namespaces are swept by
+# the applier (_LEGACY_REMOVED_RESOURCES in handler.py).
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gco-aurora-pgvector
   namespace: gco-jobs
-  labels:
-    app: gco
-    project: gco
-data:
-  endpoint: "{{AURORA_PGVECTOR_ENDPOINT}}"
-  reader_endpoint: "{{AURORA_PGVECTOR_READER_ENDPOINT}}"
-  port: "{{AURORA_PGVECTOR_PORT}}"
-  secret_arn: "{{AURORA_PGVECTOR_SECRET_ARN}}"
-  database: "gco_vectors"
-  region: "{{REGION}}"
-  role_arn: "{{SERVICE_ACCOUNT_ROLE_ARN}}"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gco-aurora-pgvector
-  namespace: gco-inference
   labels:
     app: gco
     project: gco

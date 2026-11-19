@@ -1918,7 +1918,7 @@ gco stacks deploy gco-us-east-1 -y
 
 ### Using Valkey in Jobs
 
-When Valkey is enabled, GCO creates a `gco-valkey` ConfigMap in each namespace with the endpoint and port. Reference it in your pod spec — no need to look up or hardcode endpoint URLs:
+When Valkey is enabled, GCO creates a `gco-valkey` ConfigMap in `gco-jobs` with the endpoint and port. Reference it in your pod spec — no need to look up or hardcode endpoint URLs:
 
 ```yaml
 env:
@@ -1934,7 +1934,7 @@ env:
       key: port
 ```
 
-The same manifest works in any region — the ConfigMap resolves to the local Valkey endpoint automatically.
+The same manifest works in any region — the ConfigMap resolves to the local Valkey endpoint automatically. The ConfigMap lives in `gco-jobs` only because that namespace's in-VPC egress rule (`allow-vpc-egress`) is the one path to the cache: `gco-system` and `gco-inference` pods can reach DNS, HTTPS and the Pod Identity Agent and nothing else (see [Network Security](ARCHITECTURE.md#network-security)). To use Valkey from `gco-inference`, add a NetworkPolicy that admits egress to the cache's port and create your own ConfigMap there.
 
 For use outside the cluster (scripts, Lambda functions), the endpoint is also stored in SSM at `/{project}/valkey-endpoint-{region}`.
 
@@ -2002,7 +2002,7 @@ gco stacks deploy gco-us-east-1 -y
 
 ### Using Aurora pgvector in Jobs
 
-When Aurora pgvector is enabled, GCO creates a `gco-aurora-pgvector` ConfigMap in each namespace with the endpoint, port, secret ARN, and database name. Reference it in your pod spec:
+When Aurora pgvector is enabled, GCO creates a `gco-aurora-pgvector` ConfigMap in `gco-jobs` with the endpoint, port, secret ARN, and database name (only there, for the same reason as `gco-valkey`: `gco-jobs` is the one namespace whose egress reaches in-VPC endpoints). Reference it in your pod spec:
 
 ```yaml
 env:

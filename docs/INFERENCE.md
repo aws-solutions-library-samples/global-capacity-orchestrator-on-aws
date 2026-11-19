@@ -1129,7 +1129,7 @@ Enable in `cdk.json`:
 }
 ```
 
-The endpoint is discoverable via SSM parameter `/{project}/valkey-endpoint-{region}`. See [Customization Guide](CUSTOMIZATION.md#configure-valkey-cache) for full configuration options and `examples/valkey-cache-job.yaml` for a working example.
+The endpoint is discoverable via SSM parameter `/{project}/valkey-endpoint-{region}`, and jobs in `gco-jobs` read it from the `gco-valkey` ConfigMap. Model pods in `gco-inference` cannot reach the cache (their egress is DNS, HTTPS and the Pod Identity Agent), so the cache sits with the client or a job in front of the endpoint, as in the RAG flow below. See [Customization Guide](CUSTOMIZATION.md#configure-valkey-cache) for full configuration options and `examples/valkey-cache-job.yaml` for a working example.
 
 ## RAG Patterns
 

@@ -1026,6 +1026,39 @@ class TestInferenceReachability:
         assert _clients(policy_world, sources, tenant, port) == set()
 
 
+class TestDataServiceConfigMapsMatchEgress:
+    """A namespace gets a data service's connection ConfigMap only if it can reach it.
+
+    Valkey and Aurora are in-VPC endpoints (ENIs, not pods). The ConfigMaps
+    that hand their address to workloads were published into gco-system and
+    gco-inference too, whose egress (DNS, 443, the Pod Identity Agent) can
+    never reach 6379 or 5432: a workload that followed the ConfigMap there
+    timed out.
+    """
+
+    @pytest.mark.parametrize(
+        ("filename", "name", "port"),
+        [
+            ("23-storage-valkey.yaml", "gco-valkey", 6379),
+            ("24-storage-aurora-pgvector.yaml", "gco-aurora-pgvector", 5432),
+        ],
+    )
+    def test_published_only_where_egress_reaches_the_service(self, filename, name, port):
+        published = {
+            doc["metadata"]["namespace"]
+            for doc in _stubbed_documents(MANIFESTS_DIR / filename)
+            if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == name
+        }
+        assert published, f"{filename} publishes no {name}"
+        policies = _all_shipped_network_policies()
+        service = _Endpoint(name, None, ip=_NON_POD_IP)
+        for namespace in published:
+            workload = _Endpoint("workload", namespace, {"app": "workload"})
+            assert _admits(policies, workload, service, port), (namespace, name, port)
+        # The documented consumers are jobs: gco-jobs keeps its copy.
+        assert "gco-jobs" in published
+
+
 # ─── Enforcement switch ────────────────────────────────────────────
 
 

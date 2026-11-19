@@ -32,6 +32,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Workload alarms move to their Regions](#workload-alarms-move-to-their-regions)
   - [ECR replication rules of your own are kept](#ecr-replication-rules-of-your-own-are-kept)
   - [Default-deny ingress in `gco-inference`](#default-deny-ingress-in-gco-inference)
+  - [Valkey and Aurora ConfigMaps only in `gco-jobs`](#valkey-and-aurora-configmaps-only-in-gco-jobs)
 
 ## How an upgrade works
 
@@ -591,3 +592,15 @@ accepted connections from every namespace on every port.
   template that label (its pods then get the model pods' rules: the inference
   proxy on 8443 and the other model pods), or add a NetworkPolicy that admits
   its clients. The kubelet's probes and `kubectl port-forward` keep working.
+
+### Valkey and Aurora ConfigMaps only in `gco-jobs`
+
+Earlier releases published the `gco-valkey` and `gco-aurora-pgvector`
+ConfigMaps in `gco-system`, `gco-jobs` and `gco-inference`, but only
+`gco-jobs` has an egress rule that reaches the cache and the database.
+
+- **BREAKING: the `gco-system` and `gco-inference` copies are deleted.** The
+  base pass sweeps them. A pod there that references either ConfigMap without
+  `optional: true` no longer starts. Run such a workload in `gco-jobs`, or give
+  it a NetworkPolicy that admits egress to the endpoint's port and a
+  ConfigMap of your own.

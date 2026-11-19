@@ -279,7 +279,8 @@ Container images must include the Neuron runtime — use images from `public.ecr
 
 Each regional stack can include a Valkey Serverless cache for low-latency
 key-value storage. Use cases include prompt caching, session state, feature
-stores, and shared state across inference pods.
+stores, and shared state for the jobs that call your inference endpoints
+(model pods in `gco-inference` cannot reach it; `gco-jobs` pods can).
 
 Enable Valkey in `cdk.json`:
 
@@ -299,9 +300,9 @@ gco stacks deploy gco-us-east-1 -y
 ```
 
 When Valkey is enabled, GCO automatically creates a `gco-valkey`
-ConfigMap in each namespace with the endpoint and port. Pods reference it
-via `configMapKeyRef` — no hardcoded URLs, and the same manifest works
-in any region:
+ConfigMap in `gco-jobs` with the endpoint and port (the one namespace whose
+egress reaches the cache). Job pods reference it via `configMapKeyRef` — no
+hardcoded URLs, and the same manifest works in any region:
 
 ```yaml
 env:
