@@ -2902,9 +2902,12 @@ gco images replication COMMAND
 
 **Subcommands:**
 
-- `get` - Print the current ECR replication configuration
+- `get` - Print the current ECR replication configuration (the registry's
+  rules, read with `ecr:DescribeRegistry`)
 - `status` - Print per-image replication status across project repos
-- `sync` - Apply the project's standard replication rule (`gco/*` to all deployed regions)
+- `sync` - Apply the project's standard replication rule (`gco/*` to all deployed regions):
+  reads the rules with `ecr:DescribeRegistry`, keeps every rule for other
+  repository prefixes, and writes the result with `ecr:PutReplicationConfiguration`
 
 The global stack owns the registry's replication configuration when
 `images.replication` is on. Every `gco stacks deploy`/`deploy-all` that can

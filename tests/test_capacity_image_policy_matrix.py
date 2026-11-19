@@ -458,23 +458,6 @@ class TestImageCatalogAndReplication:
         assert manager.default_disaggregated_image_uri().endswith(":v0.32.0")
         assert manager.default_disaggregated_image_uri("custom") == ("vllm/vllm-openai:custom")
 
-    @pytest.mark.parametrize(
-        "configuration",
-        ["not-a-mapping", {"rules": "not-a-list"}],
-    )
-    def test_replication_configuration_normalizes_malformed_shapes(
-        self, configuration: Any
-    ) -> None:
-        manager = _image_manager()
-        ecr = MagicMock()
-        ecr.get_replication_configuration.return_value = {
-            "registryId": "123",
-            "replicationConfiguration": configuration,
-        }
-        registry, normalized = manager._current_replication_configuration(ecr)
-        assert registry == "123"
-        assert normalized["rules"] == []
-
     def test_replication_regions_filters_duplicates_and_falls_back(self) -> None:
         manager = _image_manager()
         with patch(
@@ -507,7 +490,7 @@ class TestImageCatalogAndReplication:
             ]
         }
         ecr = MagicMock()
-        ecr.put_replication_configuration.return_value = {"registryId": "response"}
+        ecr.put_replication_configuration.return_value = {"replicationConfiguration": {}}
         manager._ecr_client = MagicMock(return_value=ecr)  # type: ignore[method-assign]
         manager._current_replication_configuration = MagicMock(  # type: ignore[method-assign]
             return_value=("existing", current)
@@ -530,7 +513,7 @@ class TestImageCatalogAndReplication:
             ],
             "repositoryFilters": [managed],
         }
-        assert result["registry_id"] == "response"
+        assert result["registry_id"] == "existing"
 
     @pytest.mark.parametrize(
         ("response", "expected"),

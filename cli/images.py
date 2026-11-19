@@ -678,22 +678,17 @@ class ImageManager:
             return f"{repo}:{tag}"
         return _DISAGGREGATED_DEFAULT_IMAGE
 
-    def _current_replication_configuration(self, ecr: Any) -> tuple[str | None, dict[str, Any]]:
-        """Return the registry ID and current ECR replication configuration."""
-        try:
-            response = ecr.get_replication_configuration()
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
-            if code == "ReplicationConfigurationNotFoundException":
-                return None, {"rules": []}
-            raise
+    def _current_replication_configuration(self, ecr: Any) -> tuple[str, dict[str, Any]]:
+        """Return the registry ID and the registry's ECR replication configuration.
 
-        configuration = response.get("replicationConfiguration") or {"rules": []}
-        if not isinstance(configuration, dict):
-            configuration = {"rules": []}
-        if not isinstance(configuration.get("rules"), list):
-            configuration = {**configuration, "rules": []}
-        return response.get("registryId"), configuration
+        ECR has no GetReplicationConfiguration operation: DescribeRegistry
+        returns the rules (:func:`cli.ecr_replication.read_registry`), an empty
+        list when none are configured.
+        """
+        from .ecr_replication import read_registry
+
+        registry_id, rules = read_registry(ecr)
+        return registry_id, {"rules": rules}
 
     def replication_get(self) -> dict[str, Any]:
         """Return the current ECR replication configuration, or ``{}``.
@@ -905,11 +900,13 @@ class ImageManager:
             **current,
             "rules": [*preserved_rules, managed_rule],
         }
-        response = ecr.put_replication_configuration(replicationConfiguration=configuration)
+        # The response carries only the configuration written; the registry ID
+        # is the one DescribeRegistry reported.
+        ecr.put_replication_configuration(replicationConfiguration=configuration)
         return {
             "configuration": configuration,
             "destinations": destinations,
-            "registry_id": response.get("registryId") or registry_id or account,
+            "registry_id": registry_id,
             "updated": True,
         }
 

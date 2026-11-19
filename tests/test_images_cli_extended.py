@@ -19,8 +19,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import boto3
 import pytest
 from botocore.exceptions import ClientError
+from botocore.stub import Stubber
 
 from cli.images import ImageManager, _isoformat, get_image_manager
 
@@ -356,46 +358,118 @@ class TestDescribe:
         assert result["scan_findings_summary"] == {"findingSeverityCounts": {}}
 
 
+def _stubbed_ecr(region: str = "us-east-2") -> tuple[Any, Stubber]:
+    """A real ECR client, built from botocore's service model, with stubbed responses.
+
+    Unlike a MagicMock it has only the operations ECR has, and the Stubber
+    checks every request and response against the model, so a call to an
+    operation that does not exist fails the test. Nothing is sent.
+    """
+    client = boto3.client(
+        "ecr",
+        region_name=region,
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",  # nosec B106 - fake credentials for a stubbed client
+    )
+    return client, Stubber(client)
+
+
+_RULE = {
+    "destinations": [{"region": "us-west-2", "registryId": "123456789012"}],
+    "repositoryFilters": [{"filter": "gco/", "filterType": "PREFIX_MATCH"}],
+}
+
+
 class TestReplicationGet:
-    def test_returns_empty_when_policy_missing(self, manager: ImageManager) -> None:
-        ecr = _ecr_mock()
-        ecr.get_replication_configuration.side_effect = ClientError(
-            {
-                "Error": {
-                    "Code": "ReplicationConfigurationNotFoundException",
-                    "Message": "",
-                }
-            },
-            "GetReplicationConfiguration",
+    """IMAGES-REPLICATION: ECR has no GetReplicationConfiguration; the rules come
+    from DescribeRegistry, so `gco images replication get` used to fail."""
+
+    def test_reads_the_rules_from_describe_registry(self, manager: ImageManager) -> None:
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_response(
+            "describe_registry",
+            {"registryId": "123456789012", "replicationConfiguration": {"rules": [_RULE]}},
+            {},
         )
-        with patch.object(manager, "_ecr_client", return_value=ecr):
+        with stubber, patch.object(manager, "_ecr_client", return_value=ecr):
+            result = manager.replication_get()
+        stubber.assert_no_pending_responses()
+        assert result == {"registryId": "123456789012", "policy": {"rules": [_RULE]}}
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {"registryId": "123456789012", "replicationConfiguration": {"rules": []}},
+            {"registryId": "123456789012"},
+        ],
+    )
+    def test_returns_empty_without_rules(
+        self, manager: ImageManager, response: dict[str, Any]
+    ) -> None:
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_response("describe_registry", response, {})
+        with stubber, patch.object(manager, "_ecr_client", return_value=ecr):
             assert manager.replication_get() == {}
 
-    def test_re_raises_unexpected_error(self, manager: ImageManager) -> None:
-        ecr = _ecr_mock()
-        ecr.get_replication_configuration.side_effect = ClientError(
-            {"Error": {"Code": "AccessDeniedException", "Message": ""}},
-            "GetReplicationConfiguration",
+    def test_re_raises_a_describe_registry_error(self, manager: ImageManager) -> None:
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_client_error(
+            "describe_registry", service_error_code="ValidationException", http_status_code=400
         )
         with (
+            stubber,
             patch.object(manager, "_ecr_client", return_value=ecr),
-            pytest.raises(ClientError),
+            pytest.raises(ClientError, match="ValidationException"),
         ):
             manager.replication_get()
 
-    def test_unpacks_replication_configuration(self, manager: ImageManager) -> None:
-        ecr = _ecr_mock()
-        configuration = {
-            "rules": [{"destinations": [{"region": "us-west-2", "registryId": "123456789012"}]}]
+    def test_the_cli_commands_run_against_the_real_ecr_model(self, manager: ImageManager) -> None:
+        """`gco images replication get` and `sync` end to end on the stubbed client."""
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_response(
+            "describe_registry",
+            {"registryId": "123456789012", "replicationConfiguration": {"rules": [_RULE]}},
+            {},
+        )
+        stubber.add_response(
+            "describe_registry",
+            {"registryId": "123456789012", "replicationConfiguration": {"rules": []}},
+            {},
+        )
+        written = {
+            "rules": [
+                {
+                    "destinations": [{"region": "eu-west-1", "registryId": "123456789012"}],
+                    "repositoryFilters": [{"filter": "gco/", "filterType": "PREFIX_MATCH"}],
+                }
+            ]
         }
-        ecr.get_replication_configuration.return_value = {
+        stubber.add_response(
+            "put_replication_configuration",
+            {"replicationConfiguration": written},
+            {"replicationConfiguration": written},
+        )
+        runner = CliRunner()
+        with (
+            stubber,
+            patch("cli.images.get_image_manager", return_value=manager),
+            patch.object(manager, "_ecr_client", return_value=ecr),
+            patch("cli.images._load_cdk_json", return_value={"regional": ["eu-west-1"]}),
+        ):
+            got = runner.invoke(cli, ["--output", "json", "images", "replication", "get"])
+            synced = runner.invoke(cli, ["--output", "json", "images", "replication", "sync"])
+        assert got.exit_code == 0, got.output
+        assert json.loads(got.output) == {
             "registryId": "123456789012",
-            "replicationConfiguration": configuration,
+            "policy": {"rules": [_RULE]},
         }
-        with patch.object(manager, "_ecr_client", return_value=ecr):
-            result = manager.replication_get()
-        assert result["registryId"] == "123456789012"
-        assert result["policy"] == configuration
+        assert synced.exit_code == 0, synced.output
+        assert '"updated": true' in synced.output
+        stubber.assert_no_pending_responses()
 
 
 class TestReplicationStatus:
@@ -498,60 +572,90 @@ class TestLifecycle:
 
 
 class TestReplicationSync:
+    """replication_sync reads the rules with DescribeRegistry and writes them
+    with PutReplicationConfiguration, both checked against botocore's model."""
+
     def test_writes_rule_to_every_other_region(self, manager: ImageManager) -> None:
-        ecr = _ecr_mock()
-        ecr.get_replication_configuration.return_value = {
-            "registryId": "123456789012",
-            "replicationConfiguration": {"rules": []},
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_response(
+            "describe_registry",
+            {"registryId": "123456789012", "replicationConfiguration": {"rules": []}},
+            {},
+        )
+        written = {
+            "rules": [
+                {
+                    "destinations": [
+                        {"region": "us-west-2", "registryId": "123456789012"},
+                        {"region": "eu-west-1", "registryId": "123456789012"},
+                    ],
+                    "repositoryFilters": [{"filter": "gco/", "filterType": "PREFIX_MATCH"}],
+                }
+            ]
         }
-        ecr.put_replication_configuration.return_value = {"registryId": "123456789012"}
+        stubber.add_response(
+            "put_replication_configuration",
+            {"replicationConfiguration": written},
+            {"replicationConfiguration": written},
+        )
         with (
+            stubber,
             patch.object(
                 manager,
                 "_replication_regions",
-                return_value=[
-                    "us-east-2",
-                    "us-west-2",
-                    "eu-west-1",
-                ],
+                return_value=["us-east-2", "us-west-2", "eu-west-1"],
             ),
             patch.object(manager, "_ecr_client", return_value=ecr),
         ):
             result = manager.replication_sync()
-        ecr.put_replication_configuration.assert_called_once()
-        cfg = ecr.put_replication_configuration.call_args.kwargs["replicationConfiguration"]
-        rule = cfg["rules"][0]
-        regions = {d["region"] for d in rule["destinations"]}
-        assert "us-east-2" not in regions  # source region elided
-        assert {"us-west-2", "eu-west-1"} <= regions
-        assert rule["repositoryFilters"][0]["filter"] == "gco/"
-        assert result["destinations"] == ["us-west-2", "eu-west-1"]
+        stubber.assert_no_pending_responses()
+        assert result == {
+            "configuration": written,
+            "destinations": ["us-west-2", "eu-west-1"],  # source region elided
+            "registry_id": "123456789012",
+            "updated": True,
+        }
 
     def test_preserves_unrelated_rules(self, manager: ImageManager) -> None:
-        ecr = _ecr_mock()
         unrelated_rule = {
             "destinations": [{"region": "ap-south-1", "registryId": "123456789012"}],
             "repositoryFilters": [{"filter": "other/", "filterType": "PREFIX_MATCH"}],
         }
-        ecr.get_replication_configuration.return_value = {
-            "registryId": "123456789012",
-            "replicationConfiguration": {"rules": [unrelated_rule]},
+        stale_rule = {
+            "destinations": [{"region": "eu-west-1", "registryId": "123456789012"}],
+            "repositoryFilters": [{"filter": "gco/", "filterType": "PREFIX_MATCH"}],
         }
-        ecr.put_replication_configuration.return_value = {"registryId": "123456789012"}
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_response(
+            "describe_registry",
+            {
+                "registryId": "123456789012",
+                "replicationConfiguration": {"rules": [unrelated_rule, stale_rule]},
+            },
+            {},
+        )
+        written = {
+            "rules": [
+                unrelated_rule,
+                {
+                    "destinations": [{"region": "us-west-2", "registryId": "123456789012"}],
+                    "repositoryFilters": [{"filter": "gco/", "filterType": "PREFIX_MATCH"}],
+                },
+            ]
+        }
+        stubber.add_response(
+            "put_replication_configuration",
+            {"replicationConfiguration": written},
+            {"replicationConfiguration": written},
+        )
         with (
+            stubber,
             patch.object(manager, "_replication_regions", return_value=["us-west-2"]),
             patch.object(manager, "_ecr_client", return_value=ecr),
         ):
-            manager.replication_sync()
-
-        configuration = ecr.put_replication_configuration.call_args.kwargs[
-            "replicationConfiguration"
-        ]
-        assert unrelated_rule in configuration["rules"]
-        assert any(
-            rule.get("repositoryFilters") == [{"filter": "gco/", "filterType": "PREFIX_MATCH"}]
-            for rule in configuration["rules"]
-        )
+            result = manager.replication_sync()
+        stubber.assert_no_pending_responses()
+        assert result["configuration"] == written
 
     def test_no_destinations_preserves_current_configuration(self, mock_config: Any) -> None:
         single_region = MagicMock()
@@ -562,7 +666,6 @@ class TestReplicationSync:
             mgr = ImageManager(config=single_region, region="us-east-2")
         mgr._account_id_cache = "123456789012"
 
-        ecr = _ecr_mock()
         current = {
             "rules": [
                 {
@@ -571,19 +674,26 @@ class TestReplicationSync:
                 }
             ]
         }
-        ecr.get_replication_configuration.return_value = {
-            "registryId": "123456789012",
-            "replicationConfiguration": current,
-        }
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_response(
+            "describe_registry",
+            {"registryId": "123456789012", "replicationConfiguration": current},
+            {},
+        )
+        # No put_replication_configuration response is queued: a write fails the test.
         with (
+            stubber,
             patch.object(mgr, "_replication_regions", return_value=["us-east-2"]),
             patch.object(mgr, "_ecr_client", return_value=ecr),
         ):
             result = mgr.replication_sync()
-        ecr.put_replication_configuration.assert_not_called()
-        assert result["configuration"] == current
-        assert result["destinations"] == []
-        assert result["updated"] is False
+        stubber.assert_no_pending_responses()
+        assert result == {
+            "configuration": current,
+            "destinations": [],
+            "registry_id": "123456789012",
+            "updated": False,
+        }
 
 
 # ---------------------------------------------------------------------------
