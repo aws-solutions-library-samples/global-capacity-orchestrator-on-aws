@@ -311,6 +311,7 @@ def test_upload_detects_source_change_between_plan_and_open(tmp_path: Path) -> N
         key="source.bin",
         size=4,
         sha256="0" * 64,
+        crc32=0,
         signature=signature,
         current=False,
     )
@@ -393,6 +394,7 @@ def test_open_upload_source_rejects_nonregular_descriptor(
         key="source",
         size=0,
         sha256="0" * 64,
+        crc32=0,
         signature=(1, 2, 3, 4),
         current=False,
     )
@@ -419,6 +421,7 @@ def test_verify_upload_source_signature_rejects_replaced_path(
         key="source",
         size=4,
         sha256="0" * 64,
+        crc32=0,
         signature=(1, 2, 3, 4),
         current=False,
     )

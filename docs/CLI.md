@@ -6260,13 +6260,17 @@ gco storage sync analytics-studio ./studio-output --direction upload --dry-run
   directory name itself is not added. A single file maps to
   `PREFIX/<file-name>`.
 - Upload incrementality uses a SHA-256 digest stored as S3 user metadata named
-  `gco-sync-sha256`. The same precomputed whole-file digest is sent as the
-  base64 `ChecksumSHA256`, so S3 rejects an upload whose received bytes differ
-  from the file that was planned. A remote object is skipped only when its size
-  and digest metadata match the local file; skipped objects are checked again
-  before a successful non-dry-run result. ETags are intentionally not used
-  because multipart and SSE-KMS ETags are not reliable whole-file digests.
-  Existing objects without this metadata are uploaded once to establish it.
+  `gco-sync-sha256`. Every upload also carries a whole-file checksum computed
+  while planning, so S3 rejects an upload whose received bytes differ from the
+  file that was planned: files under 8 MiB are sent in one request with the
+  same digest as `ChecksumSHA256`; larger files are sent as a multipart upload
+  with a full-object `ChecksumCRC32` (S3 accepts full-object checksums on
+  multipart uploads only for CRC algorithms) and a CRC-32 per part. A remote
+  object is skipped only when its size and digest metadata match the local
+  file; skipped objects are checked again before a successful non-dry-run
+  result. ETags are intentionally not used because multipart and SSE-KMS ETags
+  are not reliable whole-file digests. Existing objects without this metadata
+  are uploaded once to establish it.
 - Upload planning rejects top-level or descendant symlinks, non-regular files,
   and unsafe relative names before the first PUT. It hashes every source file
   during planning and rejects a file if its identity, size, or timestamps
