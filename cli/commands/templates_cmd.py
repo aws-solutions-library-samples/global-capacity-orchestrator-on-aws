@@ -80,14 +80,14 @@ def templates_get(config: Any, name: Any, region: Any) -> None:
     formatter = get_output_formatter(config)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="GET",
-            path=f"/api/v1/templates/{name}",
+            path=f"/api/v1/templates/{api_path_segment(name)}",
             region=query_region,
         )
 
@@ -196,14 +196,14 @@ def templates_delete(config: Any, name: Any, region: Any, yes: Any) -> None:
         confirm(f"Delete template '{name}'?", abort=True)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="DELETE",
-            path=f"/api/v1/templates/{name}",
+            path=f"/api/v1/templates/{api_path_segment(name)}",
             region=query_region,
         )
 
@@ -244,13 +244,13 @@ def templates_run(
             parameters[k] = v
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         result = aws_client.call_api(
             method="POST",
-            path=f"/api/v1/jobs/from-template/{template_name}",
+            path=f"/api/v1/jobs/from-template/{api_path_segment(template_name)}",
             region=region,
             body={
                 "name": name,

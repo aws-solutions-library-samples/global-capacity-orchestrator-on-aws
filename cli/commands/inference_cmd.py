@@ -1177,7 +1177,13 @@ _SGLANG_SERVER_INFO_IDENTITY_KEYS = (
 @click.option("--prompt", "-p", help="Text prompt to send")
 @click.option("--data", "-d", help="Raw JSON body to send")
 @click.option(
-    "--path", "api_path", default=None, help="API sub-path (default: auto-detect from framework)"
+    "--path",
+    "api_path",
+    default=None,
+    help=(
+        "API sub-path under the endpoint, starting with '/' and without '.' or '..' "
+        "segments (default: auto-detect from framework)"
+    ),
 )
 @click.option("--region", "-r", help="Target region for the request")
 @click.option(
@@ -1218,7 +1224,7 @@ def inference_invoke(
     """
     import json as _json
 
-    from ..aws_client import get_aws_client
+    from ..aws_client import checked_api_sub_path, get_aws_client
     from ..inference import get_inference_manager
 
     formatter = get_output_formatter(config)
@@ -1226,6 +1232,15 @@ def inference_invoke(
     if not prompt and not data:
         formatter.print_error("Provide --prompt (-p) or --data (-d)")
         sys.exit(1)
+
+    if api_path is not None:
+        # Appended to the endpoint's path as given: a '..' segment (or a
+        # missing leading '/') would send the request to another route.
+        try:
+            checked_api_sub_path(api_path)
+        except ValueError as e:
+            formatter.print_error(f"--path: {e}")
+            sys.exit(1)
 
     try:
         # Look up the endpoint's stored API prefix and serving spec. The record

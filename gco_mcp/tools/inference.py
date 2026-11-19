@@ -482,8 +482,8 @@ def invoke_inference(
         name: Endpoint name (e.g. my-llm).
         prompt: Text prompt to send to the model.
         max_tokens: Maximum tokens to generate (default: 100).
-        api_path: Override the API sub-path (default: auto-detect from
-            framework). A ``..`` segment is refused.
+        api_path: Override the API sub-path, starting with ``/`` (default:
+            auto-detect from framework). A ``.`` or ``..`` segment is refused.
         region: Target region for the request (default: nearest via Global Accelerator).
 
     This MCP tool intentionally returns one buffered string because the MCP

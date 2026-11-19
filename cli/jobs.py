@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import requests
 import yaml
@@ -19,7 +18,7 @@ from gco.job_admission import apply_sandbox
 from gco.job_envelope import build_job_message
 from gco.services.manifest_processor import TRAINJOB_API_VERSION, safe_load_all_yaml
 
-from .aws_client import APIRequestError, get_aws_client
+from .aws_client import APIRequestError, api_path_segment, get_aws_client
 from .config import GCOConfig, get_config
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -853,7 +852,7 @@ class JobManager:
         try:
             response = self._aws_client.call_api(
                 "GET",
-                f"/api/v1/manifests/{quote(namespace, safe='')}/{quote(job_name, safe='')}",
+                f"/api/v1/manifests/{api_path_segment(namespace)}/{api_path_segment(job_name)}",
                 region=region,
                 params={"api_version": TRAINJOB_API_VERSION, "kind": "TrainJob"},
             )
@@ -1265,7 +1264,7 @@ class JobManager:
         try:
             return self._aws_client.call_api(
                 "DELETE",
-                f"/api/v1/manifests/{quote(namespace, safe='')}/{quote(job_name, safe='')}",
+                f"/api/v1/manifests/{api_path_segment(namespace)}/{api_path_segment(job_name)}",
                 region=region,
                 params={"api_version": TRAINJOB_API_VERSION, "kind": "TrainJob"},
             )

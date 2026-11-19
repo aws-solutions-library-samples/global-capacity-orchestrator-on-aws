@@ -232,14 +232,14 @@ def webhooks_delete(config: Any, webhook_id: Any, region: Any, yes: Any) -> None
         confirm(f"Delete webhook '{webhook_id}'?", abort=True)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="DELETE",
-            path=f"/api/v1/webhooks/{webhook_id}",
+            path=f"/api/v1/webhooks/{api_path_segment(webhook_id)}",
             region=query_region,
         )
 

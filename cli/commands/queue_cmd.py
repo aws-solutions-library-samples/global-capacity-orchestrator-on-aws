@@ -347,14 +347,14 @@ def queue_get(config: Any, job_id: Any, region: Any) -> None:
     formatter = get_output_formatter(config)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
         query_region = region or (config.default_region if config.use_regional_api else None)
         result = aws_client.call_api(
             method="GET",
-            path=f"/api/v1/queue/jobs/{job_id}",
+            path=f"/api/v1/queue/jobs/{api_path_segment(job_id)}",
             region=query_region,
         )
 
@@ -422,7 +422,7 @@ def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -
         confirm(f"Cancel job {job_id}?", abort=True)
 
     try:
-        from ..aws_client import get_aws_client
+        from ..aws_client import api_path_segment, get_aws_client
 
         aws_client = get_aws_client(config)
 
@@ -433,7 +433,7 @@ def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -
 
         result = aws_client.call_api(
             method="DELETE",
-            path=f"/api/v1/queue/jobs/{job_id}",
+            path=f"/api/v1/queue/jobs/{api_path_segment(job_id)}",
             region=query_region,
             params=params,
         )

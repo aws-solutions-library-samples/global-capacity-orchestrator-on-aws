@@ -3183,7 +3183,7 @@ gco inference invoke ENDPOINT_NAME [OPTIONS]
 |--------|-------|-------------|
 | `--prompt` | `-p` | Text prompt to send |
 | `--data` | `-d` | Raw JSON body (overrides --prompt) |
-| `--path` | | API sub-path (default: auto-detected from image) |
+| `--path` | | API sub-path under the endpoint (default: auto-detected from image). It must start with `/` and may not contain a `.` or `..` segment, literal or percent-encoded, because the request would then leave the endpoint for another route |
 | `--region` | `-r` | Target region for the request |
 | `--max-tokens` | | Max tokens to generate (default: 100) |
 | `--stream/--no-stream` | | Enable or disable incremental response streaming; when omitted, raw JSON with `"stream": true` enables it automatically |
