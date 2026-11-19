@@ -92,6 +92,17 @@ Actions run in registry order. Selecting one action includes its dependencies.
 
 Only a complete `--actions all` run reports `PASSED`.
 
+What the run does not cover: it deploys no inference endpoint, so it does not
+prove that an update leaves an endpoint's model pods running (the same pod
+UIDs and container restart counts after the new inference monitor's first
+reconcile). `gco upgrade` recreates the regional stacks, so no model pod
+survives it anyway; the case that matters is an in-place update of the
+regional stack, where a TLS-sidecar pod-template digest that changed with the
+Kubernetes client version would restart every model pod. Only unit tests pin
+it: `tests/test_inference_endpoint_tls.py` replays the digests the v8.22.x and
+v8.23.0 monitors stamped and requires the monitor to leave such a pod alone
+unless its sidecar really changed.
+
 ## Local Prerequisites
 
 The [live release validation prerequisites](LIVE_RELEASE_VALIDATION.md#local-prerequisites),
