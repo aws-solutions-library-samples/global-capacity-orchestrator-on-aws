@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import boto3
 import pytest
+from botocore.stub import Stubber
 
 
 class TestStorageHelperHardening:
@@ -403,62 +405,74 @@ class TestFileSystemClientFSx:
                     assert result is None
 
 
+def _stubbed(service: str) -> tuple[Any, Stubber]:
+    """A real client built from botocore's service model, with stubbed responses."""
+    client = boto3.client(
+        service,
+        region_name="us-east-1",
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",  # nosec B106 - fake credentials, nothing is sent
+    )
+    return client, Stubber(client)
+
+
+def _access_point(ap_id: str, path: str) -> dict[str, Any]:
+    return {
+        "AccessPointId": ap_id,
+        "Name": f"ap-{ap_id}",
+        "RootDirectory": {"Path": path},
+        "PosixUser": {"Uid": 1000, "Gid": 1000},
+        "LifeCycleState": "available",
+    }
+
+
 class TestFileSystemClientAccessPoints:
     """Tests for EFS access points functionality."""
 
-    def test_get_access_point_info(self):
-        """Test getting EFS access points."""
+    @staticmethod
+    def _client(efs: Any) -> Any:
         from cli.files import FileSystemClient
 
-        with patch("cli.files.get_config") as mock_config:
-            mock_config.return_value = MagicMock()
-            mock_config.return_value.project_name = "gco"
-            with patch("cli.files.get_aws_client") as mock_aws:
-                mock_aws.return_value = MagicMock()
+        with (
+            patch("cli.files.get_config", return_value=MagicMock(project_name="gco")),
+            patch("cli.files.get_aws_client", return_value=MagicMock()),
+        ):
+            client = FileSystemClient()
+        client._session = MagicMock()
+        client._session.client.return_value = efs
+        return client
 
-                client = FileSystemClient()
-
-                with patch.object(client, "_session") as mock_session:
-                    mock_efs = MagicMock()
-                    mock_session.client.return_value = mock_efs
-
-                    mock_efs.describe_access_points.return_value = {
-                        "AccessPoints": [
-                            {
-                                "AccessPointId": "fsap-12345678",
-                                "Name": "test-ap",
-                                "RootDirectory": {"Path": "/data"},
-                                "PosixUser": {"Uid": 1000, "Gid": 1000},
-                                "LifeCycleState": "available",
-                            }
-                        ]
-                    }
-
-                    result = client.get_access_point_info("fs-12345678", "us-east-1")
-
-                    assert len(result) == 1
-                    assert result[0]["access_point_id"] == "fsap-12345678"
-                    assert result[0]["path"] == "/data"
+    def test_get_access_point_info_reads_every_page(self):
+        """N17: DescribeAccessPoints returns 100 per page; the second page was
+        never read, so `gco files access-points` stopped at 100."""
+        efs, stubber = _stubbed("efs")
+        stubber.add_response(
+            "describe_access_points",
+            {"AccessPoints": [_access_point("fsap-1", "/data")], "NextToken": "page-2"},
+            {"FileSystemId": "fs-12345678"},
+        )
+        stubber.add_response(
+            "describe_access_points",
+            {"AccessPoints": [_access_point("fsap-2", "/scratch")]},
+            {"FileSystemId": "fs-12345678", "NextToken": "page-2"},
+        )
+        client = self._client(efs)
+        with stubber:
+            result = client.get_access_point_info("fs-12345678", "us-east-1")
+        stubber.assert_no_pending_responses()
+        assert [ap["access_point_id"] for ap in result] == ["fsap-1", "fsap-2"]
+        assert result[0]["path"] == "/data"
+        assert result[0]["posix_user"] == {"Uid": 1000, "Gid": 1000}
+        assert result[1]["status"] == "available"
+        client._session.client.assert_called_once_with("efs", region_name="us-east-1")
 
     def test_get_access_point_info_empty(self):
         """Test getting access points when none exist."""
-        from cli.files import FileSystemClient
-
-        with patch("cli.files.get_config") as mock_config:
-            mock_config.return_value = MagicMock()
-            mock_config.return_value.project_name = "gco"
-            with patch("cli.files.get_aws_client") as mock_aws:
-                mock_aws.return_value = MagicMock()
-
-                client = FileSystemClient()
-
-                with patch.object(client, "_session") as mock_session:
-                    mock_efs = MagicMock()
-                    mock_session.client.return_value = mock_efs
-                    mock_efs.describe_access_points.return_value = {"AccessPoints": []}
-
-                    result = client.get_access_point_info("fs-12345678", "us-east-1")
-                    assert result == []
+        efs, stubber = _stubbed("efs")
+        stubber.add_response("describe_access_points", {"AccessPoints": []})
+        client = self._client(efs)
+        with stubber:
+            assert client.get_access_point_info("fs-12345678", "us-east-1") == []
 
 
 class TestGetFileSystemClient:

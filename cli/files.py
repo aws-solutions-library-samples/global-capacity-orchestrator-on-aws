@@ -326,7 +326,10 @@ class FileSystemClient:
         """
         try:
             efs = self._session.client("efs", region_name=region)
-            response = efs.describe_access_points(FileSystemId=file_system_id)
+            # DescribeAccessPoints returns 100 per page by default.
+            pages = efs.get_paginator("describe_access_points").paginate(
+                FileSystemId=file_system_id
+            )
 
             return [
                 {
@@ -336,7 +339,8 @@ class FileSystemClient:
                     "posix_user": ap.get("PosixUser", {}),
                     "status": ap["LifeCycleState"],
                 }
-                for ap in response.get("AccessPoints", [])
+                for page in pages
+                for ap in page.get("AccessPoints", [])
             ]
         except ClientError:
             return []

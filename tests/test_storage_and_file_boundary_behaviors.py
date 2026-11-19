@@ -497,12 +497,22 @@ def test_file_system_lookup_continues_past_wrong_type() -> None:
 
 
 def test_access_point_client_error_returns_empty_list() -> None:
+    import boto3
+    from botocore.stub import Stubber
+
     client = _file_client()
-    efs = MagicMock()
-    efs.describe_access_points.side_effect = _client_error("AccessDeniedException")
+    efs = boto3.client(
+        "efs",
+        region_name="us-east-1",
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",  # nosec B106 - fake credentials, nothing is sent
+    )
+    stubber = Stubber(efs)
+    stubber.add_client_error("describe_access_points", service_error_code="FileSystemNotFound")
     client._session.client.return_value = efs
 
-    assert client.get_access_point_info("fs-123", "us-east-1") == []
+    with stubber:
+        assert client.get_access_point_info("fs-123", "us-east-1") == []
 
 
 def _client_error(code: str):
