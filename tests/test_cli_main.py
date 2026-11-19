@@ -2582,6 +2582,32 @@ class TestNodepoolsCommands:
         assert "To apply this manifest, save it to a file and run:" in result.stderr
         assert "kubectl apply -f <filename>.yaml" in result.stderr
 
+    def test_a_printed_manifest_in_json_mode_has_no_apply_hint(self):
+        """The hint is a table-mode aid; JSON mode carries only the document."""
+        from cli.main import cli
+
+        manifest = "apiVersion: karpenter.sh/v1\nkind: NodePool\n"
+        with patch("cli.nodepools.generate_odcr_nodepool_manifest", return_value=manifest):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "-o",
+                    "json",
+                    "nodepools",
+                    "create-odcr",
+                    "-n",
+                    "pool",
+                    "-r",
+                    "us-east-1",
+                    "-c",
+                    "cr-0123456789abcdef0",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == {"status": "ok", "output": manifest.rstrip("\n")}
+        assert "kubectl apply" not in result.stderr
+
     @pytest.mark.parametrize(
         ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
     )
