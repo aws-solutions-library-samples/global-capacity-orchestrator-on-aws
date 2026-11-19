@@ -252,6 +252,110 @@ class TestSubmissionContracts:
         formatter.print.assert_called_once_with("kubectl accepted the manifest")
         manager.wait_for_job.assert_not_called()
 
+    def test_api_submission_of_a_trainjob_waits_for_the_trainjob(self, manifest_path: str) -> None:
+        """``--wait`` follows a TrainJob the API created (TRAINJOB-WAIT)."""
+        manager = MagicMock()
+        manager.submit_job.return_value = {
+            "success": True,
+            "resources": [
+                {
+                    "api_version": "trainer.kubeflow.org/v1alpha1",
+                    "kind": "TrainJob",
+                    "name": "fine-tune",
+                    "namespace": "ml-jobs",
+                    "status": "created",
+                }
+            ],
+        }
+        manager.wait_for_job.return_value = SimpleNamespace(status="failed")
+
+        result, _, formatter = _invoke(
+            ["jobs", "submit", manifest_path, "-r", "us-east-1", "--wait", "--timeout", "9"],
+            manager,
+        )
+
+        assert result.exit_code == 3, result.output
+        manager.wait_for_job.assert_called_once_with(
+            job_name="fine-tune", namespace="ml-jobs", region="us-east-1", timeout_seconds=9
+        )
+        formatter.print_error.assert_called_once_with("Job fine-tune finished with status: failed")
+
+    @pytest.mark.parametrize(
+        ("metadata", "envelope_namespace", "expected_namespace"),
+        [
+            ({"name": "fine-tune", "namespace": "ml-jobs"}, "gco-jobs", "ml-jobs"),
+            ({"name": "fine-tune"}, "team-a", "team-a"),
+            ({"name": "fine-tune"}, None, "gco-jobs"),
+        ],
+    )
+    def test_direct_submission_of_a_trainjob_waits_for_the_manifest_trainjob(
+        self,
+        manifest_path: str,
+        metadata: dict[str, str],
+        envelope_namespace: str | None,
+        expected_namespace: str,
+    ) -> None:
+        """kubectl's answer is text, so the manifest names the TrainJob to follow."""
+        manager = MagicMock()
+        manager.load_manifests.return_value = [
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "settings"}},
+            {"apiVersion": "trainer.kubeflow.org/v1alpha1", "kind": "TrainJob"},
+            {
+                "apiVersion": "trainer.kubeflow.org/v1alpha1",
+                "kind": "TrainJob",
+                "metadata": metadata,
+            },
+        ]
+        manager.submit_job_direct.return_value = {
+            "success": True,
+            "namespace": envelope_namespace,
+            "job_name": None,
+            "resources": ["trainjob.trainer.kubeflow.org/fine-tune created"],
+        }
+        manager.wait_for_job.return_value = SimpleNamespace(status="succeeded")
+
+        result, _, _formatter = _invoke(
+            ["jobs", "submit-direct", manifest_path, "-r", "us-east-1", "--wait"], manager
+        )
+
+        assert result.exit_code == 0, result.output
+        manager.load_manifests.assert_called_once_with(manifest_path)
+        manager.wait_for_job.assert_called_once_with(
+            job_name="fine-tune",
+            namespace=expected_namespace,
+            region="us-east-1",
+            timeout_seconds=3600,
+        )
+
+    @pytest.mark.parametrize(
+        ("subcommand", "extra", "submit_method"),
+        [
+            ("submit", [], "submit_job"),
+            ("submit-direct", ["--region", "us-east-1"], "submit_job_direct"),
+        ],
+    )
+    def test_wait_says_so_when_there_is_nothing_to_follow(
+        self, manifest_path: str, subcommand: str, extra: list[str], submit_method: str
+    ) -> None:
+        """A submission with neither a Job nor a TrainJob is not silently "waited for"."""
+        manager = MagicMock()
+        manager.load_manifests.return_value = [
+            {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"}}
+        ]
+        getattr(manager, submit_method).return_value = {
+            "resources": [{"kind": "Deployment", "name": "web", "status": "created"}]
+        }
+
+        result, _, formatter = _invoke(
+            ["jobs", subcommand, manifest_path, *extra, "--wait"], manager
+        )
+
+        assert result.exit_code == 0, result.output
+        manager.wait_for_job.assert_not_called()
+        formatter.print_warning.assert_called_with(
+            "--wait follows a Job or a TrainJob, and this submission created neither; not waiting"
+        )
+
     def test_direct_submission_surfaces_warnings(self, manifest_path: str) -> None:
         manager = MagicMock()
         manager.submit_job_direct.return_value = {

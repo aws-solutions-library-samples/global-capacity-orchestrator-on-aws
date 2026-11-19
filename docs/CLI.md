@@ -3469,6 +3469,11 @@ gco jobs submit MANIFEST_PATH [OPTIONS]
 | `--wait` | `-w` | Wait for job completion (exit status below) |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
+`--wait` follows the first batch Job the submission created or, when there is
+none, the first Kubeflow TrainJob (finished when its `Complete` or `Failed`
+condition is true). A submission with neither (a Deployment, a Pod) prints a
+warning that there is nothing to wait for and exits 0 once submitted.
+
 **Exit status:**
 
 | Code | Meaning |
@@ -3545,7 +3550,7 @@ gco jobs submit-direct MANIFEST_PATH [OPTIONS]
 | `--dry-run` | | Validate without applying |
 | `--label` | `-l` | Add labels (`key=value`, repeatable) |
 | `--sandbox` | | `isolated`: run every pod in an [AWS Nitro Sandbox](NITRO_SANDBOXES.md) (sets `runtimeClassName: isolated-sandbox` on each pod template; EKS 1.36+, CPU only) |
-| `--wait` | `-w` | Wait for job completion (same exit status as [`gco jobs submit`](#gco-jobs-submit)) |
+| `--wait` | `-w` | Wait for job completion; follows a Job, else a TrainJob, as [`gco jobs submit`](#gco-jobs-submit) does, with the same exit status |
 | `--timeout` | | Wait timeout in seconds (default: 3600) |
 
 `submit-direct` skips GCO's server-side admission, so `--sandbox` runs the

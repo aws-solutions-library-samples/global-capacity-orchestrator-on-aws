@@ -2,7 +2,7 @@
 
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import click
@@ -29,6 +29,46 @@ def _resolve_result_job_name(result: Any) -> str | None:
     """Pick the generated/submitted Job name from a submission response."""
     job_name, _namespace = resolve_submission_identity(result)
     return job_name
+
+
+_NOTHING_TO_WAIT_FOR = (
+    "--wait follows a Job or a TrainJob, and this submission created neither; not waiting"
+)
+
+
+def _wait_target(
+    result: Any, *, fallback_namespace: str, manifests: Iterable[Any] = ()
+) -> tuple[str, str] | None:
+    """The Job, else the Kubeflow TrainJob, that ``--wait`` follows.
+
+    A batch Job comes from the submission response. A TrainJob comes from
+    the response's resources (API submissions) or, when the response is
+    kubectl's text (direct submissions), from the first TrainJob manifest;
+    the API never renames a TrainJob. ``wait_for_job`` reads either kind:
+    ``get_job`` falls back to the TrainJob when no batch Job has the name.
+    Returns ``(name, namespace)``, or None when there is neither.
+    """
+    job_name = _resolve_result_job_name(result)
+    if job_name:
+        # The response says where the Job landed (the manifest's namespace
+        # wins over --namespace); the fallback covers responses without one.
+        return job_name, _resolve_result_namespace(result, fallback=fallback_namespace)
+
+    envelope = result if isinstance(result, Mapping) else {}
+    resources = envelope.get("resources")
+    candidates = [
+        (entry.get("name"), entry.get("namespace"))
+        for entry in (resources if isinstance(resources, list) else [])
+        if isinstance(entry, Mapping) and str(entry.get("kind", "")).lower() == "trainjob"
+    ]
+    for manifest in manifests:
+        if isinstance(manifest, Mapping) and manifest.get("kind") == "TrainJob":
+            metadata = manifest.get("metadata") or {}
+            candidates.append((metadata.get("name"), metadata.get("namespace")))
+    for name, namespace in candidates:
+        if name:
+            return str(name), str(namespace or envelope.get("namespace") or fallback_namespace)
+    return None
 
 
 #: ``submit`` / ``submit-direct --wait`` exit status when the job ran and
@@ -108,7 +148,10 @@ def jobs(config: Any) -> None:
     "--wait",
     "-w",
     is_flag=True,
-    help="Wait for job completion; exits 3 if the job fails, 4 on --timeout",
+    help=(
+        "Wait for the Job (or, without one, the Kubeflow TrainJob) to finish; "
+        "exits 3 if it fails, 4 on --timeout"
+    ),
 )
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
@@ -193,16 +236,11 @@ def submit_job(
 
         # Wait for completion if requested
         if wait and not dry_run:
-            job_name = _resolve_result_job_name(result)
-            if job_name:
-                # The API response tells us exactly where the resource landed
-                # (may differ from --namespace since the manifest's own value
-                # takes precedence). Fall back to the CLI flag or the config
-                # default only if the response didn't include a namespace.
-                resolved_ns = _resolve_result_namespace(
-                    result, fallback=namespace or config.default_namespace
-                )
-                wait_target = (job_name, resolved_ns)
+            wait_target = _wait_target(
+                result, fallback_namespace=namespace or config.default_namespace
+            )
+            if wait_target is None:
+                formatter.print_warning(_NOTHING_TO_WAIT_FOR)
 
     except Exception as e:
         formatter.print_error(f"Failed to submit job: {e}")
@@ -234,7 +272,10 @@ def submit_job(
     "--wait",
     "-w",
     is_flag=True,
-    help="Wait for job completion; exits 3 if the job fails, 4 on --timeout",
+    help=(
+        "Wait for the Job (or, without one, the Kubeflow TrainJob) to finish; "
+        "exits 3 if it fails, 4 on --timeout"
+    ),
 )
 @click.option("--timeout", default=3600, help="Wait timeout in seconds")
 @pass_config
@@ -297,6 +338,12 @@ def submit_job_direct(
 
     wait_target: tuple[str, str] | None = None
     try:
+        # kubectl answers with text, so a TrainJob to follow is named by its
+        # manifest; read them before submitting so a read error cannot be
+        # reported after a submission that succeeded.
+        follow = wait and not dry_run
+        manifests_to_follow = job_manager.load_manifests(manifest_path) if follow else []
+
         formatter.print_info(f"Submitting directly to cluster in {region} via kubectl...")
 
         result = job_manager.submit_job_direct(
@@ -322,13 +369,14 @@ def submit_job_direct(
         formatter.print(result)
 
         # Wait for completion if requested
-        if wait and not dry_run:
-            job_name = _resolve_result_job_name(result)
-            if job_name:
-                resolved_ns = _resolve_result_namespace(
-                    result, fallback=namespace or config.default_namespace
-                )
-                wait_target = (job_name, resolved_ns)
+        if follow:
+            wait_target = _wait_target(
+                result,
+                fallback_namespace=namespace or config.default_namespace,
+                manifests=manifests_to_follow,
+            )
+            if wait_target is None:
+                formatter.print_warning(_NOTHING_TO_WAIT_FOR)
 
     except Exception as e:
         formatter.print_error(f"Failed to submit job directly: {e}")
