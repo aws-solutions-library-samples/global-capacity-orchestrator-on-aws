@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T10:51:39Z">
-        <meta name="gco-source-commit" content="3c3b7b5847cb3535bafd70e8319efd8daf4f1212">
-        <meta name="gco-flow-digest" content="de6819c941e3d3a2">
+        <meta name="gco-generated-at" content="2026-11-19T18:18:19Z">
+        <meta name="gco-source-commit" content="ae5e8fb039b08d74dd7da8ba37d00fd590f05474">
+        <meta name="gco-flow-digest" content="1209a14364c23ff3">
         <title>Analytics stack Studio domain (Canvas override branch)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,68 +208,68 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op1375=>operation: 'Create the SageMaker Studio domain bound to the private VPC.\n\n        ``auth_mode=IAM`` + ``app_network_access_type=VpcOnly`` keeps Studio\n        traffic on the private subnets.\n        ``DefaultUserSettings.ExecutionRole`` points at the role created in\n        :meth:`_create_execution_role_and_grants`. ``CustomImages`` is\n        intentionally left unset so Studio falls back to the stock AWS-\n        published Distribution images (a tested invariant).\n\n        ``CustomFileSystemConfigs`` mounts ``self.studio_efs`` at\n        ``/home/sagemaker-user`` — per-user ``/home/<username>`` isolation\n        is enforced by the access points that the presigned-URL Lambda\n        creates lazily on first login.\n        '
-op1377=>operation: private_subnets = self.vpc.select_subnets(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS).subnets
-op1379=>operation: efs_fs_config = sagemaker.CfnDomain.EFSFileSystemConfigProperty(file_system_id=self.studio_efs.file_system_id, file_system_path='/home/sagemaker-user')
-op1381=>operation: efs_custom_fs = sagemaker.CfnDomain.CustomFileSystemConfigProperty(efs_file_system_config=efs_fs_config)
-op1383=>operation: custom_file_systems: list[sagemaker.CfnDomain.CustomFileSystemConfigProperty] = [efs_custom_fs]
-op1385=>operation: self.studio_compute_sg = ec2.SecurityGroup(self, 'StudioComputeSg', vpc=self.vpc, description='Allows outbound internet access from Studio notebooks', allow_all_outbound=True)
-op1387=>operation: default_user_settings = sagemaker.CfnDomain.UserSettingsProperty(execution_role=self.sagemaker_execution_role.role_arn, custom_file_system_configs=custom_file_systems, security_groups=[self.studio_compute_sg.security_group_id])
-op1389=>operation: self.studio_domain = sagemaker.CfnDomain(self, 'StudioDomain', auth_mode='IAM', app_network_access_type='VpcOnly', domain_name=f'{self.project_name}-studio-{self.region}', subnet_ids=[s.subnet_id for s in private_subnets], vpc_id=self.vpc.vpc_id, kms_key_id=self.kms_key.key_id, default_user_settings=default_user_settings)
-sub1391=>subroutine: self._grant_sagemaker_role_on_studio_domain()
-sub1393=>subroutine: self.studio_domain.node.add_dependency(self.studio_efs)
-sub1395=>subroutine: CfnOutput(self, 'StudioDomainName', value=self.studio_domain.domain_name or '', description='Name of the SageMaker Studio domain')
-op1397=>operation: from aws_cdk import CustomResource
-op1399=>operation: from aws_cdk import custom_resources as cr_provider
-op1401=>operation: cleanup_fn = lambda_.Function(self, 'CleanupFunction', runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME), handler='handler.handler', code=lambda_source_code('lambda/analytics-cleanup'), timeout=Duration.minutes(15), memory_size=128, environment={'DOMAIN_ID': self.studio_domain.attr_domain_id, 'EFS_ID': self.studio_efs.file_system_id, 'REGION': self.region, 'VPC_ID': self.vpc.vpc_id})
-op1403=>operation: domain_id = self.studio_domain.attr_domain_id
-op1405=>operation: sagemaker_arn_prefix = f'arn:{self.partition}:sagemaker:{self.region}:{self.account}'
-op1407=>operation: efs_arn_prefix = f'arn:{self.partition}:elasticfilesystem:{self.region}:{self.account}'
-op1409=>operation: cleanup_policy = iam.ManagedPolicy(self, 'CleanupFunctionPolicy', statements=[iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker:ListApps', 'sagemaker:ListSpaces', 'sagemaker:ListUserProfiles', 'ec2:DescribeSecurityGroups'], resources=['*']), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker:DescribeDomain', 'sagemaker:DeleteApp', 'sagemaker:DeleteSpace', 'sagemaker:DeleteUserProfile'], resources=[f'{sagemaker_arn_prefix}:domain/{domain_id}', f'{sagemaker_arn_prefix}:app/{domain_id}/*', f'{sagemaker_arn_prefix}:space/{domain_id}/*', f'{sagemaker_arn_prefix}:user-profile/{domain_id}/*']), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:DescribeAccessPoints'], resources=[self.studio_efs.file_system_arn]), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:DeleteAccessPoint'], resources=[f'{efs_arn_prefix}:access-point/*']), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:DeleteFileSystemPolicy', 'elasticfilesystem:DescribeMountTargets', 'elasticfilesystem:DeleteMountTarget', 'elasticfilesystem:DeleteFileSystem'], resources=[f'{efs_arn_prefix}:file-system/*']), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['ec2:RevokeSecurityGroupIngress', 'ec2:RevokeSecurityGroupEgress', 'ec2:DeleteSecurityGroup'], resources=[f'arn:{self.partition}:ec2:{self.region}:{self.account}:security-group/*'], conditions={'ArnEquals': {'ec2:Vpc': self.vpc.vpc_arn}})])
-op1411=>operation: assert cleanup_fn.role is not None
-sub1413=>subroutine: cleanup_fn.role.add_managed_policy(cleanup_policy)
-op1415=>operation: cleanup_provider = cr_provider.Provider(self, 'CleanupProvider', on_event_handler=cleanup_fn)
-op1417=>operation: cleanup_resource = CustomResource(self, 'DomainCleanup', service_token=cleanup_provider.service_token)
-sub1419=>subroutine: cleanup_resource.node.add_dependency(cleanup_policy)
-op1421=>operation: self._cleanup_resource = cleanup_resource
-op1423=>operation: from gco.stacks.nag_suppressions import acknowledge_nag_findings
-op1425=>operation: domain = f'<{self.get_logical_id(self.studio_domain)}.DomainId>'
-op1427=>operation: nag_prefix = 'Resource::arn:<AWS::Partition>:{service}:' + self.region + ':<AWS::AccountId>'
-sub1429=>subroutine: acknowledge_nag_findings(cleanup_policy, [{'id': 'AwsSolutions-IAM5', 'reason': "The stack-deletion cleanup Lambda: sagemaker:ListApps, ListSpaces, ListUserProfiles and ec2:DescribeSecurityGroups take no resource (Resource:*); the app, space and user-profile deletes name this domain, under which the names are created at run time; DeleteAccessPoint takes this Region's access points and the home file system's policy, mount-target and file-system deletes take this Region's file systems, because SageMaker creates them at run time and reports their ids only through DescribeDomain; the security-group revokes and deletes are limited to this stack's VPC by ec2:Vpc.", 'appliesTo': ['Resource::*', nag_prefix.format(service='sagemaker') + f':app/{domain}/*', nag_prefix.format(service='sagemaker') + f':space/{domain}/*', nag_prefix.format(service='sagemaker') + f':user-profile/{domain}/*', nag_prefix.format(service='elasticfilesystem') + ':access-point/*', nag_prefix.format(service='elasticfilesystem') + ':file-system/*', nag_prefix.format(service='ec2') + ':security-group/*']}])
-op1431=>operation: assert cleanup_fn.role is not None
-sub1433=>subroutine: acknowledge_nag_findings(cleanup_fn.role, [{'id': 'AwsSolutions-IAM4', 'reason': 'Cleanup Lambda uses AWSLambdaBasicExecutionRole managed policy for CloudWatch Logs access.', 'appliesTo': ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']}])
-sub1435=>subroutine: acknowledge_nag_findings(cleanup_provider, [{'id': 'AwsSolutions-IAM5', 'reason': "The CDK Provider framework's invoke policy names the cleanup function's ARN and its versions (<arn>:*).", 'appliesTo': ['Resource::<CleanupFunction1604930F.Arn>:*']}, {'id': 'AwsSolutions-IAM4', 'reason': 'CDK Provider framework uses AWSLambdaBasicExecutionRole.', 'appliesTo': ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']}])
+        <div><textarea id="code" style="width: 100%;" rows="11">op132=>operation: 'Create the SageMaker Studio domain bound to the private VPC.\n\n        ``auth_mode=IAM`` + ``app_network_access_type=VpcOnly`` keeps Studio\n        traffic on the private subnets.\n        ``DefaultUserSettings.ExecutionRole`` points at the role created in\n        :meth:`_create_execution_role_and_grants`. ``CustomImages`` is\n        intentionally left unset so Studio falls back to the stock AWS-\n        published Distribution images (a tested invariant).\n\n        ``CustomFileSystemConfigs`` mounts ``self.studio_efs`` at\n        ``/home/sagemaker-user`` — per-user ``/home/<username>`` isolation\n        is enforced by the access points that the presigned-URL Lambda\n        creates lazily on first login.\n        '
+op134=>operation: private_subnets = self.vpc.select_subnets(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS).subnets
+op136=>operation: efs_fs_config = sagemaker.CfnDomain.EFSFileSystemConfigProperty(file_system_id=self.studio_efs.file_system_id, file_system_path='/home/sagemaker-user')
+op138=>operation: efs_custom_fs = sagemaker.CfnDomain.CustomFileSystemConfigProperty(efs_file_system_config=efs_fs_config)
+op140=>operation: custom_file_systems: list[sagemaker.CfnDomain.CustomFileSystemConfigProperty] = [efs_custom_fs]
+op142=>operation: self.studio_compute_sg = ec2.SecurityGroup(self, 'StudioComputeSg', vpc=self.vpc, description='Allows outbound internet access from Studio notebooks', allow_all_outbound=True)
+op144=>operation: default_user_settings = sagemaker.CfnDomain.UserSettingsProperty(execution_role=self.sagemaker_execution_role.role_arn, custom_file_system_configs=custom_file_systems, security_groups=[self.studio_compute_sg.security_group_id])
+op146=>operation: self.studio_domain = sagemaker.CfnDomain(self, 'StudioDomain', auth_mode='IAM', app_network_access_type='VpcOnly', domain_name=f'{self.project_name}-studio-{self.region}', subnet_ids=[s.subnet_id for s in private_subnets], vpc_id=self.vpc.vpc_id, kms_key_id=self.kms_key.key_id, default_user_settings=default_user_settings)
+sub148=>subroutine: self._grant_sagemaker_role_on_studio_domain()
+sub150=>subroutine: self.studio_domain.node.add_dependency(self.studio_efs)
+sub152=>subroutine: CfnOutput(self, 'StudioDomainName', value=self.studio_domain.domain_name or '', description='Name of the SageMaker Studio domain')
+op154=>operation: from aws_cdk import CustomResource
+op156=>operation: from aws_cdk import custom_resources as cr_provider
+op158=>operation: cleanup_fn = lambda_.Function(self, 'CleanupFunction', runtime=getattr(lambda_.Runtime, LAMBDA_PYTHON_RUNTIME), handler='handler.handler', code=lambda_source_code('lambda/analytics-cleanup'), timeout=Duration.minutes(15), memory_size=128, environment={'DOMAIN_ID': self.studio_domain.attr_domain_id, 'EFS_ID': self.studio_efs.file_system_id, 'REGION': self.region, 'VPC_ID': self.vpc.vpc_id})
+op160=>operation: domain_id = self.studio_domain.attr_domain_id
+op162=>operation: sagemaker_arn_prefix = f'arn:{self.partition}:sagemaker:{self.region}:{self.account}'
+op164=>operation: efs_arn_prefix = f'arn:{self.partition}:elasticfilesystem:{self.region}:{self.account}'
+op166=>operation: cleanup_policy = iam.ManagedPolicy(self, 'CleanupFunctionPolicy', statements=[iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker:ListApps', 'sagemaker:ListSpaces', 'sagemaker:ListUserProfiles', 'ec2:DescribeSecurityGroups'], resources=['*']), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['sagemaker:DescribeDomain', 'sagemaker:DeleteApp', 'sagemaker:DeleteSpace', 'sagemaker:DeleteUserProfile'], resources=[f'{sagemaker_arn_prefix}:domain/{domain_id}', f'{sagemaker_arn_prefix}:app/{domain_id}/*', f'{sagemaker_arn_prefix}:space/{domain_id}/*', f'{sagemaker_arn_prefix}:user-profile/{domain_id}/*']), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:DescribeAccessPoints'], resources=[self.studio_efs.file_system_arn]), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:DeleteAccessPoint'], resources=[f'{efs_arn_prefix}:access-point/*']), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['elasticfilesystem:DeleteFileSystemPolicy', 'elasticfilesystem:DescribeMountTargets', 'elasticfilesystem:DeleteMountTarget', 'elasticfilesystem:DeleteFileSystem'], resources=[f'{efs_arn_prefix}:file-system/*']), iam.PolicyStatement(effect=iam.Effect.ALLOW, actions=['ec2:RevokeSecurityGroupIngress', 'ec2:RevokeSecurityGroupEgress', 'ec2:DeleteSecurityGroup'], resources=[f'arn:{self.partition}:ec2:{self.region}:{self.account}:security-group/*'], conditions={'ArnEquals': {'ec2:Vpc': self.vpc.vpc_arn}})])
+op168=>operation: assert cleanup_fn.role is not None
+sub170=>subroutine: cleanup_fn.role.add_managed_policy(cleanup_policy)
+op172=>operation: cleanup_provider = cr_provider.Provider(self, 'CleanupProvider', on_event_handler=cleanup_fn)
+op174=>operation: cleanup_resource = CustomResource(self, 'DomainCleanup', service_token=cleanup_provider.service_token)
+sub176=>subroutine: cleanup_resource.node.add_dependency(cleanup_policy)
+op178=>operation: self._cleanup_resource = cleanup_resource
+op180=>operation: from gco.stacks.nag_suppressions import acknowledge_nag_findings
+op182=>operation: domain = f'<{self.get_logical_id(self.studio_domain)}.DomainId>'
+op184=>operation: nag_prefix = 'Resource::arn:<AWS::Partition>:{service}:' + self.region + ':<AWS::AccountId>'
+sub186=>subroutine: acknowledge_nag_findings(cleanup_policy, [{'id': 'AwsSolutions-IAM5', 'reason': "The stack-deletion cleanup Lambda: sagemaker:ListApps, ListSpaces, ListUserProfiles and ec2:DescribeSecurityGroups take no resource (Resource:*); the app, space and user-profile deletes name this domain, under which the names are created at run time; DeleteAccessPoint takes this Region's access points and the home file system's policy, mount-target and file-system deletes take this Region's file systems, because SageMaker creates them at run time and reports their ids only through DescribeDomain; the security-group revokes and deletes are limited to this stack's VPC by ec2:Vpc.", 'appliesTo': ['Resource::*', nag_prefix.format(service='sagemaker') + f':app/{domain}/*', nag_prefix.format(service='sagemaker') + f':space/{domain}/*', nag_prefix.format(service='sagemaker') + f':user-profile/{domain}/*', nag_prefix.format(service='elasticfilesystem') + ':access-point/*', nag_prefix.format(service='elasticfilesystem') + ':file-system/*', nag_prefix.format(service='ec2') + ':security-group/*']}])
+op188=>operation: assert cleanup_fn.role is not None
+sub190=>subroutine: acknowledge_nag_findings(cleanup_fn.role, [{'id': 'AwsSolutions-IAM4', 'reason': 'Cleanup Lambda uses AWSLambdaBasicExecutionRole managed policy for CloudWatch Logs access.', 'appliesTo': ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']}])
+sub192=>subroutine: acknowledge_nag_findings(cleanup_provider, [{'id': 'AwsSolutions-IAM5', 'reason': "The CDK Provider framework's invoke policy names the cleanup function's ARN and its versions (<arn>:*).", 'appliesTo': ['Resource::<CleanupFunction1604930F.Arn>:*']}, {'id': 'AwsSolutions-IAM4', 'reason': 'CDK Provider framework uses AWSLambdaBasicExecutionRole.', 'appliesTo': ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']}])
 
-op1375->op1377
-op1377->op1379
-op1379->op1381
-op1381->op1383
-op1383->op1385
-op1385->op1387
-op1387->op1389
-op1389->sub1391
-sub1391->sub1393
-sub1393->sub1395
-sub1395->op1397
-op1397->op1399
-op1399->op1401
-op1401->op1403
-op1403->op1405
-op1405->op1407
-op1407->op1409
-op1409->op1411
-op1411->sub1413
-sub1413->op1415
-op1415->op1417
-op1417->sub1419
-sub1419->op1421
-op1421->op1423
-op1423->op1425
-op1425->op1427
-op1427->sub1429
-sub1429->op1431
-op1431->sub1433
-sub1433->sub1435
+op132->op134
+op134->op136
+op136->op138
+op138->op140
+op140->op142
+op142->op144
+op144->op146
+op146->sub148
+sub148->sub150
+sub150->sub152
+sub152->op154
+op154->op156
+op156->op158
+op158->op160
+op160->op162
+op162->op164
+op164->op166
+op166->op168
+op168->sub170
+sub170->op172
+op172->op174
+op174->sub176
+sub176->op178
+op178->op180
+op180->op182
+op182->op184
+op184->sub186
+sub186->op188
+op188->sub190
+sub190->sub192
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -279,17 +279,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T10:51:39Z -->
-        <!-- Generated from Git commit: 3c3b7b5847cb3535bafd70e8319efd8daf4f1212 -->
+        <!-- Generated at (UTC): 2026-11-19T18:18:19Z -->
+        <!-- Generated from Git commit: ae5e8fb039b08d74dd7da8ba37d00fd590f05474 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T10:51:39Z">2026-11-19T10:51:39Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T18:18:19Z">2026-11-19T18:18:19Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>3c3b7b5847cb3535bafd70e8319efd8daf4f1212</code>
+            Source commit: <code>ae5e8fb039b08d74dd7da8ba37d00fd590f05474</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>de6819c941e3d3a2</code>
+            Flow content SHA-256: <code>1209a14364c23ff3</code>
           </p>
           <div id="canvas"></div>
         </div>

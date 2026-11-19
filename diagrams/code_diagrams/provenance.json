@@ -117,9 +117,9 @@
       "source_commit": "3d3ba1381c5c16d0c44942f3b542591f571c3f1f"
     },
     "gco/stacks/analytics_stack.py": {
-      "digest": "956f2292eaae42f775044e34bf39f9d973ec9a13fc1925ddad98a01885c90ffd",
-      "generated_at": "2026-11-19T10:51:39Z",
-      "source_commit": "3c3b7b5847cb3535bafd70e8319efd8daf4f1212"
+      "digest": "a8de18eb38b8162ccaa9f0d7670938f2909a5646ea2d5d33530fa8be8cd26b5a",
+      "generated_at": "2026-11-19T18:18:19Z",
+      "source_commit": "ae5e8fb039b08d74dd7da8ba37d00fd590f05474"
     },
     "gco/stacks/api_gateway_global_stack.py": {
       "digest": "2085c228c7ef24bd998afbae74b35b88bb82e4ba6ac7cccf50a9895e4f28da89",
