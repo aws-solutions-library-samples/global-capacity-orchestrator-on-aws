@@ -14,15 +14,21 @@ async def queue_list(
     status: str | None = None,
     namespace: str | None = None,
     limit: int = 50,
+    cursor: str | None = None,
 ) -> str:
-    """`gco queue list` — list jobs in the global queue.
+    """`gco queue list` — list one page of jobs in the global queue.
+
+    A page holds up to ``limit`` jobs; when more may match, the result's
+    ``next_cursor`` is set. Pass it back as ``cursor`` with the same filters
+    to read the next page (a cursor is bound to its filters).
 
     Args:
         region: Filter by target region.
         status: Filter by status (queued, claimed, applying, pending, running,
             succeeded, failed, cancelled).
         namespace: Filter by Kubernetes namespace.
-        limit: Maximum results (default 50).
+        limit: Maximum results in this page (1-1000, default 50).
+        cursor: ``next_cursor`` from the previous page, to read the page after it.
     """
     args = ["queue", "list"]
     if region:
@@ -32,6 +38,8 @@ async def queue_list(
     if namespace:
         args += ["-n", namespace]
     args += ["--limit", str(limit)]
+    if cursor:
+        args += ["--cursor", cursor]
     return await asyncio.to_thread(cli_runner._run_cli, *args)
 
 

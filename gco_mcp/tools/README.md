@@ -292,7 +292,7 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 |------|-------------|
 | `cancel_queue_job` | `gco queue cancel` — cancel a job that is still queued, before a region claims it. |
 | `queue_get` | `gco queue get` — fetch a single job from the global queue. |
-| `queue_list` | `gco queue list` — list jobs in the global queue. |
+| `queue_list` | `gco queue list` — list one page of jobs in the global queue. |
 | `queue_stats` | `gco queue stats` — show aggregate stats for the global queue. |
 | `queue_submit` | `gco queue submit` — submit a job manifest to the global queue. |
 
