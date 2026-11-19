@@ -3,8 +3,8 @@ Tests for cli/files.py — the shared-filesystem CLI surface.
 
 Covers the FileSystemInfo and FileInfo dataclasses plus baseline
 FileSystemClient initialization with get_config and get_aws_client
-patched out. The broader end-to-end coverage of EFS/FSx discovery,
-DataSync transfers, and error paths lives in test_files_extended.py.
+patched out. The broader end-to-end coverage of EFS/FSx discovery
+and error paths lives in test_files_extended.py.
 """
 
 import json
