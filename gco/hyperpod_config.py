@@ -250,10 +250,11 @@ def _require_quantity(value: object, path: str) -> str:
     """
     if isinstance(value, str):
         try:
-            if parse_quantity(value) >= 0:
-                return value.strip()
+            non_negative = parse_quantity(value) >= 0
         except ValueError:
-            pass
+            non_negative = False
+        if non_negative:
+            return value.strip()
     raise HyperpodConfigError(
         f"{path} must be a Kubernetes quantity string (for example 1000, 4Ti), got {value!r}"
     )
