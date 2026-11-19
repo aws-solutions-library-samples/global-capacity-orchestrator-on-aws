@@ -1586,6 +1586,9 @@ def check_policy(
     Advisory only: the cluster is the real gate and this reads a snapshot of
     its policy, so it exits 0 unless you pass --fail-on-reject.
 
+    Regions are read in parallel; one that has not answered after 45 seconds
+    is reported as unreadable instead of holding up the others.
+
     Examples:
         gco jobs check-policy examples/gpu-job.yaml
         gco jobs check-policy examples/gpu-job.yaml -r us-east-1 -r us-east-2

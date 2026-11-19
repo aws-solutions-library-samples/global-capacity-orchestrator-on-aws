@@ -3994,6 +3994,11 @@ policy over the network, so it exits 0 unless you pass `--fail-on-reject`. A
 check that blocked on its own opinion would refuse valid jobs whenever it was
 stale or wrong.
 
+When it checks more than one region, it reads them in parallel, and a region
+whose policy read has not finished after 45 seconds is reported as unreadable
+("timed out after 45s") with an `unknown` verdict, so one hung region does not
+hold up the answer for the others.
+
 ```bash
 gco jobs check-policy [MANIFEST_PATH] [OPTIONS]
 ```

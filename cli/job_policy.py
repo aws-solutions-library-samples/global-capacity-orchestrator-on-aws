@@ -28,6 +28,7 @@ import concurrent.futures
 import contextlib
 import logging
 import re
+import threading
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -149,29 +150,60 @@ def fetch_region_policies(aws_client: Any, regions: list[str]) -> list[RegionPol
     Concurrent because each read costs a CloudFormation describe plus an API
     call and they are independent; serial fan-out over a handful of regions is
     slow enough that people stop running the check.
+
+    A region still reading after :data:`FETCH_TIMEOUT_SECONDS` is reported
+    unreachable, so one hung region cannot stall the answer for the others.
     """
     if not regions:
         return []
     if len(regions) == 1:
         return [fetch_region_policy(aws_client, regions[0])]
 
-    results: dict[str, RegionPolicy] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(regions), 8)) as pool:
-        futures = {
-            pool.submit(fetch_region_policy, aws_client, region): region for region in regions
-        }
-        for future in concurrent.futures.as_completed(futures, timeout=None):
-            region = futures[future]
-            try:
-                results[region] = future.result(timeout=FETCH_TIMEOUT_SECONDS)
-            except Exception as e:  # pragma: no cover - defensive
-                results[region] = RegionPolicy(
-                    region=region, status=FETCH_ERROR, reason=f"{type(e).__name__}: {e}"
+    futures = {_read_on_daemon_thread(aws_client, region): region for region in regions}
+    done, _ = concurrent.futures.wait(futures, timeout=FETCH_TIMEOUT_SECONDS)
+    results: list[RegionPolicy] = []
+    for future, region in futures.items():
+        if future not in done:
+            results.append(
+                RegionPolicy(
+                    region=region,
+                    status=FETCH_UNREACHABLE,
+                    reason=f"timed out after {FETCH_TIMEOUT_SECONDS}s",
                 )
-    return [
-        results.get(region, RegionPolicy(region=region, status=FETCH_ERROR, reason="no result"))
-        for region in regions
-    ]
+            )
+            continue
+        error = future.exception()
+        if error is not None:
+            results.append(
+                RegionPolicy(
+                    region=region, status=FETCH_ERROR, reason=f"{type(error).__name__}: {error}"
+                )
+            )
+        else:
+            results.append(future.result())
+    return results
+
+
+def _read_on_daemon_thread(aws_client: Any, region: str) -> concurrent.futures.Future[RegionPolicy]:
+    """Start one region's policy read on a daemon thread; return its future.
+
+    Not a ``ThreadPoolExecutor``: the interpreter joins executor workers at
+    exit even after ``shutdown(wait=False, cancel_futures=True)``, so a read
+    abandoned at the deadline would still hold the command open until its
+    HTTP retries gave up. A daemon thread is dropped at exit instead, the same
+    reason :mod:`cli.status` runs its sections on daemon threads. Every region
+    starts at once, so each one gets the whole :data:`FETCH_TIMEOUT_SECONDS`.
+    """
+    future: concurrent.futures.Future[RegionPolicy] = concurrent.futures.Future()
+
+    def read() -> None:
+        try:
+            future.set_result(fetch_region_policy(aws_client, region))
+        except Exception as e:
+            future.set_exception(e)
+
+    threading.Thread(target=read, name=f"gco-policy-{region}", daemon=True).start()
+    return future
 
 
 # ---------------------------------------------------------------------------
@@ -263,8 +295,10 @@ def _quiet_admission_logging() -> Iterator[None]:
     is about to be shown the same information as formatted findings, so the log
     line duplicates it and interleaves with the report.
 
-    Single-threaded by construction: evaluation runs after the concurrent policy
-    fetch has joined, so this never races another region's evaluation.
+    Single-threaded by construction: evaluation runs on the caller's thread
+    after the concurrent policy fetch has returned (a read abandoned at the
+    fetch deadline only ever reads), so this never races another region's
+    evaluation.
     """
     admission_logger = logging.getLogger("gco.job_admission")
     previous = admission_logger.level
