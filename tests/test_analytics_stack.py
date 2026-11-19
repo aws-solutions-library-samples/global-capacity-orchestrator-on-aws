@@ -875,6 +875,37 @@ class TestSageMakerExecutionRole:
             f"attached statements={statements!r}"
         )
 
+    def test_cluster_shared_arn_reader_reads_only_its_parameter(self) -> None:
+        """The cross-Region SSM reader's policy names the one parameter it reads.
+
+        It used ``AwsCustomResourcePolicy.ANY_RESOURCE``, which let the
+        custom-resource provider read every SSM parameter in every Region.
+        """
+        template = _synth_analytics().to_json()
+        statements = [
+            statement
+            for logical_id, resource in template["Resources"].items()
+            if resource["Type"] == "AWS::IAM::Policy"
+            and logical_id.startswith("ReadClusterSharedBucketArnCustomResourcePolicy")
+            for statement in resource["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        assert statements == [
+            {
+                "Action": "ssm:GetParameter",
+                "Effect": "Allow",
+                "Resource": {
+                    "Fn::Join": [
+                        "",
+                        [
+                            "arn:",
+                            {"Ref": "AWS::Partition"},
+                            ":ssm:us-east-2:123456789012:parameter/gco-test/cluster-shared-bucket/arn",
+                        ],
+                    ]
+                },
+            }
+        ]
+
     def test_role_has_execute_api_invoke_on_api_v1_and_inference(self) -> None:
         """Full-method ``execute-api:Invoke`` grant on ``/prod/*/api/v1/*``
         and ``/prod/*/inference/*`` for the API gateway region/account.

@@ -792,9 +792,10 @@ class GCOAnalyticsStack(Stack):
         """Attach RW + KMS on ``Cluster_Shared_Bucket`` to ``SageMaker_Execution_Role``.
 
         The bucket lives in ``GCOGlobalStack`` in the global region. Its
-        ARN is resolved at synth time via an ``AwsCustomResource`` that
-        issues ``ssm:GetParameter`` against the global region — mirroring
-        the pattern used by ``GCORegionalStack._resolve_cluster_shared_bucket_from_ssm``.
+        ARN is resolved at deploy time by an ``AwsCustomResource`` that
+        issues ``ssm:GetParameter`` against the global region, allowed on
+        that one parameter's ARN — mirroring the pattern used by
+        ``GCORegionalStack._resolve_cluster_shared_bucket_from_ssm``.
 
         Two statements attach to the role:
 
@@ -828,34 +829,14 @@ class GCOAnalyticsStack(Stack):
                 region=global_region,
                 physical_resource_id=cr.PhysicalResourceId.of("analytics-cluster-shared-arn"),
             ),
+            # The custom resource reads one parameter with a literal name in
+            # the global Region, so its policy names exactly that ARN.
             policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
-                resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+                resources=[
+                    f"arn:{self.partition}:ssm:{global_region}:{self.account}:"
+                    f"parameter{parameter_name}"
+                ]
             ),
-        )
-
-        # Scoped suppression: same shape as
-        # ``GCORegionalStack._resolve_cluster_shared_bucket_from_ssm``. The
-        # CR policy is ``Resource::*`` because cross-region SSM does not
-        # support resource-level scoping cleanly; the action is a fixed
-        # ``ssm:GetParameter`` for a single literal parameter Name.
-        acknowledge_nag_findings(
-            read_cr,
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "Cross-region ssm:GetParameter for "
-                        f"{parameter_name} in the global region. The "
-                        "AwsCustomResource SDK-call policy is scoped to a "
-                        "single fixed action (ssm:GetParameter) with a "
-                        "fixed parameter Name — the Resource: * is the "
-                        "CDK-documented escape hatch because the parameter "
-                        "ARN is not known to the calling principal's "
-                        "region. Effective blast radius: one parameter."
-                    ),
-                    "appliesTo": ["Resource::*"],
-                },
-            ],
         )
 
         shared_arn = read_cr.get_response_field("Parameter.Value")
