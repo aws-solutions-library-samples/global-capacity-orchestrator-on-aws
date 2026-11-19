@@ -256,6 +256,14 @@ gco examples validate --skip-examples efa-distributed-training,multi-gpu-trainin
 gco examples validate --resume --run-id <id> --report-dir <dir> ...
 ```
 
+Each example's submission is checkpointed just before it is made. When a
+resumed run reaches an example an interrupted attempt may have submitted
+(its record still says it was being submitted, or it failed), the run deletes
+that example's objects first and then submits it once: `gco jobs
+submit-direct` and the manifest API rename a second submission of a Job that
+is still running, and the harness would never clean up that duplicate. A
+failed deletion fails the example without submitting it.
+
 `--examples` also narrows the derived enablement: selecting only
 `valkey-cache-job` deploys with Valkey forced on but leaves Aurora, FSx,
 and the optional schedulers at their cdk.json defaults.

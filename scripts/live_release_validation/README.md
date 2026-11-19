@@ -74,7 +74,10 @@ the `pcs_overrides` CDK context (`pcs_overrides_json()`, deep-merged over the
 `pcs` block by the config loader, part of the resume identity like
 `tracing_overrides`): the API's `/api/v1/slurm/backends` listing, a batch job
 submitted with `backend=pcs` that must reach `COMPLETED` on a node PCS
-launches from zero, its slurmdbd record with the caller attribution, and the
+launches from zero (journaled under `state.pcs_probe` before the POST and with
+its job ID, so a resume waits for that job, or finds it by its run-scoped name
+in the queue and in accounting, instead of submitting another), its slurmdbd
+record with the caller attribution, and the
 output file read back from the managed login node by the real
 `gco slurm output --backend pcs` (an argv-only subprocess). `preflight` runs
 `cli.pcs_preflight` for the same merged block before `deploy`
