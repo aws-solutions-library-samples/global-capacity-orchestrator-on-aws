@@ -2954,6 +2954,35 @@ def test_pre_commit_comments_name_real_ci_jobs() -> None:
     assert mentioned <= names, sorted(mentioned - names)
 
 
+def test_tests_readme_names_real_ci_jobs() -> None:
+    """tests/README.md named lint:typecheck, lint:typecheck-stacks and
+    lint:typecheck-lambda, integration:lambda, test:fresh-install and
+    test:cdk-config-matrix, none of which exist. Every CI job it names in
+    backticks must be a job some workflow defines."""
+    names: set[str] = set()
+    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        jobs = yaml.safe_load(workflow.read_text(encoding="utf-8")).get("jobs") or {}
+        for job in jobs.values():
+            # Drop a matrix suffix: "unit:pytest:core (shard ${{ matrix.shard }}/5)".
+            names.add(re.split(r" \(| \$\{\{", str(job.get("name", "")))[0])
+    # The job-name categories (unit, integration, lint, ...), plus the GitLab-era "test".
+    categories = {name.split(":")[0] for name in names if ":" in name} | {"test"}
+    mentioned = {
+        token
+        for token in re.findall(
+            r"`([a-z][a-z0-9-]*:[a-z0-9][a-z0-9:-]*)`", _read("tests/README.md")
+        )
+        if token.split(":")[0] in categories
+    }
+    assert {
+        "lint:mypy:strict",
+        "lint:mypy:stacks",
+        "lint:mypy:lambda",
+        "integration:lambda:imports",
+    } <= mentioned
+    assert mentioned <= names, sorted(mentioned - names)
+
+
 def test_queue_processor_docs_name_the_floci_emulator_not_moto() -> None:
     """integration:docker:queue-processor consumes from the Floci service
     container; four job descriptions still said it ran against moto's SQS

@@ -319,15 +319,15 @@ python3 scripts/dump_nag_findings.py
 
 ### Fresh Install Verification
 
-The `test:fresh-install` CI job does a clean `pip install -e .` and verifies all critical imports work — including `cdk-nag`, `aws_cdk.aws_eks_v2`, the CLI entry point, and the CDK stack classes. This catches missing or mismatched dependencies in `pyproject.toml`.
+The `unit:fresh-install` CI job does a cold `pip install -e ".[cdk]"` (no pip cache, no lock) and verifies all critical imports work — including `cdk-nag`, `aws_cdk.aws_eks_v2`, the CLI entry point, and the CDK stack classes. This catches missing or mismatched dependencies in `pyproject.toml`.
 
 ### Lambda Build Verification
 
 The Lambda build directory (`lambda/kubectl-applier-simple-build/`) is auto-created by `StackManager` during deploy. In CI, this is validated at multiple levels:
 
-- `integration:lambda` — verifies all Lambda handler modules import correctly
-- `test:cdk-config-matrix` — builds the Lambda package in `before_script` and runs `cdk synth` against it (synth fails if the build dir is missing or incomplete)
-- `test_stacks.py::TestStackManagerSyncLambdaSources` — unit tests that `_sync_lambda_sources` auto-creates the build directory when missing
+- `integration:lambda:imports` — imports every deployed Python Lambda handler in the environment it deploys with, the build directory included, so a module or package the build does not stage fails here (`.github/scripts/verify_lambda_imports.py`)
+- `unit:cdk:config-matrix` — stages the Lambda packages with the build action (`.github/actions/build-lambda-package`) and runs `cdk synth` against them (synth fails if the build dir is missing or incomplete)
+- `test_stacks.py::TestBuildLambdaPackages` — unit tests that `StackManager._build_kubectl_lambda` builds the package, skips a missing source or `requirements.txt`, and replaces a stale build directory
 
 ### Lambda Handler Import Helper
 
@@ -1160,11 +1160,11 @@ When adding new features, ensure tests cover:
 
 ## Type Checking
 
-CI runs `mypy --strict` across three jobs:
+CI runs mypy with the strict `[tool.mypy]` settings in three `lint.yml` jobs:
 
-- `lint:typecheck` — `gco/` (except stacks), `cli/`, `gco_mcp/`, `scripts/`, `app.py`
-- `lint:typecheck-stacks` — `gco/stacks/` with `aws-cdk-lib` installed
-- `lint:typecheck-lambda` — each `lambda/*/` directory individually
+- `lint:mypy:strict` — `gco/` (except `gco/stacks/`), `cli/`, `gco_mcp/`, `scripts/`, `.github/scripts/`, `dockerfiles/` and `docs/client-examples/`
+- `lint:mypy:stacks` — `gco/stacks/`, `app.py` and `diagrams/` with `aws-cdk-lib` installed, then `.github/oidc_provider/` in a run of its own (its `app.py` and the root one would be two modules named `app`)
+- `lint:mypy:lambda` — each Python Lambda directory under `lambda/` on its own (the job lists them; the generated `*-build` directories are not checked)
 
 Strict flags enabled in `pyproject.toml` include `disallow_untyped_defs`,
 `disallow_untyped_calls`, `disallow_any_generics`, `no_implicit_optional`,
@@ -1173,15 +1173,16 @@ Strict flags enabled in `pyproject.toml` include `disallow_untyped_defs`,
 
 Prefer concrete types over `Any`. Runtime types from the installed packages
 (boto3, Kubernetes, fastapi, click) are preferred over `Any` fallbacks —
-the CI typecheck jobs install the full runtime (`pip install -e ".[typecheck,mcp]"`)
+`lint:mypy:strict` installs the full runtime (`pip install -c requirements-lock.txt -e ".[typecheck,mcp]"`)
 so stubs resolve properly.
 
 Run locally with the same commands:
 
 ```bash
-mypy gco/ cli/ gco_mcp/ scripts/ app.py --exclude 'gco/stacks/'
-mypy gco/stacks/
-for d in lambda/*/; do ls "$d"*.py >/dev/null 2>&1 && mypy "$d"; done
+mypy gco/ cli/ gco_mcp/ scripts/ .github/scripts/ dockerfiles/ docs/client-examples/ --exclude 'gco/stacks/'
+mypy gco/stacks/ app.py diagrams/
+mypy .github/oidc_provider/
+for d in lambda/*/; do case "$d" in *-build/) continue ;; esac; ls "$d"*.py >/dev/null 2>&1 && mypy "$d"; done
 ```
 
 ## Import Conventions After the Manifest API Refactor
