@@ -97,13 +97,14 @@ To find your API Gateway ID and construct the correct ARNs:
 ```bash
 # The API ID is the host prefix of the endpoint URL
 # (https://API_ID.execute-api.REGION.amazonaws.com/prod/).
-# Global API (stack gco-api-gateway, output ApiEndpoint):
-gco stacks outputs gco-api-gateway
+# Global API (stack gco-api-gateway in deployment_regions.api_gateway,
+# us-east-2 by default; output ApiEndpoint):
+gco stacks outputs gco-api-gateway -r us-east-2
 # Regional API (stack gco-regional-api-us-east-1, output RegionalApiEndpoint):
-gco stacks outputs gco-regional-api-us-east-1
+gco stacks outputs gco-regional-api-us-east-1 -r us-east-1
 # Or with the AWS CLI:
 aws cloudformation describe-stacks \
-  --stack-name gco-api-gateway \
+  --stack-name gco-api-gateway --region us-east-2 \
   --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
   --output text
 

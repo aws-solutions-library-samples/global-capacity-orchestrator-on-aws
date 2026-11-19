@@ -191,7 +191,8 @@ out to this path and reads `templates_count`, `webhooks_count`,
 Every path in this document is relative to one of two hosts.
 
 **Global API Gateway** — the `ApiEndpoint` CloudFormation output of the
-`gco-api-gateway` stack (`gco stacks outputs gco-api-gateway`). Use it for cross-region aggregation, and for
+`gco-api-gateway` stack (`gco stacks outputs gco-api-gateway -r us-east-2`, with the
+`deployment_regions.api_gateway` Region, `us-east-2` by default). Use it for cross-region aggregation, and for
 workload traffic in the commercial `aws` partition:
 
 ```http
