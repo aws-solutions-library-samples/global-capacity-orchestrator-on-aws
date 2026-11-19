@@ -859,7 +859,9 @@ the `cb-...` ID to this command. Run with `--dry-run` before committing —
 Capacity Block purchases incur charges. A passed dry run means the request is
 well-formed and you hold `ec2:PurchaseCapacityBlock`; EC2's dry run does not
 look the offering up, so it cannot tell you whether the offering still exists.
-Only the purchase itself does.
+Only the purchase itself does. When EC2 refuses the purchase or the dry run, the
+command exits 1 in every output mode; with `--output json` or `--output yaml` the
+result document (`success: false`, `error_code`, `error`) is still printed on stdout.
 
 ```bash
 gco capacity reserve [OPTIONS]
@@ -978,7 +980,7 @@ gco capacity find-reservations -i p6-b200 -r us-east-1 -r us-west-2 --no-pricing
 
 #### `gco capacity create-reservation`
 
-Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Run with `--dry-run` first to check the request and your permission; EC2's dry run does not check capacity or the Availability Zone, only the real request does.
+Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Run with `--dry-run` first to check the request and your permission; EC2's dry run does not check capacity or the Availability Zone, only the real request does. A refused request exits 1 in every output mode, with the result document on stdout in JSON/YAML mode, as for [`gco capacity reserve`](#gco-capacity-reserve).
 
 ```bash
 gco capacity create-reservation [OPTIONS]
@@ -1005,7 +1007,7 @@ gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2
 
 #### `gco capacity cancel-reservation`
 
-Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing.
+Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing. A refused cancellation exits 1 in every output mode, with the result document on stdout in JSON/YAML mode.
 
 ```bash
 gco capacity cancel-reservation [OPTIONS]

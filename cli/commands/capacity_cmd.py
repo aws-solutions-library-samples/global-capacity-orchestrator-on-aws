@@ -1335,9 +1335,7 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
 
         if config.output_format != "table":
             formatter.print(result)
-            return
-
-        if result["success"]:
+        elif result["success"]:
             if dry_run:
                 print()
                 print(
@@ -1372,7 +1370,9 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
                     f"-c {result['reservation_id']} -i {result['instance_type']}"
                 )
                 print()
-        else:
+        if not result["success"]:
+            # JSON/YAML mode already printed the failure document; the exit
+            # status must say it failed there too, not only in table mode.
             formatter.print_error(
                 f"Failed: {result.get('error_code', 'Unknown')}: {result.get('error', '')}"
             )
@@ -1633,9 +1633,7 @@ def create_reservation(
 
         if config.output_format != "table":
             formatter.print(result)
-            return
-
-        if result["success"]:
+        elif result["success"]:
             if dry_run:
                 print()
                 print(
@@ -1680,7 +1678,9 @@ def create_reservation(
                     f"-c {result['reservation_id']} -i {result['instance_type']}"
                 )
                 print()
-        else:
+        if not result["success"]:
+            # JSON/YAML mode already printed the failure document; the exit
+            # status must say it failed there too, not only in table mode.
             formatter.print_error(
                 f"Failed: {result.get('error_code', 'Unknown')}: {result.get('error', '')}"
             )
@@ -1740,9 +1740,7 @@ def cancel_reservation(
 
         if config.output_format != "table":
             formatter.print(result)
-            return
-
-        if result["success"]:
+        elif result["success"]:
             print()
             if dry_run:
                 print("  ✓ Dry run passed — you are authorized to cancel reservations")
@@ -1751,7 +1749,9 @@ def cancel_reservation(
             else:
                 print(f"  ✓ {result.get('message', 'Reservation cancelled.')}")
             print()
-        else:
+        if not result["success"]:
+            # JSON/YAML mode already printed the failure document; the exit
+            # status must say it failed there too, not only in table mode.
             formatter.print_error(
                 f"Failed: {result.get('error_code', 'Unknown')}: {result.get('error', '')}"
             )

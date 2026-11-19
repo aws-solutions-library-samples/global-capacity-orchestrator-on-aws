@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+import yaml
 from botocore.exceptions import ClientError
 from click.testing import CliRunner
 
@@ -366,3 +369,56 @@ def test_traffic_dial_clear_handles_generic_failure() -> None:
 
     assert result.exit_code == 1
     assert "Failed to clear traffic-dial override" in result.output
+
+
+_RESERVATION_FAILURE = {
+    "success": False,
+    "dry_run": False,
+    "region": "us-east-1",
+    "error_code": "InsufficientInstanceCapacity",
+    "error": "sold out",
+}
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+@pytest.mark.parametrize(
+    ("checker_method", "arguments"),
+    [
+        (
+            "purchase_capacity_block",
+            ["reserve", "-o", "cb-0123456789abcdef0", "-r", "us-east-1"],
+        ),
+        (
+            "create_capacity_reservation",
+            [
+                "create-reservation",
+                "-i",
+                "p5.48xlarge",
+                "-r",
+                "us-east-1",
+                "-z",
+                "us-east-1a",
+            ],
+        ),
+        (
+            "cancel_capacity_reservation",
+            ["cancel-reservation", "-o", "cr-0123456789abcdef0", "-r", "us-east-1", "-y"],
+        ),
+    ],
+)
+def test_reservation_commands_exit_nonzero_on_failure_in_machine_modes(
+    checker_method: str, arguments: list[str], output_format: str
+) -> None:
+    """A failed purchase/create/cancel used to print its document and exit 0
+    in JSON/YAML mode, so a script checking $? saw a success."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    getattr(checker, checker_method).return_value = dict(_RESERVATION_FAILURE)
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(cli, ["-o", output_format, "capacity", *arguments])
+
+    assert result.exit_code == 1, result.output
+    document = (json.loads if output_format == "json" else yaml.safe_load)(result.stdout)
+    assert document == _RESERVATION_FAILURE
+    assert "Failed: InsufficientInstanceCapacity: sold out" in result.stderr
