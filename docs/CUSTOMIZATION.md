@@ -2394,11 +2394,17 @@ You may need a specific model for **regulatory, data-residency, model-governance
 ```bash
 # Capacity advisor — pass any model or inference-profile id enabled in your account
 gco capacity ai-recommend -w "Fine-tune a 13B model" --model us.anthropic.claude-sonnet-4-6
-gco capacity predict -i p5.48xlarge -r us-east-1 --model eu.amazon.nova-pro-v1:0
+gco capacity predict -i p5.48xlarge -r us-east-1 --model us.amazon.nova-pro-v1:0
 
-# Mission engine
-gco mission start "..." --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
+# Mission engine (the mission commands need GCO_ENABLE_MISSION=true)
+gco mission run --directive "Find documentation about inference endpoints." \
+  --tool-allowlist find_docs --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
 ```
+
+The capacity advisor calls Bedrock in `AWS_REGION`, else `AWS_DEFAULT_REGION`,
+else the CLI's default Region (`gco -r`), not in the Region `-r` names after the
+subcommand, so a geography-scoped profile such as `eu.amazon.nova-pro-v1:0`
+needs an `AWS_REGION` in that geography.
 
 The `ai_recommend` MCP tool takes the same override as a `model="..."` argument; omit it to use the default.
 
