@@ -948,3 +948,32 @@ def test_block_offerings_describe_the_type_in_the_offering_region():
         checker.list_capacity_block_offerings("us-west-2", instance_type="p5.48xlarge")
 
     describe.assert_called_once_with("p5.48xlarge", region="us-west-2")
+
+
+def test_capacity_block_trend_follows_next_token():
+    """Only the first page of offerings used to be counted, which biased the
+    slope toward "shrinking" whenever the later days were on page two (N17)."""
+    checker = _make_checker()
+    now = datetime.now(UTC)
+    ec2 = MagicMock()
+    # Page one holds the early days, page two the later, busier days.
+    ec2.describe_capacity_block_offerings.side_effect = [
+        {
+            "CapacityBlockOfferings": [{"StartDate": now + timedelta(days=1, hours=1)}],
+            "NextToken": "page-2",
+        },
+        {
+            "CapacityBlockOfferings": [
+                {"StartDate": now + timedelta(days=150, hours=1)} for _ in range(4)
+            ]
+        },
+    ]
+    checker._session.client = MagicMock(return_value=ec2)
+
+    trend = checker.get_capacity_block_trend("p5.48xlarge", "us-east-1")
+
+    assert trend > 0
+    calls = ec2.describe_capacity_block_offerings.call_args_list
+    assert len(calls) == 2
+    assert "NextToken" not in calls[0].kwargs
+    assert calls[1].kwargs["NextToken"] == "page-2"

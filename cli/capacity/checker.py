@@ -703,6 +703,16 @@ class CapacityChecker:
         weighted by how long each price was in effect, not by how many price
         changes were recorded; ``current_price`` is the newest change.
         """
+        return self.get_spot_price_history_and_series(instance_type, region, days)[0]
+
+    def get_spot_price_history_and_series(
+        self, instance_type: str, region: str, days: int = 7
+    ) -> tuple[list[SpotPriceInfo], dict[str, list[float]]]:
+        """:meth:`get_spot_price_history` plus each zone's prices, newest first.
+
+        The per-zone series is what trend analysis (``compute_price_trend``)
+        reads, so a caller that wants both makes one sweep of the window.
+        """
         ec2 = self._session.client("ec2", region_name=region)
 
         end_time = datetime.now(UTC)
@@ -725,9 +735,11 @@ class CapacityChecker:
                     )
 
             results = []
+            series: dict[str, list[float]] = {}
             for az, records in az_records.items():
                 records.sort(key=lambda record: record[0])
                 prices = [price for _changed_at, price in records]
+                series[az] = prices[::-1]
                 current = prices[-1]
                 avg, std_dev = _time_weighted_mean_and_std(records, start_time, end_time)
                 min_price = min(prices)
@@ -747,11 +759,11 @@ class CapacityChecker:
                     )
                 )
 
-            return results
+            return results, series
 
         except ClientError as e:
             if "InvalidParameterValue" in str(e):
-                return []
+                return [], {}
             raise
 
     def get_on_demand_price(self, instance_type: str, region: str) -> float | None:
@@ -1636,25 +1648,33 @@ class CapacityChecker:
         now = datetime.now(UTC)
         window_end = now + timedelta(days=blocks.MAX_DURATION_DAYS)
 
-        def describe(end: datetime) -> dict[str, Any]:
-            result: dict[str, Any] = ec2.describe_capacity_block_offerings(
-                InstanceType=instance_type,
-                InstanceCount=1,
-                CapacityDurationHours=24,  # Minimum duration for broadest results
-                StartDateRange=now,
-                EndDateRange=end,
-            )
-            return result
+        def describe(end: datetime) -> list[dict[str, Any]]:
+            """Every offering in the window, following NextToken."""
+            found: list[dict[str, Any]] = []
+            api_kwargs: dict[str, Any] = {
+                "InstanceType": instance_type,
+                "InstanceCount": 1,
+                "CapacityDurationHours": 24,  # Minimum duration for broadest results
+                "StartDateRange": now,
+                "EndDateRange": end,
+            }
+            while True:
+                response = ec2.describe_capacity_block_offerings(**api_kwargs)
+                found.extend(response.get("CapacityBlockOfferings", []))
+                next_token = response.get("NextToken")
+                if not next_token:
+                    return found
+                api_kwargs["NextToken"] = next_token
 
         try:
             try:
-                response = describe(window_end)
+                offerings = describe(window_end)
             except ClientError as e:
                 latest_end = _latest_accepted_end_date(e)
                 if latest_end is None or latest_end <= now:
                     raise
                 window_end = latest_end
-                response = describe(window_end)
+                offerings = describe(window_end)
         except ClientError as e:
             kind = _classify_capacity_block_error(e)
             if kind == "request":
@@ -1678,7 +1698,6 @@ class CapacityChecker:
             )
             return 0.0
 
-        offerings = response.get("CapacityBlockOfferings", [])
         if not offerings:
             return 0.0
 

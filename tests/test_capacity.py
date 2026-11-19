@@ -3679,16 +3679,14 @@ class TestGatherCapacityDataEnhanced:
                     "all_regions": [],
                 }
                 mock_cap.get_spot_placement_score.return_value = {}
-                mock_cap.get_spot_price_history.return_value = []
+                mock_cap.get_spot_price_history_and_series.return_value = ([], {})
                 mock_cap.get_on_demand_price.return_value = None
                 mock_cap.check_instance_available_in_region.return_value = True
                 mock_cap.list_capacity_reservations.return_value = []
                 mock_cap.list_capacity_block_offerings.return_value = []
                 mock_cap.get_capacity_block_trend.return_value = 0.5
 
-                mock_ec2 = MagicMock()
-                mock_ec2.describe_spot_price_history.return_value = {"SpotPriceHistory": []}
-                mock_session.client.return_value = mock_ec2
+                mock_session.client.return_value = MagicMock()
 
                 data = advisor.gather_capacity_data(
                     instance_types=["g5.xlarge"],
@@ -3728,24 +3726,17 @@ class TestGatherCapacityDataEnhanced:
                 mock_cap.get_spot_placement_score.return_value = {"regional": 7}
                 from cli.capacity import SpotPriceInfo
 
-                mock_cap.get_spot_price_history.return_value = [
-                    SpotPriceInfo("g5.xlarge", "us-east-1a", 0.50, 0.48, 0.40, 0.55, 0.9)
-                ]
+                # One sweep of the window serves the summary and the trend.
+                mock_cap.get_spot_price_history_and_series.return_value = (
+                    [SpotPriceInfo("g5.xlarge", "us-east-1a", 0.50, 0.48, 0.40, 0.55, 0.9)],
+                    {"us-east-1a": [0.50, 0.48, 0.45]},
+                )
                 mock_cap.get_on_demand_price.return_value = 1.00
                 mock_cap.check_instance_available_in_region.return_value = True
                 mock_cap.list_capacity_reservations.return_value = []
                 mock_cap.list_capacity_block_offerings.return_value = []
                 mock_cap.get_capacity_block_trend.return_value = 0.0
-
-                # Mock raw spot price history for trend analysis
                 mock_ec2 = MagicMock()
-                mock_ec2.describe_spot_price_history.return_value = {
-                    "SpotPriceHistory": [
-                        {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.50"},
-                        {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.48"},
-                        {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.45"},
-                    ]
-                }
                 mock_session.client.return_value = mock_ec2
 
                 data = advisor.gather_capacity_data(
@@ -3797,7 +3788,7 @@ def _setup_advisor_mocks(advisor):
         recommendation_score=0,
     )
     cap.get_spot_placement_score.return_value = {}
-    cap.get_spot_price_history.return_value = []
+    cap.get_spot_price_history_and_series.return_value = ([], {})
     cap.get_on_demand_price.return_value = 1.0
     cap.check_instance_available_in_region.return_value = True
     cap.list_capacity_reservations.return_value = []
@@ -3874,15 +3865,20 @@ class TestAdvisorGatherExceptions:
         assert advisor.config.default_region in data["regions_analyzed"]
         assert len(data["instance_types_analyzed"]) > 1
 
-    def test_price_trend_exception(self):
+    def test_price_history_exception(self):
+        """The summary and the trend come from one sweep; its failure is a gap."""
         advisor = _make_advisor_with_mocks()
         _setup_advisor_mocks(advisor)
-        advisor._session = MagicMock()
-        mock_ec2 = MagicMock()
-        mock_ec2.describe_spot_price_history.side_effect = RuntimeError("fail")
-        advisor._session.client.return_value = mock_ec2
+        advisor._capacity_checker.get_spot_price_history_and_series.side_effect = RuntimeError(
+            "fail"
+        )
         data = advisor.gather_capacity_data(instance_types=["g4dn.xlarge"], regions=["us-east-1"])
-        assert "g4dn.xlarge" in data["spot_data"]
+        entry = data["spot_data"]["g4dn.xlarge"]["us-east-1"]
+        assert entry["prices"] == []
+        assert "price_trends" not in entry
+        assert ("spot price history", "RuntimeError") in {
+            (gap["source"], gap["error"]) for gap in data["data_gaps"]
+        }
 
 
 class TestAdvisorGetRecommendationErrors:

@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import boto3
@@ -235,8 +235,10 @@ class BedrockCapacityAdvisor:
                 except Exception as e:
                     record_gap(instance_type, region, "spot placement score", e)
                 try:
-                    spot_prices = self._capacity_checker.get_spot_price_history(
-                        instance_type, region, days=7
+                    spot_prices, zone_prices = (
+                        self._capacity_checker.get_spot_price_history_and_series(
+                            instance_type, region, days=7
+                        )
                     )
                     spot_entry["prices"] = [
                         {
@@ -247,36 +249,19 @@ class BedrockCapacityAdvisor:
                         }
                         for p in spot_prices
                     ]
-                except Exception as e:
-                    record_gap(instance_type, region, "spot price history", e)
-                data["spot_data"][instance_type][region] = spot_entry
-
-                # Spot price trend analysis per AZ (for AI interpretation)
-                try:
-                    ec2 = self._session.client("ec2", region_name=region)
-                    raw_resp = ec2.describe_spot_price_history(
-                        InstanceTypes=[instance_type],
-                        ProductDescriptions=["Linux/UNIX"],
-                        StartTime=datetime.now(UTC) - timedelta(days=7),
-                        EndTime=datetime.now(UTC),
-                    )
-                    az_raw: dict[str, list[float]] = {}
-                    for item in raw_resp.get("SpotPriceHistory", []):
-                        az = item["AvailabilityZone"]
-                        if az not in az_raw:
-                            az_raw[az] = []
-                        az_raw[az].append(float(item["SpotPrice"]))
+                    # Per-AZ trend (for AI interpretation) from the same
+                    # records, every page of them, rather than a second
+                    # single-page query of the same window.
                     az_trends = {
                         az: compute_price_trend(prices)
-                        for az, prices in az_raw.items()
+                        for az, prices in zone_prices.items()
                         if len(prices) >= 2
                     }
                     if az_trends:
-                        data["spot_data"][instance_type][region]["price_trends"] = az_trends
+                        spot_entry["price_trends"] = az_trends
                 except Exception as e:
-                    logger.debug(
-                        "Failed to get price trends for %s in %s: %s", instance_type, region, e
-                    )
+                    record_gap(instance_type, region, "spot price history", e)
+                data["spot_data"][instance_type][region] = spot_entry
 
                 od_entry: dict[str, Any] = {"price_per_hour": None, "available": None}
                 try:

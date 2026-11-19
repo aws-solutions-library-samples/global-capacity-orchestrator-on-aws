@@ -56,7 +56,9 @@ def test_advisor_records_each_isolated_market_lookup_failure() -> None:
     advisor = _advisor()
     capacity = advisor._capacity_checker
     capacity.get_spot_placement_score.return_value = {}
-    capacity.get_spot_price_history.side_effect = RuntimeError("spot history unavailable")
+    capacity.get_spot_price_history_and_series.side_effect = RuntimeError(
+        "spot history unavailable"
+    )
     capacity.get_on_demand_price.side_effect = RuntimeError("pricing unavailable")
     capacity.check_instance_available_in_region.side_effect = _client_error(
         "RequestLimitExceeded", "DescribeInstanceTypeOfferings"
@@ -66,9 +68,6 @@ def test_advisor_records_each_isolated_market_lookup_failure() -> None:
     capacity.get_capacity_block_trend.return_value = 0.0
     advisor._multi_region_checker.get_region_capacity.side_effect = RuntimeError("no cluster")
     advisor._multi_region_checker.recommend_region_for_job.return_value = {}
-    advisor._session.client.return_value.describe_spot_price_history.return_value = {
-        "SpotPriceHistory": []
-    }
 
     data = advisor.gather_capacity_data(["g5.xlarge"], ["us-east-1"])
 
