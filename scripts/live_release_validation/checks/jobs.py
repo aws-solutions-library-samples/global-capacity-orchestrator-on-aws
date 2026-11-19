@@ -6,6 +6,7 @@ import copy
 import hashlib
 import re
 import time
+from datetime import datetime
 from typing import Any, cast
 from urllib.parse import quote
 
@@ -336,6 +337,102 @@ def _owned_job_logs(ctx: RunContext, record: dict[str, Any], tail: int = 200) ->
     return str(data.get("logs") or "")
 
 
+def _api_instant(value: object) -> datetime | None:
+    """``value`` as an ISO 8601 instant with a UTC offset, else ``None``.
+
+    The API prints ``+00:00`` where kubectl prints ``Z``; both parse to the
+    same instant.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _job_pod_controller_uid(pod: dict[str, Any]) -> object:
+    labels = (pod.get("metadata") or {}).get("labels") or {}
+    return labels.get("batch.kubernetes.io/controller-uid", labels.get("controller-uid"))
+
+
+def _owned_job_pod_times(ctx: RunContext, record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Prove the pods route reports how the completed Job's containers ran.
+
+    ``GET /api/v1/jobs/{namespace}/{name}/pods`` reports each terminated
+    container's exit code, ``startedAt`` and ``finishedAt``. Every container
+    of every ``Succeeded`` pod the Job's UID owns must be ``terminated`` with
+    exit code 0 and two ISO 8601 instants in order. A pod that did not succeed
+    (one a disruption replaced) is not the completion and is left out.
+    """
+    actual_name, actual_namespace = _effective_job_identity(record)
+    response = ctx.aws_client.make_authenticated_request(
+        method="GET",
+        path=_job_api_path(record, "/pods"),
+        target_region=record.get("transport_region"),
+    )
+    if not response.ok:
+        raise RuntimeError(f"Job pod lookup failed: {response.status_code} {response.text}")
+    data = _response_json(response, "Job pod lookup")
+    _verify_response_region(data, str(record["region"]), "Job pod lookup")
+    if data.get("job_name") != actual_name or data.get("namespace") != actual_namespace:
+        raise RuntimeError("Job pod lookup returned a different Job identity")
+    owned = [
+        pod
+        for pod in data.get("pods") or []
+        if isinstance(pod, dict) and _job_pod_controller_uid(pod) == record.get("uid")
+    ]
+    succeeded = [pod for pod in owned if (pod.get("status") or {}).get("phase") == "Succeeded"]
+    if not succeeded:
+        phases = sorted(str((pod.get("status") or {}).get("phase")) for pod in owned)
+        raise RuntimeError(
+            f"Job {actual_namespace}/{actual_name} completed, but the pods route lists no "
+            f"Succeeded pod of it (phases: {phases})"
+        )
+    problems: list[str] = []
+    evidence: list[dict[str, Any]] = []
+    for pod in succeeded:
+        pod_name = str((pod.get("metadata") or {}).get("name"))
+        statuses = [
+            status
+            for status in (pod.get("status") or {}).get("containerStatuses") or []
+            if isinstance(status, dict)
+        ]
+        if not statuses:
+            problems.append(f"{pod_name} reports no container status")
+        containers: list[dict[str, Any]] = []
+        for status in statuses:
+            label = f"{pod_name}/{status.get('name')}"
+            exit_code = status.get("exitCode")
+            started = _api_instant(status.get("startedAt"))
+            finished = _api_instant(status.get("finishedAt"))
+            if status.get("state") != "terminated":
+                problems.append(f"{label} is {status.get('state')!r}, not terminated")
+            if type(exit_code) is not int or exit_code != 0:
+                problems.append(f"{label} exited {exit_code!r}, not 0")
+            for field, value in (("startedAt", started), ("finishedAt", finished)):
+                if value is None:
+                    problems.append(
+                        f"{label} {field} {status.get(field)!r} is not an ISO 8601 instant"
+                    )
+            if started is not None and finished is not None and finished < started:
+                problems.append(f"{label} finished before it started")
+            containers.append(
+                {
+                    key: status.get(key)
+                    for key in ("name", "state", "exitCode", "startedAt", "finishedAt")
+                }
+            )
+        evidence.append({"name": pod_name, "containers": containers})
+    if problems:
+        raise RuntimeError(
+            f"Job {actual_namespace}/{actual_name}: the pods route misreports its completed "
+            "containers: " + "; ".join(problems)
+        )
+    return evidence
+
+
 def _wait_for_owned_job_absence(ctx: RunContext, record: dict[str, Any]) -> None:
     consecutive_absent = 0
     deadline = time.monotonic() + 180
@@ -442,6 +539,7 @@ def _complete_job_lifecycle(
     logs = _owned_job_logs(ctx, record)
     if marker not in logs:
         raise RuntimeError(f"Job logs did not contain expected marker {marker!r}")
+    pods = _owned_job_pod_times(ctx, record)
     evidence = {
         "name": actual_name,
         "namespace": actual_namespace,
@@ -461,6 +559,8 @@ def _complete_job_lifecycle(
         # Where the pods ran, as the API reports it (node names, instance
         # types, capacity type); the hyperpod probe requires its own.
         "scheduling": copy.deepcopy(final.get("scheduling")),
+        # Each completed container's exit, as the pods route reports it.
+        "pods": pods,
     }
     with ctx.state_lock:
         record["validation_evidence"] = copy.deepcopy(evidence)
