@@ -90,7 +90,7 @@ TrainJobs pass the same security pipeline as every other submission, on both the
 
 - **Image trust:** `spec.trainer.image` plus every container reachable through `runtimePatches` must clear the trusted-registry allowlist.
 - **Resource caps:** the per-manifest CPU/memory/GPU budget counts `resourcesPerNode` multiplied by `numNodes` — a 16-node job is sixteen nodes of spend, not one.
-- **Security policy:** hostPath volumes, privileged containers, added capabilities, and the other `manifest_security_policy` toggles are enforced across every pod-spec view a TrainJob can produce, including every pod spec a `runtimePatches` entry carries, with or without containers. Kubeflow Trainer merges all patches into one pod template, so a hostPath volume in one patch and its mount in another are both checked.
+- **Security policy:** hostPath volumes, privileged containers, added capabilities, and the other `manifest_security_policy` toggles are enforced across every pod-spec view a TrainJob can produce, including every pod spec a `runtimePatches` entry carries, with or without containers. Kubeflow Trainer merges all patches into one pod template, so a hostPath volume in one patch and its mount in another are both checked, and so is a patch that sets only the pod-level `securityContext` (for example `runAsUser: 0` under `block_run_as_root`).
 - **Accelerator tolerations:** a GPU request must carry a matching toleration; for TrainJobs the toleration lives in a runtime patch (see below) while the request lives in `spec.trainer`, and the validators union both sides across views.
 
 If the trainer addon is disabled, submission fails with an actionable message pointing at the `helm.kubeflow_trainer` toggle instead of an inscrutable discovery error.

@@ -2163,6 +2163,26 @@ class TestTrainJobValidation:
         assert not ok
         assert "hostPath" in reason
 
+    def test_run_as_root_in_a_runtime_patch_without_containers_rejected(self, monkeypatch):
+        """A patch may set only the pod-level securityContext; the trainer
+        merges it into the one pod template, so every container would run as
+        root and BLOCK_RUN_AS_ROOT must refuse it."""
+        manifest = _trainjob(
+            runtime_patches=[
+                {
+                    "manager": "root",
+                    **_patch_with_pod_spec({"securityContext": {"runAsUser": 0}}),
+                }
+            ],
+        )
+        # The toggle stays opt-in: the default policy admits the patch.
+        assert _reload().validate_manifest(manifest) == (True, "")
+        monkeypatch.setenv("BLOCK_RUN_AS_ROOT", "true")
+        assert _reload().validate_manifest(manifest) == (
+            False,
+            "running as root (runAsUser: 0) is not permitted",
+        )
+
     def test_privileged_in_runtime_patch_rejected(self):
         qp = _reload()
         ok, reason = qp.validate_manifest(
