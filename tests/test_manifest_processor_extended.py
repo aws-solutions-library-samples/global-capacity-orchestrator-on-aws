@@ -2367,6 +2367,64 @@ class TestTrainJobValidation:
         assert not is_valid
         assert "hostPath" in error
 
+    def test_run_as_root_in_a_runtime_patch_without_containers_rejected(
+        self, mock_k8s_config, manifest_processor
+    ):
+        """A patch may set only the pod-level securityContext; the trainer
+        merges it into the one pod template, so every container would run as
+        root and block_run_as_root must refuse it."""
+        from gco.services.manifest_processor import ManifestProcessor
+
+        with patch("gco.services.manifest_processor.client"):
+            processor = ManifestProcessor(
+                cluster_id="test-cluster",
+                region="us-east-1",
+                config_dict={
+                    "allowed_namespaces": ["gco-jobs"],
+                    "validation_enabled": True,
+                    "manifest_security_policy": {"block_run_as_root": True},
+                },
+            )
+        manifest = _trainjob_manifest(
+            runtime_patches=[
+                {
+                    "manager": "root",
+                    **_runtime_patch_with_pod_spec({"securityContext": {"runAsUser": 0}}),
+                }
+            ],
+        )
+        assert processor.validate_manifest(manifest) == (
+            False,
+            "Security context validation failed: running as root (runAsUser: 0) is not permitted",
+        )
+        # The toggle stays opt-in: the default policy admits the same patch.
+        assert manifest_processor.validate_manifest(manifest) == (True, None)
+
+    def test_container_security_context_is_not_a_pod_spec_view(self, manifest_processor):
+        """A container's own securityContext marks the container, not a pod
+        spec: the patch pod spec is the only view, and the injected pod-level
+        default never lands in a container."""
+        from gco.job_admission import extract_trainjob_pod_specs
+
+        pod_spec = {
+            "containers": [
+                {
+                    "name": "worker",
+                    "image": "python:3.14-slim",
+                    "securityContext": {"runAsUser": 1000},
+                }
+            ],
+            "initContainers": [
+                {"name": "setup", "image": "python:3.14-slim", "securityContext": {}}
+            ],
+        }
+        manifest = _trainjob_manifest(runtime_patches=[_runtime_patch_with_pod_spec(pod_spec)])
+        assert extract_trainjob_pod_specs(manifest).embedded == [pod_spec]
+        manifest_processor._inject_security_defaults(manifest)
+        assert pod_spec["automountServiceAccountToken"] is False
+        assert "automountServiceAccountToken" not in pod_spec["containers"][0]
+        assert "automountServiceAccountToken" not in pod_spec["initContainers"][0]
+
     def test_privileged_container_in_runtime_patch_rejected(self, manifest_processor):
         manifest = _trainjob_manifest(
             runtime_patches=[

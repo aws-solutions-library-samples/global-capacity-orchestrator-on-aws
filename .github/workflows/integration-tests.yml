@@ -34,7 +34,7 @@
 #   - integration:kind:cost-pipeline              — kind + Calico + pinned kube-prometheus-stack/OpenCost + real cost-monitor report to Floci S3
 #   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow/trust-manager + TrainJob e2e + SAR sweep + mlflow over HTTPS
 #   - integration:kind:platform-addons            — kind + pinned Argo CD/Crossplane/Crossview + repo-server HPA + PR-commit sync + fences + captures
-#   - integration:lambda:imports                  — import each Lambda handler
+#   - integration:lambda:imports                  — import each Lambda handler with only the runtime's packages + what it deploys
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module             — pytest tests/test_integration.py
 #
@@ -319,13 +319,20 @@ jobs:
 
   integration-lambda-imports:
     name: "integration:lambda:imports"
+    # x86_64, the architecture every GCO Python Lambda runs on: the build
+    # action stages kubectl-applier-simple's wheels for manylinux x86_64.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # Several Lambda modules (notably lambda/api-gateway-proxy/proxy_utils.py)
-    # instantiate boto3 clients at module import time, so boto3 needs a
-    # region even though no AWS calls are made. Matches the top-level
-    # AWS_DEFAULT_REGION=us-east-1 variable from the retired GitLab pipeline.
+    # Each handler is imported in an environment of only what it deploys
+    # with: the Lambda runtime's packages, pinned in
+    # .github/config/lambda-python-runtime.txt, plus the files (and, for the
+    # kubectl build and the two images, the requirements.txt) its deployment
+    # ships. The project install below runs the build action and the script;
+    # no handler imports from it. Several Lambda modules (notably
+    # lambda/api-gateway-proxy/proxy_utils.py) instantiate boto3 clients at
+    # module import time, so boto3 needs a region even though no AWS calls
+    # are made.
     env:
       AWS_DEFAULT_REGION: us-east-1
       AWS_REGION: us-east-1
@@ -334,6 +341,12 @@ jobs:
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: ".nvmrc"
+          # Nothing here installs from the root lockfile; the build action's
+          # npm ci of the streaming Lambda fetches its own three packages.
+          package-manager-cache: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
@@ -342,8 +355,23 @@ jobs:
       - name: Install project
         run: |
           pip install -c requirements-lock.txt -e .
+      - uses: ./.github/actions/build-lambda-package
+      - name: Install uv (builds the per-Lambda import environments)
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
+      - name: Cache the import environments' wheels
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/uv-cache
+          key: >-
+            lambda-imports-uv-${{ runner.os }}-${{ hashFiles('.python-version',
+            '.github/config/lambda-python-runtime.txt', 'lambda/*/requirements.txt') }}
+          restore-keys: |
+            lambda-imports-uv-${{ runner.os }}-
       - name: Import each Lambda handler
-        run: python3 .github/scripts/verify_lambda_imports.py
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+        run: python3 .github/scripts/verify_lambda_imports.py --require-all
 
   integration-pytest-cross-module:
     name: "integration:pytest:cross-module"
@@ -5134,13 +5162,15 @@ jobs:
         # the kro, Argo CD and Crossplane tenant roles must not do in
         # gco-inference: write the model endpoints' keypair, create an object
         # carrying the monitor's label, change what a monitor ConfigMap
-        # carries or unlabel it, recreate a deleted <name>-tls-proxy
-        # ConfigMap without the label, change a monitor Deployment's pod
-        # template, create the shared mooncake-master, or forge the monitor's
-        # provenance. The same identity may still annotate, scale and delete
-        # those objects, and the inference monitor's ServiceAccount may do all
-        # of it (it alone does not write the keypair). The probe Deployment
-        # keeps zero replicas, so no image is pulled.
+        # carries or unlabel it, set, change or remove the gco.io/endpoint
+        # label or the project label of an object the monitor manages,
+        # recreate a deleted <name>-tls-proxy ConfigMap without the label,
+        # change a monitor Deployment's pod template, create the shared
+        # mooncake-master, or forge the monitor's provenance. The same
+        # identity may still label, annotate, scale and delete those objects,
+        # and the inference monitor's ServiceAccount may do all of it (it
+        # alone does not write the keypair). The probe Deployment keeps zero
+        # replicas, so no image is pulled.
         # tests/test_tenant_write_fence.py evaluates the same rules offline.
         run: |
           set -euo pipefail
@@ -5151,6 +5181,8 @@ jobs:
           policy="ValidatingAdmissionPolicy 'gco-tenant-write-fence'"
           only_monitor="only the inference monitor (system:serviceaccount:gco-system:gco-inference-monitor-sa) may"
           managed="is managed by the inference monitor: only"
+          endpoint_label="only the inference monitor may set, change or remove the gco.io/endpoint label of an object it manages"
+          project_label="only the inference monitor may set, change or remove the project label of an object it manages"
           # config_map <file> <name> <labels JSON> <data JSON>
           config_map() {
             printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"%s","namespace":"gco-inference","labels":%s},"data":%s}\n' \
@@ -5201,13 +5233,37 @@ jobs:
           # A monitor pod program: its data is the monitor's, and once deleted
           # it cannot come back without the label.
           config_map "${work}/program.json" gco-ci-fence-tls-proxy \
-            '{"app":"gco-ci-fence","project":"gco","gco.io/type":"inference"}' '{"tls_proxy.py":"print(1)"}'
+            '{"app":"gco-ci-fence","project":"gco","gco.io/type":"inference","gco.io/endpoint":"gco-ci-fence"}' \
+            '{"tls_proxy.py":"print(1)"}'
           kubectl "${monitor[@]}" create -f "${work}/program.json"
           refused "a tenant rewriting a monitor ConfigMap" "${managed}" \
             kubectl "${tenant[@]}" -n gco-inference patch configmap gco-ci-fence-tls-proxy --type=merge \
               -p '{"data":{"tls_proxy.py":"print(2)"}}'
           refused "a tenant unlabelling a monitor ConfigMap" "${only_monitor}" \
             kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/type-
+
+          # The label naming the endpoint that owns a monitor object, and the
+          # project label its provenance check reads: the monitor's to set,
+          # change or remove.
+          refused "a tenant relabelling a monitor ConfigMap for another endpoint" "${endpoint_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label --overwrite configmap gco-ci-fence-tls-proxy \
+              gco.io/endpoint=gco-ci-other
+          refused "a tenant removing a monitor ConfigMap's endpoint label" "${endpoint_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/endpoint-
+          refused "a tenant changing a monitor ConfigMap's project label" "${project_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label --overwrite configmap gco-ci-fence-tls-proxy \
+              project=gco-ci-other
+          refused "a tenant removing a monitor ConfigMap's project label" "${project_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy project-
+          kubectl "${monitor[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/endpoint- project-
+          refused "a tenant setting a monitor ConfigMap's endpoint label" "${endpoint_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy \
+              gco.io/endpoint=gco-ci-fence
+          refused "a tenant setting a monitor ConfigMap's project label" "${project_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy project=gco
+          kubectl "${monitor[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy \
+            gco.io/endpoint=gco-ci-fence project=gco
+          kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco-ci/note=admitted
           kubectl "${tenant[@]}" -n gco-inference annotate configmap gco-ci-fence-tls-proxy gco-ci/note=admitted
           kubectl "${tenant[@]}" -n gco-inference delete configmap gco-ci-fence-tls-proxy
           config_map "${work}/unlabelled.json" gco-ci-fence-tls-proxy '{"app":"gco-ci-fence"}' '{"tls_proxy.py":"print(3)"}'
@@ -5811,8 +5867,9 @@ jobs:
   #     the Job instead of deleting it; the shipped example Application syncs
   #     and its resources finalizer cascades when the helm installer's
   #     pre-uninstall cleanup deletes the argoproj.io objects in the argocd
-  #     namespace (it does so only while GCO's own Argo CD release exists);
-  #     the applier's disable-path inventories remove the rest.
+  #     namespace (it does so only while GCO's own Argo CD release exists),
+  #     and an AppProject in another namespace comes through untouched; the
+  #     applier's disable-path inventories remove the rest.
   #   * Crossplane: the go-templating function turns Healthy, the example XRD
   #     and Composition serve BatchJob, an XR in gco-jobs composes a Job that
   #     completes and marks the XR Ready, an XR in gco-system cannot compose
@@ -6287,9 +6344,23 @@ jobs:
         # deletes the Job before the Application goes. The projects get a
         # later pass (the controller finalizes nothing whose project is
         # gone), so the cascade must finish inside the wait: needing the
-        # finalizer-strip fallback fails the step.
+        # finalizer-strip fallback fails the step. The cleanup stays in that
+        # namespace: argoproj.io is also the group of Argo Workflows, Rollouts
+        # and Events, and of a cluster's own Argo CD, so an AppProject in
+        # another namespace must survive it untouched.
         run: |
           set -euo pipefail
+          kubectl create namespace gco-ci-foreign-argo
+          kubectl apply -f - <<'EOF'
+          apiVersion: argoproj.io/v1alpha1
+          kind: AppProject
+          metadata:
+            name: gco-ci-foreign
+            namespace: gco-ci-foreign-argo
+            finalizers: ["gco-ci.example.com/foreign"]
+          spec:
+            description: not GCO's; the installer cleanup must not touch it
+          EOF
           python3 - <<'PY'
           import logging
           import os
@@ -6317,18 +6388,31 @@ jobs:
           print(message)
           if not ok:
               raise SystemExit(message)
+          if not message.endswith(" in namespace argocd"):
+              raise SystemExit(f"the cleanup was not limited to the release namespace: {message}")
           if recorder.stalls:
               raise SystemExit(f"the cascade fell back to stripping finalizers: {recorder.stalls}")
           PY
-          if kubectl get applications.argoproj.io,appprojects.argoproj.io -A -o name | grep -q .; then
-            echo "::error::argoproj.io objects survived the installer cleanup"
+          if kubectl -n argocd get applications.argoproj.io,appprojects.argoproj.io -o name | grep -q .; then
+            echo "::error::argoproj.io objects in argocd survived the installer cleanup"
             exit 1
           fi
           if kubectl -n gco-jobs get job gco-gitops-hello >/dev/null 2>&1; then
             echo "::error::the resources finalizer did not delete the synced Job"
             exit 1
           fi
-          echo "the example Application's finalizer deleted the Job during the installer cleanup"
+          # Neither deleted nor stripped of its finalizer: the cleanup never reached it.
+          foreign="$(kubectl -n gco-ci-foreign-argo get appproject gco-ci-foreign \
+            -o 'jsonpath={.metadata.deletionTimestamp}|{.metadata.finalizers[*]}' 2>&1 || true)"
+          if [ "${foreign}" != '|gco-ci.example.com/foreign' ]; then
+            echo "::error::the installer cleanup reached an AppProject outside argocd (${foreign})"
+            exit 1
+          fi
+          kubectl -n gco-ci-foreign-argo patch appproject gco-ci-foreign --type=merge \
+            -p '{"metadata":{"finalizers":null}}'
+          kubectl delete namespace gco-ci-foreign-argo --wait=true
+          echo "the example Application's finalizer deleted the Job during the installer cleanup;"
+          echo "the AppProject outside argocd was left alone"
       - name: Prune the Argo CD post-Helm objects and uninstall the chart
         run: |
           set -euo pipefail

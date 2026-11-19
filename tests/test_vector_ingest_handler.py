@@ -396,3 +396,24 @@ class TestLazyClients:
 
         assert first is second
         assert built == [service]
+
+
+def test_the_documented_ingest_limits_are_the_handlers(handler):
+    """docs/CUSTOMIZATION.md and docs/CLI.md state these numbers to users."""
+    from pathlib import Path
+
+    docs = Path(__file__).resolve().parents[1] / "docs"
+    customization = (docs / "CUSTOMIZATION.md").read_text(encoding="utf-8")
+    cli = (docs / "CLI.md").read_text(encoding="utf-8")
+    assert handler.MAX_OBJECT_BYTES == 4 * 1024 * 1024
+    assert handler.MAX_CHUNKS_PER_OBJECT == 500
+    assert handler.MAX_CHUNK_CHARS == 2000
+    assert handler.TIME_RESERVE_MS == 30_000
+    for row in (
+        "| Object size (`MAX_OBJECT_BYTES`) | 4 MiB (4,194,304 bytes) |",
+        "| Chunks (`MAX_CHUNKS_PER_OBJECT`) | 500 |",
+        "| Chunk size (`MAX_CHUNK_CHARS`) | 2,000 characters |",
+        "| Time left before a chunk (`TIME_RESERVE_MS`) | 30 s of the 5-minute invocation |",
+    ):
+        assert row in customization, row
+    assert "refuses an object over 4 MiB, or one that makes more\nthan 500 chunks" in cli

@@ -601,6 +601,26 @@ class TestStudioEfs:
         template = _synth_analytics()
         template.resource_count_is("AWS::EFS::FileSystem", 1)
 
+    @pytest.mark.parametrize("removal", ["destroy", "retain"])
+    def test_efs_carries_the_tags_the_doctor_orphan_scan_matches(self, removal: str) -> None:
+        """A retained file system is found by its tags after its stack is gone.
+
+        ``gco analytics doctor`` matches ``gco:analytics:managed`` and
+        ``gco:project`` (``_managed_by_project``); CDK's ``Name`` tag stays.
+        """
+        from cli.analytics_user_mgmt import _managed_by_project
+
+        template = _synth_analytics(config=_AnalyticsMockConfig(efs_removal=removal))
+        fs = next(iter(template.find_resources("AWS::EFS::FileSystem").values()))
+        tags = {tag["Key"]: tag["Value"] for tag in fs["Properties"]["FileSystemTags"]}
+        assert tags == {
+            "gco:analytics:managed": "true",
+            "gco:project": "gco-test",
+            "Name": "test-analytics-stack/StudioEfs",
+        }
+        assert _managed_by_project(tags, "gco-test")
+        assert not _managed_by_project(tags, "other-project")
+
     def test_efs_is_kms_encrypted_with_analytics_key(self) -> None:
         """``Encrypted=true`` and ``KmsKeyId`` references the analytics
         KMS key via ``Fn::GetAtt``."""
@@ -1340,6 +1360,17 @@ class TestCognitoUserPool:
     def test_exactly_one_user_pool_is_created(self) -> None:
         template = _synth_analytics()
         template.resource_count_is("AWS::Cognito::UserPool", 1)
+
+    @pytest.mark.parametrize("removal", ["destroy", "retain"])
+    def test_user_pool_carries_the_tags_the_doctor_orphan_scan_matches(self, removal: str) -> None:
+        """A retained pool is found by its tags, even after CloudFormation forgets the stack."""
+        from cli.analytics_user_mgmt import _managed_by_project
+
+        template = _synth_analytics(config=_AnalyticsMockConfig(cognito_removal=removal))
+        pool = next(iter(template.find_resources("AWS::Cognito::UserPool").values()))
+        tags = pool["Properties"]["UserPoolTags"]
+        assert tags == {"gco:analytics:managed": "true", "gco:project": "gco-test"}
+        assert _managed_by_project(tags, "gco-test")
 
     def test_standard_threat_protection_mode_is_no_enforcement(self) -> None:
         """``UserPoolAddOns.AdvancedSecurityMode=OFF``.

@@ -1105,10 +1105,13 @@ remediation commands inline, with the real access point, mount target
 and file system ids, so you don't need to hunt them down — but they are
 reproduced above so you can script the cleanup yourself if you prefer.
 It finds them from the deleted `gco-analytics` stack's resource list
-(CloudFormation keeps it for 90 days after the delete) and, for the file
-system, from its `Name` tag (`gco-analytics/StudioEfs` for the default
-project name); a user pool retained more than 90 days ago is only found
-once the stack tags it `gco:analytics:managed=true` and `gco:project`.
+(CloudFormation keeps it for 90 days after the delete), from the
+`gco:analytics:managed=true` and `gco:project=<project>` tags the stack
+gives the file system and the user pool, and, for the file system, from
+its `Name` tag (`gco-analytics/StudioEfs` for the default project name).
+The tags are what find a user pool retained more than 90 days ago; a
+deployment made before the stack added them gets them, in place, on its
+next `gco stacks deploy`.
 
 Cognito pools support the same retain opt-in via
 `analytics_environment.cognito.removal_policy = "retain"` with

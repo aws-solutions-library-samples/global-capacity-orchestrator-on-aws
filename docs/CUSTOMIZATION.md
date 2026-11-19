@@ -2153,6 +2153,22 @@ searches answer a "still building" hint until it is ACTIVE.
 | `replica_regions` | `[]` | Regions to replicate into. Empty means "follow `deployment_regions.regional`", minus the global region (the primary) |
 | `corpus_prefix` | `vector-corpus/` | S3 key prefix on the cluster-shared bucket watched by the ingest Lambda |
 
+Ingest limits, per object (constants in `lambda/vector-ingest/handler.py`;
+none of them is configurable):
+
+| Limit | Value | What happens past it |
+|-------|-------|----------------------|
+| Object size (`MAX_OBJECT_BYTES`) | 4 MiB (4,194,304 bytes) | Refused as `too_large` before its body is read |
+| Chunks (`MAX_CHUNKS_PER_OBJECT`) | 500 | Refused as `too_large` before any Bedrock call |
+| Chunk size (`MAX_CHUNK_CHARS`) | 2,000 characters | `.txt`/`.md` paragraphs are packed up to it and longer ones split at it; a `.jsonl` record longer than it fails the object |
+| Time left before a chunk (`TIME_RESERVE_MS`) | 30 s of the 5-minute invocation | The object stops as `out_of_time`; its retry starts again from chunk 0 |
+
+500 chunks of up to 2,000 characters is about 1 MB of text, so the chunk
+limit is the one a long document meets first: split it into several
+objects. A refused object writes nothing; the Lambda logs the reason in its
+one-line JSON summary, and after Lambda's own retries the S3 event lands in
+the ingest dead-letter queue (14 days) for replay.
+
 Cost model: the table is on-demand, so a mostly idle corpus costs storage
 plus per-request reads — but **every write is replicated**, so ingesting a
 corpus pays one write per chunk per region (plus one Bedrock embedding call

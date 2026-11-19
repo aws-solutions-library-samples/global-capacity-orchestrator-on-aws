@@ -319,15 +319,15 @@ python3 scripts/dump_nag_findings.py
 
 ### Fresh Install Verification
 
-The `test:fresh-install` CI job does a clean `pip install -e .` and verifies all critical imports work — including `cdk-nag`, `aws_cdk.aws_eks_v2`, the CLI entry point, and the CDK stack classes. This catches missing or mismatched dependencies in `pyproject.toml`.
+The `unit:fresh-install` CI job does a cold `pip install -e ".[cdk]"` (no pip cache, no lock) and verifies all critical imports work — including `cdk-nag`, `aws_cdk.aws_eks_v2`, the CLI entry point, and the CDK stack classes. This catches missing or mismatched dependencies in `pyproject.toml`.
 
 ### Lambda Build Verification
 
 The Lambda build directory (`lambda/kubectl-applier-simple-build/`) is auto-created by `StackManager` during deploy. In CI, this is validated at multiple levels:
 
-- `integration:lambda` — verifies all Lambda handler modules import correctly
-- `test:cdk-config-matrix` — builds the Lambda package in `before_script` and runs `cdk synth` against it (synth fails if the build dir is missing or incomplete)
-- `test_stacks.py::TestStackManagerSyncLambdaSources` — unit tests that `_sync_lambda_sources` auto-creates the build directory when missing
+- `integration:lambda:imports` — imports every deployed Python Lambda handler in the environment it deploys with, the build directory included, so a module or package the build does not stage fails here (`.github/scripts/verify_lambda_imports.py`)
+- `unit:cdk:config-matrix` — stages the Lambda packages with the build action (`.github/actions/build-lambda-package`) and runs `cdk synth` against them (synth fails if the build dir is missing or incomplete)
+- `test_stacks.py::TestBuildLambdaPackages` — unit tests that `StackManager._build_kubectl_lambda` builds the package, skips a missing source or `requirements.txt`, and replaces a stale build directory
 
 ### Lambda Handler Import Helper
 
@@ -409,7 +409,7 @@ Every Lambda handler test in this repo now loads via this helper. The legacy `sy
 
 | File | Description |
 |------|-------------|
-| `test_ci_runtime_verifiers.py` | Behavioral contracts for `.github/scripts/verify_lambda_imports.py` and `verify_container_tool_versions.py`: discovers and imports all 17 tracked Python Lambda handlers in bounded isolated subprocesses, parses every reviewed Dockerfile tool pin, accepts exact runtime matches for the development and helm-installer images, and rejects valid-but-different versions. |
+| `test_ci_runtime_verifiers.py` | Behavioral contracts for `.github/scripts/verify_lambda_imports.py` and `verify_container_tool_versions.py`: the Lambda verifier's 19 targets match every Python handler `gco/stacks` deploys (read from the stack source, no synth) and their packaging; the runtime pin file names the `LAMBDA_PYTHON_RUNTIME` runtime and only the packages it ships; real isolated imports from a stdlib-only interpreter prove a zipped Lambda cannot reach the project's packages or `PYTHONPATH`, a build sees what it staged and an image only its copied files and requirements; Dockerfile forms the model cannot represent are refused; the container verifier parses every reviewed Dockerfile tool pin, accepts exact runtime matches for the development and helm-installer images, and rejects valid-but-different versions. |
 | `test_structured_logging_sanitizer.py` | `gco/services/structured_logging.py::sanitize_log_value` — the single log-injection (CWE-117) barrier for untrusted logged values. Pins the neutralization contract: CR/LF become literal `\r`/`\n` sequences, Unicode line separators (NEL, U+2028, U+2029) and all other control characters (ANSI escapes, NUL, DEL, TAB) become `?`, printable text including non-ASCII passes through unchanged, non-strings are coerced, and no output ever contains a raw control character. |
 | `test_workflow_security_contract.py` | Structural security invariants for the GitHub Actions surface, written after a red-team pass found it clean so the next workflow edit cannot quietly reintroduce a known Actions vulnerability class. Parses every workflow (and composite action) rather than grepping: no attacker-controlled expression (`github.event.*`, `github.head_ref`, `inputs.*`) may be interpolated into a `run:` script — the script-injection sink — while whole-line comments are exempt so a workflow can still *document* the footgun it avoids; no `pull_request_target`, which hands fork code a writable token and secrets; every workflow declares explicit `permissions` (or every one of its jobs does) and never `write-all`, so a change to the org-wide default can't silently widen a job; `persist-credentials: true` appears only in the two release stages that actually push a ref; every `runs-on` resolves — through `matrix.include` when expression-driven — to a known GitHub-hosted label, since a self-hosted runner would execute untrusted PR code on a persistent host; and `pages.yml`'s privileged `workflow_run` trigger keeps all four of its guards (success, `push` event, same repository, default branch). Four further invariants enforce supply-chain pinning across both workflows and composite actions. A tag is a mutable pointer its publisher can move onto secret-reading code with no diff here, so every third-party `uses:` must name a commit SHA; local `./.github/actions/*` refs are exempt because they resolve inside the commit under review. The pinning rules themselves live in `.github/scripts/verify_action_pins.py` so this PR-time contract and the `lint:actions:pinning` CI job cannot disagree about what "pinned" means: every third-party `uses:` names a 40-character commit SHA followed by an exact `# vX.Y.Z` comment, and every reference to one action agrees on one commit and one version (keyed per repository, so `github/codeql-action/init` and `…/analyze` must share a commit). A separate check compares the line parser's ref count against the structural walk, because the comment can only be read from raw lines and a ref its regex missed would skip every other check. The last closes the loop on maintenance: `.github/dependabot.yml` must keep both its `/` entry (which for this ecosystem scans only `.github/workflows` plus a repository-root `action.yml`) and a `directories` glob reaching every composite action that names a third-party action, because a SHA nothing bumps is a pin that rots. Each invariant was mutation-tested: injecting a PR-title interpolation, a self-hosted label, a stray `persist-credentials`, a `pull_request_target` trigger, a reverted tag ref, a stripped version comment, a bare `# v7` and a two-part `# v7.0` comment, two commits for one action, split `codeql-action` subpaths, a flow-style `{uses: ...}` step, a deleted composite-action Dependabot block, a narrowed glob, and a moved `/` entry each fails the matching test. |
 | `test_workflow_draft_pr_gating_contract.py` | Keeps draft pull requests off the shared GitHub Actions runner pool, where every push to a draft previously started all nine PR workflows — roughly 66 jobs for a branch its author had marked not ready. Three invariants have to hold together or the gate is useless or harmful: every job in a PR-triggered workflow carries `pull_request.draft == false` (GitHub has no workflow-level `if:`, so one ungated job — especially a matrix — silently reopens the hole); `ready_for_review` is in every PR workflow's trigger `types`, without which a PR leaving draft never re-fires and could reach a mergeable state having never run CI; and because declaring `types` *replaces* the default `[opened, synchronize, reopened]`, the gated workflows must restate all three, the dangerous omission being `synchronize` (lose it and pushes to an open PR stop running CI while opened/reopened keep working well enough to pass review). The pull_request workflow inventory is pinned so a new workflow must opt in or out deliberately, `pr-type-label.yml` is asserted to be the one *un*gated workflow so drifting into the exemption also fails, and every PR workflow is required to carry the per-ref concurrency group with `cancel-in-progress: true` so a superseded run stops holding a slot. |
@@ -1161,11 +1161,11 @@ When adding new features, ensure tests cover:
 
 ## Type Checking
 
-CI runs `mypy --strict` across three jobs:
+CI runs mypy with the strict `[tool.mypy]` settings in three `lint.yml` jobs:
 
-- `lint:typecheck` — `gco/` (except stacks), `cli/`, `gco_mcp/`, `scripts/`, `app.py`
-- `lint:typecheck-stacks` — `gco/stacks/` with `aws-cdk-lib` installed
-- `lint:typecheck-lambda` — each `lambda/*/` directory individually
+- `lint:mypy:strict` — `gco/` (except `gco/stacks/`), `cli/`, `gco_mcp/`, `scripts/`, `.github/scripts/`, `dockerfiles/` and `docs/client-examples/`
+- `lint:mypy:stacks` — `gco/stacks/`, `app.py` and `diagrams/` with `aws-cdk-lib` installed, then `.github/oidc_provider/` in a run of its own (its `app.py` and the root one would be two modules named `app`)
+- `lint:mypy:lambda` — each Python Lambda directory under `lambda/` on its own (the job lists them; the generated `*-build` directories are not checked)
 
 Strict flags enabled in `pyproject.toml` include `disallow_untyped_defs`,
 `disallow_untyped_calls`, `disallow_any_generics`, `no_implicit_optional`,
@@ -1174,15 +1174,16 @@ Strict flags enabled in `pyproject.toml` include `disallow_untyped_defs`,
 
 Prefer concrete types over `Any`. Runtime types from the installed packages
 (boto3, Kubernetes, fastapi, click) are preferred over `Any` fallbacks —
-the CI typecheck jobs install the full runtime (`pip install -e ".[typecheck,mcp]"`)
+`lint:mypy:strict` installs the full runtime (`pip install -c requirements-lock.txt -e ".[typecheck,mcp]"`)
 so stubs resolve properly.
 
 Run locally with the same commands:
 
 ```bash
-mypy gco/ cli/ gco_mcp/ scripts/ app.py --exclude 'gco/stacks/'
-mypy gco/stacks/
-for d in lambda/*/; do ls "$d"*.py >/dev/null 2>&1 && mypy "$d"; done
+mypy gco/ cli/ gco_mcp/ scripts/ .github/scripts/ dockerfiles/ docs/client-examples/ --exclude 'gco/stacks/'
+mypy gco/stacks/ app.py diagrams/
+mypy .github/oidc_provider/
+for d in lambda/*/; do case "$d" in *-build/) continue ;; esac; ls "$d"*.py >/dev/null 2>&1 && mypy "$d"; done
 ```
 
 ## Import Conventions After the Manifest API Refactor

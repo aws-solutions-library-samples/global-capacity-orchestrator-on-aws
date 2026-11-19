@@ -165,9 +165,9 @@ class TrainJobPodSpecs(NamedTuple):
             defaults then apply — our shipped runtimes pin trusted images).
         embedded: Every pod-spec-shaped dict found anywhere under ``spec``
             (today that means inside ``runtimePatches``; see
-            :data:`_POD_SPEC_LIST_FIELDS`); these are live references into
-            the manifest, so security-default injection through them mutates
-            the manifest.
+            :func:`_collect_embedded_pod_specs`); these are live references
+            into the manifest, so security-default injection through them
+            mutates the manifest.
         num_nodes: ``spec.trainer.numNodes`` (minimum 1) — the replica
             multiplier for the trainer spec's resource totals.
     """
@@ -177,33 +177,47 @@ class TrainJobPodSpecs(NamedTuple):
     num_nodes: int
 
 
+#: The container lists of a pod spec. Their items are containers, whose own
+#: ``securityContext`` is checked as a container's, never as a pod's.
+_CONTAINER_LIST_FIELDS = ("containers", "initContainers", "ephemeralContainers")
+
 #: List fields that mark a dict as a pod spec: the container lists, plus the
 #: pod-level ``volumes`` and ``tolerations`` the checks read. A runtime patch
 #: may set pod-level fields without any container (the documented GPU variant
 #: sets only a toleration and a node selector), and Kubeflow Trainer merges
 #: every patch into the same pod template, so a hostPath volume in one patch
 #: and its mount in another must both be seen.
-_POD_SPEC_LIST_FIELDS = (
-    "containers",
-    "initContainers",
-    "ephemeralContainers",
-    "volumes",
-    "tolerations",
-)
+_POD_SPEC_LIST_FIELDS = (*_CONTAINER_LIST_FIELDS, "volumes", "tolerations")
 
 
-def _collect_embedded_pod_specs(node: Any, found: list[dict[str, Any]]) -> None:
-    """Recursively collect every dict that carries a pod-spec list field.
+def _collect_embedded_pod_specs(
+    node: Any, found: list[dict[str, Any]], *, is_container: bool = False
+) -> None:
+    """Recursively collect every pod-spec-shaped dict.
+
+    A dict is pod-spec-shaped when it carries one of
+    :data:`_POD_SPEC_LIST_FIELDS` or, unless it is a container
+    (*is_container*: an item of a container list), a ``securityContext``
+    mapping. A runtime patch may set the pod-level security context alone,
+    and ``runAsUser: 0`` there runs every container of the merged pod as
+    root; in the TrainJob schema the only other ``securityContext`` fields
+    are the containers' own.
 
     Walking the whole structure — rather than enumerating known patch paths —
     means a future TrainJob field that can smuggle a container or volume is
     validated by default instead of silently skipped.
     """
     if isinstance(node, dict):
-        if any(isinstance(node.get(key), list) for key in _POD_SPEC_LIST_FIELDS):
+        if any(isinstance(node.get(key), list) for key in _POD_SPEC_LIST_FIELDS) or (
+            not is_container and isinstance(node.get("securityContext"), dict)
+        ):
             found.append(node)
-        for value in node.values():
-            _collect_embedded_pod_specs(value, found)
+        for key, value in node.items():
+            if key in _CONTAINER_LIST_FIELDS and isinstance(value, list):
+                for container in value:
+                    _collect_embedded_pod_specs(container, found, is_container=True)
+            else:
+                _collect_embedded_pod_specs(value, found)
     elif isinstance(node, list):
         for item in node:
             _collect_embedded_pod_specs(item, found)

@@ -1264,7 +1264,14 @@ def test_the_kind_probes_expect_the_messages_evaluated_here() -> None:
         for step in steps
         if step.get("name") == "Prove the tenant write fence in the real API server"
     )
-    for fragment in (ONLY_THE_MONITOR, MANAGED_CONTENT, POD_PROGRAM, PROVENANCE_OWNED):
+    for fragment in (
+        ONLY_THE_MONITOR,
+        MANAGED_CONTENT,
+        POD_PROGRAM,
+        ENDPOINT_LABEL_OWNED,
+        PROJECT_LABEL_OWNED,
+        PROVENANCE_OWNED,
+    ):
         assert fragment in run, fragment
     assert "only the cert-manager controller" in KEYPAIR_OWNED
     assert f"'{POLICY}'" in run

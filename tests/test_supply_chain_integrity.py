@@ -686,9 +686,11 @@ def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> 
     values and loads into the job's own cluster, so ``helm install --wait``
     never waits on a kubelet pull (ECR Public's anonymous throttle kept failing
     Argo CD's Redis that way). The chart values and post-Helm manifests come
-    from the helpers the regional stack calls, Argo CD syncs this commit, and
-    both dashboards are captured by the CLI's own screenshot code and uploaded
-    even when a later step fails.
+    from the helpers the regional stack calls, Argo CD syncs this commit, the
+    installer cleanup cascades the example Application inside the argocd
+    namespace and leaves an AppProject elsewhere alone, and both dashboards are
+    captured by the CLI's own screenshot code and uploaded even when a later
+    step fails.
     """
     workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
     job = workflow["jobs"]["integration-kind-platform-addons"]
@@ -747,6 +749,21 @@ def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> 
         for fragment in fragments:
             assert fragment in run, (step_name, fragment)
         assert "build_port_forward_command" in run
+    # The installer cleanup is limited to GCO's release namespace (finding L1):
+    # the survivor check covers argocd, and an AppProject in another namespace,
+    # created first, keeps its finalizer and gets no deletion timestamp.
+    cascade = by_name["Cascade the example Application through the installer cleanup"]["run"]
+    foreign = cascade.index("namespace: gco-ci-foreign-argo")
+    cleanup = cascade.index("handler._delete_chart_custom_resources(")
+    untouched = cascade.index("'|gco-ci.example.com/foreign'")
+    assert foreign < cleanup < untouched
+    assert 'finalizers: ["gco-ci.example.com/foreign"]' in cascade
+    assert 'if not message.endswith(" in namespace argocd"):' in cascade
+    assert (
+        "kubectl -n argocd get applications.argoproj.io,appprojects.argoproj.io -o name" in cascade
+    )
+    assert "appprojects.argoproj.io -A" not in cascade
+    assert "kubectl delete namespace gco-ci-foreign-argo --wait=true" in cascade
     chromium = by_name["Install the headless Chromium the captures drive (with retry)"]["run"]
     assert "playwright install --with-deps --only-shell chromium" in chromium
     assert "for attempt in 1 2 3" in chromium
@@ -1241,11 +1258,13 @@ def test_kind_examples_smoke_proves_the_tenant_write_fence() -> None:
     (so RBAC stops nothing) that is not the inference monitor is refused, with
     the policy's own messages: writing gco-inference-tls (the monitor too is
     refused that), creating a monitor-labelled ConfigMap, rewriting or
-    unlabelling a monitor ConfigMap, recreating a deleted pod program without
-    the label, changing or restarting a monitor Deployment's pod template,
-    creating the shared mooncake-master, and forging a lifecycle id. In
-    between, the same identity annotates, deletes and scales those objects and
-    the monitor's ServiceAccount writes them, all admitted. The probe
+    unlabelling a monitor ConfigMap, changing or removing its gco.io/endpoint
+    and project labels and setting them again once the monitor has removed
+    them, recreating a deleted pod program without the label, changing or
+    restarting a monitor Deployment's pod template, creating the shared
+    mooncake-master, and forging a lifecycle id. In between, the same identity
+    labels, annotates, deletes and scales those objects and the monitor's
+    ServiceAccount writes them (both labels included), all admitted. The probe
     Deployment has zero replicas, so the job pulls nothing for it.
     tests/test_tenant_write_fence.py evaluates the same rules offline.
     """
@@ -1274,6 +1293,15 @@ def test_kind_examples_smoke_proves_the_tenant_write_fence() -> None:
         'kubectl "${monitor[@]}" create -f "${work}/program.json"',
         'refused "a tenant rewriting a monitor ConfigMap"',
         'refused "a tenant unlabelling a monitor ConfigMap"',
+        'refused "a tenant relabelling a monitor ConfigMap for another endpoint"',
+        'refused "a tenant removing a monitor ConfigMap\'s endpoint label"',
+        'refused "a tenant changing a monitor ConfigMap\'s project label"',
+        'refused "a tenant removing a monitor ConfigMap\'s project label"',
+        "label configmap gco-ci-fence-tls-proxy gco.io/endpoint- project-",
+        'refused "a tenant setting a monitor ConfigMap\'s endpoint label"',
+        'refused "a tenant setting a monitor ConfigMap\'s project label"',
+        "gco.io/endpoint=gco-ci-fence project=gco",
+        "label configmap gco-ci-fence-tls-proxy gco-ci/note=admitted",
         "annotate configmap gco-ci-fence-tls-proxy gco-ci/note=admitted",
         "delete configmap gco-ci-fence-tls-proxy",
         'refused "a tenant recreating a deleted pod program unlabelled"',
@@ -1295,9 +1323,18 @@ def test_kind_examples_smoke_proves_the_tenant_write_fence() -> None:
     for message in (
         "only the cert-manager controller",
         "the inference monitor mounts ConfigMaps named",
+        "may set, change or remove the gco.io/endpoint label of an object it manages",
+        "may set, change or remove the project label of an object it manages",
         "may set, change or remove the gco.io/lifecycle-id",
     ):
         assert message in run, message
+    # The relabelled object starts with both labels, and the monitor's own
+    # removal and restore run as the monitor.
+    assert '"gco.io/type":"inference","gco.io/endpoint":"gco-ci-fence"' in run
+    assert (
+        'kubectl "${monitor[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy '
+        "gco.io/endpoint- project-"
+    ) in run
     assert '"replicas":0' in run
 
 
@@ -2433,7 +2470,22 @@ def test_workflows_invoke_behaviorally_tested_runtime_verifiers() -> None:
         ".github/workflows/integration-tests.yml", "Verify pinned toolchain versions"
     )
 
-    assert "python3 .github/scripts/verify_lambda_imports.py" in lambda_step
+    assert "python3 .github/scripts/verify_lambda_imports.py --require-all" in lambda_step
+    # Finding C19: the handlers import from the build action's staged
+    # directories, in uv-built environments whose wheels are cached.
+    lambda_job = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))["jobs"][
+        "integration-lambda-imports"
+    ]
+    steps = [step.get("uses") or step.get("run") or "" for step in lambda_job["steps"]]
+    staged = steps.index("./.github/actions/build-lambda-package")
+    pinned_uv = steps.index("bash .github/scripts/use-pinned-uv.sh")
+    cached = next(i for i, step in enumerate(steps) if step.startswith("actions/cache@"))
+    verified = next(i for i, step in enumerate(steps) if "verify_lambda_imports.py" in step)
+    assert staged < verified and pinned_uv < cached < verified
+    cache = lambda_job["steps"][cached]
+    assert cache["with"]["path"] == "${{ runner.temp }}/uv-cache"
+    assert ".github/config/lambda-python-runtime.txt" in cache["with"]["key"]
+    assert lambda_job["steps"][verified]["env"]["UV_CACHE_DIR"] == cache["with"]["path"]
     assert "verify_container_tool_versions.py helm-installer --image helm-installer:ci" in (
         " ".join(helm_step.split())
     )
@@ -2902,6 +2954,35 @@ def test_pre_commit_comments_name_real_ci_jobs() -> None:
     assert mentioned <= names, sorted(mentioned - names)
 
 
+def test_tests_readme_names_real_ci_jobs() -> None:
+    """tests/README.md named lint:typecheck, lint:typecheck-stacks and
+    lint:typecheck-lambda, integration:lambda, test:fresh-install and
+    test:cdk-config-matrix, none of which exist. Every CI job it names in
+    backticks must be a job some workflow defines."""
+    names: set[str] = set()
+    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        jobs = yaml.safe_load(workflow.read_text(encoding="utf-8")).get("jobs") or {}
+        for job in jobs.values():
+            # Drop a matrix suffix: "unit:pytest:core (shard ${{ matrix.shard }}/5)".
+            names.add(re.split(r" \(| \$\{\{", str(job.get("name", "")))[0])
+    # The job-name categories (unit, integration, lint, ...), plus the GitLab-era "test".
+    categories = {name.split(":")[0] for name in names if ":" in name} | {"test"}
+    mentioned = {
+        token
+        for token in re.findall(
+            r"`([a-z][a-z0-9-]*:[a-z0-9][a-z0-9:-]*)`", _read("tests/README.md")
+        )
+        if token.split(":")[0] in categories
+    }
+    assert {
+        "lint:mypy:strict",
+        "lint:mypy:stacks",
+        "lint:mypy:lambda",
+        "integration:lambda:imports",
+    } <= mentioned
+    assert mentioned <= names, sorted(mentioned - names)
+
+
 def test_queue_processor_docs_name_the_floci_emulator_not_moto() -> None:
     """integration:docker:queue-processor consumes from the Floci service
     container; four job descriptions still said it ran against moto's SQS
@@ -3010,7 +3091,7 @@ def test_ci_installs_uv_at_the_dockerfile_dev_pin() -> None:
             assert not re.search(r"pip install\s+['\"]?uv\b", run), f"{path}: {run}"
             if "use-pinned-uv.sh" in run:
                 installs.append(path.name)
-    assert sorted(installs) == ["integration-tests.yml"] * 3 + ["unit-tests.yml"]
+    assert sorted(installs) == ["integration-tests.yml"] * 4 + ["unit-tests.yml"]
     assert re.search(r"^ARG UV_VERSION=\d+\.\d+\.\d+$", _read("Dockerfile.dev"), re.MULTILINE)
 
 
