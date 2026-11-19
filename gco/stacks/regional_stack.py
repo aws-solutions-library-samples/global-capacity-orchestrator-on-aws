@@ -4401,9 +4401,7 @@ class GCORegionalStack(Stack):
             "{{INFERENCE_PROXY_ROLE_ARN}}": self.inference_proxy_role.role_arn,
             "{{HEALTH_MONITOR_ROLE_ARN}}": self.health_monitor_role.role_arn,
             "{{EFS_FILE_SYSTEM_ID}}": self.efs_file_system.file_system_id,
-            "{{EFS_ACCESS_POINT_ID}}": self.efs_access_point.access_point_id,
             "{{JOB_QUEUE_URL}}": self.job_queue.queue_url,
-            "{{JOB_QUEUE_ARN}}": self.job_queue.queue_arn,
             "{{DEPLOYMENT_TIMESTAMP}}": deployment_timestamp,
             # Resource thresholds
             "{{CPU_THRESHOLD}}": str(thresholds.cpu_threshold),
@@ -4849,10 +4847,6 @@ class GCORegionalStack(Stack):
             image_replacements["{{FSX_FILE_SYSTEM_ID}}"] = self.fsx_file_system.ref
             image_replacements["{{FSX_DNS_NAME}}"] = self.fsx_file_system.attr_dns_name
             image_replacements["{{FSX_MOUNT_NAME}}"] = self.fsx_file_system.attr_lustre_mount_name
-            image_replacements["{{PRIVATE_SUBNET_ID}}"] = self.vpc.private_subnets[0].subnet_id
-            image_replacements["{{FSX_SECURITY_GROUP_ID}}"] = (
-                self.fsx_security_group.security_group_id
-            )
 
         # kro capability tenant RBAC (07-kro-tenant-access.yaml). The token is
         # emitted only when kro is enabled for this region; a disabled

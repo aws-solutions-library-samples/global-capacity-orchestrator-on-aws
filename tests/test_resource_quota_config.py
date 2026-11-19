@@ -315,8 +315,6 @@ class TestManifestTemplatePlaceholderCoverage:
             "FSX_FILE_SYSTEM_ID",
             "FSX_DNS_NAME",
             "FSX_MOUNT_NAME",
-            "FSX_SECURITY_GROUP_ID",
-            "PRIVATE_SUBNET_ID",
             "VALKEY_ENDPOINT",
             "VALKEY_PORT",
         }
@@ -336,6 +334,33 @@ class TestManifestTemplatePlaceholderCoverage:
                 continue
             for match in pattern.finditer(content):
                 yield yaml_path.name, match.group(1)
+
+    #: ``{{...}}`` words the replacement sources use in prose, not as tokens.
+    PROSE_PLACEHOLDERS = frozenset({"PLACEHOLDER", "TOKEN"})
+
+    def test_every_rendered_token_is_read_somewhere(self):
+        """No replacement is built for a token that no manifest or chart file reads.
+
+        EFS_ACCESS_POINT_ID, JOB_QUEUE_ARN, PRIVATE_SUBNET_ID and
+        FSX_SECURITY_GROUP_ID were rendered on every deploy and read by nothing.
+        """
+        pattern = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+        rendered = {
+            token
+            for path in self.REPLACEMENT_SOURCES
+            for token in pattern.findall(path.read_text(encoding="utf-8"))
+        } - self.PROSE_PLACEHOLDERS
+        consumers = [
+            *self.MANIFEST_DIR.glob("*.yaml"),
+            *(
+                p
+                for p in Path("lambda/helm-installer").rglob("*")
+                if p.is_file() and p.suffix in {".yaml", ".yml", ".json", ".py"}
+            ),
+        ]
+        read = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in consumers)
+        unread = sorted(t for t in rendered if "{{" + t + "}}" not in read)
+        assert not unread, f"replacement tokens nothing reads: {unread}"
 
     def test_every_placeholder_has_cdk_replacement(self):
         """Every required manifest token has a production replacement literal."""

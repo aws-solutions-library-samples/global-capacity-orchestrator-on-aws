@@ -671,10 +671,17 @@ def test_convergence_payload_carries_enabled_features_and_security_policy(featur
         "{{FSX_FILE_SYSTEM_ID}}": "GCOFsxLustre",
         "{{FSX_DNS_NAME}}": "GCOFsxLustre",
         "{{FSX_MOUNT_NAME}}": "GCOFsxLustre",
-        "{{FSX_SECURITY_GROUP_ID}}": "FsxSecurityGroup",
     }
     for key, logical_prefix in optional_tokens.items():
         assert logical_prefix in json.dumps(replacements[key])
+    # No manifest reads these; the stack no longer renders them.
+    for unused in (
+        "{{EFS_ACCESS_POINT_ID}}",
+        "{{JOB_QUEUE_ARN}}",
+        "{{PRIVATE_SUBNET_ID}}",
+        "{{FSX_SECURITY_GROUP_ID}}",
+    ):
+        assert unused not in replacements
 
     assert properties["ProjectName"] == "gco-test"
     assert properties["Region"] == _REGION
