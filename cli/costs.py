@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 from gco.k8s_objects import present
 
@@ -32,6 +33,17 @@ DEFAULT_COST_ALLOCATION_TAG_KEYS: tuple[str, ...] = ("Project", "aws:eks:cluster
 # UpdateCostAllocationTagsStatus accepts at most 20 entries per call and
 # ListCostAllocationTags at most 20 TagKeys filters; batch both.
 _COST_ALLOCATION_TAG_BATCH_SIZE = 20
+
+
+class CostDataUnavailableError(RuntimeError):
+    """Cost Explorer lacks the history the request needs (``DataUnavailableException``)."""
+
+
+def _client_error_code(error: BaseException) -> str:
+    """The AWS error code of a botocore ``ClientError``, else an empty string."""
+    if isinstance(error, ClientError):
+        return str(error.response.get("Error", {}).get("Code", ""))
+    return ""
 
 
 @dataclass
@@ -336,13 +348,19 @@ class CostTracker:
                 },
             )
 
-            return {
-                "forecast_total": float(response.get("Total", {}).get("Amount", 0)),
-                "period_start": start.isoformat(),
-                "period_end": end.isoformat(),
-            }
         except Exception as e:
-            return {"error": str(e)}
+            error = (
+                CostDataUnavailableError
+                if _client_error_code(e) == "DataUnavailableException"
+                else RuntimeError
+            )
+            raise error(f"Cost Explorer forecast failed: {e}") from e
+
+        return {
+            "forecast_total": float(response.get("Total", {}).get("Amount", 0)),
+            "period_start": start.isoformat(),
+            "period_end": end.isoformat(),
+        }
 
     # ------------------------------------------------------------------
     # Cost allocation tags — the switches behind every query above.

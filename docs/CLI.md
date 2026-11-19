@@ -1748,7 +1748,7 @@ gco costs forecast
 gco costs forecast --days 60
 ```
 
-> **Note:** Cost Explorer needs at least 14 days of historical data to generate forecasts.
+> **Note:** Cost Explorer needs at least 14 days of historical data to generate forecasts. When it cannot produce one (too little history, a missing `ce:GetCostForecast` permission, a window it rejects), the command prints the error and exits 1 in every output mode.
 
 #### `gco costs allocation`
 

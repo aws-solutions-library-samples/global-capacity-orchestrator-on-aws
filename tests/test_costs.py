@@ -453,10 +453,101 @@ class TestGetForecast:
         mock_ce.get_cost_forecast.side_effect = Exception("Not enough data")
 
         tracker = CostTracker()
-        forecast = tracker.get_forecast()
+        with pytest.raises(RuntimeError, match="Cost Explorer forecast failed: Not enough data"):
+            tracker.get_forecast()
 
-        assert "error" in forecast
-        assert "Not enough data" in forecast["error"]
+
+def _ce_client_error(code: str, message: str, operation: str = "GetCostForecast"):
+    from botocore.exceptions import ClientError
+
+    return ClientError({"Error": {"Code": code, "Message": message}}, operation)
+
+
+class TestForecastFailures:
+    """`gco costs forecast` printed the error, a "needs 14+ days" hint for any
+    failure, and exited 0; in JSON mode stdout was {"status": "ok"} (N36). A
+    failure now exits 1 in every output mode, and the hint is shown only when
+    Cost Explorer says it lacks the data."""
+
+    @patch("cli.costs.boto3.Session")
+    def test_get_forecast_raises_on_access_denied(self, mock_session_cls):
+        from cli.costs import CostDataUnavailableError
+
+        mock_ce = mock_session_cls.return_value.client.return_value
+        mock_ce.get_cost_forecast.side_effect = _ce_client_error(
+            "AccessDeniedException", "not authorized to perform ce:GetCostForecast"
+        )
+
+        with pytest.raises(RuntimeError, match="AccessDeniedException") as raised:
+            CostTracker().get_forecast(days_ahead=30)
+        assert not isinstance(raised.value, CostDataUnavailableError)
+
+    @patch("cli.costs.boto3.Session")
+    def test_get_forecast_names_missing_history(self, mock_session_cls):
+        from cli.costs import CostDataUnavailableError
+
+        mock_ce = mock_session_cls.return_value.client.return_value
+        mock_ce.get_cost_forecast.side_effect = _ce_client_error(
+            "DataUnavailableException", "Insufficient amount of historical data"
+        )
+
+        with pytest.raises(CostDataUnavailableError, match="Insufficient amount"):
+            CostTracker().get_forecast(days_ahead=30)
+
+    @pytest.mark.parametrize("output_format", ["table", "json", "yaml"])
+    @patch("cli.costs.boto3.Session")
+    def test_access_denied_exits_1_in_every_output_mode(self, mock_session_cls, output_format):
+        from cli.main import cli
+
+        mock_ce = mock_session_cls.return_value.client.return_value
+        mock_ce.get_cost_forecast.side_effect = _ce_client_error(
+            "AccessDeniedException", "not authorized to perform ce:GetCostForecast"
+        )
+
+        result = CliRunner().invoke(cli, ["--output", output_format, "costs", "forecast"])
+
+        assert result.exit_code == 1, result.output
+        assert "AccessDeniedException" in result.stderr
+        assert "status" not in result.stdout
+        # The missing-history hint is not offered for an unrelated failure.
+        assert "14+ days" not in result.output
+
+    @patch("cli.costs.boto3.Session")
+    def test_missing_history_exits_1_with_the_hint(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = mock_session_cls.return_value.client.return_value
+        mock_ce.get_cost_forecast.side_effect = _ce_client_error(
+            "DataUnavailableException", "Insufficient amount of historical data"
+        )
+
+        result = CliRunner().invoke(cli, ["costs", "forecast"])
+
+        assert result.exit_code == 1, result.output
+        assert "Forecast unavailable" in result.stderr
+        assert "Cost Explorer needs 14+ days" in result.stdout
+
+    @pytest.mark.parametrize("command", ["summary", "regions", "trend", "forecast"])
+    @pytest.mark.parametrize("days", ["0", "-3"])
+    @patch("cli.costs.boto3.Session")
+    def test_a_window_below_one_day_is_a_usage_error(self, mock_session_cls, command, days):
+        from cli.main import cli
+
+        result = CliRunner().invoke(cli, ["costs", command, "--days", days])
+
+        assert result.exit_code == 2, result.output
+        assert "--days" in result.stderr
+        mock_session_cls.return_value.client.assert_not_called()
+
+    @pytest.mark.parametrize("command", ["namespaces", "regions", "trend", "top"])
+    def test_k8s_window_below_one_day_is_a_usage_error(self, command):
+        from cli.main import cli
+
+        with patch("cli.cost_analytics.get_cost_analytics") as factory:
+            result = CliRunner().invoke(cli, ["costs", "k8s", command, "--days", "0"])
+
+        assert result.exit_code == 2, result.output
+        factory.assert_not_called()
 
 
 class TestEstimateRunningWorkloads:
@@ -703,8 +794,9 @@ class TestCostsCLI:
 
         runner = CliRunner()
         result = runner.invoke(cli, ["costs", "forecast"])
-        assert result.exit_code == 0  # Graceful handling
-        assert "unavailable" in result.output.lower() or "not enough" in result.output.lower()
+        assert result.exit_code == 1
+        assert "Failed to get forecast" in result.stderr
+        assert "not enough data points" in result.output.lower()
 
     @patch("cli.costs.CostTracker.estimate_running_workloads", return_value=[])
     @patch("cli.costs.boto3.Session")
@@ -1422,8 +1514,8 @@ class TestForecastCLIExtended:
 
         runner = CliRunner()
         result = runner.invoke(cli, ["costs", "forecast"])
-        assert result.exit_code == 0  # Graceful
-        assert "unavailable" in result.output.lower() or "error" in result.output.lower()
+        assert result.exit_code == 1
+        assert "API error" in result.stderr
 
 
 # ============================================================================

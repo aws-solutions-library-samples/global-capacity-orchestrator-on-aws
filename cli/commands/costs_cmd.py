@@ -10,6 +10,10 @@ from ..output import confirm, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
+# Every --days window covers at least one day: Cost Explorer rejects an empty
+# or reversed period (a billed request), and the Athena queries need a day.
+_DAYS = click.IntRange(min=1)
+
 
 def _get_deployment_regions(config: GCOConfig) -> list[str]:
     """Get the list of regional deployment regions from cdk.json or fallback to default."""
@@ -60,7 +64,11 @@ def _print_query_result(config: Any, result: Any, title: str) -> None:
 
 @costs.command("summary")
 @click.option(
-    "--days", "-d", default=30, type=int, help="Number of days to look back (default: 30)"
+    "--days",
+    "-d",
+    default=30,
+    type=_DAYS,
+    help="Number of days to look back (default: 30)",
 )
 @click.option(
     "--all", "show_all", is_flag=True, help="Show all account costs (not filtered by GCO tag)"
@@ -116,7 +124,11 @@ def costs_summary(config: Any, days: Any, show_all: Any) -> None:
 
 @costs.command("regions")
 @click.option(
-    "--days", "-d", default=30, type=int, help="Number of days to look back (default: 30)"
+    "--days",
+    "-d",
+    default=30,
+    type=_DAYS,
+    help="Number of days to look back (default: 30)",
 )
 @pass_config
 def costs_regions(config: Any, days: Any) -> None:
@@ -158,7 +170,7 @@ def costs_regions(config: Any, days: Any) -> None:
 
 
 @costs.command("trend")
-@click.option("--days", "-d", default=14, type=int, help="Number of days (default: 14)")
+@click.option("--days", "-d", default=14, type=_DAYS, help="Number of days (default: 14)")
 @click.option(
     "--all", "show_all", is_flag=True, help="Show all account costs (not filtered by GCO tag)"
 )
@@ -281,7 +293,7 @@ def costs_workloads(config: Any, region: Any) -> None:
 
 
 @costs.command("forecast")
-@click.option("--days", "-d", default=30, type=int, help="Days to forecast (default: 30)")
+@click.option("--days", "-d", default=30, type=_DAYS, help="Days to forecast (default: 30)")
 @pass_config
 def costs_forecast(config: Any, days: Any) -> None:
     """Forecast GCO costs for the next N days.
@@ -290,18 +302,13 @@ def costs_forecast(config: Any, days: Any) -> None:
         gco costs forecast
         gco costs forecast --days 60
     """
-    from ..costs import get_cost_tracker
+    from ..costs import CostDataUnavailableError, get_cost_tracker
 
     formatter = get_output_formatter(config)
 
     try:
         tracker = get_cost_tracker(config)
         forecast = tracker.get_forecast(days_ahead=days)
-
-        if "error" in forecast:
-            formatter.print_error(f"Forecast unavailable: {forecast['error']}")
-            formatter.print_info("Cost Explorer needs 14+ days of data to generate forecasts")
-            return
 
         if config.output_format != "table":
             formatter.print(forecast)
@@ -314,6 +321,10 @@ def costs_forecast(config: Any, days: Any) -> None:
         print(f"  Daily average:    ${total / days:>10.2f}")
         print()
 
+    except CostDataUnavailableError as e:
+        formatter.print_error(f"Forecast unavailable: {e}")
+        formatter.print_info("Cost Explorer needs 14+ days of data to generate forecasts")
+        sys.exit(1)
     except Exception as e:
         formatter.print_error(f"Failed to get forecast: {e}")
         sys.exit(1)
@@ -530,7 +541,7 @@ def costs_k8s(config: Any) -> None:
 
 
 @costs_k8s.command("namespaces")
-@click.option("--days", "-d", default=7, type=int, help="Days to look back (default: 7)")
+@click.option("--days", "-d", default=7, type=_DAYS, help="Days to look back (default: 7)")
 @click.option("--region", "-r", help="Restrict to one deployment region")
 @pass_config
 def costs_k8s_namespaces(config: Any, days: Any, region: Any) -> None:
@@ -555,7 +566,7 @@ def costs_k8s_namespaces(config: Any, days: Any, region: Any) -> None:
 
 
 @costs_k8s.command("regions")
-@click.option("--days", "-d", default=7, type=int, help="Days to look back (default: 7)")
+@click.option("--days", "-d", default=7, type=_DAYS, help="Days to look back (default: 7)")
 @pass_config
 def costs_k8s_regions(config: Any, days: Any) -> None:
     """Show Kubernetes allocation cost by deployment region.
@@ -577,7 +588,7 @@ def costs_k8s_regions(config: Any, days: Any) -> None:
 
 
 @costs_k8s.command("trend")
-@click.option("--days", "-d", default=14, type=int, help="Days to look back (default: 14)")
+@click.option("--days", "-d", default=14, type=_DAYS, help="Days to look back (default: 14)")
 @click.option(
     "--granularity",
     type=click.Choice(["daily", "hourly"]),
@@ -619,7 +630,7 @@ def costs_k8s_trend(config: Any, days: Any, granularity: Any, namespace: Any) ->
     show_default=True,
     help="Grouping dimension",
 )
-@click.option("--days", "-d", default=7, type=int, help="Days to look back (default: 7)")
+@click.option("--days", "-d", default=7, type=_DAYS, help="Days to look back (default: 7)")
 @pass_config
 def costs_k8s_top(config: Any, top_n: Any, by: Any, days: Any) -> None:
     """Show the top-N spenders by namespace, region, or cluster.
