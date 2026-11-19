@@ -177,11 +177,22 @@ def _deployed_python_handlers() -> set[tuple[str, str, str]]:
     Read from the source (no synth): each ``lambda_.Function`` (``zip``) names
     its ``handler`` and ``code``; a ``DockerImageFunction``'s (``image``)
     handler is its Dockerfile's ``CMD``. A ``code=`` variable resolves to its
-    assignment in the same method.
+    assignment in the same method, and a ``handler=`` name to a module-level
+    string constant of the same file (``PRESIGNED_URL_HANDLER``, which the API
+    document generator also reads).
     """
     deployed: set[tuple[str, str, str]] = set()
     for path in sorted((ROOT / "gco" / "stacks").glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        module_strings = {
+            node.targets[0].id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
         for method in ast.walk(tree):
             if not isinstance(method, ast.FunctionDef):
                 continue
@@ -212,8 +223,14 @@ def _deployed_python_handlers() -> set[tuple[str, str, str]]:
                     assert command is not None, dockerfile
                     deployed.add(("image", directory, command.group(1)))
                 else:
-                    assert isinstance(handler, ast.Constant), f"{path.name}:{node.lineno}"
-                    deployed.add(("zip", directory, str(handler.value)))
+                    if isinstance(handler, ast.Name):
+                        value = module_strings.get(handler.id)
+                    elif isinstance(handler, ast.Constant):
+                        value = handler.value
+                    else:
+                        value = None
+                    assert isinstance(value, str), f"{path.name}:{node.lineno}: handler="
+                    deployed.add(("zip", directory, value))
     return deployed
 
 
