@@ -1000,6 +1000,21 @@ class TestModelsDelete:
         assert result.exit_code == 0
         assert "No files found" in result.output
 
+    @pytest.mark.parametrize("deleted", [5, 0])
+    @pytest.mark.parametrize(
+        ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
+    )
+    def test_delete_prints_one_document_with_the_count(self, runner, deleted, output_format, parse):
+        """CM18: JSON/YAML mode printed {"status": "ok"} whether or not
+        anything was deleted; the count is now the document."""
+        mock_mgr = MagicMock()
+        mock_mgr.delete_model.return_value = deleted
+        with patch("cli.models.get_model_manager", return_value=mock_mgr):
+            result = runner.invoke(cli, ["-o", output_format, "models", "delete", "llama3", "-y"])
+        assert result.exit_code == 0, result.output
+        assert parse(result.stdout) == {"model_name": "llama3", "files_deleted": deleted}
+        assert ("No files found" in result.stderr) is (deleted == 0)
+
     def test_delete_error(self, runner):
         mock_mgr = MagicMock()
         mock_mgr.delete_model.side_effect = RuntimeError("fail")

@@ -4584,7 +4584,9 @@ Permanently delete a model from the versioned central S3 bucket. This removes
 all current files, historical object versions, and delete markers beneath the
 model prefix; the operation cannot be undone. If S3 reports an error for one
 batch, earlier successful deletions remain in effect and the command reports
-the failed object versions.
+the failed object versions. With `--output json` or `yaml` the result is
+`{"model_name": ..., "files_deleted": N}`, `N` being `0` when the model had no
+files.
 
 ```bash
 gco models delete MODEL_NAME [OPTIONS]

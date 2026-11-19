@@ -351,9 +351,10 @@ def list_nodepools(
         ) as route:
             nodepools_list = list_cluster_nodepools(cluster_name, target_region, **route)
 
-        if not nodepools_list:
+        if not nodepools_list and config.output_format == "table":
             formatter.print_info("No NodePools found")
             return
+        # JSON/YAML keep the list shape: an empty result is `[]`.
 
         formatter.print(nodepools_list)
 
