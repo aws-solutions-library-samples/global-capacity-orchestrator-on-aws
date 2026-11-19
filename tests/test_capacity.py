@@ -4040,3 +4040,113 @@ def test_weighted_recommend_converts_gpu_count_to_instances_for_placement_score(
                 "p4d.24xlarge", "us-east-1", target_capacity=expected_instances
             )
             assert result["all_regions"][0]["spot_target_instances"] == expected_instances
+
+
+def _weighted_checker_with(capacities, offered, *, failing=()):
+    """A MultiRegionCapacityChecker over ``capacities`` whose EC2 offering
+    check answers ``offered`` (a set of Regions) or raises for ``failing``."""
+    from cli.capacity import CapacityCheckError, MultiRegionCapacityChecker
+
+    with patch("cli.capacity.multi_region.get_config") as mock_config:
+        mock_config.return_value = MagicMock(default_region="us-east-1")
+        checker = MultiRegionCapacityChecker()
+
+    cap_checker = MagicMock()
+
+    def is_offered(instance_type, region):
+        if region in failing:
+            raise CapacityCheckError(f"Could not check instance availability in {region}")
+        return region in offered
+
+    cap_checker.check_instance_available_in_region.side_effect = is_offered
+    cap_checker.gpus_per_instance.return_value = 8
+    cap_checker.get_spot_placement_score.return_value = {}
+    cap_checker.get_spot_price_history.return_value = []
+    cap_checker.get_on_demand_price.return_value = None
+    cap_checker.get_capacity_block_trend.return_value = 0.0
+    return checker, cap_checker
+
+
+def test_weighted_recommend_never_picks_a_region_that_does_not_offer_the_type():
+    """An idle Region without p5 used to outrank a busy Region that sells it,
+    with a reason that read like an endorsement."""
+    from cli.capacity import RegionCapacity
+
+    capacities = [
+        RegionCapacity(region="us-east-1", queue_depth=30, gpu_utilization=90.0),
+        RegionCapacity(region="eu-west-3"),
+    ]
+    for cap in capacities:
+        cap.telemetry_status = "complete"
+    checker, cap_checker = _weighted_checker_with(capacities, offered={"us-east-1"})
+    with (
+        patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+        patch("cli.capacity.multi_region.CapacityChecker", return_value=cap_checker),
+    ):
+        result = checker.recommend_region_for_job(instance_type="p5.48xlarge")
+
+    assert result["region"] == "us-east-1"
+    assert [entry["region"] for entry in result["all_regions"]] == ["us-east-1"]
+    assert result["ineligible_regions"] == [
+        {"region": "eu-west-3", "reason": "p5.48xlarge is not offered in eu-west-3"}
+    ]
+
+
+def test_weighted_recommend_fails_when_no_region_offers_the_type():
+    from cli.capacity import NoEligibleRegionError, RegionCapacity
+
+    capacities = [RegionCapacity(region="eu-west-3"), RegionCapacity(region="sa-east-1")]
+    checker, cap_checker = _weighted_checker_with(capacities, offered=set())
+    with (
+        patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+        patch("cli.capacity.multi_region.CapacityChecker", return_value=cap_checker),
+        pytest.raises(
+            NoEligibleRegionError, match=r"No deployed Region offers p5\.48xlarge"
+        ) as exc,
+    ):
+        checker.recommend_region_for_job(instance_type="p5.48xlarge")
+
+    assert [entry["region"] for entry in exc.value.ineligible] == ["eu-west-3", "sa-east-1"]
+
+
+def test_weighted_recommend_ranks_an_unverified_offering_after_confirmed_ones():
+    """A failed offering check is a missing signal, not "offered"."""
+    from cli.capacity import RegionCapacity
+
+    capacities = [
+        RegionCapacity(region="us-east-1", queue_depth=30, gpu_utilization=90.0),
+        RegionCapacity(region="eu-west-3"),
+    ]
+    for cap in capacities:
+        cap.telemetry_status = "complete"
+    checker, cap_checker = _weighted_checker_with(
+        capacities, offered={"us-east-1"}, failing={"eu-west-3"}
+    )
+    with (
+        patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+        patch("cli.capacity.multi_region.CapacityChecker", return_value=cap_checker),
+    ):
+        result = checker.recommend_region_for_job(instance_type="p5.48xlarge")
+
+    assert [entry["region"] for entry in result["all_regions"]] == ["us-east-1", "eu-west-3"]
+    unverified = result["all_regions"][1]
+    assert unverified["offered"] is None
+    assert "Could not check instance availability in eu-west-3" in unverified["telemetry_errors"][0]
+    assert result["all_regions"][0]["offered"] is True
+
+
+def test_weighted_recommend_checks_the_canonical_type_for_an_alias():
+    from cli.capacity import RegionCapacity
+
+    capacities = [RegionCapacity(region="us-east-1")]
+    checker, cap_checker = _weighted_checker_with(capacities, offered={"us-east-1"})
+    with (
+        patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+        patch("cli.capacity.multi_region.CapacityChecker", return_value=cap_checker),
+    ):
+        result = checker.recommend_region_for_job(instance_type="p6-b200")
+
+    cap_checker.check_instance_available_in_region.assert_called_once_with(
+        "p6-b200.48xlarge", "us-east-1"
+    )
+    assert result["instance_type"] == "p6-b200.48xlarge"

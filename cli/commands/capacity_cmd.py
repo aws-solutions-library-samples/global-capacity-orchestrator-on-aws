@@ -409,7 +409,8 @@ def recommend_region(
     Analyzes capacity across all deployed EKS regions and recommends
     the best region. When --instance-type is provided, uses weighted
     multi-signal scoring that factors in spot placement scores, pricing,
-    queue depth, GPU utilization, and running job counts.
+    queue depth, GPU utilization, and running job counts; Regions that do
+    not offer the type are left out, and the command fails when none does.
 
     Without --instance-type, uses a simpler composite score based on
     queue depth, GPU utilization, and running jobs.

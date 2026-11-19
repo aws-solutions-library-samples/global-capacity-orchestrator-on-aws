@@ -15,6 +15,7 @@ from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, get_config
 
+from . import blocks
 from .backends import (
     BACKEND_EKS,
     BACKEND_HYPERPOD,
@@ -30,6 +31,7 @@ from .backends import (
     sum_gpus,
 )
 from .checker import CapacityChecker
+from .models import CapacityCheckError
 
 logger = logging.getLogger(__name__)
 
@@ -441,14 +443,36 @@ class MultiRegionCapacityChecker:
         Workload-aware recommendation using weighted multi-signal scoring.
 
         Gathers per-region capacity data for the specific instance type and
-        combines it with cluster metrics using weighted scoring.
+        combines it with cluster metrics using weighted scoring. A Region that
+        does not offer the type is left out (``ineligible_regions``); one whose
+        offering could not be checked stays in with a missing signal, so it
+        ranks after the Regions confirmed to sell the type.
+
+        Raises:
+            NoEligibleRegionError: no Region offers the type.
         """
+        instance_type, _alias_note = blocks.normalize_instance_type(instance_type)
         capacity_checker = CapacityChecker(self.config)
 
         scored_regions: list[dict[str, Any]] = []
+        ineligible: list[dict[str, str]] = []
 
         for cap in capacities:
             region = cap.region
+            telemetry_errors = list(cap.telemetry_errors)
+
+            # A Region that does not sell the type cannot run the work, however
+            # idle it is; its instance signals would just read as zeros.
+            offered: bool | None = None
+            try:
+                offered = capacity_checker.check_instance_available_in_region(instance_type, region)
+            except CapacityCheckError as e:
+                telemetry_errors.append(str(e))
+            if offered is False:
+                ineligible.append(
+                    {"region": region, "reason": f"{instance_type} is not offered in {region}"}
+                )
+                continue
 
             # Gather instance-specific signals for this region
             spot_score = 0.0
@@ -497,11 +521,12 @@ class MultiRegionCapacityChecker:
                 running_jobs=cap.running_jobs,
                 capacity_block_trend=cb_trend,
             )
-            missing_scored_signals = _missing_scored_signal_count(cap)
+            missing_scored_signals = _missing_scored_signal_count(cap) + (offered is None)
 
             scored_regions.append(
                 {
                     "region": region,
+                    "offered": offered,
                     "score": weighted_score,
                     "queue_depth": cap.queue_depth,
                     "gpu_utilization": cap.gpu_utilization,
@@ -511,9 +536,17 @@ class MultiRegionCapacityChecker:
                     "spot_price_ratio": spot_price_ratio,
                     "capacity_block_trend": cb_trend,
                     "telemetry_status": cap.telemetry_status,
-                    "telemetry_errors": cap.telemetry_errors or None,
+                    "telemetry_errors": telemetry_errors or None,
                     "unavailable_scored_signals": missing_scored_signals,
                 }
+            )
+
+        if not scored_regions:
+            details = "; ".join(entry["reason"] for entry in ineligible)
+            raise NoEligibleRegionError(
+                f"No deployed Region offers {instance_type} ({details}). Check the type "
+                "with 'gco capacity instance-info', or deploy a Region that offers it",
+                ineligible,
             )
 
         scored_regions.sort(
@@ -585,6 +618,7 @@ class MultiRegionCapacityChecker:
             "telemetry_status": best["telemetry_status"],
             "telemetry_errors": best["telemetry_errors"],
             "all_regions": scored_regions,
+            "ineligible_regions": ineligible,
         }
 
     def _no_eligible_region(

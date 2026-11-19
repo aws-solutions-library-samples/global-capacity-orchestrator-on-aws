@@ -668,6 +668,10 @@ The spot placement score is asked for the number of instances that hold `--gpu-c
 (or `--min-gpus`) GPUs of the type, rounded up (`-i p4d.24xlarge --gpu-count 16` scores
 2 instances), and for one instance when no GPU count is given or the type's GPU count is
 unknown; each Region's entry reports it as `spot_target_instances`.
+A Region that does not offer the type is left out of the ranking (listed with `--verbose`,
+and under `ineligible_regions` in JSON), and the command fails when no deployed Region
+offers it; a Region whose offering could not be checked is ranked after the Regions
+confirmed to sell the type (`offered: null`). Aliases such as `p6-b200` are expanded first.
 
 `--backend hyperpod` considers only Regions whose regional stack runs a
 [SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) cluster and ranks

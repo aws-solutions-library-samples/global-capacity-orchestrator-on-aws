@@ -106,7 +106,9 @@ def recommend_region(
     Args:
         gpu: Whether the workload requires GPUs.
         instance_type: Specific instance type to check. When provided, uses weighted
-            multi-signal scoring (spot placement scores, pricing, queue depth, etc.).
+            multi-signal scoring (spot placement scores, pricing, queue depth, etc.);
+            Regions that do not offer the type are left out
+            (``ineligible_regions``), and the call fails when none does.
             With ``backend="hyperpod"`` it names the HyperPod instance group type
             the Region must have (``ml.g5.8xlarge`` or ``g5.8xlarge``).
         gpu_count: Number of GPUs required for the workload.
