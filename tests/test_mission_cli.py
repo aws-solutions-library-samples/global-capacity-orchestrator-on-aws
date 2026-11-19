@@ -1769,6 +1769,160 @@ class TestMissionRunCli:
         assert envelope["code"] == "validation_error"
         assert envelope["details"]["field"] == "retries"
 
+    @staticmethod
+    def _run_args(*extra: str, save_path: Path | None = None) -> list[str]:
+        args = [
+            "mission",
+            "run",
+            "--directive",
+            "Find documentation.",
+            "--tool-allowlist",
+            "find_docs",
+            "--max-iterations",
+            "1",
+            "--max-wall-clock",
+            "30",
+            "--no-sampling",
+            *extra,
+        ]
+        if save_path is not None:
+            args += ["--save-criteria", str(save_path)]
+        return args
+
+    @pytest.mark.parametrize(
+        ("options", "expected"),
+        [
+            (["--cadence", "every_iteration"], {"kind": "every_iteration"}),
+            (
+                ["--cadence", "every_n_iterations", "--cadence-n", "2"],
+                {"kind": "every_n_iterations", "n": 2},
+            ),
+            (
+                ["--cadence", "every_t_seconds", "--cadence-t", "60"],
+                {"kind": "every_t_seconds", "t": 60},
+            ),
+            (
+                ["--cadence", "on_event", "--cadence-event", "goal_reached"],
+                {"kind": "on_event", "event_name": "goal_reached"},
+            ),
+        ],
+        ids=["every_iteration", "every_n_iterations", "every_t_seconds", "on_event"],
+    )
+    def test_run_accepts_every_advertised_cadence_kind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_backend: Path,
+        options: list[str],
+        expected: dict[str, Any],
+    ) -> None:
+        """``run`` offered four --cadence kinds but had no --cadence-n/-t/-event,
+        so three of them always failed validation (N1)."""
+        _enable_flag(monkeypatch)
+        mission_command = import_module("cli.commands.mission_cmd")
+        driven: list[str] = []
+        monkeypatch.setattr(
+            mission_command,
+            "_run_to_completion",
+            lambda session_id, *, dry_run=False: driven.append(session_id),
+        )
+
+        result = CliRunner().invoke(cli, self._run_args(*options))
+
+        assert result.exit_code == 0, result.stderr
+        from mission import state as mission_state
+
+        (session_id,) = driven
+        session = mission_state.get_backend().load_session(session_id)
+        assert session is not None
+        assert session["checkpoint_cadence"] == expected
+
+    @pytest.mark.parametrize(
+        ("options", "field", "subfield"),
+        [
+            (["--cadence", "every_n_iterations"], "checkpoint_cadence", "n"),
+            (["--cadence", "every_t_seconds", "--cadence-t", "0"], "checkpoint_cadence", "t"),
+            (["--cadence", "on_event"], "checkpoint_cadence", "event_name"),
+            (["--stagnation-threshold", "0"], "stagnation-threshold", None),
+        ],
+        ids=["n-missing", "t-not-positive", "event-missing", "stagnation"],
+    )
+    def test_run_rejects_bad_flags_before_scaffolding(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_backend: Path,
+        options: list[str],
+        field: str,
+        subfield: str | None,
+    ) -> None:
+        """A bad flag used to be rejected only after the scaffold step had run
+        (Bedrock tokens spent, --save-criteria written); it now costs nothing."""
+        _enable_flag(monkeypatch)
+        import mission.criteria_scaffold as criteria_scaffold
+
+        def _must_not_scaffold(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("scaffolded criteria for a run that cannot start")
+
+        monkeypatch.setattr(
+            criteria_scaffold, "generate_deterministic_criteria", _must_not_scaffold
+        )
+        save_path = tmp_path / "criteria.json"
+
+        result = CliRunner().invoke(cli, self._run_args(*options, save_path=save_path))
+
+        assert result.exit_code == 1, result.stderr
+        envelope = json.loads(result.stderr)
+        assert envelope["code"] == "validation_error"
+        assert envelope["details"]["field"] == field
+        assert envelope["details"].get("subfield") == subfield
+        assert not save_path.exists()
+
+    def test_run_rejects_scaffolded_criteria_that_do_not_validate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_backend: Path,
+    ) -> None:
+        _enable_flag(monkeypatch)
+        import mission.criteria_scaffold as criteria_scaffold
+        from mission import state as mission_state
+
+        monkeypatch.setattr(
+            criteria_scaffold,
+            "generate_deterministic_criteria",
+            lambda *_args, **_kwargs: [{"criterion_id": "x", "kind": "not-a-kind"}],
+        )
+
+        result = CliRunner().invoke(cli, self._run_args())
+
+        assert result.exit_code == 1, result.stderr
+        assert json.loads(result.stderr)["code"] == "validation_error"
+        assert mission_state.get_backend().list_sessions() == []
+
+    def test_run_rejects_a_bad_budget_before_sampling(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_backend: Path,
+    ) -> None:
+        _enable_flag(monkeypatch)
+        from mission import sampling as mission_sampling
+
+        def _must_not_sample(**_kwargs: Any) -> Any:
+            raise AssertionError("selected a sampling backend for a run that cannot start")
+
+        monkeypatch.setattr(mission_sampling, "select_sampling_backend", _must_not_sample)
+        monkeypatch.setattr(
+            mission_sampling, "resolve_sampling_state", lambda _use: (True, "bedrock")
+        )
+        args = self._run_args(save_path=tmp_path / "criteria.json")
+        args[args.index("--max-iterations") + 1] = "0"
+
+        result = CliRunner().invoke(cli, args)
+
+        assert result.exit_code == 1, result.stderr
+        assert json.loads(result.stderr)["code"] == "validation_error"
+        assert not (tmp_path / "criteria.json").exists()
+
     def test_run_feature_flag_gate(
         self,
         monkeypatch: pytest.MonkeyPatch,

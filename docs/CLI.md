@@ -4170,10 +4170,13 @@ gco mission run [OPTIONS]
 - `--allow-scripted-strategies` — Permit scripted strategies (the AST-validated Python sandbox).
 - `--save-criteria PATH` — Also write the scaffolded criteria JSON to `PATH` for inspection or reuse.
 - `--cadence` — Checkpoint cadence kind (default: `every_iteration`).
+- `--cadence-n INTEGER` — `n` parameter for `every_n_iterations`.
+- `--cadence-t INTEGER` — `t` parameter (seconds) for `every_t_seconds`.
+- `--cadence-event TEXT` — `event_name` parameter for `on_event`.
 - `--stagnation-threshold INTEGER` — Iterations of no progress before terminate (default: 3).
 - `--dry-run` — Use a stub tool dispatcher and disable Strategy_Revision sampling during iteration (the criteria scaffolder still runs through Bedrock when sampling is enabled). Smoke-tests the loop without spending AWS or Bedrock credits.
 
-A scaffold-summary JSON line lands on stderr before iteration starts; per-iteration verdicts stream to stderr as JSON lines; the Final_Report lands on stdout when a terminal verdict fires.
+The directive, caps, cadence and stagnation threshold are validated before the scaffold step, so a bad flag exits 1 without sampling and without writing `--save-criteria`. A scaffold-summary JSON line lands on stderr before iteration starts; per-iteration verdicts stream to stderr as JSON lines; the Final_Report lands on stdout when a terminal verdict fires.
 
 ```bash
 # No-AWS smoke test against in-memory tools.
