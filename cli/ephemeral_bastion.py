@@ -840,14 +840,16 @@ def destroy_ephemeral_bastion(
     region: str,
     *,
     project_name: str = DEFAULT_PROJECT_NAME,
-    delete_iam: bool = True,
 ) -> None:
-    """Terminate the bastion and (best-effort) delete its IAM role + profile.
+    """Terminate the bastion. Its IAM role and instance profile stay in place.
 
-    Termination is the cost-critical step and is always attempted. IAM cleanup is
-    best-effort: a leftover role/instance-profile costs nothing and is greppable
-    by its ``gco:ephemeral`` tag, so a failure here is logged, not raised. The
-    role / profile deleted are the ones named for ``project_name``.
+    Every ``--via-ssm auto`` bastion of the project uses the same role and
+    instance profile (named for ``project_name``), in every Region, because
+    IAM is global. Deleting them when one tunnel closes revoked the
+    credentials of a bastion another session was still using and failed a
+    launch in progress, so they are left for ``gco stacks destroy-all``
+    (``StackManager._cleanup_bastion_iam``). They cost nothing.
+    ``project_name`` is validated for the caller's naming contract.
     """
     _validate(instance_id, _INSTANCE_RE, "instance id")
     _validate(region, _REGION_RE, "region")
@@ -855,19 +857,6 @@ def destroy_ephemeral_bastion(
 
     _run_aws(build_terminate_instances_command(instance_id, region))
     logger.info("Terminating ephemeral bastion %s.", instance_id)
-
-    if not delete_iam:
-        return
-    teardown = build_iam_teardown_commands(
-        bastion_role_name(project_name),
-        bastion_profile_name(project_name),
-        region,
-    )
-    for step in teardown:
-        try:
-            _run_aws(step, allow_exists=True)
-        except RuntimeError as exc:  # best-effort — never mask the termination
-            logger.warning("IAM teardown step failed (%s): %s", " ".join(step[:3]), exc)
 
 
 @contextmanager

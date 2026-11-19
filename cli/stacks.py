@@ -6771,11 +6771,12 @@ class StackManager:
     def _cleanup_bastion_iam(self) -> dict[str, Any]:
         """Best-effort teardown of the ephemeral-bastion IAM role + profile.
 
-        ``destroy_ephemeral_bastion`` already attempts this when a tunnel
-        closes normally, but a killed process leaves the pair behind (they
-        cost nothing, yet fail any clean-account audit). Deletion is by the
-        exact project-scoped names from the bastion naming contract; a
-        ``NoSuchEntity`` response simply means there was nothing to clean.
+        Every ``--via-ssm auto`` bastion of the project shares the pair, so
+        ``destroy_ephemeral_bastion`` leaves it in place when a tunnel closes;
+        this full teardown is where it goes (it costs nothing, yet fails any
+        clean-account audit). Deletion is by the exact project-scoped names
+        from the bastion naming contract; a ``NoSuchEntity`` response simply
+        means there was nothing to clean.
         """
         from .ephemeral_bastion import (
             _run_aws,

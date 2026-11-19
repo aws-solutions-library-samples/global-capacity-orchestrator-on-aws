@@ -1430,7 +1430,11 @@ cluster security group (no new security group, and **no inbound ports** — SSM 
 outbound-only), requires IMDSv2, self-terminates after `--bastion-ttl-minutes`,
 and is tagged `gco:ephemeral=true`. It is torn down automatically when the tunnel
 closes; if teardown ever fails, the command prints the exact orphan-check
-command.
+command. Its IAM role and instance profile (`<project>-ephemeral-bastion-role`
+and `<project>-ephemeral-bastion-profile`) are shared by every `auto` bastion
+of the project in every Region, so teardown terminates only the instance and
+leaves them in place for the next session; `gco stacks destroy-all` deletes
+them.
 
 ##### Route selection
 
@@ -5532,8 +5536,9 @@ After stack deletion, `destroy-all` makes a best-effort sweep of known resources
 that CloudFormation never modeled. It targets the implicit CloudWatch log groups
 created out-of-band by Lambda (`/aws/lambda/<function>`), the EKS control plane
 (`/aws/eks/<cluster>/cluster`), and Container Insights
-(`/aws/containerinsights/<cluster>/...`), plus the ephemeral SSM bastion's IAM
-role and instance profile if a killed tunnel session left them behind.
+(`/aws/containerinsights/<cluster>/...`), plus the IAM role and instance
+profile that every `--via-ssm auto` bastion of the project shares (tunnel
+teardown leaves them in place).
 
 The sweep also deletes a destroyed stack's own log groups that exist again
 after CloudFormation deleted them. A Lambda function's last log lines can arrive
