@@ -42,10 +42,13 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Training job admission](#training-job-admission)
   - [Stopped inference endpoints stay stopped](#stopped-inference-endpoints-stay-stopped)
   - [Health readings and the `active_jobs` metric](#health-readings-and-the-active_jobs-metric)
+  - [Job status filter and request paths](#job-status-filter-and-request-paths)
   - [Access-logs buckets use SSE-S3](#access-logs-buckets-use-sse-s3)
   - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
+  - [`Project` tag on PCS instances](#project-tag-on-pcs-instances)
   - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
   - [MCP server tools](#mcp-server-tools)
+  - [Pre-commit hook for contributors](#pre-commit-hook-for-contributors)
 
 ## How an upgrade works
 
@@ -819,6 +822,21 @@ monitor checks before it deletes a stale object
   the pod's `securityContext.runAsUser: 0` is refused. Earlier releases
   admitted both. Move the volume to a supported volume type, or set a
   non-root user.
+- **BREAKING: a TrainJob whose runtime patches select HyperPod nodes needs
+  the HyperPod toleration.** The job API now merges a TrainJob's runtime
+  patches per pod template, as Kubeflow Trainer does, and a TrainJob whose
+  every patched pod template selects `gco.aws/capacity-provider: hyperpod`
+  is held to the HyperPod rule: it must tolerate `gco.aws/hyperpod`, in the
+  same patch or another one, or carry the
+  `kueue.x-k8s.io/queue-name: gco-hyperpod` label. Earlier releases judged
+  each patch on its own, so they asked such a TrainJob for an
+  `nvidia.com/gpu` toleration when it requested GPUs, although HyperPod
+  nodes have no such taint, and admitted one without the HyperPod
+  toleration, whose pods then stayed Pending. Add the toleration to a
+  runtime patch
+  ([HYPERPOD.md → How work reaches HyperPod nodes](HYPERPOD.md#how-work-reaches-hyperpod-nodes)).
+  `gco jobs submit-sqs --auto-region` now also ranks only the Regions with
+  HyperPod for such a TrainJob.
 - **BREAKING: the `torch-distributed` runtime schedules on amd64 nodes only.**
   Its image is published for amd64 only, so the shipped ClusterTrainingRuntime
   now selects `kubernetes.io/arch: amd64`. A TrainJob that runs an image of
@@ -866,6 +884,27 @@ monitor checks before it deletes a stale object
   Messages from `GET /api/v1/health` name the read that failed instead of
   carrying the exception text. Clients that matched on either text need the
   new one.
+
+### Job status filter and request paths
+
+- **BREAKING (scripts that filter on `succeeded`): `succeeded` matches
+  finished jobs.** The job responses call a finished Job `succeeded`, but the
+  `status` filter of `GET /api/v1/jobs` and `GET /api/v1/global/jobs`, and of
+  the bulk deletes `DELETE /api/v1/jobs` and `DELETE /api/v1/global/jobs`,
+  compared it with the manifest processor's name, `completed`, so `succeeded`
+  matched nothing. The API now reads `succeeded` as `completed`, and
+  `gco jobs list --status succeeded` and `gco jobs bulk-delete --status
+  succeeded` send `completed`. A scheduled bulk delete filtered on
+  `succeeded` that deleted nothing now deletes the finished jobs it matches:
+  run it once with `"dry_run": true` (or `gco jobs bulk-delete` without
+  `--execute`) to see what it would delete.
+- **Request paths with a dot segment answer 400.** Both API Gateway proxies,
+  behind the global API and the regional bridges, refuse a path with a `.` or
+  `..` segment, literal or percent-encoded (`%2E%2E`), before forwarding it:
+  the HTTP client they forward with removes such segments, so the request
+  would reach a route other than the one API Gateway authorized. No GCO route
+  has one, and the CLI already refused such names; a client that builds
+  paths from unchecked names gets 400 for them.
 
 ### Access-logs buckets use SSE-S3
 
@@ -915,6 +954,24 @@ to what they use.
   scoped to the domain, `Studio_EFS`, the Region's access points and file
   systems, and security groups in the analytics VPC.
 
+### `Project` tag on PCS instances
+
+The cost reports filter Cost Explorer on the `Project` tag that `cdk.json`
+`context.tags` puts on the whole app (`GCO` as shipped). In `pcs` managed
+mode, the EC2 instances and EBS volumes AWS PCS launches take their tags from
+the node groups' launch templates, which set `Project` to `project_name`
+(`gco` as shipped), as did the PCS lifecycle log group, so PCS compute spend
+fell outside the reports.
+
+- **BREAKING (narrow, PCS managed mode): PCS resources carry
+  `Project=<context.tags.Project>`.** `project_name` stands in when
+  `context.tags` sets no `Project`. The redeploy updates the launch templates
+  and the log group in place; the node groups move to the new launch template
+  version, and running nodes keep the old tag until PCS replaces them. A
+  tag-based IAM condition, cost filter or script that finds PCS instances by
+  `Project=<project_name>` should match the `gco:project` tag, which keeps the
+  project name, or the new value.
+
 ### CLI exit codes, output and prompts
 
 Scripts that check `gco`'s exit status, parse its `-o json` or `-o yaml`
@@ -940,6 +997,9 @@ Exit status and options:
 | `gco queue list` | `--limit` must be 1-1000, the API's range (exit 2); `--cursor` reads the next page | |
 | `gco stacks access` | Exits 1 when the access entry, the policy association or kubectl is refused (it said the entry "may already exist" and exited 0) | Fix the permission the message names |
 | `gco stacks addons status` | Exits 1 when a Region cannot be read or an add-on is not healthy | |
+| `gco images orphans` | **BREAKING:** exits 1, naming the source, when the inference endpoints or a Region's jobs cannot be read; it treated an unreadable source as using no image, so it listed tags in use. It also counts more images as in use: every image an endpoint record names and the images of every unfinished job whatever its age, by tag or by digest, through any Region's replica | Fix the read the message names before deleting anything |
+| `gco images describe` | **BREAKING:** exits 1, with `Tag '<tag>' not found in <name>` on stderr, for a tag the repository does not have; it exited 0 | Treat exit 1 as "no such image" |
+| `gco vector ingest` | **BREAKING:** exits 1 (`vector_ingest_failed`) before uploading anything when a file is over 4 MiB or makes more than 500 chunks, the ingest Lambda's limits, or when two files have the same file name, which upload to the same key | Split large files; rename one of two files with the same name |
 | `gco slurm submit` | **BREAKING:** refuses `--mem=0`, also as an `#SBATCH` directive, which it sent as a 1 MiB limit | Give a size |
 | Commands that look up the regional stacks (`gco jobs submit-direct`, `submit-sqs`, `queue-status` and the fleet-wide commands) | **BREAKING:** a throttled, denied or failed `DescribeStacks` fails the command; it read as "No GCO stack found" or dropped the Region | Fix the credentials or permission the message names |
 | Commands that put a name or ID into an API path | **BREAKING:** an empty value, `.`, `..`, or a value with such a path segment is refused before any request (exit 1); `gco inference invoke --path` must start with `/` | |
@@ -961,7 +1021,8 @@ data.
 | `gco analytics doctor` | `{"passed": ..., "checks": [{"name", "ok", "remediation"}]}`, also when it exits 1 |
 | `gco capacity ai-recommend` | The recommendation's fields |
 | `gco capacity check --enrich-historical` | `{"estimates": [...], "historical": {...}}` |
-| `gco capacity spot-prices` with no data | `[]` |
+| `gco capacity spot-prices`, `gco files list`, `gco files access-points` and `gco nodepools list` with nothing to list | `[]` |
+| `gco models delete` | `{"model_name": ..., "files_deleted": N}`, `N` being `0` for a model without files |
 | `gco -o yaml deps scan` | The same envelope as `-o json`; `--report` now writes its file in every mode |
 | `gco jobs submit --check-policy` | The submission document; the policy findings go to stderr |
 | Every command | Datetimes in ISO 8601 at any depth (`2026-01-15T10:30:00+00:00`); those inside job, stack and file records printed as `2026-01-15 10:30:00+00:00` |
@@ -980,10 +1041,8 @@ Prompts, namespaces, Regions and permissions:
   manifest without a namespace, as `gco jobs submit` does; the queue
   processor used to put it in `gco-jobs`. Set the namespace in the manifest
   to pin it.
-- **`--status succeeded` matches succeeded jobs.** `gco jobs list` and
-  `gco jobs bulk-delete` sent `succeeded` to an API that names the state
-  `completed`, so the filter matched nothing; a scheduled
-  `gco jobs bulk-delete --status succeeded` now deletes what it names.
+- **`--status succeeded` matches succeeded jobs**; see
+  [Job status filter and request paths](#job-status-filter-and-request-paths).
 - **BREAKING: `gco webhooks create` asks for the secret on a terminal** when
   neither `--secret` nor `GCO_WEBHOOK_SECRET` is set. Pass `--secret ''` to
   register without one; without a terminal nothing changes.
@@ -999,6 +1058,38 @@ Prompts, namespaces, Regions and permissions:
   else the first `deployment_regions.regional` entry. They used to skip
   straight from `--region` to that entry. Pass `--region` where a script
   depends on the Region.
+- **BREAKING: `gco monitoring users add`, `list` and `remove` read the
+  Grafana Secret on the CLI's Region.** Without `--admin-password` (or
+  `GCO_GRAFANA_ADMIN_PASSWORD`) they read the `kube-prometheus-stack-grafana`
+  Secret on the `--region` cluster, else the default Region's, through that
+  cluster's kubeconfig context, and give kubectl 60 seconds. They used to read
+  it through the current kubeconfig context, whichever cluster that named,
+  and outside the VPC waited for a private endpoint (the default) until TCP
+  gave up. Pass `--region` where a script depends on the cluster, and outside
+  the VPC `--via-ssm INSTANCE_ID|auto` (`-y` skips the `auto` bastion
+  prompt): the read opens an SSM tunnel of its own, next to the one
+  `gco monitoring open` holds. The `monitoring_users_list` and `monitoring_user_add` MCP tools pass
+  neither option: run the server where the default Region's API endpoint is
+  reachable, or set `GCO_GRAFANA_ADMIN_PASSWORD` in its environment.
+- **BREAKING: `gco vector status`, `search` and `ingest` read the CLI's
+  deployment.** They take the project and the global Region from the CLI
+  configuration (`project_name` and `deployment_regions.global` in
+  `cdk.json`, the config file, `GCO_PROJECT_NAME`, `GCO_GLOBAL_REGION`) and
+  read the store's SSM parameters in that Region, where the global stack
+  publishes them. They used to take `GCO_PROJECT_NAME` (default `gco`) and
+  `AWS_REGION` or the profile Region, so they called a deployed store
+  unavailable from another Region and read the `gco` project's store from
+  another project's checkout. `DYNAMODB_REGION` and `GLOBAL_REGION` still
+  come first. Where `AWS_REGION` chose the Region, set `GCO_GLOBAL_REGION`;
+  outside a checkout the CLI's global Region defaults to `us-east-2`.
+- **BREAKING (skopeo older than 0.1.41 only): the image mirror's skopeo
+  copies pass the ECR login in a file.** When neither Docker Buildx nor
+  Finch/nerdctl can copy multi-arch images, the deploy's Volcano mirror,
+  `gco images mirror` and the `images_mirror` MCP tool run `skopeo copy`,
+  which now reads the login from an auth file only you can read
+  (`--dest-authfile`) instead of `--dest-creds` on its command line, where
+  every local user could see the token. skopeo 0.1.41 and later have the
+  option; upgrade an older one.
 - **BREAKING: kubectl calls name the cluster's context.** A kubeconfig
   cluster entry pinned to a local tunnel that no context uses now fails
   instead of falling back to the current context, which could be another
@@ -1075,8 +1166,22 @@ has the details.
   `destroy_all` with `yes=False` stop before destroying anything, and
   `analytics_login_url` without a password (argument or
   `GCO_STUDIO_PASSWORD`) returns `code: password_required`.
+- **`images_orphans` fails instead of guessing, and `images_describe`
+  answers `{}` for a missing tag.** `images_orphans` returns an error when
+  the inference endpoints or a Region's jobs cannot be read, as
+  `gco images orphans` exits 1, instead of listing tags that may be in use.
+  `images_describe` returns `{}` for a tag the repository does not have,
+  where ECR's `ImageNotFoundException` used to come back as an error.
 - **`deps_scan` is tagged `low-risk`** instead of `safe`: its full scan
   pip-installs into the server's environment.
 - **Audit records are written.** The server writes one JSON line per record
   to stderr, or appends them to the file `GCO_MCP_AUDIT_LOG` names;
   `GCO_MCP_AUDIT_LOG_LEVEL` filters them. Earlier releases wrote none.
+
+### Pre-commit hook for contributors
+
+- **The linter hook's id is `ruff-check`.** `.pre-commit-config.yaml` uses
+  ruff-pre-commit's current id instead of its legacy alias `ruff`, so
+  `SKIP=ruff` no longer skips the linter: skip it for one commit with
+  `SKIP=ruff-check git commit ...`, and run it alone with
+  `pre-commit run ruff-check`. CI runs ruff directly and is unaffected.
