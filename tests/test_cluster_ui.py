@@ -431,95 +431,135 @@ class _FakeProcess:
         return self.returncode
 
 
-class TestWaitForLocalPort:
-    def test_returns_once_the_port_accepts(self) -> None:
-        with socket.socket() as server:
-            server.bind(("127.0.0.1", 0))
-            server.listen()
-            port = server.getsockname()[1]
-            cluster_ui.wait_for_local_port(port, _FakeProcess(), timeout=5)
-            cluster_ui.wait_for_local_port(port, None, timeout=5)
-
-    def test_a_dead_port_forward_is_reported_with_its_stderr(self) -> None:
-        process = _FakeProcess(exited=1, stderr=b"error: unable to forward port\n")
-        with pytest.raises(RuntimeError, match="exited before localhost:1 was ready: error"):
-            cluster_ui.wait_for_local_port(1, process)  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize("stderr", [None, b""])
-    def test_a_silent_exit_reports_the_code(self, stderr: bytes | None) -> None:
-        process = _FakeProcess(exited=3, stderr=stderr)
-        with pytest.raises(RuntimeError, match="exit code 3"):
-            cluster_ui.wait_for_local_port(1, process)  # type: ignore[arg-type]
-
-    def test_deadline(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def refuse(*_a: Any, **_k: Any) -> None:
-            raise ConnectionRefusedError
-
-        clock = iter([0.0, 0.1, 99.0])
-        sleeps: list[float] = []
-        monkeypatch.setattr(cluster_ui.socket, "create_connection", refuse)
-        monkeypatch.setattr(cluster_ui.time, "monotonic", lambda: next(clock))
-        monkeypatch.setattr(cluster_ui.time, "sleep", sleeps.append)
-        with pytest.raises(RuntimeError, match="did not accept connections within 2s"):
-            cluster_ui.wait_for_local_port(8080, None, timeout=2)
-        assert sleeps == [0.5]
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
 
 
 class TestBackgroundPortForward:
-    def _run(
-        self, monkeypatch: pytest.MonkeyPatch, process: _FakeProcess, *, ready: bool = True
-    ) -> list[Any]:
-        launched: list[Any] = []
+    """The background forward trusts only kubectl's own IPv4 listener line.
 
-        def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeProcess:
+    The stand-in kubectl is this interpreter running a script, as above, so the
+    pipe, the reader and process cleanup are real.
+    """
+
+    @staticmethod
+    def _stand_in(script: str) -> list[str]:
+        return [sys.executable, "-c", script]
+
+    def test_yields_once_kubectl_reports_its_ipv4_listener(self) -> None:
+        port = _free_port()
+        script = (
+            "import time\n"
+            f"print('Forwarding from 127.0.0.1:{port} -> 8080', flush=True)\n"
+            f"print('Forwarding from [::1]:{port} -> 8080', flush=True)\n"
+            "time.sleep(30)\n"
+        )
+        with cluster_ui.background_port_forward(self._stand_in(script), port) as process:
+            assert process.poll() is None
+        assert process.poll() is not None
+
+    def test_a_port_another_process_listens_on_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The screenshot command would POST the Argo CD admin password to it."""
+
+        def popen(*_a: Any, **_k: Any) -> None:
+            raise AssertionError("kubectl must not start on a port another process holds")
+
+        monkeypatch.setattr(cluster_ui.subprocess, "Popen", popen)
+        with socket.socket() as foreign:
+            foreign.bind(("127.0.0.1", 0))
+            foreign.listen()
+            port = foreign.getsockname()[1]
+            with (
+                pytest.raises(RuntimeError, match=rf"already listens on 127\.0\.0\.1:{port}"),
+                cluster_ui.background_port_forward(["kubectl"], port),
+            ):
+                pytest.fail("body must not run")  # pragma: no cover
+
+    def test_a_listener_kubectl_reports_only_on_ipv6_does_not_count(self) -> None:
+        port = _free_port()
+        script = (
+            "import time\n"
+            f"print('Forwarding from [::1]:{port} -> 8080', flush=True)\n"
+            "time.sleep(30)\n"
+        )
+        with (
+            pytest.raises(RuntimeError, match=rf"did not report a listener on 127\.0\.0\.1:{port}"),
+            cluster_ui.background_port_forward(self._stand_in(script), port, timeout=0.5),
+        ):
+            pytest.fail("body must not run")  # pragma: no cover
+
+    def test_an_exit_before_the_listener_carries_kubectls_error(self) -> None:
+        port = _free_port()
+        script = "import sys\nsys.stderr.write('error: unable to forward port\\n')\nsys.exit(1)\n"
+        with (
+            pytest.raises(RuntimeError, match="was ready: error: unable to forward port"),
+            cluster_ui.background_port_forward(self._stand_in(script), port),
+        ):
+            pytest.fail("body must not run")  # pragma: no cover
+
+    def test_a_silent_exit_reports_the_code(self) -> None:
+        port = _free_port()
+        with (
+            pytest.raises(RuntimeError, match="was ready: exit code 3"),
+            cluster_ui.background_port_forward(self._stand_in("raise SystemExit(3)"), port),
+        ):
+            pytest.fail("body must not run")  # pragma: no cover
+
+    def test_a_listener_line_still_in_the_pipe_at_exit_counts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        port = _free_port()
+
+        def delayed_output() -> Iterator[bytes]:
+            time.sleep(0.3)
+            yield f"Forwarding from 127.0.0.1:{port} -> 8080\n".encode()
+
+        process = _FakeProcess(exited=0)
+        process.stdout = delayed_output()  # type: ignore[attr-defined]
+        monkeypatch.setattr(cluster_ui, "_READY_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(cluster_ui.subprocess, "Popen", lambda cmd, **kw: process)
+        with cluster_ui.background_port_forward(["kubectl", "port-forward"], port) as proc:
+            assert proc is process
+        assert process.events == []
+
+    def test_kills_a_process_that_ignores_terminate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        port = _free_port()
+        process = _FakeProcess(hang_on_wait=True)
+        process.stdout = iter([f"Forwarding from 127.0.0.1:{port} -> 8080\n".encode()])  # type: ignore[attr-defined]
+        launched: list[tuple[list[str], dict[str, Any]]] = []
+
+        def popen(cmd: list[str], **kwargs: Any) -> _FakeProcess:
             launched.append((cmd, kwargs))
             return process
 
-        def fake_wait(port: int, proc: Any, *, timeout: float) -> None:
-            launched.append(("wait", port, proc is process, timeout))
-            if not ready:
-                raise RuntimeError("never ready")
-
-        monkeypatch.setattr(cluster_ui.subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(cluster_ui, "wait_for_local_port", fake_wait)
-        return launched
-
-    def test_yields_when_ready_and_terminates_on_exit(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        process = _FakeProcess()
-        launched = self._run(monkeypatch, process)
-        with cluster_ui.background_port_forward(("kubectl", "port-forward"), 8080) as proc:
-            assert proc is process
-        cmd, kwargs = launched[0]
-        assert cmd == ["kubectl", "port-forward"]
-        assert kwargs == {"stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE}
-        assert launched[1] == ("wait", 8080, True, cluster_ui.PORT_FORWARD_READY_TIMEOUT_SECONDS)
-        assert process.events == ["terminate", "wait:5"]
-
-    def test_kills_a_process_that_ignores_terminate(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        process = _FakeProcess(hang_on_wait=True)
-        self._run(monkeypatch, process)
-        with cluster_ui.background_port_forward(["kubectl"], 8080, timeout=3):
+        monkeypatch.setattr(cluster_ui.subprocess, "Popen", popen)
+        with cluster_ui.background_port_forward(("kubectl", "port-forward"), port, timeout=3):
             pass
+        assert launched == [
+            (
+                ["kubectl", "port-forward"],
+                {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT},
+            )
+        ]
         assert process.events == ["terminate", "wait:5", "kill", "wait:5"]
 
-    def test_an_exited_process_is_left_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        process = _FakeProcess(exited=0)
-        self._run(monkeypatch, process)
-        with cluster_ui.background_port_forward(["kubectl"], 8080):
-            pass
-        assert process.events == []
-
-    def test_readiness_failure_still_cleans_up(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        process = _FakeProcess()
-        self._run(monkeypatch, process, ready=False)
+    def test_a_failing_body_still_stops_kubectl(self) -> None:
+        port = _free_port()
+        script = (
+            "import time\n"
+            f"print('Forwarding from 127.0.0.1:{port} -> 8080', flush=True)\n"
+            "time.sleep(30)\n"
+        )
         with (
-            pytest.raises(RuntimeError, match="never ready"),
-            cluster_ui.background_port_forward(["kubectl"], 8080),
+            pytest.raises(RuntimeError, match="capture failed"),
+            cluster_ui.background_port_forward(self._stand_in(script), port) as process,
         ):
-            pytest.fail("body must not run")  # pragma: no cover
-        assert process.events == ["terminate", "wait:5"]
+            raise RuntimeError("capture failed")
+        assert process.poll() is not None
 
 
 # ─── Playwright capture ──────────────────────────────────────────────────────

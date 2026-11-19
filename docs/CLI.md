@@ -2513,7 +2513,10 @@ Forward the UI in the background, log in to the Argo CD API as `admin` and
 capture `/applications` with the session cookie as a full-page PNG — no browser
 sign-in. Needs Playwright (`pip install 'gco[diagrams]'` and
 `playwright install chromium` once). This is the code behind
-`images/argocd-ui.png`.
+`images/argocd-ui.png`. The command refuses a `--local-port` another process
+already listens on and sends the password only after kubectl reports its own
+listener on `127.0.0.1:<port>`, the address it then connects to
+(`crossplane screenshot` forwards the same way).
 
 ```bash
 gco gitops screenshot [OPTIONS]

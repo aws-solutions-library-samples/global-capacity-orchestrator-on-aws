@@ -536,9 +536,9 @@ class TestScreenshotCommand:
             {"server": _SERVER, "tls_server_name": _SNI, "context": _CONTEXT}
         ]
         assert capture["forwards"][0][0][-1] == f"--context={_CONTEXT}"
-        assert capture["tokens"] == [("http://localhost:8080", "from-secret")]
+        assert capture["tokens"] == [("http://127.0.0.1:8080", "from-secret")]
         (base_url, output, token, headless) = capture["captures"][0]
-        assert (base_url, token, headless) == ("http://localhost:8080", "jwt", True)
+        assert (base_url, token, headless) == ("http://127.0.0.1:8080", "jwt", True)
         assert output == tmp_path / "argocd-ui.png"
         (cmd, port) = capture["forwards"][0]
         assert port == 8080 and cmd[3:6] == ["argocd", "svc/argocd-server", "8080:80"]
@@ -569,8 +569,8 @@ class TestScreenshotCommand:
             ],
         )
         assert result.exit_code == 0, result.output
-        assert capture["tokens"] == [("http://localhost:18080", "given")]
-        assert capture["captures"] == [("http://localhost:18080", target, "jwt", False)]
+        assert capture["tokens"] == [("http://127.0.0.1:18080", "given")]
+        assert capture["captures"] == [("http://127.0.0.1:18080", target, "jwt", False)]
 
     def test_password_from_the_environment(
         self,
@@ -585,7 +585,7 @@ class TestScreenshotCommand:
             env={"GCO_ARGOCD_ADMIN_PASSWORD": "from-env"},
         )
         assert result.exit_code == 0, result.output
-        assert capture["tokens"] == [("http://localhost:8080", "from-env")]
+        assert capture["tokens"] == [("http://127.0.0.1:8080", "from-env")]
 
     def test_failures_exit_1(
         self,

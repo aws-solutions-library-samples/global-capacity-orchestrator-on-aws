@@ -302,7 +302,7 @@ class TestScreenshotCommand:
         assert result.exit_code == 0, result.output
         assert capture["forwards"][0][0][-1] == f"--context={_CONTEXT}"
         assert capture["captures"] == [
-            ("http://localhost:3001", tmp_path / "crossview-dashboard.png", True)
+            ("http://127.0.0.1:3001", tmp_path / "crossview-dashboard.png", True)
         ]
         (cmd, port) = capture["forwards"][0]
         assert port == 3001 and cmd[3:6] == [
@@ -331,7 +331,7 @@ class TestScreenshotCommand:
             ],
         )
         assert result.exit_code == 0, result.output
-        assert capture["captures"] == [("http://localhost:13001", target, False)]
+        assert capture["captures"] == [("http://127.0.0.1:13001", target, False)]
 
     def test_failures_exit_1(
         self,

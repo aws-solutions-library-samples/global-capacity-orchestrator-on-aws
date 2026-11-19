@@ -199,7 +199,7 @@ def crossplane_screenshot(
             )
             with cluster_ui.background_port_forward(cmd, bind_port):
                 written = capture_dashboard_screenshot(
-                    f"http://localhost:{bind_port}", output, headless=not headed
+                    f"http://127.0.0.1:{bind_port}", output, headless=not headed
                 )
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))

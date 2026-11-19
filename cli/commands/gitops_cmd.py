@@ -245,7 +245,8 @@ def gitops_screenshot(
     bind_port = local_port or DEFAULT_LOCAL_PORT
     output = output_path or Path.cwd() / DEFAULT_SCREENSHOT_FILENAME
     namespace, target, remote_port = PORT_FORWARD_TARGET
-    base_url = f"http://localhost:{bind_port}"
+    # The address background_port_forward verified kubectl listens on.
+    base_url = f"http://127.0.0.1:{bind_port}"
     try:
         context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(

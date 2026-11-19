@@ -25,6 +25,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -53,6 +54,11 @@ FOREGROUND_PORT_FORWARD_READY_TIMEOUT_SECONDS = 120.0
 #: kubectl prints one of these per local address it binds, once the API server
 #: has accepted the port-forward (client-go tools/portforward).
 _FORWARDING_LINE = re.compile(r"^Forwarding from \S+:(?P<port>\d+) -> \d+")
+#: The same line for kubectl's IPv4 listener, the address the background
+#: forward's callers connect to.
+_IPV4_FORWARDING_LINE = re.compile(r"^Forwarding from 127\.0\.0\.1:(?P<port>\d+) -> \d+")
+#: kubectl output lines kept to explain a background forward that failed.
+_ERROR_TAIL_LINES = 20
 
 #: How often the foreground readiness wait re-checks kubectl (it stays
 #: responsive to Ctrl-C between checks).
@@ -210,34 +216,28 @@ def read_secret_key(
     return base64.b64decode(data[key]).decode("utf-8")
 
 
-def wait_for_local_port(
-    port: int,
-    process: subprocess.Popen[bytes] | None = None,
-    *,
-    timeout: float = PORT_FORWARD_READY_TIMEOUT_SECONDS,
-) -> None:
-    """Block until 127.0.0.1:``port`` accepts a TCP connection.
+def require_free_local_port(port: int) -> None:
+    """Raise ``RuntimeError`` when something already accepts connections on 127.0.0.1:``port``."""
+    try:
+        connection = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    except OSError:
+        return
+    connection.close()
+    raise RuntimeError(
+        f"Another process already listens on 127.0.0.1:{port}; stop it or pass a free --local-port."
+    )
 
-    Raises ``RuntimeError`` when ``process`` (the port-forward) exits first or
-    the deadline passes.
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        if process is not None and process.poll() is not None:
-            stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
-            raise RuntimeError(
-                f"kubectl port-forward exited before localhost:{port} was ready: "
-                f"{stderr.strip() or f'exit code {process.returncode}'}"
-            )
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1.0):
-                return
-        except OSError:
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"localhost:{port} did not accept connections within {int(timeout)}s"
-                ) from None
-            time.sleep(0.5)
+
+def _drain_port_forward_output(
+    stream: Iterable[bytes], local_port: int, ready: threading.Event, tail: deque[str]
+) -> None:
+    """Read kubectl's output to EOF, setting ``ready`` at its IPv4 listener on ``local_port``."""
+    for raw in stream:
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        tail.append(line)
+        match = _IPV4_FORWARDING_LINE.match(line)
+        if match is not None and int(match.group("port")) == local_port:
+            ready.set()
 
 
 @contextmanager
@@ -249,17 +249,51 @@ def background_port_forward(
 ) -> Iterator[subprocess.Popen[bytes]]:
     """Run a validated ``kubectl port-forward`` argv in the background until exit.
 
-    Yields once the local port accepts connections; always terminates the
-    process (kill after a short grace period) on the way out.
+    Refuses a port another process already listens on, then yields once
+    kubectl reports its own listener on ``127.0.0.1:local_port``. kubectl
+    prints that line only after its listen there succeeded, so a caller that
+    connects to ``http://127.0.0.1:<port>`` (not ``localhost``, which can
+    resolve to another process on ``::1``) reaches kubectl. A port that merely
+    accepts connections proves nothing: the screenshot commands sent the Argo
+    CD admin password to whatever listened there. kubectl's output is drained
+    for the forward's whole life. The process is always terminated (killed
+    after a short grace period) on the way out.
     """
+    require_free_local_port(local_port)
     process = subprocess.Popen(  # nosemgrep: dangerous-subprocess-use-audit - argv built by build_port_forward_command; list form, no shell=True
-        list(cmd), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        list(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT
     )
+    ready = threading.Event()
+    tail: deque[str] = deque(maxlen=_ERROR_TAIL_LINES)
+    reader = threading.Thread(
+        target=_drain_port_forward_output,
+        args=(cast(IO[bytes], process.stdout), local_port, ready, tail),
+        name="kubectl-port-forward-output",
+        daemon=True,
+    )
+    reader.start()
     try:
-        wait_for_local_port(local_port, process, timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while not ready.wait(_READY_POLL_SECONDS):
+            if process.poll() is not None:
+                # The listener line may still be in flight from the reader.
+                reader.join(_RELAY_DRAIN_SECONDS)
+                if ready.is_set():
+                    break
+                detail = " ".join(line for line in tail if line.strip())
+                raise RuntimeError(
+                    f"kubectl port-forward exited before 127.0.0.1:{local_port} was ready: "
+                    f"{detail or f'exit code {process.returncode}'}"
+                )
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"kubectl port-forward did not report a listener on 127.0.0.1:{local_port} "
+                    f"within {timeout:g}s"
+                )
         yield process
     finally:
         _stop_process(process)
+        reader.join(_RELAY_DRAIN_SECONDS)
 
 
 def _stop_process(process: subprocess.Popen[bytes]) -> None:
