@@ -874,13 +874,15 @@ aws ecr describe-images \
 # 2. Use smaller base images
 # In your image build recipe: FROM python:3.14-slim instead of python:3.14
 
-# 3. Pre-pull images
-kubectl create daemonset image-puller \
-  --image=YOUR-IMAGE \
-  --namespace=kube-system
-
-# 4. Use image pull secrets for faster auth
+# 3. Pull from the cluster's own Region: push the image to the project's ECR
+#    registry, which replicates it to the workload Regions (images.replication),
+#    instead of pulling it from a public registry or another Region
+gco images push my-app -t v1 --local-image my-app:dev
 ```
+
+Pre-pulling with a DaemonSet helps less than it seems (and kubectl has no
+`create daemonset`): EKS Auto Mode adds a node when pods need one, and a
+DaemonSet's pod pulls the image on that node at the same time as yours.
 
 ### High CPU/Memory Usage
 
