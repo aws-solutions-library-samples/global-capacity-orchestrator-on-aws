@@ -69,11 +69,18 @@ def _aws_client() -> GCOAWSClient:
 def test_vector_region_resolution_handles_configured_and_absent_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in vector_store._REGION_ENV_ORDER:
+    for name in ("DYNAMODB_REGION", "GLOBAL_REGION", "AWS_REGION"):
         monkeypatch.delenv(name, raising=False)
     assert vector_store._resolve_region() is None
-    monkeypatch.setenv(vector_store._REGION_ENV_ORDER[0], "us-west-2")
-    assert vector_store._resolve_region() == "us-west-2"
+    monkeypatch.setenv("AWS_REGION", "us-west-1")
+    assert vector_store._resolve_region() == "us-west-1"
+    # The deployment's global Region comes before AWS_REGION ...
+    assert vector_store._resolve_region("us-east-2") == "us-east-2"
+    # ... and after the store variables, DYNAMODB_REGION first.
+    monkeypatch.setenv("GLOBAL_REGION", "eu-west-2")
+    assert vector_store._resolve_region("us-east-2") == "eu-west-2"
+    monkeypatch.setenv("DYNAMODB_REGION", "us-west-2")
+    assert vector_store._resolve_region("us-east-2") == "us-west-2"
 
 
 def test_vector_plain_recursively_converts_decimal_values() -> None:

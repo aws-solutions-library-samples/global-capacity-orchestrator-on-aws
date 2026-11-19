@@ -6894,9 +6894,27 @@ cluster-shared bucket are chunked and embedded by the
 `lambda/vector-ingest` Lambda automatically; `gco vector ingest` is a
 convenience wrapper around that upload.
 
-Corpus lifecycle notes: re-uploading a file overwrites its chunks in place
-(deterministic ids), deleting an S3 object does **not** delete its items,
-and adopting a newer `vector_store.embedding_model_id` means re-ingesting
+The commands read the deployment the CLI configuration names. The global
+stack publishes the table, index and bucket names as SSM parameters under
+`/{project_name}/` in `deployment_regions.global` only, so `gco vector`
+looks them up there and reads that Region's table unless `--region` names
+a replica. The project and Region come from `cdk.json` (`project_name`,
+`deployment_regions.global`), the config file, or `GCO_PROJECT_NAME` /
+`GCO_GLOBAL_REGION`; `DYNAMODB_REGION` or `GLOBAL_REGION`, when set, take
+precedence over the configured Region. `AWS_REGION` and the profile Region
+only choose where `gco vector search` calls Bedrock to embed the query
+(after `DYNAMODB_REGION` and `GLOBAL_REGION`).
+
+Corpus lifecycle notes: `gco vector ingest` uploads each file to the corpus
+prefix plus its file name (the directory is dropped), so ingesting a name
+that is already in the corpus replaces that document, and two files with
+the same name in one call are refused before anything is uploaded.
+Re-uploading overwrites the chunks in place (deterministic ids), but a file
+that makes fewer chunks than the one it replaces leaves the old file's last
+chunks behind until the corpus is re-created (see [Corpus lifecycle and
+limits](CUSTOMIZATION.md#corpus-lifecycle-and-limits)). Deleting an S3
+object does **not** delete its items, and adopting a newer
+`vector_store.embedding_model_id` means re-ingesting
 the corpus — vectors are only comparable to vectors from the model that
 wrote them. After the first enabled deploy the vector index takes several
 minutes to build; searches answer a "still building" hint until it is

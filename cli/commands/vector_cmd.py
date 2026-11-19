@@ -19,10 +19,21 @@ import click
 _VECTOR_UNAVAILABLE_HINT = (
     "The vector store is not available. The table, index, and ingest pipeline "
     "ship with the global stack when vector_store.enabled is true in cdk.json "
-    "(off by default): enable it and run 'gco stacks deploy gco-global', or "
+    "(off by default): enable it and run 'gco stacks deploy {global_stack}', or "
     "wait a few minutes for the vector index to finish building after the "
     "first deployment. 'gco vector status' shows where things stand."
 )
+
+
+def _config() -> Any:
+    """Return the CLI's merged configuration (cdk.json, config file, ``GCO_*``).
+
+    The root ``gco`` group stores it on the context; the ``vector`` group
+    invoked on its own (tests) loads it the same way.
+    """
+    from ..config import GCOConfig, get_config
+
+    return click.get_current_context().find_object(GCOConfig) or get_config()
 
 
 def _emit_json(payload: Any, *, err: bool = False) -> None:
@@ -47,16 +58,27 @@ def _emit_error(code: str, details: dict[str, Any] | None = None) -> None:
 
 def _exit_unavailable(err: Exception) -> None:
     """Print the deployment hint and a structured envelope, then exit 1."""
-    click.echo(_VECTOR_UNAVAILABLE_HINT, err=True)
+    click.echo(_VECTOR_UNAVAILABLE_HINT.format(global_stack=_config().global_stack_name), err=True)
     _emit_error("vector_store_unavailable", {"message": str(err)})
     raise SystemExit(1)
 
 
 def _build_client(query_region: str | None = None) -> Any:
-    """Construct the store client (SSM-lazy; free until first use)."""
+    """Construct the store client (SSM-lazy; free until first use).
+
+    The project name and global Region come from the CLI configuration, so
+    ``gco vector`` reads the deployment every other command addresses: the
+    SSM names the global stack publishes in its own Region, and that
+    Region's table unless ``query_region`` names a replica.
+    """
     from ..vector_store import VectorStoreClient
 
-    return VectorStoreClient(query_region=query_region)
+    config = _config()
+    return VectorStoreClient(
+        project_name=config.project_name,
+        global_region=config.global_region,
+        query_region=query_region,
+    )
 
 
 @click.group("vector")
@@ -69,6 +91,10 @@ def vector() -> None:
     files under the corpus prefix of the cluster-shared bucket — or use
     'gco vector ingest' — and the ingest Lambda chunks, embeds, and
     stores them.
+
+    The commands read the deployment the CLI configuration names: the
+    project_name and deployment_regions.global of cdk.json (or the config
+    file, GCO_PROJECT_NAME and GCO_GLOBAL_REGION).
     """
 
 
@@ -135,8 +161,12 @@ def vector_ingest_cmd(files: tuple[Path, ...], demo: bool, wait: bool, output: s
 
     Uploading IS ingestion: the S3 event notification invokes the ingest
     Lambda, which chunks, embeds, and writes the items; global-table
-    replication then fans them out to every replica region. Re-uploading
-    a file overwrites its chunks in place.
+    replication then fans them out to every replica region.
+
+    Each file uploads to the corpus prefix plus its file name (the
+    directory is dropped), so ingesting a name that is already in the
+    corpus replaces that document, overwriting its chunks in place. Two
+    FILES with the same name are refused before anything is uploaded.
     """
     from ..vector_store import (
         VectorStoreUnavailableError,
