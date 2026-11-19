@@ -2170,7 +2170,7 @@ Validate the shipped example manifests under `examples/`.
 
 #### `gco examples validate`
 
-Run [example-job validation](EXAMPLE_VALIDATION.md): deploy the configured GCO topology (force-enabling any optional schedulers or infrastructure features the selected examples need), execute every selected example through its **documented** submission path (`gco jobs submit`/`submit-sqs`/`submit-direct`, `gco dag run`, or `kubectl apply` over the CLI's own SSM-tunnel machinery), verify per-example success criteria, clean each example up, destroy everything, and write per-example reports. `--static-only` runs the offline contract checks in seconds with no AWS access and no consent flags — it is the minimum bar for any change under `examples/` (CI enforces the same checks).
+Run [example-job validation](EXAMPLE_VALIDATION.md): deploy the configured GCO topology (force-enabling any optional schedulers or infrastructure features the selected examples need), execute every selected example through its **documented** submission path (`gco jobs submit`/`submit-sqs`/`submit-direct`, `gco dag run`, or `kubectl apply` over the CLI's own SSM-tunnel machinery), verify per-example success criteria, clean each example up, destroy everything, and write per-example reports. `--static-only` runs the offline contract checks in seconds with no AWS access and no consent flags — it is the minimum bar for any change under `examples/` (CI enforces the same checks). During a live run, Ctrl-C, `SIGTERM` and `SIGHUP` reach the harness and its teardown is awaited exactly as for [`gco release validate`](#gco-release-validate).
 
 ```bash
 # Offline checks only (fast; no AWS):
@@ -4906,6 +4906,8 @@ Release validation lifecycle.
 
 Run [live release validation](LIVE_RELEASE_VALIDATION.md) end to end with no interactive prompts. The command derives the expected commit SHA, branch, run id, and a private report directory outside the checkout, then executes `python -m scripts.live_release_validation` with the derived identity. Consent is expressed through explicit flags — there is deliberately nothing to confirm interactively, which makes the command scriptable while keeping accidental invocation implausible. The harness itself re-verifies every identity claim (account, SHA, branch, clean worktree, healthy `CDKToolkit` stacks) before acting. When a cluster-facing action (`inference`, `platform-workloads`, `network-posture`, `eks-capabilities`) or `all` is selected, preflight also requires `session-manager-plugin` on `PATH` before deployment. Separate digest-pinned vLLM, SGLang and Triton images plus full immutable vLLM/SGLang model revisions are mandatory (Triton serves a harness-generated identity model from the model registry); exact framework requests/responses, model-info probes, the Mooncake store scenario, shared TLS proxy autoscaling, endpoint/HPA shape, and timeout contracts all belong to the main checkpoint identity.
 
+Ctrl-C, `SIGTERM` and `SIGHUP` are passed on to the harness once each. The first starts its controlled cleanup (the teardown, the final inventory and the report) and the command waits for it; a second stops the teardown but still writes the report. After 6 hours the command interrupts the harness again itself, and 5 minutes later kills it and prints the `--resume` command that finishes the teardown. The command exits with the harness's status (130 after Ctrl-C). See [Run the Script Locally](LIVE_RELEASE_VALIDATION.md#run-the-script-locally).
+
 ```bash
 gco release validate --expected-account 123456789012 \
   --i-understand-this-deploys-and-destroys-infrastructure \
@@ -4945,7 +4947,7 @@ gco release validate --expected-account 123456789012 \
 
 #### `gco release validate-upgrade`
 
-Run [upgrade validation](UPGRADE_VALIDATION.md): deploy the previous release from a private clone with that release's own `gco`, run its `gco upgrade` to the checked-out commit, verify the upgraded deployment (the topology check, unchanged control-plane stack IDs, recreated workload stacks, a job template written before the upgrade that must read back unchanged), then destroy everything and verify the account against its baseline. Like `gco release validate`, it derives the SHA, branch, run id and report directory, takes consent only as flags, and executes `python -m scripts.upgrade_validation`. The candidate commit is tagged only in a private mirror inside the run's workspace, never in your repository.
+Run [upgrade validation](UPGRADE_VALIDATION.md): deploy the previous release from a private clone with that release's own `gco`, run its `gco upgrade` to the checked-out commit, verify the upgraded deployment (the topology check, unchanged control-plane stack IDs, recreated workload stacks, a job template written before the upgrade that must read back unchanged), then destroy everything and verify the account against its baseline. Like `gco release validate`, it derives the SHA, branch, run id and report directory, takes consent only as flags, and executes `python -m scripts.upgrade_validation`. The candidate commit is tagged only in a private mirror inside the run's workspace, never in your repository. Ctrl-C, `SIGTERM` and `SIGHUP` reach the harness and its cleanup is awaited exactly as for `gco release validate`.
 
 ```bash
 gco release validate-upgrade --expected-account 123456789012 \

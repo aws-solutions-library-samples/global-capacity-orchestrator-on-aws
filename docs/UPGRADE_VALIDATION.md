@@ -164,7 +164,10 @@ itself is interrupted during a phase, `--resume` adopts what the phase left and
 then fails the phase instead of running it again: an interrupted upgrade is a
 failed validation, and the guaranteed cleanup tears the run down. Stopping the
 harness (Ctrl-C, `SIGTERM`, a closed terminal) stops the command and every CDK
-process it started. Killing it outright (`kill -9`) cannot, so the command keeps
+process it started. `gco release validate-upgrade` passes those signals on to
+the harness and waits for its cleanup and report the way `gco release validate`
+does ([bounded at 6 hours](LIVE_RELEASE_VALIDATION.md#run-the-script-locally)).
+Killing it outright (`kill -9`) cannot, so the command keeps
 going on its own; `--resume` then refuses to continue until it has finished or
 been stopped, and names its process ID.
 

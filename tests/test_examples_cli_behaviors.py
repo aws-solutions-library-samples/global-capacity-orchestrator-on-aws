@@ -137,9 +137,11 @@ def test_live_validation_rejects_unsafe_or_incomplete_requests(
 ) -> None:
     run_git = Mock()
     run = Mock()
+    run_harness = Mock()
     monkeypatch.setattr(examples_cmd, "_repo_root", lambda: Path("/checkout"))
     monkeypatch.setattr(examples_cmd, "_run_git", run_git)
     monkeypatch.setattr(examples_cmd.subprocess, "run", run)
+    monkeypatch.setattr(examples_cmd, "_run_harness", run_harness)
 
     result = runner.invoke(examples, ["validate", *extra_args])
 
@@ -147,6 +149,7 @@ def test_live_validation_rejects_unsafe_or_incomplete_requests(
     assert message in result.output
     run_git.assert_not_called()
     run.assert_not_called()
+    run_harness.assert_not_called()
 
 
 def test_live_validation_builds_exact_explicit_command_and_output(
@@ -156,10 +159,12 @@ def test_live_validation_builds_exact_explicit_command_and_output(
     repo_root = Path("/checkout")
     sha = "0123456789abcdef0123456789abcdef01234567"
     run_git = Mock(side_effect=[sha, "feature/ops"])
-    run = Mock(return_value=CompletedProcess([], 9))
+    run = Mock(return_value=9)
     monkeypatch.setattr(examples_cmd, "_repo_root", lambda: repo_root)
     monkeypatch.setattr(examples_cmd, "_run_git", run_git)
-    monkeypatch.setattr(examples_cmd.subprocess, "run", run)
+    # A live run goes through the interrupt relay, never subprocess.run.
+    monkeypatch.setattr(examples_cmd.subprocess, "run", Mock(side_effect=AssertionError))
+    monkeypatch.setattr(examples_cmd, "_run_harness", run)
 
     result = runner.invoke(
         examples,
@@ -234,7 +239,10 @@ def test_live_validation_builds_exact_explicit_command_and_output(
     assert invocation.kwargs == {
         "cwd": repo_root,
         "env": dict(os.environ),
-        "check": False,
+        "resume_hint": (
+            "Finish the teardown by running the same command again with "
+            "--resume --run-id RID-1 --report-dir /reports/RID-1."
+        ),
     }
     assert result.output.splitlines() == [
         "run-id:     RID-1",
@@ -254,7 +262,7 @@ def test_live_validation_derives_default_identity_and_omits_optional_flags(
     repo_root = Path("/checkout")
     sha = "0123456789abcdef0123456789abcdef01234567"
     home = Path("/home/test")
-    run = Mock(return_value=CompletedProcess([], 0))
+    run = Mock(return_value=0)
 
     class FrozenDateTime:
         @classmethod
@@ -270,7 +278,7 @@ def test_live_validation_derives_default_identity_and_omits_optional_flags(
     )
     monkeypatch.setattr(examples_cmd, "datetime", FrozenDateTime)
     monkeypatch.setattr(examples_cmd.Path, "home", classmethod(lambda _cls: home))
-    monkeypatch.setattr(examples_cmd.subprocess, "run", run)
+    monkeypatch.setattr(examples_cmd, "_run_harness", run)
 
     result = runner.invoke(
         examples,

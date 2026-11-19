@@ -80,8 +80,11 @@ Action pipeline: `preflight → static → baseline → deploy → examples →
 destroy → final-inventory`. Consent, identity verification (account, SHA,
 branch, clean worktree), checkpoint/resume, KMS-deletion authorization,
 and report privacy all behave exactly as documented for
-[live release validation](LIVE_RELEASE_VALIDATION.md). A failed example
-never skips teardown — `destroy` and `final-inventory` run regardless.
+[live release validation](LIVE_RELEASE_VALIDATION.md), and so does an
+interruption: `gco examples validate` passes Ctrl-C, `SIGTERM` and `SIGHUP`
+on to the harness and waits, up to 6 hours, for its teardown and report. A
+failed example never skips teardown — `destroy` and `final-inventory` run
+regardless.
 
 Per-run enablement is **derived from the selection**: examples that need
 off-by-default charts thread `helm_enabled_overrides` (`argocd`,

@@ -20,7 +20,7 @@ from typing import NoReturn
 
 import click
 
-from .release_cmd import CONSENT_FLAG, _repo_root, _run_git
+from .release_cmd import CONSENT_FLAG, _repo_root, _resume_hint, _run_git, _run_harness
 
 _ACCOUNT_RE = re.compile(r"\d{12}")
 
@@ -136,6 +136,9 @@ def examples_validate(
     change under ``examples/`` (CI enforces it too); behavior changes also
     require a live run for the affected examples. See
     docs/EXAMPLE_VALIDATION.md.
+
+    During a live run, Ctrl-C, SIGTERM and SIGHUP are passed on to the
+    harness and its teardown is awaited, as for `gco release validate`.
     """
     repo_root = _repo_root()
     selection_args: list[str] = []
@@ -231,5 +234,11 @@ def examples_validate(
     )
     click.echo(f"report-dir: {resolved_report_dir}")
 
-    result = subprocess.run(command, cwd=repo_root, env=dict(os.environ), check=False)
-    sys.exit(result.returncode)
+    sys.exit(
+        _run_harness(
+            command,
+            cwd=repo_root,
+            env=dict(os.environ),
+            resume_hint=_resume_hint(resolved_run_id, resolved_report_dir),
+        )
+    )
