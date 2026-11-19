@@ -426,6 +426,9 @@ def test_jobs_section_surfaces_totals_and_scan_completeness() -> None:
     assert section.data["totals"] == {"total": 4, "queued": 3, "running": 1}
     assert section.data["complete"] is True
     assert section.data["records_evaluated"] == 4
+    # The route aggregates `gco queue submit` records only (N22): the
+    # document says so, so `empty` is never read as "no jobs at all".
+    assert section.data["source"] == "central job queue"
     # A single attempt: a status snapshot reports a failing route honestly
     # rather than retrying past the section timeout.
     client.call_api.assert_called_once_with(

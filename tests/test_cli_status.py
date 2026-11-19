@@ -347,6 +347,35 @@ def test_status_table_names_drill_down_commands(runner: CliRunner) -> None:
     assert "gco inference list" in output
 
 
+def test_status_drill_downs_read_the_same_source_as_their_section(runner: CliRunner) -> None:
+    """``queue`` is SQS depth and ``jobs`` is the central job queue (N22).
+
+    Each heading must name the command that reads the same thing:
+    ``gco jobs queue-status`` reads SQS, ``gco queue stats`` calls the
+    queue-statistics route the jobs section reads.
+    """
+    result, _ = _invoke(
+        runner, [], config=_config(output_format="table"), document=_rich_document()
+    )
+
+    headings = {
+        line.split(" [", 1)[0]: line for line in result.output.splitlines() if " · " in line
+    }
+    assert headings["queue"].endswith("·  gco jobs queue-status --all-regions")
+    assert headings["jobs"].endswith("·  gco queue stats")
+
+
+def test_status_jobs_block_says_it_counts_the_central_job_queue(runner: CliRunner) -> None:
+    """Jobs sent with ``jobs submit``/``submit-sqs``/``submit-direct`` are not counted."""
+    result, _ = _invoke(
+        runner, [], config=_config(output_format="table"), document=_rich_document()
+    )
+
+    lines = result.output.splitlines()
+    jobs_heading = next(index for index, line in enumerate(lines) if line.startswith("jobs ["))
+    assert lines[jobs_heading + 1].startswith("  central job queue: total 41  queued 3")
+
+
 def test_status_table_and_json_render_the_same_document(runner: CliRunner) -> None:
     document = _rich_document()
     table_result, _ = _invoke(runner, [], config=_config(output_format="table"), document=document)

@@ -97,6 +97,12 @@ _DEGRADED_STATUSES = frozenset({STATUS_PARTIAL, STATUS_UNAVAILABLE, STATUS_ERROR
 REGION_SOURCE_CDK_JSON = "cdk.json"
 REGION_SOURCE_FLAG = "--region flag"
 
+# Source marker for the ``jobs`` section. The queue-statistics route counts
+# the central job queue's records, which only ``gco queue submit`` and
+# ``gco jobs submit-queue`` create; jobs sent with ``gco jobs submit``,
+# ``submit-sqs`` or ``submit-direct`` never appear there.
+JOBS_SOURCE_CENTRAL_QUEUE = "central job queue"
+
 # Stack health classification. Anything ending ``_IN_PROGRESS`` is a deploy
 # in flight; ``UPDATE_ROLLBACK_COMPLETE`` and friends mean the last deploy
 # did not take, which is unhealthy even though CloudFormation is at rest.
@@ -521,7 +527,12 @@ def _gather_queue(
 
 
 def _gather_jobs(config: GCOConfig, region: str | None) -> Section:
-    """Read fleet-wide job counts from the queue-statistics API route."""
+    """Read the central job queue's record counts from the queue-statistics route.
+
+    The route aggregates the job-queue table, so the section counts what
+    ``gco queue submit`` / ``gco jobs submit-queue`` queued and nothing else;
+    ``data["source"]`` says so, so ``empty`` is never read as "no jobs".
+    """
     from cli.aws_client import get_aws_client
 
     aws_client = get_aws_client(config)
@@ -552,6 +563,7 @@ def _gather_jobs(config: GCOConfig, region: str | None) -> Section:
         "running": int(summary.get("total_running", 0)),
     }
     data: dict[str, Any] = {
+        "source": JOBS_SOURCE_CENTRAL_QUEUE,
         "totals": totals,
         "by_region": by_region,
         "complete": bool(summary.get("complete", True)),
@@ -1047,7 +1059,7 @@ def derive_findings(sections: dict[str, Section]) -> list[Finding]:
                 severity=SEVERITY_WARN,
                 section=SECTION_JOBS,
                 message=(
-                    f"the job-count scan was truncated after {evaluated} records; "
+                    f"the central job-queue scan was truncated after {evaluated} records; "
                     "totals are a floor, not a count"
                 ),
             )

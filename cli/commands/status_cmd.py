@@ -34,11 +34,14 @@ pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
 # The summary is a route into the existing per-domain commands; every block
 # names its drill-down so the reader never has to guess the next command.
+# Each drill-down reads the same source as its section: ``queue`` is SQS
+# depth (``jobs queue-status``), ``jobs`` is the central job queue that
+# ``queue stats`` aggregates.
 _DRILL_DOWNS = {
     SECTION_REGIONS: "gco stacks regions list",
     SECTION_STACKS: "gco stacks status <name> --region <region>",
-    SECTION_QUEUE: "gco queue stats",
-    SECTION_JOBS: "gco jobs list --all-regions",
+    SECTION_QUEUE: "gco jobs queue-status --all-regions",
+    SECTION_JOBS: "gco queue stats",
     SECTION_CAPACITY: "gco capacity status",
     SECTION_INFERENCE: "gco inference list",
     SECTION_COSTS: "gco costs summary",
@@ -95,7 +98,7 @@ def _render_jobs(data: dict[str, Any]) -> list[str]:
     complete = data.get("complete", True)
     scan = "complete" if complete else f"TRUNCATED after {data.get('records_evaluated')} records"
     lines = [
-        f"total {totals.get('total', 0)}  queued {totals.get('queued', 0)}  "
+        f"central job queue: total {totals.get('total', 0)}  queued {totals.get('queued', 0)}  "
         f"running {totals.get('running', 0)}  (scan {scan})"
     ]
     for region, statuses in data.get("by_region", {}).items():
@@ -330,11 +333,12 @@ def status(
 ) -> None:
     """Show fleet-wide deployment status across configured regions.
 
-    Aggregates control-plane state — stacks, queue depth, jobs, capacity,
-    and inference endpoints — into one document. Every section carries its
-    own status, so a failed read degrades that section instead of hiding
-    the rest. Reads that bill per request or need cluster reachability are
-    opt-in flags.
+    Aggregates control-plane state — stacks, queue depth, central job-queue
+    counts, capacity, and inference endpoints — into one document. The jobs
+    section counts only `gco queue submit` records; list every job with
+    `gco jobs list --all-regions`. Every section carries its own status, so
+    a failed read degrades that section instead of hiding the rest. Reads
+    that bill per request or need cluster reachability are opt-in flags.
 
     Examples:
         gco status

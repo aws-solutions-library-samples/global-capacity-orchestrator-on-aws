@@ -6009,7 +6009,7 @@ gco stacks outputs gco-global -r us-east-2
 
 One read-only command that answers "what is my deployment doing right now?" across every
 configured region — the aggregate view that otherwise takes `gco stacks status`,
-`gco queue stats`, `gco jobs list --all-regions`, `gco capacity status`, and
+`gco jobs queue-status --all-regions`, `gco queue stats`, `gco capacity status`, and
 `gco inference list` run separately and joined by hand. The same document backs the
 `fleet_status` MCP tool, so an agent learns the whole fleet state in one call.
 
@@ -6058,8 +6058,8 @@ Kubernetes API, so both are opt-in flags.
 |---------|------|--------|
 | `regions` | 1 | `cdk.json` deployment topology (no AWS call) |
 | `stacks` | 1 | CloudFormation status per expected stack, plus deployed optional stacks |
-| `queue` | 1 | SQS job-queue and dead-letter-queue depth per region |
-| `jobs` | 1 | Job counts by region and status from the queue-statistics API |
+| `queue` | 1 | SQS job-queue and dead-letter-queue depth per region, as `gco jobs queue-status --all-regions` shows it |
+| `jobs` | 1 | Central job-queue records by region and status from the queue-statistics API, as `gco queue stats` shows them (`source: central job queue`). Only `gco queue submit` and `gco jobs submit-queue` create these records, so jobs sent with `gco jobs submit`, `submit-sqs` or `submit-direct` are not counted; list those with `gco jobs list --all-regions` |
 | `capacity` | 1 | Queue depth and GPU/CPU utilization per region, with telemetry provenance |
 | `inference` | 1 | Inference endpoint desired state from the global registry |
 | `costs` | 2 | Cost Explorer 30-day total by service, plus cost-allocation-tag status (`--with-costs`) |
@@ -6069,8 +6069,8 @@ Kubernetes API, so both are opt-in flags.
 **Section status vocabulary.** Every section carries a `status`; anything that
 is not `ok` or `empty` also carries a human-readable `reason` and the raw
 `errors`. The distinction between `empty` and `unavailable` is the point:
-"there are no jobs" and "I could not find out whether there are jobs" lead to
-opposite decisions.
+"the queue is empty" and "I could not find out whether the queue is empty" lead
+to opposite decisions.
 
 | Status | Meaning |
 |--------|---------|
