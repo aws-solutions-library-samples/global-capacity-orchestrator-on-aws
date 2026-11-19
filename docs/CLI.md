@@ -1548,7 +1548,7 @@ gco config-cmd init [OPTIONS]
 
 ```bash
 gco config-cmd init
-gco config-cmd init -f          # overwrite existing
+gco config-cmd init -f             # overwrite existing
 gco -r eu-west-1 config-cmd init   # template with default_region set
 ```
 
