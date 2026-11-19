@@ -1201,6 +1201,15 @@ If you need users to submit NetworkPolicy resources:
 "allowed_kinds": ["Job", "CronJob", "Deployment", "StatefulSet", "DaemonSet", "Service", "ConfigMap", "Pod", "TrainJob", "NetworkPolicy"]
 ```
 
+The list only decides what the processors accept. Creating the object also
+needs a Kubernetes grant: `gco-manifest-processor-sa` holds create, get,
+patch and delete in `gco-jobs` for the default kinds only
+(`gco-manifest-processor-role` in
+`lambda/kubectl-applier-simple/manifests/02-rbac.yaml`). For an added kind,
+bind it to a Role of your own in each allowed namespace, for example one
+granting `networking.k8s.io` `networkpolicies` the same verbs; without it the
+create is refused with 403.
+
 After changing any security policy or allowed_kinds settings, redeploy the regional stack:
 
 > **Note:** These settings apply to the **manifest processor** and **queue processor** validation layers. They do not affect containers or resources created outside the job submission APIs (e.g., by platform operators via kubectl directly or by Helm charts).

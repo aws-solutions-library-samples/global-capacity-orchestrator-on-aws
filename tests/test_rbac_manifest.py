@@ -116,7 +116,7 @@ class TestHealthMonitorRole:
         calls are read from the source, so a new call fails this test until
         its grant is added, and a grant no call needs fails it too.
         """
-        calls = _kubernetes_api_calls(HEALTH_MONITOR_PROCESS_MODULES)
+        calls = _kubernetes_api_calls(_process_modules("gco.services.health_api"))
         assert set(calls) == set(HEALTH_MONITOR_CALL_GRANTS), (
             "update HEALTH_MONITOR_CALL_GRANTS and 02-rbac.yaml for these calls: "
             f"{sorted(set(calls) ^ set(HEALTH_MONITOR_CALL_GRANTS), key=str)}"
@@ -313,7 +313,7 @@ class TestManifestProcessorRole:
         # Rules the manifest-processor writes to (excluding pods/log and events
         # which are read-only subresources/observability resources).
         write_resource_sets = [
-            {"pods", "services", "configmaps", "persistentvolumeclaims"},
+            {"pods", "services", "configmaps"},
             {"deployments", "statefulsets", "daemonsets"},
             {"jobs", "cronjobs"},
         ]
@@ -393,8 +393,9 @@ class TestManifestProcessorRole:
         for rule in role.get("rules", []):
             if "" in rule.get("apiGroups", []) and "events" in rule.get("resources", []):
                 event_verbs.update(rule.get("verbs", []))
-        assert {"get", "list"} <= event_verbs, (
-            "cluster-read role must grant core events 'get' and 'list' so the "
+        # The read is a field-selected list; nothing gets one event by name.
+        assert event_verbs == {"list"}, (
+            "cluster-read role must grant core events 'list' so the "
             "job events read can return Node and NodeClaim events"
         )
 
@@ -413,8 +414,8 @@ class TestManifestProcessorRole:
                 "resources", []
             ):
                 nodeclaim_verbs.update(rule.get("verbs", []))
-        assert {"get", "list"} <= nodeclaim_verbs, (
-            "cluster-read role must grant karpenter.sh nodeclaims 'get' and 'list'"
+        assert nodeclaim_verbs == {"list"}, (
+            "cluster-read role must grant karpenter.sh nodeclaims 'list'"
         )
         assert nodeclaim_verbs <= READ_ONLY_VERBS, (
             f"nodeclaims must stay read-only, got {nodeclaim_verbs - READ_ONLY_VERBS}"
@@ -969,15 +970,6 @@ class TestNamespaceScopedServiceDoesNotUseClusterAPIs:
 
 # ─── RBAC derived from the code ────────────────────────────────────
 
-#: Modules the health-monitor container runs (``python -m
-#: gco.services.health_api`` imports the rest).
-HEALTH_MONITOR_PROCESS_MODULES = (
-    "gco/services/health_api.py",
-    "gco/services/health_monitor.py",
-    "gco/services/webhook_dispatcher.py",
-    "gco/services/leader_lease.py",
-)
-
 #: The RBAC each Kubernetes API call of the health-monitor process needs, as
 #: (scope, apiGroup, resource, verb). Custom-object calls are keyed with the
 #: group and plural they pass.
@@ -1008,12 +1000,49 @@ _API_CLASSES = (
     k8s_client.CoreV1Api,
     k8s_client.CustomObjectsApi,
     k8s_client.NetworkingV1Api,
+    k8s_client.NodeV1Api,
     k8s_client.RbacAuthorizationV1Api,
     k8s_client.AutoscalingV2Api,
 )
 _API_METHODS = frozenset(
-    name for api in _API_CLASSES for name in dir(api) if not name.startswith("_")
+    name
+    for api in _API_CLASSES
+    for name in dir(api)
+    if name.split("_", 1)[0] in {"list", "read", "get", "create", "patch", "replace", "delete"}
 )
+
+
+def _module_file(module: str) -> Path | None:
+    path = Path(*module.split("."))
+    for candidate in (path.with_suffix(".py"), path / "__init__.py"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _process_modules(
+    entry: str, *, imported_for_helpers: frozenset[str] = frozenset()
+) -> list[str]:
+    """``entry`` and every gco module it imports, transitively, as dotted names.
+
+    ``imported_for_helpers`` names modules a process imports only for helpers
+    while their Kubernetes calls run in another process; they are not followed.
+    """
+    seen: set[str] = set()
+    pending = [entry]
+    while pending:
+        module = pending.pop()
+        path = _module_file(module)
+        if module in seen or module in imported_for_helpers or path is None:
+            continue
+        seen.add(module)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("gco"):
+                pending.append(str(node.module))
+                pending.extend(f"{node.module}.{alias.name}" for alias in node.names)
+            elif isinstance(node, ast.Import):
+                pending.extend(alias.name for alias in node.names if alias.name.startswith("gco"))
+    return sorted(seen)
 
 
 def _keyword_value(call: ast.Call, name: str, module: object) -> str | None:
@@ -1028,16 +1057,16 @@ def _keyword_value(call: ast.Call, name: str, module: object) -> str | None:
     return None
 
 
-def _kubernetes_api_calls(paths) -> set[tuple[str, str | None, str | None]]:
-    """``(method, group, plural)`` for every Kubernetes client method the files reference.
+def _kubernetes_api_calls(modules) -> set[tuple[str, str | None, str | None]]:
+    """``(method, group, plural)`` for every Kubernetes client method the modules reference.
 
     A method passed by reference (``asyncio.to_thread(api.list_node, ...)``,
     ``watch.stream(api.list_job_for_all_namespaces, ...)``) counts like a call.
     """
     found: set[tuple[str, str | None, str | None]] = set()
-    for path in paths:
-        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
-        module = importlib.import_module(path.removesuffix(".py").replace("/", "."))
+    for name in modules:
+        tree = ast.parse(Path(str(_module_file(name))).read_text(encoding="utf-8"))
+        module = importlib.import_module(name)
         custom_calls = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -1075,3 +1104,134 @@ def _grants(role: dict) -> set[tuple[str, str, str]]:
         for resource in rule.get("resources", [])
         for verb in rule.get("verbs", [])
     }
+
+
+#: The RBAC each Kubernetes API call of the manifest-processor service account
+#: needs. Two processes run as it: the REST service (``python -m
+#: gco.services.manifest_api``, its routes and the central queue worker) and
+#: the SQS queue processor. "cluster" grants come from
+#: gco-manifest-processor-cluster-read, "gco-jobs" grants from the gco-jobs
+#: Roles (gco-manifest-processor-role, and the Slurm token Role when Slurm is on).
+MANIFEST_PROCESSOR_CALL_GRANTS = {
+    # /readyz: one namespace list proves the API server answers.
+    ("list_namespace", None, None): {("cluster", "", "namespaces", "list")},
+    # Job and pod detail: the node a pod landed on.
+    ("read_node", None, None): {("cluster", "", "nodes", "get")},
+    # Job events in the job's namespace, Node and NodeClaim events in default.
+    ("list_namespaced_event", None, None): {
+        ("gco-jobs", "", "events", "list"),
+        ("cluster", "", "events", "list"),
+    },
+    ("list_cluster_custom_object", "karpenter.sh", "nodeclaims"): {
+        ("cluster", "karpenter.sh", "nodeclaims", "list")
+    },
+    ("get_namespaced_custom_object", "metrics.k8s.io", "pods"): {
+        ("cluster", "metrics.k8s.io", "pods", "get")
+    },
+    ("read_runtime_class", None, None): {("cluster", "node.k8s.io", "runtimeclasses", "get")},
+    ("list_namespaced_job", None, None): {("gco-jobs", "batch", "jobs", "list")},
+    ("read_namespaced_job", None, None): {("gco-jobs", "batch", "jobs", "get")},
+    ("delete_namespaced_job", None, None): {("gco-jobs", "batch", "jobs", "delete")},
+    ("list_namespaced_pod", None, None): {("gco-jobs", "", "pods", "list")},
+    ("read_namespaced_pod", None, None): {("gco-jobs", "", "pods", "get")},
+    ("read_namespaced_pod_log", None, None): {("gco-jobs", "", "pods/log", "get")},
+    ("list_namespaced_limit_range", None, None): {("gco-jobs", "", "limitranges", "list")},
+    ("list_namespaced_resource_quota", None, None): {("gco-jobs", "", "resourcequotas", "list")},
+    # The Slurm REST client's JWT (post-helm-slurm-api-access.yaml).
+    ("read_namespaced_secret", None, None): {("gco-jobs", "", "secrets", "get")},
+}
+
+#: The REST service imports the webhook dispatcher for its URL validation only;
+#: the dispatcher and its Lease run in the health-monitor pod.
+_MANIFEST_API_HELPER_IMPORTS = frozenset({"gco.services.webhook_dispatcher"})
+
+
+def _manifest_processor_calls() -> set[tuple[str, str | None, str | None]]:
+    rest = _process_modules(
+        "gco.services.manifest_api", imported_for_helpers=_MANIFEST_API_HELPER_IMPORTS
+    )
+    return _kubernetes_api_calls(rest) | _kubernetes_api_calls(
+        _process_modules("gco.services.queue_processor")
+    )
+
+
+def _manifest_processor_gco_jobs_roles() -> list[dict]:
+    """The gco-jobs Roles bound to gco-manifest-processor-sa, Slurm's included."""
+    import re
+
+    manifests = RBAC_MANIFEST_PATH.parent
+    roles = []
+    for path in (RBAC_MANIFEST_PATH, manifests / "post-helm-slurm-api-access.yaml"):
+        text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "placeholder", path.read_text(encoding="utf-8"))
+        docs = [doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)]
+        bound = {
+            doc["roleRef"]["name"]
+            for doc in docs
+            if doc["kind"] == "RoleBinding"
+            and doc["metadata"]["namespace"] == "gco-jobs"
+            and any(s.get("name") == "gco-manifest-processor-sa" for s in doc["subjects"])
+        }
+        roles.extend(
+            doc
+            for doc in docs
+            if doc["kind"] == "Role"
+            and doc["metadata"]["namespace"] == "gco-jobs"
+            and doc["metadata"]["name"] in bound
+        )
+    return roles
+
+
+class TestManifestProcessorRbacMatchesItsCalls:
+    """The manifest-processor service account holds what its two processes call."""
+
+    def test_every_call_has_a_known_grant(self):
+        calls = _manifest_processor_calls()
+        assert calls == set(MANIFEST_PROCESSOR_CALL_GRANTS), (
+            "update MANIFEST_PROCESSOR_CALL_GRANTS and the RBAC for these calls: "
+            f"{sorted(calls ^ set(MANIFEST_PROCESSOR_CALL_GRANTS), key=str)}"
+        )
+
+    def test_the_cluster_read_role_grants_exactly_the_cluster_scoped_calls(self, rbac_docs):
+        """No wildcard CRD groups: nothing the service runs reads Kueue, Ray or Volcano."""
+        needed = {
+            grant[1:]
+            for call in _manifest_processor_calls()
+            for grant in MANIFEST_PROCESSOR_CALL_GRANTS[call]
+            if grant[0] == "cluster"
+        }
+        role = _find_doc(rbac_docs, "ClusterRole", "gco-manifest-processor-cluster-read")
+        assert _grants(role) == needed
+
+    def test_the_gco_jobs_roles_cover_every_namespaced_call(self):
+        needed = {
+            grant[1:]
+            for call in _manifest_processor_calls()
+            for grant in MANIFEST_PROCESSOR_CALL_GRANTS[call]
+            if grant[0] == "gco-jobs"
+        }
+        granted = set().union(*(_grants(role) for role in _manifest_processor_gco_jobs_roles()))
+        assert needed <= granted, sorted(needed - granted)
+
+    def test_the_gco_jobs_role_names_only_resources_something_uses(self, rbac_docs):
+        """Each resource is a default submittable kind or the target of a typed call.
+
+        Submissions reach the dynamic client for the kinds in
+        job_validation_policy.allowed_kinds, by default
+        gco.job_admission.DEFAULT_ALLOWED_KINDS, which also pins their
+        apiVersions for the status and delete endpoints. PersistentVolumeClaim
+        is neither, so the Role grants no write on it.
+        """
+        from gco.job_admission import DEFAULT_ALLOWED_KINDS, RESOURCE_API_VERSIONS
+
+        assert set(RESOURCE_API_VERSIONS) == set(DEFAULT_ALLOWED_KINDS)
+        submittable = {kind.lower() + "s" for kind in DEFAULT_ALLOWED_KINDS}
+        typed = {
+            grant[2]
+            for grants in MANIFEST_PROCESSOR_CALL_GRANTS.values()
+            for grant in grants
+            if grant[0] == "gco-jobs"
+        }
+        role = _find_doc(rbac_docs, "Role", "gco-manifest-processor-role")
+        resources = {resource for _group, resource, _verb in _grants(role)}
+        assert resources <= submittable | typed, sorted(resources - submittable - typed)
+        assert submittable <= resources, sorted(submittable - resources)
