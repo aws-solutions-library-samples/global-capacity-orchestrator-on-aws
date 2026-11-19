@@ -4546,7 +4546,7 @@ gco monitoring open [OPTIONS]
 **Example:**
 
 ```bash
-# From inside the VPC:
+# From a host in the VPC that the cluster security group admits on 443:
 gco monitoring open --region us-east-1
 
 # From a laptop, tunnelling through an SSM-managed instance:

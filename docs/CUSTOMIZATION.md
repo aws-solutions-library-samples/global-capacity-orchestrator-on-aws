@@ -605,6 +605,15 @@ For direct kubectl access with private endpoints, you need network connectivity 
 - **Bastion Host**: EC2 instance in the VPC with kubectl configured
 - **AWS Cloud9**: IDE in the VPC with kubectl access
 
+Being in the VPC is not enough on its own: the EKS cluster security group admits
+HTTPS to the private endpoint only from itself, from GCO's own Lambdas and, with
+HyperPod on, from its nodes; no rule admits the VPC CIDR. Attach the cluster
+security group (the regional stack's `ClusterSecurityGroupId` output) to a bastion
+or Cloud9 instance, or add the security group of your instance or Client VPN
+endpoint to the cluster security group as an ingress source on 443. See
+[ARCHITECTURE.md → Network Security](ARCHITECTURE.md#network-security) for every
+client GCO itself runs.
+
 The `gco cluster tunnel` command automates the SSM path end-to-end — it opens an
 `AWS-StartPortForwardingSessionToRemoteHost` tunnel to the private API endpoint
 and prints the `kubectl` flags to use with it. `--via-ssm auto` even provisions a
