@@ -1038,11 +1038,11 @@ A region's Slurm cluster(s), reached through the GCO API's `/api/v1/slurm/*` rou
 | Tool | Description | Risk Tier | Gated By |
 |------|-------------|-----------|----------|
 | `monitoring_status` | Show the cluster observability toggle + config from `cdk.json` | safe | — |
-| `monitoring_users_list` | List Grafana users via the admin API | safe | — |
+| `monitoring_users_list` | List Grafana users via the admin API; `region` and `via_ssm` (an SSM-managed instance id) pick the cluster whose Grafana Secret it reads | safe | — |
 | `enable_monitoring` | Toggle cluster observability on in `cdk.json` | low-risk | — |
 | `disable_monitoring` | Toggle cluster observability off in `cdk.json` | low-risk | — |
-| `monitoring_user_add` | Add a Grafana user via the admin API | low-risk | — |
-| `monitoring_user_remove` | Remove a Grafana user (irreversible) | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
+| `monitoring_user_add` | Add a Grafana user via the admin API; takes `region` and `via_ssm` | low-risk | — |
+| `monitoring_user_remove` | Remove a Grafana user (irreversible); takes `region` and `via_ssm` | destructive | `GCO_ENABLE_DESTRUCTIVE_OPERATIONS` |
 
 ### Cluster
 

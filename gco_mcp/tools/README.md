@@ -272,9 +272,9 @@ Every registered MCP tool, grouped by module, with a one-line description from t
 | `disable_monitoring` | `gco monitoring disable` — flip cluster observability off in cdk.json. |
 | `enable_monitoring` | `gco monitoring enable` — flip cluster observability on in cdk.json. |
 | `monitoring_status` | `gco monitoring status` — show the cluster observability toggle + config. |
-| `monitoring_user_add` | `gco monitoring users add` — create a Grafana user via the admin API. |
-| `monitoring_user_remove` | `gco monitoring users remove` — delete a Grafana user (gated). |
-| `monitoring_users_list` | `gco monitoring users list` — list Grafana users via the admin API. |
+| `monitoring_user_add` | `gco monitoring users add` — create a Grafana user via the admin API. `region` and `via_ssm` (an SSM-managed instance id) pick the cluster whose Grafana Secret it reads; `via_ssm="auto"` is refused. |
+| `monitoring_user_remove` | `gco monitoring users remove` — delete a Grafana user (gated). Takes `region` and `via_ssm` like `monitoring_user_add`. |
+| `monitoring_users_list` | `gco monitoring users list` — list Grafana users via the admin API. Takes `region` and `via_ssm` like `monitoring_user_add`. |
 
 ### `nodepools.py`
 
@@ -458,7 +458,10 @@ transport the server's own stdin is the client's message stream, so an
 inherited one would let a CLI prompt read the client's messages. A prompt now
 reads end-of-file and the CLI exits at once (`Aborted!`). A tool must not rely
 on a prompt: pass `-y` or an environment variable instead, or refuse before
-calling the CLI, as `analytics_login_url` does without a password.
+calling the CLI, as `analytics_login_url` does without a password. No tool
+provisions an SSM bastion: a `via_ssm` argument names an existing
+SSM-managed instance, and the monitoring user tools refuse `auto`
+(`code: bastion_not_provisioned`).
 
 Every child process also gets its environment from `iam.child_environment(env)`:
 the server's own environment plus a tool's `env`, unless `GCO_MCP_ROLE_ARN` is

@@ -1071,9 +1071,13 @@ Prompts, namespaces, Regions and permissions:
   gave up. Pass `--region` where a script depends on the cluster, and outside
   the VPC `--via-ssm INSTANCE_ID|auto` (`-y` skips the `auto` bastion
   prompt): the read opens an SSM tunnel of its own, next to the one
-  `gco monitoring open` holds. The `monitoring_users_list` and `monitoring_user_add` MCP tools pass
-  neither option: run the server where the default Region's API endpoint is
-  reachable, or set `GCO_GRAFANA_ADMIN_PASSWORD` in its environment.
+  `gco monitoring open` holds. The `monitoring_users_list`,
+  `monitoring_user_add` and `monitoring_user_remove` MCP tools take optional
+  `region` and `via_ssm` arguments and pass them on; `via_ssm` names an
+  SSM-managed instance, and `auto` is refused
+  (`code: bastion_not_provisioned`) because the tools never launch a
+  bastion. Without `via_ssm`, run the server where the Region's API endpoint
+  is reachable, or set `GCO_GRAFANA_ADMIN_PASSWORD` in its environment.
 - **BREAKING: `gco vector status`, `search` and `ingest` read the CLI's
   deployment.** They take the project and the global Region from the CLI
   configuration (`project_name` and `deployment_regions.global` in
