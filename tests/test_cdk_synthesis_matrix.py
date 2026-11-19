@@ -29,8 +29,9 @@ findings. That test stays as-is. This file asserts that ``app.synth()``
 completes without raising for every config in ``CONFIGS``, mirroring what
 the old script checked, plus two template invariants cdk-nag cannot see:
 every Secrets Manager grant names exactly one secret, and the API Gateway
-auth secret's grants target the Region that secret lives in; and every
-CloudWatch alarm reads metrics of, and notifies a topic in, its own Region.
+auth secret's grants target the Region that secret lives in; every
+CloudWatch alarm reads metrics of, and notifies a topic in, its own Region;
+and every bucket that receives S3 server access logs uses SSE-S3.
 """
 
 from __future__ import annotations
@@ -589,13 +590,121 @@ def test_alarm_region_check(stacks: list[SimpleNamespace], problem: str | None) 
         assert len(problems) == 1 and problem in problems[0], problems
 
 
+def _default_encryption(bucket: Mapping[str, Any]) -> list[Any]:
+    """The ``SSEAlgorithm`` of each default-encryption rule of a bucket."""
+    encryption = (bucket.get("Properties") or {}).get("BucketEncryption") or {}
+    return [
+        (rule.get("ServerSideEncryptionByDefault") or {}).get("SSEAlgorithm")
+        for rule in encryption.get("ServerSideEncryptionConfiguration") or []
+    ]
+
+
+def _access_log_destination_problems(assembly: Any) -> list[str]:
+    """Every bucket that receives S3 server access logs without SSE-S3.
+
+    The S3 User Guide (Enabling Amazon S3 server access logging) requires the
+    destination bucket to use SSE-S3: with SSE-KMS default encryption, log
+    objects might be delivered encrypted with a key the bucket owner cannot
+    access. Each source bucket's ``LoggingConfiguration`` names its destination
+    by ``Ref``; a destination outside the source's stack cannot be checked here,
+    so it is reported too. cdk-nag does not relate the two buckets.
+    """
+    problems = []
+    for stack in assembly.stacks:
+        resources = stack.template.get("Resources") or {}
+        for logical_id, resource in resources.items():
+            properties = resource.get("Properties") or {}
+            if (
+                resource.get("Type") != "AWS::S3::Bucket"
+                or "LoggingConfiguration" not in properties
+            ):
+                continue
+            destination = properties["LoggingConfiguration"].get("DestinationBucketName")
+            target_id = destination.get("Ref") if isinstance(destination, dict) else None
+            target = resources.get(target_id) if isinstance(target_id, str) else None
+            if target is None or target.get("Type") != "AWS::S3::Bucket":
+                problems.append(
+                    f"{stack.stack_name}/{logical_id}: access logs go to "
+                    f"{_render(destination)}, not a bucket of this stack"
+                )
+            elif _default_encryption(target) != ["AES256"]:
+                problems.append(
+                    f"{stack.stack_name}/{target_id}: receives the access logs of {logical_id} "
+                    f"with default encryption {_default_encryption(target)}, not SSE-S3"
+                )
+    return problems
+
+
+def _logged_bucket(destination: Any) -> dict[str, Any]:
+    return {
+        "Type": "AWS::S3::Bucket",
+        "Properties": {"LoggingConfiguration": {"DestinationBucketName": destination}},
+    }
+
+
+def _encrypted_bucket(algorithm: str) -> dict[str, Any]:
+    return {
+        "Type": "AWS::S3::Bucket",
+        "Properties": {
+            "BucketEncryption": {
+                "ServerSideEncryptionConfiguration": [
+                    {"ServerSideEncryptionByDefault": {"SSEAlgorithm": algorithm}}
+                ]
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("resources", "problem"),
+    [
+        ({"Data": _logged_bucket({"Ref": "Logs"}), "Logs": _encrypted_bucket("AES256")}, None),
+        (
+            {"Data": _logged_bucket({"Ref": "Logs"}), "Logs": _encrypted_bucket("aws:kms")},
+            "gco-global/Logs: receives the access logs of Data with default encryption ['aws:kms']",
+        ),
+        (
+            {"Data": _logged_bucket({"Ref": "Logs"}), "Logs": {"Type": "AWS::S3::Bucket"}},
+            "with default encryption [], not SSE-S3",
+        ),
+        (
+            {"Data": _logged_bucket({"Fn::ImportValue": "logs-bucket"})},
+            "gco-global/Data: access logs go to",
+        ),
+        ({"Data": _logged_bucket("literal-bucket-name")}, "not a bucket of this stack"),
+        (
+            {"Data": _logged_bucket({"Ref": "Queue"}), "Queue": {"Type": "AWS::SQS::Queue"}},
+            "not a bucket of this stack",
+        ),
+    ],
+    ids=[
+        "sse-s3-destination",
+        "sse-kms-destination",
+        "no-default-encryption",
+        "imported-destination",
+        "literal-destination",
+        "destination-not-a-bucket",
+    ],
+)
+def test_access_log_destination_check(resources: dict[str, Any], problem: str | None) -> None:
+    """The template check behind ``test_synth_succeeds`` accepts an SSE-S3
+    destination and rejects every other one, so it cannot pass vacuously."""
+    stack = SimpleNamespace(stack_name="gco-global", template={"Resources": resources})
+    problems = _access_log_destination_problems(SimpleNamespace(stacks=[stack]))
+    if problem is None:
+        assert problems == []
+    else:
+        assert len(problems) == 1 and problem in problems[0], problems
+
+
 @pytest.mark.parametrize(("config_name", "overrides"), CONFIGS, ids=[c[0] for c in CONFIGS])
 def test_synth_succeeds(config_name: str, overrides: dict[str, Any]) -> None:
     """Every config in the shared matrix must synthesize without raising; every
     Secrets Manager grant it renders must name exactly one secret, in the Region
     that secret lives in (see ``_secret_grant_problems``); and every alarm must
     read metrics of, and notify a topic in, its own Region
-    (see ``_alarm_region_problems``)."""
+    (see ``_alarm_region_problems``); and every server access log destination
+    must be SSE-S3 (see ``_access_log_destination_problems``)."""
     from gco.config.config_loader import ConfigLoader
     from gco.stacks.constants import api_gateway_auth_secret_name
 
@@ -618,6 +727,10 @@ def test_synth_succeeds(config_name: str, overrides: dict[str, Any]) -> None:
     )
     assert not alarm_problems, "Alarms outside the Region of their data:\n" + "\n".join(
         alarm_problems
+    )
+    log_problems = _access_log_destination_problems(assembly)
+    assert not log_problems, "Access-log destinations S3 cannot deliver to:\n" + "\n".join(
+        log_problems
     )
 
 

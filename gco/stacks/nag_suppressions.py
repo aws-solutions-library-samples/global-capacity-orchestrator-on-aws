@@ -222,6 +222,39 @@ def acknowledge_security_group_cidr_findings(scope: IConstruct, *, reason: str) 
     )
 
 
+#: The rules that require SSE-KMS default encryption on every S3 bucket.
+_S3_DEFAULT_ENCRYPTION_KMS_RULES: tuple[str, ...] = (
+    "HIPAA.Security-S3DefaultEncryptionKMS",
+    "NIST.800.53.R5-S3DefaultEncryptionKMS",
+    "PCI.DSS.321-S3DefaultEncryptionKMS",
+)
+
+#: Why a bucket that receives S3 server access logs uses SSE-S3.
+ACCESS_LOG_DESTINATION_SSE_S3_REASON = (
+    "This bucket is an S3 server access log destination. The S3 User Guide "
+    "(Enabling Amazon S3 server access logging) requires a destination bucket "
+    "to use SSE-S3: with SSE-KMS default encryption, log objects might be "
+    "delivered encrypted with a key the bucket owner cannot access. The bucket "
+    "whose requests it logs is SSE-KMS."
+)
+
+
+def acknowledge_access_log_destination_encryption(bucket: IConstruct) -> None:
+    """Acknowledge the SSE-KMS rules on an S3 server access log destination bucket.
+
+    Server access logging requires an SSE-S3 destination, so the
+    ``S3DefaultEncryptionKMS`` rules cannot be met there. Scope this to the
+    destination bucket, never to a stack.
+    """
+    acknowledge_nag_findings(
+        bucket,
+        [
+            NagSuppression(id=rule, reason=ACCESS_LOG_DESTINATION_SSE_S3_REASON)
+            for rule in _S3_DEFAULT_ENCRYPTION_KMS_RULES
+        ],
+    )
+
+
 def nag_validation_plugins(
     scope: IConstruct, *, verbose: bool = True
 ) -> list[IPolicyValidationPlugin]:

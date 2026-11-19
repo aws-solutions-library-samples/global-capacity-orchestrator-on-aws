@@ -34,6 +34,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Default-deny ingress in `gco-inference`](#default-deny-ingress-in-gco-inference)
   - [Valkey and Aurora ConfigMaps only in `gco-jobs`](#valkey-and-aurora-configmaps-only-in-gco-jobs)
   - [Narrower platform service-account RBAC](#narrower-platform-service-account-rbac)
+  - [Access-logs buckets use SSE-S3](#access-logs-buckets-use-sse-s3)
 
 ## How an upgrade works
 
@@ -644,3 +645,16 @@ exactly the calls those services make.
   Role of your own in each allowed namespace, or the create is refused with
   403. Tooling that borrowed either service account's token for other reads
   needs a role of its own too.
+
+### Access-logs buckets use SSE-S3
+
+Earlier releases encrypted the server access logs of the cluster-shared,
+regional-shared and cost report buckets with each bucket's KMS key. S3 server
+access logging requires the destination bucket to use SSE-S3; with SSE-KMS,
+log objects might be delivered encrypted with a key the account cannot use.
+
+- **The three access-logs buckets switch to SSE-S3 in place.** The redeploy
+  changes only their default encryption and drops the key-policy statement
+  for `logging.s3.amazonaws.com`; no bucket is replaced and no object is
+  touched. Log objects delivered earlier keep their KMS encryption and stay
+  readable to principals with `kms:Decrypt` on the key, which is unchanged.

@@ -17,8 +17,8 @@ synthesized CloudFormation template:
   (belt-and-suspenders with ``enforce_ssl=True``),
 - KMS key has ``EnableKeyRotation=true`` and ``PendingWindowInDays=7``,
 - the cluster-shared access-logs bucket exists separately from the
-  ``model_bucket_access_logs`` bucket and is KMS-encrypted with the same
-  ``Cluster_Shared_KMS_Key``.
+  ``model_bucket_access_logs`` bucket and is SSE-S3, which S3 server access
+  logging requires of a destination bucket.
 
 No Docker or AWS calls — pure template assertions.
 """
@@ -347,38 +347,30 @@ class TestClusterSharedBucket:
             f"PendingWindowInDays should be 7, got {props.get('PendingWindowInDays')!r}"
         )
 
-    def test_access_logs_bucket_is_separate_and_kms_encrypted_with_cluster_shared_key(self):
-        """Cluster-shared access-logs bucket is distinct from ``model_bucket_access_logs`` and KMS-encrypted with the cluster-shared key."""
+    def test_access_logs_bucket_is_separate_and_sse_s3(self):
+        """Cluster-shared access-logs bucket is distinct from both other buckets and SSE-S3.
+
+        The S3 User Guide (Enabling Amazon S3 server access logging) requires a
+        log destination to use SSE-S3; with SSE-KMS default encryption, log
+        objects might be delivered encrypted with a key the owner cannot use.
+        """
         template = _synth(cdk.App())
 
         primary_lid, _ = _find_cluster_shared_bucket(template)
         access_logs_lid, access_logs = _find_cluster_shared_access_logs_bucket(template)
-        kms_lid, _ = _find_cluster_shared_kms_key(template)
 
         # Must be a different bucket than the primary.
         assert access_logs_lid != primary_lid, (
             "Access-logs bucket must be a distinct resource from the primary bucket"
         )
+        # Must also differ from the model-weights access-logs bucket: the
+        # primary bucket's LoggingConfiguration names this one.
+        assert access_logs_lid.startswith("ClusterSharedAccessLogsBucket"), access_logs_lid
 
-        # Must also differ from the model-weights access-logs bucket, which is
-        # SSE-S3-encrypted (SSEAlgorithm=AES256) and has no KMSMasterKeyID.
-        # The cluster-shared access-logs bucket is SSE-KMS with the
-        # cluster-shared key. This assertion distinguishes the two.
         encryption = access_logs["Properties"]["BucketEncryption"]
         cfgs = encryption["ServerSideEncryptionConfiguration"]
-        assert len(cfgs) == 1, f"Expected one SSE configuration, got {len(cfgs)}"
-        sse = cfgs[0]["ServerSideEncryptionByDefault"]
-        assert sse.get("SSEAlgorithm") == "aws:kms", (
-            f"cluster_shared_access_logs_bucket should use SSE-KMS, got {sse!r}"
-        )
-        key_id = sse.get("KMSMasterKeyID")
-        assert isinstance(key_id, dict) and "Fn::GetAtt" in key_id, (
-            f"KMSMasterKeyID should be a Fn::GetAtt reference, got {key_id!r}"
-        )
-        get_att = key_id["Fn::GetAtt"]
-        assert get_att[0] == kms_lid and get_att[1] == "Arn", (
-            "cluster_shared_access_logs_bucket should be encrypted with the "
-            f"cluster-shared KMS key, got GetAtt={get_att!r}"
+        assert cfgs == [{"ServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}], (
+            f"cluster_shared_access_logs_bucket should use SSE-S3 only, got {cfgs!r}"
         )
 
         # Sanity: the access-logs bucket has PublicAccessBlock fully enabled

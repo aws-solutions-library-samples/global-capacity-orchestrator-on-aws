@@ -201,6 +201,28 @@ class TestCostReportBucket:
         logging = bucket["Properties"]["LoggingConfiguration"]
         assert logging["LogFilePrefix"] == "cost-reports/"
 
+    def test_access_logs_bucket_is_sse_s3(self, template):
+        """S3 server access logging requires an SSE-S3 destination bucket.
+
+        With SSE-KMS default encryption, log objects might be delivered
+        encrypted with a key the owner cannot use (S3 User Guide, Enabling
+        Amazon S3 server access logging), so the key is not used for the logs.
+        """
+        destination = _cost_report_bucket(template)["Properties"]["LoggingConfiguration"][
+            "DestinationBucketName"
+        ]
+        logs_bucket = template.find_resources("AWS::S3::Bucket")[destination["Ref"]]
+        assert logs_bucket["Properties"]["BucketEncryption"] == {
+            "ServerSideEncryptionConfiguration": [
+                {"ServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}
+            ]
+        }
+        (key,) = template.find_resources("AWS::KMS::Key").values()
+        principals = [
+            statement["Principal"] for statement in key["Properties"]["KeyPolicy"]["Statement"]
+        ]
+        assert {"Service": "logging.s3.amazonaws.com"} not in principals
+
 
 class TestNoRegionalCostMonitors:
     """A monitoring stack synthesized without regional stacks grants nobody.

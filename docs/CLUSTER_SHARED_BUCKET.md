@@ -24,7 +24,9 @@ every regional GCO cluster's job-pod role can read and write. It is
 present on every deploy of `gco-global`, regardless of whether the
 analytics environment is enabled. The bucket, its access-logs bucket, and
 the `Cluster_Shared_KMS_Key` that encrypts it are all owned by
-`GCOGlobalStack`; no other stack creates, destroys, or mutates them.
+`GCOGlobalStack`; no other stack creates, destroys, or mutates them. The
+access-logs bucket uses SSE-S3 rather than the key, because S3 server access
+logging requires an SSE-S3 destination bucket.
 
 Bucket name: CloudFormation-generated (`gco-global-clustersharedbucket<hash>-<suffix>`). S3 bucket names are a global namespace and a deleted name is not reliably reusable, so the name is never reconstructed — resolve it from the SSM parameters or ConfigMap below ([ADR-0005](adr/0005-cloudformation-generated-s3-bucket-names.md)).
 Default global region: `us-east-2` (from `cdk.json::deployment_regions.global`).

@@ -3772,13 +3772,13 @@ class GCORegionalStack(Stack):
 
         1. ``regional_shared_kms_key`` — a customer-managed KMS key with annual
            rotation and a 7-day pending window on destroy. Its policy holds
-           CDK's account statement and the ``logging.s3.amazonaws.com`` grant
-           CDK adds for server access-log delivery into the KMS-encrypted
-           access-logs bucket. Nothing else is named: S3 encrypts and decrypts
-           objects with the requesting principal's own permissions
-           (``kms:ViaService``), and no CloudWatch Logs group uses the key.
+           only CDK's account statement: S3 encrypts and decrypts objects with
+           the requesting principal's own permissions (``kms:ViaService``),
+           the access-logs bucket does not use the key, and no CloudWatch Logs
+           group uses it.
         2. ``regional_shared_access_logs_bucket`` — the dedicated S3 access-logs
-           destination for the primary bucket.
+           destination for the primary bucket, SSE-S3 because S3 server access
+           logging requires an SSE-S3 destination bucket.
         3. ``regional_shared_bucket`` — the primary bucket. Its physical name
            is CloudFormation-generated (``<stack>-regionalsharedbucket…``):
            S3 bucket names are a global namespace and a deleted name is not
@@ -3839,13 +3839,13 @@ class GCORegionalStack(Stack):
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
         access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
 
-        # Dedicated access-logs bucket for the regional bucket, encrypted with
-        # the regional KMS key.
+        # Dedicated access-logs bucket for the regional bucket. SSE-S3: S3
+        # server access logging requires an SSE-S3 destination
+        # (ACCESS_LOG_DESTINATION_SSE_S3_REASON).
         self.regional_shared_access_logs_bucket = s3.Bucket(
             self,
             "RegionalSharedAccessLogsBucket",
-            encryption=s3.BucketEncryption.KMS,
-            encryption_key=self.regional_shared_kms_key,
+            encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
             versioned=True,
@@ -3937,7 +3937,10 @@ class GCORegionalStack(Stack):
         # CDK-nag suppressions scoped per-resource at the construct site,
         # mirroring the central bucket pattern. Every suppression carries an
         # explicit reason; no blanket bypasses.
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+        from gco.stacks.nag_suppressions import (
+            acknowledge_access_log_destination_encryption,
+            acknowledge_nag_findings,
+        )
 
         regional_replication_reason = (
             "The general-purpose regional bucket is a region-local store; "
@@ -4002,6 +4005,7 @@ class GCORegionalStack(Stack):
                 },
             ],
         )
+        acknowledge_access_log_destination_encryption(self.regional_shared_access_logs_bucket)
 
         # Grant the in-region pod role read/write on this bucket and use of its
         # KMS key — and nothing else. The grant lives next to the bucket it
