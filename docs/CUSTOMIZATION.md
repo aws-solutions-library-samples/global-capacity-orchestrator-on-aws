@@ -1651,13 +1651,18 @@ spec:
 
 ### Add Prometheus Monitoring
 
-```bash
-# Install Prometheus using Helm
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm install prometheus prometheus-community/kube-prometheus-stack \
-  --namespace monitoring \
-  --create-namespace
-```
+GCO already runs Prometheus. With `cluster_observability.enabled` (the
+default), every regional cluster gets kube-prometheus-stack, with Prometheus,
+Alertmanager and Grafana, in the `monitoring` namespace; see
+[MONITORING.md](MONITORING.md). Do not `helm install` a second copy: it would
+add a second Prometheus Operator over the same CRDs.
+
+That Prometheus discovers `ServiceMonitor` and `PodMonitor` objects in every
+namespace, so to scrape a workload of your own, create one next to it. Pods in
+`gco-jobs` and `gco-inference` accept connections only from the sources their
+NetworkPolicies name, so also add a NetworkPolicy that admits the Prometheus
+pods of the `monitoring` namespace on the metrics port. Browse the result with
+`gco monitoring open --service prometheus` or `--service grafana`.
 
 ## Cost Tracking Setup
 
