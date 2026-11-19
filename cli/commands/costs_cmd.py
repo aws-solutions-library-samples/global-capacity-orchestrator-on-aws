@@ -10,6 +10,10 @@ from ..output import confirm, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
+# Every --days window covers at least one day: Cost Explorer rejects an empty
+# or reversed period (a billed request), and the Athena queries need a day.
+_DAYS = click.IntRange(min=1)
+
 
 def _get_deployment_regions(config: GCOConfig) -> list[str]:
     """Get the list of regional deployment regions from cdk.json or fallback to default."""
@@ -60,7 +64,11 @@ def _print_query_result(config: Any, result: Any, title: str) -> None:
 
 @costs.command("summary")
 @click.option(
-    "--days", "-d", default=30, type=int, help="Number of days to look back (default: 30)"
+    "--days",
+    "-d",
+    default=30,
+    type=_DAYS,
+    help="Number of days to look back (default: 30)",
 )
 @click.option(
     "--all", "show_all", is_flag=True, help="Show all account costs (not filtered by GCO tag)"
@@ -116,7 +124,11 @@ def costs_summary(config: Any, days: Any, show_all: Any) -> None:
 
 @costs.command("regions")
 @click.option(
-    "--days", "-d", default=30, type=int, help="Number of days to look back (default: 30)"
+    "--days",
+    "-d",
+    default=30,
+    type=_DAYS,
+    help="Number of days to look back (default: 30)",
 )
 @pass_config
 def costs_regions(config: Any, days: Any) -> None:
@@ -158,7 +170,7 @@ def costs_regions(config: Any, days: Any) -> None:
 
 
 @costs.command("trend")
-@click.option("--days", "-d", default=14, type=int, help="Number of days (default: 14)")
+@click.option("--days", "-d", default=14, type=_DAYS, help="Number of days (default: 14)")
 @click.option(
     "--all", "show_all", is_flag=True, help="Show all account costs (not filtered by GCO tag)"
 )
@@ -212,11 +224,16 @@ def costs_trend(config: Any, days: Any, show_all: Any) -> None:
 def costs_workloads(config: Any, region: Any) -> None:
     """Estimate costs for running workloads (jobs and inference endpoints).
 
+    Reads each region's cluster with your kubeconfig credentials, so its API
+    endpoint must be reachable from here. A region that cannot be read is
+    named on stderr and the command exits 1; the other regions are still
+    printed.
+
     Examples:
         gco costs workloads
         gco costs workloads -r us-east-1
     """
-    from ..costs import get_cost_tracker
+    from ..costs import WorkloadReadError, get_cost_tracker
 
     formatter = get_output_formatter(config)
 
@@ -225,63 +242,82 @@ def costs_workloads(config: Any, region: Any) -> None:
 
         regions = [region] if region else _get_deployment_regions(config)
         all_workloads = []
+        unread: list[str] = []
 
         for r in regions:
-            workloads = tracker.estimate_running_workloads(r)
+            try:
+                workloads = tracker.estimate_running_workloads(r)
+            except WorkloadReadError as e:
+                workloads = e.workloads
+                unread.append(r)
+                for error in e.errors:
+                    formatter.print_error(f"{r}: {error}")
             all_workloads.extend(workloads)
 
-        if config.output_format != "table":
-            formatter.print(
-                [
-                    {
-                        "name": w.name,
-                        "type": w.workload_type,
-                        "instance_type": w.instance_type,
-                        "gpu_count": w.gpu_count,
-                        "hourly_rate": w.hourly_rate,
-                        "runtime_hours": w.runtime_hours,
-                        "estimated_cost": w.estimated_cost,
-                        "region": w.region,
-                    }
-                    for w in all_workloads
-                ]
-            )
-            return
-
-        if not all_workloads:
-            formatter.print_info("No running workloads found")
-            return
-
-        print(f"\n  Running Workload Costs ({len(all_workloads)} workloads)")
-        print("  " + "-" * 95)
-        print(
-            f"  {'NAME':<30} {'TYPE':<10} {'INSTANCE':<15} {'GPU':>3} {'$/HR':>8} {'HOURS':>7} {'COST':>10}"
-        )
-        print("  " + "-" * 95)
-
-        total = 0.0
-        for w in sorted(all_workloads, key=lambda x: x.estimated_cost, reverse=True):
-            name = w.name[:29]
-            print(
-                f"  {name:<30} {w.workload_type:<10} {w.instance_type:<15} "
-                f"{w.gpu_count:>3} ${w.hourly_rate:>7.3f} {w.runtime_hours:>7.1f} ${w.estimated_cost:>9.4f}"
-            )
-            total += w.estimated_cost
-
-        total_hourly = sum(w.hourly_rate for w in all_workloads)
-        print("  " + "-" * 95)
-        print(
-            f"  {'TOTAL':<30} {'':10} {'':15} {'':>3} ${total_hourly:>7.3f} {'':>7} ${total:>9.4f}"
-        )
-        print()
-
+        _report_workloads(config, formatter, all_workloads, regions, unread)
     except Exception as e:
         formatter.print_error(f"Failed to estimate workload costs: {e}")
         sys.exit(1)
 
+    if unread:
+        # The estimate above leaves these regions out.
+        sys.exit(1)
+
+
+def _report_workloads(
+    config: Any, formatter: Any, all_workloads: list[Any], regions: list[str], unread: list[str]
+) -> None:
+    """Print the workload estimates; the ``unread`` regions are already reported."""
+    if config.output_format != "table":
+        formatter.print(
+            [
+                {
+                    "name": w.name,
+                    "type": w.workload_type,
+                    "instance_type": w.instance_type,
+                    "gpu_count": w.gpu_count,
+                    "hourly_rate": w.hourly_rate,
+                    "runtime_hours": w.runtime_hours,
+                    "estimated_cost": w.estimated_cost,
+                    "region": w.region,
+                }
+                for w in all_workloads
+            ]
+        )
+        return
+
+    if not all_workloads:
+        read = [r for r in regions if r not in unread]
+        if not unread:
+            formatter.print_info("No running workloads found")
+        elif read:
+            formatter.print_info(f"No running workloads found in {', '.join(read)}")
+        return
+
+    print(f"\n  Running Workload Costs ({len(all_workloads)} workloads)")
+    print("  " + "-" * 95)
+    print(
+        f"  {'NAME':<30} {'TYPE':<10} {'INSTANCE':<15} {'GPU':>3} {'$/HR':>8} {'HOURS':>7} {'COST':>10}"
+    )
+    print("  " + "-" * 95)
+
+    total = 0.0
+    for w in sorted(all_workloads, key=lambda x: x.estimated_cost, reverse=True):
+        name = w.name[:29]
+        print(
+            f"  {name:<30} {w.workload_type:<10} {w.instance_type:<15} "
+            f"{w.gpu_count:>3} ${w.hourly_rate:>7.3f} {w.runtime_hours:>7.1f} ${w.estimated_cost:>9.4f}"
+        )
+        total += w.estimated_cost
+
+    total_hourly = sum(w.hourly_rate for w in all_workloads)
+    print("  " + "-" * 95)
+    print(f"  {'TOTAL':<30} {'':10} {'':15} {'':>3} ${total_hourly:>7.3f} {'':>7} ${total:>9.4f}")
+    print()
+
 
 @costs.command("forecast")
-@click.option("--days", "-d", default=30, type=int, help="Days to forecast (default: 30)")
+@click.option("--days", "-d", default=30, type=_DAYS, help="Days to forecast (default: 30)")
 @pass_config
 def costs_forecast(config: Any, days: Any) -> None:
     """Forecast GCO costs for the next N days.
@@ -290,18 +326,13 @@ def costs_forecast(config: Any, days: Any) -> None:
         gco costs forecast
         gco costs forecast --days 60
     """
-    from ..costs import get_cost_tracker
+    from ..costs import CostDataUnavailableError, get_cost_tracker
 
     formatter = get_output_formatter(config)
 
     try:
         tracker = get_cost_tracker(config)
         forecast = tracker.get_forecast(days_ahead=days)
-
-        if "error" in forecast:
-            formatter.print_error(f"Forecast unavailable: {forecast['error']}")
-            formatter.print_info("Cost Explorer needs 14+ days of data to generate forecasts")
-            return
 
         if config.output_format != "table":
             formatter.print(forecast)
@@ -314,6 +345,10 @@ def costs_forecast(config: Any, days: Any) -> None:
         print(f"  Daily average:    ${total / days:>10.2f}")
         print()
 
+    except CostDataUnavailableError as e:
+        formatter.print_error(f"Forecast unavailable: {e}")
+        formatter.print_info("Cost Explorer needs 14+ days of data to generate forecasts")
+        sys.exit(1)
     except Exception as e:
         formatter.print_error(f"Failed to get forecast: {e}")
         sys.exit(1)
@@ -530,7 +565,7 @@ def costs_k8s(config: Any) -> None:
 
 
 @costs_k8s.command("namespaces")
-@click.option("--days", "-d", default=7, type=int, help="Days to look back (default: 7)")
+@click.option("--days", "-d", default=7, type=_DAYS, help="Days to look back (default: 7)")
 @click.option("--region", "-r", help="Restrict to one deployment region")
 @pass_config
 def costs_k8s_namespaces(config: Any, days: Any, region: Any) -> None:
@@ -555,7 +590,7 @@ def costs_k8s_namespaces(config: Any, days: Any, region: Any) -> None:
 
 
 @costs_k8s.command("regions")
-@click.option("--days", "-d", default=7, type=int, help="Days to look back (default: 7)")
+@click.option("--days", "-d", default=7, type=_DAYS, help="Days to look back (default: 7)")
 @pass_config
 def costs_k8s_regions(config: Any, days: Any) -> None:
     """Show Kubernetes allocation cost by deployment region.
@@ -577,7 +612,7 @@ def costs_k8s_regions(config: Any, days: Any) -> None:
 
 
 @costs_k8s.command("trend")
-@click.option("--days", "-d", default=14, type=int, help="Days to look back (default: 14)")
+@click.option("--days", "-d", default=14, type=_DAYS, help="Days to look back (default: 14)")
 @click.option(
     "--granularity",
     type=click.Choice(["daily", "hourly"]),
@@ -619,7 +654,7 @@ def costs_k8s_trend(config: Any, days: Any, granularity: Any, namespace: Any) ->
     show_default=True,
     help="Grouping dimension",
 )
-@click.option("--days", "-d", default=7, type=int, help="Days to look back (default: 7)")
+@click.option("--days", "-d", default=7, type=_DAYS, help="Days to look back (default: 7)")
 @pass_config
 def costs_k8s_top(config: Any, top_n: Any, by: Any, days: Any) -> None:
     """Show the top-N spenders by namespace, region, or cluster.

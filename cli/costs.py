@@ -13,10 +13,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 from gco.k8s_objects import present
 
-from .config import GCOConfig, get_config
+from .config import GCOConfig, _load_cdk_tags, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +30,58 @@ logger = logging.getLogger(__name__)
 # GPU spend.
 DEFAULT_COST_ALLOCATION_TAG_KEYS: tuple[str, ...] = ("Project", "aws:eks:cluster-name")
 
+# The cost allocation tag the Cost Explorer queries filter on, and the value
+# the committed cdk.json gives it.
+PROJECT_TAG_KEY = "Project"
+DEFAULT_PROJECT_TAG_VALUE = "GCO"
+
 # UpdateCostAllocationTagsStatus accepts at most 20 entries per call and
 # ListCostAllocationTags at most 20 TagKeys filters; batch both.
 _COST_ALLOCATION_TAG_BATCH_SIZE = 20
+
+
+class CostDataUnavailableError(RuntimeError):
+    """Cost Explorer lacks the history the request needs (``DataUnavailableException``)."""
+
+
+def project_tag_value() -> str:
+    """Value of the ``Project`` tag the stacks carry.
+
+    app.py tags every stack with cdk.json ``context.tags``, so the value is
+    read from there (the project root's cdk.json); outside a checkout, or
+    when cdk.json sets none, it is the committed default ``GCO``.
+    """
+    value = _load_cdk_tags().get(PROJECT_TAG_KEY)
+    return value if isinstance(value, str) and value else DEFAULT_PROJECT_TAG_VALUE
+
+
+def _project_tag_filter() -> dict[str, Any]:
+    """Cost Explorer filter matching spend tagged with this project's ``Project`` value."""
+    return {"Tags": {"Key": PROJECT_TAG_KEY, "Values": [project_tag_value()]}}
+
+
+def _results_by_time(ce: Any, request: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every ``ResultsByTime`` entry of a GetCostAndUsage request, across its pages.
+
+    Cost Explorer returns ``NextPageToken`` when a result exceeds one page;
+    the service has no boto3 paginator, so the token is followed here.
+    """
+    results: list[dict[str, Any]] = []
+    token: str | None = None
+    while True:
+        page_request = {**request, "NextPageToken": token} if token else request
+        response = ce.get_cost_and_usage(**page_request)
+        results.extend(response.get("ResultsByTime", []))
+        token = response.get("NextPageToken")
+        if not token:
+            return results
+
+
+def _client_error_code(error: BaseException) -> str:
+    """The AWS error code of a botocore ``ClientError``, else an empty string."""
+    if isinstance(error, ClientError):
+        return str(error.response.get("Error", {}).get("Code", ""))
+    return ""
 
 
 @dataclass
@@ -72,6 +122,27 @@ class WorkloadCost:
     status: str
 
 
+#: Namespaces ``gco costs workloads`` prices, with the workload kind each holds.
+_WORKLOAD_NAMESPACES: tuple[tuple[str, str], ...] = (
+    ("gco-inference", "inference"),
+    ("gco-jobs", "job"),
+)
+
+
+class WorkloadReadError(RuntimeError):
+    """Some or all of a region's running workloads could not be read.
+
+    ``errors`` names each read that failed; ``workloads`` holds the estimates
+    for what was read.
+    """
+
+    def __init__(self, region: str, errors: list[str], workloads: list[WorkloadCost]) -> None:
+        super().__init__("; ".join(errors))
+        self.region = region
+        self.errors = errors
+        self.workloads = workloads
+
+
 class CostTracker:
     """Track and estimate costs for GCO resources."""
 
@@ -105,15 +176,10 @@ class CostTracker:
         }
 
         if not unfiltered:
-            kwargs["Filter"] = {
-                "Tags": {
-                    "Key": "Project",
-                    "Values": ["GCO"],
-                }
-            }
+            kwargs["Filter"] = _project_tag_filter()
 
         try:
-            response = ce.get_cost_and_usage(**kwargs)
+            results = _results_by_time(ce, kwargs)
         except Exception as e:
             raise RuntimeError(f"Cost Explorer query failed: {e}") from e
 
@@ -123,13 +189,19 @@ class CostTracker:
             period_end=end.isoformat(),
         )
 
-        for result in response.get("ResultsByTime", []):
+        # A window that crosses a month boundary has one ResultsByTime entry
+        # per month, each naming the service again: sum per service first.
+        by_service: dict[str, float] = {}
+        for result in results:
             for group in result.get("Groups", []):
                 service = group["Keys"][0]
                 amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
-                if amount > 0.001:
-                    summary.by_service.append(ResourceCost(service=service, amount=amount))
-                    summary.total += amount
+                by_service[service] = by_service.get(service, 0.0) + amount
+
+        for service, amount in by_service.items():
+            if amount > 0.001:
+                summary.by_service.append(ResourceCost(service=service, amount=amount))
+                summary.total += amount
 
         # Sort by cost descending
         summary.by_service.sort(key=lambda x: x.amount, reverse=True)
@@ -144,28 +216,26 @@ class CostTracker:
         start = end - timedelta(days=days)
 
         try:
-            response = ce.get_cost_and_usage(
-                TimePeriod={
-                    "Start": start.isoformat(),
-                    "End": end.isoformat(),
+            results = _results_by_time(
+                ce,
+                {
+                    "TimePeriod": {
+                        "Start": start.isoformat(),
+                        "End": end.isoformat(),
+                    },
+                    "Granularity": "MONTHLY",
+                    "Metrics": ["UnblendedCost"],
+                    "Filter": _project_tag_filter(),
+                    "GroupBy": [
+                        {"Type": "DIMENSION", "Key": "REGION"},
+                    ],
                 },
-                Granularity="MONTHLY",
-                Metrics=["UnblendedCost"],
-                Filter={
-                    "Tags": {
-                        "Key": "Project",
-                        "Values": ["GCO"],
-                    }
-                },
-                GroupBy=[
-                    {"Type": "DIMENSION", "Key": "REGION"},
-                ],
             )
         except Exception as e:
             raise RuntimeError(f"Cost Explorer query failed: {e}") from e
 
         by_region: dict[str, float] = {}
-        for result in response.get("ResultsByTime", []):
+        for result in results:
             for group in result.get("Groups", []):
                 region = group["Keys"][0]
                 amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
@@ -191,20 +261,15 @@ class CostTracker:
         }
 
         if not unfiltered:
-            kwargs["Filter"] = {
-                "Tags": {
-                    "Key": "Project",
-                    "Values": ["GCO"],
-                }
-            }
+            kwargs["Filter"] = _project_tag_filter()
 
         try:
-            response = ce.get_cost_and_usage(**kwargs)
+            results = _results_by_time(ce, kwargs)
         except Exception as e:
             raise RuntimeError(f"Cost Explorer query failed: {e}") from e
 
         trend = []
-        for result in response.get("ResultsByTime", []):
+        for result in results:
             date = result["TimePeriod"]["Start"]
             amount = float(result["Total"]["UnblendedCost"]["Amount"])
             trend.append({"date": date, "amount": amount})
@@ -212,99 +277,120 @@ class CostTracker:
         return trend
 
     def estimate_running_workloads(self, region: str) -> list[WorkloadCost]:
-        """Estimate costs for currently running workloads in a region."""
+        """Estimate costs for currently running workloads in a region.
+
+        Lists the pods of the job and inference namespaces in the region's
+        cluster with the caller's kubeconfig credentials, so the cluster's
+        API endpoint must be reachable from here. Every request goes through
+        :class:`~gco.services.k8s_client.BoundedApiClient`, which bounds it by
+        ``K8S_API_TIMEOUT`` (default 30 s).
+
+        Raises:
+            WorkloadReadError: access to the cluster could not be set up, or
+                a namespace could not be listed. Its ``workloads`` holds the
+                estimates for the namespaces that were read, so a cluster that
+                cannot be reached never reads as one with nothing running.
+        """
         try:
             from .capacity import get_capacity_checker
         except ImportError:
             return []
 
+        from kubernetes import client as k8s_client
+        from kubernetes import config as k8s_config
+        from kubernetes.client.exceptions import ApiException
+
+        from gco.services.k8s_client import BoundedApiClient
+
+        from .kubectl_helpers import update_kubeconfig
+
         checker = get_capacity_checker(self._config)
         estimates: list[WorkloadCost] = []
+        project_name = (self._config or get_config()).project_name
+        cluster_name = f"{project_name}-{region}"
 
-        # Get running pods from EKS
         try:
-            project_name = (self._config or get_config()).project_name
-            cluster_name = f"{project_name}-{region}"
-
-            from .kubectl_helpers import update_kubeconfig
-
             update_kubeconfig(cluster_name, region)
-
-            from kubernetes import client as k8s_client
-            from kubernetes import config as k8s_config
-
             k8s_config.load_kube_config()
-            v1 = k8s_client.CoreV1Api()
-
-            # Check inference namespace
-            for ns in ["gco-inference", "gco-jobs"]:
-                try:
-                    pods = v1.list_namespaced_pod(namespace=ns)
-                except Exception as e:
-                    logger.debug("Failed to list pods in %s: %s", ns, e)
-                    continue
-
-                for pod in pods.items:
-                    status = present(pod.status, "pod.status")
-                    phase = status.phase
-
-                    if phase not in ("Running", "Pending"):
-                        continue
-                    name = present(present(pod.metadata, "pod.metadata").name, "pod.metadata.name")
-
-                    spec = present(pod.spec, "pod.spec")
-                    gpu_count = 0
-                    instance_type = "unknown"
-                    # Get GPU requests
-                    for container in spec.containers or []:
-                        resources = present(container.resources, "container.resources")
-                        requests = resources.requests or {}
-                        gpu_req = requests.get(  # nosec B113  # dict.get(), not HTTP requests
-                            "nvidia.com/gpu", "0"
-                        )
-                        gpu_count += int(gpu_req)
-
-                    # Get node instance type
-                    if spec.node_name:
-                        try:
-                            node = v1.read_node(spec.node_name)
-                            node_labels = present(node.metadata, "node.metadata").labels or {}
-                            instance_type = node_labels.get(
-                                "node.kubernetes.io/instance-type", "unknown"
-                            )
-                        except Exception as e:
-                            logger.debug("Failed to get node info for %s: %s", spec.node_name, e)
-
-                    # Calculate cost
-                    hourly_rate = checker.get_on_demand_price(instance_type, region) or 0.0
-
-                    # Calculate runtime
-                    start_time = status.start_time
-                    if start_time:
-                        runtime = datetime.now(UTC) - start_time
-                        runtime_hours = runtime.total_seconds() / 3600
-                    else:
-                        runtime_hours = 0.0
-
-                    workload_type = "inference" if ns == "gco-inference" else "job"
-
-                    estimates.append(
-                        WorkloadCost(
-                            name=name,
-                            workload_type=workload_type,
-                            instance_type=instance_type,
-                            gpu_count=gpu_count,
-                            hourly_rate=hourly_rate,
-                            runtime_hours=round(runtime_hours, 2),
-                            estimated_cost=round(hourly_rate * runtime_hours, 4),
-                            region=region,
-                            status=phase,
-                        )
-                    )
-
+            v1 = k8s_client.CoreV1Api(BoundedApiClient())
         except Exception as e:
-            logger.debug("Failed to estimate workload costs: %s", e)
+            raise WorkloadReadError(
+                region, [f"cannot set up access to cluster {cluster_name}: {e}"], estimates
+            ) from e
 
+        errors: list[str] = []
+        for ns, workload_type in _WORKLOAD_NAMESPACES:
+            try:
+                pods = v1.list_namespaced_pod(namespace=ns)
+            except ApiException as e:
+                # The API server answered; access may cover only some namespaces.
+                errors.append(
+                    f"cannot list pods in {ns} on cluster {cluster_name}: HTTP {e.status} {e.reason}"
+                )
+                continue
+            except Exception as e:
+                # No answer: the next namespace would wait out the same timeouts.
+                errors.append(f"cannot reach the API server of cluster {cluster_name}: {e}")
+                break
+
+            for pod in pods.items:
+                status = present(pod.status, "pod.status")
+                phase = status.phase
+
+                if phase not in ("Running", "Pending"):
+                    continue
+                name = present(present(pod.metadata, "pod.metadata").name, "pod.metadata.name")
+
+                spec = present(pod.spec, "pod.spec")
+                gpu_count = 0
+                instance_type = "unknown"
+                # Get GPU requests
+                for container in spec.containers or []:
+                    resources = present(container.resources, "container.resources")
+                    requests = resources.requests or {}
+                    gpu_req = requests.get(  # nosec B113  # dict.get(), not HTTP requests
+                        "nvidia.com/gpu", "0"
+                    )
+                    gpu_count += int(gpu_req)
+
+                # Get node instance type
+                if spec.node_name:
+                    try:
+                        node = v1.read_node(spec.node_name)
+                        node_labels = present(node.metadata, "node.metadata").labels or {}
+                        instance_type = node_labels.get(
+                            "node.kubernetes.io/instance-type", "unknown"
+                        )
+                    except Exception as e:
+                        logger.debug("Failed to get node info for %s: %s", spec.node_name, e)
+
+                # Calculate cost
+                hourly_rate = checker.get_on_demand_price(instance_type, region) or 0.0
+
+                # Calculate runtime
+                start_time = status.start_time
+                if start_time:
+                    runtime = datetime.now(UTC) - start_time
+                    runtime_hours = runtime.total_seconds() / 3600
+                else:
+                    runtime_hours = 0.0
+
+                estimates.append(
+                    WorkloadCost(
+                        name=name,
+                        workload_type=workload_type,
+                        instance_type=instance_type,
+                        gpu_count=gpu_count,
+                        hourly_rate=hourly_rate,
+                        runtime_hours=round(runtime_hours, 2),
+                        estimated_cost=round(hourly_rate * runtime_hours, 4),
+                        region=region,
+                        status=phase,
+                    )
+                )
+
+        if errors:
+            raise WorkloadReadError(region, errors, estimates)
         return estimates
 
     def get_forecast(self, days_ahead: int = 30) -> dict[str, Any]:
@@ -322,21 +408,22 @@ class CostTracker:
                 },
                 Metric="UNBLENDED_COST",
                 Granularity="MONTHLY",
-                Filter={
-                    "Tags": {
-                        "Key": "Project",
-                        "Values": ["GCO"],
-                    }
-                },
+                Filter=_project_tag_filter(),
             )
 
-            return {
-                "forecast_total": float(response.get("Total", {}).get("Amount", 0)),
-                "period_start": start.isoformat(),
-                "period_end": end.isoformat(),
-            }
         except Exception as e:
-            return {"error": str(e)}
+            error = (
+                CostDataUnavailableError
+                if _client_error_code(e) == "DataUnavailableException"
+                else RuntimeError
+            )
+            raise error(f"Cost Explorer forecast failed: {e}") from e
+
+        return {
+            "forecast_total": float(response.get("Total", {}).get("Amount", 0)),
+            "period_start": start.isoformat(),
+            "period_end": end.isoformat(),
+        }
 
     # ------------------------------------------------------------------
     # Cost allocation tags — the switches behind every query above.

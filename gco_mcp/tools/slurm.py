@@ -241,7 +241,8 @@ async def slurm_submit(
         tasks: Task count (--ntasks).
         cpus_per_task: CPUs per task.
         gpus_per_node: GPUs per node.
-        memory: Memory per node: MiB or a K/M/G/T suffix such as 64G.
+        memory: Memory per node: MiB or a K/M/G/T suffix such as 64G. 0 (all of
+            each node's memory) is refused; give an explicit size.
         time_limit: Wall time: minutes, HH:MM:SS or D-HH:MM:SS.
         working_directory: Working directory on the worker (default: the
             backend identity's home on the shared filesystem).

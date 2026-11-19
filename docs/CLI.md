@@ -1076,7 +1076,7 @@ gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2
 
 #### `gco capacity cancel-reservation`
 
-Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing. A refused cancellation exits 1 in every output mode, with the result document on stdout in JSON/YAML mode.
+Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing. A refused cancellation exits 1 in every output mode, with the result document on stdout in JSON/YAML mode. The command asks for confirmation first (on stderr in JSON/YAML mode) and declining exits 1. Pass `--yes` in scripts: without a terminal on stdin and without `--yes` the command exits 2 before calling EC2 instead of waiting for an answer; `--dry-run` never asks.
 
 ```bash
 gco capacity cancel-reservation [OPTIONS]
@@ -1087,7 +1087,7 @@ gco capacity cancel-reservation [OPTIONS]
 | `--reservation-id` | `-o` | Capacity Reservation ID (`cr-…`) to cancel (required) |
 | `--region` | `-r` | AWS region where the reservation exists (required) |
 | `--dry-run` | | Check your permission without cancelling; does not verify the reservation exists |
-| `--yes` | `-y` | Skip confirmation |
+| `--yes` | `-y` | Skip the confirmation prompt; required when stdin is not a terminal |
 
 ```bash
 gco capacity cancel-reservation -o cr-0123456789abcdef0 -r us-east-1 --dry-run
@@ -1293,9 +1293,10 @@ Manually dial `REGION` to `PERCENTAGE` (0-100) and record an override the
 scheduled controller honors: the region is left alone until the override is
 cleared. Applies `UpdateEndpointGroup` carrying only the dial, so the
 registered ALB endpoint is untouched. Prompts for confirmation unless
-`--yes` is passed; changes apply to new connections only and converge to the
-accelerator's edge locations over a few minutes. Warns when the change would
-leave no fully dialed region on the listener.
+`--yes` is passed (declining exits 1 and changes nothing); changes apply to
+new connections only and converge to the accelerator's edge locations over a
+few minutes. Warns when the change would leave no fully dialed region on the
+listener.
 
 The override (`/{project}/traffic-dial/override-{region}` in SSM) is written
 before the dial changes, so the controller already skips the region when it does.
@@ -1531,7 +1532,7 @@ invocation.
 
 #### `gco config-cmd init`
 
-Initialize the config file with a starter template.
+Initialize the config file with a starter template. The template lists the per-machine settings (`default_region`, `default_namespace`, `output_format`, `verbose`, `use_regional_api`, the cache and timeout settings, the mount paths) as commented-out lines with their built-in defaults. Settings you give this command are written as values instead: the root `-r`, `-o`, `-v` and `--regional-api`/`--global-api` options, and the `GCO_*` environment variables for those settings. `project_name` and the deployment Regions are never written, because each checkout's `cdk.json` supplies them and a value in this file would override the `cdk.json` of every checkout (see [Config File](#config-file) for the precedence). The file is created with owner-only permissions, together with `~/.gco` when it does not exist yet.
 
 ```bash
 gco config-cmd init [OPTIONS]
@@ -1547,8 +1548,11 @@ gco config-cmd init [OPTIONS]
 
 ```bash
 gco config-cmd init
-gco config-cmd init -f          # overwrite existing
+gco config-cmd init -f             # overwrite existing
+gco -r eu-west-1 config-cmd init   # template with default_region set
 ```
+
+Earlier releases wrote every resolved setting, including `project_name` and the Regions from the `cdk.json` where `init` ran. If your `~/.gco/config.yaml` came from one of them, run `gco config-cmd init --force` (or delete those keys) so each checkout's `cdk.json` applies again.
 
 #### `gco config-cmd show`
 
@@ -1578,7 +1582,7 @@ gco config-cmd get default_region
 
 ### Costs Commands
 
-View cost breakdowns and estimates for GCO resources. Uses AWS Cost Explorer filtered by the `Project: GCO` tag applied to all resources.
+View cost breakdowns and estimates for GCO resources. `summary`, `regions`, `trend` and `forecast` use AWS Cost Explorer filtered by the `Project` tag that `cdk.json` `context.tags` applies to every stack (`GCO` in the committed file). The CLI reads the value from the `cdk.json` in the current directory and uses `GCO` outside a checkout. Two deployments in one account that keep the same value see each other's spend; give each deployment its own `context.tags.Project` value to report project-scoped cost.
 
 **Setup (one-time):** To filter costs by the `Project` tag, you must activate cost allocation tags in your AWS account. The CLI can do this for you:
 
@@ -1707,6 +1711,8 @@ gco costs trend --all
 
 Estimate costs for currently running workloads (jobs and inference endpoints) based on instance pricing and runtime.
 
+The command lists the pods in `gco-jobs` and `gco-inference` with your kubeconfig credentials (it runs `aws eks update-kubeconfig` for each region's cluster first), so each cluster's API endpoint must be reachable from where you run it. With the default `PRIVATE` endpoint access that means a host inside the VPC that the cluster security group admits on 443; this command has no `--via-ssm` route (see [Route selection](#route-selection)). Each Kubernetes request attempt is bounded by `K8S_API_TIMEOUT` seconds (default 30). A region whose cluster cannot be read is named on stderr and the command exits 1; the workloads read from the other regions are still printed, so a cluster that cannot be reached never reads as one with nothing running.
+
 ```bash
 gco costs workloads [OPTIONS]
 ```
@@ -1748,7 +1754,7 @@ gco costs forecast
 gco costs forecast --days 60
 ```
 
-> **Note:** Cost Explorer needs at least 14 days of historical data to generate forecasts.
+> **Note:** Cost Explorer needs at least 14 days of historical data to generate forecasts. When it cannot produce one (too little history, a missing `ce:GetCostForecast` permission, a window it rejects), the command prints the error and exits 1 in every output mode.
 
 #### `gco costs allocation`
 
@@ -1813,6 +1819,8 @@ After activation, allow up to 24 hours before tag data appears in Cost Explorer.
 #### `gco costs k8s`
 
 Query Kubernetes allocation costs across regions. These commands run [Amazon Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) aggregations over the [Parquet](https://parquet.apache.org/docs/) allocation reports the per-region cost-monitor services write to the central cost report bucket. Requires `cost_monitoring.enabled` in `cdk.json` (the default) and a deployed monitoring stack — see [docs/COST_MONITORING.md](COST_MONITORING.md).
+
+The queries run in the monitoring Region: `deployment_regions.monitoring` from the `cdk.json` in the current directory, overridden by `monitoring_region` in the [config file](#config-file) or `GCO_MONITORING_REGION`. Outside a checkout the CLI uses `us-east-2`, the monitoring stack's default Region, so set one of those when your monitoring stack is elsewhere.
 
 ```bash
 gco costs k8s COMMAND [OPTIONS]
@@ -2227,7 +2235,7 @@ gco deps scan [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--nodepools-only` | Run only the accelerator-catalog / Karpenter NodePool freshness check (offline policy validation always; live EC2 catalog comparison when AWS credentials resolve). Fast, and the only network it may touch is EC2. |
-| `--report FILE` | Write the Markdown report to `FILE` instead of stdout. |
+| `--report FILE` | Write the Markdown report to `FILE` instead of stdout. With `-o json` or `-o yaml` the envelope still goes to stdout and the report is also written to `FILE`. |
 
 **Examples:**
 
@@ -2240,7 +2248,7 @@ gco deps scan --nodepools-only
 
 # Machine-readable envelope (has_drift, scan_complete, report_markdown,
 # findings: the same rows as JSON, one record per surface) —
-# the same shape the MCP deps_scan tool returns
+# the same shape the MCP deps_scan tool returns; -o yaml renders it as YAML
 gco -o json deps scan
 
 # Save the report for a PR description
@@ -4165,10 +4173,13 @@ gco mission run [OPTIONS]
 - `--allow-scripted-strategies` — Permit scripted strategies (the AST-validated Python sandbox).
 - `--save-criteria PATH` — Also write the scaffolded criteria JSON to `PATH` for inspection or reuse.
 - `--cadence` — Checkpoint cadence kind (default: `every_iteration`).
+- `--cadence-n INTEGER` — `n` parameter for `every_n_iterations`.
+- `--cadence-t INTEGER` — `t` parameter (seconds) for `every_t_seconds`.
+- `--cadence-event TEXT` — `event_name` parameter for `on_event`.
 - `--stagnation-threshold INTEGER` — Iterations of no progress before terminate (default: 3).
 - `--dry-run` — Use a stub tool dispatcher and disable Strategy_Revision sampling during iteration (the criteria scaffolder still runs through Bedrock when sampling is enabled). Smoke-tests the loop without spending AWS or Bedrock credits.
 
-A scaffold-summary JSON line lands on stderr before iteration starts; per-iteration verdicts stream to stderr as JSON lines; the Final_Report lands on stdout when a terminal verdict fires.
+The directive, caps, cadence and stagnation threshold are validated before the scaffold step, so a bad flag exits 1 without sampling and without writing `--save-criteria`. A scaffold-summary JSON line lands on stderr before iteration starts; per-iteration verdicts stream to stderr as JSON lines; the Final_Report lands on stdout when a terminal verdict fires.
 
 ```bash
 # No-AWS smoke test against in-memory tools.
@@ -5161,7 +5172,7 @@ gco slurm submit SCRIPT --auto-region [OPTIONS]
 | `--tasks`, `-n` | Task count (`--ntasks`). |
 | `--cpus-per-task`, `-c` | CPUs per task. |
 | `--gpus-per-node` | GPUs per node (`gres/gpu:N`); the `gpu` partitions are whole-node, so match the instance's GPU count. |
-| `--mem` | Memory per node: MiB, or a `K`/`M`/`G`/`T` suffix such as `64G`. |
+| `--mem` | Memory per node: MiB, or a `K`/`M`/`G`/`T` suffix such as `64G`; a `K` size rounds up to whole MiB, as in sbatch. `--mem=0` (sbatch's "all of each node's memory") is refused, as a flag or an `#SBATCH` directive, because the API can only request an explicit size; an explicit `--mem` flag overrides the directive. |
 | `--time`, `-t` | Wall time: minutes, `HH:MM:SS` or `D-HH:MM:SS`. |
 | `--chdir`, `-D` | Working directory on the worker (default `/tmp` on Slinky, where `/home/slurm/...` is on the shared EFS; the identity's home on PCS). |
 | `--env`, `-e` | Extra environment variable `NAME=VALUE` (repeatable). |
@@ -5887,7 +5898,7 @@ gco stacks hyperpod COMMAND [OPTIONS]
 | `--cluster-name` | | `enable` | The HyperPod cluster name (default `<project>-hyperpod`) |
 | `--yes` | `-y` | `enable`, `disable` | Skip confirmation |
 
-`preflight` runs against the live account with the AWS APIs alone (no kubectl, no CDK). Per Region: SageMaker HyperPod publishes a health-monitoring agent image there (the regional stack refuses to synthesize otherwise), HyperPod publishes a node AMI for the EKS minor the cluster will run at `CreateCluster` (the version the deployed cluster reports, or cdk.json `kubernetes_version` before the first deploy; a cdk.json minor below the running one, or more than one above it, fails because the deploy could not apply it; read from the public SSM tree `/aws/service/sagemaker-hyperpod/ami/x86_64` — HyperPod picks the AMI from the cluster's version at `CreateCluster`, and the newest EKS minor has none until HyperPod catches up, see [HYPERPOD.md](HYPERPOD.md#enabling-it)), the account's `<instance type> for cluster usage` Service Quotas cover every instance group's count (a type with no such quota is not a HyperPod type in the Region), every `training_plan_arn` names a plan that exists, is `Active` or `Scheduled`, targets HyperPod clusters, reserves the group's instance type and sits in the configured zone, the configured Availability Zone exists, the regional EKS cluster (once deployed) is `ACTIVE` and authenticates with access entries, and no HyperPod cluster of the same name that this project does not own exists in the Region. An AWS error while checking (a denied call, throttling) is a warning, never a failure: only a fact that would break the deploy or keep the nodes from joining fails the preflight. `gco stacks deploy` and `deploy-all` run the same checks for every regional stack with HyperPod on; `--skip-hyperpod-preflight` bypasses them.
+`preflight` runs against the live account with the AWS APIs alone (no kubectl, no CDK). Per Region: SageMaker HyperPod publishes a health-monitoring agent image there (the regional stack refuses to synthesize otherwise), HyperPod publishes a node AMI for the EKS minor the cluster will run at `CreateCluster` (the version the deployed cluster reports, or cdk.json `kubernetes_version` before the first deploy; a cdk.json minor below the running one, or more than one above it, fails because the deploy could not apply it; read from the public SSM tree `/aws/service/sagemaker-hyperpod/ami/x86_64` — HyperPod picks the AMI from the cluster's version at `CreateCluster`, and the newest EKS minor has none until HyperPod catches up, see [HYPERPOD.md](HYPERPOD.md#enabling-it)), the account's `<instance type> for cluster usage` Service Quotas cover every instance group's count (the applied value, or AWS's default for a quota the account never had changed; a type with neither is not a HyperPod type in the Region), every `training_plan_arn` names a plan that exists, is `Active` or `Scheduled`, targets HyperPod clusters, reserves the group's instance type and sits in the configured zone, the configured Availability Zone exists, the regional EKS cluster (once deployed) is `ACTIVE` and authenticates with access entries, and no HyperPod cluster of the same name that this project does not own exists in the Region. An AWS error while checking (a denied call, throttling) is a warning, never a failure: only a fact that would break the deploy or keep the nodes from joining fails the preflight. `gco stacks deploy` and `deploy-all` run the same checks for every regional stack with HyperPod on; `--skip-hyperpod-preflight` bypasses them.
 
 **Example:**
 
@@ -5921,6 +5932,8 @@ gco stacks addons COMMAND [OPTIONS]
 | `--all-regions` | `-A` | Apply across all deployment regions |
 
 `status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply. An active teardown fence (`_teardown`) shows as `teardown-active`. The command exits 1 when any row is not healthy or a Region's records cannot be read. With `gco -o json` or `-o yaml` it prints one list of `{region, name, status, message}` rows across the Regions; a Region whose records cannot be read contributes a row with status `error` and no name.
+
+`install` replays the execution input the last deploy stored in `/{project}/addons/{region}/_input` into the Helm install state machine of this project's regional stack, `{project}-{region}`. It finds that state machine among the stack's resources (`cloudformation:ListStackResources`), because every deployment's state machine gets a generated name of the same shape, and it exits 1 instead of starting another deployment's installer when the stack or its state machine cannot be found.
 
 **Example:**
 
@@ -6988,7 +7001,21 @@ The CLI looks for `.gco.yaml` or `.gco.json` in the current directory, then
 `~/.gco/config.yaml` or `~/.gco/config.json`; `gco --config PATH` (`-c`)
 points at a file explicitly. Keys mirror the `GCOConfig` fields in
 `cli/config.py`; unknown keys are ignored, so the region *list* still comes
-from `cdk.json` (`deployment_regions`), not from this file:
+from `cdk.json` (`deployment_regions`), not from this file.
+
+Each setting takes the value of the last of these sources that sets it:
+
+1. Built-in defaults.
+2. The `cdk.json` in the current directory: `project_name`, the
+   `deployment_regions` entries, and its first `regional` entry as
+   `default_region`.
+3. The config file.
+4. `GCO_*` environment variables (see [Environment Variables](#environment-variables)).
+5. The root options `-r`, `-o`, `-v` and `--regional-api`/`--global-api`.
+
+A config-file key therefore overrides the `cdk.json` of every checkout you
+run the CLI in. Keep `project_name` and the Regions out of `~/.gco/config.yaml`
+unless you mean that; `gco config-cmd init` never writes them.
 
 ```yaml
 default_region: us-east-1
@@ -7046,6 +7073,7 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_LOG_LEVEL` | Level for GCO's own loggers (`DEBUG`, `INFO`, `WARNING`, ...); `-v` is `DEBUG`. Leaves the AWS SDK loggers alone |
 | `GCO_CACHE_DIR` | Directory for cached lookups (default `~/.gco/cache`) |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
+| `K8S_API_TIMEOUT` | Seconds one Kubernetes API request attempt from `gco costs workloads` may take (default `30`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
 | `GCO_AUTOPILOT_ENGINE` | Select `claude-code` (default), `codex`, or `opencode`; top-level `--engine` wins. |
 | `GCO_AUTOPILOT_MODEL` | Shared Bedrock model override: Claude uses it directly, Codex uses it after `GCO_AUTOPILOT_CODEX_MODEL`, and OpenCode after `GCO_AUTOPILOT_OPENCODE_MODEL`; top-level `--model` wins. See [Autopilot](AUTOPILOT.md). |

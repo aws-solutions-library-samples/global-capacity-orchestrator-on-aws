@@ -517,22 +517,49 @@ class TestTableEdgeBranches:
 
 
 class TestMonitoringRegionResolution:
-    def test_reads_the_monitoring_region_from_cdk_json(self):
+    """Athena and Glue live in the monitoring Region. The client used to read
+    cdk.json's deployment_regions.monitoring itself, else the default
+    (workload) Region, so an installed CLI outside a checkout queried
+    us-east-1 and GCO_MONITORING_REGION had no effect (N15)."""
+
+    def test_uses_the_configured_monitoring_region(self):
+        with patch("cli.cost_analytics.boto3.client") as mock_client:
+            analytics = CostAnalytics(
+                config=GCOConfig(default_region="us-east-1", monitoring_region="eu-central-1")
+            )
+        assert analytics.region == "eu-central-1"
+        mock_client.assert_called_once_with("athena", region_name="eu-central-1")
+
+    def test_monitoring_region_follows_cdk_json_and_the_environment(self, monkeypatch):
+        from cli.config import get_config
+
+        monkeypatch.delenv("GCO_MONITORING_REGION", raising=False)
         with (
             patch(
                 "cli.config._load_cdk_json",
                 return_value={"monitoring": "eu-central-1", "regional": ["us-east-1"]},
             ),
-            patch("cli.cost_analytics.boto3.client") as mock_client,
+            patch("cli.cost_analytics.boto3.client"),
         ):
-            analytics = CostAnalytics(config=GCOConfig(project_name="gco"))
-        assert analytics.region == "eu-central-1"
-        mock_client.assert_called_once_with("athena", region_name="eu-central-1")
+            assert CostAnalytics(config=get_config()).region == "eu-central-1"
+            monkeypatch.setenv("GCO_MONITORING_REGION", "eu-west-2")
+            assert CostAnalytics(config=get_config()).region == "eu-west-2"
 
-    def test_falls_back_to_the_default_region(self):
+    def test_outside_a_checkout_it_is_not_the_default_workload_region(self, monkeypatch):
+        from cli.config import get_config
+
+        monkeypatch.delenv("GCO_MONITORING_REGION", raising=False)
         with (
             patch("cli.config._load_cdk_json", return_value={}),
             patch("cli.cost_analytics.boto3.client"),
         ):
-            analytics = CostAnalytics(config=GCOConfig(default_region="ap-southeast-2"))
+            analytics = CostAnalytics(config=get_config())
+        # GCOConfig's default, the same Region the monitoring stack defaults to.
+        assert analytics.region == "us-east-2"
+
+    def test_an_explicit_region_still_wins(self):
+        with patch("cli.cost_analytics.boto3.client"):
+            analytics = CostAnalytics(
+                config=GCOConfig(monitoring_region="eu-central-1"), region="ap-southeast-2"
+            )
         assert analytics.region == "ap-southeast-2"

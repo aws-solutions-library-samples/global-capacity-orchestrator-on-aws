@@ -3274,6 +3274,11 @@ def addons_install(config: Any, region: Any, all_regions: bool) -> None:
         sys.exit(1)
 
 
+#: Construct id of the regional stack's Helm install state machine
+#: (gco/stacks/regional_stack.py); CDK appends a hash to form the logical id.
+_HELM_INSTALL_STATE_MACHINE_ID = "HelmInstallStateMachine"
+
+
 def _decode_addon_replay_input(stored_value: str) -> str:
     """Reverse the helm orchestrator's zlib+base64 replay-input encoding.
 
@@ -3288,6 +3293,24 @@ def _decode_addon_replay_input(stored_value: str) -> str:
         return stored_value
     compressed = base64.b64decode(stored_value.encode("ascii"), validate=True)
     return zlib.decompress(compressed).decode("utf-8")
+
+
+def _helm_install_state_machine_arn(cloudformation: Any, stack_name: str) -> str | None:
+    """ARN of the Helm install state machine the regional stack ``stack_name`` owns.
+
+    The state machine has no explicit name, so CloudFormation generates one
+    of the same shape for every deployment in the Region. It is found among
+    the stack's own resources by its construct id instead; the physical id
+    of a state machine is its ARN.
+    """
+    paginator = cloudformation.get_paginator("list_stack_resources")
+    for page in paginator.paginate(StackName=stack_name):
+        for resource in page.get("StackResourceSummaries", []):
+            if resource.get("ResourceType") == "AWS::StepFunctions::StateMachine" and str(
+                resource.get("LogicalResourceId", "")
+            ).startswith(_HELM_INSTALL_STATE_MACHINE_ID):
+                return str(resource.get("PhysicalResourceId") or "") or None
+    return None
 
 
 def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
@@ -3319,16 +3342,25 @@ def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
         )
         return False
 
+    stack_name = f"{project}-{region}"
+    try:
+        cloudformation = boto3.client("cloudformation", region_name=region)
+        arn = _helm_install_state_machine_arn(cloudformation, stack_name)
+    except Exception as e:
+        formatter.print_error(
+            f"[{region}] Could not read the resources of stack {stack_name}: {e}. "
+            f"Deploy the regional stack first (gco stacks deploy {stack_name} -y)."
+        )
+        return False
+    if not arn:
+        formatter.print_error(
+            f"[{region}] Stack {stack_name} has no Helm install state machine. "
+            f"Deploy the regional stack first (gco stacks deploy {stack_name} -y)."
+        )
+        return False
+
     try:
         sfn = boto3.client("stepfunctions", region_name=region)
-        machines = sfn.list_state_machines(maxResults=1000)["stateMachines"]
-        arn = next(
-            (m["stateMachineArn"] for m in machines if "HelmInstall" in m["name"]),
-            None,
-        )
-        if not arn:
-            formatter.print_error(f"[{region}] No HelmInstall state machine found.")
-            return False
         resp = sfn.start_execution(stateMachineArn=arn, input=execution_input)
     except Exception as e:
         formatter.print_error(f"[{region}] Failed to start add-on install: {e}")

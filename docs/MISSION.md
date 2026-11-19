@@ -699,6 +699,7 @@ Useful options:
 | `--retries N` | `3` | Sampling-path retry budget when the validator rejects the model's response. After exhaustion, falls back to deterministic templates. |
 | `--allow-scripted-strategies` | off | Permit scripted strategies (the AST-validated Python sandbox). Disabled by default; required only for goals that exceed what `tool_calls` can express. |
 | `--cadence` | `every_iteration` | Checkpoint cadence kind passed through to the engine. |
+| `--cadence-n N` / `--cadence-t SECONDS` / `--cadence-event NAME` | unset | The parameter the `every_n_iterations`, `every_t_seconds` or `on_event` cadence needs. See [Checkpoint Cadences](#checkpoint-cadences). |
 | `--stagnation-threshold N` | `3` | Iterations of no progress before the cascade emits `terminate, no_progress`. |
 | `--dry-run` | off | Use a stub tool dispatcher and disable Strategy_Revision sampling during iteration. The criteria scaffolder still runs through Bedrock when sampling is enabled. Useful for smoke-testing the loop bookkeeping without spending live tool credits. |
 

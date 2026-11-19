@@ -260,8 +260,9 @@ nodes never join: the Region publishes a health-monitoring agent image,
 HyperPod publishes a node AMI for the EKS minor the cluster runs (cdk.json
 `kubernetes_version`; see [Enabling it](#enabling-it)), the
 account's `<instance type> for cluster usage` Service Quotas cover every
-instance group's count (a type with no such quota is not a HyperPod type in
-the Region), each `training_plan_arn` exists, is `Active` or `Scheduled`,
+instance group's count (the applied value, or AWS's default for a quota the
+account never had changed; a type with neither is not a HyperPod type in the
+Region), each `training_plan_arn` exists, is `Active` or `Scheduled`,
 targets HyperPod clusters, reserves the group's instance type and sits in the
 configured zone, the configured Availability Zone exists, the EKS cluster
 (once deployed) is `ACTIVE` and authenticates with access entries, and no

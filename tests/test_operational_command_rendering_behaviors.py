@@ -490,6 +490,10 @@ def test_config_init_prompts_before_overwriting_existing_file(
     config_path.parent.mkdir()
     config_path.write_text("old", encoding="utf-8")
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    for variable in ("GCO_DEFAULT_REGION", "GCO_DEFAULT_NAMESPACE", "GCO_OUTPUT_FORMAT"):
+        monkeypatch.delenv(variable, raising=False)
+    for variable in ("GCO_VERBOSE", "GCO_CACHE_DIR", "GCO_REGIONAL_API"):
+        monkeypatch.delenv(variable, raising=False)
     save = Mock()
     monkeypatch.setattr(config, "save", save)
 
@@ -497,7 +501,8 @@ def test_config_init_prompts_before_overwriting_existing_file(
 
     assert result.exit_code == 0, result.output
     assert "Overwrite?" in result.output
-    save.assert_called_once_with(str(config_path))
+    # Nothing was given on the command line or in GCO_* variables.
+    save.assert_called_once_with(str(config_path), keys=set())
 
 
 def _release_inference_args() -> list[str]:

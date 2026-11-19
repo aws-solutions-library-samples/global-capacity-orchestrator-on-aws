@@ -119,6 +119,20 @@ def _expect_default_quotas(clients: _Clients) -> None:
     )
 
 
+def _expect_aws_default_quotas(clients: _Clients, *pages: list[dict[str, Any]]) -> None:
+    tokens = [None, *[f"default-token-{i}" for i in range(1, len(pages))]]
+    for index, (page, token) in enumerate(zip(pages, tokens, strict=True)):
+        response: dict[str, Any] = {"Quotas": page}
+        if index + 1 < len(pages):
+            response["NextToken"] = tokens[index + 1]
+        expected: dict[str, Any] = {"ServiceCode": "sagemaker"}
+        if token:
+            expected["NextToken"] = token
+        clients["service-quotas"].add_response(
+            "list_aws_default_service_quotas", response, expected
+        )
+
+
 def _capacity(instance_type: str, zone: str | None = None) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "ReservedCapacityArn": f"{_PLAN_ARN}/rc-{instance_type}",
@@ -679,6 +693,8 @@ def test_instance_types_sum_groups_and_paginate_quotas(clients: _Clients) -> Non
         [_quota("ml.g5.8xlarge", 4)],
         [_quota("ml.t3.large", 1), _quota("ml.c5.large", 0)],
     )
+    # ml.p5.48xlarge has no applied value, and no default either.
+    _expect_aws_default_quotas(clients, [_quota("ml.g5.8xlarge", 0)])
     _expect_eks(clients)
     _expect_clusters(clients, [])
     config = _config(
@@ -711,6 +727,72 @@ def test_instance_types_sum_groups_and_paginate_quotas(clients: _Clients) -> Non
         ),
     ]
     assert not report.ok
+
+
+def test_instance_types_fall_back_to_the_default_quota(clients: _Clients) -> None:
+    """ListServiceQuotas leaves out a quota the account never had applied. Such a
+    type was failed as "not a HyperPod instance type here", which blocked the
+    deploy even when its default quota covers the groups (N21)."""
+    _expect_quotas(clients, [_quota("ml.t3.large", 1)])
+    _expect_aws_default_quotas(
+        clients,
+        [_quota("ml.t3.large", 0), _quota("ml.c5.large", 0)],
+        [_quota("ml.g5.8xlarge", 8)],
+    )
+    _expect_eks(clients)
+    _expect_clusters(clients, [])
+    config = _config(
+        instance_groups=[
+            _group(name="a", instance_count=2),
+            _group(name="t", instance_type="ml.t3.large", instance_count=1),
+            _group(name="c", instance_type="ml.c5.large", instance_count=1),
+        ]
+    )
+
+    report = _run(clients, config)
+
+    assert [(c.status, c.detail) for c in _by_name(report, "instance-types")] == [
+        (
+            pf.PASS,
+            "ml.g5.8xlarge: 2 of 8 quota for cluster usage (the default; no increase applied)",
+        ),
+        # An applied value wins over the default.
+        (pf.PASS, "ml.t3.large: 1 of 1 quota for cluster usage"),
+        # A zero default is a quota problem, not an unknown instance type.
+        (
+            pf.FAIL,
+            "ml.c5.large: instance groups ask for 1, the account's 'for cluster usage' "
+            "quota is 0 (the default; no increase applied); request an increase",
+        ),
+    ]
+
+
+def test_instance_types_denied_default_listing_warns_only_for_the_unresolved(
+    clients: _Clients,
+) -> None:
+    _expect_quotas(clients, [_quota("ml.t3.large", 1)])
+    clients["service-quotas"].add_client_error(
+        "list_aws_default_service_quotas",
+        service_error_code="AccessDeniedException",
+        service_message="nope",
+        expected_params={"ServiceCode": "sagemaker"},
+    )
+    _expect_eks(clients)
+    _expect_clusters(clients, [])
+    config = _config(
+        instance_groups=[
+            _group(name="a", instance_count=2),
+            _group(name="t", instance_type="ml.t3.large", instance_count=1),
+        ]
+    )
+
+    report = _run(clients, config)
+
+    assert [(c.status, c.detail) for c in _by_name(report, "instance-types")] == [
+        (pf.WARN, "could not check: AccessDeniedException: nope"),
+        (pf.PASS, "ml.t3.large: 1 of 1 quota for cluster usage"),
+    ]
+    assert report.ok
 
 
 def test_instance_types_denied_quota_listing_is_a_warning(clients: _Clients) -> None:
@@ -1008,6 +1090,28 @@ def test_cluster_name_taken_by_this_project_passes(clients: _Clients) -> None:
     assert _by_name(report, "cluster-name")[0] == pf.Check(
         "cluster-name", pf.PASS, f"{_CLUSTER_NAME} exists (InService) and belongs to this project"
     )
+
+
+def test_cluster_name_reads_every_page_of_tags(clients: _Clients) -> None:
+    """ListTags pages its answer; reading only the first page could miss
+    gco:project and fail this project's own cluster as someone else's (N17)."""
+    _expect_default_quotas(clients)
+    _expect_eks(clients)
+    _expect_clusters(clients, [_summary()])
+    clients["sagemaker"].add_response(
+        "list_tags",
+        {"Tags": [{"Key": f"team-{i}", "Value": "x"} for i in range(50)], "NextToken": "more"},
+        {"ResourceArn": _CLUSTER_ARN},
+    )
+    clients["sagemaker"].add_response(
+        "list_tags",
+        {"Tags": [{"Key": "gco:project", "Value": _PROJECT}]},
+        {"ResourceArn": _CLUSTER_ARN, "NextToken": "more"},
+    )
+
+    report = _run(clients, _config())
+
+    assert _by_name(report, "cluster-name")[0].status == pf.PASS
 
 
 def test_cluster_name_taken_by_someone_else_fails(clients: _Clients) -> None:

@@ -521,6 +521,61 @@ def test_charging_commands_skip_the_prompt_for_yes_and_dry_run(
     )
 
 
+_CANCEL_ARGUMENTS = ["cancel-reservation", "-o", "cr-0123456789abcdef0", "-r", "us-east-1"]
+
+
+def test_cancel_reservation_refuses_to_run_unconfirmed_without_a_terminal() -> None:
+    """cancel-reservation read its confirmation from stdin, so a script that
+    left stdin on an open pipe hung. Without a terminal and without --yes it
+    now stops before calling EC2, as reserve and create-reservation do."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(cli, ["capacity", *_CANCEL_ARGUMENTS])
+
+    assert result.exit_code == 2, result.output
+    assert "stdin is not a terminal" in result.stderr
+    assert "pass --yes" in result.stderr
+    assert "incurs charges" not in result.stderr
+    checker.cancel_capacity_reservation.assert_not_called()
+
+
+@pytest.mark.parametrize(("answer", "exit_code"), [("n\n", 1), ("y\n", 0)])
+def test_cancel_reservation_asks_on_a_terminal(answer: str, exit_code: int) -> None:
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.cancel_capacity_reservation.return_value = {
+        "success": True,
+        "dry_run": False,
+        "message": "Capacity reservation cr-0123456789abcdef0 cancelled.",
+    }
+    with (
+        patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker),
+        patch("cli.commands.capacity_cmd._stdin_is_interactive", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, ["capacity", *_CANCEL_ARGUMENTS], input=answer)
+
+    assert result.exit_code == exit_code, result.output
+    assert "Cancel capacity reservation 'cr-0123456789abcdef0' in us-east-1?" in result.output
+    assert checker.cancel_capacity_reservation.called is (exit_code == 0)
+
+
+@pytest.mark.parametrize("skip_flag", ["--yes", "-y", "--dry-run"])
+def test_cancel_reservation_needs_no_terminal_with_yes_or_dry_run(skip_flag: str) -> None:
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.cancel_capacity_reservation.return_value = {"success": True, "dry_run": True}
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(cli, ["capacity", *_CANCEL_ARGUMENTS, skip_flag])
+
+    assert result.exit_code == 0, result.output
+    assert "[y/N]" not in result.output
+    checker.cancel_capacity_reservation.assert_called_once()
+
+
 def test_stdin_is_interactive_needs_a_terminal_on_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     from cli.commands import capacity_cmd
 

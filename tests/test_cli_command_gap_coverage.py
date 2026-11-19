@@ -154,13 +154,15 @@ def test_cost_workloads_json_preserves_region_and_workload_fields(runner: CliRun
 
 
 def test_cost_forecast_explains_an_unavailable_forecast(runner: CliRunner) -> None:
+    from cli.costs import CostDataUnavailableError
+
     tracker = MagicMock()
-    tracker.get_forecast.return_value = {"error": "not enough historical data"}
+    tracker.get_forecast.side_effect = CostDataUnavailableError("not enough historical data")
 
     with patch("cli.costs.get_cost_tracker", return_value=tracker):
         result = _invoke(runner, costs, ["forecast", "--days", "45"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     assert "Forecast unavailable: not enough historical data" in result.output
     assert "Cost Explorer needs 14+ days" in result.output
     tracker.get_forecast.assert_called_once_with(days_ahead=45)

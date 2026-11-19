@@ -184,6 +184,20 @@ def _make_stub_dispatcher() -> Any:
     return make_stub_dispatcher()
 
 
+def _cadence_from_options(
+    cadence: str, cadence_n: int | None, cadence_t: int | None, cadence_event: str | None
+) -> dict[str, Any]:
+    """Build the checkpoint-cadence dict from the ``--cadence*`` options."""
+    cadence_dict: dict[str, Any] = {"kind": cadence}
+    if cadence_n is not None:
+        cadence_dict["n"] = cadence_n
+    if cadence_t is not None:
+        cadence_dict["t"] = cadence_t
+    if cadence_event is not None:
+        cadence_dict["event_name"] = cadence_event
+    return cadence_dict
+
+
 # ---------------------------------------------------------------------------
 # Click group
 # ---------------------------------------------------------------------------
@@ -401,13 +415,7 @@ def mission_start(
     }
 
     # Build the cadence dict.
-    cadence_dict: dict[str, Any] = {"kind": cadence}
-    if cadence_n is not None:
-        cadence_dict["n"] = cadence_n
-    if cadence_t is not None:
-        cadence_dict["t"] = cadence_t
-    if cadence_event is not None:
-        cadence_dict["event_name"] = cadence_event
+    cadence_dict = _cadence_from_options(cadence, cadence_n, cadence_t, cadence_event)
 
     # Resolve the effective allowlist before any persistence. The explicit
     # path keeps the thin CLI behaviour (no live-registry per-name check); the
@@ -1380,6 +1388,20 @@ def mission_scaffold_criteria_cmd(
     help="Checkpoint cadence kind.",
 )
 @click.option(
+    "--cadence-n", type=int, default=None, help="Cadence n parameter (every_n_iterations)."
+)
+@click.option(
+    "--cadence-t",
+    type=int,
+    default=None,
+    help="Cadence t parameter in seconds (every_t_seconds).",
+)
+@click.option(
+    "--cadence-event",
+    default=None,
+    help="Cadence event_name parameter (on_event).",
+)
+@click.option(
     "--dry-run",
     "dry_run",
     is_flag=True,
@@ -1404,6 +1426,9 @@ def mission_run_cmd(
     save_criteria: str | None,
     stagnation_threshold: int,
     cadence: str,
+    cadence_n: int | None,
+    cadence_t: int | None,
+    cadence_event: str | None,
     dry_run: bool,
 ) -> None:
     """Scaffold criteria and run a Mission session to completion in one call.
@@ -1459,6 +1484,29 @@ def mission_run_cmd(
         allow_all_tools=allow_all_tools, tool_allowlist=tool_allowlist
     )
 
+    # Validate everything the flags alone decide before the scaffold step,
+    # so a bad flag spends no sampling tokens and writes no --save-criteria
+    # file. Only the scaffolded criteria are validated afterwards.
+    budget: dict[str, Any] = {
+        "max_iterations": max_iterations,
+        "max_wall_clock_seconds": max_wall_clock,
+    }
+    cadence_dict = _cadence_from_options(cadence, cadence_n, cadence_t, cadence_event)
+    try:
+        directive_clean = mission_validation.validate_directive(directive)
+        budget_clean = mission_validation.validate_budget(budget, allowlist_resolved, {})
+        cadence_clean = mission_validation.validate_cadence(cadence_dict)
+    except MissionValidationError as exc:
+        _emit_error(exc.code, exc.details)
+        sys.exit(1)
+
+    if not isinstance(stagnation_threshold, int) or stagnation_threshold <= 0:
+        _emit_error(
+            "validation_error",
+            {"field": "stagnation-threshold", "reason": "must_be_positive_int"},
+        )
+        sys.exit(1)
+
     # ---- Step 1: scaffold criteria. -------------------------------------
     # Resolve the sampling state once; reuse it for both the scaffold
     # call and the persisted session's ``use_sampling`` field so the
@@ -1506,27 +1554,11 @@ def mission_run_cmd(
             encoding="utf-8",
         )
 
-    # ---- Step 2: validate everything and persist the session. -----------
-    budget: dict[str, Any] = {
-        "max_iterations": max_iterations,
-        "max_wall_clock_seconds": max_wall_clock,
-    }
-    cadence_dict: dict[str, Any] = {"kind": cadence}
-
+    # ---- Step 2: validate the criteria and persist the session. ---------
     try:
-        directive_clean = mission_validation.validate_directive(directive)
         criteria_clean = mission_validation.validate_criteria(criteria)
-        budget_clean = mission_validation.validate_budget(budget, allowlist_resolved, {})
-        cadence_clean = mission_validation.validate_cadence(cadence_dict)
     except MissionValidationError as exc:
         _emit_error(exc.code, exc.details)
-        sys.exit(1)
-
-    if not isinstance(stagnation_threshold, int) or stagnation_threshold <= 0:
-        _emit_error(
-            "validation_error",
-            {"field": "stagnation-threshold", "reason": "must_be_positive_int"},
-        )
         sys.exit(1)
 
     session_id = f"mission-{secrets.token_hex(8)}"
