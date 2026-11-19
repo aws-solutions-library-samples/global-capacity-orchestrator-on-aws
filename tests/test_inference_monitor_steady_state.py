@@ -1,4 +1,4 @@
-"""The inference monitor's steady-state cost (finding I16).
+"""The inference monitor's steady-state cost.
 
 Every pass used to try to create each object a Mooncake endpoint needs and
 take the 409 as "already there". Each attempt was a failed request preceded by

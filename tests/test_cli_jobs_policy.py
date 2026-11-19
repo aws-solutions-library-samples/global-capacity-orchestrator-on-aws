@@ -799,7 +799,7 @@ class TestAdvisoryPreSubmitPolicy:
     def test_machine_output_keeps_the_findings_off_stdout(
         self, manifest_path: str, verdict: RegionVerdict, output_format: str
     ) -> None:
-        """stdout stays the submission document; the verdict lines go to stderr (X19).
+        """stdout stays the submission document; the verdict lines go to stderr.
 
         Before, the verdict lines went to stdout and the output transaction
         turned the whole stdout into a ``{"status": "ok", "output": ...}`` text

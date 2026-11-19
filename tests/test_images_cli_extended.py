@@ -382,7 +382,7 @@ _RULE = {
 
 class TestDescribeAgainstTheEcrModel:
     def test_a_tag_the_repository_lacks_is_empty(self, manager: ImageManager) -> None:
-        """N43: DescribeImages answers a missing tag with ImageNotFoundException,
+        """DescribeImages answers a missing tag with ImageNotFoundException,
         not an empty list; describe reports both as {}."""
         ecr, stubber = _stubbed_ecr()
         stubber.add_client_error(
@@ -970,7 +970,7 @@ class TestOrphans:
     def test_a_tag_named_through_another_regions_replica_is_in_use(
         self, manager: ImageManager
     ) -> None:
-        """CC19: endpoints and jobs pull from their own Region's replica, so
+        """Endpoints and jobs pull from their own Region's replica, so
         the scan's us-east-2 URI never matched a us-west-2 reference."""
         tags = [
             {"tag": "v1", "digest": "sha256:1", "pushed_at": self._OLD},
@@ -1056,7 +1056,7 @@ class TestInferenceImageRefs:
         }
 
     def test_raises_when_the_inference_manager_cannot_start(self, manager: ImageManager) -> None:
-        """CC19: an unreadable endpoint table used to mean "nothing is
+        """An unreadable endpoint table used to mean "nothing is
         referenced", so every old tag was listed, in-use ones included."""
         with (
             patch("cli.inference.InferenceManager", side_effect=RuntimeError("boom")),
@@ -1133,7 +1133,7 @@ class TestJobImageRefs:
         ]
 
     def test_an_unfinished_job_counts_however_old(self, manager: ImageManager) -> None:
-        """CC19: a job running for longer than the threshold uses its image;
+        """A job running for longer than the threshold uses its image;
         only finished jobs older than the threshold stop counting."""
         old = datetime.now(UTC) - timedelta(days=120)
         recent = datetime.now(UTC) - timedelta(days=1)
@@ -1170,7 +1170,7 @@ class TestJobImageRefs:
         assert refs == set()
 
     def test_raises_when_a_region_cannot_be_listed(self, manager: ImageManager) -> None:
-        """CC19: a skipped Region used to make its jobs' images look unused."""
+        """A skipped Region used to make its jobs' images look unused."""
         with pytest.raises(RuntimeError, match="could not list the jobs in us-west-2: api down"):
             self._refs(
                 manager,

@@ -422,7 +422,7 @@ class TestAddonsInstall:
         """Two deployments in one Region carry install state machines with the
         same generated name shape. install started the first one whose name
         contained HelmInstall, so it could replay this project's input into
-        the other deployment's installer (N12)."""
+        the other deployment's installer."""
         from cli.commands import stacks_cmd
         from cli.main import cli
 

@@ -2428,7 +2428,7 @@ class TestQueueTools:
 
     @pytest.mark.asyncio
     async def test_queue_list_reads_the_next_page_with_its_cursor(self):
-        """`gco queue list --cursor` pages; the tool passes the cursor through (MCP-CURSOR)."""
+        """`gco queue list --cursor` pages; the tool passes the cursor through."""
         with patch("cli_runner.subprocess.run") as mock:
             mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
             await run_mcp.queue_list(status="running", cursor="eyJvZmZzZXQiOiA1MH0=")

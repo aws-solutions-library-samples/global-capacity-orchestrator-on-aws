@@ -224,7 +224,7 @@ class TestResolvers:
 
 
 class TestClusterAccessRegionSelection:
-    """N5: the global -r, GCO_DEFAULT_REGION and the config file pick the cluster."""
+    """The global -r, GCO_DEFAULT_REGION and the config file pick the cluster."""
 
     @pytest.fixture
     def checkout(self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -1588,7 +1588,7 @@ class TestTerminationSignals:
     def test_a_signal_while_the_bastion_waits_for_ssm_still_terminates_it(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """CC3 meets N38: the handler's SystemExit reaches the create guard."""
+        """The signal handler's exit reaches the guard that removes a bastion still being created."""
         monkeypatch.setattr(
             ct.kubectl_helpers, "describe_cluster_access", lambda c, r: dict(ACCESS["PRIVATE"])
         )

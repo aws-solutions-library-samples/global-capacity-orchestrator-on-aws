@@ -300,7 +300,7 @@ def _summary_line(caplog):
 
 
 class TestObjectLimits:
-    """Documents that cannot finish inside the 5-minute timeout (L12).
+    """Documents that cannot finish inside the 5-minute timeout.
 
     Before, nothing bounded an object: one Bedrock call and one PutItem per
     chunk ran until Lambda killed the invocation, the summary line was never

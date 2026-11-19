@@ -139,7 +139,7 @@ class TestCannedQueries:
     def test_cost_by_namespace_region_filter_is_parameterized(self):
         """Athena substitutes an execution parameter as SQL text, and a string
         must be a quoted literal: the bare value ran `region = us-east-1`,
-        which Athena reads as the arithmetic `us - east - 1` (CM13)."""
+        which Athena reads as the arithmetic `us - east - 1`."""
         analytics, athena = _analytics()
         analytics.cost_by_namespace(days=7, region="us-east-1")
         kwargs = athena.start_query_execution.call_args.kwargs
@@ -528,7 +528,7 @@ class TestMonitoringRegionResolution:
     """Athena and Glue live in the monitoring Region. The client used to read
     cdk.json's deployment_regions.monitoring itself, else the default
     (workload) Region, so an installed CLI outside a checkout queried
-    us-east-1 and GCO_MONITORING_REGION had no effect (N15)."""
+    us-east-1 and GCO_MONITORING_REGION had no effect."""
 
     def test_uses_the_configured_monitoring_region(self):
         with patch("cli.cost_analytics.boto3.client") as mock_client:

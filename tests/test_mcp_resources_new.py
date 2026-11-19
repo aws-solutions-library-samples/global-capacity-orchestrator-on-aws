@@ -290,7 +290,7 @@ class TestModuleStructure:
 
 
 class TestEnvVarsResourceMatchesTheCode:
-    """``config://gco/env-vars`` lists what the code reads, and only that (N46)."""
+    """``config://gco/env-vars`` lists what the code reads, and only that."""
 
     @staticmethod
     def _listed() -> set[str]:

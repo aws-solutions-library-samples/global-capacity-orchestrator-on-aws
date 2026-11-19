@@ -2148,7 +2148,7 @@ def test_create_reports_rotated_regions_and_default_physical_id() -> None:
 
 
 def test_a_failed_region_does_not_stop_the_others(caplog) -> None:
-    """Every Region is renewed and published before one combined error (L14).
+    """Every Region is renewed and published before one combined error.
 
     Before, the first failing Region raised out of the loop: the Regions after
     it were not renewed and no expiry metric was published for any Region.

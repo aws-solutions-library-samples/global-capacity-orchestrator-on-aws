@@ -329,7 +329,7 @@ def _assert_each_attempt_signed_afresh(mock_pool, signing_key: str) -> None:
     """Every attempt verifies under ``signing_key`` and no two share a nonce.
 
     The backend accepts each nonce once (gco/services/auth_middleware.py), so a
-    retry that re-sent the first envelope was refused with 403 (finding L3).
+    retry that re-sent the first envelope was refused with 403.
     """
     nonces = []
     for request in mock_pool.request.call_args_list:

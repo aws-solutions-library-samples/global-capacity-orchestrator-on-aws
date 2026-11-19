@@ -762,7 +762,7 @@ def test_a_namespace_directory_in_the_task_root_does_not_unblock_a_module(
 def test_pythonpath_stays_out_of_the_import(
     lambda_verifier: Any, fake_runtime: Path, tmp_path: Path
 ) -> None:
-    """The finding: imports used to resolve against the project's environment.
+    """Imports used to resolve against the project's environment.
 
     PyYAML is reachable through PYTHONPATH here, yet a zipped Lambda that
     imports it would fail in AWS, so the check fails too.

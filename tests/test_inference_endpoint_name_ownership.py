@@ -5,7 +5,7 @@ The inference monitor names an endpoint's Kubernetes objects after it
 canary of ``llama`` and the primary Deployment of an endpoint named
 ``llama-canary`` share one name. Before the ``gco.io/endpoint`` label, every
 pass for ``llama`` read that Deployment as a stale canary of its own and
-deleted it (finding I2). These checks drive the monitor's real cleanup,
+deleted it. These checks drive the monitor's real cleanup,
 authorization and create paths against mocked Kubernetes clients, and the
 deploy-time name rules that keep new endpoints from colliding at all.
 """
@@ -318,7 +318,7 @@ def test_deleting_an_endpoint_leaves_the_other_endpoints_objects_and_completes()
 
 
 def test_cleanup_reads_no_http_route_because_no_release_created_one() -> None:
-    """Finding I22: the only HTTPRoute any release created is gco-system/gco-routes.
+    """The only HTTPRoute any release created is gco-system/gco-routes.
 
     Endpoint cleanup read three per-endpoint HTTPRoute names no release ever
     created, every pass, before an endpoint could be acknowledged deleted.
@@ -360,7 +360,7 @@ def test_cleanup_reads_no_http_route_because_no_release_created_one() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ingresses older releases created are removed with the endpoint (finding I5)
+# Ingresses older releases created are removed with the endpoint
 # ---------------------------------------------------------------------------
 
 

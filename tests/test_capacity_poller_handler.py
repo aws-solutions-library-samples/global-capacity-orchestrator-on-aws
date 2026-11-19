@@ -400,7 +400,7 @@ class TestSpotPriceSummary:
 
 
 class TestRealPaginators:
-    """Both probes read every page through botocore's own paginators (L13).
+    """Both probes read every page through botocore's own paginators.
 
     Before, each made one call and dropped the NextToken, so an AZ, or a
     Capacity Block offering, on a later page was not counted.

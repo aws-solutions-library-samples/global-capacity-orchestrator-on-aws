@@ -679,7 +679,7 @@ class TestGetEksToken:
         )
 
     def test_aws_cn_token_is_signed_for_the_china_sts_host(self) -> None:
-        """CC25, real botocore, offline: the host was hard-coded to
+        """Real botocore, offline: the host was hard-coded to
         sts.<region>.amazonaws.com, which does not exist in aws-cn, so EKS
         there rejected every token `gco nodepools` built."""
         session = boto3.Session(

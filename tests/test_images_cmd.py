@@ -167,7 +167,7 @@ class TestImagesDescribe:
     def test_describe_missing_tag_is_an_error(
         self, runner: CliRunner, mock_config: Any, output_format: str
     ) -> None:
-        """N43: a missing tag exited 0 (and printed {"status": "ok"} in JSON
+        """A missing tag exited 0 (and printed {"status": "ok"} in JSON
         mode), so a script asking "does this image exist?" got a yes."""
         mock_config.output_format = output_format
         mock_mgr = MagicMock()

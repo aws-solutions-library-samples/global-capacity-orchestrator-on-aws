@@ -732,7 +732,7 @@ def test_instance_types_sum_groups_and_paginate_quotas(clients: _Clients) -> Non
 def test_instance_types_fall_back_to_the_default_quota(clients: _Clients) -> None:
     """ListServiceQuotas leaves out a quota the account never had applied. Such a
     type was failed as "not a HyperPod instance type here", which blocked the
-    deploy even when its default quota covers the groups (N21)."""
+    deploy even when its default quota covers the groups."""
     _expect_quotas(clients, [_quota("ml.t3.large", 1)])
     _expect_aws_default_quotas(
         clients,
@@ -1094,7 +1094,7 @@ def test_cluster_name_taken_by_this_project_passes(clients: _Clients) -> None:
 
 def test_cluster_name_reads_every_page_of_tags(clients: _Clients) -> None:
     """ListTags pages its answer; reading only the first page could miss
-    gco:project and fail this project's own cluster as someone else's (N17)."""
+    gco:project and fail this project's own cluster as someone else's."""
     _expect_default_quotas(clients)
     _expect_eks(clients)
     _expect_clusters(clients, [_summary()])

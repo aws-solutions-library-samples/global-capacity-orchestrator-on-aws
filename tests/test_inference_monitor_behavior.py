@@ -496,7 +496,7 @@ def test_split_role_status_waits_for_the_pd_proxy(
     expected_state: str,
     expected_proxy: dict[str, int],
 ) -> None:
-    """Requests reach a split endpoint only through ``<name>-proxy`` (finding I11)."""
+    """Requests reach a split endpoint only through ``<name>-proxy``."""
     store = MagicMock()
     monitor = _make_monitor(store)
     monitor._mooncake_master_ready_replicas = MagicMock(  # type: ignore[method-assign]
@@ -951,7 +951,7 @@ async def test_reconcile_mooncake_does_not_promote_while_roles_are_creating() ->
 
 @pytest.mark.asyncio
 async def test_reconcile_mooncake_does_not_promote_while_a_role_rolls_out() -> None:
-    """Finding I21: old-template role pods keep the region serving, not the update applied."""
+    """Old-template role pods keep the region serving, not the update applied."""
     store = MagicMock()
     monitor = _store_mode_monitor(store, reported_state="running", rollout_complete=False)
     spec = {"mooncake": {"mode": "store", "store": {"enabled": True}}}
@@ -1627,7 +1627,7 @@ def test_active_cleanup_request_budget_is_explicit_and_bounded() -> None:
     # the TLS sidecar program ConfigMap), generated child, and legacy Ingress
     # exactly once; future expansion must update this reviewed bound rather
     # than introducing an unbounded hot loop. (No release created a
-    # per-endpoint HTTPRoute, so none is read: finding I22.)
+    # per-endpoint HTTPRoute, so none is read.)
     assert request_count == 29
 
 

@@ -868,7 +868,7 @@ class TestHeartbeatActivityBranches:
 
 
 class TestCancelHeartbeatTask:
-    """Only the heartbeat's own cancellation is absorbed (X22)."""
+    """Only the heartbeat's own cancellation is absorbed."""
 
     def test_cancellation_of_the_waiting_task_propagates(self) -> None:
         """The waiter is cancelled while the heartbeat is still stopping.

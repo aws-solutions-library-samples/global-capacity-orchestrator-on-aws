@@ -348,7 +348,7 @@ def test_status_table_names_drill_down_commands(runner: CliRunner) -> None:
 
 
 def test_status_drill_downs_read_the_same_source_as_their_section(runner: CliRunner) -> None:
-    """``queue`` is SQS depth and ``jobs`` is the central job queue (N22).
+    """``queue`` is SQS depth and ``jobs`` is the central job queue.
 
     Each heading must name the command that reads the same thing:
     ``gco jobs queue-status`` reads SQS, ``gco queue stats`` calls the

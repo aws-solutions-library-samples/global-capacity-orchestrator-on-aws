@@ -1816,7 +1816,7 @@ class TestMissionRunCli:
         expected: dict[str, Any],
     ) -> None:
         """``run`` offered four --cadence kinds but had no --cadence-n/-t/-event,
-        so three of them always failed validation (N1)."""
+        so three of them always failed validation."""
         _enable_flag(monkeypatch)
         mission_command = import_module("cli.commands.mission_cmd")
         driven: list[str] = []

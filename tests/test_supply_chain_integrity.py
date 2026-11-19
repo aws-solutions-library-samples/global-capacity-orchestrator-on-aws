@@ -749,7 +749,7 @@ def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> 
         for fragment in fragments:
             assert fragment in run, (step_name, fragment)
         assert "build_port_forward_command" in run
-    # The installer cleanup is limited to GCO's release namespace (finding L1):
+    # The installer cleanup is limited to GCO's release namespace:
     # the survivor check covers argocd, and an AppProject in another namespace,
     # created first, keeps its finalizer and gets no deletion timestamp.
     cascade = by_name["Cascade the example Application through the installer cleanup"]["run"]
@@ -2471,7 +2471,7 @@ def test_workflows_invoke_behaviorally_tested_runtime_verifiers() -> None:
     )
 
     assert "python3 .github/scripts/verify_lambda_imports.py" in lambda_step
-    # Finding C19: the handlers import from the build action's staged
+    # The handlers import from the build action's staged
     # directories, inside the Lambda base image the script pulls itself.
     lambda_job = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))["jobs"][
         "integration-lambda-imports"
@@ -2623,7 +2623,7 @@ def test_direct_docker_scanners_are_prepulled_with_retry() -> None:
 
 def test_gate_images_are_pinned_by_tag_and_digest() -> None:
     """Every image a security or lint job runs names its tag and manifest-list
-    digest (finding C11). A tag alone can be re-pushed upstream, which changes
+    digest. A tag alone can be re-pushed upstream, which changes
     what a gate runs, and so what it lets through, with no diff here; the
     monthly deps scan reports when a pinned tag's digest moves. The tag stays
     beside the digest for readers and for that scan's version sweep."""
@@ -2907,7 +2907,7 @@ def test_kind_clusters_without_a_default_cni_install_one() -> None:
 
 
 def test_pre_commit_ruff_hooks_skip_generated_trees_and_keep_pyprojects_excludes() -> None:
-    """Finding C16. pre-commit matches a hook's ``exclude`` with ``re.search``
+    """pre-commit matches a hook's ``exclude`` with ``re.search``
     against repository-relative paths, so the old ``'/(\\.venv|cdk\\.out|...)/'``
     needed a slash before ``.venv`` and never matched a top-level path. The
     ruff hook's ``--exclude`` args replaced ``[tool.ruff] exclude`` instead of
@@ -2941,7 +2941,7 @@ def test_pre_commit_ruff_hooks_skip_generated_trees_and_keep_pyprojects_excludes
 
 def test_pre_commit_comments_name_real_ci_jobs() -> None:
     """The mypy hook's comment named lint:typecheck-stacks, a job that no
-    longer exists (finding C16); every CI job the config names must exist."""
+    longer exists; every CI job the config names must exist."""
     names = {
         job["name"] for job in yaml.safe_load(_read(".github/workflows/lint.yml"))["jobs"].values()
     }
@@ -2982,7 +2982,7 @@ def test_tests_readme_names_real_ci_jobs() -> None:
 def test_queue_processor_docs_name_the_floci_emulator_not_moto() -> None:
     """integration:docker:queue-processor consumes from the Floci service
     container; four job descriptions still said it ran against moto's SQS
-    server (finding C15)."""
+    server."""
     workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
     services = workflow["jobs"]["integration-docker-queue-processor"]["services"]
     assert services["floci"]["image"].startswith("floci/floci:")
@@ -2997,7 +2997,7 @@ def test_queue_processor_docs_name_the_floci_emulator_not_moto() -> None:
 
 def test_composite_action_descriptions_never_name_a_stale_pin() -> None:
     """A composite action's description named an older release of the action
-    it wraps than the one its steps pin (finding C15: build-push-action
+    it wraps than the one its steps pin (build-push-action
     v7.3.0 against v7.4.0, setup-buildx-action v4.2.0 against v4.4.1,
     upload-artifact v7.0.1 against v7.0.2). A description may name the action
     without a version; a version it names must be the pinned one."""
@@ -3017,7 +3017,7 @@ def test_composite_action_descriptions_never_name_a_stale_pin() -> None:
 
 def test_ci_md_names_every_permission_beyond_contents_read() -> None:
     """The permissions bullet in .github/CI.md listed some grants and not
-    others (finding C15: cve-scan's issues: write, pr-type-label's
+    others (cve-scan's issues: write, pr-type-label's
     pull-requests: write and CodeQL's security-events: write were missing).
     Every grant beyond contents: read must be named with its workflow."""
     bullet = next(
@@ -3044,7 +3044,7 @@ _HELM_COMMAND = re.compile(
 
 
 def test_jobs_that_run_helm_install_the_installer_pinned_helm_first() -> None:
-    """Finding C17: grafana-dashboards.yml rendered kube-prometheus-stack with
+    """``grafana-dashboards.yml`` rendered kube-prometheus-stack with
     whatever helm the runner image shipped, while every other job installs the
     authenticated Helm release lambda/helm-installer/Dockerfile pins. Any job
     step that runs helm must come after a step that downloads that release
@@ -3077,7 +3077,7 @@ def _all_steps(document: dict | None) -> list[dict]:
 
 
 def test_ci_installs_uv_at_the_dockerfile_dev_pin() -> None:
-    """Finding C17: four jobs ran ``pip install uv`` (whatever PyPI served)
+    """Four jobs ran ``pip install uv`` (whatever PyPI served)
     while Dockerfile.dev pins UV_VERSION and the deps scan tracks that pin.
     Every uv install goes through use-pinned-uv.sh, which reads it."""
     installs = []
@@ -3092,7 +3092,7 @@ def test_ci_installs_uv_at_the_dockerfile_dev_pin() -> None:
 
 
 def test_pip_audit_is_pinned_and_audits_the_lock_once() -> None:
-    """Finding C17: pip-audit was installed unpinned and run twice over the
+    """``pip-audit`` was installed unpinned and run twice over the
     same lock, each run resolving the lock into a fresh virtualenv. One
     --no-deps --disable-pip run over the fully pinned lock now writes the
     report and decides the job."""
@@ -3116,7 +3116,7 @@ def test_pip_audit_is_pinned_and_audits_the_lock_once() -> None:
 
 
 def test_cve_scan_job_installs_nothing_trivy_does_not_need() -> None:
-    """Finding C17: the cve-scan job installed the project's security extra
+    """The cve-scan job installed the project's security extra
     although it only runs Trivy, which reads requirements-lock.txt itself."""
     job = yaml.safe_load(_read(".github/workflows/cve-scan.yml"))["jobs"]["cve-scan"]
     for step in job["steps"]:
@@ -3125,7 +3125,7 @@ def test_cve_scan_job_installs_nothing_trivy_does_not_need() -> None:
 
 
 def test_every_kind_calico_install_runs_the_one_script() -> None:
-    """Finding C18: the Calico install was copied into three kind jobs and
+    """The Calico install was copied into three kind jobs and
     the copies diverged (two lost the calico-node describe diagnostics and
     the retry log line). All three now run .github/scripts/install-calico.sh,
     which keeps the authenticated download, the retried rollout wait and the

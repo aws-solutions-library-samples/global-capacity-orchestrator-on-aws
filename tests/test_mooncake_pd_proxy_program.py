@@ -37,7 +37,7 @@ def test_prefill_priming_drops_fields_a_one_token_request_cannot_carry() -> None
     vLLM's own disaggregation proxies (the Mooncake connector example and the
     NIXL toy proxy) drop ``stream_options`` and keep ``min_tokens`` /
     ``min_completion_tokens`` for decode only. Kept on the priming call, either
-    one made prefill answer 400, so decode recomputed the prompt (finding I15).
+    one made prefill answer 400, so decode recomputed the prompt.
     """
     body = {
         "model": "m",

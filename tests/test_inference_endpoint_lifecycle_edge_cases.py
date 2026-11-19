@@ -1544,7 +1544,7 @@ def test_cli_deploy_json_output_prints_result() -> None:
 
 
 def test_cli_deploy_refuses_an_env_value_that_is_not_key_value() -> None:
-    """A malformed -e is a usage error, not silently dropped (finding CM7)."""
+    """A malformed -e is a usage error, not silently dropped."""
     manager = MagicMock()
     manager.deploy.return_value = {
         "endpoint_name": "ep",

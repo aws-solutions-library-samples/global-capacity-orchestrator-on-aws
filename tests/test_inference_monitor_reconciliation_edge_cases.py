@@ -930,7 +930,7 @@ def test_region_address_classification(address: str, expected: str) -> None:
 
 @pytest.mark.parametrize("name", ["my-llama-3", "qa-model-1", "pd-test-2", "team-ml-bert-2"])
 def test_region_shaped_endpoint_name_keeps_its_own_peers_in_region(name: str) -> None:
-    """Finding I4: the local role Services of ``my-llama-3`` are not Region ``my-llama-3``."""
+    """The local role Services of ``my-llama-3`` are not Region ``my-llama-3``."""
     monitor = _make_monitor()
     spec = {"mooncake": {"mode": "disaggregated", "transfer": {"protocol": "tcp"}}}
 

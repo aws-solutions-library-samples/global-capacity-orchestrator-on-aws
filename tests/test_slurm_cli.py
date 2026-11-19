@@ -190,7 +190,7 @@ class TestSbatchDirectives:
     @pytest.mark.parametrize("value", ["0", "0G", "0K", "0m"])
     def test_zero_memory_stays_zero(self, value):
         """--mem=0 is Slurm's "all of each node's memory"; it used to become a
-        1 MiB limit (N13)."""
+        1 MiB limit."""
         assert slurm_lib.memory_mb(value) == 0
 
     @pytest.mark.parametrize("directive", ["--mem=0", "--mem 0G"])
@@ -798,7 +798,7 @@ class TestSubmit:
         self, runner, api, tmp_path, script_text, flags
     ):
         """The API can only send an explicit memory_per_node size, so --mem=0
-        is refused instead of being sent as a 1 MiB limit (N13)."""
+        is refused instead of being sent as a 1 MiB limit."""
         script = tmp_path / "train.sbatch"
         script.write_text(script_text)
 

@@ -525,7 +525,7 @@ class TestInferenceEndpointStore:
         assert result["desired_state"] == "deploying"  # reset on spec change
 
     def test_update_spec_leaves_a_stopped_endpoint_stopped(self, store):
-        """Finding I13: a spec change is applied on the next start, not by restarting."""
+        """A spec change is applied on the next start, not by restarting."""
         created = store.create_endpoint("stopped-ep", {"image": "img:v1"}, ["us-east-1"])
         stopped = store.update_desired_state(
             "stopped-ep", "stopped", expected_lifecycle_id=created["lifecycle_id"]
@@ -664,7 +664,7 @@ class TestInferenceEndpointStore:
         return lifecycle, deleted["deletion_generation"]
 
     def test_region_removed_before_delete_acknowledges_the_deletion(self, store):
-        """Finding I1: a removal acknowledgement does not block the deletion's own writes."""
+        """A removal acknowledgement does not block the deletion's own writes."""
         lifecycle, generation = self._remove_west_then_delete(store, "rm-ep")
 
         for observations, state in ((1, "deleting"), (2, "deleted")):
@@ -690,7 +690,7 @@ class TestInferenceEndpointStore:
         assert status["absence_observations"] == 2
 
     def test_endpoint_deleted_after_a_region_removal_is_purged(self, store):
-        """Finding I1, end to end: both Regions' monitors acknowledge and the record goes."""
+        """End to end: both Regions' monitors acknowledge and the record goes."""
         import asyncio
 
         from gco.services import inference_monitor as im
@@ -1748,7 +1748,7 @@ class TestInferenceMonitor:
 
     @pytest.mark.asyncio
     async def test_stop_scales_the_canary_with_its_endpoint(self, monitor, mock_store):
-        """Finding I6: a stopped classic endpoint's canary releases its GPUs too."""
+        """A stopped classic endpoint's canary releases its GPUs too."""
         deployments = {}
         for deployment_name, replicas, ready in (("ep", 2, 2), ("ep-canary", 1, 1)):
             deployment = MagicMock()

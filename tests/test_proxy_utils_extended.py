@@ -273,7 +273,7 @@ class TestForwardRequestTimeout:
 
 
 class TestTransportFailuresWithRetriesDisabled:
-    """The errors urllib3 raises from the backend pool, which has retries off (L7).
+    """The errors urllib3 raises from the backend pool, which has retries off.
 
     Before, only TimeoutError (and an impossible MaxRetryError) counted as a
     transport failure: a reset or aborted connection was a 500 with no retry
@@ -1023,7 +1023,7 @@ class _NonceCheckingBackend:
 
 
 class TestReadOnlyRetriesSignAfresh:
-    """Each read-only retry carries a new HMAC envelope (finding L3).
+    """Each read-only retry carries a new HMAC envelope.
 
     The backend accepts a nonce once. Re-sending the first attempt's envelope
     turned a retry that reached the same pod into "403 Forbidden - requests

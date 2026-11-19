@@ -160,7 +160,7 @@ class TestFullScan:
     @pytest.mark.parametrize("output_format", ["json", "yaml"])
     def test_report_option_writes_file_in_machine_modes(self, monkeypatch, tmp_path, output_format):
         """--report was ignored with -o json: the envelope went to stdout and
-        no file was written (CM14)."""
+        no file was written."""
         monkeypatch.setattr(deps_cmd.subprocess, "run", _FakeScan(has_drift=True))
         target = tmp_path / "report.md"
 
@@ -175,7 +175,7 @@ class TestFullScan:
     def test_yaml_is_a_machine_mode(self, monkeypatch):
         """-o yaml streamed the scanner log and printed the bare Markdown, which
         the root wrapped as {status: ok, output: ...}; it now gets the same
-        envelope as -o json, rendered as YAML (CM14)."""
+        envelope as -o json, rendered as YAML."""
         from cli.main import cli
 
         fake = _FakeScan(has_drift=True)

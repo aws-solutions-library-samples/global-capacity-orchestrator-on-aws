@@ -190,7 +190,7 @@ class TestModelManager:
         assert result == []
 
     def test_list_models_reads_every_page_of_prefixes(self, manager):
-        """N17: one ListObjectsV2 page holds at most 1,000 keys and prefixes,
+        """One ListObjectsV2 page holds at most 1,000 keys and prefixes,
         so `gco models list` stopped at the first 1,000 models."""
         s3, stubber = self._stubbed_s3()
         listing = {"Bucket": "bucket", "Prefix": "models/", "Delimiter": "/"}

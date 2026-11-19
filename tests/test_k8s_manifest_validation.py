@@ -942,7 +942,7 @@ class TestConstants:
 
     def test_crd_catalog_is_read_at_one_pinned_commit(self) -> None:
         """Schemas come from one catalog commit, so upstream changes reach the
-        gate only when CRD_CATALOG_COMMIT moves (finding C12: the catalog was
+        gate only when CRD_CATALOG_COMMIT moves (the catalog was
         read from ``main``). The deps scan reads the constant as a plain string
         literal to report when main moves past it."""
         assert re.fullmatch(r"[0-9a-f]{40}", validator.CRD_CATALOG_COMMIT)

@@ -634,7 +634,7 @@ class TestInferenceAddRegion:
         assert "Failed to add us-west-2 to endpoint 'ep': throttled" in result.output
 
     def test_a_failed_write_reports_its_error_not_a_missing_endpoint(self, runner):
-        """Finding CC15: the manager turned a store failure into "not found"."""
+        """The manager turned a store failure into "not found"."""
         store = _region_store(["us-east-1"])
         result = self._invoke(
             runner, _real_manager(store), _region_client("us-east-1", "us-west-2")
@@ -780,7 +780,7 @@ class TestInferenceRemoveRegion:
         assert "Could not list the deployed Regions (throttled)" in result.output
 
     def test_a_failed_write_reports_its_error_not_a_missing_endpoint(self, runner):
-        """Finding CC15: the manager turned a store failure into "not found"."""
+        """The manager turned a store failure into "not found"."""
         store = _region_store(["us-east-1", "us-west-2"])
         result = self._invoke(
             runner, _real_manager(store), _region_client("us-east-1"), *self._command("-y")
@@ -852,7 +852,7 @@ class TestInferenceUpdateImage:
 
 
 class TestSpecChangeOnStoppedEndpoint:
-    """Finding I13: a stopped endpoint keeps a spec change until it is started."""
+    """A stopped endpoint keeps a spec change until it is started."""
 
     NOTE = "Endpoint 'ep' is stopped; the change takes effect when it starts"
     CASES = [
@@ -1005,7 +1005,7 @@ class TestModelsDelete:
         ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
     )
     def test_delete_prints_one_document_with_the_count(self, runner, deleted, output_format, parse):
-        """CM18: JSON/YAML mode printed {"status": "ok"} whether or not
+        """JSON/YAML mode printed {"status": "ok"} whether or not
         anything was deleted; the count is now the document."""
         mock_mgr = MagicMock()
         mock_mgr.delete_model.return_value = deleted
@@ -2673,7 +2673,7 @@ class TestInferenceConfigureStore:
         mock_mgr.configure_store.assert_not_called()
 
     def test_configure_store_without_settings_leaves_a_configured_store_alone(self, runner):
-        """Finding CM17: no flags re-wrote the current store block and redeployed."""
+        """No flags re-wrote the current store block and redeployed."""
         mock_mgr = MagicMock()
         mock_mgr.get_endpoint.return_value = self._endpoint({"enabled": True, "offload": "cpu"})
         with patch("cli.inference.get_inference_manager", return_value=mock_mgr):
@@ -2992,7 +2992,7 @@ class TestModelNamedOnlyByEnv:
 
 
 # =============================================================================
-# Machine-readable results of the mutation commands (finding CM6)
+# Machine-readable results of the mutation commands
 # =============================================================================
 
 _CANARY_ENDPOINT = {
@@ -3066,7 +3066,7 @@ class TestMutationResults:
 
 
 # =============================================================================
-# deploy option validation (finding CM7)
+# deploy option validation
 # =============================================================================
 
 

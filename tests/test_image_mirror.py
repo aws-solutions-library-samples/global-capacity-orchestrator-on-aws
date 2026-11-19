@@ -171,7 +171,7 @@ class TestCopyStrategy:
         ]
 
     def test_skopeo_command_reads_the_login_from_the_auth_file(self):
-        """CC17: the ECR token never goes on skopeo's command line, which any
+        """The ECR token never goes on skopeo's command line, which any
         local user can read while the copy runs."""
         cmds = mirror._copy_commands(
             self._item(), "docker", "skopeo", authfile="/private/auth.json"
@@ -966,7 +966,7 @@ class TestMirrorImages:
 
     def test_skopeo_force_copy_does_not_use_runtime_login_or_presence_probe(self):
         """skopeo gets the ECR login from a private auth file that exists only
-        while the copies run (CC17), never from its command line."""
+        while the copies run, never from its command line."""
         source_ref = "docker.io/example/image:v1"
         registry_host = "123456789012.dkr.ecr.us-east-1.amazonaws.com"
         copies: list[dict[str, object]] = []

@@ -918,7 +918,7 @@ class TestFilesCommands:
         ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
     )
     def test_an_empty_listing_keeps_the_list_shape(self, argv, method, output_format, parse):
-        """CM18: an empty result returned after the warning, so the root output
+        """An empty result returned after the warning, so the root output
         transaction printed {"status": "ok"} instead of the usual list."""
         from cli.main import cli
 
@@ -2555,7 +2555,7 @@ class TestNodepoolsCommands:
         ],
     )
     def test_a_printed_manifest_is_all_of_stdout(self, command, generator):
-        """N41: `> pool.yaml` used to append the two apply-hint lines after the
+        """`> pool.yaml` used to append the two apply-hint lines after the
         YAML, so `kubectl apply -f pool.yaml` failed to parse it."""
         from cli.main import cli
 
@@ -2612,7 +2612,7 @@ class TestNodepoolsCommands:
         ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
     )
     def test_an_empty_nodepool_list_keeps_the_list_shape(self, output_format, parse):
-        """CM18: no NodePools printed {"status": "ok"} in JSON/YAML mode."""
+        """No NodePools printed {"status": "ok"} in JSON/YAML mode."""
         from cli.main import cli
 
         with patch("cli.nodepools.list_cluster_nodepools", return_value=[]):

@@ -252,7 +252,7 @@ def test_image_reference_collectors_fail_when_their_manager_cannot_be_imported(
     method_name: str,
     args: tuple[object, ...],
 ) -> None:
-    """An unreadable reference source fails the orphan scan (CC19): an empty
+    """An unreadable reference source fails the orphan scan: an empty
     set would report every old tag, in-use ones included, as an orphan."""
     manager = _image_manager()
     original_import = builtins.__import__

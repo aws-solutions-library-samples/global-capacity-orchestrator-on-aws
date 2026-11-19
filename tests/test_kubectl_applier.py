@@ -5119,7 +5119,7 @@ class TestEksClientPlumbing:
 
 
 class TestKubernetesRequestTimeout:
-    """Every Kubernetes call carries a bounded timeout down to urllib3 (finding L4).
+    """Every Kubernetes call carries a bounded timeout down to urllib3.
 
     Kubernetes 37 hands urllib3 ``timeout=None`` for a call without
     ``_request_timeout``, and urllib3 then blocks on the socket with no limit,

@@ -1294,7 +1294,7 @@ def _role_spec(role: str, image: str) -> dict[str, Any]:
 def test_role_deployment_rolls_onto_an_updated_image(
     monitor: InferenceMonitor, role: str, deploy_name: str
 ) -> None:
-    """Finding I7: ``update-image`` reaches the prefill, decode and store role pods."""
+    """``update-image`` reaches the prefill, decode and store role pods."""
     new_image = "vllm/vllm-openai:v0.7.0"
     monitor.apps_v1.read_namespaced_deployment.side_effect = _by_name(
         {
@@ -1690,7 +1690,7 @@ def _pd_proxy_pass(
 
 
 def test_pd_proxy_pod_template_carries_no_leader_epoch(monitor: InferenceMonitor) -> None:
-    """Finding I8: provenance stays on the Deployment's own metadata."""
+    """Provenance stays on the Deployment's own metadata."""
     created = _pd_proxy_pass(monitor, "epoch-a", None)
 
     assert created["metadata"]["annotations"]["gco.io/leader-epoch"] == "epoch-a"
@@ -1786,7 +1786,7 @@ def _container_env(body: Mapping[str, Any], container_name: str) -> list[dict[st
 
 
 def test_every_setting_the_pd_proxy_program_reads_is_used() -> None:
-    """Finding I17: the program read a residency timeout it never applied."""
+    """The program read a residency timeout it never applied."""
     source = PD_PROXY_PROGRAM.read_text(encoding="utf-8")
     used = {
         node.id
@@ -1802,7 +1802,7 @@ def test_every_setting_the_pd_proxy_program_reads_is_used() -> None:
 
 
 def test_pd_proxy_gets_exactly_the_settings_its_program_reads(monitor: InferenceMonitor) -> None:
-    """Finding I17: a new proxy carries no setting its program ignores and lacks none it reads."""
+    """A new proxy carries no setting its program ignores and lacks none it reads."""
     created = _pd_proxy_pass(monitor, "epoch-a", None)
 
     rendered = {variable["name"] for variable in _container_env(created, "proxy")}

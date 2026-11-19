@@ -443,7 +443,7 @@ class TestFileSystemClientAccessPoints:
         return client
 
     def test_get_access_point_info_reads_every_page(self):
-        """N17: DescribeAccessPoints returns 100 per page; the second page was
+        """DescribeAccessPoints returns 100 per page; the second page was
         never read, so `gco files access-points` stopped at 100."""
         efs, stubber = _stubbed("efs")
         stubber.add_response(

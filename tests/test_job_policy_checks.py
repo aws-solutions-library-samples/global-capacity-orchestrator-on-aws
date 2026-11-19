@@ -412,7 +412,7 @@ class TestFetching:
     def test_slow_region_is_unreachable_at_the_deadline(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """One hung region must not stall the answer for the others (N16)."""
+        """One hung region must not stall the answer for the others."""
         monkeypatch.setattr("cli.job_policy.FETCH_TIMEOUT_SECONDS", 0.2)
         release = threading.Event()
         client = MagicMock()

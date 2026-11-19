@@ -888,7 +888,7 @@ def test_spot_price_average_is_weighted_by_the_time_each_price_held():
 
 
 def test_spot_price_history_reads_every_page():
-    """Only the newest page used to be read (N17)."""
+    """Only the newest page used to be read."""
     checker = _make_checker()
     now = datetime.now(UTC)
     ec2 = MagicMock()
@@ -952,7 +952,7 @@ def test_block_offerings_describe_the_type_in_the_offering_region():
 
 def test_capacity_block_trend_follows_next_token():
     """Only the first page of offerings used to be counted, which biased the
-    slope toward "shrinking" whenever the later days were on page two (N17)."""
+    slope toward "shrinking" whenever the later days were on page two."""
     checker = _make_checker()
     now = datetime.now(UTC)
     ec2 = MagicMock()

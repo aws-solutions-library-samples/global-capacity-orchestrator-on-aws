@@ -567,7 +567,7 @@ def _studio_efs(efs, ec2, *, name="gco-analytics/StudioEfs", tags=()):
 
 class TestScanOrphanResources:
     """The scan used to look for a tag only per-user EFS access points carry,
-    so it could never flag a retained file system or user pool (N34)."""
+    so it could never flag a retained file system or user pool."""
 
     @mock_aws
     def test_reports_what_a_deleted_stack_retained_with_ordered_cleanup(self):

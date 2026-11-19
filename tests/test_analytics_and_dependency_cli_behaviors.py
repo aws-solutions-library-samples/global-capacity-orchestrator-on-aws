@@ -199,7 +199,7 @@ def test_studio_login_polls_until_profile_is_ready(runner: CliRunner) -> None:
 
     assert result.exit_code == 0, result.output
     # The URL is printed alone on stdout for `URL=$(gco analytics studio
-    # login ...)`; the provisioning progress used to precede it there (N40).
+    # login ...)`; the provisioning progress used to precede it there.
     assert result.stdout == "https://studio.example/session\n"
     assert "Waiting for user profile to provision..." in result.stderr
     assert ".. ready" in result.stderr

@@ -239,7 +239,7 @@ class TestGCOConfigSave:
 
     def test_save_creates_directory(self, tmp_path):
         """save() created ~/.gco only when no path was passed, so an explicit
-        path in a missing directory raised FileNotFoundError (N3)."""
+        path in a missing directory raised FileNotFoundError."""
         config = GCOConfig()
         config_path = tmp_path / "subdir" / "config.yaml"
 
@@ -260,7 +260,7 @@ class TestGCOConfigSave:
 
     def test_config_init_on_a_fresh_home(self, tmp_path, monkeypatch):
         """`gco config-cmd init` is often the first command a new user runs; it
-        crashed with FileNotFoundError when ~/.gco did not exist yet (N3)."""
+        crashed with FileNotFoundError when ~/.gco did not exist yet."""
         from click.testing import CliRunner
 
         from cli.main import cli
@@ -319,7 +319,7 @@ class TestConfigInitWritesOnlyWhatTheUserSet:
     """`config-cmd init` wrote the fully merged config, including project_name
     and every Region read from the cdk.json where it ran. A config-file value
     counts as explicitly set, so that snapshot then overrode the cdk.json of
-    every other checkout (N4)."""
+    every other checkout."""
 
     @pytest.fixture
     def home(self, tmp_path, monkeypatch):

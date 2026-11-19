@@ -428,7 +428,7 @@ class TestUsersCli:
     def test_list_reads_the_secret_on_the_regions_cluster_through_a_tunnel(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, cluster: dict[str, Any]
     ) -> None:
-        """N7: the documented laptop flow, `monitoring open --via-ssm` in one
+        """The documented laptop flow, `monitoring open --via-ssm` in one
         terminal and `monitoring users list` in another, needs the Secret read
         to reach the private endpoint itself, on the right cluster."""
         reads: list[dict[str, Any]] = []

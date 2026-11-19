@@ -274,7 +274,7 @@ def _liveness_exit_code(port: int) -> int:
 
 
 def test_inference_monitor_liveness_window_is_the_stall_deadline_plus_one_lease():
-    """Finding I19: the window the probe enforces derives from the code's constants."""
+    """The window the probe enforces derives from the code's constants."""
     from gco.services.inference_monitor import LEASE_DURATION_INTERVALS, PASS_STALL_INTERVALS
 
     interval = _manifest_reconcile_interval()
@@ -299,7 +299,7 @@ def test_inference_monitor_liveness_window_is_the_stall_deadline_plus_one_lease(
 def test_inference_monitor_liveness_probe_fails_only_once_progress_stops(
     since_iteration: float, since_pass_step: float, live: bool
 ):
-    """Finding I19: liveness follows loop progress, so a standby never fails it."""
+    """Liveness follows loop progress, so a standby never fails it."""
     monitor = _monitor(reconcile_interval=_manifest_reconcile_interval())
     now = time.monotonic()
     monitor._last_loop_completed_at = now - since_iteration

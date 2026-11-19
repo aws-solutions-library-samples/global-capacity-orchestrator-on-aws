@@ -183,7 +183,7 @@ def test_stream_decode_rejects_when_no_decode_backend(monkeypatch, caplog) -> No
     ("error", "status", "error_type", "logged"),
     [
         # An empty Service can drop the SYN instead of refusing it, so no
-        # Ready decode pod also shows up as a connect timeout (finding I14).
+        # Ready decode pod also shows up as a connect timeout.
         (proxy.httpx.ConnectTimeout("timed out"), 503, "no_decode_backend", "unreachable"),
         (proxy.httpx.ReadTimeout("slow"), 504, "decode_timeout", "timed out"),
         (proxy.httpx.PoolTimeout("busy"), 504, "decode_timeout", "timed out"),

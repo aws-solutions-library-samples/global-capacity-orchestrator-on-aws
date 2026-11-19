@@ -1148,7 +1148,7 @@ class TestWebhooksCommands:
         return result, mock_aws
 
     def test_webhooks_create_prompts_for_a_hidden_secret_on_a_terminal(self):
-        """No --secret and no $GCO_WEBHOOK_SECRET on a terminal: ask, hidden (N42)."""
+        """No --secret and no $GCO_WEBHOOK_SECRET on a terminal: ask, hidden."""
         result, mock_aws = self._create_webhook(interactive=True, input="hmac-key\nhmac-key\n")
 
         assert result.exit_code == 0, result.output

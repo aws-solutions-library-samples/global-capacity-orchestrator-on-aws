@@ -417,7 +417,7 @@ def _summary(regions, *, error=None):
 
 
 class TestStoredState:
-    """The run summary must still reach SSM at real multi-Region sizes (L11).
+    """The run summary must still reach SSM at real multi-Region sizes.
 
     Before, the whole summary went to a Standard parameter: 14 Regions with
     their endpoint-group ARNs are 4277 bytes, over the 4 KB limit, and the

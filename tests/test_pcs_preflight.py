@@ -1155,7 +1155,7 @@ class TestManagedMode:
     def test_a_reservation_ec2_does_not_know_fails(self, clients: _Clients, code: str) -> None:
         """EC2 answers DescribeCapacityReservations for an unknown id with an
         error rather than omitting it. The error became "could not check" WARN,
-        which never blocks a deploy, and hid the checks of the other ids (N14)."""
+        which never blocks a deploy, and hid the checks of the other ids."""
         self._expect_two_reservation_groups(clients)
         clients["ec2"].add_client_error(
             "describe_capacity_reservations",

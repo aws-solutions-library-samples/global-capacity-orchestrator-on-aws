@@ -1,4 +1,4 @@
-"""Readiness counts only pods of the Deployment's current template (finding I12).
+"""Readiness counts only pods of the Deployment's current template.
 
 ``readyReplicas`` counts every Ready pod a Deployment selects, including the
 previous template's pods while a rollout replaces them. Right after
@@ -226,7 +226,7 @@ async def test_promotion_waits_for_another_region_still_rolling_out() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mooncake roles (finding I21)
+# Mooncake roles
 # ---------------------------------------------------------------------------
 
 SPLIT = {"mode": "disaggregated", "topology": {"prefill": 1, "decode": 2}}

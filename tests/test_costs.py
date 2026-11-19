@@ -244,8 +244,8 @@ def _two_month_service_groups() -> dict:
 
 class TestCostSummaryAcrossMonths:
     """A MONTHLY query returns one ResultsByTime entry per calendar month in the
-    window. The summary listed each service once per month with partial amounts
-    (N35); it must list each service once, with its total for the window."""
+    window. The summary listed each service once per month with partial amounts;
+    it must list each service once, with its total for the window."""
 
     @patch("cli.costs.boto3.Session")
     def test_each_service_is_listed_once_with_its_window_total(self, mock_session_cls):
@@ -465,7 +465,7 @@ def _ce_client_error(code: str, message: str, operation: str = "GetCostForecast"
 
 class TestForecastFailures:
     """`gco costs forecast` printed the error, a "needs 14+ days" hint for any
-    failure, and exited 0; in JSON mode stdout was {"status": "ok"} (N36). A
+    failure, and exited 0; in JSON mode stdout was {"status": "ok"}. A
     failure now exits 1 in every output mode, and the hint is shown only when
     Cost Explorer says it lacks the data."""
 
@@ -1416,7 +1416,7 @@ def _day(date: str, amount: str) -> dict:
 
 class TestCostExplorerPagination:
     """GetCostAndUsage returns NextPageToken when a result exceeds one page;
-    the summary, region and trend reads used only the first page (CC23)."""
+    the summary, region and trend reads used only the first page."""
 
     @staticmethod
     def _pages(mock_session_cls, *pages):
@@ -1505,7 +1505,7 @@ class TestCostExplorerPagination:
 class TestProjectTagValueFromCdkJson:
     """Every Cost Explorer query filtered on the literal Project=GCO, while the
     stacks are tagged from cdk.json context.tags (app.py). A deployment whose
-    Project tag differs got $0 from summary/regions/trend/forecast (N44)."""
+    Project tag differs got $0 from summary/regions/trend/forecast."""
 
     @patch("cli.costs.boto3.Session")
     def test_queries_use_the_value_cdk_json_tags_the_stacks_with(
@@ -1909,7 +1909,7 @@ def _wire_node(instance_type: str):
 class TestWorkloadReadFailures:
     """`gco costs workloads` swallowed every Kubernetes failure (kubeconfig,
     pod listing) and printed "No running workloads found" with exit 0, and its
-    requests carried no timeout (N37). Failures are now reported per region and
+    requests carried no timeout. Failures are now reported per region and
     the command exits 1; requests go through BoundedApiClient."""
 
     @staticmethod

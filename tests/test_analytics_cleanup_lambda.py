@@ -214,7 +214,7 @@ class TestHandler:
         mock_efs.assert_called_once_with("us-east-2", "d-test123")
 
     def test_access_points_go_after_the_profiles_and_the_resource_policy(self):
-        """The Studio EFS's access points are deleted on every stack delete (L9).
+        """The Studio EFS's access points are deleted on every stack delete.
 
         _delete_access_points had not been called since it was written, so
         every per-user access point the presigned-URL Lambda created was

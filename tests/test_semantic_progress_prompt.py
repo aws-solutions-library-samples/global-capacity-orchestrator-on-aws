@@ -184,7 +184,7 @@ def test_oversized_context_keeps_the_newest_tail_and_drops_the_oldest_head(
 
 
 # ---------------------------------------------------------------------------
-# The context is framed as untrusted data (N45)
+# The context is framed as untrusted data
 # ---------------------------------------------------------------------------
 
 

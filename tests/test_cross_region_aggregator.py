@@ -845,7 +845,7 @@ class _SilentServer:
 
 
 class TestRegionalRequestBudget:
-    """Each regional request is sent once and ends before the invocation does (L5).
+    """Each regional request is sent once and ends before the invocation does.
 
     urllib3's default Retry(total=3) re-sent a timed-out GET or DELETE three
     more times with a fresh 10-second timeout each, so a stalled Region took
@@ -948,7 +948,7 @@ class TestRegionalRequestBudget:
 
 
 class TestClientInputValidation:
-    """Malformed client input is a 400, not a 500 (L15)."""
+    """Malformed client input is a 400, not a 500."""
 
     @staticmethod
     def _jobs(limit):

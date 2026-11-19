@@ -102,7 +102,7 @@ class _Ticks:
 
 
 class TestWedgedPassReleasesLeadership:
-    """Finding I9: a pass that stops progressing must not hold the Lease forever."""
+    """A pass that stops progressing must not hold the Lease forever."""
 
     def test_stall_deadline_is_ten_reconcile_intervals(self) -> None:
         monitor = _monitor()
@@ -244,7 +244,7 @@ def _endpoints(*names: str, desired_state: str = "running") -> list[dict[str, An
 
 
 class TestShutdownHandsOverLeadership:
-    """Finding I18: SIGTERM stops a pass at an endpoint boundary and releases the Lease."""
+    """SIGTERM stops a pass at an endpoint boundary and releases the Lease."""
 
     @pytest.mark.asyncio
     async def test_sigterm_mid_pass_starts_no_further_endpoint(self) -> None:

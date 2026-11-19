@@ -1,4 +1,4 @@
-"""The endpoint store reads every page of the endpoints table (finding I10).
+"""The endpoint store reads every page of the endpoints table.
 
 A DynamoDB scan returns at most 1 MB per call and reports where it stopped in
 ``LastEvaluatedKey``. ``InferenceEndpointStore.list_endpoints`` read one page

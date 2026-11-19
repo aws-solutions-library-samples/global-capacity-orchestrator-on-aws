@@ -906,7 +906,7 @@ class TestCustomResourceCleanupNeedsGcoRelease:
         assert [command[:2] for command in commands] == [["helm", "status"]]
 
     def test_deploy_with_the_chart_disabled_leaves_an_unmanaged_install_alone(self):
-        """The finding's scenario: Argo CD off in GCO, an operator's own Argo CD on."""
+        """Argo CD off in GCO, an operator's own Argo CD on."""
         commands: list[list[str]] = []
         event = {
             "Action": "install_chart",
