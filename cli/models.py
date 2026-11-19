@@ -43,7 +43,7 @@ class ModelManager:
         except Exception as e:
             raise RuntimeError(
                 "Model bucket not found. Deploy the global stack first "
-                "with 'gco stacks deploy gco-global'."
+                f"with 'gco stacks deploy {self.config.global_stack_name}'."
             ) from e
 
     def _get_s3_client(self) -> Any:

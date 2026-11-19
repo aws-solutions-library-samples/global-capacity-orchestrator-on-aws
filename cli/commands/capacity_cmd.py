@@ -1891,8 +1891,21 @@ def cancel_reservation(
 _HISTORY_DISABLED_HINT = (
     "The historical capacity surface is not enabled. It is an optional add-on to "
     "the global stack: set historical.enabled to true in cdk.json and run "
-    "'gco stacks deploy gco-global'. See lambda/capacity-poller/README.md."
+    "'gco stacks deploy {global_stack}'. See lambda/capacity-poller/README.md."
 )
+
+
+def _history_disabled_hint() -> str:
+    """:data:`_HISTORY_DISABLED_HINT` naming this deployment's global stack.
+
+    The stack is ``<project>-global``, from the CLI configuration the root
+    ``gco`` group stores on the context (loaded here when there is none).
+    """
+    from ..config import get_config
+
+    context = click.get_current_context(silent=True)
+    config = context.find_object(GCOConfig) if context is not None else None
+    return _HISTORY_DISABLED_HINT.format(global_stack=(config or get_config()).global_stack_name)
 
 
 def _history_disabled(exc: Exception) -> bool:
@@ -1917,7 +1930,7 @@ def _historical_statistics(
         stats: dict[str, Any] = get_capacity_history_store().get_statistics(instance_type, region)
     except Exception as e:  # supplementary to check; never fail the command
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
         else:
             formatter.print_warning(f"Historical enrichment unavailable: {e}")
         return None
@@ -2007,7 +2020,7 @@ def history_show(config: Any, instance_type: Any, region: Any, hours: Any) -> No
         formatter.print(trend, columns=["timestamp", *METRIC_FIELDS])
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
             return
         formatter.print_error(f"Failed to load capacity history: {e}")
         sys.exit(1)
@@ -2052,7 +2065,7 @@ def history_stats(config: Any, instance_type: Any, region: Any, hours: Any) -> N
             formatter.print(stats)
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
             return
         formatter.print_error(f"Failed to compute capacity statistics: {e}")
         sys.exit(1)
@@ -2094,7 +2107,7 @@ def history_patterns(config: Any, instance_type: Any, region: Any, hours: Any, m
             formatter.print(patterns)
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
             return
         formatter.print_error(f"Failed to compute capacity patterns: {e}")
         sys.exit(1)
@@ -2210,7 +2223,7 @@ def predict_capacity(
         return
     except Exception as e:
         if _history_disabled(e):
-            formatter.print_warning(_HISTORY_DISABLED_HINT)
+            formatter.print_warning(_history_disabled_hint())
             return
         if is_bedrock_ftu_form_error(e):
             formatter.print_error(BEDROCK_FTU_REMEDIATION)

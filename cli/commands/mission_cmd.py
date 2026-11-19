@@ -1611,7 +1611,7 @@ def mission_run_cmd(
 _MEMORY_UNAVAILABLE_HINT = (
     "Mission memory is not available. The table and vector index ship with the "
     "global stack (mission_memory.enabled in cdk.json, on by default): run "
-    "'gco stacks deploy gco-global', or wait for the vector index to finish "
+    "'gco stacks deploy {global_stack}', or wait for the vector index to finish "
     "backfilling after the first deployment. See docs/MISSION.md."
 )
 
@@ -1625,7 +1625,11 @@ def _build_memory_store() -> Any:
 
 def _exit_memory_unavailable(err: Exception) -> None:
     """Print the deployment hint and a structured envelope, then exit 1."""
-    click.echo(_MEMORY_UNAVAILABLE_HINT, err=True)
+    from mission import deployment
+
+    # The global stack of the project the memory store read (<project>-global).
+    global_stack = f"{deployment.project_name()}-global"
+    click.echo(_MEMORY_UNAVAILABLE_HINT.format(global_stack=global_stack), err=True)
     _emit_error("mission_memory_unavailable", {"message": str(err)})
     raise SystemExit(1)
 
