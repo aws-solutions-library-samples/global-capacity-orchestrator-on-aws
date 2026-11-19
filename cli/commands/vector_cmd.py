@@ -161,8 +161,12 @@ def vector_ingest_cmd(files: tuple[Path, ...], demo: bool, wait: bool, output: s
 
     Uploading IS ingestion: the S3 event notification invokes the ingest
     Lambda, which chunks, embeds, and writes the items; global-table
-    replication then fans them out to every replica region. Re-uploading
-    a file overwrites its chunks in place.
+    replication then fans them out to every replica region.
+
+    Each file uploads to the corpus prefix plus its file name (the
+    directory is dropped), so ingesting a name that is already in the
+    corpus replaces that document, overwriting its chunks in place. Two
+    FILES with the same name are refused before anything is uploaded.
     """
     from ..vector_store import (
         VectorStoreUnavailableError,

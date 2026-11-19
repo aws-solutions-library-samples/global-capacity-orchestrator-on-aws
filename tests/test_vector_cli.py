@@ -274,6 +274,40 @@ class TestIngest:
         with pytest.raises(VectorStoreError, match="nothing to ingest"):
             _client().ingest([])
 
+    def test_refuses_two_files_with_one_name_before_any_upload(self, tmp_path):
+        # The object key is the corpus prefix plus the file name, so both
+        # files would land on vector-corpus/README.md and the second upload
+        # would silently replace the first document.
+        first = tmp_path / "team-a" / "README.md"
+        second = tmp_path / "team-b" / "README.md"
+        for path, body in ((first, "runbook A"), (second, "runbook B")):
+            path.parent.mkdir()
+            path.write_text(body)
+        store = _client()
+        store._s3_client = _FakeS3()
+
+        with pytest.raises(
+            VectorStoreError, match=re.escape("vector-corpus/README.md")
+        ) as exc_info:
+            store.ingest([first, second])
+
+        assert f"{first} and {second} would both upload" in str(exc_info.value)
+        assert store._s3_client.puts == []
+
+    def test_names_that_differ_only_in_case_are_distinct_keys(self, tmp_path):
+        # S3 keys are case-sensitive: README.md and readme.md do not collide.
+        upper = tmp_path / "a" / "README.md"
+        lower = tmp_path / "b" / "readme.md"
+        for path in (upper, lower):
+            path.parent.mkdir()
+            path.write_text(path.name)
+        store = _client()
+        store._s3_client = _FakeS3()
+
+        summary = store.ingest([upper, lower])
+
+        assert summary["uploaded"] == ["vector-corpus/README.md", "vector-corpus/readme.md"]
+
     def test_wait_polls_until_every_source_has_chunks(self, tmp_path, monkeypatch):
         doc = tmp_path / "a.txt"
         doc.write_text("text")
@@ -799,6 +833,20 @@ class TestVectorCommands:
         assert captured["paths"] == [doc]
         assert captured["wait"] == 0
         assert json.loads(result.output)["uploaded"] == ["vector-corpus/a.md"]
+
+    def test_ingest_refuses_files_sharing_a_name_without_calling_aws(self, tmp_path):
+        first = tmp_path / "a" / "notes.txt"
+        second = tmp_path / "b" / "notes.txt"
+        for path in (first, second):
+            path.parent.mkdir()
+            path.write_text("text")
+
+        result = self._invoke("ingest", str(first), str(second))
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.stderr.strip().splitlines()[-1])
+        assert envelope["code"] == "vector_ingest_failed"
+        assert "would both upload to vector-corpus/notes.txt" in envelope["details"]["message"]
 
     def test_ingest_wait_flag_blocks_and_a_timeout_fails(self, tmp_path, monkeypatch):
         doc = tmp_path / "a.md"

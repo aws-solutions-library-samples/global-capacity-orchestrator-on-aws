@@ -532,7 +532,10 @@ class VectorStoreClient:
 
         Args:
             paths: Files to upload. Every path must exist and carry an
-                ingestible suffix (.txt, .md, .jsonl).
+                ingestible suffix (.txt, .md, .jsonl). Each uploads to the
+                corpus prefix plus its file name (the directory is not
+                part of the key), so the file names must be distinct; a
+                name already in the corpus replaces that document.
             wait_timeout_seconds: 0 returns right after the uploads.
 
         Returns:
@@ -543,8 +546,8 @@ class VectorStoreClient:
         Raises:
             VectorStoreUnavailableError: Bucket/table SSM names absent,
                 no credentials, or endpoint unreachable.
-            VectorStoreError: A path is missing or not ingestible, or
-                the upload fails.
+            VectorStoreError: A path is missing or not ingestible, two
+                paths share a file name, or the upload fails.
         """
         from botocore.exceptions import BotoCoreError, ClientError
 
@@ -558,6 +561,17 @@ class VectorStoreClient:
                     f"{path.name}: unsupported suffix {path.suffix!r} — the ingest "
                     f"pipeline reads {', '.join(_INGESTIBLE_SUFFIXES)}"
                 )
+        # The key drops the directory: two files with one name would land
+        # on one key, and the second upload would replace the first.
+        first_by_name: dict[str, Path] = {}
+        for path in paths:
+            if path.name in first_by_name:
+                raise VectorStoreError(
+                    f"{first_by_name[path.name]} and {path} would both upload to "
+                    f"{self._corpus_prefix}{path.name}: the corpus key is the file "
+                    "name, so the second would replace the first. Rename one of them."
+                )
+            first_by_name[path.name] = path
 
         bucket_name, bucket_region = self._resolve_bucket()
         client = self._get_s3_client(bucket_region)
