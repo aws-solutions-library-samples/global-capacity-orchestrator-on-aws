@@ -5633,8 +5633,9 @@ a group CloudFormation retained is left alone.
 
 Once every regional stack is confirmed absent, `destroy-all` also deletes each
 Region's `/<project>/addons/<region>/` SSM parameters: the add-on status records
-that `gco stacks addons status` reads, the convergence replay input and
-execution record, and the teardown fence. The Helm and manifest tooling writes
+that `gco stacks addons status` reads, the convergence replay input (with
+its parts, when it was too large for one parameter) and execution record, and
+the teardown fence. The Helm and manifest tooling writes
 them at runtime, so CloudFormation never removes them; the next deployment in
 that Region writes them again.
 
@@ -6020,9 +6021,11 @@ gco stacks addons COMMAND [OPTIONS]
 | `--region` | `-r` | AWS region (default: first deployment region) |
 | `--all-regions` | `-A` | Apply across all deployment regions |
 
-`status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply. An active teardown fence (`_teardown`) shows as `teardown-active`. The command exits 1 when any row is not healthy or a Region's records cannot be read. With `gco -o json` or `-o yaml` it prints one list of `{region, name, status, message}` rows across the Regions; a Region whose records cannot be read contributes a row with status `error` and no name.
+`status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply. An active teardown fence (`_teardown`) shows as `teardown-active`; the replay input (`_input` and its parts) and the execution record (`_execution`) are not listed. The command exits 1 when any row is not healthy or a Region's records cannot be read. With `gco -o json` or `-o yaml` it prints one list of `{region, name, status, message}` rows across the Regions; a Region whose records cannot be read contributes a row with status `error` and no name.
 
 `install` replays the execution input the last deploy stored in `/{project}/addons/{region}/_input` into the Helm install state machine of this project's regional stack, `{project}-{region}`. It finds that state machine among the stack's resources (`cloudformation:ListStackResources`), because every deployment's state machine gets a generated name of the same shape, and it exits 1 instead of starting another deployment's installer when the stack or its state machine cannot be found.
+
+The deploy stores that input compressed and base64-encoded. When the encoding is larger than one SSM parameter value (8 KiB), it is split into parts, `_input.<digest>.1` to `_input.<digest>.<n>`, and `_input` holds a header with the part count and the SHA-256 of the whole encoding. `install` reads the parts in order and exits 1, naming the parameter, when a part is missing or the parts do not match the header's SHA-256.
 
 **Example:**
 

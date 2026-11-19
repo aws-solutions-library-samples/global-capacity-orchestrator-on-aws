@@ -851,7 +851,7 @@ def _chart_tls_proxy_sidecar(
     """
     # Leaves out what Kubernetes and tls_proxy already default to (the port
     # protocol, the keypair file paths under /var/run/gco/tls): these specs
-    # ride in the convergence replay input, which SSM caps at 8 KiB encoded.
+    # ride in every convergence execution input and its SSM replay copy.
     volume_name = "gco-tls"
     container: dict[str, Any] = {
         "name": name,

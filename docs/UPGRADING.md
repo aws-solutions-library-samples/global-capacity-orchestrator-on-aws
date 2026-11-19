@@ -46,6 +46,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Access-logs buckets use SSE-S3](#access-logs-buckets-use-sse-s3)
   - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
   - [`Project` tag on PCS instances](#project-tag-on-pcs-instances)
+  - [Add-on replay input in parts](#add-on-replay-input-in-parts)
   - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
   - [MCP server tools](#mcp-server-tools)
   - [Pre-commit hook for contributors](#pre-commit-hook-for-contributors)
@@ -985,6 +986,27 @@ fell outside the reports.
   tag-based IAM condition, cost filter or script that finds PCS instances by
   `Project=<project_name>` should match the `gco:project` tag, which keeps the
   project name, or the new value.
+
+### Add-on replay input in parts
+
+A regional deployment whose Helm convergence input encoded to more than 8 KiB
+failed and rolled back with
+`Encoded convergence replay input is <n> bytes; SSM Parameter Store supports at most 8192 bytes`.
+The default charts plus Slurm and YuniKorn, with PCS managed mode, HyperPod
+and EKS capabilities enabled, are one configuration that reaches that size.
+
+- **Such a deployment now succeeds.** The input's limit is now Step
+  Functions' 256 KiB execution-input limit. Its replay copy for `gco stacks addons install`,
+  `/<project>/addons/<region>/_input`, stays one value while its encoding fits
+  in 8 KiB, as in earlier releases. A larger encoding is written to
+  `_input.<digest>.1` to `_input.<digest>.<n>`, and `_input` holds a header
+  that names the parts. `gco stacks addons status` does not list the parts,
+  `destroy-all` deletes them with the other add-on parameters, and reading
+  them takes the same `ssm:GetParameter` permission as `_input`.
+- **Replay a split input with this release's CLI.** An older
+  `gco stacks addons install` cannot read the header and exits 1 with
+  `Could not read /<project>/addons/<region>/_input`. Only an input too large
+  for the earlier releases to deploy is split.
 
 ### CLI exit codes, output and prompts
 

@@ -49,6 +49,7 @@ from scripts.live_release_validation.checks.inference_common import (
     ManagedInferenceValidationError,
 )
 from scripts.live_release_validation.inference_contract import MOONCAKE_CONFIG_DIGEST_ANNOTATION
+from tests._lambda_imports import load_lambda_module
 from tests._live_validation_patching import patch_live_validation_helper
 from tests.test_live_release_validation import (
     TestDeterministicTopologyReadiness as _TopologyFixtures,
@@ -2148,6 +2149,98 @@ class TestConvergeRegionAddons:
         _install_clock(monkeypatch, checks_topology)
         self._converge(environment)
         assert "sfn:us-east-1" in environment.events
+
+    _INPUT = "/gco-live/addons/us-east-1/_input"
+
+    def _store_input_in_parts(self, environment: SimpleNamespace) -> tuple[list[str], str]:
+        """Grow the Region's input past one SSM value and store it as the orchestrator does.
+
+        Returns the written parameter names (header last) and the input JSON.
+        """
+        region = "us-east-1"
+        execution_input = dict(environment.inputs[region])
+        execution_input["ImageReplacements"] = {
+            f"{{{{IMAGE_{index:03d}}}}}": (
+                f"123456789012.dkr.ecr.{region}.amazonaws.com/gco/component-{index:03d}"
+                f"@sha256:{hashlib.sha256(f'image-{index}'.encode()).hexdigest()}"
+            )
+            for index in range(143)
+        }
+        input_json = _canonical(execution_input)
+        orchestrator = load_lambda_module("helm-orchestrator")
+        writes = orchestrator._replay_input_writes(
+            self._INPUT, orchestrator._encode_replay_input(input_json)
+        )
+        assert len(writes) == 3, "the fixture must need two parts and a header"
+        environment.parameter_values.update(dict(writes))
+        self._set_execution(
+            environment,
+            {
+                **environment.metadata[region],
+                "input_sha256": hashlib.sha256(input_json.encode("utf-8")).hexdigest(),
+            },
+        )
+        describe = environment.clients[("stepfunctions", region)].describe_execution
+        describe.return_value["input"] = input_json
+        return [name for name, _value in writes], input_json
+
+    def test_a_replay_input_stored_in_parts_converges(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        environment = _topology_environment()
+        _install_clock(monkeypatch, checks_topology)
+        (first, second, _header), input_json = self._store_input_in_parts(environment)
+        evidence: dict[str, Any] = {}
+
+        checks_topology._converge_region_addons(
+            environment.ctx,
+            region="us-east-1",
+            stack_name=environment.stack_names["us-east-1"],
+            stack=environment.stacks[environment.stack_names["us-east-1"]],
+            evidence=evidence,
+        )
+
+        assert evidence["input"] == json.loads(input_json)
+        assert evidence["input_sha256"] == hashlib.sha256(input_json.encode()).hexdigest()
+        reads = [event for event in environment.events if event.startswith("ssm:")]
+        assert reads[:4] == [
+            "ssm:us-east-1:_execution",
+            "ssm:us-east-1:_input",
+            f"ssm:us-east-1:{first.rsplit('/', 1)[1]}",
+            f"ssm:us-east-1:{second.rsplit('/', 1)[1]}",
+        ]
+
+    def test_a_corrupted_replay_input_in_parts_is_refused(self) -> None:
+        environment = _topology_environment()
+        (first, second, header_name), _input_json = self._store_input_in_parts(environment)
+        values = environment.parameter_values
+        header = values[header_name]
+        digest = header.rsplit(":", 1)[1]
+        original = values[first]
+
+        values[first] = original[:-1] + ("A" if original[-1] != "A" else "B")
+        with pytest.raises(RuntimeError, match="has a 2-part value that does not match"):
+            self._converge(environment)
+        values[first] = original
+
+        values[header_name] = f"chunked:v1:1:{digest}"
+        with pytest.raises(RuntimeError, match="has a 1-part value that does not match"):
+            self._converge(environment)
+
+        values[header_name] = f"chunked:v1:3:{digest}"
+        with pytest.raises(RuntimeError, match=r"names 3 parts, and part 3 \(.*\.3\) could not"):
+            self._converge(environment)
+
+        values[header_name] = header
+        original_second = values.pop(second)
+        with pytest.raises(RuntimeError, match=r"names 2 parts, and part 2 \(.*\.2\) could not"):
+            self._converge(environment)
+        values[second] = original_second
+
+        for malformed in ("chunked:v1:two:" + digest, "chunked:v1:2:" + digest[:40]):
+            values[header_name] = malformed
+            with pytest.raises(RuntimeError, match="has a malformed chunked-input header"):
+                self._converge(environment)
 
 
 class TestHealthAndMetricsPayloads:

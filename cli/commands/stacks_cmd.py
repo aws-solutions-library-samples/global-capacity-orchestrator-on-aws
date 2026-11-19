@@ -3165,6 +3165,8 @@ def addons_status(config: Any, region: Any, all_regions: bool) -> None:
 _ADDON_HEALTHY_STATUSES = frozenset({"installed", "uninstalled", "absent", "applied", "validated"})
 # SSM parameters under /<project>/addons/<region>/ that are not status records.
 _ADDON_BOOKKEEPING_PARAMS = frozenset({"_input", "_execution"})
+# Parts of a replay input too large for one parameter (_input.<digest>.<k>).
+_ADDON_INPUT_PART_PREFIX = "_input."
 # The teardown provider's fence: its value is the teardown execution name.
 _ADDON_TEARDOWN_FENCE = "_teardown"
 
@@ -3197,9 +3199,9 @@ def _addons_status_one(
     rows = []
     for p in params:
         name = p["Name"].rsplit("/", 1)[-1]
-        # _input (replay input) and _execution (orchestrator run metadata)
-        # are bookkeeping, not add-on status records.
-        if name in _ADDON_BOOKKEEPING_PARAMS:
+        # _input (replay input), its parts and _execution (orchestrator run
+        # metadata) are bookkeeping, not add-on status records.
+        if name in _ADDON_BOOKKEEPING_PARAMS or name.startswith(_ADDON_INPUT_PART_PREFIX):
             continue
         if name == _ADDON_TEARDOWN_FENCE:
             # Not JSON, so it used to read as an "unknown" chart; an active
@@ -3295,6 +3297,55 @@ def _decode_addon_replay_input(stored_value: str) -> str:
     return zlib.decompress(compressed).decode("utf-8")
 
 
+#: ``_input`` value when the encoded replay input is stored in parts
+#: (``_replay_input_writes`` in lambda/helm-orchestrator/handler.py).
+_ADDON_CHUNKED_INPUT_HEADER = re.compile(
+    r"chunked:v1:(?P<count>[1-9][0-9]*):(?P<sha256>[0-9a-f]{64})"
+)
+
+
+def _read_addon_replay_input(ssm: Any, input_param: str) -> str:
+    """Read the replay input at ``input_param`` and return its execution-input JSON.
+
+    ``input_param`` holds raw JSON (older releases), one zlib+base64 value, or,
+    when that encoding is larger than one SSM value (8 KiB), the header
+    ``chunked:v1:<n>:<sha256>``. The encoded value is then split across
+    ``<input_param>.<sha256[:16]>.1`` to ``.<n>``, which are read in order and
+    must join to the SHA-256 the header names. A malformed header, a missing
+    part or a digest mismatch raises ``ValueError``.
+    """
+    import hashlib
+
+    from botocore.exceptions import ClientError
+
+    stored = ssm.get_parameter(Name=input_param)["Parameter"]["Value"]
+    if not stored.startswith("chunked:"):
+        return _decode_addon_replay_input(stored)
+    header = _ADDON_CHUNKED_INPUT_HEADER.fullmatch(stored)
+    if header is None:
+        raise ValueError(f"malformed chunked-input header {stored[:120]!r}")
+    count = int(header["count"])
+    digest = header["sha256"]
+    parts: list[str] = []
+    for index in range(1, count + 1):
+        part_param = f"{input_param}.{digest[:16]}.{index}"
+        try:
+            parts.append(ssm.get_parameter(Name=part_param)["Parameter"]["Value"])
+        except ClientError as exc:
+            reason = (
+                "does not exist"
+                if exc.response.get("Error", {}).get("Code") == "ParameterNotFound"
+                else f"could not be read ({exc})"
+            )
+            raise ValueError(
+                f"its header names {count} parts, and part {index}, {part_param}, {reason}"
+            ) from exc
+    encoded = "".join(parts)
+    if hashlib.sha256(encoded.encode("utf-8")).hexdigest() != digest:
+        raise ValueError(f"its {count}-part value does not match the SHA-256 in its header")
+    return _decode_addon_replay_input(encoded)
+
+
 def _helm_install_state_machine_arn(cloudformation: Any, stack_name: str) -> str | None:
     """ARN of the Helm install state machine the regional stack ``stack_name`` owns.
 
@@ -3333,8 +3384,7 @@ def _addons_install_one(formatter: Any, project: str, region: str) -> bool:
                 f"[{region}] Add-on teardown is active ({fence_param}); refusing to start."
             )
             return False
-        stored_input = ssm.get_parameter(Name=input_param)["Parameter"]["Value"]
-        execution_input = _decode_addon_replay_input(stored_input)
+        execution_input = _read_addon_replay_input(ssm, input_param)
     except Exception as e:
         formatter.print_error(
             f"[{region}] Could not read {input_param}: {e}. "

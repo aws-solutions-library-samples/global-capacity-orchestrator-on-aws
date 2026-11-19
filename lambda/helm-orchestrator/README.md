@@ -56,6 +56,28 @@ There is no `isComplete` handler: the resource is considered created as soon as
 the execution has been started, so a slow or failing chart can never block (or
 roll back) the cluster.
 
+### Replay input
+
+Before it starts the execution, `on_event` stores the exact execution input in
+SSM so `gco stacks addons install` can replay it, and records the started
+execution and the input's SHA-256 in `/<project>/addons/<region>/_execution`.
+The input is canonical JSON, at most 256 KiB (Step Functions' execution-input
+limit, checked before anything is written). The stored copy is that JSON
+compressed with zlib and base64-encoded, because SSM refuses a value that
+contains `{{`:
+
+- When the encoding fits one parameter value (8 KiB), it is the value of
+  `/<project>/addons/<region>/_input`, the only form earlier releases wrote.
+- When it does not, it is split into 8 KiB parts written to
+  `_input.<sha256[:16]>.<k>` (k = 1..n), and `_input` then holds the header
+  `chunked:v1:<n>:<sha256>`, where the SHA-256 is that of the whole encoded
+  value. The parts are written before the header, so a deployment that fails
+  part-way leaves `_input` naming parts that are still complete. Once the
+  execution is recorded, the parts of the previous header that the new value
+  does not use are deleted; a failure to read or delete them is only logged,
+  and `gco stacks destroy-all` removes every parameter under
+  `/<project>/addons/<region>`.
+
 ## Packaging
 
 Plain (zip) Lambda — pure boto3, no Helm/kubectl binaries. The actual Helm work
@@ -83,7 +105,9 @@ Passed through verbatim as the state-machine execution input.
 ## IAM Permissions
 
 - `states:StartExecution` on the Helm-install state machine (`on_event`)
-- `ssm:PutParameter` on `/<project>/addons/*` (best-effort execution-input replay)
+- `ssm:PutParameter`, `ssm:GetParameter` and `ssm:DeleteParameter` on
+  `/<project>/addons/*` (the replay input and its parts, the execution record,
+  the teardown fence)
 
 ## Dependencies
 

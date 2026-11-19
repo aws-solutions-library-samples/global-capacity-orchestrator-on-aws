@@ -154,6 +154,52 @@ def _ssm_string_parameter(client: Any, name: str) -> str:
     return value
 
 
+# ``_input`` value when the encoded replay input is stored in parts
+# (``_replay_input_writes`` in lambda/helm-orchestrator/handler.py).
+_REPLAY_INPUT_CHUNKED_HEADER = re.compile(
+    r"chunked:v1:(?P<count>[1-9][0-9]*):(?P<sha256>[0-9a-f]{64})"
+)
+
+
+def _read_replay_input_parameter(client: Any, name: str) -> str:
+    """Read the orchestrator's replay input at ``name`` and return its decoded JSON.
+
+    ``name`` holds one zlib+base64 value or, when that encoding is larger than
+    one SSM value (8 KiB), the header ``chunked:v1:<n>:<sha256>``: the encoded
+    value is then split across ``<name>.<sha256[:16]>.1`` to ``.<n>``. Each
+    part is read with the same exact identity and type checks, and the joined
+    parts must have the SHA-256 the header names.
+    """
+    description = f"SSM parameter {name}"
+    stored = _ssm_string_parameter(client, name)
+    if not stored.startswith("chunked:"):
+        return _decode_replay_input_parameter(stored, description)
+    header = _REPLAY_INPUT_CHUNKED_HEADER.fullmatch(stored)
+    if header is None:
+        raise RuntimeError(
+            f"{description} has a malformed chunked-input header: "
+            f"{_bounded_topology_evidence(stored, 160)}"
+        )
+    count = int(header["count"])
+    digest = header["sha256"]
+    parts: list[str] = []
+    for index in range(1, count + 1):
+        part_name = f"{name}.{digest[:16]}.{index}"
+        try:
+            parts.append(_ssm_string_parameter(client, part_name))
+        except Exception as exc:
+            raise RuntimeError(
+                f"{description} names {count} parts, and part {index} ({part_name}) "
+                f"could not be read: {exc}"
+            ) from exc
+    encoded = "".join(parts)
+    if hashlib.sha256(encoded.encode("utf-8")).hexdigest() != digest:
+        raise RuntimeError(
+            f"{description} has a {count}-part value that does not match the SHA-256 in its header"
+        )
+    return _decode_replay_input_parameter(encoded, description)
+
+
 def _epoch_seconds(value: Any, description: str) -> int:
     """Normalize an SDK timestamp while rejecting booleans and invalid values."""
     if isinstance(value, datetime):
@@ -461,10 +507,7 @@ def _converge_region_addons(
     input_parameter = f"{parameter_root}/_input"
     ssm = ctx.session.client("ssm", region_name=region)
     execution_json = _ssm_string_parameter(ssm, execution_parameter)
-    input_json = _decode_replay_input_parameter(
-        _ssm_string_parameter(ssm, input_parameter),
-        f"SSM parameter {input_parameter}",
-    )
+    input_json = _read_replay_input_parameter(ssm, input_parameter)
     execution = _topology_json_object(
         execution_json,
         f"SSM parameter {execution_parameter}",
