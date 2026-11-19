@@ -2082,7 +2082,7 @@ dashboard. No AWS or cluster access. The
 the same document.
 
 ```bash
-gco crossplane status [--output json]
+gco [-o json] crossplane status
 ```
 
 #### `gco crossplane open`
@@ -2491,7 +2491,7 @@ autoscaler, and how to reach the UI. No AWS or cluster access; a
 document.
 
 ```bash
-gco gitops status [--region REGION] [--output json]
+gco [-o json] gitops status [--region REGION]
 ```
 
 #### `gco gitops open`
@@ -4111,9 +4111,12 @@ This reads the deployed cluster, not your local `cdk.json`. The two diverge
 whenever the stack was deployed from a different checkout, and CDK adds the
 project's own ECR registries to `trusted_registries` at synth time, so the
 effective allowlist is always larger than the configured one (a policy without
-`trusted_registries` starts from the services' default list). Note that
-`gco jobs submit --dry-run` is a client-side `kubectl` parse, not an admission
-preview — it never consults this policy.
+`trusted_registries` starts from the services' default list).
+`gco jobs submit --dry-run` checks a manifest against this policy in the
+region that receives it and applies nothing, but it never reaches the
+Kubernetes API server, so the `LimitRange` and `ResourceQuota` this command
+also reports are not evaluated. `gco jobs submit-direct --dry-run` is a
+client-side `kubectl --dry-run=client` parse that consults neither.
 
 ```bash
 gco jobs policy [OPTIONS]
@@ -5169,7 +5172,7 @@ Work with a region's Slurm cluster(s): the [Slinky](https://slinky.schedmd.com/)
 The backends enabled in the region, from `GET /api/v1/slurm/backends`: for each, its kind and endpoint, and for PCS the cluster id, status, Slurm version, accounting mode, default partition, the Slurm identity the API submits as, and the login kind (`ssm`). The header says whether `--backend` is required (both on) or which one is the default (one on). A backend whose discovery fails is listed as `unavailable` with the reason, so one broken backend never hides the other.
 
 ```bash
-gco slurm backends -r REGION [--output json]
+gco [-o json] slurm backends -r REGION
 ```
 
 #### `gco slurm status`
@@ -5177,7 +5180,7 @@ gco slurm backends -r REGION [--output json]
 Controller reachability (`ping`), every partition with its node and CPU totals, and node and job counts by state. The default partition is marked `*`. The header names the backend that answered when the API resolved one (`[pcs]`).
 
 ```bash
-gco slurm status -r REGION [--backend slinky|pcs] [--output json]
+gco [-o json] slurm status -r REGION [--backend slinky|pcs]
 ```
 
 #### `gco slurm partitions`
@@ -6605,8 +6608,7 @@ gco tasks tail TASK_ID [OPTIONS]
 **Options:**
 
 - `-n, --lines INTEGER` — Lines to show from the end of the log (default: 100)
-- `-f, --follow` — Stream new lines as they're written
-- `--interval FLOAT` — Polling interval in seconds when `--follow` is set (default: 1.0)
+- `-f, --follow` — Stream new lines as they're written, polling the log every half second, until the task is no longer running
 
 ```bash
 gco tasks tail deploy_all-1747683123-42

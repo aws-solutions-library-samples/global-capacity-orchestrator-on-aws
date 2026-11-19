@@ -368,10 +368,10 @@ pytest --cov tests/
 # Run with verbose output
 pytest tests/ -v
 
-# Run only unit tests
-pytest tests/ -m unit
+# Run the tests of one area, selected by name (the suite has no unit/integration split)
+pytest tests/ -k inference
 
-# Run only integration tests
+# Run only the MCP protocol end-to-end tests (the one module marked integration)
 pytest tests/ -m integration
 ```
 

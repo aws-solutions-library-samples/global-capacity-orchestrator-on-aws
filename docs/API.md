@@ -191,7 +191,8 @@ out to this path and reads `templates_count`, `webhooks_count`,
 Every path in this document is relative to one of two hosts.
 
 **Global API Gateway** — the `ApiEndpoint` CloudFormation output of the
-`gco-api-gateway` stack (`gco stacks outputs gco-api-gateway`). Use it for cross-region aggregation, and for
+`gco-api-gateway` stack (`gco stacks outputs gco-api-gateway -r us-east-2`, with the
+`deployment_regions.api_gateway` Region, `us-east-2` by default). Use it for cross-region aggregation, and for
 workload traffic in the commercial `aws` partition:
 
 ```http
@@ -2442,8 +2443,13 @@ configured strings under `manifest_caps.configured`, because `"384"` vCPU and
 `384000` millicores are the same cap and a caller doing a local pre-check needs
 to know which one it is holding.
 
-Note that `gco jobs submit --dry-run` is **not** an admission preview — it runs
-`kubectl --dry-run=client`, a client-side parse that never consults this policy.
+`gco jobs submit --dry-run` (`POST /api/v1/manifests` with `"dry_run": true`)
+checks the manifests against the first layer, the front-door policy of the
+region that receives them, and applies nothing. It is not a full admission
+preview: the manifests never reach the Kubernetes API server, so the
+`LimitRange` and `ResourceQuota` layers are not evaluated. `gco jobs
+submit-direct --dry-run` is a client-side `kubectl --dry-run=client` parse
+that consults none of the three.
 
 ## Cluster-Internal Surfaces
 

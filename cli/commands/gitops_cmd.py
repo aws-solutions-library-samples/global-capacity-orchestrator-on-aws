@@ -50,7 +50,7 @@ def gitops_status(config: Any, region: str | None) -> None:
 
     Examples:
         gco gitops status
-        gco gitops status -r us-west-2 --output json
+        gco -o json gitops status -r us-west-2
     """
     from ..gitops import gitops_status as _gitops_status
 

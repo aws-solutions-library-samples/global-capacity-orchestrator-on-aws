@@ -183,7 +183,7 @@ captured by the kind CI job with the `gco crossplane screenshot` code.
 ### Status
 
 ```bash
-gco crossplane status [--output json]
+gco [-o json] crossplane status
 ```
 
 The command reads `cdk.json`, `charts.yaml` and the shipped post-Helm

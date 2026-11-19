@@ -275,7 +275,11 @@ aws cloudformation delete-stack \
 
 **Causes**:
 
-- A Helm chart task exceeded its 14-minute Lambda budget or the 2-hour state-machine budget
+- A Helm chart task ran out of time on every attempt, or the whole convergence ran out of its 2-hour
+  state-machine budget. Each chart is one Helm installer invocation: Helm's own `--timeout` (the
+  chart's `wait_timeout`, 10 minutes by default) inside a 13-minute process cap
+  (`HELM_CMD_TIMEOUT_SECONDS`, 780) and the 15-minute Lambda limit, and the state machine retries
+  a failed chart up to four times
 - VPC networking or DNS prevented a Lambda from reaching EKS/AWS APIs
 - EKS authentication or access-entry failures
 - A Kubernetes resource never became ready
@@ -439,9 +443,11 @@ kubectl describe nodes
 # Solution: Increase nodepool limits or reduce pod requests
 
 # 3. "serviceaccount not found"
-kubectl get sa -n gco-system
-# Solution: Apply service account manifest
-kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
+kubectl get sa -n gco-system                          # the platform services' accounts
+kubectl get sa gco-service-account -n gco-jobs        # job pods (also in gco-inference)
+# Solution: re-run the convergence, which applies the base manifests with their
+# role ARNs filled in (see Service Account Issues below)
+gco stacks addons install -r <region>
 ```
 
 ### Pods Stuck in ContainerCreating
@@ -515,12 +521,19 @@ kubectl describe pod POD-NAME -n NAMESPACE
 **Solution**:
 
 ```bash
-# 1. Verify service account exists
-kubectl get sa gco-service-account -n gco-system
+# 1. Verify the service accounts exist: the platform services' accounts in
+#    gco-system, and gco-service-account (job and model pods) in gco-jobs and
+#    gco-inference
+kubectl get sa -n gco-system
+kubectl get sa gco-service-account -n gco-jobs
+kubectl get sa gco-service-account -n gco-inference
 
-# 2. If missing, apply manifests
-kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
-kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
+# 2. If one is missing, re-run the convergence. It applies the base manifests,
+#    service accounts and RBAC included, with their {{...}} placeholders (the
+#    IAM role ARNs and other deploy-time values) filled in. Do not kubectl apply
+#    the files under lambda/kubectl-applier-simple/manifests/ yourself: they are
+#    templates, and the literal placeholders would replace the role annotations.
+gco stacks addons install -r <region>
 
 # 3. Restart pods to pick up service account
 kubectl rollout restart deployment/health-monitor -n gco-system
@@ -720,10 +733,12 @@ kubectl run test-pod --image=busybox --rm -it -- wget -O- http://SERVICE-NAME.NA
 kubectl get networkpolicies -n NAMESPACE
 ```
 
-GCO's own Services speak only HTTPS: the API services and the cost monitor on
-8443, model endpoints on 8443 (`https://<service>.gco-inference.svc.cluster.local:8443`),
-and their NetworkPolicies admit only their known clients, so a plain-HTTP
-`wget` from a test pod is expected to fail. See
+GCO's own Services speak only HTTPS: the health-monitor, manifest-processor
+and inference-proxy Services on port 443 (their pods' TLS sidecars listen on
+8443), the cost monitor on 8443, and model endpoints on 8443
+(`https://<service>.gco-inference.svc.cluster.local:8443`). Their
+NetworkPolicies admit only their known clients, so a plain-HTTP `wget` from a
+test pod is expected to fail. See
 [In-cluster TLS](ARCHITECTURE.md#in-cluster-tls).
 
 ### In-cluster TLS Errors
@@ -861,13 +876,15 @@ aws ecr describe-images \
 # 2. Use smaller base images
 # In your image build recipe: FROM python:3.14-slim instead of python:3.14
 
-# 3. Pre-pull images
-kubectl create daemonset image-puller \
-  --image=YOUR-IMAGE \
-  --namespace=kube-system
-
-# 4. Use image pull secrets for faster auth
+# 3. Pull from the cluster's own Region: push the image to the project's ECR
+#    registry, which replicates it to the workload Regions (images.replication),
+#    instead of pulling it from a public registry or another Region
+gco images push my-app -t v1 --local-image my-app:dev
 ```
+
+Pre-pulling with a DaemonSet helps less than it seems (and kubectl has no
+`create daemonset`): EKS Auto Mode adds a node when pods need one, and a
+DaemonSet's pod pulls the image on that node at the same time as yours.
 
 ### High CPU/Memory Usage
 
@@ -930,8 +947,12 @@ aws cloudwatch get-metric-statistics \
 # 2. Check EKS API server metrics
 kubectl get --raw /metrics | grep apiserver_request_duration
 
-# 3. Scale up services
-kubectl scale deployment/manifest-processor --replicas=5 -n gco-system
+# 3. Scale up the manifest processor in cdk.json, not with kubectl scale: the
+#    next deploy or convergence resets the Deployment to
+#    manifest_processor.replicas (3 by default). Raise replicas, or set
+#    manifest_processor.autoscaling.enabled to true for a CPU
+#    HorizontalPodAutoscaler up to autoscaling.max_replicas, then redeploy:
+gco stacks deploy gco-REGION -y
 
 # 4. Check for resource constraints
 kubectl describe nodes | grep -A 5 "Allocated resources"

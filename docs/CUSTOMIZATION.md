@@ -1419,16 +1419,18 @@ spec:
 
 ### Lambda Configuration
 
-Edit `gco/stacks/regional_stack.py`:
+The kubectl-applier Lambda (`KubectlApplierFunction` in
+`gco/stacks/regional_stack.py`) already runs with Lambda's maximum timeout of
+15 minutes, so its timeout cannot be raised. Its memory (512 MB) can, which also
+gives it more CPU:
 
 ```python
-kubectl_lambda = lambda_.Function(
-    self, "KubectlApplierFunction",
-    runtime=lambda_.Runtime.PYTHON_3_14,
-    handler="handler.lambda_handler",
-    code=lambda_.Code.from_asset("lambda/kubectl-applier-simple-build"),
-    timeout=Duration.minutes(10),  # Increase from 5
-    memory_size=1024,              # Increase from 512
+self.kubectl_lambda = lambda_.Function(
+    self,
+    "KubectlApplierFunction",
+    ...
+    timeout=Duration.minutes(15),  # already Lambda's maximum
+    memory_size=1024,              # raised from 512
     ...
 )
 ```
@@ -1550,14 +1552,14 @@ See [Schedulers & Orchestrators](SCHEDULERS.md) for detailed guidance on each to
 
 Volcano's images live on Docker Hub, whose anonymous pull limit can fail a cold
 cluster's chart install. The regional stack can mirror them into the project's
-ECR and point the chart at the copy. It is on by default:
+ECR and point the chart at the copy. It is on by default, mirroring into
+`<project_name>/dockerhub` (`gco/dockerhub` for the stock project):
 
 ```json
 {
   "context": {
     "volcano_image_mirror": {
-      "enabled": true,
-      "ecr_namespace": "gco/dockerhub"
+      "enabled": true
     }
   }
 }
@@ -1573,8 +1575,9 @@ gco stacks addons install -r <region>
 gco stacks addons status -r <region>
 ```
 
-`ecr_namespace` must start with `gco/` so the copies inherit the project's
-node-pull access, ECR replication and trusted-registry allow-list. For why a
+An `ecr_namespace` of your own must start with `<project_name>/` so the copies
+inherit the project's node-pull access, ECR replication and trusted-registry
+allow-list. For why a
 mirror rather than a pull-through cache, manual `gco images mirror` runs, the
 multi-arch copy strategy, the MCP tools and troubleshooting, see
 [Image Mirror](IMAGE_MIRROR.md).
@@ -1583,29 +1586,20 @@ multi-arch copy strategy, the MCP tools and troubleshooting, see
 
 ### Enable EKS Logging
 
-Edit `gco/stacks/regional_stack.py`:
-
-```python
-self.cluster = eks.Cluster(
-    self,
-    "GCOEksCluster",
-    cluster_name=cluster_config.cluster_name,
-    version=eks.KubernetesVersion.V1_35,
-    vpc=self.vpc,
-    compute=eks.ComputeConfig(node_pools=["system", "general-purpose"]),
-    endpoint_access=eks.EndpointAccess.PUBLIC_AND_PRIVATE,
-    role=cluster_admin_role,
-    vpc_subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
-    logging=eks.ClusterLoggingTypes.all(),  # Enable all logging
-)
-```
+EKS control-plane logging is already on. The regional stack creates every
+cluster with all five log types (API server, audit, authenticator, controller
+manager and scheduler; `cluster_logging` in `gco/stacks/regional_stack.py`), so
+there is nothing to enable. EKS writes them to the CloudWatch Logs group
+`/aws/eks/<project>-<region>/cluster`.
 
 ### Add CloudWatch Container Insights
 
-```bash
-# Apply Container Insights DaemonSet
-kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/quickstart/cwagent-fluentd-quickstart.yaml
-```
+Container Insights is already on as well. Each regional stack installs the
+`amazon-cloudwatch-observability` EKS add-on, which publishes the Container
+Insights metrics and sends container logs to
+`/aws/containerinsights/<project>-<region>/application`. Do not also apply the
+standalone Container Insights DaemonSet: it would run a second agent that
+collects the same data.
 
 ### Load Balancer Configuration
 
@@ -1651,13 +1645,18 @@ spec:
 
 ### Add Prometheus Monitoring
 
-```bash
-# Install Prometheus using Helm
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm install prometheus prometheus-community/kube-prometheus-stack \
-  --namespace monitoring \
-  --create-namespace
-```
+GCO already runs Prometheus. With `cluster_observability.enabled` (the
+default), every regional cluster gets kube-prometheus-stack, with Prometheus,
+Alertmanager and Grafana, in the `monitoring` namespace; see
+[MONITORING.md](MONITORING.md). Do not `helm install` a second copy: it would
+add a second Prometheus Operator over the same CRDs.
+
+That Prometheus discovers `ServiceMonitor` and `PodMonitor` objects in every
+namespace, so to scrape a workload of your own, create one next to it. Pods in
+`gco-jobs` and `gco-inference` accept connections only from the sources their
+NetworkPolicies name, so also add a NetworkPolicy that admits the Prometheus
+pods of the `monitoring` namespace on the metrics port. Browse the result with
+`gco monitoring open --service prometheus` or `--service grafana`.
 
 ## Cost Tracking Setup
 
@@ -2389,11 +2388,17 @@ You may need a specific model for **regulatory, data-residency, model-governance
 ```bash
 # Capacity advisor — pass any model or inference-profile id enabled in your account
 gco capacity ai-recommend -w "Fine-tune a 13B model" --model us.anthropic.claude-sonnet-4-6
-gco capacity predict -i p5.48xlarge -r us-east-1 --model eu.amazon.nova-pro-v1:0
+gco capacity predict -i p5.48xlarge -r us-east-1 --model us.amazon.nova-pro-v1:0
 
-# Mission engine
-gco mission start "..." --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
+# Mission engine (the mission commands need GCO_ENABLE_MISSION=true)
+gco mission run --directive "Find documentation about inference endpoints." \
+  --tool-allowlist find_docs --bedrock-model-id us.meta.llama3-3-70b-instruct-v1:0
 ```
+
+The capacity advisor calls Bedrock in `AWS_REGION`, else `AWS_DEFAULT_REGION`,
+else the CLI's default Region (`gco -r`), not in the Region `-r` names after the
+subcommand, so a geography-scoped profile such as `eu.amazon.nova-pro-v1:0`
+needs an `AWS_REGION` in that geography.
 
 The `ai_recommend` MCP tool takes the same override as a `model="..."` argument; omit it to use the default.
 
@@ -2668,17 +2673,14 @@ being ignored; see [How cdk.json Is Validated](#how-cdkjson-is-validated).
 
 ### 2. Environment-Specific Configuration
 
-```python
-# In your stack
-env = self.node.try_get_context("environment") or "dev"
-
-if env == "prod":
-    replicas = 5
-    instance_types = ["g5.2xlarge"]
-else:
-    replicas = 2
-    instance_types = ["g4dn.xlarge"]
-```
+GCO's stacks read no `environment` setting, and a top-level key they do not
+read only draws a warning (`environment is not a GCO cdk.json key and is
+ignored`), so per-environment settings live in separate `cdk.json` files: one
+checkout per environment, each with its own `cdk.json`. Give each a different
+`project_name`, which names every stack and resource, if two environments
+share an account, or deploy each to its own account with its own credentials,
+as in step 4. For a single run, `gco stacks deploy-all --enable fsx_lustre`
+turns a feature on without editing `cdk.json`.
 
 ### 3. Version Control
 
@@ -3125,14 +3127,17 @@ FSx is cheaper per GB but you pay for provisioned capacity (minimum 1.2 TB). EFS
 
 ### Scale-to-Zero Savings
 
-Inference endpoints with KEDA can scale to zero when idle, eliminating GPU costs during off-hours:
+Endpoint autoscaling does not scale to zero: `--min-replicas` is at least 1,
+and nothing starts a pod when a request arrives for an endpoint with none, so
+an idle endpoint keeps at least one GPU node. Stop it instead when nobody needs
+it, for example from a scheduled job at the start and end of off-peak hours:
 
-```yaml
-minReplicaCount: 0   # No GPU cost when idle
-cooldownPeriod: 300  # Scale down after 5 min of no traffic
+```bash
+gco inference stop my-llm -y   # every Deployment of the endpoint scales to zero; the configuration is kept
+gco inference start my-llm     # back on the same spec; the pods need a free GPU node and a model load
 ```
 
-A single `g5.xlarge` (1x A10G GPU) costs ~$1.00/hour on-demand. Scale-to-zero during 12 hours of off-peak saves ~$360/month per endpoint.
+A single `g5.xlarge` (1x A10G GPU) costs ~$1.00/hour on-demand. Stopping an endpoint for 12 hours of off-peak a day saves ~$360/month per endpoint, once EKS Auto Mode has removed the idle node.
 
 ### Sample Monthly Costs
 

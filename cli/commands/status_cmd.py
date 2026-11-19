@@ -343,7 +343,7 @@ def status(
     Examples:
         gco status
         gco status -r us-east-1
-        gco status --output json
+        gco -o json status
         gco status --with-costs --with-nodepools
         gco status --with-policy
         gco status --watch 10
