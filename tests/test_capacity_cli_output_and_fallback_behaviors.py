@@ -534,3 +534,80 @@ def test_stdin_is_interactive_needs_a_terminal_on_stdin(monkeypatch: pytest.Monk
 
     terminal.isatty.return_value = False
     assert capacity_cmd._stdin_is_interactive() is False
+
+
+_HISTORICAL_STATS = {
+    "instance_type": "g5.xlarge",
+    "region": "us-east-1",
+    "hours_back": 168,
+    "sample_count": 5,
+    "metrics": {"spot_score": {"p25": 5, "p50": 6, "p75": 7, "min": 3, "max": 9}},
+}
+_ESTIMATE = {"instance_type": "g5.xlarge", "region": "us-east-1", "capacity_type": "spot"}
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_check_enrich_historical_prints_one_machine_document(output_format: str) -> None:
+    """The historical lines used to be printed after the estimates, so the root
+    output transaction wrapped all of stdout as {"status": "ok", "output": ...}."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.estimate_capacity.return_value = [dict(_ESTIMATE)]
+    store = MagicMock()
+    store.get_statistics.return_value = dict(_HISTORICAL_STATS)
+    with (
+        patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker),
+        patch("cli.capacity.history.get_capacity_history_store", return_value=store),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "-o",
+                output_format,
+                "capacity",
+                "check",
+                "-i",
+                "g5.xlarge",
+                "-r",
+                "us-east-1",
+                "--enrich-historical",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    document = (json.loads if output_format == "json" else yaml.safe_load)(result.stdout)
+    assert document == {"estimates": [_ESTIMATE], "historical": _HISTORICAL_STATS}
+
+
+def test_check_enrich_historical_machine_document_has_null_history_when_unreadable() -> None:
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.estimate_capacity.return_value = [dict(_ESTIMATE)]
+    store = MagicMock()
+    store.get_statistics.side_effect = ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "no table"}}, "Query"
+    )
+    with (
+        patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker),
+        patch("cli.capacity.history.get_capacity_history_store", return_value=store),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "-o",
+                "json",
+                "capacity",
+                "check",
+                "-i",
+                "g5.xlarge",
+                "-r",
+                "us-east-1",
+                "--enrich-historical",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"estimates": [_ESTIMATE], "historical": None}
+    assert "optional add-on" in result.stderr

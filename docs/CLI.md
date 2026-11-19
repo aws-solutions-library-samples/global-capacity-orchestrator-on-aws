@@ -598,11 +598,18 @@ gco capacity check [OPTIONS]
 | `--type` | `-t` | Capacity type: `spot`, `on-demand`, or `both` |
 | `--enrich-historical` | | Append historical capacity context to the output (requires historical.enabled) |
 
+With `--output json` or `--output yaml`, the command prints the list of estimates;
+with `--enrich-historical` it prints one document instead,
+`{"estimates": [...], "historical": {...}}`, where `historical` is the
+[`gco capacity history stats`](#gco-capacity-history-stats) summary for the last 7 days, or `null`
+when the history cannot be read (the reason goes to stderr).
+
 **Example:**
 
 ```bash
 gco capacity check --instance-type g4dn.xlarge --region us-east-1
 gco capacity check -i g5.xlarge -r us-west-2 -t spot
+gco --output json capacity check -i g5.xlarge -r us-west-2 --enrich-historical
 ```
 
 #### `gco capacity status`

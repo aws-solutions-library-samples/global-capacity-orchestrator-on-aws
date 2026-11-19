@@ -66,7 +66,10 @@ def capacity(config: Any) -> None:
 @click.option(
     "--enrich-historical",
     is_flag=True,
-    help="Append historical capacity context (requires historical.enabled)",
+    help=(
+        "Append historical capacity context (requires historical.enabled); "
+        "JSON/YAML output becomes one {estimates, historical} document"
+    ),
 )
 @pass_config
 def check_capacity(
@@ -88,11 +91,19 @@ def check_capacity(
 
         if config.output_format == "table":
             print(format_capacity_table(estimates))
+            if enrich_historical:
+                _print_historical_enrichment(formatter, instance_type, region)
+        elif enrich_historical:
+            # One machine document; `historical` is null when the history
+            # cannot be read, and the reason goes to stderr.
+            formatter.print(
+                {
+                    "estimates": estimates,
+                    "historical": _historical_statistics(formatter, instance_type, region),
+                }
+            )
         else:
             formatter.print(estimates)
-
-        if enrich_historical:
-            _print_historical_enrichment(formatter, instance_type, region)
 
     except Exception as e:
         formatter.print_error(f"Failed to check capacity: {e}")
@@ -1822,23 +1833,36 @@ def _history_disabled(exc: Exception) -> bool:
     )
 
 
-def _print_historical_enrichment(formatter: Any, instance_type: str, region: str) -> None:
-    """Append a historical capacity summary to ``gco capacity check`` output."""
+def _historical_statistics(
+    formatter: Any, instance_type: str, region: str
+) -> dict[str, Any] | None:
+    """Read the 7-day historical summary for ``gco capacity check``.
+
+    Warns on stderr and returns None when the history cannot be read; the
+    enrichment is supplementary, so it never fails the command.
+    """
     from ..capacity.history import get_capacity_history_store
 
     try:
-        stats = get_capacity_history_store().get_statistics(instance_type, region)
+        stats: dict[str, Any] = get_capacity_history_store().get_statistics(instance_type, region)
     except Exception as e:  # supplementary to check; never fail the command
         if _history_disabled(e):
             formatter.print_warning(_HISTORY_DISABLED_HINT)
         else:
             formatter.print_warning(f"Historical enrichment unavailable: {e}")
-        return
+        return None
     if stats["sample_count"] == 0:
         formatter.print_warning(
             f"No historical samples for {instance_type} in {region} yet "
             "(the poller records one about every 15 minutes)."
         )
+    return stats
+
+
+def _print_historical_enrichment(formatter: Any, instance_type: str, region: str) -> None:
+    """Append a historical capacity summary to ``gco capacity check`` table output."""
+    stats = _historical_statistics(formatter, instance_type, region)
+    if stats is None or stats["sample_count"] == 0:
         return
     formatter.print_info(f"Historical context (last 7 days, {stats['sample_count']} samples):")
     spot_stats = stats["metrics"].get("spot_score")
