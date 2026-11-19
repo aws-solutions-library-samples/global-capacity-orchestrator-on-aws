@@ -29,7 +29,15 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from cli import cluster_tunnel as ct
+# Patch the modules the CLI code holds (ct.ephemeral_bastion, ct.ssm_tunnel,
+# monitoring_cmd.cluster_ui), not dotted paths such as "cli.cluster_ui.x".
+# cli binds them with `from . import x`, and coverage given module names
+# (`--cov=cli.commands.x`) imports the cli packages inside a block that drops
+# them from sys.modules again; afterwards the dotted path and the CLI's own
+# reference can name two copies of one module. `import cli.cluster_tunnel`
+# names the copy the commands import.
+import cli.cluster_tunnel as ct
+from cli.commands import monitoring_cmd
 from cli.main import cli
 
 PRIVATE_ENDPOINT = "https://ABC123.gr7.us-east-1.eks.amazonaws.com"
@@ -560,7 +568,7 @@ class TestClusterTunnelInteractive:
             lambda c, r: {"endpoint": PRIVATE_ENDPOINT, "public": False, "private": True},
         )
         proc = _FakeTunnel()
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", lambda *a, **k: proc)
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: proc)
         blocked: dict[str, bool] = {}
         monkeypatch.setattr(
             "cli.commands.cluster_cmd._block_until_interrupt",
@@ -587,7 +595,7 @@ class TestClusterTunnelInteractive:
             "cli.kubectl_helpers.describe_cluster_access",
             lambda c, r: {"endpoint": PRIVATE_ENDPOINT, "public": False, "private": True},
         )
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", lambda *a, **k: _FakeTunnel())
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: _FakeTunnel())
         monkeypatch.setattr("cli.commands.cluster_cmd._block_until_interrupt", lambda: None)
         monkeypatch.delenv("GCO_DEV_CONTAINER", raising=False)
         monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
@@ -675,7 +683,7 @@ class TestClusterTunnelInteractive:
         def _boom(*a: object, **k: object) -> None:
             raise RuntimeError("tunnel start failed")
 
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", _boom)
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", _boom)
         res = runner.invoke(
             cli, ["cluster", "tunnel", "--via-ssm", "i-0123456789abcdef0", "--region", "us-east-1"]
         )
@@ -700,16 +708,20 @@ class TestMonitoringOpenAutoBastion:
         created: list[str] = []
         destroyed: list[str] = []
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.create_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "create_ephemeral_bastion",
             lambda c, r, **k: created.append("x") or "i-0aaaaaaaaaaaaaaaa",
         )
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.destroy_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "destroy_ephemeral_bastion",
             lambda iid, r, **k: destroyed.append(iid),
         )
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", lambda *a, **k: _FakeTunnel())
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: _FakeTunnel())
         captured: dict[str, Any] = {}
-        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _ready_forward(captured))
+        monkeypatch.setattr(
+            monitoring_cmd.cluster_ui, "exec_port_forward", _ready_forward(captured)
+        )
         res = runner.invoke(
             cli,
             ["monitoring", "open", "--via-ssm", "auto", "-y", "--region", "us-east-1"],
@@ -1228,7 +1240,7 @@ class TestClusterTunnelRoutes:
 
         monkeypatch.setattr("cli.kubectl_helpers.describe_cluster_access", describe)
         proc = _FakeTunnel()
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", lambda *a, **k: proc)
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", lambda *a, **k: proc)
         blocked: list[str] = []
         monkeypatch.setattr(
             "cli.commands.cluster_cmd._block_until_interrupt", lambda: blocked.append("held")
@@ -1255,11 +1267,13 @@ class TestClusterTunnelRoutes:
         proc, blocked = self._patch(monkeypatch, ACCESS["PUBLIC_AND_PRIVATE"])
         lifecycle: list[str] = []
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.create_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "create_ephemeral_bastion",
             lambda c, r, **k: lifecycle.append("create") or BASTION,
         )
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.destroy_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "destroy_ephemeral_bastion",
             lambda iid, r, **k: lifecycle.append(f"destroy:{iid}"),
         )
         res = runner.invoke(
@@ -1387,11 +1401,13 @@ class TestMonitoringOpenRoutes:
         )
         lifecycle: list[str] = []
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.create_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "create_ephemeral_bastion",
             lambda c, r, **k: lifecycle.append("create") or BASTION,
         )
         monkeypatch.setattr(
-            "cli.ephemeral_bastion.destroy_ephemeral_bastion",
+            ct.ephemeral_bastion,
+            "destroy_ephemeral_bastion",
             lambda iid, r, **k: lifecycle.append(f"destroy:{iid}"),
         )
         proc = _FakeTunnel()
@@ -1400,8 +1416,10 @@ class TestMonitoringOpenRoutes:
             lifecycle.append("tunnel")
             return proc
 
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", start)
-        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _ready_forward(captured, fail=fail))
+        monkeypatch.setattr(ct.ssm_tunnel, "start_api_tunnel", start)
+        monkeypatch.setattr(
+            monitoring_cmd.cluster_ui, "exec_port_forward", _ready_forward(captured, fail=fail)
+        )
         return lifecycle
 
     def test_auto_on_public_and_private_forwards_through_the_bastion(

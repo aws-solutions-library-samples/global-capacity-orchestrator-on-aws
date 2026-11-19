@@ -24,7 +24,7 @@ import subprocess
 
 import requests
 
-from .cluster_ui import kubectl_server_flags
+from . import cluster_ui
 from .kubectl_helpers import kubectl_context_flags
 
 DEFAULT_GRAFANA_URL = "http://localhost:3000"
@@ -76,7 +76,7 @@ def read_grafana_admin_credentials(
         namespace,
         "-o",
         "json",
-        *kubectl_server_flags(server, tls_server_name),
+        *cluster_ui.kubectl_server_flags(server, tls_server_name),
     ]
     try:
         result = subprocess.run(
