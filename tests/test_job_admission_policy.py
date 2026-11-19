@@ -30,6 +30,7 @@ from gco.job_admission import (
     parse_gpu_count,
     parse_memory_bytes,
     resource_totals,
+    trainjob_validation_pod_specs,
     weighted_pod_specs,
 )
 
@@ -434,7 +435,7 @@ class TestHyperpodRouting:
     def test_only_a_manifest_whose_every_pod_spec_selects_hyperpod_is_routed(self) -> None:
         selecting = {"nodeSelector": {"gco.aws/capacity-provider": "hyperpod"}, "containers": []}
         other = {"nodeSelector": {"gco.aws/capacity-provider": "karpenter"}, "containers": []}
-        manifest: dict[str, Any] = {"kind": "TrainJob", "metadata": {}}
+        manifest: dict[str, Any] = {"kind": "Job", "metadata": {}}
         assert hyperpod_routing(manifest, [selecting, selecting]) == "selector"
         assert hyperpod_routing(manifest, [selecting, other]) is None
         assert hyperpod_routing(manifest, [{"containers": []}]) is None
@@ -444,6 +445,107 @@ class TestHyperpodRouting:
         assert hyperpod_routing(manifest, []) is None
         assert hyperpod_routing({"kind": "Job"}, [selecting]) == "selector"
         assert hyperpod_routing({"kind": "Job", "metadata": {"labels": "oops"}}, [other]) is None
+
+    @staticmethod
+    def _trainjob(*patches: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """A two-node, one-GPU-per-node TrainJob; each patch maps replicated job names to pod specs."""
+        return {
+            "apiVersion": "trainer.kubeflow.org/v1alpha1",
+            "kind": "TrainJob",
+            "metadata": {"name": "t", "namespace": "gco-jobs"},
+            "spec": {
+                "runtimeRef": {"name": "torch-distributed"},
+                "trainer": {
+                    "image": "docker.io/pytorch/pytorch:latest",
+                    "numNodes": 2,
+                    "resourcesPerNode": {"limits": {"nvidia.com/gpu": "1"}},
+                },
+                "runtimePatches": [
+                    {
+                        "manager": f"example.com/patch-{index}",
+                        "trainingRuntimeSpec": {
+                            "template": {
+                                "spec": {
+                                    "replicatedJobs": [
+                                        {
+                                            "name": name,
+                                            "template": {"spec": {"template": {"spec": pod_spec}}},
+                                        }
+                                        for name, pod_spec in patch.items()
+                                    ]
+                                }
+                            }
+                        },
+                    }
+                    for index, patch in enumerate(patches)
+                ],
+            },
+        }
+
+    _HYPERPOD_SELECTOR = {"nodeSelector": {"gco.aws/capacity-provider": "hyperpod"}}
+
+    def test_a_trainjob_is_routed_by_its_merged_pod_templates(self, monkeypatch) -> None:
+        """Trainer merges the runtime patches naming one replicated job into one pod template.
+
+        Here the node selector sits in one patch and the toleration in another:
+        one pod that selects and tolerates HyperPod. Judged view by view (each
+        patch, and the synthetic trainer spec, which has no scheduling fields),
+        the TrainJob was not routed, so the accelerator rule asked for an
+        ``nvidia.com/gpu`` toleration that HyperPod nodes have no taint for.
+        """
+        import importlib
+
+        import gco.services.queue_processor as qp
+        from cli.capacity.placement import manifest_placement
+
+        manifest = self._trainjob(
+            {"node": self._HYPERPOD_SELECTOR}, {"node": {"tolerations": [_hyperpod_toleration()]}}
+        )
+        assert hyperpod_routing(manifest, trainjob_validation_pod_specs(manifest)) == "selector"
+        assert check_tolerations(manifest) == (True, None)
+        monkeypatch.delenv("REQUIRE_ACCELERATOR_TOLERATION", raising=False)
+        qp = importlib.reload(qp)
+        assert qp.validate_manifest(manifest) == (True, "")
+        assert manifest_placement([manifest]).routing == "selector"
+
+        # Routed, so the HyperPod taint is what it must tolerate.
+        untolerated = self._trainjob({"node": self._HYPERPOD_SELECTOR})
+        ok, message = check_tolerations(untolerated)
+        assert not ok
+        assert "gco.aws/hyperpod=true:NoSchedule" in (message or "")
+        assert qp.validate_manifest(untolerated) == (False, message)
+
+    def test_every_pod_template_a_trainjob_patches_must_select_hyperpod(self) -> None:
+        selector = self._HYPERPOD_SELECTOR
+        views = trainjob_validation_pod_specs
+
+        def route(manifest: dict[str, Any]) -> str | None:
+            return hyperpod_routing(manifest, views(manifest))
+
+        # Another replicated job is another pod.
+        assert route(self._trainjob({"node": selector, "dataset-initializer": {}})) is None
+        # A later patch's value wins; a null is pruned by the API server.
+        karpenter = {"nodeSelector": {"gco.aws/capacity-provider": "karpenter"}}
+        assert route(self._trainjob({"node": selector}, {"node": karpenter})) is None
+        assert route(self._trainjob({"node": karpenter}, {"node": selector})) == "selector"
+        pruned = {"nodeSelector": {"gco.aws/capacity-provider": None, "zone": "a"}}
+        assert route(self._trainjob({"node": selector}, {"node": pruned})) == "selector"
+        # No patch, or nothing a pod template can be read from.
+        assert route(self._trainjob()) is None
+        for runtime_patches in (
+            "not-a-list",
+            [{"manager": "m"}],
+            [{"manager": "m", "trainingRuntimeSpec": {"template": "not-a-dict"}}],
+            [{"manager": "m", "trainingRuntimeSpec": {"template": {"spec": {}}}}],
+        ):
+            manifest = self._trainjob()
+            manifest["spec"]["runtimePatches"] = runtime_patches
+            assert route(manifest) is None, runtime_patches
+        malformed = self._trainjob({"node": selector}, {"node": {"nodeSelector": "oops"}})
+        jobs = malformed["spec"]["runtimePatches"][1]["trainingRuntimeSpec"]["template"]["spec"]
+        jobs["replicatedJobs"].append("not-a-dict")
+        assert route(malformed) == "selector"
+        assert route({"kind": "TrainJob", "spec": "not-a-dict"}) is None
 
     def test_the_sqs_path_routes_the_same_way(self, monkeypatch) -> None:
         import importlib
