@@ -4597,16 +4597,16 @@ class TestCheckpointPersistence:
         assert loaded.identity == {"run_id": "run-123"}
         assert loaded.state == {"nested": {"value": 1}}
 
-    def test_checkpoint_without_state_keeps_compatible_empty_default(self, tmp_path: Path) -> None:
+    def test_a_checkpoint_without_state_is_corrupt(self, tmp_path: Path) -> None:
         from scripts.live_release_validation import models
 
         path = tmp_path / "report" / "checkpoint.json"
-        models.atomic_write_json(
-            path,
-            {"schema_version": models.SCHEMA_VERSION, "identity": {}},
-        )
+        payload = models.RunCheckpoint(identity={}).to_dict()
+        del payload["state"]
+        models.atomic_write_json(path, payload)
 
-        assert models.RunCheckpoint.from_path(path).state == {}
+        with pytest.raises(ValueError, match="is corrupt: missing state"):
+            models.RunCheckpoint.from_path(path)
 
     @pytest.mark.parametrize(
         "state",
@@ -4623,11 +4623,7 @@ class TestCheckpointPersistence:
         path = tmp_path / "report" / "checkpoint.json"
         models.atomic_write_json(
             path,
-            {
-                "schema_version": models.SCHEMA_VERSION,
-                "identity": {},
-                "state": state,
-            },
+            {**models.RunCheckpoint(identity={}).to_dict(), "state": state},
         )
 
         with pytest.raises(ValueError, match="state must be an object"):

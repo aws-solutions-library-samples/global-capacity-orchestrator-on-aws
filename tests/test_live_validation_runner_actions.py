@@ -1414,11 +1414,13 @@ class TestModelSerialization:
         assert "ValueError: boom" in (failed.traceback or "")
         restored = ActionResult.from_dict(models.to_jsonable(failed))
         assert restored == failed
-        minimal = ActionResult.from_dict({"name": "x", "status": "skipped", "details": None})
-        assert minimal.description == ""
-        assert minimal.duration_seconds == 0.0
-        assert minimal.details == {}
-        assert minimal.error is None
+        # A partial record is not filled in with defaults.
+        with pytest.raises(ValueError, match="missing description, duration_seconds"):
+            ActionResult.from_dict({"name": "x", "status": "skipped", "details": None})
+        with pytest.raises(ValueError, match="must be an object"):
+            ActionResult.from_dict(["not", "a", "result"])
+        skipped = ActionResult.from_dict({**models.to_jsonable(passed), "status": "skipped"})
+        assert skipped.status == "skipped"
 
 
 class TestCheckpointLoading:
@@ -1461,35 +1463,87 @@ class TestCheckpointLoading:
         with pytest.raises(ValueError, match="invalid action_results"):
             RunCheckpoint.from_path(path)
 
-    def test_loader_keeps_only_object_action_results_and_fills_defaults(
-        self, tmp_path: Path
-    ) -> None:
-        path = self._write(
-            tmp_path,
-            {
-                "schema_version": models.SCHEMA_VERSION,
-                "identity": None,
-                "created_at": "",
-                "completed_actions": ["preflight", 7],
-                "action_results": {
-                    "preflight": {"name": "preflight", "status": "passed"},
-                    "garbage": "not-an-object",
-                },
-                "deployment_attempted": 1,
-                "baseline": ["not", "a", "dict"],
-            },
+    @staticmethod
+    def _valid() -> dict[str, Any]:
+        checkpoint = RunCheckpoint(identity={"run_id": "run-123"}, deployment_attempted=True)
+        checkpoint.action_results["preflight"] = ActionResult(
+            name="preflight",
+            description="d",
+            status="passed",
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            duration_seconds=1.0,
         )
+        checkpoint.completed_actions.append("preflight")
+        return checkpoint.to_dict()
 
-        loaded = RunCheckpoint.from_path(path)
+    def test_a_checkpoint_as_written_loads_unchanged(self, tmp_path: Path) -> None:
+        payload = self._valid()
+        loaded = RunCheckpoint.from_path(self._write(tmp_path, payload))
+        assert models.to_jsonable(loaded) == payload
 
-        assert loaded.identity == {}
-        assert loaded.created_at
-        assert loaded.completed_actions == ["preflight", "7"]
-        assert list(loaded.action_results) == ["preflight"]
-        assert loaded.deployment_attempted is True
-        assert loaded.destroyed is False
-        assert loaded.baseline is None
-        assert loaded.state == {}
+    @pytest.mark.parametrize(
+        ("mutate", "message"),
+        [
+            # The field that decides whether teardown runs: missing or not a
+            # boolean must never read as "nothing was deployed".
+            (lambda raw: raw.pop("deployment_attempted"), "missing deployment_attempted"),
+            (lambda raw: raw.update(deployment_attempted="false"), "deployment_attempted must"),
+            (lambda raw: raw.update(deployment_attempted=1), "deployment_attempted must"),
+            (lambda raw: raw.update(destroyed=None), "destroyed must be true or false"),
+            (lambda raw: raw.update(identity=None), "identity must be an object"),
+            (lambda raw: raw.update(created_at=""), "created_at must be a non-empty string"),
+            (lambda raw: raw.update(updated_at=7), "updated_at must be a non-empty string"),
+            (lambda raw: raw.update(completed_actions="preflight"), "completed_actions must"),
+            (lambda raw: raw.update(completed_actions=["preflight", 7]), "completed_actions must"),
+            (lambda raw: raw.update(baseline=["not", "a", "dict"]), "baseline must be"),
+            (lambda raw: raw.pop("state"), "missing state"),
+            (
+                lambda raw: raw["action_results"].update(garbage="not-an-object"),
+                "action_results.garbage is invalid",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].pop("description"),
+                r"action_results.preflight is invalid \(missing description\)",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(status="done"),
+                "action_results.preflight is invalid .*status",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(duration_seconds=True),
+                "action_results.preflight is invalid .*duration_seconds",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(details=None),
+                "action_results.preflight is invalid .*details",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(error=3),
+                "action_results.preflight is invalid .*error",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(name=1),
+                "action_results.preflight is invalid .*name",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(name="baseline"),
+                "action_results.preflight names another action",
+            ),
+            (
+                lambda raw: raw.update(completed_actions=["preflight", "baseline"]),
+                "baseline is completed without a passed result",
+            ),
+        ],
+        ids=lambda value: value if isinstance(value, str) else "",
+    )
+    def test_a_corrupt_field_is_an_error_not_a_default(
+        self, tmp_path: Path, mutate: Callable[[dict[str, Any]], Any], message: str
+    ) -> None:
+        payload = self._valid()
+        mutate(payload)
+        with pytest.raises(ValueError, match=f"is corrupt: {message}"):
+            RunCheckpoint.from_path(self._write(tmp_path, payload))
 
 
 class TestReportMarkdown:
@@ -2679,7 +2733,7 @@ class TestMainEntryPoint:
         "checkpoint_payload",
         [
             {"schema_version": 1},
-            {"schema_version": models.SCHEMA_VERSION, "deployment_attempted": False},
+            RunCheckpoint(identity={}, deployment_attempted=False).to_dict(),
         ],
         ids=["unreadable", "not-deployed"],
     )

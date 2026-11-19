@@ -247,7 +247,7 @@ Resume is only for an interrupted local run whose original `checkpoint.json` rem
 - default and additional protected-stack names; and
 - KMS deletion confirmation.
 
-Do not edit the checkpoint, move it to another checkout or machine, or use it to adopt infrastructure from another invocation. A new command without `--resume` is a fresh run and intentionally refuses pre-existing project stacks.
+Do not edit the checkpoint, move it to another checkout or machine, or use it to adopt infrastructure from another invocation. A checkpoint that lacks a field the harness writes, or holds one of the wrong type (a `deployment_attempted` that is not `true` or `false`, a completed action without a passed result), is refused as corrupt instead of being read with defaults, because a default could skip the teardown of what the run deployed. A new command without `--resume` is a fresh run and intentionally refuses pre-existing project stacks.
 
 ## Cleanup, Retained Resources, and Recovery
 
