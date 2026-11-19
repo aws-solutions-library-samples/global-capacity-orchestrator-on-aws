@@ -60,6 +60,7 @@ PROBE_NAMES = (
     "metrics-plaintext",
     "cost-from-default",
     "cost-plaintext",
+    "model-from-inference",
     "model-from-default",
     "model-from-jobs",
     "https-egress",
@@ -88,6 +89,7 @@ ENFORCED = {
     "metrics-plaintext": ("Failed", 42),
     "cost-from-default": ("Failed", 42),
     "cost-plaintext": ("Failed", 42),
+    "model-from-inference": ("Succeeded", 0),
     "model-from-default": ("Failed", 42),
     "model-from-jobs": ("Failed", 42),
     "https-egress": ("Succeeded", 0),
@@ -352,6 +354,15 @@ class TestProbeMatrix:
         assert by_name["cost-plaintext"].url == "http://5.5.5.5:8080/"
         assert by_name["model-from-default"].url == "http://4.4.4.4:8443/"
         assert by_name["model-from-jobs"].client_namespace == "gco-jobs"
+        # The positive control for the two model denies: a peer the policies
+        # admit reaches the same listener on the same port.
+        control = by_name["model-from-inference"]
+        assert control.url == by_name["model-from-default"].url
+        assert control.client_namespace == "gco-inference"
+        assert control.pod_labels == (("gco.io/type", "inference"),)
+        assert control.expected == "reachable"
+        assert control.enforcement_only is False
+        assert {spec.name for spec in specs if spec.pod_labels} == {"model-from-inference"}
         assert by_name["https-egress"].url == "https://checkip.amazonaws.com/"
         assert by_name["http-egress"].url == "http://checkip.amazonaws.com/"
         assert by_name["pod-identity-agent"].url == "http://169.254.170.23/v1/credentials"
@@ -426,7 +437,20 @@ class TestEnforcedCluster:
             method="GET", path="/api/v1/cost/status", target_region=None
         )
 
-        # Three listeners then twelve probes, each cleared before creation and
+        # The control probe carries the label the inference policies select.
+        control = next(
+            job
+            for job in cluster.applied
+            if job["metadata"]["name"] == f"gco-live-netpol-model-from-inference-{TOKEN}"
+        )
+        assert control["spec"]["template"]["metadata"]["labels"]["gco.io/type"] == "inference"
+        assert all(
+            "gco.io/type" not in job["spec"]["template"]["metadata"]["labels"]
+            for job in cluster.applied[3:]
+            if job is not control
+        )
+
+        # Three listeners then thirteen probes, each cleared before creation and
         # deleted afterwards; the record holds every Job before it exists.
         created = [
             (job["metadata"]["namespace"], job["metadata"]["name"]) for job in cluster.applied
@@ -440,6 +464,7 @@ class TestEnforcedCluster:
             ("default", f"gco-live-netpol-metrics-plaintext-{TOKEN}"),
             ("default", f"gco-live-netpol-cost-from-default-{TOKEN}"),
             ("default", f"gco-live-netpol-cost-plaintext-{TOKEN}"),
+            ("gco-inference", f"gco-live-netpol-model-from-inference-{TOKEN}"),
             ("default", f"gco-live-netpol-model-from-default-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-model-from-jobs-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-https-egress-{TOKEN}"),
@@ -685,6 +710,8 @@ class TestEnforcementDisabled:
             "metrics-open": "matched",
             "metrics-plaintext": "matched",
             "cost-plaintext": "matched",
+            # The positive control is reachability, which holds either way.
+            "model-from-inference": "matched",
             "https-egress": "matched",
             "pod-identity-agent": "matched",
             API_PROBE: "matched",
@@ -698,6 +725,7 @@ class TestEnforcementDisabled:
             "metrics-open",
             "metrics-plaintext",
             "cost-plaintext",
+            "model-from-inference",
             "https-egress",
             "pod-identity-agent",
         }
@@ -817,8 +845,25 @@ class TestVerdictMismatches:
         assert API_PROBE not in failure
         # Everything the run created was still deleted.
         assert all(job["deleted"] for job in record["jobs"])
-        assert len(record["jobs"]) == 15
+        assert len(record["jobs"]) == 16
         assert "evidence" not in record
+
+    def test_a_model_listener_no_admitted_peer_reaches_voids_its_denies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Both denies hold, but so does a block for the one peer the policies
+        # admit: the listener is not serving on the pod network, so the denies
+        # prove nothing about the policies.
+        cluster = _FakeCluster({**ENFORCED, "model-from-inference": ("Failed", 42)})
+        _failure(
+            _context(),
+            cluster,
+            monkeypatch,
+            match=(
+                r"model-from-inference \(gco-inference -> http://10\.0\.4\.2:8443/\) "
+                r"expected reachable, observed blocked"
+            ),
+        )
 
     @pytest.mark.parametrize(
         ("verdict", "observed"),
@@ -1091,7 +1136,7 @@ class TestDisruptions:
         ]
         assert [item["metadata"]["name"] for item in cluster.applied].count(job) == 2
         assert [entry["name"] for entry in record["jobs"]].count(job) == 1
-        assert len(record["jobs"]) == 15
+        assert len(record["jobs"]) == 16
         assert all(entry["deleted"] for entry in record["jobs"])
 
     def test_a_second_disruption_is_reported_as_one_not_as_a_verdict(
@@ -1262,6 +1307,14 @@ class TestShippedManifests:
     def test_the_model_listener_is_selected_by_the_model_ingress_policies(self) -> None:
         ingress = _shipped_network_policies()[("gco-inference", "allow-inference-proxy-ingress")]
         assert ingress["spec"]["podSelector"] == {"matchLabels": {"gco.io/type": "inference"}}
+
+    def test_the_model_positive_control_rides_the_internal_inference_policy(self) -> None:
+        """The control probe is admitted by allow-inference-internal, both ways."""
+        policy = _shipped_network_policies()[("gco-inference", "allow-inference-internal")]
+        peers = {"podSelector": {"matchLabels": {"gco.io/type": "inference"}}}
+        assert policy["spec"]["podSelector"] == peers["podSelector"]
+        assert policy["spec"]["ingress"][0] == {"from": [peers], "ports": [{"protocol": "TCP"}]}
+        assert policy["spec"]["egress"][0] == {"to": [peers], "ports": [{"protocol": "TCP"}]}
 
     @pytest.mark.parametrize(
         ("namespace", "name", "port"),

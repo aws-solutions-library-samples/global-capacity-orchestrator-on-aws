@@ -19,10 +19,16 @@ pods and reading the verdict from each probe's exit code:
 * ``default`` -> the live cost-monitor's ``https://…:8443``: **blocked**
   (``allow-manifest-processor-to-cost-monitor-ingress`` admits only the
   manifest processor), and its plaintext ``:8080``: **blocked** (loopback);
-* ``default`` and ``gco-jobs`` -> a stand-in model pod in ``gco-inference`` on
-  ``:8443``: **blocked** (``allow-inference-proxy-ingress`` admits only the
-  inference proxy; the stand-in carries the ``gco.io/type: inference`` label
-  those policies select);
+* a probe in ``gco-inference`` carrying ``gco.io/type: inference`` -> a
+  stand-in model pod there on ``:8443``: **reachable**
+  (``allow-inference-internal`` admits TCP among inference pods). This is the
+  positive control for the next two verdicts: it shows the stand-in serves on
+  the pod network, so their "blocked" is the policies' answer and not a
+  listener nobody can reach;
+* ``default`` and ``gco-jobs`` -> the same stand-in on ``:8443``: **blocked**
+  (``allow-inference-proxy-ingress`` admits only the inference proxy; the
+  stand-in carries the ``gco.io/type: inference`` label those policies
+  select);
 * ``gco-jobs`` -> ``https://checkip.amazonaws.com/``: **reachable**
   (``allow-dns`` plus ``allow-https-egress``);
 * ``gco-jobs`` -> ``http://checkip.amazonaws.com/`` on port 80: **blocked**
@@ -111,6 +117,8 @@ _COST_MONITOR_LOOPBACK_PORT = 8080
 #: The model pods' only Service port (their TLS sidecar).
 _MODEL_PORT = 8443
 _MODEL_NAMESPACE = "gco-inference"
+#: The label the gco-inference policies select model pods by.
+_MODEL_POD_LABEL = ("gco.io/type", "inference")
 _COST_STATUS_PATH = "/api/v1/cost/status"
 _EGRESS_HOST = "checkip.amazonaws.com"
 #: The EKS Pod Identity Agent's link-local address on every node; the
@@ -157,6 +165,9 @@ class ProbeSpec:
     enforcement_only: bool
     #: Dials the cost monitor, which exists only with cost monitoring on.
     requires_cost_monitor: bool = False
+    #: Labels the probe pod carries on top of the manifest's, for a client the
+    #: policy under test selects by label.
+    pod_labels: tuple[tuple[str, str], ...] = ()
 
 
 def _probe_specs(
@@ -227,6 +238,15 @@ def _probe_specs(
             "cost-monitor binds :8080 to 127.0.0.1 (HOST)",
             enforcement_only=False,
             requires_cost_monitor=True,
+        ),
+        ProbeSpec(
+            "model-from-inference",
+            _MODEL_NAMESPACE,
+            f"http://{model_target_ip}:{_MODEL_PORT}/",
+            "reachable",
+            "gco-inference/allow-inference-internal (gco.io/type: inference peers, any TCP)",
+            enforcement_only=False,
+            pod_labels=(_MODEL_POD_LABEL,),
         ),
         ProbeSpec(
             "model-from-default",
@@ -759,6 +779,8 @@ class NetworkPostureProbe:
                     namespace=spec.client_namespace,
                     replacements={"__PROBE_URL__": spec.url},
                 )
+                if spec.pod_labels:
+                    job["spec"]["template"]["metadata"]["labels"].update(dict(spec.pod_labels))
                 self._create_job(job)
                 launched.append((spec, job))
             for spec, job in launched:
