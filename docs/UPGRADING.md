@@ -35,6 +35,7 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Valkey and Aurora ConfigMaps only in `gco-jobs`](#valkey-and-aurora-configmaps-only-in-gco-jobs)
   - [Narrower platform service-account RBAC](#narrower-platform-service-account-rbac)
   - [Access-logs buckets use SSE-S3](#access-logs-buckets-use-sse-s3)
+  - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
 
 ## How an upgrade works
 
@@ -661,3 +662,32 @@ log objects might be delivered encrypted with a key the account cannot use.
   for `logging.s3.amazonaws.com`; no bucket is replaced and no object is
   touched. Log objects delivered earlier keep their KMS encryption and stay
   readable to principals with `kms:Decrypt` on the key, which is unchanged.
+- **BREAKING (only for reports you added): the cluster-shared and cost
+  report keys no longer name the `s3.amazonaws.com` service principal, and
+  the cluster-shared key no longer names CloudWatch Logs.** Nothing GCO
+  deploys used those statements: S3 encrypts objects with the permissions of
+  whoever reads or writes them, and no log group uses either key. If you
+  configured S3 Inventory reports or storage class analysis exports that S3
+  writes into the cluster-shared or cost report bucket, add a key-policy
+  statement for `s3.amazonaws.com` (`kms:GenerateDataKey`) to that key
+  before redeploying, or point them at another bucket.
+
+### Analytics roles act on their own domain
+
+With `analytics_environment.enabled`, the analytics stack's roles were scoped
+to what they use.
+
+- **BREAKING (narrow): the SageMaker execution role's Studio actions name
+  this stack's domain.** Creating, updating or deleting spaces and apps,
+  tagging, and describing profiles through the role's own statement now
+  covers `<project>-studio-<region>` only, not every domain in the Region; a
+  notebook that managed another domain's spaces or apps with the execution
+  role needs a role of its own for that. `AmazonSageMakerFullAccess` stays
+  attached, unchanged.
+- **The role reads exactly the three cluster-shared parameters**
+  (`/<project>/cluster-shared-bucket/{name,arn,region}`) and uses the
+  cluster-shared key only through S3 for that bucket
+  (`kms:EncryptionContext:aws:s3:arn`), as the regional job role does.
+- **The stack-deletion cleanup Lambda** holds exactly the API calls it makes,
+  scoped to the domain, `Studio_EFS`, the Region's access points and file
+  systems, and security groups in the analytics VPC.
