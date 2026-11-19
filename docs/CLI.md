@@ -4098,9 +4098,12 @@ This reads the deployed cluster, not your local `cdk.json`. The two diverge
 whenever the stack was deployed from a different checkout, and CDK adds the
 project's own ECR registries to `trusted_registries` at synth time, so the
 effective allowlist is always larger than the configured one (a policy without
-`trusted_registries` starts from the services' default list). Note that
-`gco jobs submit --dry-run` is a client-side `kubectl` parse, not an admission
-preview — it never consults this policy.
+`trusted_registries` starts from the services' default list).
+`gco jobs submit --dry-run` checks a manifest against this policy in the
+region that receives it and applies nothing, but it never reaches the
+Kubernetes API server, so the `LimitRange` and `ResourceQuota` this command
+also reports are not evaluated. `gco jobs submit-direct --dry-run` is a
+client-side `kubectl --dry-run=client` parse that consults neither.
 
 ```bash
 gco jobs policy [OPTIONS]

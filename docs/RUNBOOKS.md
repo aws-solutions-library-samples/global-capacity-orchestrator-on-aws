@@ -492,10 +492,11 @@ kubectl logs -n gco-system -l app=queue-processor --all-containers \
 **Diagnosis:**
 
 ```bash
-# 1. Dry-run the manifest to see the exact error.
-#    Note this is a client-side kubectl parse, not an admission preview —
-#    it does not consult the cluster's validation policy.
-gco jobs submit my-job.yaml -n gco-jobs --dry-run
+# 1. Dry-run the manifest to see the exact error. The region that receives
+#    it checks it against its validation policy and applies nothing; the
+#    LimitRange and ResourceQuota of step 3 are checked only on a real
+#    submission.
+gco jobs submit my-job.yaml -n gco-jobs --region us-east-1 --dry-run
 
 # 2. Read what the region ACTUALLY enforces, from the deployed cluster.
 #    Prefer this over cdk.json: cdk.json is the input to a deploy, not the
