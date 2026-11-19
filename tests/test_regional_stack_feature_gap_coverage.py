@@ -955,8 +955,9 @@ def test_teardown_waits_then_uninstalls_in_strict_reverse_order(feature_stack):
             assert state["End"] is True
         assert state["TimeoutSeconds"] == {
             "keda": 360,
+            "kueue": 240,
             "argocd": 240,
-            "crossplane": 360,
+            "crossplane": 420,
             "slinky-slurm": 240,
         }.get(chart_name, 120)
         assert "Catch" not in state
