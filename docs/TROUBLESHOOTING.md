@@ -733,10 +733,12 @@ kubectl run test-pod --image=busybox --rm -it -- wget -O- http://SERVICE-NAME.NA
 kubectl get networkpolicies -n NAMESPACE
 ```
 
-GCO's own Services speak only HTTPS: the API services and the cost monitor on
-8443, model endpoints on 8443 (`https://<service>.gco-inference.svc.cluster.local:8443`),
-and their NetworkPolicies admit only their known clients, so a plain-HTTP
-`wget` from a test pod is expected to fail. See
+GCO's own Services speak only HTTPS: the health-monitor, manifest-processor
+and inference-proxy Services on port 443 (their pods' TLS sidecars listen on
+8443), the cost monitor on 8443, and model endpoints on 8443
+(`https://<service>.gco-inference.svc.cluster.local:8443`). Their
+NetworkPolicies admit only their known clients, so a plain-HTTP `wget` from a
+test pod is expected to fail. See
 [In-cluster TLS](ARCHITECTURE.md#in-cluster-tls).
 
 ### In-cluster TLS Errors
