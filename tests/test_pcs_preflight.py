@@ -1104,6 +1104,128 @@ class TestManagedMode:
         assert "does not exist in us-east-1" in reservations["gone"].detail
         assert "spot-role" not in grouped and "login" not in str(grouped.get("zones"))
 
+    _TWO_RESERVATIONS = {
+        "enabled": True,
+        "managed": {
+            "login": {"enabled": False},
+            "node_groups": [
+                {
+                    "name": name,
+                    "instance_types": ["c6i.large"],
+                    "availability_zones": ["us-east-1a"],
+                    "capacity_reservation": {"type": "odcr", "id": reservation_id},
+                }
+                for name, reservation_id in (
+                    ("kept", "cr-0cccccccccccccccc"),
+                    ("gone", "cr-0dddddddddddddddd"),
+                )
+            ],
+            "queues": [{"name": "gco", "node_groups": ["kept", "gone"], "default": True}],
+        },
+    }
+    _RESERVATION_IDS = ["cr-0cccccccccccccccc", "cr-0dddddddddddddddd"]
+
+    def _expect_two_reservation_groups(self, clients: _Clients) -> None:
+        _expect_list_clusters(clients, [])
+        clients["ec2"].add_response(
+            "describe_instance_types",
+            {"InstanceTypes": [_instance_type("c6i.large", "x86_64")]},
+            {"InstanceTypes": ["c6i.large"]},
+        )
+        clients["ec2"].add_response(
+            "describe_instance_type_offerings",
+            {
+                "InstanceTypeOfferings": [
+                    {
+                        "InstanceType": "c6i.large",
+                        "LocationType": "availability-zone",
+                        "Location": "us-east-1a",
+                    }
+                ]
+            },
+            {
+                "LocationType": "availability-zone",
+                "Filters": [{"Name": "instance-type", "Values": ["c6i.large"]}],
+            },
+        )
+
+    @pytest.mark.parametrize(
+        "code", ["InvalidCapacityReservationId.NotFound", "InvalidCapacityReservationId.Malformed"]
+    )
+    def test_a_reservation_ec2_does_not_know_fails(self, clients: _Clients, code: str) -> None:
+        """EC2 answers DescribeCapacityReservations for an unknown id with an
+        error rather than omitting it. The error became "could not check" WARN,
+        which never blocks a deploy, and hid the checks of the other ids (N14)."""
+        self._expect_two_reservation_groups(clients)
+        clients["ec2"].add_client_error(
+            "describe_capacity_reservations",
+            service_error_code=code,
+            service_message="The capacity reservation ID 'cr-0dddddddddddddddd' does not exist",
+            expected_params={"CapacityReservationIds": self._RESERVATION_IDS},
+        )
+        clients["ec2"].add_response(
+            "describe_capacity_reservations",
+            {
+                "CapacityReservations": [
+                    {
+                        "CapacityReservationId": "cr-0cccccccccccccccc",
+                        "InstanceType": "c6i.large",
+                        "AvailabilityZone": "us-east-1a",
+                        "State": "active",
+                        "ReservationType": "default",
+                        "InstanceMatchCriteria": "targeted",
+                    }
+                ]
+            },
+            {"CapacityReservationIds": ["cr-0cccccccccccccccc"]},
+        )
+        clients["ec2"].add_client_error(
+            "describe_capacity_reservations",
+            service_error_code=code,
+            expected_params={"CapacityReservationIds": ["cr-0dddddddddddddddd"]},
+        )
+
+        report = pf.run_preflight(
+            _REGION,
+            validate_pcs_config(self._TWO_RESERVATIONS),
+            project=_PROJECT,
+            client_factory=clients.factory,
+        )
+
+        assert not report.ok
+        reservations = {
+            c.detail.split(":", 1)[0]: c for c in _by_name(report)["capacity-reservations"]
+        }
+        assert set(reservations) == {"kept", "gone"}
+        assert reservations["kept"].status == pf.PASS
+        assert reservations["gone"].status == pf.FAIL
+        assert "cr-0dddddddddddddddd does not exist in us-east-1" in reservations["gone"].detail
+
+    def test_a_permission_error_on_one_reservation_stays_a_warning(self, clients: _Clients) -> None:
+        self._expect_two_reservation_groups(clients)
+        clients["ec2"].add_client_error(
+            "describe_capacity_reservations",
+            service_error_code="InvalidCapacityReservationId.NotFound",
+            expected_params={"CapacityReservationIds": self._RESERVATION_IDS},
+        )
+        clients["ec2"].add_client_error(
+            "describe_capacity_reservations",
+            service_error_code="UnauthorizedOperation",
+            expected_params={"CapacityReservationIds": ["cr-0cccccccccccccccc"]},
+        )
+
+        report = pf.run_preflight(
+            _REGION,
+            validate_pcs_config(self._TWO_RESERVATIONS),
+            project=_PROJECT,
+            client_factory=clients.factory,
+        )
+
+        assert report.ok
+        (check,) = _by_name(report)["capacity-reservations"]
+        assert check.status == pf.WARN
+        assert "UnauthorizedOperation" in check.detail
+
     def test_api_errors_are_warnings(self, clients: _Clients) -> None:
         clients["pcs"].add_client_error(
             "list_clusters", service_error_code="AccessDeniedException", expected_params={}
