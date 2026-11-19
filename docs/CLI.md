@@ -737,6 +737,11 @@ thinking fields.
 | `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.capacity_advisor_default_model_id`) |
 | `--raw` | | Show raw AI response |
 
+With `--output json` or `--output yaml`, the command prints one document with
+`recommended_region`, `recommended_instance_type`, `recommended_capacity_type`,
+`confidence`, `cost_estimate`, `reasoning`, `alternative_options` and `warnings`
+(plus `raw_response` with `--raw`); the disclaimer goes to stderr.
+
 **Example:**
 
 ```bash

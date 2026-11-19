@@ -11,7 +11,7 @@ import yaml
 from botocore.exceptions import ClientError
 from click.testing import CliRunner
 
-from cli.capacity.advisor import CapacityPredictionResult
+from cli.capacity.advisor import BedrockCapacityRecommendation, CapacityPredictionResult
 from cli.capacity.traffic_dial import RegionDialStatus
 from cli.commands.capacity_cmd import (
     _format_patterns_grid,
@@ -611,3 +611,86 @@ def test_check_enrich_historical_machine_document_has_null_history_when_unreadab
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == {"estimates": [_ESTIMATE], "historical": None}
     assert "optional add-on" in result.stderr
+
+
+def _ai_recommendation() -> BedrockCapacityRecommendation:
+    return BedrockCapacityRecommendation(
+        recommended_region="us-west-2",
+        recommended_instance_type="g5.xlarge",
+        recommended_capacity_type="spot",
+        reasoning="High spot score. Low queue depth.",
+        confidence="high",
+        cost_estimate="$0.40/hr",
+        alternative_options=[
+            {"region": "us-east-1", "instance_type": "g5.xlarge", "capacity_type": "on-demand"}
+        ],
+        warnings=["Spot can be interrupted"],
+        raw_response='{"recommended_region": "us-west-2"}',
+    )
+
+
+_AI_DOCUMENT = {
+    "recommended_region": "us-west-2",
+    "recommended_instance_type": "g5.xlarge",
+    "recommended_capacity_type": "spot",
+    "confidence": "high",
+    "cost_estimate": "$0.40/hr",
+    "reasoning": "High spot score. Low queue depth.",
+    "alternative_options": [
+        {"region": "us-east-1", "instance_type": "g5.xlarge", "capacity_type": "on-demand"}
+    ],
+    "warnings": ["Spot can be interrupted"],
+}
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_ai_recommend_prints_one_machine_document(output_format: str) -> None:
+    """The disclaimer and the recommendation used to be printed as text in
+    every mode, so JSON/YAML callers (the MCP tool included) got the text
+    envelope instead of the recommendation."""
+    from cli.main import cli
+
+    advisor = MagicMock()
+    advisor.model_id = "example.model-v1"
+    advisor.get_recommendation.return_value = _ai_recommendation()
+    with patch("cli.capacity.get_bedrock_capacity_advisor", return_value=advisor):
+        result = CliRunner().invoke(
+            cli, ["-o", output_format, "capacity", "ai-recommend", "-w", "training"]
+        )
+
+    assert result.exit_code == 0, result.output
+    document = (json.loads if output_format == "json" else yaml.safe_load)(result.stdout)
+    assert document == _AI_DOCUMENT
+    assert "AI-POWERED RECOMMENDATION DISCLAIMER" in result.stderr
+
+
+def test_ai_recommend_machine_document_carries_the_raw_response_only_with_raw() -> None:
+    from cli.main import cli
+
+    advisor = MagicMock()
+    advisor.model_id = "example.model-v1"
+    advisor.get_recommendation.return_value = _ai_recommendation()
+    with patch("cli.capacity.get_bedrock_capacity_advisor", return_value=advisor):
+        result = CliRunner().invoke(
+            cli, ["-o", "json", "capacity", "ai-recommend", "-w", "training", "--raw"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        **_AI_DOCUMENT,
+        "raw_response": '{"recommended_region": "us-west-2"}',
+    }
+
+
+def test_ai_recommend_table_mode_keeps_the_disclaimer_on_stdout() -> None:
+    from cli.main import cli
+
+    advisor = MagicMock()
+    advisor.model_id = "example.model-v1"
+    advisor.get_recommendation.return_value = _ai_recommendation()
+    with patch("cli.capacity.get_bedrock_capacity_advisor", return_value=advisor):
+        result = CliRunner().invoke(cli, ["capacity", "ai-recommend", "-w", "training"])
+
+    assert result.exit_code == 0, result.output
+    assert "AI-POWERED RECOMMENDATION DISCLAIMER" in result.stdout
+    assert "Region:        us-west-2" in result.stdout
