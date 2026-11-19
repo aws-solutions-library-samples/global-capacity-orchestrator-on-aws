@@ -123,13 +123,19 @@ class CostTracker:
             period_end=end.isoformat(),
         )
 
+        # A window that crosses a month boundary has one ResultsByTime entry
+        # per month, each naming the service again: sum per service first.
+        by_service: dict[str, float] = {}
         for result in response.get("ResultsByTime", []):
             for group in result.get("Groups", []):
                 service = group["Keys"][0]
                 amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
-                if amount > 0.001:
-                    summary.by_service.append(ResourceCost(service=service, amount=amount))
-                    summary.total += amount
+                by_service[service] = by_service.get(service, 0.0) + amount
+
+        for service, amount in by_service.items():
+            if amount > 0.001:
+                summary.by_service.append(ResourceCost(service=service, amount=amount))
+                summary.total += amount
 
         # Sort by cost descending
         summary.by_service.sort(key=lambda x: x.amount, reverse=True)

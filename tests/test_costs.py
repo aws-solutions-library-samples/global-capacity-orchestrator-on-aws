@@ -195,6 +195,102 @@ class TestGetCostSummary:
 
         # Both periods should be summed
         assert summary.total == pytest.approx(125.00)
+        assert [(s.service, s.amount) for s in summary.by_service] == [
+            ("EC2", pytest.approx(125.00))
+        ]
+
+
+def _two_month_service_groups() -> dict:
+    """GetCostAndUsage answer for a 30-day window that crosses a month boundary."""
+    return {
+        "ResultsByTime": [
+            {
+                "TimePeriod": {"Start": "2026-10-20", "End": "2026-11-01"},
+                "Groups": [
+                    {
+                        "Keys": ["Amazon Elastic Compute Cloud - Compute"],
+                        "Metrics": {"UnblendedCost": {"Amount": "200.00"}},
+                    },
+                    {
+                        "Keys": ["Amazon Simple Storage Service"],
+                        "Metrics": {"UnblendedCost": {"Amount": "6.00"}},
+                    },
+                    {
+                        "Keys": ["AWS Key Management Service"],
+                        "Metrics": {"UnblendedCost": {"Amount": "0.0006"}},
+                    },
+                ],
+            },
+            {
+                "TimePeriod": {"Start": "2026-11-01", "End": "2026-11-19"},
+                "Groups": [
+                    {
+                        "Keys": ["Amazon Simple Storage Service"],
+                        "Metrics": {"UnblendedCost": {"Amount": "4.00"}},
+                    },
+                    {
+                        "Keys": ["Amazon Elastic Compute Cloud - Compute"],
+                        "Metrics": {"UnblendedCost": {"Amount": "120.00"}},
+                    },
+                    {
+                        "Keys": ["AWS Key Management Service"],
+                        "Metrics": {"UnblendedCost": {"Amount": "0.0006"}},
+                    },
+                ],
+            },
+        ]
+    }
+
+
+class TestCostSummaryAcrossMonths:
+    """A MONTHLY query returns one ResultsByTime entry per calendar month in the
+    window. The summary listed each service once per month with partial amounts
+    (N35); it must list each service once, with its total for the window."""
+
+    @patch("cli.costs.boto3.Session")
+    def test_each_service_is_listed_once_with_its_window_total(self, mock_session_cls):
+        mock_ce = mock_session_cls.return_value.client.return_value
+        mock_ce.get_cost_and_usage.return_value = _two_month_service_groups()
+
+        summary = CostTracker().get_cost_summary(days=30)
+
+        assert [(s.service, s.amount) for s in summary.by_service] == [
+            ("Amazon Elastic Compute Cloud - Compute", pytest.approx(320.00)),
+            ("Amazon Simple Storage Service", pytest.approx(10.00)),
+            # 0.0006 a month is below the display floor; the window total is not.
+            ("AWS Key Management Service", pytest.approx(0.0012)),
+        ]
+        assert summary.total == pytest.approx(330.0012)
+
+    @patch("cli.costs.boto3.Session")
+    def test_json_by_service_has_one_row_per_service(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = mock_session_cls.return_value.client.return_value
+        mock_ce.get_cost_and_usage.return_value = _two_month_service_groups()
+
+        result = CliRunner().invoke(cli, ["--output", "json", "costs", "summary"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        services = [row["service"] for row in data["by_service"]]
+        assert services == sorted(set(services), key=services.index)
+        assert len(services) == 3
+        assert data["by_service"][0]["amount"] == pytest.approx(320.00)
+
+    @patch("cli.costs.boto3.Session")
+    def test_table_lists_each_service_once(self, mock_session_cls):
+        from cli.main import cli
+
+        mock_ce = mock_session_cls.return_value.client.return_value
+        mock_ce.get_cost_and_usage.return_value = _two_month_service_groups()
+
+        result = CliRunner().invoke(cli, ["costs", "summary"])
+
+        assert result.exit_code == 0, result.output
+        assert result.output.count("Amazon Elastic Compute Cloud - Compute") == 1
+        assert "320.00" in result.output
+        assert result.output.count("Amazon Simple Storage Service") == 1
 
 
 class TestGetCostByRegion:
