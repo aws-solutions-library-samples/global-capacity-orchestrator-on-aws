@@ -26,16 +26,26 @@ recreates every regional stack, and the data inside those stacks goes with them.
 - [Release notes for running deployments](#release-notes-for-running-deployments)
   - [In-cluster TLS and tracing](#in-cluster-tls-and-tracing)
   - [Tenant write fence and MLflow over HTTPS](#tenant-write-fence-and-mlflow-over-https)
+  - [Clusters first deployed with v4.1.0 or earlier](#clusters-first-deployed-with-v410-or-earlier)
   - [vLLM endpoints deployed with MODEL](#vllm-endpoints-deployed-with-model)
   - [Stricter cdk.json validation](#stricter-cdkjson-validation)
   - [API calls need an IAM permission](#api-calls-need-an-iam-permission)
+  - [Workload pods reach fewer AWS resources](#workload-pods-reach-fewer-aws-resources)
+  - [In-VPC hosts need the cluster security group](#in-vpc-hosts-need-the-cluster-security-group)
+  - [MCP server role and its access entry](#mcp-server-role-and-its-access-entry)
   - [Workload alarms move to their Regions](#workload-alarms-move-to-their-regions)
   - [ECR replication rules of your own are kept](#ecr-replication-rules-of-your-own-are-kept)
   - [Default-deny ingress in `gco-inference`](#default-deny-ingress-in-gco-inference)
   - [Valkey and Aurora ConfigMaps only in `gco-jobs`](#valkey-and-aurora-configmaps-only-in-gco-jobs)
   - [Narrower platform service-account RBAC](#narrower-platform-service-account-rbac)
+  - [Endpoint and project labels on the monitor's objects](#endpoint-and-project-labels-on-the-monitors-objects)
+  - [Training job admission](#training-job-admission)
+  - [Stopped inference endpoints stay stopped](#stopped-inference-endpoints-stay-stopped)
+  - [Health readings and the `active_jobs` metric](#health-readings-and-the-active_jobs-metric)
   - [Access-logs buckets use SSE-S3](#access-logs-buckets-use-sse-s3)
   - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
+  - [CLI exit codes, output and prompts](#cli-exit-codes-output-and-prompts)
+  - [MCP server tools](#mcp-server-tools)
 
 ## How an upgrade works
 
@@ -472,11 +482,17 @@ pass, with the deprecation warnings below. A file you edited can fail: each
 error names the full key path (for example `cost_monitoring.reports.interval`)
 and what the key accepts, and `gco stacks synth` shows it without deploying.
 
-**Fix errors before you run `gco upgrade`.** The upgrade validates your file
-when it first synthesizes with the new release. With a deployed monitoring
-stack that happens before the teardown; without one it can happen after it.
-If the upgrade stops on a validation error, fix `cdk.json` and run
-`gco stacks deploy-all` (see [If it stops halfway](#if-it-stops-halfway)).
+**A rejected `cdk.json` stops the upgrade before any stack changes.**
+`gco upgrade` runs the CLI it was started with. An upgrade started from
+v8.23.0 or earlier has no configuration check of its own, so the new
+release's loader first runs in the teardown's opening `cdk list`, which fails
+before any stack is touched. The message reads `Upgrade failed during the
+stack cycle: Failed to list stacks: ...`, followed by the CDK output that
+holds the validation error; its "Stacks may be partly torn down" does not
+apply. Upgrades started from this release on check the file before the
+teardown and print each warning ([step 4](#how-an-upgrade-works)). Either
+way, fix `cdk.json` and run `gco upgrade --skip-checkout`
+(see [If it stops halfway](#if-it-stops-halfway)).
 
 **String flags are never read differently on upgrade.** Earlier releases read
 the `enabled` flags of `fsx_lustre` (and `fsx_lustre_regions`), `valkey`,
@@ -570,6 +586,110 @@ IAM-authorized route without an `execute-api:Invoke` permission of its own.
   identity, so the resource policy still admits `GET /studio/*`; the Cognito
   authorizer decides who signs in.
 
+### Workload pods reach fewer AWS resources
+
+Every job and model pod runs as `gco-service-account` in `gco-jobs` or
+`gco-inference`, which assumes the regional stack's `ServiceAccountRole`.
+Earlier releases ran the inference monitor as that role too, so the role held
+read and write on the inference endpoints table and the Parameter Store read
+of `/<project>/regional-shared-bucket/name` that only the monitor uses. It
+also read every bucket whose name starts with the project name and could
+decrypt through S3 with any key in the account.
+
+- **The inference monitor runs as its own role.** The redeploy creates
+  `InferenceMonitorRole`, trusted only by
+  `gco-system/gco-inference-monitor-sa`, and the monitor pods restart onto it
+  during the same deploy. Nothing to do.
+- **BREAKING: job and model pods lose the inference endpoints table and the
+  bucket-name parameter.** A pod that read or wrote the table, or read
+  `/<project>/regional-shared-bucket/name`, gets `AccessDenied`. Change
+  endpoints through `gco inference`, and read the bucket name from the
+  `gco-regional-shared-bucket` ConfigMap
+  ([REGIONAL_SHARED_BUCKET.md → ConfigMap schema](REGIONAL_SHARED_BUCKET.md#configmap-schema)).
+- **BREAKING: pods read three buckets.** The role keeps read and write on the
+  cluster-shared and regional-shared buckets and read on the model bucket,
+  each named exactly; the `<project>-*` statement and its account-wide key
+  grant are gone. GCO's access-log, cost-report and analytics Studio buckets,
+  and any bucket of your own named `<project>-...`, are out of the pods' reach
+  ([REGIONAL_SHARED_BUCKET.md → The job-pod role's other buckets](REGIONAL_SHARED_BUCKET.md#the-job-pod-roles-other-buckets)).
+  A model endpoint whose `--model-source` points at another bucket fails in
+  its `model-sync` init container with `AccessDenied` the next time one of its
+  pods starts. Upload the weights with `gco models upload` and deploy the
+  endpoint again with `--model-source $(gco models uri <name>)`, or attach a
+  policy to `ServiceAccountRole` in each `<project>-<region>` stack that
+  allows `s3:GetObject` and `s3:ListBucket` on the other bucket and, when that
+  bucket uses SSE-KMS, `kms:Decrypt` on its key. Do the same for jobs that
+  read such a bucket.
+
+### In-VPC hosts need the cluster security group
+
+Earlier releases let the EKS cluster security group admit HTTPS (443) from the
+whole VPC CIDR, a rule meant for the GA registration Lambda. Through it, any
+host in the regional VPC could reach the cluster's private Kubernetes API
+endpoint.
+
+- **BREAKING: a host of your own in the VPC needs a rule of its own.** The
+  redeploy replaces the CIDR rule with one from the Lambda's own security
+  group. GCO's own clients are covered: Auto Mode nodes and the
+  `--via-ssm auto` bastion carry the cluster security group, the
+  kubectl-applier, Helm installer and GA registration Lambdas have 443 rules
+  from their security groups, and HyperPod nodes have a rule from theirs. An
+  instance you name with `--via-ssm <instance-id>`, a bastion or Cloud9
+  instance, a Client VPN endpoint or a VPC-attached CI runner that reached
+  the endpoint only through the CIDR rule now times out. Before redeploying,
+  attach the cluster security group (the regional stack's
+  `ClusterSecurityGroupId` output) to it, or admit its own security group on
+  443:
+
+  ```bash
+  aws ec2 authorize-security-group-ingress --region <region> \
+    --group-id <ClusterSecurityGroupId> \
+    --protocol tcp --port 443 --source-group <your-security-group-id>
+  ```
+
+  `gco upgrade` creates a new cluster and with it a new cluster security
+  group, so after an upgrade do this with the new `ClusterSecurityGroupId`.
+  [ARCHITECTURE.md → Network Security](ARCHITECTURE.md#network-security)
+  lists every client GCO runs and the rule that admits it.
+
+### MCP server role and its access entry
+
+Each regional stack creates `McpServerRole`, exported as `McpServerRoleArn`,
+for the MCP server's `GCO_MCP_ROLE_ARN` setting. In earlier releases the role
+applied only to the server's own AWS calls: the `gco` and `kubectl` processes
+behind most tools ran with the credentials of whoever started the server, and
+the role had no EKS access entry.
+
+- **BREAKING (servers with `GCO_MCP_ROLE_ARN` set): the tools' `gco` and
+  `kubectl` processes run as the role.** The role now grants what the tools
+  registered without a `GCO_ENABLE_*` flag call: `execute-api:Invoke` on the
+  GCO APIs, CloudFormation, SSM, EKS, ECR and Logs reads scoped to the
+  project, job submission to the regional queues, and read-only Kubernetes
+  access to its own Region's cluster through an access entry. It grants
+  nothing broader, so sixteen default tools, and every gated tool that
+  deploys, destroys, builds, pushes, uploads, deletes or buys capacity, fail
+  under it with `AccessDenied` or `Forbidden`;
+  [gco_mcp/README.md → IAM role](../gco_mcp/README.md#iam-role-gco_mcp_role_arn)
+  lists them. Unset `GCO_MCP_ROLE_ARN` for those tools, or extend the role.
+- **BREAKING: delete an access entry you created for the role.** The stack
+  now creates the role's access entry itself (`McpServerAccessEntry`). If you
+  created one for `McpServerRole` by hand, the in-place redeploy fails on it
+  with `ResourceInUseException` and rolls back. Before running
+  `gco stacks deploy-all`, look for one in each workload Region and delete
+  it:
+
+  ```bash
+  aws eks describe-access-entry --region <region> \
+    --cluster-name <project>-<region> --principal-arn <McpServerRoleArn>
+  aws eks delete-access-entry --region <region> \
+    --cluster-name <project>-<region> --principal-arn <McpServerRoleArn>
+  ```
+
+  `describe-access-entry` answers `ResourceNotFoundException` when there is
+  none. `gco upgrade` needs no such step: it recreates each cluster, and with
+  it the role, which gets a new ARN, so set `GCO_MCP_ROLE_ARN` to the new
+  `McpServerRoleArn` afterwards.
+
 ### Workload alarms move to their Regions
 
 Earlier releases created every workload Region's SQS, EKS node and
@@ -591,8 +711,8 @@ monitoring Region those alarms never left `OK`.
   alarms.** The jobs table's alarms read metrics of `deployment_regions.global`
   and the API Gateway and Lambda alarms metrics of
   `deployment_regions.api_gateway`. When either Region is not the monitoring
-  Region, a redeploy creates that group of alarms in `<project>-global` or
-  `<project>-api-gateway`, with an alert topic exported as
+  Region, a redeploy creates that group of alarms, with new names, in
+  `<project>-global` or `<project>-api-gateway`, with an alert topic exported as
   `GlobalAlertTopicArn` or `ApiGatewayAlertTopicArn`, and deletes the copies
   from `<project>-monitoring`, which never saw data (and a global Region other
   than the monitoring Region used to fail `cdk synth`). **Subscribe your
@@ -659,12 +779,93 @@ exactly the calls those services make.
   Volcano object (nothing in GCO read them), the unused second verb on
   namespaces, nodes, events, NodeClaims and pod metrics, and every grant on
   PersistentVolumeClaims in `gco-jobs`.
+- **The inference monitor** lost its grant on HTTPRoutes in `gco-inference`;
+  no release created per-endpoint HTTPRoutes.
 - **BREAKING: a kind you added to `job_validation_policy.allowed_kinds` needs
   its own grant.** `gco-manifest-processor-sa` can create only the default
   kinds; for PersistentVolumeClaim (or NetworkPolicy, as before), bind it to a
   Role of your own in each allowed namespace, or the create is refused with
   403. Tooling that borrowed either service account's token for other reads
   needs a role of its own too.
+
+### Endpoint and project labels on the monitor's objects
+
+The tenant write fence
+([Tenant write fence and MLflow over HTTPS](#tenant-write-fence-and-mlflow-over-https))
+kept the inference monitor's `gco.io/type` label and provenance annotations
+to the monitor. The monitor now also labels every object it creates with
+`gco.io/endpoint: <name>` and leaves alone an object labelled for another
+endpoint, and the fence covers that label and the `project` label, which the
+monitor checks before it deletes a stale object
+([ARCHITECTURE.md → Tenant write fence](ARCHITECTURE.md#tenant-write-fence)).
+
+- **BREAKING (Argo CD, Crossplane and kro tenant tools): only the inference
+  monitor sets, changes or removes `gco.io/endpoint` or `project` on the
+  objects it manages in `gco-inference`**: those labelled
+  `gco.io/type: inference`, the shared `mooncake-master`, and the ConfigMaps
+  its pods mount by name. Every other identity, cluster administrators and
+  the kubectl applier included, is refused. Remove both labels from the
+  manifests your tools apply to those objects. Objects of your own are not
+  affected.
+
+### Training job admission
+
+- **BREAKING: TrainJob runtime patches without containers are validated.**
+  A Kubeflow TrainJob runtime patch may set pod-level fields alone, and the
+  REST and SQS paths now check such a patch as a pod spec. With
+  `job_validation_policy.manifest_security_policy.block_host_path` on (as
+  shipped), a patch that adds a hostPath volume is refused even when another
+  patch's container mounts it; with `block_run_as_root` on, a patch that sets
+  the pod's `securityContext.runAsUser: 0` is refused. Earlier releases
+  admitted both. Move the volume to a supported volume type, or set a
+  non-root user.
+- **BREAKING: the `torch-distributed` runtime schedules on amd64 nodes only.**
+  Its image is published for amd64 only, so the shipped ClusterTrainingRuntime
+  now selects `kubernetes.io/arch: amd64`. A TrainJob that runs an image of
+  its own with an arm64 build on Graviton nodes must set the node selector in
+  a runtime patch.
+- **BREAKING: queued manifests are held to
+  `manifest_processor.yaml_max_depth`.** The SQS path (`gco jobs submit-sqs`)
+  refuses a manifest nested deeper than the limit (default 50), as the REST
+  path already did.
+
+### Stopped inference endpoints stay stopped
+
+- **BREAKING: changing a stopped endpoint no longer starts it.**
+  `gco inference update-image`, `set-topology`, `configure-store`, `canary`,
+  `promote` and `rollback` moved a stopped endpoint back to `deploying`, and
+  the monitors scaled it up again. They now store the change and the endpoint
+  stays stopped; run `gco inference start <name>` to bring it up on the new
+  spec. Scripts that relied on the restart need that extra command.
+- **BREAKING (only if you set it): `K8S_API_TIMEOUT` must be a positive whole
+  number of seconds.** No manifest sets it; the default is 30. If you added it
+  to the inference monitor's or the manifest processor's environment, `0`
+  (which the Kubernetes client reads as no timeout) or a negative value now
+  stops the service at start-up with
+  `K8S_API_TIMEOUT must be a positive number of seconds`. Remove it or set a
+  positive whole number.
+
+### Health readings and the `active_jobs` metric
+
+- **BREAKING (dashboards and alarms): `active_jobs` counts Jobs.** The
+  `active_jobs` field of `GET /api/v1/metrics` and the health monitor's
+  CloudWatch metric `ActiveJobs` (namespace `GCO/HealthMonitor`) now count the
+  Jobs in the job namespaces that have a pending or running pod. They counted
+  every running pod outside `kube-system`, `kube-public` and
+  `kube-node-lease`, platform and model pods included, so the values drop.
+  Re-baseline dashboards and alarms built on them.
+- **A failed cluster read is no longer healthy.** When the metrics-server,
+  node or pod read fails, the health monitor keeps its last complete reading
+  for up to 60 seconds, then reports the cluster unhealthy and names the read
+  that failed; earlier releases reported a healthy, idle cluster.
+  `GET /api/v1/health` answers 503 while it is unhealthy. Utilization above
+  100% is reported as it is instead of failing the reading.
+- **BREAKING (API contract): `GET /api/v1/metrics` answers 503 until the
+  health monitor has started.** It answered 500 with the 503's text, and other
+  failures now answer 500 with `Failed to get metrics` and no exception text.
+  Messages from `GET /api/v1/health` name the read that failed instead of
+  carrying the exception text. Clients that matched on either text need the
+  new one.
 
 ### Access-logs buckets use SSE-S3
 
@@ -704,6 +905,178 @@ to what they use.
   (`/<project>/cluster-shared-bucket/{name,arn,region}`) and uses the
   cluster-shared key only through S3 for that bucket
   (`kms:EncryptionContext:aws:s3:arn`), as the regional job role does.
+- **BREAKING (narrow): notebooks can no longer send to the job dead-letter
+  queues.** The role's `sqs:SendMessage` names each workload Region's job
+  queue (`<project>-jobs-<region>`); its `<project>-jobs-*` pattern also
+  matched the dead-letter queues (`<project>-jobs-dlq-<region>`). Submit jobs
+  to the job queues; a notebook that wrote to a dead-letter queue needs a
+  role of its own for that.
 - **The stack-deletion cleanup Lambda** holds exactly the API calls it makes,
   scoped to the domain, `Studio_EFS`, the Region's access points and file
   systems, and security groups in the analytics VPC.
+
+### CLI exit codes, output and prompts
+
+Scripts that check `gco`'s exit status, parse its `-o json` or `-o yaml`
+output, or run it without a terminal see the changes below. Exit status 1
+still means the command failed, and 2 that Click refused its options.
+
+Exit status and options:
+
+| Command | Change | What to do |
+|---|---|---|
+| `gco jobs submit --wait`, `gco jobs submit-direct --wait` | **BREAKING:** exit 3 when the job fails and 4 when `--timeout` expires; a failed job exited 0 and a timeout 1, which now means the job was not submitted or its status could not be read. `--wait` also follows a Kubeflow TrainJob, with the same codes ([CLI.md → `gco jobs submit`](CLI.md#gco-jobs-submit)) | Treat 3 as "ran and failed" and 4 as "still running"; do not resubmit on either |
+| `gco jobs list --region` | Exits 1 when the Region's API read fails (it printed no jobs); `--limit` is honoured across API pages and must be at least 1 | Handle the failure |
+| `gco jobs delete` | **BREAKING:** exits 1 with the API's 404 for a name that is neither a Job nor a TrainJob (with the TrainJob CRD installed it printed "deleted"); a TrainJob delete the cluster refuses is reported instead of "not found" | Check the name |
+| `gco inference promote`, `gco inference rollback`, `gco capacity traffic-dial set` | **BREAKING:** a declined confirmation exits 1 (it exited 0 with "Cancelled") | Pass `-y` where the change is intended |
+| `gco inference configure-store` | **BREAKING:** with no option, exits 1 and changes nothing; with a store block it used to restart the rollout | Pass at least one setting |
+| `gco inference deploy` | **BREAKING:** exits 2 for `-e`, `-l` or `--node-selector` without `KEY=VALUE`, an `--autoscale-metric` other than `TYPE[:TARGET]` (`cpu`, `memory`, `gpu` or `gpu_memory`, target a whole number of at least 1), `--min-replicas` or `--max-replicas` below 1 or a maximum below the minimum, and replica bounds without `--autoscale-metric`, which were ignored | Fix the value; use `--replicas` for a fixed count |
+| `gco capacity reserve`, `gco capacity create-reservation` | **BREAKING:** ask for confirmation before spending money; without a terminal on stdin, exit 2 unless `--yes` or `--dry-run` is given | Add `--yes` to unattended runs |
+| `gco capacity cancel-reservation` | **BREAKING:** without a terminal on stdin, exits 2 unless `--yes` or `--dry-run` is given; a piped answer no longer works | Add `--yes` |
+| `gco capacity reserve`, `create-reservation`, `cancel-reservation` with `-o json` or `-o yaml` | Exit 1 when the request fails (they exited 0); the result document is still printed | Check the exit status |
+| `gco costs forecast` | **BREAKING:** exits 1 when Cost Explorer cannot forecast (it exited 0 with an `error` field) | Handle the failure |
+| `gco costs workloads` | **BREAKING:** exits 1 when a Region's cluster cannot be read; the workloads it read are still printed | Run it where each cluster's API endpoint is reachable |
+| `gco costs` commands with `--days` | **BREAKING:** `--days` must be at least 1 (exit 2) | |
+| `gco queue list` | `--limit` must be 1-1000, the API's range (exit 2); `--cursor` reads the next page | |
+| `gco stacks access` | Exits 1 when the access entry, the policy association or kubectl is refused (it said the entry "may already exist" and exited 0) | Fix the permission the message names |
+| `gco stacks addons status` | Exits 1 when a Region cannot be read or an add-on is not healthy | |
+| `gco slurm submit` | **BREAKING:** refuses `--mem=0`, also as an `#SBATCH` directive, which it sent as a 1 MiB limit | Give a size |
+| Commands that look up the regional stacks (`gco jobs submit-direct`, `submit-sqs`, `queue-status` and the fleet-wide commands) | **BREAKING:** a throttled, denied or failed `DescribeStacks` fails the command; it read as "No GCO stack found" or dropped the Region | Fix the credentials or permission the message names |
+| Commands that put a name or ID into an API path | **BREAKING:** an empty value, `.`, `..`, or a value with such a path segment is refused before any request (exit 1); `gco inference invoke --path` must start with `/` | |
+
+JSON and YAML output. **BREAKING** for scripts that parsed the old output:
+these commands printed `{"status": "ok"}` or their text wrapped in
+`{"status": "ok", "output": "..."}`, and now print one document with their
+data.
+
+| Command | Prints |
+|---|---|
+| `gco inference scale`, `stop`, `start`, `delete`, `update-image`, `canary`, `promote`, `rollback` | The updated endpoint record |
+| `gco jobs queue-status --all-regions` | A list of the per-Region documents `queue-status -r` prints |
+| `gco tasks list` | `{"tasks": [...]}` |
+| `gco dag run` | The DAG with each step's `status`, `job_name`, times and `error`, and a top-level `status` of `succeeded` or `failed` |
+| `gco dag validate` | `name`, `valid`, `errors`, `region`, `namespace`, `steps` and, when valid, `execution_order` |
+| `gco stacks addons status` | A list of `{region, name, status, message}` rows |
+| `gco stacks access` | `cluster`, `region`, `principal_arn`, `api_server_reachable`, `node_count`, `kubectl_error`, `warning` |
+| `gco analytics doctor` | `{"passed": ..., "checks": [{"name", "ok", "remediation"}]}`, also when it exits 1 |
+| `gco capacity ai-recommend` | The recommendation's fields |
+| `gco capacity check --enrich-historical` | `{"estimates": [...], "historical": {...}}` |
+| `gco capacity spot-prices` with no data | `[]` |
+| `gco deps scan -o yaml` | The same envelope as `-o json`; `--report` now writes its file in every mode |
+| `gco jobs submit --check-policy` | The submission document; the policy findings go to stderr |
+| Every command | Datetimes in ISO 8601 at any depth (`2026-01-15T10:30:00+00:00`); those inside job, stack and file records printed as `2026-01-15 10:30:00+00:00` |
+
+Prompts, namespaces, Regions and permissions:
+
+- **BREAKING: `gco jobs submit-queue` is `gco queue submit` under a second
+  name.** It goes through the global API (a Region's bridge only with
+  `--regional-api`), checks `--priority` in 0-100 and has the spot price
+  gate, and `gco queue submit` gains `--sandbox`. Both send the manifest's
+  own namespace, else `--namespace`, else `GCO_DEFAULT_NAMESPACE` (default
+  `gco-jobs`); they used to send `gco-jobs` and get a 422 for a manifest in
+  another namespace. A `--namespace` that contradicts the manifest fails
+  before any AWS call: drop one of them.
+- **BREAKING: `gco jobs submit-sqs` applies `GCO_DEFAULT_NAMESPACE`** to a
+  manifest without a namespace, as `gco jobs submit` does; the queue
+  processor used to put it in `gco-jobs`. Set the namespace in the manifest
+  to pin it.
+- **`--status succeeded` matches succeeded jobs.** `gco jobs list` and
+  `gco jobs bulk-delete` sent `succeeded` to an API that names the state
+  `completed`, so the filter matched nothing; a scheduled
+  `gco jobs bulk-delete --status succeeded` now deletes what it names.
+- **BREAKING: `gco webhooks create` asks for the secret on a terminal** when
+  neither `--secret` nor `GCO_WEBHOOK_SECRET` is set. Pass `--secret ''` to
+  register without one; without a terminal nothing changes.
+- **BREAKING: `gco config-cmd init` no longer writes `project_name` or the
+  Regions.** A `~/.gco/config.yaml` an earlier `init` wrote still pins them,
+  and a key in that file overrides every checkout's `cdk.json`, so a second
+  deployment's checkout can drive the first one's stacks. Rerun
+  `gco config-cmd init --force`.
+- **BREAKING: cluster-access commands follow the CLI's Region.**
+  `gco cluster tunnel`, `cluster doctor`, `monitoring open`,
+  `costs dashboard`, `gitops`, `crossplane` and `slurm` take `--region`, else
+  the default Region (`gco -r`, `GCO_DEFAULT_REGION` or the config file),
+  else the first `deployment_regions.regional` entry. They used to skip
+  straight from `--region` to that entry. Pass `--region` where a script
+  depends on the Region.
+- **BREAKING: kubectl calls name the cluster's context.** A kubeconfig
+  cluster entry pinned to a local tunnel that no context uses now fails
+  instead of falling back to the current context, which could be another
+  cluster's. Add a context for it
+  (`kubectl config set-context <name> --cluster <entry> --user <user>`), or
+  remove the entry and rerun the command to refresh it. An SSM tunnel refuses
+  a local port that already accepts connections: stop the other listener or
+  pick another port.
+- **BREAKING: some commands call AWS somewhere else.**
+  `gco stacks addons install` reads its state machine from the
+  `<project>-<region>` stack, so it needs `cloudformation:ListStackResources`
+  there. `gco costs k8s` runs its Athena queries in the CLI's monitoring
+  Region: `GCO_MONITORING_REGION`, else `monitoring_region` in the config
+  file, else `deployment_regions.monitoring`, else `us-east-2`. Outside a
+  checkout it used the default workload Region, and the first two were
+  ignored whenever a `cdk.json` was present. `gco capacity ai-recommend` and
+  `gco capacity predict` call Bedrock in `AWS_REGION`, else
+  `AWS_DEFAULT_REGION`, else the default Region, instead of `us-east-1`; set
+  `AWS_REGION` when that Region does not offer the model.
+- **BREAKING: the PCS preflight fails a `capacity_reservation.id` that does
+  not exist**, so `gco stacks deploy` stops on it instead of warning. Fix the
+  ID in `cdk.json`.
+- **BREAKING: `gco release validate` refuses an account that still has a
+  parameter under `/<project>/`.** Teardowns from earlier releases left the
+  add-on and traffic-dial parameters behind; confirm nothing deployed reads
+  them and delete them with `aws ssm delete-parameters`
+  ([LIVE_RELEASE_VALIDATION.md](LIVE_RELEASE_VALIDATION.md)).
+- **`gco upgrade` checks the preserved `cdk.json` before its teardown** from
+  the next upgrade on, and stops when the check cannot run
+  ([step 4](#how-an-upgrade-works)).
+
+### MCP server tools
+
+These change what a client of the MCP server (`gco-mcp`) sees;
+[gco_mcp/README.md → Breaking Changes in This Version](../gco_mcp/README.md#breaking-changes-in-this-version)
+has the details.
+
+- **BREAKING: `populate_kv_cache` is gated and confined.** It registers only
+  with `GCO_ENABLE_MODEL_UPLOAD=true` and uploads only a source under
+  `GCO_STORAGE_LOCAL_ROOT`, like `upload_to_regional_bucket`. Set both for a
+  client that uses it.
+- **BREAKING: local path arguments must be inside the project root.**
+  `manifest_path`, `slurm_submit`'s `script_path`, `images_build`'s
+  `context`, the `deploy_*` tools' `outputs_file`, and every step manifest a
+  DAG file names must resolve under `GCO_PROJECT_ROOT` (else the checkout,
+  else the server's working directory), or the tool returns
+  `code: path_outside_project_root`. Move the files under the project, or
+  point `GCO_PROJECT_ROOT` at a directory that holds them. Free text that
+  contains `..` is no longer refused.
+- **BREAKING: `GCO_MCP_ROLE_ARN` applies to the tools' processes**; see
+  [MCP server role and its access entry](#mcp-server-role-and-its-access-entry).
+- **BREAKING (Mission): scripts and allowlists are held to their limits.**
+  `GCO_MCP_CODE_MODE_MAX_DURATION_SECS` now counts the time a scripted
+  strategy spends in tool calls, so a script that loops on tool calls stops
+  at the cap, and a stopped script ends the iteration with
+  `script_time_limit`, `script_memory_limit` or `script_error` instead of
+  `max_wall_clock`. An explicit allowlist (`tool_allowlist`, or
+  `gco mission start --tool-allowlist`) that names a `mission_*` control
+  tool or a `swarm_*` tool is rejected with `control_tool_not_allowed`;
+  `mission_memory_search` stays allowed. `predicate` criteria are
+  size-bounded ([MISSION.md → Size bounds](MISSION.md#size-bounds)):
+  `mission_start` and `swarm_start` reject a larger one with
+  `validation_error`, and a session saved before the upgrade reports it as
+  `inconclusive` (`predicate_rejected_post_load`). Rewrite such a predicate
+  with subscripts (`obs["events"]`) and `int()` or `float()` around the
+  operands (`int(obs["step"]) % 10 == 0`).
+- **`dag_run` runs as a long task.** Its result is the task status with a
+  `task_id`, not the CLI's step document; read the steps with `task_tail`.
+- **Failed status tools return their document.** `addons_status`,
+  `eks_capabilities_status`, `hyperpod_status`, `hyperpod_preflight` and
+  `analytics_doctor` return the CLI's JSON document under `output`, next to
+  `error` and `exit_code`.
+- **Child processes get `/dev/null` as stdin.** `destroy_stack` and
+  `destroy_all` with `yes=False` stop before destroying anything, and
+  `analytics_login_url` without a password (argument or
+  `GCO_STUDIO_PASSWORD`) returns `code: password_required`.
+- **`deps_scan` is tagged `low-risk`** instead of `safe`: its full scan
+  pip-installs into the server's environment.
+- **Audit records are written.** The server writes one JSON line per record
+  to stderr, or appends them to the file `GCO_MCP_AUDIT_LOG` names;
+  `GCO_MCP_AUDIT_LOG_LEVEL` filters them. Earlier releases wrote none.
