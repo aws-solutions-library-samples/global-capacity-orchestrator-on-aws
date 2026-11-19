@@ -19,7 +19,9 @@ CloudFormation stacks — to a tagged release in one pass:
    container runtime and the image are both present.
 4. **Cycle the stacks.** Check that the checkout's deployable sources are
    readable by every user (the redeploy would refuse them otherwise, after the
-   teardown), then scale the workload tier to zero
+   teardown) and that the checked-out release's configuration loader accepts
+   the preserved ``cdk.json`` (printing its warnings), then scale the workload
+   tier to zero
    (:meth:`cli.stacks.StackManager.destroy_orchestrated` with
    ``keep_control_plane=True`` — the monitoring stack is first updated in place
    so it stops referencing the regional stacks), then run the ordinary
@@ -40,6 +42,7 @@ can be exercised without git, pip, or AWS.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess  # fixed argv only, never a shell string
@@ -87,6 +90,50 @@ _REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 #: Wall-clock cap for one git/pip/npm/image-build subprocess.
 _TOOL_TIMEOUT_SECONDS = 1800.0
+
+#: Wall-clock cap for the configuration check (it imports the CDK library).
+CONFIGURATION_CHECK_TIMEOUT_SECONDS = 300.0
+
+#: Prefix of the one line of the configuration check's output that is its result.
+_CONFIGURATION_CHECK_MARKER = "gco-configuration-check: "
+
+#: Run by a fresh interpreter from the checkout root, so ``gco`` is the
+#: checked-out release's package (``-c`` puts the working directory first on
+#: the module path) whatever release the running CLI is. It reads the CDK
+#: context (cdk.json's, with the run's ``--context`` overrides) from stdin,
+#: loads it the way that release's CDK app does, and prints the loader's
+#: warnings, including those it logged before an error stopped it, and the
+#: error.
+_CONFIGURATION_CHECK = """
+import json
+import logging
+import sys
+
+warnings = []
+
+
+class Collect(logging.Handler):
+    def emit(self, record):
+        message = record.getMessage()
+        if message not in warnings:
+            warnings.append(message)
+
+
+loader_log = logging.getLogger("gco.config.config_loader")
+loader_log.addHandler(Collect(logging.WARNING))
+loader_log.propagate = False
+context = json.load(sys.stdin)
+
+import aws_cdk
+from gco.config.config_loader import ConfigLoader, ConfigValidationError
+
+try:
+    ConfigLoader(aws_cdk.App(context=context))
+    error = None
+except ConfigValidationError as exc:
+    error = str(exc)
+print(MARKER + json.dumps({"error": error, "warnings": warnings}))
+""".replace("MARKER", repr(_CONFIGURATION_CHECK_MARKER))
 
 Logger = Callable[[str], None]
 
@@ -645,6 +692,70 @@ def require_container_runtime() -> str:
     return runtime
 
 
+@dataclass(frozen=True)
+class ConfigurationCheck:
+    """What the checked-out release's configuration loader made of cdk.json."""
+
+    #: The loader's warnings: deprecated keys, keys that take no effect, each
+    #: saying what to do instead.
+    warnings: tuple[str, ...] = ()
+    #: Why this cdk.json cannot be deployed with the checked-out release, or
+    #: ``None`` when it can.
+    error: str | None = None
+
+
+def check_preserved_configuration(
+    root: Path, overrides: Mapping[str, str] | None = None
+) -> ConfigurationCheck:
+    """Load ``root``'s cdk.json with the checked-out release's ``ConfigLoader``.
+
+    The upgrade keeps cdk.json byte for byte, so a value the new release
+    validates more strictly, or a key it no longer reads, is only found by its
+    own loader. The CDK app runs that loader on every synth, but the first
+    synth is inside the teardown. This runs it before: in a fresh interpreter
+    from the checkout (:data:`_CONFIGURATION_CHECK`), on cdk.json's context
+    plus ``overrides`` (the run's ``--context`` pairs, as the CLI passes them).
+    A cdk.json that is not JSON, a check that cannot run, and the loader's
+    error all come back as ``error``.
+    """
+    try:
+        document = json.loads((root / "cdk.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return ConfigurationCheck(error=f"cdk.json could not be read as JSON: {exc}")
+    context = document.get("context") if isinstance(document, dict) else None
+    merged = {**(context if isinstance(context, dict) else {}), **dict(overrides or {})}
+    release = "the checked-out release's configuration check"
+    try:
+        result = subprocess.run(  # fixed argv, no shell
+            [sys.executable, "-c", _CONFIGURATION_CHECK],
+            cwd=str(root),
+            input=json.dumps(merged),
+            capture_output=True,
+            text=True,
+            timeout=CONFIGURATION_CHECK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ConfigurationCheck(
+            error=f"{release} did not finish within {CONFIGURATION_CHECK_TIMEOUT_SECONDS:.0f}s"
+        )
+    for line in reversed(result.stdout.splitlines()):
+        if line.startswith(_CONFIGURATION_CHECK_MARKER):
+            report = json.loads(line.removeprefix(_CONFIGURATION_CHECK_MARKER))
+            warnings = tuple(str(warning) for warning in report["warnings"])
+            if report["error"] is None:
+                return ConfigurationCheck(warnings=warnings)
+            return ConfigurationCheck(
+                warnings=warnings,
+                error=f"the checked-out release rejects cdk.json: {report['error']}",
+            )
+    lines = (result.stderr or result.stdout).strip().splitlines()
+    detail = lines[-1] if lines else "no output"
+    return ConfigurationCheck(
+        error=f"{release} could not run (exit status {result.returncode}): {detail}"
+    )
+
+
 @dataclass
 class StackCycleResult:
     """Outcome of the teardown/redeploy half of the upgrade."""
@@ -673,6 +784,8 @@ def run_stack_cycle(
     on_stack_start: Callable[[str], None] | None = None,
     on_stack_complete: Callable[[str, bool], None] | None = None,
     log: Logger = _quiet,
+    warn: Logger | None = None,
+    cdk_context: Mapping[str, str] | None = None,
     sleep: Callable[[float], None] | None = None,
     max_attempts: int = 3,
     retry_wait_seconds: float = 30.0,
@@ -687,6 +800,13 @@ def run_stack_cycle(
     after it. The teardown's monitoring detach would catch it too, but only
     when the monitoring stack is deployed.
 
+    Then the preserved cdk.json is loaded with the checked-out release's
+    configuration loader (:func:`check_preserved_configuration`, with the
+    run's ``cdk_context`` overrides): each warning goes to ``warn`` (``log``
+    when not given), and a cdk.json that release rejects stops the upgrade
+    before the teardown, with the loader's message, instead of failing the
+    teardown's first synth.
+
     The teardown uses the same retry loop as ``gco stacks destroy-all``: a
     failed attempt clears the orphaned network interfaces that typically block
     VPC deletion, waits, and tries again. The redeploy is a single
@@ -697,6 +817,8 @@ def run_stack_cycle(
     Raises:
         cli.stacks.AssetPermissionError: before any stack is touched, when a
             deployable source is owner-only.
+        UpgradeError: before any stack is touched, when the checked-out
+            release cannot deploy the preserved cdk.json.
     """
     import time
 
@@ -704,6 +826,17 @@ def run_stack_cycle(
     result = StackCycleResult()
 
     manager.ensure_asset_sources_readable()
+
+    log("Checking cdk.json with the checked-out release's configuration loader...")
+    configuration = check_preserved_configuration(Path(manager.project_root), cdk_context)
+    for warning in configuration.warnings:
+        (warn or log)(f"cdk.json: {warning}")
+    if configuration.error is not None:
+        raise UpgradeError(
+            f"Stopped before the teardown: {configuration.error.rstrip('.')}. No stack was "
+            "changed. Fix cdk.json (the upgrade kept it byte for byte), then run "
+            "'gco upgrade --skip-checkout' to cycle the stacks on this checkout."
+        )
 
     log("Phase 1/2: scaling the workload tier to zero (control plane stays)...")
     ok = False

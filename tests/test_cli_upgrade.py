@@ -256,6 +256,9 @@ def test_enable_overrides_reach_both_managers() -> None:
     assert engine.manager.set_extra_cdk_context.call_count == 2
     for call in engine.manager.set_extra_cdk_context.call_args_list:
         assert call.args[0] == {"feature_enabled_overrides": "fsx_lustre"}
+    # ...and the configuration check before the teardown loads cdk.json with them.
+    cycle_kwargs = engine.patches["run_stack_cycle"].call_args.kwargs
+    assert cycle_kwargs["cdk_context"] == {"feature_enabled_overrides": "fsx_lustre"}
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +319,7 @@ def test_full_run_executes_every_step_in_order() -> None:
     p["run_stack_cycle"].assert_called_once()
     cycle_kwargs = p["run_stack_cycle"].call_args.kwargs
     assert cycle_kwargs["parallel"] is False and cycle_kwargs["max_workers"] == 4
+    assert cycle_kwargs["cdk_context"] == {}
     # Two managers: one for the plan, a fresh one after the checkout moved.
     assert p["get_stack_manager"].call_count == 2
     assert "Upgrade to v8.1.0 complete." in result.output
@@ -505,6 +509,27 @@ def test_owner_only_sources_stop_the_upgrade_with_no_stack_changed() -> None:
     assert "No stack was changed" in result.output
     assert "gco upgrade --skip-checkout" in result.output
     assert "Upgrade failed" not in result.output
+
+
+def test_a_cdk_json_the_new_release_rejects_stops_with_no_stack_changed() -> None:
+    with _Engine(_plan()) as engine:
+
+        def rejected(manager: Any, **kwargs: Any) -> StackCycleResult:
+            kwargs["warn"]("cdk.json: images.lifecycle is deprecated and ignored: remove it")
+            raise UpgradeError(
+                "Stopped before the teardown: the checked-out release rejects cdk.json: "
+                "kubernetes_version must be a string. No stack was changed. Fix cdk.json "
+                "(the upgrade kept it byte for byte), then run 'gco upgrade --skip-checkout' "
+                "to cycle the stacks on this checkout."
+            )
+
+        engine.patches["run_stack_cycle"].side_effect = rejected
+        result = _invoke(["-y"])
+    assert result.exit_code == 1
+    assert "images.lifecycle is deprecated and ignored: remove it" in result.output
+    assert "kubernetes_version must be a string" in result.output
+    assert "No stack was changed" in result.output
+    assert "Upgrade failed during the stack cycle" not in result.output
 
 
 def test_missing_container_runtime_stops_before_the_checkout() -> None:

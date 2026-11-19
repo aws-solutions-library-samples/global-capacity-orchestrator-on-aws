@@ -6617,6 +6617,8 @@ Runs inside a git checkout of the repository and:
    container runtime and the image are both present;
 3. checks that the checkout's deployable sources are readable by every user —
    the check `gco stacks deploy` makes, run here before anything is torn down —
+   and loads `cdk.json` with the new release's configuration loader (with the
+   `--enable` overrides), printing each of its warnings,
    then scales the workload tier to zero: the monitoring stack is updated in
    place with `--context gco:control-plane-only=true` so it stops referencing
    the regional stacks, then every regional API bridge and regional stack is
@@ -6669,6 +6671,10 @@ gco upgrade [OPTIONS]
   command before the teardown with no stack changed; make them readable
   ([Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask))
   and rerun `gco upgrade --skip-checkout`.
+- A `cdk.json` the new release's configuration loader rejects (a value it now
+  validates more strictly) stops the command the same way, with no stack
+  changed and the loader's message, which names the key to fix. Fix it and rerun
+  `gco upgrade --skip-checkout` ([If it stops halfway](UPGRADING.md#if-it-stops-halfway)).
 - The running `gco` process keeps executing the previous release's CLI code until
   you open a new shell (the dev-container shell function starts a fresh container
   from the rebuilt image). The deployed stacks are on the new release either way.
