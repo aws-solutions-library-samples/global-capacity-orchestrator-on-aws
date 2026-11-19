@@ -780,8 +780,8 @@ class GCOApiGatewayGlobalStack(Stack):
         # Grant Secrets Manager permission to invoke the rotation Lambda
         rotation_lambda.grant_invoke(iam.ServicePrincipal("secretsmanager.amazonaws.com"))
 
-        # cdk-nag suppression: CDK's grant methods generate Resource: * for
-        # the rotation function's execution role.
+        # Every statement on the secret names its ARN; Resource: * is only on
+        # the two statements that take no resource.
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         acknowledge_nag_findings(
@@ -790,11 +790,12 @@ class GCOApiGatewayGlobalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The secret rotation Lambda needs secretsmanager:GetSecretValue "
-                        "and PutSecretValue on the rotation secret. CDK's grant methods "
-                        "generate Resource: * for the rotation function's execution role "
-                        "because the secret ARN includes a random suffix not known at "
-                        "synth time."
+                        "Resource: * is on two statements that take no resource: "
+                        "xray:PutTraceSegments and xray:PutTelemetryRecords, which active "
+                        "tracing adds, and secretsmanager:GetRandomPassword, which CDK's "
+                        "rotation schedule grants every rotation function (this one "
+                        "generates its key with Python's secrets module). Every "
+                        "statement on the signing-key secret names that secret's ARN."
                     ),
                     "appliesTo": ["Resource::*"],
                 },
