@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -94,11 +95,26 @@ class BedrockCapacityAdvisor:
         self._uses_default_model = model_id is None
         self.model_id: str = self.DEFAULT_MODEL if model_id is None else model_id
 
+    def bedrock_region(self) -> str:
+        """The Region the advisor calls Bedrock Runtime in.
+
+        The SDK's own ``AWS_REGION`` and ``AWS_DEFAULT_REGION`` first, then the
+        CLI's default region (``gco -r``, ``GCO_DEFAULT_REGION``, the config
+        file, or cdk.json's first regional Region), the order ``gco autopilot``
+        uses for its Bedrock sessions. A geography-scoped inference profile
+        (``eu.``, ``apac.``) is only offered in its geography's Regions.
+        """
+        return (
+            os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or self.config.default_region
+        )
+
     def _get_bedrock_client(self) -> Any:
-        """Get Bedrock runtime client."""
+        """Get Bedrock runtime client in :meth:`bedrock_region`."""
         return self._session.client(
             "bedrock-runtime",
-            region_name="us-east-1",
+            region_name=self.bedrock_region(),
             config=Config(read_timeout=BEDROCK_READ_TIMEOUT_SECONDS),
         )
 
@@ -729,17 +745,19 @@ Respond ONLY with the JSON object, no additional text."""
             # Raised as a distinct type (still a RuntimeError) so callers can
             # tell a fixable account-setup gap from a transient Bedrock fault.
             raise_if_bedrock_ftu_form_error(e)
+            region = self.bedrock_region()
             if error_code == "AccessDeniedException":
                 raise RuntimeError(
-                    "Access denied to Bedrock. Ensure your IAM role has "
+                    f"Access denied to Bedrock in {region}. Ensure your IAM role has "
                     "bedrock:InvokeModel permission and the model is enabled in your account."
                 ) from e
             if error_code == "ValidationException":
                 raise RuntimeError(
-                    f"Model {self.model_id} may not be available. "
-                    "Try a different model with --model option."
+                    f"Model {self.model_id} may not be available in {region}. "
+                    "Try a different model with --model option, or another Region "
+                    "with AWS_REGION or gco --region."
                 ) from e
-            raise RuntimeError(f"Bedrock API error: {e}") from e
+            raise RuntimeError(f"Bedrock API error in {region}: {e}") from e
         except json.JSONDecodeError as e:
             # ``response_text`` is always bound here: the decoder can only
             # fail after the response text was extracted.

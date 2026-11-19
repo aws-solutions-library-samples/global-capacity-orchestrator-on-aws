@@ -10,6 +10,7 @@ These modules back the Bedrock-assisted capacity advisor and the multi-region ca
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
 from botocore.exceptions import ClientError
 
 from cli.aws_client import RegionalStack
@@ -20,6 +21,7 @@ from cli.capacity import (
     compute_price_trend,
     get_multi_region_capacity_checker,
 )
+from cli.config import GCOConfig
 
 
 def _make_advisor():
@@ -467,3 +469,64 @@ def test_missing_running_job_count_is_an_unavailable_signal_not_zero_jobs():
 
     result = checker._simple_recommend([capacity])
     assert "no running jobs" not in result["reason"]
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        ({"AWS_REGION": "eu-west-3", "AWS_DEFAULT_REGION": "eu-central-1"}, "eu-west-3"),
+        ({"AWS_DEFAULT_REGION": "eu-central-1"}, "eu-central-1"),
+        ({}, "ap-northeast-1"),  # the CLI's default region
+    ],
+)
+def test_advisor_calls_bedrock_in_the_configured_region(monkeypatch, environment, expected):
+    """The Bedrock Runtime client used to be pinned to us-east-1, so an EU-only
+    account or an eu. inference profile could never be used."""
+    from cli.capacity.advisor import BedrockCapacityAdvisor
+
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    config = GCOConfig(default_region="ap-northeast-1")
+    with patch("cli.capacity.advisor.boto3.Session") as session_cls:
+        advisor = BedrockCapacityAdvisor(config, model_id="eu.example.model-v1")
+        advisor._get_bedrock_client()
+
+    assert advisor.bedrock_region() == expected
+    service, kwargs = (
+        session_cls.return_value.client.call_args.args,
+        (session_cls.return_value.client.call_args.kwargs),
+    )
+    assert service == ("bedrock-runtime",)
+    assert kwargs["region_name"] == expected
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("ValidationException", "may not be available in eu-west-3"),
+        ("AccessDeniedException", "Access denied to Bedrock in eu-west-3"),
+        ("ThrottlingException", "Bedrock API error in eu-west-3"),
+    ],
+)
+def test_advisor_bedrock_errors_name_the_region_called(monkeypatch, code, expected):
+    from cli.capacity.advisor import BedrockCapacityAdvisor
+
+    monkeypatch.setenv("AWS_REGION", "eu-west-3")
+    with patch("cli.capacity.advisor.boto3.Session"):
+        advisor = BedrockCapacityAdvisor(
+            GCOConfig(default_region="us-east-1"), model_id="eu.example.model-v1"
+        )
+    bedrock = MagicMock()
+    bedrock.converse.side_effect = ClientError(
+        {"Error": {"Code": code, "Message": "no"}}, "Converse"
+    )
+    advisor._get_bedrock_client = MagicMock(return_value=bedrock)
+    with (
+        patch.object(advisor, "gather_capacity_data", return_value={}),
+        patch.object(advisor, "_gather_historical_context", return_value={}),
+        patch.object(advisor, "_build_prompt", return_value="prompt"),
+        pytest.raises(RuntimeError, match=expected),
+    ):
+        advisor.get_recommendation(workload_description="training")

@@ -738,6 +738,14 @@ thinking fields.
 - AWS credentials with `bedrock:InvokeModel` permission
 - The specified Bedrock model must be enabled in your account
 
+Bedrock is called in `AWS_REGION`, else `AWS_DEFAULT_REGION`, else the CLI's default
+region (`gco --region`, `GCO_DEFAULT_REGION`, the config file, or the first regional
+Region in `cdk.json`), the same order `gco autopilot` uses. A geography-scoped
+inference profile (`eu.`, `apac.`, `jp.`, `au.`) only answers in its geography's
+Regions, so pick a Region there when passing one with `--model`. Bedrock errors name
+the Region that was called. [`gco capacity predict`](#gco-capacity-predict) uses the
+same Region.
+
 **Options:**
 
 | Option | Short | Description |
