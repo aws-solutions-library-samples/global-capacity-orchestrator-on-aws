@@ -380,15 +380,16 @@ def test_fetch_studio_url_returns_pending_provisioning_state() -> None:
 
 
 def test_orphan_scan_skips_resources_without_identifiers() -> None:
+    cfn = MagicMock()
+    cfn.get_paginator.return_value.paginate.return_value = [{"StackResourceSummaries": []}]
     efs = MagicMock()
-    efs.describe_file_systems.return_value = {"FileSystems": [{}]}
+    efs.get_paginator.return_value.paginate.return_value = [{"FileSystems": [{}]}]
     cognito = MagicMock()
-    cognito.list_user_pools.return_value = {"UserPools": [{}]}
+    cognito.get_paginator.return_value.paginate.return_value = [{"UserPools": [{}]}]
 
-    with patch("boto3.client", side_effect=[efs, cognito]):
-        assert analytics_user_mgmt.scan_orphan_analytics_resources("us-east-1") == []
+    with patch("boto3.client", side_effect=[cfn, efs, cognito]):
+        assert analytics_user_mgmt.scan_orphan_analytics_resources("us-east-1", "gco") == []
 
-    efs.list_tags_for_resource.assert_not_called()
     cognito.describe_user_pool.assert_not_called()
 
 

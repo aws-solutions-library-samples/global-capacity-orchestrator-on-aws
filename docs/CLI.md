@@ -458,7 +458,16 @@ Checks performed:
 - The three `/gco/cluster-shared-bucket/*` SSM parameters are
   present in the global region
 - No orphaned retained analytics resources are left from a previous
-  `retain`-policy destroy
+  `retain`-policy destroy: a Studio EFS file system or Cognito user pool
+  that a deleted `{project}-analytics` stack skipped on delete
+  (CloudFormation lists a deleted stack's resources for 90 days), or a file
+  system tagged `Name={project}-analytics/StudioEfs` (the tag CDK gives
+  it) or `gco:analytics:managed=true` with `gco:project={project}`. The live
+  stack's resources are never reported. The remediation lists the delete
+  commands in order, with `--region`: access points and mount targets
+  before the file system, hosted UI domains before the user pool. When the
+  CloudFormation lookup fails, the check fails without suggesting any
+  deletion.
 
 ```bash
 gco analytics doctor

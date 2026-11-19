@@ -727,7 +727,7 @@ def analytics_doctor(config: Any) -> None:
         )
 
     # 4. No orphaned retained analytics resources
-    orphan_cmds = scan_orphan_analytics_resources(config.api_gateway_region)
+    orphan_cmds = scan_orphan_analytics_resources(config.api_gateway_region, config.project_name)
     _emit(
         "no orphaned retained analytics resources",
         not orphan_cmds,
