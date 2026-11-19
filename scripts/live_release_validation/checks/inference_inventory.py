@@ -31,9 +31,6 @@ KUBERNETES_INVENTORY_KINDS: tuple[KubernetesInventoryKind, ...] = (
     KubernetesInventoryKind("config_maps", "configmaps"),
     KubernetesInventoryKind("generated_admin_secrets", "secrets"),
     KubernetesInventoryKind("legacy_ingresses", "ingresses.networking.k8s.io"),
-    KubernetesInventoryKind(
-        "legacy_http_routes", "httproutes.gateway.networking.k8s.io", optional_api=True
-    ),
 )
 
 
@@ -164,11 +161,6 @@ class InferenceInventoryMixin:
             "legacy_ingresses": {
                 f"inference-{endpoint_name}",
                 f"inference-{endpoint_name}-proxy",
-            },
-            "legacy_http_routes": {
-                endpoint_name,
-                f"{endpoint_name}-canary",
-                f"{endpoint_name}-proxy",
             },
         }
         if summary_key in exact_names:

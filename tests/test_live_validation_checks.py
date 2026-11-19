@@ -4212,8 +4212,10 @@ class TestInventoryAndAbsence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         runner, plan, record, kubectl, clock = self._runner(tmp_path, monkeypatch)
-        # Twelve 0.17s reads: the last one ends past the 2s deletion budget.
-        kubectl.clock, kubectl.tick = clock, 0.17
+        # One read per inventory kind, together just past the 2s deletion budget,
+        # so the sweep's last read ends after the deadline.
+        kubectl.clock = clock
+        kubectl.tick = 2.1 / len(inventory_module.KUBERNETES_INVENTORY_KINDS)
         runner.table.item = _owned_item(runner.settings, plan, runner.owner_nonce)
         with pytest.raises(ManagedInferenceValidationError, match="absence was not proven"):
             runner.prove_absence(record)
