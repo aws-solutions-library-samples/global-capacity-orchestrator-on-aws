@@ -68,7 +68,7 @@ contains `{{`:
 
 - When the encoding fits one parameter value (8 KiB), it is the value of
   `/<project>/addons/<region>/_input`, the only form earlier releases wrote.
-- When it does not, it is split into 8 KiB parts written to
+- When it does not, it is split into parts of at most 8 KiB written to
   `_input.<sha256[:16]>.<k>` (k = 1..n), and `_input` then holds the header
   `chunked:v1:<n>:<sha256>`, where the SHA-256 is that of the whole encoded
   value. The parts are written before the header, so a deployment that fails
