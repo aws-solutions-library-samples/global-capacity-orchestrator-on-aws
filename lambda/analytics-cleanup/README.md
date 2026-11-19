@@ -44,34 +44,18 @@ Without this cleanup, `cdk destroy gco-analytics` would fail with "domain has ac
 
 ## IAM permissions required
 
-The stack grants these through a customer-managed policy (`CleanupFunctionPolicy` in `gco/stacks/analytics_stack.py`), so the grant outlives the custom resource's run:
+The stack grants these through a customer-managed policy (`CleanupFunctionPolicy` in `gco/stacks/analytics_stack.py`), so the grant outlives the custom resource's run. Each statement names what the handler touches as far as the template knows it (`<region>`, `<account>` and `<domain-id>` are the stack's own):
 
-```json
-{
-  "Effect": "Allow",
-  "Action": [
-    "sagemaker:ListApps",
-    "sagemaker:DeleteApp",
-    "sagemaker:ListSpaces",
-    "sagemaker:DeleteSpace",
-    "sagemaker:ListUserProfiles",
-    "sagemaker:DeleteUserProfile",
-    "sagemaker:DescribeDomain",
-    "elasticfilesystem:DescribeAccessPoints",
-    "elasticfilesystem:DeleteAccessPoint",
-    "elasticfilesystem:DescribeFileSystems",
-    "elasticfilesystem:DescribeMountTargets",
-    "elasticfilesystem:DeleteMountTarget",
-    "elasticfilesystem:DeleteFileSystem",
-    "elasticfilesystem:DeleteFileSystemPolicy",
-    "ec2:DescribeSecurityGroups",
-    "ec2:DeleteSecurityGroup",
-    "ec2:RevokeSecurityGroupIngress",
-    "ec2:RevokeSecurityGroupEgress"
-  ],
-  "Resource": "*"
-}
-```
+| Actions | Resource |
+|---------|----------|
+| `sagemaker:ListApps`, `sagemaker:ListSpaces`, `sagemaker:ListUserProfiles`, `ec2:DescribeSecurityGroups` | `*` (these take no resource) |
+| `sagemaker:DescribeDomain`, `sagemaker:DeleteApp`, `sagemaker:DeleteSpace`, `sagemaker:DeleteUserProfile` | The domain: `arn:aws:sagemaker:<region>:<account>:domain/<domain-id>`, and `app/<domain-id>/*`, `space/<domain-id>/*`, `user-profile/<domain-id>/*` under it |
+| `elasticfilesystem:DescribeAccessPoints` | `Studio_EFS` |
+| `elasticfilesystem:DeleteAccessPoint` | `arn:aws:elasticfilesystem:<region>:<account>:access-point/*` (the access points are created at run time) |
+| `elasticfilesystem:DeleteFileSystemPolicy`, `elasticfilesystem:DescribeMountTargets`, `elasticfilesystem:DeleteMountTarget`, `elasticfilesystem:DeleteFileSystem` | `arn:aws:elasticfilesystem:<region>:<account>:file-system/*` (SageMaker creates the home file system at run time and reports its id only through `DescribeDomain`) |
+| `ec2:RevokeSecurityGroupIngress`, `ec2:RevokeSecurityGroupEgress`, `ec2:DeleteSecurityGroup` | `arn:aws:ec2:<region>:<account>:security-group/*` with `ArnEquals` `ec2:Vpc` = the analytics VPC |
+
+`tests/test_analytics_stack.py` reads the handler's API calls and fails when one is not granted.
 
 ## Error handling
 

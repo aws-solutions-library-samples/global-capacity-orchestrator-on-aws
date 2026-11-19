@@ -134,6 +134,26 @@ def _synth_analytics(
     return assertions.Template.from_stack(stack)
 
 
+_DOMAIN_ID = {"Fn::GetAtt": ["StudioDomain", "DomainId"]}
+
+
+def _render_arn(value: Any) -> str:
+    """Render a synthesized ARN: the partition as ``aws``, the domain id as ``<domain>``.
+
+    Literal parts are kept, ``Fn::Join`` parts are concatenated, and any other
+    token is rendered as its JSON, so an unexpected reference stays visible.
+    """
+    if isinstance(value, str):
+        return value
+    if value == {"Ref": "AWS::Partition"}:
+        return "aws"
+    if value == _DOMAIN_ID:
+        return "<domain>"
+    if isinstance(value, dict) and "Fn::Join" in value:
+        return "".join(_render_arn(part) for part in value["Fn::Join"][1])
+    return json.dumps(value, sort_keys=True)
+
+
 # ---------------------------------------------------------------------------
 # _parse_removal helper
 # ---------------------------------------------------------------------------
@@ -641,7 +661,6 @@ class TestStudioEfs:
         required_actions = {
             "elasticfilesystem:DescribeAccessPoints",
             "elasticfilesystem:DeleteAccessPoint",
-            "elasticfilesystem:DescribeFileSystems",
             "elasticfilesystem:DescribeMountTargets",
             "elasticfilesystem:DeleteMountTarget",
             "elasticfilesystem:DeleteFileSystem",
@@ -672,6 +691,137 @@ class TestStudioEfs:
         ]
         assert len(attached_roles) == 1
         assert attached_roles[0].startswith("CleanupFunctionServiceRole")
+
+    def test_cleanup_policy_grants_what_the_handler_calls_and_scopes_it(self) -> None:
+        """The cleanup policy holds exactly the handler's API calls, each scoped.
+
+        The actions are read from ``lambda/analytics-cleanup/handler.py`` (every
+        ``<client>.<operation>(`` and paginator), so a new call fails here until
+        it is granted. List calls and ``DescribeSecurityGroups`` take no
+        resource; the domain's apps, spaces and profiles are named by domain id;
+        the access-point lookup names Studio_EFS; the run-time access points and
+        SageMaker's home file system are this Region's; the security-group
+        changes are limited to this stack's VPC.
+        """
+        import re
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parent.parent / "lambda/analytics-cleanup/handler.py"
+        ).read_text(encoding="utf-8")
+        clients = dict(re.findall(r'(\w+) = boto3\.client\("([a-z0-9-]+)"', source))
+        prefixes = {"sagemaker": "sagemaker", "efs": "elasticfilesystem", "ec2": "ec2"}
+        operations = {
+            (clients[var], op)
+            for var, op in re.findall(r"\b(\w+)\.(\w+)\(", source)
+            if var in clients and op != "get_paginator"
+        } | {
+            (clients[var], op)
+            for var, op in re.findall(r'\b(\w+)\.get_paginator\("(\w+)"\)', source)
+        }
+        handler_actions = {
+            f"{prefixes[service]}:{''.join(word.title() for word in op.split('_'))}"
+            for service, op in operations
+        }
+
+        template = _synth_analytics().to_json()
+        (policy,) = [
+            resource
+            for logical_id, resource in template["Resources"].items()
+            if resource["Type"] == "AWS::IAM::ManagedPolicy"
+            and logical_id.startswith("CleanupFunctionPolicy")
+        ]
+        statements = policy["Properties"]["PolicyDocument"]["Statement"]
+
+        def _actions(statement: Mapping[str, Any]) -> frozenset[str]:
+            action = statement["Action"]
+            return frozenset(action if isinstance(action, list) else [action])
+
+        granted = {action for statement in statements for action in _actions(statement)}
+        assert granted == handler_actions
+
+        _render = _render_arn
+        by_actions = {
+            _actions(statement): (
+                sorted(_render(r) for r in statement["Resource"])
+                if isinstance(statement["Resource"], list)
+                else [_render(statement["Resource"])],
+                {
+                    operator: {key: _render(value) for key, value in condition.items()}
+                    for operator, condition in statement.get("Condition", {}).items()
+                }
+                or None,
+            )
+            for statement in statements
+        }
+        prefix = "arn:aws:{}:us-east-2:123456789012"
+        efs_id = _render({"Fn::GetAtt": [self._efs_logical_id(template), "Arn"]})
+        vpc_ids = [lid for lid, r in template["Resources"].items() if r["Type"] == "AWS::EC2::VPC"]
+        assert len(vpc_ids) == 1
+        assert by_actions == {
+            frozenset(
+                {
+                    "sagemaker:ListApps",
+                    "sagemaker:ListSpaces",
+                    "sagemaker:ListUserProfiles",
+                    "ec2:DescribeSecurityGroups",
+                }
+            ): (["*"], None),
+            frozenset(
+                {
+                    "sagemaker:DescribeDomain",
+                    "sagemaker:DeleteApp",
+                    "sagemaker:DeleteSpace",
+                    "sagemaker:DeleteUserProfile",
+                }
+            ): (
+                sorted(
+                    prefix.format("sagemaker") + suffix
+                    for suffix in (
+                        ":domain/<domain>",
+                        ":app/<domain>/*",
+                        ":space/<domain>/*",
+                        ":user-profile/<domain>/*",
+                    )
+                ),
+                None,
+            ),
+            frozenset({"elasticfilesystem:DescribeAccessPoints"}): ([efs_id], None),
+            frozenset({"elasticfilesystem:DeleteAccessPoint"}): (
+                [prefix.format("elasticfilesystem") + ":access-point/*"],
+                None,
+            ),
+            frozenset(
+                {
+                    "elasticfilesystem:DeleteFileSystemPolicy",
+                    "elasticfilesystem:DescribeMountTargets",
+                    "elasticfilesystem:DeleteMountTarget",
+                    "elasticfilesystem:DeleteFileSystem",
+                }
+            ): ([prefix.format("elasticfilesystem") + ":file-system/*"], None),
+            frozenset(
+                {
+                    "ec2:RevokeSecurityGroupIngress",
+                    "ec2:RevokeSecurityGroupEgress",
+                    "ec2:DeleteSecurityGroup",
+                }
+            ): (
+                [prefix.format("ec2") + ":security-group/*"],
+                {
+                    "ArnEquals": {
+                        "ec2:Vpc": "arn:aws:ec2:us-east-2:123456789012:vpc/"
+                        + json.dumps({"Ref": vpc_ids[0]}, sort_keys=True)
+                    }
+                },
+            ),
+        }
+
+    @staticmethod
+    def _efs_logical_id(template: Mapping[str, Any]) -> str:
+        (efs_id,) = [
+            lid for lid, r in template["Resources"].items() if r["Type"] == "AWS::EFS::FileSystem"
+        ]
+        return efs_id
 
     def test_efs_deletion_policy_is_delete_by_default(self) -> None:
         """Default ``efs_removal="destroy"`` yields
@@ -1056,49 +1206,73 @@ class TestSageMakerExecutionRole:
         role_lid, _ = self._find_sagemaker_role(template)
         assert self._sqs_send_resources(self._collect_role_statements(template, role_lid)) == []
 
-    def test_role_has_ssm_getparameter_on_cluster_shared_bucket_prefix(self) -> None:
-        """``ssm:GetParameter`` on the ``Cluster_Shared_Bucket`` metadata
-        parameters in the global region.
+    def test_role_reads_exactly_the_three_cluster_shared_parameters(self) -> None:
+        """``ssm:GetParameter`` on the three ``Cluster_Shared_Bucket`` metadata
+        parameters in the global region, and on nothing else.
 
-        Lets a Studio notebook resolve the shared bucket name/arn/region
-        at runtime without a per-user JupyterLab terminal export step.
-        The parameters live under
-        ``/<project_name>/cluster-shared-bucket`` in the global region where
-        ``GCOGlobalStack`` is deployed. The analytics test fixture synthesizes
-        with a mock config whose ``project_name`` is ``"gco-test"``.
+        Lets a Studio notebook resolve the shared bucket name/arn/region at
+        runtime without a per-user JupyterLab terminal export step.
+        ``GCOGlobalStack`` writes exactly ``<prefix>/name``, ``/arn`` and
+        ``/region`` under ``/<project_name>/cluster-shared-bucket``; the grant
+        names those three instead of the ``<prefix>/*`` path. The fixture's
+        ``project_name`` is ``"gco-test"``.
         """
         from gco.stacks.constants import cluster_shared_ssm_parameter_prefix
 
-        cluster_shared_prefix = cluster_shared_ssm_parameter_prefix("gco-test")
+        prefix = cluster_shared_ssm_parameter_prefix("gco-test")
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+        (ssm_statement,) = [
+            stmt
+            for stmt in statements
+            if "ssm:GetParameter"
+            in (stmt["Action"] if isinstance(stmt["Action"], list) else [stmt["Action"]])
+        ]
+        assert sorted(ssm_statement["Action"]) == ["ssm:GetParameter", "ssm:GetParameters"]
+        assert sorted(_render_arn(arn) for arn in ssm_statement["Resource"]) == [
+            f"arn:aws:ssm:us-east-2:123456789012:parameter{prefix}/{name}"
+            for name in ("arn", "name", "region")
+        ]
+
+    def test_studio_ui_actions_name_this_domain(self) -> None:
+        """The Studio UI statement names this stack's domain, not every domain.
+
+        Domain, user-profile, space and app ARNs all start with the domain id,
+        so the ``domain/*``, ``user-profile/*/*``, ``space/*/*`` and
+        ``app/*/*/*/*`` wildcards are scoped to it. ``ListSpaces`` and
+        ``ListApps`` take no resource, so a statement naming ARNs never granted
+        them; ``AmazonSageMakerFullAccess`` grants them on ``*``.
+        """
         template = _synth_analytics()
         role_lid, _ = self._find_sagemaker_role(template)
         statements = self._collect_role_statements(template, role_lid)
 
-        matches = []
-        for stmt in statements:
-            if stmt.get("Effect") != "Allow":
-                continue
-            actions = stmt.get("Action")
-            action_set = set(actions) if isinstance(actions, list) else {actions}
-            if "ssm:GetParameter" not in action_set:
-                continue
-            resources = stmt.get("Resource") or []
-            if not isinstance(resources, list):
-                resources = [resources]
-            for res in resources:
-                # Expected shape:
-                #   arn:<partition>:ssm:<global-region>:<account>:
-                #   parameter/gco/cluster-shared-bucket/*
-                rendered = res if isinstance(res, str) else json.dumps(res, sort_keys=True)
-                if ":ssm:" in rendered and f"parameter{cluster_shared_prefix}/*" in rendered:
-                    matches.append(stmt)
-                    break
+        def _actions(statement: Mapping[str, Any]) -> list[str]:
+            action = statement["Action"]
+            return action if isinstance(action, list) else [action]
 
-        assert matches, (
-            "expected an Allow statement granting ssm:GetParameter on "
-            f"parameter{cluster_shared_prefix}/* in the "
-            f"global region; attached statements={statements!r}"
+        (studio,) = [s for s in statements if "sagemaker:CreateSpace" in _actions(s)]
+        assert "sagemaker:ListSpaces" not in _actions(studio)
+        assert "sagemaker:ListApps" not in _actions(studio)
+        rendered = sorted(_render_arn(arn) for arn in studio["Resource"])
+        arn_prefix = "arn:aws:sagemaker:us-east-2:123456789012"
+        assert rendered == sorted(
+            arn_prefix + suffix
+            for suffix in (
+                ":domain/<domain>",
+                ":user-profile/<domain>/*",
+                ":space/<domain>/*",
+                ":app/<domain>/*/*/*",
+            )
         )
+        dumped = json.dumps(statements)
+        for wildcard in (":domain/*", ":user-profile/*/*", ":space/*/*", ":app/*/*/*/*"):
+            assert wildcard not in dumped
+        managed = json.dumps(
+            template.find_resources("AWS::IAM::Role")[role_lid]["Properties"]["ManagedPolicyArns"]
+        )
+        assert "AmazonSageMakerFullAccess" in managed
 
     @pytest.mark.parametrize("region", ["cn-north-1", "us-gov-west-1"])
     def test_noncommercial_policies_retain_partition_and_url_suffix_tokens(
