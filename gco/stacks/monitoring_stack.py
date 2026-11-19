@@ -31,15 +31,16 @@ Cross-Region Metrics:
 
 Alarms:
     CloudWatch evaluates an alarm only against metrics in its own Region, so
-    this stack creates alarms only for metrics published in the monitoring
-    Region, where the API Gateway, its Lambdas and the DynamoDB tables live
-    in the default topology:
-    - API Gateway 5XX errors and p99 latency
-    - Proxy Lambda errors and throttles, secret rotation failures
-    - DynamoDB jobs table throttling and system errors
-    - Composite: API Gateway and proxy Lambda errors together
-    When ``deployment_regions.api_gateway`` differs from the monitoring
-    Region, the API Gateway and Lambda alarms see no data.
+    every alarm lives in the Region of its metrics
+    (``gco/stacks/control_plane_alarms.py``):
+    - API Gateway 5XX errors and p99 latency, proxy Lambda errors and
+      throttles, secret rotation failures, and the composite of API Gateway
+      and proxy Lambda errors: here while ``deployment_regions.api_gateway``
+      is the monitoring Region (the default), otherwise in the API Gateway
+      stack with its own alert topic.
+    - DynamoDB jobs table throttling and system errors: here while
+      ``deployment_regions.global`` is the monitoring Region (the default),
+      otherwise in the global stack with its own alert topic.
     Each workload Region's alarms (SQS message age and dead-letter messages,
     EKS CPU/memory, manifest failures, and their composite) are created in
     that Region's stack with its own alert topic; see
@@ -56,7 +57,6 @@ from aws_cdk import (
 )
 from aws_cdk import aws_athena as athena
 from aws_cdk import aws_cloudwatch as cloudwatch
-from aws_cdk import aws_cloudwatch_actions as cw_actions
 from aws_cdk import aws_glue as glue
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_kms as kms
@@ -75,6 +75,7 @@ from gco.stacks.constants import (
     cost_glue_database_name,
     cost_report_ssm_parameter_prefix,
 )
+from gco.stacks.control_plane_alarms import add_api_alarms, add_jobs_table_alarms
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-11-19T00:26:15Z
@@ -84,51 +85,6 @@ from gco.stacks.constants import (
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/monitoring_stack.GCOMonitoringStack___init__.png``)
 # Regenerate with ``SOURCE_DATE_EPOCH=<unix-seconds> GCO_DIAGRAM_SOURCE_COMMIT=<40-char-sha> python diagrams/generate.py --code-only``.
 # <pyflowchart-code-diagram> END
-
-
-#: DynamoDB publishes ``ThrottledRequests`` and ``SystemErrors`` only per
-#: ``TableName`` *and* ``Operation``; a metric with ``TableName`` alone never
-#: has data. The alarms sum these operations (every operation GCO issues on the
-#: jobs table, plus the batch and transaction calls). An alarm's metric math
-#: may reference at most 10 metrics, which is exactly this list.
-DYNAMODB_ALARM_OPERATIONS: tuple[str, ...] = (
-    "GetItem",
-    "PutItem",
-    "UpdateItem",
-    "DeleteItem",
-    "Query",
-    "Scan",
-    "BatchGetItem",
-    "BatchWriteItem",
-    "TransactGetItems",
-    "TransactWriteItems",
-)
-
-
-def dynamodb_operations_sum(
-    metric_name: str, table_name: str, *, region: str, label: str
-) -> cloudwatch.MathExpression:
-    """Sum of a per-operation DynamoDB metric over ``DYNAMODB_ALARM_OPERATIONS``.
-
-    ``FILL(..., 0)`` gives every period a value even when no operation had a
-    datapoint, so the sum never depends on all ten series being present.
-    """
-    return cloudwatch.MathExpression(
-        expression="SUM(FILL(METRICS(), 0))",
-        using_metrics={
-            f"m{index}": cloudwatch.Metric(
-                namespace="AWS/DynamoDB",
-                metric_name=metric_name,
-                dimensions_map={"TableName": table_name, "Operation": operation},
-                statistic="Sum",
-                period=Duration.minutes(5),
-                region=region,
-            )
-            for index, operation in enumerate(DYNAMODB_ALARM_OPERATIONS)
-        },
-        label=label,
-        period=Duration.minutes(5),
-    )
 
 
 def dynamodb_search_sum(
@@ -230,11 +186,8 @@ class GCOMonitoringStack(Stack):
         # Create CloudWatch dashboard
         self.dashboard = self._create_dashboard()
 
-        # Create alarms
+        # Create the alarms whose metrics are in this stack's Region
         self._create_alarms()
-
-        # Create composite alarms
-        self._create_composite_alarms()
 
         # Create custom metrics
         self._create_custom_metrics()
@@ -2282,239 +2235,47 @@ class GCOMonitoringStack(Stack):
         return widgets
 
     def _create_alarms(self) -> None:
-        """Create CloudWatch alarms"""
-        self._create_global_accelerator_alarms()
-        self._create_api_gateway_alarms()
-        self._create_lambda_alarms()
-        self._create_dynamodb_alarms()
+        """Create the control-plane alarms whose metrics are in this stack's Region.
 
-    def _create_global_accelerator_alarms(self) -> None:
-        """Create Global Accelerator alarms.
-
-        Note: Global Accelerator metrics are only available in us-west-2.
-        CloudWatch Alarms must be in the same region as the metrics they monitor.
-        Since this monitoring stack may be deployed in a different region,
-        we skip GA alarms here. To monitor GA, either:
-        1. Create alarms manually in us-west-2
-        2. Use CloudWatch cross-region dashboard widgets (which we do)
-        3. Deploy a separate alarm stack in us-west-2
+        CloudWatch evaluates an alarm only against metrics in its own Region.
+        The API Gateway and Lambda alarms are created here while
+        ``deployment_regions.api_gateway`` is the monitoring Region, and the
+        jobs table's alarms while ``deployment_regions.global`` is; otherwise
+        the API Gateway or global stack creates them with an alert topic in its
+        own Region (``gco/stacks/control_plane_alarms.py``). Global Accelerator
+        publishes its metrics in us-west-2 only, so it gets dashboard widgets
+        and no alarms.
         """
-        # GA alarms skipped - metrics only available in us-west-2
-        # Dashboard widgets use region parameter to display GA metrics correctly
-
-    def _create_api_gateway_alarms(self) -> None:
-        """Create API Gateway alarms"""
-        # Get the actual API name from the api_gateway_stack
-        api_name = (
-            self.api_gateway_stack.api.rest_api_name
-            if self.api_gateway_stack
-            else f"{self.project_name}-global-api"
-        )
-
-        # High 5XX error rate
-        api_5xx_alarm = cloudwatch.Alarm(
-            self,
-            "ApiGateway5xxAlarm",
-            alarm_description="API Gateway has high 5XX error rate",
-            metric=cloudwatch.Metric(
-                namespace="AWS/ApiGateway",
-                metric_name="5XXError",
-                dimensions_map={"ApiName": api_name},
-                statistic="Sum",
-                period=Duration.minutes(5),
-            ),
-            threshold=10,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            evaluation_periods=2,
-            datapoints_to_alarm=2,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        api_5xx_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-        # High latency
-        api_latency_alarm = cloudwatch.Alarm(
-            self,
-            "ApiGatewayHighLatencyAlarm",
-            alarm_description="API Gateway has high latency",
-            metric=cloudwatch.Metric(
-                namespace="AWS/ApiGateway",
-                metric_name="Latency",
-                dimensions_map={"ApiName": api_name},
-                statistic="p99",
-                period=Duration.minutes(5),
-            ),
-            threshold=10000,  # 10 seconds
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            evaluation_periods=3,
-            datapoints_to_alarm=2,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        api_latency_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_lambda_alarms(self) -> None:
-        """Create Lambda function alarms."""
-        if self.api_gateway_stack is None:
-            return
-
-        proxy_lambda = self.api_gateway_stack.proxy_lambda
-        if proxy_lambda is not None:
-            proxy_function_name = proxy_lambda.function_name
-            proxy_errors_alarm = cloudwatch.Alarm(
+        monitoring_region = self.config.get_monitoring_region()
+        api_gateway_region = self.config.get_api_gateway_region()
+        if api_gateway_region == monitoring_region:
+            api_stack = self.api_gateway_stack
+            proxy_lambda = api_stack.proxy_lambda if api_stack is not None else None
+            add_api_alarms(
                 self,
-                "ProxyLambdaErrorsAlarm",
-                alarm_description="API Gateway proxy Lambda has errors",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/Lambda",
-                    metric_name="Errors",
-                    dimensions_map={"FunctionName": proxy_function_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
+                region=api_gateway_region,
+                api_name=(
+                    api_stack.api.rest_api_name
+                    if api_stack is not None
+                    else f"{self.project_name}-global-api"
                 ),
-                threshold=5,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            proxy_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-            proxy_throttles_alarm = cloudwatch.Alarm(
-                self,
-                "ProxyLambdaThrottlesAlarm",
-                alarm_description="API Gateway proxy Lambda is being throttled",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/Lambda",
-                    metric_name="Throttles",
-                    dimensions_map={"FunctionName": proxy_function_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
+                proxy_function_name=(
+                    proxy_lambda.function_name if proxy_lambda is not None else None
                 ),
-                threshold=1,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-                evaluation_periods=2,
-                datapoints_to_alarm=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+                rotation_function_name=(
+                    api_stack.rotation_lambda.function_name if api_stack is not None else None
+                ),
+                topic=self.alert_topic,
             )
-            proxy_throttles_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
-        rotation_errors_alarm = cloudwatch.Alarm(
-            self,
-            "RotationLambdaErrorsAlarm",
-            alarm_description="Secret rotation Lambda has errors",
-            metric=cloudwatch.Metric(
-                namespace="AWS/Lambda",
-                metric_name="Errors",
-                dimensions_map={
-                    "FunctionName": self.api_gateway_stack.rotation_lambda.function_name
-                },
-                statistic="Sum",
-                period=Duration.hours(1),
-            ),
-            threshold=1,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-            evaluation_periods=1,
-            datapoints_to_alarm=1,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        rotation_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_dynamodb_alarms(self) -> None:
-        """Create DynamoDB alarms for job queue, templates, and webhooks tables."""
-        # Get table names from global stack
-        jobs_table = self.global_stack.jobs_table.table_name
-
-        # DynamoDB tables are in the global region
         global_region = self.config.get_global_region()
-
-        # Jobs table throttling alarm
-        jobs_throttle_alarm = cloudwatch.Alarm(
-            self,
-            "DynamoDBJobsThrottleAlarm",
-            alarm_description="DynamoDB jobs table is being throttled",
-            metric=dynamodb_operations_sum(
-                "ThrottledRequests",
-                jobs_table,
+        if global_region == monitoring_region:
+            add_jobs_table_alarms(
+                self,
+                table_name=self.global_stack.jobs_table.table_name,
                 region=global_region,
-                label="Jobs table throttled requests (all operations)",
-            ),
-            threshold=1,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-            evaluation_periods=2,
-            datapoints_to_alarm=2,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        jobs_throttle_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-        # Jobs table system errors alarm
-        jobs_errors_alarm = cloudwatch.Alarm(
-            self,
-            "DynamoDBJobsErrorsAlarm",
-            alarm_description="DynamoDB jobs table has system errors",
-            metric=dynamodb_operations_sum(
-                "SystemErrors",
-                jobs_table,
-                region=global_region,
-                label="Jobs table system errors (all operations)",
-            ),
-            threshold=1,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-            evaluation_periods=1,
-            datapoints_to_alarm=1,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-        )
-        jobs_errors_alarm.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
-
-    def _create_composite_alarms(self) -> None:
-        """Create the composite alarm for API Gateway and proxy Lambda errors.
-
-        Each Region's CPU-and-memory composite alarm lives in that Region's
-        stack (``gco/stacks/regional_alarms.py``): a composite alarm can only
-        combine alarms of its own Region.
-        """
-        # API Gateway + Lambda composite alarm (only if api_gateway_stack is available)
-        if self.api_gateway_stack and self.api_gateway_stack.proxy_lambda is not None:
-            api_name = self.api_gateway_stack.api.rest_api_name
-            proxy_function_name = self.api_gateway_stack.proxy_lambda.function_name
-
-            api_error_alarm = cloudwatch.Alarm(
-                self,
-                "CompositeApiErrors",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/ApiGateway",
-                    metric_name="5XXError",
-                    dimensions_map={"ApiName": api_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=5,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+                topic=self.alert_topic,
             )
-
-            lambda_error_alarm = cloudwatch.Alarm(
-                self,
-                "CompositeLambdaErrors",
-                metric=cloudwatch.Metric(
-                    namespace="AWS/Lambda",
-                    metric_name="Errors",
-                    dimensions_map={"FunctionName": proxy_function_name},
-                    statistic="Sum",
-                    period=Duration.minutes(5),
-                ),
-                threshold=3,
-                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-                evaluation_periods=2,
-                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-
-            api_lambda_composite = cloudwatch.CompositeAlarm(
-                self,
-                "ApiLambdaCompositeAlarm",
-                alarm_description="Critical: Both API Gateway and Lambda proxy have errors",
-                alarm_rule=cloudwatch.AlarmRule.all_of(api_error_alarm, lambda_error_alarm),
-            )
-            api_lambda_composite.add_alarm_action(cw_actions.SnsAction(self.alert_topic))
 
     def _create_custom_metrics(self) -> None:
         """Create custom metric filters and log groups"""

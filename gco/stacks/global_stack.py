@@ -38,6 +38,7 @@ from gco.stacks.constants import (
     LAMBDA_PYTHON_RUNTIME,
     cluster_shared_ssm_parameter_prefix,
 )
+from gco.stacks.control_plane_alarms import add_jobs_table_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -158,6 +159,12 @@ class GCOGlobalStack(Stack):
 
         # Create DynamoDB tables for templates and webhooks
         self._create_dynamodb_tables()
+
+        # CloudWatch evaluates an alarm only in its own Region. When the
+        # monitoring stack is in another Region, the jobs table's alarms live
+        # here, with an alert topic of their own.
+        if config.get_global_region() != config.get_monitoring_region():
+            self._create_jobs_table_alarms()
 
         # Create S3 bucket for model weights
         self._create_model_bucket()
@@ -1493,6 +1500,26 @@ class GCOGlobalStack(Stack):
         if region in self.endpoint_groups:
             return str(self.endpoint_groups[region].endpoint_group_arn)
         raise ValueError(f"No endpoint group found for region: {region}")
+
+    def _create_jobs_table_alarms(self) -> None:
+        """Create the jobs table's alarms and their alert topic in this Region.
+
+        Used when ``deployment_regions.global`` is not the monitoring Region;
+        otherwise the monitoring stack creates the same alarms and they notify
+        its topic (``gco/stacks/control_plane_alarms.py``).
+        """
+        topic = create_alert_topic(
+            self,
+            "AlertTopic",
+            display_name="GCO (Global Capacity Orchestrator on AWS) Global Stack Alerts",
+            output_id="GlobalAlertTopicArn",
+        )
+        add_jobs_table_alarms(
+            self,
+            table_name=self.jobs_table.table_name,
+            region=self.config.get_global_region(),
+            topic=topic,
+        )
 
     def _create_dynamodb_tables(self) -> None:
         """Create DynamoDB tables for templates, webhooks, jobs, inference endpoints, and missions."""

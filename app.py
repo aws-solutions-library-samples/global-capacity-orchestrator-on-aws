@@ -159,6 +159,7 @@ def main() -> None:
         certificate_regions=regional_regions,
         backend_tls_config=config.get_backend_tls_config(),
         max_request_body_bytes=manifest_processor_config.get("max_request_body_bytes", 1_048_576),
+        monitoring_region=monitoring_region,
         env=cdk.Environment(account=account, region=api_gateway_region),
         description="Global API Gateway with IAM authentication",
     )

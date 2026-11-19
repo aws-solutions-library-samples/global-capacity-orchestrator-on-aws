@@ -79,6 +79,7 @@ from gco.stacks.constants import (
     cross_region_aggregator_role_name,
     validated_request_body_limit,
 )
+from gco.stacks.control_plane_alarms import add_api_alarms, create_alert_topic
 from gco.stacks.lambda_assets import lambda_source_code
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
@@ -143,6 +144,13 @@ class GCOApiGatewayGlobalStack(Stack):
     This stack creates the single authenticated entry point for all GCO
     API requests. All requests must be signed with AWS credentials.
 
+    ``monitoring_region`` is ``deployment_regions.monitoring``. When it is
+    not this stack's Region, the monitoring stack cannot alarm on this API and
+    its Lambdas (CloudWatch alarms see only their own Region's metrics), so
+    this stack creates those alarms with an alert topic of its own
+    (``gco/stacks/control_plane_alarms.py``). ``None`` leaves them to the
+    monitoring stack.
+
     Attributes:
         secret: Secrets Manager secret containing the backend HMAC signing key
         proxy_lambda: Buffered Lambda proxy for the control-plane API
@@ -163,6 +171,7 @@ class GCOApiGatewayGlobalStack(Stack):
         certificate_regions: list[str] | None = None,
         backend_tls_config: dict[str, Any] | None = None,
         max_request_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES,
+        monitoring_region: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -257,6 +266,11 @@ class GCOApiGatewayGlobalStack(Stack):
 
         # Export API endpoint
         self._create_outputs()
+
+        # Alarm on the API and its Lambdas here when the monitoring stack is
+        # in another Region, where their metrics never arrive.
+        if monitoring_region is not None and monitoring_region != self.region:
+            self._create_api_alarms()
 
         # Wire /studio/* routes when analytics is explicitly enabled at
         # construction time. Most deployments take the mutator path
@@ -1332,6 +1346,25 @@ class GCOApiGatewayGlobalStack(Stack):
             value=self.backend_tls_root_ca_parameter_name,
             description="SSM parameter containing the public backend TLS root trust bundle",
             export_name=f"{self.project_name}-backend-tls-root-ca-parameter",
+        )
+
+    def _create_api_alarms(self) -> None:
+        """Create the API, proxy and rotation alarms and their alert topic here."""
+        topic = create_alert_topic(
+            self,
+            "AlertTopic",
+            display_name="GCO (Global Capacity Orchestrator on AWS) API Gateway Alerts",
+            output_id="ApiGatewayAlertTopicArn",
+        )
+        add_api_alarms(
+            self,
+            region=self.region,
+            api_name=self.api.rest_api_name,
+            proxy_function_name=(
+                self.proxy_lambda.function_name if self.proxy_lambda is not None else None
+            ),
+            rotation_function_name=self.rotation_lambda.function_name,
+            topic=topic,
         )
 
     def set_analytics_config(self, config: AnalyticsApiConfig) -> None:

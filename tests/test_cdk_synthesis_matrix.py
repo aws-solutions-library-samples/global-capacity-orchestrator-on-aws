@@ -27,15 +27,17 @@ What this does *not* replace
 curated IAM-relevant subset — and asserts zero unsuppressed cdk-nag
 findings. That test stays as-is. This file asserts that ``app.synth()``
 completes without raising for every config in ``CONFIGS``, mirroring what
-the old script checked, plus one template invariant cdk-nag cannot see:
+the old script checked, plus two template invariants cdk-nag cannot see:
 every Secrets Manager grant names exactly one secret, and the API Gateway
-auth secret's grants target the Region that secret lives in.
+auth secret's grants target the Region that secret lives in; and every
+CloudWatch alarm reads metrics of, and notifies a topic in, its own Region.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -237,11 +239,363 @@ def test_secret_grant_check(resource: Any, problem: str | None) -> None:
         assert len(problems) == 1 and problem in problems[0], problems
 
 
+#: Resource types an alarm dimension can name by a literal physical name, and
+#: the property that holds the name.
+_NAMED_RESOURCES = {
+    "AWS::ApiGateway::RestApi": "Name",
+    "AWS::DynamoDB::Table": "TableName",
+    "AWS::EKS::Cluster": "Name",
+    "AWS::Lambda::Function": "FunctionName",
+    "AWS::SQS::Queue": "QueueName",
+}
+#: The custom resource through which CDK reads a value from another Region.
+_CROSS_REGION_READER = "Custom::CrossRegionExportReader"
+_ALARM_TYPES = frozenset({"AWS::CloudWatch::Alarm", "AWS::CloudWatch::CompositeAlarm"})
+_ACTION_KEYS = ("AlarmActions", "OKActions", "InsufficientDataActions")
+
+
+def _alarm_metrics(properties: dict[str, Any]) -> list[dict[str, Any]]:
+    """The metrics an alarm reads: its single metric, or each metric of its math."""
+    if "Namespace" in properties:
+        return [properties]
+    return [
+        query["MetricStat"]["Metric"]
+        for query in properties.get("Metrics") or []
+        if "MetricStat" in query
+    ]
+
+
+def _alarm_region_problems(assembly: Any, *, publisher_regions: Mapping[str, str]) -> list[str]:
+    """Every alarm that reads a metric, or notifies a topic, outside its own Region.
+
+    CloudWatch evaluates an alarm only against metrics of its own Region and an
+    alarm's SNS action must be a topic of that Region, so an alarm on another
+    Region's resource synthesizes and deploys cleanly and then never leaves
+    ``OK``. A metric's Region is that of the resource one of its dimensions
+    names: a ``Ref`` or ``Fn::GetAtt`` is the alarm's own stack, an
+    ``Fn::ImportValue`` its Region (CloudFormation exports are regional), CDK's
+    cross-Region reader another Region, and a literal the Region of every
+    resource deployed under that physical name. A metric whose dimensions name
+    no resource must be in a namespace of ``publisher_regions``, which says
+    where it is published; any other namespace is a problem, so a new alarm
+    cannot pass unchecked.
+    """
+    names: dict[str, set[str]] = {}
+    for stack in assembly.stacks:
+        for resource in (stack.template.get("Resources") or {}).values():
+            name_property = _NAMED_RESOURCES.get(resource.get("Type"), "")
+            name = (resource.get("Properties") or {}).get(name_property)
+            if isinstance(name, str):
+                names.setdefault(name, set()).add(stack.environment.region)
+
+    problems = []
+    for stack in assembly.stacks:
+        region = stack.environment.region
+        resources = stack.template.get("Resources") or {}
+
+        def regions_of(value: Any, *, own_region: str = region, own: dict = resources) -> Any:
+            """The Regions ``value`` places its resource in, or None if it names none."""
+            if isinstance(value, str):
+                return names.get(value)
+            if isinstance(value, dict) and len(value) == 1:
+                ((function, argument),) = value.items()
+                if function == "Fn::ImportValue":
+                    return {own_region}
+                if function in {"Ref", "Fn::GetAtt"}:
+                    target = argument if isinstance(argument, str) else argument[0]
+                    if (own.get(target) or {}).get("Type") == _CROSS_REGION_READER:
+                        return {"another Region"}
+                    return {own_region}
+            return None
+
+        for logical_id, resource in resources.items():
+            if resource.get("Type") not in _ALARM_TYPES:
+                continue
+            where = f"{stack.stack_name}/{logical_id}"
+            properties = resource.get("Properties") or {}
+            for metric in _alarm_metrics(properties):
+                namespace = metric.get("Namespace")
+                sources = [
+                    found
+                    for dimension in metric.get("Dimensions") or []
+                    if (found := regions_of(dimension.get("Value"))) is not None
+                ]
+                if not sources:
+                    publisher = publisher_regions.get(namespace)
+                    if publisher is None:
+                        problems.append(
+                            f"{where}: no dimension of its {namespace} metric names a resource "
+                            "and the namespace has no known publisher Region"
+                        )
+                    elif publisher != region:
+                        problems.append(f"{where}: {namespace} is published in {publisher}")
+                problems.extend(
+                    f"{where}: reads {namespace} data from {', '.join(sorted(found))}"
+                    for found in sources
+                    if region not in found
+                )
+            for key in _ACTION_KEYS:
+                for action in properties.get(key) or []:
+                    found = regions_of(action)
+                    if found is None:
+                        match = re.search(r":sns:([^:]+):", _render(action))
+                        found = {match[1].replace("<AWS::Region>", region)} if match else set()
+                    if region not in found:
+                        problems.append(f"{where}: notifies {_render(action)} in another Region")
+    return problems
+
+
+def _alarm_template(region: str, *resources: tuple[str, dict[str, Any]]) -> SimpleNamespace:
+    """One synthesized stack in ``region`` holding ``(logical id, resource)`` pairs."""
+    return SimpleNamespace(
+        stack_name=f"gco-{region}",
+        environment=SimpleNamespace(region=region),
+        template={"Resources": dict(resources)},
+    )
+
+
+def _alarm(namespace: str, dimensions: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """A single-metric alarm on ``namespace`` with the given dimension values."""
+    return {
+        "Type": "AWS::CloudWatch::Alarm",
+        "Properties": {
+            "Namespace": namespace,
+            "MetricName": "Errors",
+            "Dimensions": [{"Name": key, "Value": value} for key, value in dimensions.items()],
+            **extra,
+        },
+    }
+
+
+_TOPIC = ("Topic", {"Type": "AWS::SNS::Topic"})
+_REST_API = ("Api", {"Type": "AWS::ApiGateway::RestApi", "Properties": {"Name": "gco-global-api"}})
+_READER = ("ExportsReader", {"Type": _CROSS_REGION_READER})
+
+
+@pytest.mark.parametrize(
+    ("stacks", "problem"),
+    [
+        (
+            [
+                _alarm_template(
+                    "us-east-2",
+                    _REST_API,
+                    _TOPIC,
+                    (
+                        "A",
+                        _alarm(
+                            "AWS/ApiGateway",
+                            {"ApiName": "gco-global-api"},
+                            AlarmActions=[{"Ref": "Topic"}],
+                        ),
+                    ),
+                )
+            ],
+            None,
+        ),
+        (
+            [
+                _alarm_template(
+                    "us-east-2",
+                    (
+                        "A",
+                        _alarm(
+                            "AWS/Lambda",
+                            {"FunctionName": {"Fn::ImportValue": "gco-api-gateway:Proxy"}},
+                        ),
+                    ),
+                )
+            ],
+            None,
+        ),
+        (
+            [
+                _alarm_template(
+                    "us-east-2",
+                    (
+                        "A",
+                        {
+                            "Type": "AWS::CloudWatch::Alarm",
+                            "Properties": {
+                                "Metrics": [
+                                    {"Id": "e", "Expression": "SUM(METRICS())"},
+                                    {
+                                        "Id": "m0",
+                                        "MetricStat": {
+                                            "Metric": {
+                                                "Namespace": "AWS/DynamoDB",
+                                                "Dimensions": [
+                                                    {"Name": "Operation", "Value": "GetItem"},
+                                                    {
+                                                        "Name": "TableName",
+                                                        "Value": {"Ref": "Table"},
+                                                    },
+                                                ],
+                                            }
+                                        },
+                                    },
+                                ]
+                            },
+                        },
+                    ),
+                )
+            ],
+            None,
+        ),
+        ([_alarm_template("us-west-2", ("A", _alarm("GCO/BackendTLS", {"Project": "gco"})))], None),
+        (
+            [
+                _alarm_template(
+                    "us-east-2",
+                    _REST_API,
+                    (
+                        "A",
+                        _alarm(
+                            "AWS/ApiGateway",
+                            {"ApiName": "gco-global-api"},
+                            AlarmActions=["arn:aws:sns:us-east-2:123456789012:alerts"],
+                        ),
+                    ),
+                )
+            ],
+            None,
+        ),
+        (
+            [
+                _alarm_template("us-west-2", _REST_API),
+                _alarm_template(
+                    "us-east-2", ("A", _alarm("AWS/ApiGateway", {"ApiName": "gco-global-api"}))
+                ),
+            ],
+            "reads AWS/ApiGateway data from us-west-2",
+        ),
+        (
+            [
+                _alarm_template(
+                    "us-east-2",
+                    _READER,
+                    (
+                        "A",
+                        _alarm(
+                            "AWS/Lambda",
+                            {
+                                "FunctionName": {
+                                    "Fn::GetAtt": ["ExportsReader", "/cdk/exports/proxy"]
+                                }
+                            },
+                        ),
+                    ),
+                )
+            ],
+            "reads AWS/Lambda data from another Region",
+        ),
+        (
+            [_alarm_template("us-east-2", ("A", _alarm("GCO/BackendTLS", {"Project": "gco"})))],
+            "GCO/BackendTLS is published in us-west-2",
+        ),
+        (
+            [_alarm_template("us-east-2", ("A", _alarm("GCO/Unknown", {"Project": "gco"})))],
+            "has no known publisher Region",
+        ),
+        (
+            [
+                _alarm_template(
+                    "us-east-2",
+                    _REST_API,
+                    _READER,
+                    (
+                        "A",
+                        _alarm(
+                            "AWS/ApiGateway",
+                            {"ApiName": "gco-global-api"},
+                            AlarmActions=[{"Fn::GetAtt": ["ExportsReader", "/cdk/exports/topic"]}],
+                        ),
+                    ),
+                )
+            ],
+            "notifies",
+        ),
+        (
+            [
+                _alarm_template(
+                    "us-east-2",
+                    _REST_API,
+                    (
+                        "A",
+                        _alarm(
+                            "AWS/ApiGateway",
+                            {"ApiName": "gco-global-api"},
+                            OKActions=["arn:aws:sns:us-west-2:123456789012:alerts"],
+                        ),
+                    ),
+                )
+            ],
+            "notifies arn:aws:sns:us-west-2",
+        ),
+        (
+            [
+                _alarm_template(
+                    "us-east-2",
+                    (
+                        "A",
+                        {
+                            "Type": "AWS::CloudWatch::CompositeAlarm",
+                            "Properties": {
+                                "AlarmActions": [
+                                    {
+                                        "Fn::Join": [
+                                            "",
+                                            [
+                                                "arn:aws:sns:us-west-2:",
+                                                {"Ref": "AWS::AccountId"},
+                                                ":alerts",
+                                            ],
+                                        ]
+                                    }
+                                ]
+                            },
+                        },
+                    ),
+                )
+            ],
+            "notifies",
+        ),
+    ],
+    ids=[
+        "literal-name-same-region",
+        "import",
+        "metric-math-ref",
+        "known-publisher",
+        "literal-topic-arn",
+        "literal-name-other-region",
+        "cross-region-reader",
+        "publisher-other-region",
+        "unknown-publisher",
+        "cross-region-topic",
+        "literal-topic-other-region",
+        "joined-topic-other-region",
+    ],
+)
+def test_alarm_region_check(stacks: list[SimpleNamespace], problem: str | None) -> None:
+    """The template check behind ``test_synth_succeeds`` accepts each same-Region
+    form and rejects each other-Region one (``GCO/BackendTLS`` is published in
+    us-west-2 here), so it cannot pass vacuously."""
+    problems = _alarm_region_problems(
+        SimpleNamespace(stacks=stacks), publisher_regions={"GCO/BackendTLS": "us-west-2"}
+    )
+    if problem is None:
+        assert problems == []
+    else:
+        assert len(problems) == 1 and problem in problems[0], problems
+
+
 @pytest.mark.parametrize(("config_name", "overrides"), CONFIGS, ids=[c[0] for c in CONFIGS])
 def test_synth_succeeds(config_name: str, overrides: dict[str, Any]) -> None:
-    """Every config in the shared matrix must synthesize without raising, and
-    every Secrets Manager grant it renders must name exactly one secret, in the
-    Region that secret lives in (see ``_secret_grant_problems``)."""
+    """Every config in the shared matrix must synthesize without raising; every
+    Secrets Manager grant it renders must name exactly one secret, in the Region
+    that secret lives in (see ``_secret_grant_problems``); and every alarm must
+    read metrics of, and notify a topic in, its own Region
+    (see ``_alarm_region_problems``)."""
     from gco.config.config_loader import ConfigLoader
     from gco.stacks.constants import api_gateway_auth_secret_name
 
@@ -256,6 +610,14 @@ def test_synth_succeeds(config_name: str, overrides: dict[str, Any]) -> None:
     )
     assert not problems, "Secrets Manager grants that IAM would scope wrongly:\n" + "\n".join(
         problems
+    )
+    # The backend TLS certificate manager, in the API Gateway stack, publishes
+    # GCO/BackendTLS from that Region (lambda/tls-certificate-manager/handler.py).
+    alarm_problems = _alarm_region_problems(
+        assembly, publisher_regions={"GCO/BackendTLS": config.get_api_gateway_region()}
+    )
+    assert not alarm_problems, "Alarms outside the Region of their data:\n" + "\n".join(
+        alarm_problems
     )
 
 

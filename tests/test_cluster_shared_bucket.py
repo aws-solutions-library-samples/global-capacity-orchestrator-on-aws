@@ -52,6 +52,9 @@ class MockConfigLoader:
     def get_global_region(self) -> str:
         return "us-east-2"
 
+    def get_monitoring_region(self) -> str:
+        return "us-east-2"
+
     def get_tags(self) -> dict[str, str]:
         return {"Environment": "test", "Project": "gco"}
 

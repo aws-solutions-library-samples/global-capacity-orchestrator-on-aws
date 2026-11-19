@@ -322,6 +322,7 @@ def _build_full(app: cdk.App, config: ConfigLoader) -> list[str] | None:
         max_request_body_bytes=config.get_manifest_processor_config().get(
             "max_request_body_bytes", 1_048_576
         ),
+        monitoring_region=regions["monitoring"],
         env=cdk.Environment(region=regions["api_gateway"]),
     )
     api_gateway_stack.add_stack_dependency(global_stack)

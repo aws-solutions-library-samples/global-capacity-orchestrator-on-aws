@@ -801,7 +801,7 @@ class TestDynamoDbMetricsCoverEveryOperation:
         ],
     )
     def test_jobs_table_alarm_sums_every_operation(self, template, alarm_prefix, metric_name):
-        from gco.stacks.monitoring_stack import DYNAMODB_ALARM_OPERATIONS
+        from gco.stacks.control_plane_alarms import DYNAMODB_ALARM_OPERATIONS
 
         (alarm,) = [
             resource["Properties"]

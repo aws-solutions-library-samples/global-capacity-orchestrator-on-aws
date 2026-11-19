@@ -794,23 +794,8 @@ def add_monitoring_suppressions(stack: Stack) -> None:
                 id="PCI.DSS.321-CloudWatchLogGroupEncrypted",
                 reason="CloudWatch Logs are encrypted by default with AWS-managed keys.",
             ),
-            # CloudWatch Alarm Action suppressions for composite alarm inputs
-            # These alarms are intentionally used only as inputs to composite alarms
-            # The composite alarms have actions attached, not the individual alarms
-            NagSuppression(
-                id="HIPAA.Security-CloudWatchAlarmAction",
-                reason=(
-                    "These alarms are inputs to composite alarms which have SNS actions. "
-                    "Individual alarms don't need actions as they're aggregated for better signal-to-noise."
-                ),
-            ),
-            NagSuppression(
-                id="NIST.800.53.R5-CloudWatchAlarmAction",
-                reason=(
-                    "These alarms are inputs to composite alarms which have SNS actions. "
-                    "Individual alarms don't need actions as they're aggregated for better signal-to-noise."
-                ),
-            ),
+            # The composite alarm's inputs, which carry no action of their own,
+            # are acknowledged on each input (gco/stacks/control_plane_alarms.py).
         ],
     )
 
