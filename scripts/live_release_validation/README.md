@@ -80,8 +80,10 @@ output file read back from the managed login node by the real
 `cli.pcs_preflight` for the same merged block before `deploy`
 (`_pcs_preflight`), and `cleanup/pcs_nodes.py` waits after teardown for the
 instances PCS launched to leave `shutting-down` and for their tagged root
-volumes to finish deleting, which the inventory would otherwise count as
-present. The inventory's `pcs` scanner (`inventory/scanners.py`)
+volumes to start deleting, which the inventory would otherwise count as
+present. The wait, the cluster-volume scanner and the tagged-volume strip
+(`ownership/ebs_volumes.py`) share one set of volume states that count as
+gone, `deleting` and `deleted` (`inventory/_shared.py`). The inventory's `pcs` scanner (`inventory/scanners.py`)
 claims clusters by project name or `gco:project` tag and everything PCS keeps
 under them. It runs in every enabled Region PCS is offered in: botocore lists
 no Region for PCS (the service ships only an endpoint ruleset), so

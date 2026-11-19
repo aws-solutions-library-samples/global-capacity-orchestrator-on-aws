@@ -15,6 +15,7 @@ from botocore.exceptions import ClientError
 
 from ._shared import (
     _GLOBAL_ACCELERATOR_CONTROL_REGIONS,
+    _TERMINAL_VOLUME_STATES,
     _arn_is_project_owned,
     _ec2_resource_is_project_owned,
     _iam_resource_is_project_owned,
@@ -319,11 +320,6 @@ def _ec2_items(client: Any, operation: str, response_key: str) -> list[dict[str,
 
 _CLUSTER_TAG_PREFIX = "kubernetes.io/cluster/"
 
-#: Volume states that mean EC2 is already removing the volume, so it is not
-#: residual. Everything else -- ``available``, ``in-use``, ``creating``,
-#: ``error`` -- counts against the all-zero teardown gate.
-_VOLUME_TERMINAL_STATES = frozenset({"deleting", "deleted"})
-
 
 def _list_cluster_volumes(session: Any, region: str, project_name: str) -> list[str]:
     """Return EBS volumes tagged for a project cluster by the EKS CSI driver.
@@ -359,7 +355,7 @@ def _list_cluster_volumes(session: Any, region: str, project_name: str) -> list[
         volume_id = str(volume.get("VolumeId") or "")
         if not volume_id:
             raise RuntimeError(f"EC2 returned a volume without an ID in {region}")
-        if str(volume.get("State") or "") in _VOLUME_TERMINAL_STATES:
+        if str(volume.get("State") or "") in _TERMINAL_VOLUME_STATES:
             continue
         for key in _tags_to_dict(volume.get("Tags", [])):
             if not key.startswith(_CLUSTER_TAG_PREFIX):

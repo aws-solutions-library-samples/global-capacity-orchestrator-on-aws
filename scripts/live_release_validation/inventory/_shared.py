@@ -23,6 +23,15 @@ _ECR_MANIFEST_MEDIA_TYPES = (
 
 _GLOBAL_ACCELERATOR_CONTROL_REGIONS = {"aws": "us-west-2"}
 
+#: Every state ``ec2:DescribeVolumes`` reports for an EBS volume.
+_EBS_VOLUME_STATES = ("creating", "available", "in-use", "deleting", "deleted", "error")
+#: The volume states in which EBS is already removing the volume, so it is never
+#: residue. The cluster-volume scanner, the tagged-volume strip
+#: (``ownership/ebs_volumes.py``) and the PCS node wait (``cleanup/pcs_nodes.py``)
+#: all read this one set; anything else (``available``, ``in-use``,
+#: ``creating``, ``error``) counts against the all-zero teardown gate.
+_TERMINAL_VOLUME_STATES = frozenset({"deleting", "deleted"})
+
 
 _REGIONAL_PROJECT_RESOURCE_CATEGORIES = (
     "tagged_resources",
