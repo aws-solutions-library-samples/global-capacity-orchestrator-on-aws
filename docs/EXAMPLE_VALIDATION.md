@@ -182,9 +182,10 @@ skip):
   deletes the queue.
 - **vector-store-search-job** — runs the documented prerequisite verbatim
   (`gco vector ingest --demo --wait`), records exactly which corpus objects
-  were uploaded, and reverts precisely those afterwards: the DynamoDB chunk
-  items per recorded source key, then the S3 objects. A pre-existing user
-  corpus in the same table is never touched.
+  were uploaded, and reverts precisely those afterwards, in the table and
+  bucket of the run's project and global Region (the ones the ingest used):
+  the DynamoDB chunk items per recorded source key, then the S3 objects. A
+  pre-existing user corpus in the same table is never touched.
 - **kubeflow-trainjob** — waits for the TrainJob CRD and the shipped
   `torch-distributed` runtime before submitting (deploy-time artifacts;
   nothing to revert).

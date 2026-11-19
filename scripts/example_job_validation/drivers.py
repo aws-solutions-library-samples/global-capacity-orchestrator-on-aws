@@ -918,12 +918,16 @@ class VectorDemoCorpus:
     the same filtered-Scan shape the CLI's ingest wait uses (the table has
     no by-source key schema; corpora are document-scale). Scoping deletion
     to the recorded keys means a pre-existing user corpus in the same table
-    is never touched.
+    is never touched. ``project_name`` and ``global_region`` are the run's
+    (its CLI configuration's): ``gco vector ingest --demo`` resolves the
+    table and bucket from them, so the revert must too.
     """
 
     repo_root: Path
     session: Any
     region: str
+    project_name: str | None = None
+    global_region: str | None = None
     uploaded: list[str] = field(default_factory=list)
     bucket: str = ""
 
@@ -962,7 +966,11 @@ class VectorDemoCorpus:
             return
         from cli.vector_store import VectorStoreClient
 
-        client = VectorStoreClient(query_region=self.region)
+        client = VectorStoreClient(
+            project_name=self.project_name,
+            global_region=self.global_region,
+            query_region=self.region,
+        )
         table_name = client._resolve_table_name()
         bucket_name, bucket_region = client._resolve_bucket()
         if bucket_name != self.bucket:

@@ -209,7 +209,11 @@ def _run_one_example(
             # The example's documented prerequisite, run verbatim and fully
             # reverted in the finally below (S3 objects + chunk items).
             vector_corpus = drivers.VectorDemoCorpus(
-                repo_root=ctx.settings.repo_root, session=ctx.session, region=region
+                repo_root=ctx.settings.repo_root,
+                session=ctx.session,
+                region=region,
+                project_name=ctx.config.project_name,
+                global_region=ctx.config.global_region,
             )
             evidence["setup"] = vector_corpus.create()
         elif spec.setup_driver == "trainer-runtime-ready":
