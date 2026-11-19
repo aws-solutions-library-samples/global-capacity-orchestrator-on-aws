@@ -5867,8 +5867,9 @@ jobs:
   #     the Job instead of deleting it; the shipped example Application syncs
   #     and its resources finalizer cascades when the helm installer's
   #     pre-uninstall cleanup deletes the argoproj.io objects in the argocd
-  #     namespace (it does so only while GCO's own Argo CD release exists);
-  #     the applier's disable-path inventories remove the rest.
+  #     namespace (it does so only while GCO's own Argo CD release exists),
+  #     and an AppProject in another namespace comes through untouched; the
+  #     applier's disable-path inventories remove the rest.
   #   * Crossplane: the go-templating function turns Healthy, the example XRD
   #     and Composition serve BatchJob, an XR in gco-jobs composes a Job that
   #     completes and marks the XR Ready, an XR in gco-system cannot compose
@@ -6343,9 +6344,23 @@ jobs:
         # deletes the Job before the Application goes. The projects get a
         # later pass (the controller finalizes nothing whose project is
         # gone), so the cascade must finish inside the wait: needing the
-        # finalizer-strip fallback fails the step.
+        # finalizer-strip fallback fails the step. The cleanup stays in that
+        # namespace: argoproj.io is also the group of Argo Workflows, Rollouts
+        # and Events, and of a cluster's own Argo CD, so an AppProject in
+        # another namespace must survive it untouched.
         run: |
           set -euo pipefail
+          kubectl create namespace gco-ci-foreign-argo
+          kubectl apply -f - <<'EOF'
+          apiVersion: argoproj.io/v1alpha1
+          kind: AppProject
+          metadata:
+            name: gco-ci-foreign
+            namespace: gco-ci-foreign-argo
+            finalizers: ["gco-ci.example.com/foreign"]
+          spec:
+            description: not GCO's; the installer cleanup must not touch it
+          EOF
           python3 - <<'PY'
           import logging
           import os
@@ -6373,18 +6388,31 @@ jobs:
           print(message)
           if not ok:
               raise SystemExit(message)
+          if not message.endswith(" in namespace argocd"):
+              raise SystemExit(f"the cleanup was not limited to the release namespace: {message}")
           if recorder.stalls:
               raise SystemExit(f"the cascade fell back to stripping finalizers: {recorder.stalls}")
           PY
-          if kubectl get applications.argoproj.io,appprojects.argoproj.io -A -o name | grep -q .; then
-            echo "::error::argoproj.io objects survived the installer cleanup"
+          if kubectl -n argocd get applications.argoproj.io,appprojects.argoproj.io -o name | grep -q .; then
+            echo "::error::argoproj.io objects in argocd survived the installer cleanup"
             exit 1
           fi
           if kubectl -n gco-jobs get job gco-gitops-hello >/dev/null 2>&1; then
             echo "::error::the resources finalizer did not delete the synced Job"
             exit 1
           fi
-          echo "the example Application's finalizer deleted the Job during the installer cleanup"
+          # Neither deleted nor stripped of its finalizer: the cleanup never reached it.
+          foreign="$(kubectl -n gco-ci-foreign-argo get appproject gco-ci-foreign \
+            -o 'jsonpath={.metadata.deletionTimestamp}|{.metadata.finalizers[*]}' 2>&1 || true)"
+          if [ "${foreign}" != '|gco-ci.example.com/foreign' ]; then
+            echo "::error::the installer cleanup reached an AppProject outside argocd (${foreign})"
+            exit 1
+          fi
+          kubectl -n gco-ci-foreign-argo patch appproject gco-ci-foreign --type=merge \
+            -p '{"metadata":{"finalizers":null}}'
+          kubectl delete namespace gco-ci-foreign-argo --wait=true
+          echo "the example Application's finalizer deleted the Job during the installer cleanup;"
+          echo "the AppProject outside argocd was left alone"
       - name: Prune the Argo CD post-Helm objects and uninstall the chart
         run: |
           set -euo pipefail

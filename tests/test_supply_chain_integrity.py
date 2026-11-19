@@ -686,9 +686,11 @@ def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> 
     values and loads into the job's own cluster, so ``helm install --wait``
     never waits on a kubelet pull (ECR Public's anonymous throttle kept failing
     Argo CD's Redis that way). The chart values and post-Helm manifests come
-    from the helpers the regional stack calls, Argo CD syncs this commit, and
-    both dashboards are captured by the CLI's own screenshot code and uploaded
-    even when a later step fails.
+    from the helpers the regional stack calls, Argo CD syncs this commit, the
+    installer cleanup cascades the example Application inside the argocd
+    namespace and leaves an AppProject elsewhere alone, and both dashboards are
+    captured by the CLI's own screenshot code and uploaded even when a later
+    step fails.
     """
     workflow = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))
     job = workflow["jobs"]["integration-kind-platform-addons"]
@@ -747,6 +749,21 @@ def test_kind_platform_addons_is_a_real_artifact_test_that_stays_fail_fast() -> 
         for fragment in fragments:
             assert fragment in run, (step_name, fragment)
         assert "build_port_forward_command" in run
+    # The installer cleanup is limited to GCO's release namespace (finding L1):
+    # the survivor check covers argocd, and an AppProject in another namespace,
+    # created first, keeps its finalizer and gets no deletion timestamp.
+    cascade = by_name["Cascade the example Application through the installer cleanup"]["run"]
+    foreign = cascade.index("namespace: gco-ci-foreign-argo")
+    cleanup = cascade.index("handler._delete_chart_custom_resources(")
+    untouched = cascade.index("'|gco-ci.example.com/foreign'")
+    assert foreign < cleanup < untouched
+    assert 'finalizers: ["gco-ci.example.com/foreign"]' in cascade
+    assert 'if not message.endswith(" in namespace argocd"):' in cascade
+    assert (
+        "kubectl -n argocd get applications.argoproj.io,appprojects.argoproj.io -o name" in cascade
+    )
+    assert "appprojects.argoproj.io -A" not in cascade
+    assert "kubectl delete namespace gco-ci-foreign-argo --wait=true" in cascade
     chromium = by_name["Install the headless Chromium the captures drive (with retry)"]["run"]
     assert "playwright install --with-deps --only-shell chromium" in chromium
     assert "for attempt in 1 2 3" in chromium
