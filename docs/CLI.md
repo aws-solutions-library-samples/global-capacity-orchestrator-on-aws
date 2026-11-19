@@ -664,6 +664,10 @@ gco capacity recommend-region [OPTIONS]
 When `--instance-type` is provided, the recommendation uses weighted multi-signal
 scoring that combines spot placement scores, spot-vs-on-demand pricing, queue depth,
 GPU utilization, and running job counts. Without it, a simpler composite score is used.
+The spot placement score is asked for the number of instances that hold `--gpu-count`
+(or `--min-gpus`) GPUs of the type, rounded up (`-i p4d.24xlarge --gpu-count 16` scores
+2 instances), and for one instance when no GPU count is given or the type's GPU count is
+unknown; each Region's entry reports it as `spot_target_instances`.
 
 `--backend hyperpod` considers only Regions whose regional stack runs a
 [SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) cluster and ranks

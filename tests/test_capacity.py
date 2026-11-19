@@ -3394,40 +3394,6 @@ class TestWeightedRecommendRegion:
                 assert result["region"] == "us-east-1"
                 assert result["scoring_method"] == "weighted"
 
-    def test_weighted_recommend_gpu_count_passed_to_placement_score(self):
-        """gpu_count should be passed as target_capacity to spot placement score."""
-        from cli.capacity import MultiRegionCapacityChecker, RegionCapacity
-
-        with patch("cli.capacity.multi_region.get_config") as mock_config:
-            mock_config.return_value = MagicMock()
-
-            checker = MultiRegionCapacityChecker()
-
-            capacities = [
-                RegionCapacity(region="us-east-1", recommendation_score=0.0),
-            ]
-
-            with (
-                patch.object(checker, "get_all_regions_capacity", return_value=capacities),
-                patch("cli.capacity.multi_region.CapacityChecker") as MockCapChecker,
-            ):
-                mock_cap = MagicMock()
-                MockCapChecker.return_value = mock_cap
-                mock_cap.get_spot_placement_score.return_value = {"regional": 5}
-                mock_cap.get_spot_price_history.return_value = []
-                mock_cap.get_on_demand_price.return_value = None
-                mock_cap.get_capacity_block_trend.return_value = 0.0
-
-                checker.recommend_region_for_job(
-                    instance_type="p4d.24xlarge",
-                    gpu_count=8,
-                )
-
-                # Verify target_capacity was set to gpu_count
-                mock_cap.get_spot_placement_score.assert_called_once_with(
-                    "p4d.24xlarge", "us-east-1", target_capacity=8
-                )
-
 
 class TestEstimateOnDemandCapacityWithoutDryRun:
     """Tests for the updated _estimate_on_demand_capacity without dry-run."""
@@ -3972,3 +3938,52 @@ class TestAdvisorGetRecommendationErrors:
             pytest.raises(RuntimeError, match="Failed to get AI recommendation"),
         ):
             advisor.get_recommendation()
+
+
+@pytest.mark.parametrize(
+    ("gpu_count", "gpus_per_instance", "expected_instances"),
+    [
+        (8, 8, 1),  # one p4d.24xlarge holds 8 GPUs
+        (16, 8, 2),
+        (12, 8, 2),  # rounded up to whole instances
+        (0, 8, 1),  # no GPU count asked for
+        (8, None, 1),  # the type's GPU count is unknown in the Region
+    ],
+)
+def test_weighted_recommend_converts_gpu_count_to_instances_for_placement_score(
+    gpu_count, gpus_per_instance, expected_instances
+):
+    """Spot Placement Score's TargetCapacity counts instances ("units"), so
+    asking for 8 GPUs of p4d.24xlarge must score 1 instance, not 8."""
+    from cli.capacity import MultiRegionCapacityChecker, RegionCapacity
+
+    with patch("cli.capacity.multi_region.get_config") as mock_config:
+        mock_config.return_value = MagicMock()
+
+        checker = MultiRegionCapacityChecker()
+
+        capacities = [
+            RegionCapacity(region="us-east-1", recommendation_score=0.0),
+        ]
+
+        with (
+            patch.object(checker, "get_all_regions_capacity", return_value=capacities),
+            patch("cli.capacity.multi_region.CapacityChecker") as MockCapChecker,
+        ):
+            mock_cap = MagicMock()
+            MockCapChecker.return_value = mock_cap
+            mock_cap.gpus_per_instance.return_value = gpus_per_instance
+            mock_cap.get_spot_placement_score.return_value = {"regional": 5}
+            mock_cap.get_spot_price_history.return_value = []
+            mock_cap.get_on_demand_price.return_value = None
+            mock_cap.get_capacity_block_trend.return_value = 0.0
+
+            result = checker.recommend_region_for_job(
+                instance_type="p4d.24xlarge",
+                gpu_count=gpu_count,
+            )
+
+            mock_cap.get_spot_placement_score.assert_called_once_with(
+                "p4d.24xlarge", "us-east-1", target_capacity=expected_instances
+            )
+            assert result["all_regions"][0]["spot_target_instances"] == expected_instances

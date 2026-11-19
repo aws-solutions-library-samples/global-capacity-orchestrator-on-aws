@@ -1332,9 +1332,10 @@ class CapacityChecker:
 
         return reservations
 
-    def _gpus_per_instance(self, instance_type: str, region: str) -> int | None:
-        """GPUs per instance for per-GPU-hour pricing, memoized per type+region.
+    def gpus_per_instance(self, instance_type: str, region: str) -> int | None:
+        """GPUs per instance of a type in a Region, memoized per type+region.
 
+        Used for per-GPU-hour pricing and to turn a GPU count into instances.
         Returns ``None`` when the type cannot be described, which callers treat
         as "omit the per-GPU figure" rather than as zero GPUs — reporting a
         per-GPU-hour price of infinity, or silently dividing by a wrong count,
@@ -1364,7 +1365,7 @@ class CapacityChecker:
             logger.debug("On-demand price lookup failed for %s in %s: %s", instance_type, region, e)
             on_demand = None
 
-        gpus_per_instance = self._gpus_per_instance(str(instance_type), region)
+        gpus_per_instance = self.gpus_per_instance(str(instance_type), region)
 
         pricing = blocks.compute_reservation_pricing(
             on_demand, reservation.get("total_instances"), gpus_per_instance

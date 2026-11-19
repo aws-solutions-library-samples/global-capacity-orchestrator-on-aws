@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -41,6 +42,18 @@ _SLURM_STATUS_PATH = "/api/v1/slurm/status"
 def _missing_scored_signal_count(capacity: RegionCapacity) -> int:
     """Return the number of unavailable signals used for placement scoring."""
     return len(_SCORED_TELEMETRY_SIGNALS.intersection(capacity.unavailable_signals))
+
+
+def _instances_for_gpus(gpu_count: int, gpus_per_instance: int | None) -> int:
+    """Whole instances that hold ``gpu_count`` GPUs, at least one.
+
+    Spot Placement Score's ``TargetCapacity`` counts instances, not GPUs. When
+    no GPU count is asked for or the type's GPU count is unknown in the Region,
+    the score is asked for one instance.
+    """
+    if gpu_count <= 0 or not gpus_per_instance:
+        return 1
+    return math.ceil(gpu_count / gpus_per_instance)
 
 
 def _check_backend(backend: str) -> None:
@@ -440,10 +453,14 @@ class MultiRegionCapacityChecker:
             # Gather instance-specific signals for this region
             spot_score = 0.0
             spot_price_ratio = 1.0  # spot/on-demand ratio (lower = better savings)
+            spot_target_instances = 1
 
             try:
+                spot_target_instances = _instances_for_gpus(
+                    gpu_count, capacity_checker.gpus_per_instance(instance_type, region)
+                )
                 placement_scores = capacity_checker.get_spot_placement_score(
-                    instance_type, region, target_capacity=max(1, gpu_count)
+                    instance_type, region, target_capacity=spot_target_instances
                 )
                 if placement_scores:
                     spot_score = placement_scores.get("regional", 0) / 10.0  # Normalize to 0-1
@@ -490,6 +507,7 @@ class MultiRegionCapacityChecker:
                     "gpu_utilization": cap.gpu_utilization,
                     "running_jobs": cap.running_jobs,
                     "spot_placement_score": spot_score,
+                    "spot_target_instances": spot_target_instances,
                     "spot_price_ratio": spot_price_ratio,
                     "capacity_block_trend": cb_trend,
                     "telemetry_status": cap.telemetry_status,

@@ -234,8 +234,8 @@ def test_instance_info_cache_and_missing_pricing_fields_are_defensive() -> None:
     checker = _checker()
     info = InstanceTypeInfo("p5.48xlarge", 192, 2048, 8, "H100", 640)
     with patch.object(checker, "get_instance_info", return_value=info) as get_info:
-        assert checker._gpus_per_instance("p5.48xlarge", "us-east-1") == 8
-        assert checker._gpus_per_instance("p5.48xlarge", "us-east-1") == 8
+        assert checker.gpus_per_instance("p5.48xlarge", "us-east-1") == 8
+        assert checker.gpus_per_instance("p5.48xlarge", "us-east-1") == 8
     get_info.assert_called_once()
 
     reservation = {"total_instances": 1}
