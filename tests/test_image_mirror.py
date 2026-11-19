@@ -13,12 +13,15 @@ ECR client mocked — no Docker daemon or AWS calls.
 
 import base64
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cli import _image_mirror as mirror
+from gco.config.config_loader import ConfigValidationError
 
 
 def _sample_charts(**basic_overrides):
@@ -569,6 +572,69 @@ class TestConfigurationInputs:
             "enabled": False,
             "ecr_namespace": "research/dockerhub",
         }
+
+    @staticmethod
+    def _cdk_json(tmp_path: Path, block: object) -> Path:
+        config_path = tmp_path / "cdk.json"
+        config_path.write_text(
+            json.dumps({"context": {"project_name": "research", "volcano_image_mirror": block}}),
+            encoding="utf-8",
+        )
+        return config_path
+
+    @pytest.mark.parametrize("value", ["false", "off", 1, None])
+    def test_an_enabled_value_the_synth_rejects_is_an_error_not_truthiness(
+        self, tmp_path: Path, value: object
+    ):
+        """MIRROR-FLAG: ``bool("false")`` is True, so the deploy path mirrored
+        images for a cdk.json whose synth then fails; the flag now follows the
+        regional stack's read_block_flag."""
+        config_path = self._cdk_json(tmp_path, {"enabled": value})
+
+        with pytest.raises(ConfigValidationError, match=r"volcano_image_mirror\.enabled must be"):
+            mirror.read_mirror_config(config_path)
+        # The namespace alone does not depend on the flag.
+        assert mirror.cdk_default_namespace(config_path) == "research/dockerhub"
+
+    def test_the_string_true_still_reads_as_true(self, tmp_path: Path):
+        config_path = self._cdk_json(tmp_path, {"enabled": "TRUE"})
+
+        assert mirror.read_mirror_config(config_path) == {
+            "enabled": True,
+            "ecr_namespace": "research/dockerhub",
+        }
+
+    def test_a_block_that_is_not_an_object_is_an_error(self, tmp_path: Path):
+        config_path = self._cdk_json(tmp_path, "enabled")
+
+        with pytest.raises(ConfigValidationError, match="volcano_image_mirror must be an object"):
+            mirror.read_mirror_config(config_path)
+        assert mirror.cdk_default_namespace(config_path) == "research/dockerhub"
+
+    def test_a_json_boolean_is_read_without_importing_aws_cdk(self, tmp_path: Path):
+        """A base install has no aws_cdk (the ``cdk`` extra); the common case
+        must not import the config loader that needs it."""
+        config_path = self._cdk_json(tmp_path, {"enabled": True})
+        snippet = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from cli import _image_mirror\n"
+            f"config = _image_mirror.read_mirror_config(Path({str(config_path)!r}))\n"
+            "assert config['enabled'] is True, config\n"
+            "assert 'gco.config.config_loader' not in sys.modules, 'config loader imported'\n"
+            "assert 'aws_cdk' not in sys.modules, 'aws_cdk imported'\n"
+            "print('ok')\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", snippet],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == "ok"
 
 
 class TestRuntimeCapabilities:

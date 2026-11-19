@@ -248,33 +248,63 @@ def plan_from_sources(
     return items
 
 
-def read_mirror_config(cdk_json_path: Path = _CDK_JSON) -> dict[str, Any]:
-    """Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.
+def _mirror_settings(cdk_json_path: Path) -> tuple[object, str]:
+    """Return cdk.json's raw ``volcano_image_mirror`` block and its ECR namespace.
 
-    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for
-    the stock project) when the block is absent, so a second deployment mirrors
-    into its own ECR namespace (#139).
-    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key
-    is still named ``volcano_image_mirror`` — Volcano is the only consumer today
-    — but the mirror itself is general; see :func:`collect_source_refs`.)
+    The block is ``None`` when it, or a readable cdk.json, is absent.
     """
     try:
         with open(cdk_json_path, encoding="utf-8") as f:
             ctx = json.load(f).get("context", {}) or {}
     except OSError, json.JSONDecodeError:
-        return {"enabled": False, "ecr_namespace": _DEFAULT_NAMESPACE}
+        return None, _DEFAULT_NAMESPACE
     # Default the mirror namespace to the deployment's own project prefix
     # (``<project_name>/dockerhub``) so a second deployment mirrors into its own
     # ECR namespace (#139); resolves to ``gco/dockerhub`` for the stock project.
     default_namespace = f"{ctx.get('project_name') or 'gco'}/dockerhub"
-    block = ctx.get("volcano_image_mirror") or {}
+    raw = ctx.get("volcano_image_mirror")
+    block = raw if isinstance(raw, dict) else {}
     namespace = str(block.get("ecr_namespace", default_namespace)).strip("/") or default_namespace
-    return {"enabled": bool(block.get("enabled", False)), "ecr_namespace": namespace}
+    return raw, namespace
+
+
+def _mirror_enabled(block: object) -> bool:
+    """Read ``volcano_image_mirror.enabled`` the way the regional stack does.
+
+    That is :func:`gco.config.config_loader.read_block_flag`: a JSON boolean,
+    or the string ``"true"``; any other value is a ``ConfigValidationError``
+    (a string such as ``"false"`` is not read by truthiness). An absent key and
+    a JSON boolean need no parsing, so the loader, which imports aws_cdk (the
+    ``cdk`` extra), is imported only for the other values.
+    """
+    if block is None:
+        return False
+    if isinstance(block, dict) and isinstance(block.get("enabled", False), bool):
+        return bool(block.get("enabled", False))
+    from gco.config.config_loader import read_block_flag
+
+    return read_block_flag(block, "volcano_image_mirror.enabled", default=False)
+
+
+def read_mirror_config(cdk_json_path: Path = _CDK_JSON) -> dict[str, Any]:
+    """Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.
+
+    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for
+    the stock project) when the block is absent, so a second deployment mirrors
+    into its own ECR namespace (#139). ``enabled`` is read with the regional
+    stack's rules (:func:`_mirror_enabled`), so a value the synth rejects raises
+    here, before the deploy path mirrors anything.
+    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key
+    is still named ``volcano_image_mirror`` — Volcano is the only consumer today
+    — but the mirror itself is general; see :func:`collect_source_refs`.)
+    """
+    block, namespace = _mirror_settings(cdk_json_path)
+    return {"enabled": _mirror_enabled(block), "ecr_namespace": namespace}
 
 
 def cdk_default_namespace(cdk_json_path: Path = _CDK_JSON) -> str:
     """Return ``volcano_image_mirror.ecr_namespace`` from cdk.json (default gco/dockerhub)."""
-    return str(read_mirror_config(cdk_json_path)["ecr_namespace"])
+    return _mirror_settings(cdk_json_path)[1]
 
 
 def _account_id() -> str:
