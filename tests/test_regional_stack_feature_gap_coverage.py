@@ -1152,6 +1152,25 @@ def test_explicit_context_bool_parser_rejects_ambiguous_values():
         rs._explicit_context_bool("enabled", key="test")
 
 
+@pytest.mark.parametrize("raw", ["yes", "1", 1, "retain"])
+def test_an_ambiguous_provider_log_retention_flag_fails_the_synth(raw):
+    # The harness-only flag used to read every value but true/"true" as
+    # "delete the provider log groups", so a typo silently changed teardown.
+    app = cdk.App(context={rs._LIVE_VALIDATION_PROVIDER_LOG_CONTEXT: raw})
+    with pytest.raises(
+        ValueError,
+        match=r"gco_live_validation_retain_provider_log_groups must be true or false",
+    ):
+        rs.GCORegionalStack(
+            app,
+            "provider-log-flag",
+            config=MagicMock(),
+            region=_REGION,
+            auth_secret_arn=f"arn:aws:secretsmanager:{_REGION}:{_ACCOUNT}:secret:test-auth",
+            env=cdk.Environment(account=_ACCOUNT, region=_REGION),
+        )
+
+
 def test_non_ga_partition_omits_registration_and_tears_down_directly(ga_disabled_stack):
     _stack, template = ga_disabled_stack
     _, install_machine = _single_resource(

@@ -1114,13 +1114,11 @@ class GCORegionalStack(Stack):
             self.node.try_get_context(_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT),
             key=_LIVE_VALIDATION_DISABLE_EFS_BACKUPS_CONTEXT,
         )
-        retain_provider_logs = self.node.try_get_context(_LIVE_VALIDATION_PROVIDER_LOG_CONTEXT)
         self.provider_log_group_removal_policy = (
             RemovalPolicy.RETAIN
-            if retain_provider_logs is True
-            or (
-                isinstance(retain_provider_logs, str)
-                and retain_provider_logs.strip().casefold() == "true"
+            if _explicit_context_bool(
+                self.node.try_get_context(_LIVE_VALIDATION_PROVIDER_LOG_CONTEXT),
+                key=_LIVE_VALIDATION_PROVIDER_LOG_CONTEXT,
             )
             else RemovalPolicy.DESTROY
         )
