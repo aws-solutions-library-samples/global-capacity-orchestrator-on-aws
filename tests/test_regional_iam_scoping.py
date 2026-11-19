@@ -434,6 +434,31 @@ def test_fsx_csi_driver_role_describes_only_its_file_system(all_features_resourc
     }
 
 
+def test_regional_bucket_key_names_no_service_principal(resources):
+    """S3 uses the caller's own KMS permissions and no log group uses the key.
+
+    The policy keeps CDK's account statement and the server access-log
+    delivery grant CDK adds: no ``s3.amazonaws.com`` or
+    ``logs.<region>.amazonaws.com`` grant.
+    """
+    [key] = [
+        r
+        for lid, r in resources.items()
+        if lid.startswith("RegionalSharedKmsKey") and r["Type"] == "AWS::KMS::Key"
+    ]
+    statements = key["Properties"]["KeyPolicy"]["Statement"]
+    assert [s["Principal"] for s in statements] == [
+        {"AWS": "arn:aws:iam::123456789012:root"},
+        {"Service": "logging.s3.amazonaws.com"},
+    ]
+    log_group_keys = [
+        r["Properties"].get("KmsKeyId")
+        for r in resources.values()
+        if r["Type"] == "AWS::Logs::LogGroup"
+    ]
+    assert not [k for k in log_group_keys if k and "RegionalSharedKmsKey" in json.dumps(k)]
+
+
 def test_unmapped_types_are_refused():
     from gco.stacks.drift_read_permissions import drift_read_actions
 

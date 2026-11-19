@@ -3736,10 +3736,12 @@ class GCORegionalStack(Stack):
         pattern in ``GCOGlobalStack``:
 
         1. ``regional_shared_kms_key`` — a customer-managed KMS key with annual
-           rotation and a 7-day pending window on destroy. The key policy grants
-           the ``s3.amazonaws.com`` and ``logs.<region>.amazonaws.com`` service
-           principals encrypt/decrypt so S3 server-side encryption and access-log
-           delivery work without role-side grants.
+           rotation and a 7-day pending window on destroy. Its policy holds
+           CDK's account statement and the ``logging.s3.amazonaws.com`` grant
+           CDK adds for server access-log delivery into the KMS-encrypted
+           access-logs bucket. Nothing else is named: S3 encrypts and decrypts
+           objects with the requesting principal's own permissions
+           (``kms:ViaService``), and no CloudWatch Logs group uses the key.
         2. ``regional_shared_access_logs_bucket`` — the dedicated S3 access-logs
            destination for the primary bucket.
         3. ``regional_shared_bucket`` — the primary bucket. Its physical name
@@ -3797,45 +3799,13 @@ class GCORegionalStack(Stack):
             removal_policy=regional_shared_removal_policy,
         )
 
-        # Key-policy grants for the service principals that encrypt/decrypt on
-        # behalf of the bucket (S3 server-side encryption) and the access-logs
-        # bucket (CloudWatch/S3 log delivery).
-        kms_actions = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey",
-        ]
-
-        self.regional_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowS3ServiceEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
-        self.regional_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchLogsEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal(f"logs.{self.deployment_region}.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
         # Retention for the access-logs bucket honors the same `s3_access_logs`
         # context field used by the central buckets (default 90 days).
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
         access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
 
         # Dedicated access-logs bucket for the regional bucket, encrypted with
-        # the regional KMS key (its key policy grants the logs service principal
-        # encrypt/decrypt).
+        # the regional KMS key.
         self.regional_shared_access_logs_bucket = s3.Bucket(
             self,
             "RegionalSharedAccessLogsBucket",
