@@ -355,6 +355,18 @@ class TestTrainerRuntimeManifest:
         assert container["securityContext"] == {"allowPrivilegeEscalation": False}
         assert "runAsNonRoot" not in container["securityContext"]
 
+    def test_runtime_pods_run_on_amd64_nodes(self, manifest_text):
+        # Documented deviation #3: the pinned pytorch/pytorch image is
+        # published for linux/amd64 only, and the CPU pool and gpu-arm-pool
+        # also launch arm64 nodes (tests/test_example_architecture_pins.py).
+        rendered = manifest_text.replace("{{KUBEFLOW_TRAINER_ENABLED}}", "true")
+        (runtime,) = [doc for doc in yaml.safe_load_all(rendered) if doc]
+        pod_spec = runtime["spec"]["template"]["spec"]["replicatedJobs"][0]["template"]["spec"][
+            "template"
+        ]["spec"]
+        assert pod_spec["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+        assert pod_spec["containers"][0]["image"].startswith("pytorch/pytorch:")
+
 
 class TestTrainJobExampleSchema:
     """CRD-schema shapes the example must honor (no kubeconform coverage).

@@ -13,8 +13,8 @@
 #
 # Extracted from chart kubeflow-trainer 2.3.0
 # (helm template --set runtimes.torchDistributed.enabled=true), minus the
-# Helm bookkeeping labels and with exactly two GCO additions to the pod
-# template (both mirrored in _apply_documented_runtime_deviations in
+# Helm bookkeeping labels and with exactly three GCO additions to the pod
+# template (all mirrored in _apply_documented_runtime_deviations in
 # .github/scripts/validate_helm_charts.py, which fails CI on any other
 # drift):
 #   - automountServiceAccountToken: false — the same security default both
@@ -28,6 +28,11 @@
 #     spec.trainer.image commonly assume root too — forcing non-root here
 #     would fail admission for them (kubelet refuses runAsNonRoot with a
 #     root image).
+#   - nodeSelector kubernetes.io/arch: amd64 — the pinned pytorch/pytorch
+#     image is published for linux/amd64 only, while the cpu-general pool
+#     and gpu-arm-pool also launch arm64 (Graviton) nodes, where it cannot
+#     start. A TrainJob whose image also has an arm64 build can change the
+#     selector through a runtime patch.
 # Keep in lockstep with the chart version pinned in
 # lambda/helm-installer/charts.yaml.
 #
@@ -65,6 +70,8 @@ spec:
                 # nosemgrep: yaml.kubernetes.security.run-as-non-root.run-as-non-root -- root image upstream; rationale in header
                 spec:
                   automountServiceAccountToken: false
+                  nodeSelector:
+                    kubernetes.io/arch: amd64
                   containers:
                     - name: node
                       image: pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime

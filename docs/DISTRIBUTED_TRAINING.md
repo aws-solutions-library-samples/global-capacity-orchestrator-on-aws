@@ -71,7 +71,7 @@ spec:
     command: ["torchrun", "/workspace/train.py"]
 ```
 
-`torchrun` inherits the rendezvous configuration (`PET_*` environment) the controller injects, so your training script only needs `torch.distributed.init_process_group()`. The shipped example also carries one runtime patch that pins the pods to amd64 nodes, because this image is linux/amd64 only (see [GPU Training](#gpu-training)).
+`torchrun` inherits the rendezvous configuration (`PET_*` environment) the controller injects, so your training script only needs `torch.distributed.init_process_group()`. This image is linux/amd64 only, so the shipped runtime pins its pods to amd64 nodes, and the shipped example repeats the pin in a runtime patch (see [GPU Training](#gpu-training)).
 
 ### What the controller creates
 
@@ -128,7 +128,7 @@ spec:
                             effect: NoSchedule
 ```
 
-Every runtime patch names its owner in `manager` (any non-empty string; the TrainJob CRD requires it and keys the list by it). The `kubernetes.io/arch: amd64` selector is there because the runtime's `pytorch/pytorch` image is published for linux/amd64 only, while the GPU NodePools also launch arm64 (Graviton g5g) nodes; drop it only for a multi-arch image. The shipped CPU example carries the same pin, because the CPU pool launches both architectures too.
+Every runtime patch names its owner in `manager` (any non-empty string; the TrainJob CRD requires it and keys the list by it). The `kubernetes.io/arch: amd64` selector is there because the runtime's `pytorch/pytorch` image is published for linux/amd64 only, while the GPU NodePools also launch arm64 (Graviton g5g) nodes; the shipped `torch-distributed` runtime sets the same selector (see [Runtimes](#runtimes)), and the patch repeats it so the pods stay on amd64 with a custom runtime that does not. The shipped CPU example carries the same patch, because the CPU pool launches both architectures too.
 
 EKS Auto Mode provisions GPU capacity on demand; check availability first with `gco capacity check --instance-type g4dn.xlarge --region us-east-1`. For multi-node GPU training use `nccl` as the process-group backend (the CPU example uses `gloo`).
 
@@ -161,7 +161,7 @@ Distributed training on Spot is a cost/interruption trade:
 kubectl get clustertrainingruntime
 ```
 
-Platform operators can add custom runtimes (different base images, initContainers, node selectors) by applying additional `ClusterTrainingRuntime` objects; user-facing TrainJobs stay unchanged. Runtime pod templates ship with `automountServiceAccountToken: false` — training pods get no Kubernetes API token unless a TrainJob opts back in through a runtime patch.
+Platform operators can add custom runtimes (different base images, initContainers, node selectors) by applying additional `ClusterTrainingRuntime` objects; user-facing TrainJobs stay unchanged. Runtime pod templates ship with `automountServiceAccountToken: false` — training pods get no Kubernetes API token unless a TrainJob opts back in through a runtime patch. They also carry a `kubernetes.io/arch: amd64` node selector, because the pinned `pytorch/pytorch` image is published for linux/amd64 only; a TrainJob whose image also has an arm64 build can change the selector through a runtime patch.
 
 ## Troubleshooting
 

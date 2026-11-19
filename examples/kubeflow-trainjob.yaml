@@ -28,8 +28,9 @@
 # runtime's) is linux/amd64 only, while the CPU pool and the GPU pools also
 # launch arm64 (Graviton) nodes. `spec.trainer` carries images and per-node
 # resources but no scheduling fields, so the nodeSelector rides in a
-# runtime patch on the `node` pod template. Every patch names its owner in
-# `manager` (any string; the CRD requires it).
+# runtime patch on the `node` pod template. The shipped runtime sets the same
+# selector; the patch keeps the job on amd64 with a runtime that does not.
+# Every patch names its owner in `manager` (any string; the CRD requires it).
 #
 # GPU variant: swap the resources below to request GPUs and add the GPU
 # toleration to the same patch (this is the shape the platform's

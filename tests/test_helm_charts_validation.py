@@ -1126,6 +1126,8 @@ spec:
               template:
                 spec:
                   automountServiceAccountToken: false
+                  nodeSelector:
+                    kubernetes.io/arch: amd64
                   containers:
                     - name: node
                       image: {_TRAINER_IMAGE}
@@ -1315,9 +1317,9 @@ class TestTrainerLockstepValidation:
         assert errors == []
 
     def test_matching_upstream_passes_online(self) -> None:
-        # The upstream fixture has neither the automount override nor the
-        # NoNewPrivs securityContext — proving both documented deviations
-        # are tolerated by the spec comparison.
+        # The upstream fixture has no automount override, no NoNewPrivs
+        # securityContext and no amd64 nodeSelector — proving all three
+        # documented deviations are tolerated by the spec comparison.
         errors = _lockstep(
             online=True,
             runtime_fetcher=lambda entry, helm: _upstream_runtime(),
@@ -1335,6 +1337,21 @@ class TestTrainerLockstepValidation:
         assert len(image_errors) == 1
         assert "pytorch/pytorch:8.8.8-runtime" in image_errors[0]
         assert _TRAINER_IMAGE in image_errors[0]
+
+    def test_a_shipped_runtime_without_the_amd64_pin_fails_online(self) -> None:
+        # The deviations are required, not just tolerated: the image is
+        # linux/amd64 only, so dropping the pin is drift.
+        unpinned = _RUNTIME_MANIFEST_FIXTURE.replace(
+            "                  nodeSelector:\n                    kubernetes.io/arch: amd64\n", ""
+        )
+        assert unpinned != _RUNTIME_MANIFEST_FIXTURE
+        errors = _lockstep(
+            manifest_text=unpinned,
+            online=True,
+            runtime_fetcher=lambda entry, helm: _upstream_runtime(),
+        )
+        assert len(errors) == 1
+        assert "differs from what chart" in errors[0]
 
     def test_non_image_spec_drift_fails_online(self) -> None:
         upstream = _upstream_runtime()
@@ -2398,6 +2415,12 @@ class TestTrainerLockstepParserEdges:
                         {
                             "name": "node",
                             "template": {
+                                "spec": {"template": {"spec": {"nodeSelector": "not-a-mapping"}}}
+                            },
+                        },
+                        {
+                            "name": "node",
+                            "template": {
                                 "spec": {
                                     "template": {
                                         "spec": {
@@ -2421,12 +2444,14 @@ class TestTrainerLockstepParserEdges:
 
         adjusted = validator._apply_documented_runtime_deviations(spec)
 
-        node_pod = adjusted["template"]["spec"]["replicatedJobs"][3]["template"]["spec"][
-            "template"
-        ]["spec"]
+        jobs = adjusted["template"]["spec"]["replicatedJobs"]
+        node_pod = jobs[4]["template"]["spec"]["template"]["spec"]
         assert node_pod["automountServiceAccountToken"] is False
-        # A non-mapping securityContext is left alone rather than overwritten.
+        assert node_pod["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+        # A non-mapping securityContext or nodeSelector is left alone rather
+        # than overwritten.
         assert node_pod["containers"][2]["securityContext"] == "not-a-mapping"
+        assert jobs[3]["template"]["spec"]["template"]["spec"]["nodeSelector"] == "not-a-mapping"
         assert adjusted["template"]["spec"]["replicatedJobs"][0] == "not-a-mapping"
 
     def test_documented_deviations_tolerate_a_non_list_jobs_field(self) -> None:

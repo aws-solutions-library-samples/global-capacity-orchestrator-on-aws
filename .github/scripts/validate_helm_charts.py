@@ -739,9 +739,10 @@ def validate_gateway_lockstep(
 # blueprints through a post-install hook Job (an unpinned run-time network
 # fetch), so GCO disables that hook and ships the ``torch-distributed``
 # runtime itself — extracted verbatim from the pinned chart into
-# ``post-helm-kubeflow-trainer-runtimes.yaml`` with two documented
-# deviations (``automountServiceAccountToken: false`` and NoNewPrivs on the
-# ``node`` container). Three more surfaces
+# ``post-helm-kubeflow-trainer-runtimes.yaml`` with three documented
+# deviations (``automountServiceAccountToken: false``, NoNewPrivs on the
+# ``node`` container and a ``kubernetes.io/arch: amd64`` node selector).
+# Three more surfaces
 # repeat the runtime's pinned trainer image so users see exactly what runs:
 #
 #   * the shipped runtime manifest (the source of truth in-repo),
@@ -884,14 +885,18 @@ def doc_pytorch_images(doc_text: str) -> list[str]:
 def _apply_documented_runtime_deviations(upstream_spec: dict[str, Any]) -> dict[str, Any]:
     """Return the upstream runtime spec with GCO's sanctioned deviations applied.
 
-    Exactly two deviations from verbatim extraction are documented in the
-    manifest header, both on the ``node`` pod template:
+    Exactly three deviations from verbatim extraction are documented in the
+    manifest header, all on the ``node`` pod template:
 
     - ``automountServiceAccountToken: false`` (the same security default
-      both submission paths inject into user Jobs), and
+      both submission paths inject into user Jobs),
     - ``securityContext.allowPrivilegeEscalation: false`` on the ``node``
       container (NoNewPrivs; the platform's manifest policy already rejects
-      an explicit ``true``).
+      an explicit ``true``), and
+    - ``nodeSelector`` ``kubernetes.io/arch: amd64`` (the runtime's
+      ``pytorch/pytorch`` image is published for linux/amd64 only, and GCO's
+      CPU and GPU NodePools also launch arm64 nodes). Revisit it when an
+      image bump brings an arm64 build.
 
     Anything else that differs from upstream is drift and must fail — a new
     deliberate deviation belongs here *and* in the manifest header, in the
@@ -908,6 +913,9 @@ def _apply_documented_runtime_deviations(upstream_spec: dict[str, Any]) -> dict[
         if not isinstance(pod_spec, dict):
             continue
         pod_spec["automountServiceAccountToken"] = False
+        node_selector = pod_spec.setdefault("nodeSelector", {})
+        if isinstance(node_selector, dict):
+            node_selector["kubernetes.io/arch"] = "amd64"
         for container in pod_spec.get("containers") or []:
             if isinstance(container, dict) and container.get("name") == "node":
                 security = container.setdefault("securityContext", {})
