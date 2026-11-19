@@ -8,7 +8,9 @@ Resources Created:
     VPC & Networking:
         - VPC spanning every AZ in the region, public subnets (NAT), private subnets (EKS and ALB)
         - 2 NAT Gateways for high availability
-        - VPC endpoints for ECR, S3, STS, Secrets Manager, SSM, CloudWatch
+        - VPC endpoints from cdk.json ``vpc_endpoints``: S3 and DynamoDB gateway
+          endpoints by default; interface endpoints (STS, ECR, CloudWatch, SQS,
+          SSM, Secrets Manager, KMS, EKS, EFS, Bedrock, X-Ray) opt-in
         - VPC Flow Logs (CloudWatch Logs, 30-day retention)
 
     EKS Cluster (Auto Mode):
@@ -7150,8 +7152,10 @@ class GCORegionalStack(Stack):
         any shared state across pods.  Valkey Serverless auto-scales and
         requires no node management.
 
-        The cache is placed in the VPC private subnets and accessible from
-        any pod via the cluster security group.
+        The cache is placed in the VPC private subnets. Its security group
+        admits the Valkey port (6379) from the VPC CIDR rather than from the
+        cluster security group; pods take VPC addresses, so every pod can
+        reach it.
         """
         valkey_config = self.config.get_valkey_config()
         if not valkey_config.get("enabled", False):
@@ -7159,7 +7163,8 @@ class GCORegionalStack(Stack):
 
         from aws_cdk import aws_elasticache as elasticache
 
-        # Security group for Valkey (allow access from EKS cluster)
+        # Security group for Valkey: 6379 from the VPC CIDR (pods have VPC
+        # addresses), no egress.
         valkey_sg = ec2.SecurityGroup(
             self,
             "ValkeySG",
