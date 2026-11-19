@@ -667,21 +667,23 @@ class TestRootOutputOptionPlacement:
         ]
         assert misplaced == []
 
-    @pytest.mark.parametrize("group", ["status", "crossplane", "gitops"])
-    def test_help_examples_put_the_output_option_first(self, group):
-        pending: list[click.Command] = [cli.commands[group]]
-        examples: list[str] = []
+    def test_help_examples_put_the_output_option_first(self):
+        """Every ``gco ...`` example in the help of every command of the tree."""
+        pending: list[tuple[str, click.Command]] = [("gco", cli)]
+        examples: list[tuple[str, str]] = []
         while pending:
-            command = pending.pop()
+            path, command = pending.pop()
             examples.extend(
-                raw.strip()
+                (path, raw.strip())
                 for raw in (command.help or "").splitlines()
                 if raw.strip().startswith("gco ")
             )
             if isinstance(command, click.Group):
-                pending.extend(command.commands.values())
-        assert any("-o json" in line for line in examples)
-        assert [line for line in examples if _output_option_misplaced(line)] == []
+                pending.extend((f"{path} {name}", sub) for name, sub in command.commands.items())
+        with_output = [line for _, line in examples if re.search(r"(-o|--output) json", line)]
+        assert len(with_output) > 10
+        misplaced = [f"{path}: {line}" for path, line in examples if _output_option_misplaced(line)]
+        assert misplaced == []
 
     @pytest.mark.parametrize(
         ("line", "misplaced"),

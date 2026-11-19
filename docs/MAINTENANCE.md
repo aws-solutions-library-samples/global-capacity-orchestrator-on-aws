@@ -1035,13 +1035,16 @@ monitoring region resolved in `app.py`) creates the observability surface:
   - each regional stack: SQS message age (stuck jobs) and dead-letter
     messages, EKS node CPU/memory, manifest-processing failures, and a
     composite of CPU and memory above 90%.
-- **Alert delivery** — every alarm notifies an SNS topic of its own stack: the
-  monitoring stack's `AlertTopicArn` output, each regional stack's
+- **Alert delivery** — every alarm above notifies an SNS topic of its own
+  stack: the monitoring stack's `AlertTopicArn` output, each regional stack's
   `RegionalAlertTopicArn` output, and, only when they hold alarms (their Region
   is not the monitoring Region), the global stack's `GlobalAlertTopicArn` and
   the API Gateway stack's `ApiGatewayAlertTopicArn` outputs. **Subscribe your
   on-call channel to every one of them** — an alarm with no subscriber is
-  silent (see the secret-rotation runbook).
+  silent (see the secret-rotation runbook). The API Gateway stack's
+  `BackendTls*` alarms on the internal certificate manager notify no topic;
+  attach an action to them yourself
+  ([RUNBOOKS.md → Backend Certificate Rotation Fails](RUNBOOKS.md#backend-certificate-rotation-fails)).
 
 Shape is guarded by `tests/test_monitoring_stack.py`,
 `tests/test_control_plane_alarms.py`, `tests/test_regional_alarms.py` and

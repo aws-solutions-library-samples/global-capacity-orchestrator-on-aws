@@ -352,7 +352,7 @@ gco inference deploy ENDPOINT_NAME \
   --extra-args TOKEN               # One server argument per value, repeatable
   --port PORT                      # Container port (default: 8000; not 8443, the TLS sidecar's)
   --model-path PATH                # Mount the inference EFS volume at /models (no sync)
-  --model-source S3_URI            # S3 URI for auto-sync via init container
+  --model-source S3_URI            # Model-bucket URI ($(gco models uri NAME)), synced by an init container
   --health-path PATH               # Health check endpoint (default: /health)
   --env KEY=VALUE                  # Environment variable, repeatable
   --namespace NS                   # K8s namespace (default: gco-inference)

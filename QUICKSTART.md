@@ -39,6 +39,15 @@ docker --version    # or: finch version / podman version
 docker info         # confirms the daemon is running
 ```
 
+Your AWS identity needs permission to create the stacks; administrator access
+is the simplest. The `gco` commands that call the GCO API (`gco jobs submit`,
+`jobs list`, `jobs logs`, `jobs delete`, `queue submit`, `dag run`,
+`inference invoke`) are authorized by that identity's own IAM policy, which
+must allow `execute-api:Invoke` on the GCO APIs: the APIs' resource policies
+admit no principal of the account by themselves. Administrator credentials
+have the permission; [CLI.md → Regional API Mode](docs/CLI.md#regional-api-mode)
+has a policy for a narrower identity.
+
 Everything else — Python 3.14, Node.js 24, CDK, kubectl, the AWS CLI, Docker CLI + Buildx and every GCO Python dependency — ships inside the container at the exact versions CI uses.
 
 ## Step 1: Clone and Build the Dev Container
@@ -225,6 +234,11 @@ gco jobs logs hello-gco -n gco-jobs -r us-east-1
 gco jobs delete hello-gco -n gco-jobs -r us-east-1 -y
 ```
 
+`examples/simple-job.yaml` sets `ttlSecondsAfterFinished: 120`, so Kubernetes
+deletes the Job two minutes after it finishes. After that, `gco jobs logs`
+reads the output from CloudWatch Logs, and the clean-up step is not needed:
+`gco jobs delete` then fails with the API's 404.
+
 **Other submission methods:**
 
 ```bash
@@ -294,7 +308,7 @@ The `inference_monitor` in each target region automatically creates the Kubernet
 - See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for customization options
 - Review [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for architecture details
 - When a new release ships, [docs/UPGRADING.md](docs/UPGRADING.md) explains `gco upgrade` — it recreates the regional stacks, so back regional data up to the cluster-shared bucket first
-- Optionally enable [direct Regional API access](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access) for IAM-authorized callers that need an explicitly region-pinned path; the bridge itself is always deployed for aggregation
+- For a Region-pinned path, call that Region's [API bridge](docs/CUSTOMIZATION.md#regional-api-gateway-aggregation-bridge-and-direct-regional-access) directly: every Region has one, and the same `execute-api:Invoke` permission covers it
 
 ### MCP Server (for Cursor / Kiro / LLM integration)
 
@@ -349,6 +363,13 @@ If deployment fails partway through, destroy and redeploy:
 gco stacks destroy-all -y
 gco stacks deploy-all -y
 ```
+
+### `403 Client Error: Forbidden` from `gco jobs` or `gco queue`
+
+API Gateway refuses a caller whose IAM policy does not allow
+`execute-api:Invoke` on the GCO APIs. Attach a policy that allows it
+([CLI.md → Regional API Mode](docs/CLI.md#regional-api-mode)); administrator
+credentials already have it.
 
 ### "Unauthorized" when using kubectl
 

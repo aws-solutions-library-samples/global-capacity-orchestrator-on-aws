@@ -1297,7 +1297,7 @@ def list_training_plans(config: Any, instance_type: Any, regions: Any, status: A
     Examples:
         gco capacity training-plans
         gco capacity training-plans -r us-east-1 --status Active
-        gco capacity training-plans -i ml.p5.48xlarge --output json
+        gco -o json capacity training-plans -i ml.p5.48xlarge
     """
     from ..capacity import training_plans
 

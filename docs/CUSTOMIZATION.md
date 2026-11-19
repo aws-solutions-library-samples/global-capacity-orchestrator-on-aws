@@ -950,9 +950,9 @@ Global Accelerator uses HTTP health checks to determine if a region is healthy. 
 
 The block merges over the shipped defaults, so a partial block keeps every
 unspecified default. The legacy `health_check_grace_period` and
-`health_check_timeout` keys are tolerated and ignored — Global Accelerator
-endpoint groups have no such settings (the keys were never consumed); remove
-them from existing configs at your convenience.
+`health_check_timeout` keys are ignored, with a deprecation warning at synth:
+Global Accelerator endpoint groups have no such settings (the keys were never
+consumed). Remove them from existing configs.
 
 The `/api/v1/health` endpoint returns 200 when the cluster is within resource thresholds and 503 when overloaded. This enables intelligent routing — GA automatically routes traffic away from overloaded regions.
 
@@ -2596,7 +2596,9 @@ instead of failing halfway through a deploy.
   `images.empty_on_delete` and `images.lifecycle` (no stack creates or
   deletes the `<project_name>/*` ECR repositories: the gco CLI creates them,
   they survive a destroy, and `gco images init` applies its own lifecycle
-  policy).
+  policy), and `api_gateway.regional_api_enabled` (callers reach the global
+  API and every regional bridge with their own `execute-api:Invoke`
+  permission).
 - The per-Region overlays (`fsx_lustre_regions`, `pcs_regions`,
   `hyperpod_regions`) are keyed by Region name. A name that is not an AWS
   Region fails; a real Region that is not in `deployment_regions.regional`

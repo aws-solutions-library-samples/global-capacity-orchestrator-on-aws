@@ -3030,7 +3030,7 @@ gco inference deploy llama3-70b \
   -i vllm/vllm-openai:v0.32.0 \
   -r us-east-1 -r eu-west-1 \
   --replicas 2 --gpu-count 4 \
-  --model-source s3://bucket/models/llama3-70b \
+  --model-source $(gco models uri llama3-70b) \
   -e MODEL=/models/llama3-70b
 
 # Deploy with autoscaling (creates a Kubernetes HPA)
@@ -3922,8 +3922,8 @@ reports, as `kubectl` does, and a pod a disruption is deleting is called out
 with its `DisruptionTarget` reason (`EvictionByEvictionAPI` for a Karpenter /
 EKS Auto Mode drain). `--output json` adds a per-pod `node` block, each pod's
 `metadata.deletionTimestamp` and `status.disruptionTarget`, each container's
-state (for an exited container, `exitCode`, `reason`, `startedAt` and
-`finishedAt`) and previous termination (`lastState`), and a job-wide
+state (for an exited container, `exitCode`, `reason`, `signal`, `message`,
+`startedAt` and `finishedAt`) and previous termination (`lastState`), and a job-wide
 `scheduling` block; see [Get Job Pods](API.md#get-job-pods).
 
 #### `gco jobs metrics`
