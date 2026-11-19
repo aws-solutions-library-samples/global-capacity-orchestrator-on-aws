@@ -159,6 +159,43 @@ class TestBuildTargetUrl:
         assert url == "https://my-alb.example.com/valid/%2F/literal%25/malformed%252G"
 
 
+class TestHasDotSegment:
+    """urllib3 removes ``.``/``..`` segments from the request target it sends."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/v1/jobs/../../../inference/x",
+            "/api/v1/./jobs",
+            "/api/v1/jobs/..",
+            "/api/v1/jobs/%2E%2E/%2e%2e/inference/x",
+            "/api/v1/jobs/..%2F..%2F..%2Finference/x",
+            "/api/v1/%2e/jobs",
+        ],
+    )
+    def test_dot_segments_literal_or_encoded(self, proxy_utils_module, path):
+        proxy_utils, _, _ = proxy_utils_module
+        assert proxy_utils.has_dot_segment(path) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/api/v1/jobs", "/api/v1/jobs/a.b/...", "/inference/m/v1/x.json", "/", ""],
+    )
+    def test_other_paths(self, proxy_utils_module, path):
+        proxy_utils, _, _ = proxy_utils_module
+        assert proxy_utils.has_dot_segment(path) is False
+
+    def test_urllib3_removes_the_segments_the_check_refuses(self, proxy_utils_module):
+        """The reason for the check: the URL sent is not the URL signed."""
+        from urllib3.util.url import parse_url
+
+        proxy_utils, _, _ = proxy_utils_module
+        url = proxy_utils.build_target_url(
+            "alb.example.com", "/api/v1/jobs/../../../inference/x", None
+        )
+        assert parse_url(url).path == "/inference/x"
+
+
 class TestForwardRequest:
     def test_returns_success_response_on_200(self, proxy_utils_module):
         proxy_utils, _, mock_pool = proxy_utils_module
@@ -350,6 +387,19 @@ class TestApiGatewayProxyHandler:
         assert len(forwarded_headers["x-gco-nonce"]) == 32
         assert len(forwarded_headers["x-gco-content-sha256"]) == 64
 
+    @pytest.mark.parametrize(
+        "path",
+        ["/api/v1/jobs/../../../inference/x", "/api/v1/jobs/%2E%2E/%2E%2E/%2E%2E/inference/x"],
+    )
+    def test_refuses_a_path_with_a_dot_segment(self, api_gw_proxy_module, path):
+        handler, _, mock_pool = api_gw_proxy_module
+
+        result = handler.lambda_handler(self._make_event(path=path), None)
+
+        assert result["statusCode"] == 400
+        assert "'.' or '..'" in json.loads(result["body"])["error"]
+        mock_pool.request.assert_not_called()
+
     def test_each_read_only_retry_is_signed_afresh(self, api_gw_proxy_module):
         handler, _, mock_pool = api_gw_proxy_module
         mock_pool.request.side_effect = [
@@ -473,7 +523,7 @@ class TestApiGatewayProxyHandler:
         handler, _, mock_pool = api_gw_proxy_module
 
         with patch.object(handler, "build_target_url", side_effect=ValueError("bad path")):
-            result = handler.lambda_handler(self._make_event(path="/../etc"), None)
+            result = handler.lambda_handler(self._make_event(path="/api/v1/jobs"), None)
 
         assert result["statusCode"] == 503
         mock_pool.request.assert_not_called()
@@ -553,6 +603,18 @@ class TestRegionalApiProxyHandler:
         assert forwarded_headers["x-gco-signature-version"] == "v1"
         assert len(forwarded_headers["x-gco-signature"]) == 64
         assert len(forwarded_headers["x-gco-nonce"]) == 32
+
+    @pytest.mark.parametrize(
+        "path", ["/api/v1/jobs/../../../inference/x", "/api/v1/jobs/..%2F..%2F..%2Finference/x"]
+    )
+    def test_refuses_a_path_with_a_dot_segment(self, regional_proxy_module, path):
+        handler, _, mock_pool = regional_proxy_module
+
+        result = handler.lambda_handler(self._make_event(path=path), None)
+
+        assert result["statusCode"] == 400
+        assert "'.' or '..'" in json.loads(result["body"])["error"]
+        mock_pool.request.assert_not_called()
 
     def test_each_read_only_retry_is_signed_afresh(self, regional_proxy_module):
         handler, _, mock_pool = regional_proxy_module

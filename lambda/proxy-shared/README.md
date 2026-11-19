@@ -67,6 +67,14 @@ or read timeout in `504 Gateway timeout`, the same mapping as the Node
 streaming proxy. TLS failures return bounded errors without exposing trust
 state.
 
+### `has_dot_segment(path)`
+
+Whether the request path has a `.` or `..` segment, literal or
+percent-encoded. urllib3 removes such segments from the URL it sends, so
+`/api/v1/jobs/../../../inference/x` would reach `/inference/x`, a route other
+than the one API Gateway authorized. Both proxies answer such a path with
+`400` before forwarding; no GCO route has a dot segment.
+
 ### `build_target_url(endpoint, path, query_params)`
 
 Constructs the target URL from endpoint, path, and query parameters.

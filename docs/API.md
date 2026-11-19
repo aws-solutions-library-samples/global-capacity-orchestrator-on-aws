@@ -2531,7 +2531,7 @@ All error responses follow this format:
 |------|-------------|
 | 200 | Success |
 | 201 | Created |
-| 400 | Bad Request - Invalid input |
+| 400 | Bad Request - Invalid input, or a request path with a `.` or `..` segment (literal or percent-encoded), which the API Gateway proxies refuse before forwarding |
 | 403 | Forbidden - Namespace not allowed |
 | 404 | Not Found - Resource doesn't exist |
 | 409 | Conflict - Resource already exists |
