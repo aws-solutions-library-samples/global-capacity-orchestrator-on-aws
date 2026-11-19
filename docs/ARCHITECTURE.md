@@ -211,7 +211,7 @@ rendered as spec sheets and as the interaction diagram in
 
 **Service Accounts & RBAC**
 
-- `gco-health-monitor-sa`: Read-only cluster health plus narrowly named self-healing resources
+- `gco-health-monitor-sa`: Lists nodes, pods and node metrics, lists and watches Jobs (lifecycle webhooks), plus the named `gco-gateway` Gateway and its two election Leases
 - `gco-manifest-processor-sa`: Job-namespace Kubernetes writes and control-plane table access
 - `gco-inference-monitor-sa`: Inference-namespace reconciliation permissions, and its own IAM role: read, update and delete on the inference endpoints table (no create; the CLI creates endpoints) and the regional bucket's `/name` discovery parameter for the Mooncake cold tier
 - `gco-inference-proxy-sa`: Exact AWS secret/endpoint-read access and no Kubernetes RBAC binding

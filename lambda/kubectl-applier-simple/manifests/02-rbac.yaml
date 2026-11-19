@@ -72,27 +72,25 @@ metadata:
   labels:
     app: health-monitor
     project: gco
+# Exactly the calls the health-monitor pod makes (gco.services.health_api and
+# the modules it runs in-process); tests/test_rbac_manifest.py reads them from
+# the source and fails when a grant and a call disagree.
 rules:
-  # Core resources — read-only
+  # health_monitor: utilization and pending demand, from one node list and
+  # one pod list across the cluster.
   - apiGroups: [""]
-    resources: ["pods", "nodes", "services", "events"]
-    verbs: ["get", "list", "watch"]
+    resources: ["nodes", "pods"]
+    verbs: ["list"]
 
-  # Apps resources — read-only
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch"]
-
-  # Batch resources — read-only (webhook_dispatcher watches jobs to fire
-  # lifecycle events; runs in-process inside the health-monitor pod)
+  # webhook_dispatcher: lists jobs, then watches them for lifecycle events.
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list", "watch"]
 
-  # Metrics — read-only
+  # health_monitor: node CPU and memory from metrics-server.
   - apiGroups: ["metrics.k8s.io"]
-    resources: ["nodes", "pods"]
-    verbs: ["get", "list"]
+    resources: ["nodes"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -2445,13 +2445,14 @@ jobs:
             exit 1
           fi
 
-          allowed_output=$(kubectl auth can-i get pods -n gco-system \
+          # The health monitor lists pods cluster-wide; it never gets one.
+          allowed_output=$(kubectl auth can-i list pods -n gco-system \
             --as=system:serviceaccount:gco-system:gco-health-monitor-sa 2>&1) || {
             echo "FAIL: RBAC allow probe errored: $allowed_output"
             exit 1
           }
           if [ "$allowed_output" = "yes" ]; then
-            echo "PASS: gco-health-monitor-sa can get pods in gco-system"
+            echo "PASS: gco-health-monitor-sa can list pods in gco-system"
           else
             echo "FAIL: expected an explicit RBAC allow; output=$allowed_output"
             exit 1

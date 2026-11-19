@@ -11,10 +11,13 @@ and dedicated SAs live in gco-system. Fixtures load and classify the
 YAML docs so each test stays focused on one property.
 """
 
+import ast
+import importlib
 from pathlib import Path
 
 import pytest
 import yaml
+from kubernetes import client as k8s_client
 
 RBAC_MANIFEST_PATH = Path("lambda/kubectl-applier-simple/manifests/02-rbac.yaml")
 
@@ -105,13 +108,26 @@ class TestHealthMonitorRole:
             f"Health monitor role has non-read verbs: {all_verbs - READ_ONLY_VERBS}"
         )
 
-    def test_health_monitor_covers_expected_resources(self, rbac_docs):
-        """Health monitor should cover pods, nodes, deployments, services, events, jobs, metrics."""
-        role = _find_doc(rbac_docs, "ClusterRole", "gco-health-monitor-role")
-        resources = _get_all_resources(role)
-        resource_names = {r[1] for r in resources}
-        expected = {"pods", "nodes", "deployments", "services", "events", "jobs"}
-        assert expected.issubset(resource_names), f"Missing resources: {expected - resource_names}"
+    def test_health_monitor_grants_exactly_what_its_process_calls(self, rbac_docs):
+        """Every grant is a call the health-monitor pod makes, and every call is granted.
+
+        The pod runs gco.services.health_api, which hosts the health monitor,
+        the webhook dispatcher and their Lease elections. Their Kubernetes API
+        calls are read from the source, so a new call fails this test until
+        its grant is added, and a grant no call needs fails it too.
+        """
+        calls = _kubernetes_api_calls(HEALTH_MONITOR_PROCESS_MODULES)
+        assert set(calls) == set(HEALTH_MONITOR_CALL_GRANTS), (
+            "update HEALTH_MONITOR_CALL_GRANTS and 02-rbac.yaml for these calls: "
+            f"{sorted(set(calls) ^ set(HEALTH_MONITOR_CALL_GRANTS), key=str)}"
+        )
+        needed = {grant for call in calls for grant in HEALTH_MONITOR_CALL_GRANTS[call]}
+        cluster_role = _find_doc(rbac_docs, "ClusterRole", "gco-health-monitor-role")
+        namespaced = _find_doc(rbac_docs, "Role", "gco-health-monitor-self-healing")
+        granted = {("cluster", *grant) for grant in _grants(cluster_role)} | {
+            ("gco-system", *grant) for grant in _grants(namespaced)
+        }
+        assert granted == needed
 
     def test_health_monitor_self_healing_is_exactly_scoped(self, rbac_docs):
         """Gateway repair and election access stay in gco-system and named resources."""
@@ -949,3 +965,113 @@ class TestNamespaceScopedServiceDoesNotUseClusterAPIs:
             "(02-rbac.yaml). These calls will fail with HTTP 403 at runtime and "
             f"crash-loop the monitor: {offenders}"
         )
+
+
+# ─── RBAC derived from the code ────────────────────────────────────
+
+#: Modules the health-monitor container runs (``python -m
+#: gco.services.health_api`` imports the rest).
+HEALTH_MONITOR_PROCESS_MODULES = (
+    "gco/services/health_api.py",
+    "gco/services/health_monitor.py",
+    "gco/services/webhook_dispatcher.py",
+    "gco/services/leader_lease.py",
+)
+
+#: The RBAC each Kubernetes API call of the health-monitor process needs, as
+#: (scope, apiGroup, resource, verb). Custom-object calls are keyed with the
+#: group and plural they pass.
+HEALTH_MONITOR_CALL_GRANTS = {
+    ("list_node", None, None): {("cluster", "", "nodes", "list")},
+    ("list_pod_for_all_namespaces", None, None): {("cluster", "", "pods", "list")},
+    # The webhook dispatcher lists, then watches from the list's resourceVersion.
+    ("list_job_for_all_namespaces", None, None): {
+        ("cluster", "batch", "jobs", "list"),
+        ("cluster", "batch", "jobs", "watch"),
+    },
+    ("list_cluster_custom_object", "metrics.k8s.io", "nodes"): {
+        ("cluster", "metrics.k8s.io", "nodes", "list")
+    },
+    ("get_namespaced_custom_object", "gateway.networking.k8s.io", "gateways"): {
+        ("gco-system", "gateway.networking.k8s.io", "gateways", "get")
+    },
+    ("read_namespaced_lease", None, None): {("gco-system", "coordination.k8s.io", "leases", "get")},
+    ("replace_namespaced_lease", None, None): {
+        ("gco-system", "coordination.k8s.io", "leases", "update")
+    },
+}
+
+_API_CLASSES = (
+    k8s_client.AppsV1Api,
+    k8s_client.BatchV1Api,
+    k8s_client.CoordinationV1Api,
+    k8s_client.CoreV1Api,
+    k8s_client.CustomObjectsApi,
+    k8s_client.NetworkingV1Api,
+    k8s_client.RbacAuthorizationV1Api,
+    k8s_client.AutoscalingV2Api,
+)
+_API_METHODS = frozenset(
+    name for api in _API_CLASSES for name in dir(api) if not name.startswith("_")
+)
+
+
+def _keyword_value(call: ast.Call, name: str, module: object) -> str | None:
+    """A keyword argument's value: a literal, or a module-level constant."""
+    for keyword in call.keywords:
+        if keyword.arg != name:
+            continue
+        if isinstance(keyword.value, ast.Constant):
+            return str(keyword.value.value)
+        if isinstance(keyword.value, ast.Name):
+            return str(getattr(module, keyword.value.id))
+    return None
+
+
+def _kubernetes_api_calls(paths) -> set[tuple[str, str | None, str | None]]:
+    """``(method, group, plural)`` for every Kubernetes client method the files reference.
+
+    A method passed by reference (``asyncio.to_thread(api.list_node, ...)``,
+    ``watch.stream(api.list_job_for_all_namespaces, ...)``) counts like a call.
+    """
+    found: set[tuple[str, str | None, str | None]] = set()
+    for path in paths:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        module = importlib.import_module(path.removesuffix(".py").replace("/", "."))
+        custom_calls = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                target = node.func
+                if isinstance(target, ast.Attribute) and target.attr.endswith("_custom_object"):
+                    custom_calls[id(target)] = node
+                # asyncio.to_thread(api.method, group=..., plural=...)
+                for argument in node.args[:1]:
+                    if isinstance(argument, ast.Attribute) and argument.attr.endswith(
+                        "_custom_object"
+                    ):
+                        custom_calls[id(argument)] = node
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in _API_METHODS:
+                if node.attr.endswith("_custom_object"):
+                    call = custom_calls[id(node)]
+                    found.add(
+                        (
+                            node.attr,
+                            _keyword_value(call, "group", module),
+                            _keyword_value(call, "plural", module),
+                        )
+                    )
+                else:
+                    found.add((node.attr, None, None))
+    return found
+
+
+def _grants(role: dict) -> set[tuple[str, str, str]]:
+    """Every (apiGroup, resource, verb) a Role or ClusterRole grants."""
+    return {
+        (group, resource, verb)
+        for rule in role.get("rules", [])
+        for group in rule.get("apiGroups", [""])
+        for resource in rule.get("resources", [])
+        for verb in rule.get("verbs", [])
+    }
