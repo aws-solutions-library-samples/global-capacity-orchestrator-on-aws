@@ -3446,3 +3446,50 @@ class TestRegionalApiEndpointCache:
         client.get_regional_api_endpoint("us-east-1")
 
         assert cfn.describe_stacks.call_count == 2
+
+
+class TestJobStatusFilterVocabulary:
+    """`succeeded` is sent as the `completed` the server filters on (DOC-1).
+
+    The CLI (JobInfo, `--status` choices) and the API's own
+    `computed_status` call a finished Job `succeeded`, but
+    `GET /api/v1/jobs?status=` and the bulk-delete filter compare against
+    the manifest processor's `_get_job_status`, which returns `completed`,
+    so `gco jobs list --status succeeded` matched nothing.
+    """
+
+    @staticmethod
+    def _client():
+        from cli.aws_client import GCOAWSClient
+        from cli.config import GCOConfig
+
+        with patch("cli.aws_client.boto3.Session"):
+            client = GCOAWSClient(GCOConfig())
+        response = MagicMock(ok=True, status_code=200)
+        response.json.return_value = {"jobs": []}
+        client.make_authenticated_request = MagicMock(return_value=response)
+        return client
+
+    @pytest.mark.parametrize(
+        ("status", "sent"),
+        [("succeeded", "completed"), ("running", "running"), ("pending", "pending")],
+    )
+    def test_regional_listing_sends_the_server_status(self, status, sent):
+        client = self._client()
+        client.get_jobs(region="us-east-1", status=status)
+        path = client.make_authenticated_request.call_args.kwargs["path"]
+        assert path == f"/api/v1/jobs?status={sent}"
+
+    def test_global_listing_sends_the_server_status_and_encodes_its_query(self):
+        client = self._client()
+        client.get_global_jobs(namespace="team&x=1", status="succeeded", limit=5)
+        path = client.make_authenticated_request.call_args.kwargs["path"]
+        assert path == "/api/v1/global/jobs?limit=5&namespace=team%26x%3D1&status=completed"
+
+    @pytest.mark.parametrize(("status", "sent"), [("succeeded", "completed"), ("failed", "failed")])
+    def test_bulk_deletes_send_the_server_status(self, status, sent):
+        client = self._client()
+        client.bulk_delete_jobs(status=status, region="us-east-1")
+        assert client.make_authenticated_request.call_args.kwargs["body"]["status"] == sent
+        client.bulk_delete_global(status=status)
+        assert client.make_authenticated_request.call_args.kwargs["body"]["status"] == sent

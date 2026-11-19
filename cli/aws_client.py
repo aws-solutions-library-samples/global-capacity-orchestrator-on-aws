@@ -270,6 +270,18 @@ def checked_api_sub_path(path: str) -> str:
     return path
 
 
+#: ``gco jobs`` reports a finished Job as ``succeeded`` (``JobInfo``, the
+#: ``--status`` choices, the API's own ``computed_status``), but the job
+#: listing's ``status`` filter and the bulk-delete filter compare against the
+#: manifest processor's ``_get_job_status``, which calls it ``completed``.
+_SERVER_JOB_STATUS = {"succeeded": "completed"}
+
+
+def _server_job_status(status: str) -> str:
+    """Translate a ``gco jobs`` status into the value the server filters on."""
+    return _SERVER_JOB_STATUS.get(status, status)
+
+
 def _job_path(namespace: str, job_name: str) -> str:
     """``/api/v1/jobs/{namespace}/{job_name}`` with both values encoded."""
     return f"/api/v1/jobs/{api_path_segment(namespace)}/{api_path_segment(job_name)}"
@@ -956,7 +968,9 @@ class GCOAWSClient:
         Args:
             region: Specific region to query (None for all regions)
             namespace: Filter by namespace
-            status: Filter by status (running, completed, failed)
+            status: Filter by status: pending, running, succeeded or failed
+                (``succeeded`` is sent as ``completed``, the value the
+                server's filter matches)
             limit: Page size (the API accepts 1-1000; its default is 50)
             offset: Number of jobs to skip, for the following pages
 
@@ -970,7 +984,7 @@ class GCOAWSClient:
         if namespace:
             params["namespace"] = namespace
         if status:
-            params["status"] = status
+            params["status"] = _server_job_status(status)
         if limit is not None:
             params["limit"] = str(limit)
         if offset:
@@ -1120,19 +1134,20 @@ class GCOAWSClient:
 
         Args:
             namespace: Filter by namespace
-            status: Filter by status
+            status: Filter by status: pending, running, succeeded (sent as
+                the server's ``completed``) or failed
             limit: Maximum jobs to return
 
         Returns:
             Aggregated job list with region information
         """
-        params = [f"limit={limit}"]
+        params = {"limit": str(limit)}
         if namespace:
-            params.append(f"namespace={namespace}")
+            params["namespace"] = namespace
         if status:
-            params.append(f"status={status}")
+            params["status"] = _server_job_status(status)
 
-        query_string = f"?{'&'.join(params)}"
+        query_string = f"?{urlencode(params, quote_via=quote)}"
 
         response = self.make_authenticated_request(
             method="GET", path=f"/api/v1/global/jobs{query_string}"
@@ -1181,7 +1196,8 @@ class GCOAWSClient:
 
         Args:
             namespace: Filter by namespace
-            status: Filter by status
+            status: Filter by status (``succeeded`` is sent as the server's
+                ``completed``)
             older_than_days: Delete jobs older than N days
             label_selector: Kubernetes label selector
             dry_run: If True, only return what would be deleted
@@ -1193,7 +1209,7 @@ class GCOAWSClient:
         if namespace:
             body["namespace"] = namespace
         if status:
-            body["status"] = status
+            body["status"] = _server_job_status(status)
         if older_than_days:
             body["older_than_days"] = older_than_days
         if label_selector:
@@ -1357,7 +1373,8 @@ class GCOAWSClient:
 
         Args:
             namespace: Filter by namespace
-            status: Filter by status
+            status: Filter by status (``succeeded`` is sent as the server's
+                ``completed``)
             older_than_days: Delete jobs older than N days
             label_selector: Kubernetes label selector
             region: Target region
@@ -1370,7 +1387,7 @@ class GCOAWSClient:
         if namespace:
             body["namespace"] = namespace
         if status:
-            body["status"] = status
+            body["status"] = _server_job_status(status)
         if older_than_days:
             body["older_than_days"] = older_than_days
         if label_selector:

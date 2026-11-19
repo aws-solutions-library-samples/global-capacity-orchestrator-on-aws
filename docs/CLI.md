@@ -3609,7 +3609,7 @@ gco jobs list [OPTIONS]
 | `--region` | `-r` | Target region (required unless --all-regions) |
 | `--all-regions` | `-a` | Query all regions via global API |
 | `--namespace` | `-n` | Filter by namespace |
-| `--status` | `-s` | Filter by status |
+| `--status` | `-s` | Filter by status: `pending`, `running`, `succeeded` or `failed` (the status `gco jobs get` reports) |
 | `--limit` | `-l` | Maximum jobs to return (default: 50, at least 1). With `--region` the CLI reads as many API pages (up to 1000 jobs each) as that takes, newest first |
 
 With `--region`, a read that fails (an HTTP error from the regional API, a Region
@@ -3927,7 +3927,7 @@ gco jobs bulk-delete [OPTIONS]
 | `--region` | `-r` | Target region (required unless --all-regions) |
 | `--all-regions` | `-a` | Delete across all regions |
 | `--namespace` | `-n` | Filter by namespace |
-| `--status` | `-s` | Filter by status |
+| `--status` | `-s` | Filter by status: `succeeded` (or its synonym `completed`) or `failed` |
 | `--older-than-days` | `-d` | Delete jobs older than N days |
 | `--label-selector` | `-l` | Kubernetes label selector |
 | `--dry-run` | | Only show what would be deleted (default) |
