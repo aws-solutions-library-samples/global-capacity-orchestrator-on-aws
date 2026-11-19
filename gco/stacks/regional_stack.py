@@ -3581,6 +3581,8 @@ class GCORegionalStack(Stack):
         )
         reader.node.add_dependency(self.aws_custom_resource_role)
         bucket_arn = f"arn:{self.partition}:s3:::{reader.get_response_field('Parameter.Value')}"
+        # The MCP server role lists the same bucket (list_models).
+        self.model_bucket_arn = bucket_arn
 
         self.service_account_role.add_to_policy(
             iam.PolicyStatement(
@@ -7914,32 +7916,27 @@ class GCORegionalStack(Stack):
         )
 
     def _create_mcp_role(self) -> None:
-        """Create dedicated IAM role for the MCP server.
+        """Create the IAM role the MCP server and the processes it starts run as.
 
-        The MCP server exposes GCO CLI tools to LLM agents. Without a dedicated
-        role, the server would inherit the full ambient credentials of the user
-        who launches it (often an administrator). This method creates a
-        least-privilege role that the MCP server can assume at startup via
-        ``GCO_MCP_ROLE_ARN``.
+        The MCP server exposes GCO CLI tools to LLM agents. With
+        ``GCO_MCP_ROLE_ARN`` set to this role (the ``McpServerRoleArn``
+        output), the server assumes it at startup and every ``gco`` and
+        ``kubectl`` process it starts runs as the role rather than with the
+        ambient credentials of whoever launched the server.
 
-        Permissions are scoped to the minimum needed by the tools exposed:
+        The permissions cover the tools the server registers with no
+        ``GCO_ENABLE_*`` flag, as ``gco/stacks/mcp_role_permissions.py``
+        derives them: the read-only AWS calls behind those tools,
+        ``execute-api:Invoke`` on the GCO APIs, and job submission to the
+        regional job queues. No statement lets the role assume or pass a role,
+        so CDK's bootstrap roles are out of its reach, and it cannot write a
+        stack, an image, a model or a bucket object. An EKS access entry gives
+        it read-only Kubernetes access to this Region's cluster.
 
-        - ``eks:DescribeCluster`` on this regional EKS cluster ARN only.
-        - ``s3:GetObject`` on model weights buckets. The model bucket lives in
-          the global stack, so we scope to the same name pattern used by the
-          service account role (``{project_name}-*``). This is a deliberate
-          compromise: a precise cross-stack ARN export would force a tight
-          dependency on the global stack, and cdk-nag will flag it anyway
-          because the bucket name is auto-generated.
-        - ``cloudwatch:GetMetricData`` / ``cloudwatch:ListMetrics``. These APIs
-          do not support resource-level IAM, so wildcard is required. Read-only.
-        - ``sqs:SendMessage`` scoped to this region's job queue ARN only.
-
-        The trust policy uses ``AccountRootPrincipal`` so any IAM user/role in
-        the account can assume it (gated by an explicit sts:AssumeRole
-        permission on the caller — standard AWS behavior). Operators who want
-        to restrict assumption further should add an external-id or principal
-        condition to the trust policy after deployment.
+        The trust policy names the account (``AccountRootPrincipal``), which
+        leaves the decision to IAM: a principal in the account can assume the
+        role only when its own identity policy allows ``sts:AssumeRole`` on the
+        role's ARN, so grant that to the people and hosts that run the server.
 
         Operators can disable this component entirely by setting
         ``mcp_server.enabled`` to ``false`` in cdk.json.
@@ -7949,65 +7946,66 @@ class GCORegionalStack(Stack):
         ):
             return
 
+        from gco.stacks.mcp_role_permissions import (
+            MCP_EKS_ACCESS_POLICY,
+            MCP_KUBERNETES_GROUP,
+            McpRoleScope,
+            mcp_server_role_statements,
+            wildcard_resources,
+        )
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
         project_name = self.config.get_project_name()
+        workload_regions = tuple(self.config.get_regions())
+        statements = mcp_server_role_statements(
+            McpRoleScope(
+                partition=self.partition,
+                account=self.account,
+                project_name=project_name,
+                global_region=self.config.get_global_region(),
+                api_regions=tuple(
+                    sorted({self.config.get_api_gateway_region(), *workload_regions})
+                ),
+                workload_regions=workload_regions,
+                model_bucket_arn=self.model_bucket_arn,
+            )
+        )
 
         self.mcp_server_role = iam.Role(
             self,
             "McpServerRole",
             assumed_by=iam.AccountRootPrincipal(),
             description=(
-                "Least-privilege role assumed by the GCO MCP server at startup. "
-                "Grants only the permissions needed by MCP tools: eks:DescribeCluster, "
-                "s3:GetObject on model buckets, cloudwatch read-only metrics, and "
-                "sqs:SendMessage to the regional job queue."
+                "Role the GCO MCP server and its gco and kubectl processes run as "
+                "(GCO_MCP_ROLE_ARN): read-only AWS access for the default tools, "
+                "execute-api:Invoke on the GCO APIs and job queue submission. "
+                "No role assumption or stack, image or model writes."
             ),
             max_session_duration=Duration.hours(12),
         )
+        for statement in statements:
+            self.mcp_server_role.add_to_policy(statement)
 
-        # eks:DescribeCluster on this region's cluster only
-        self.mcp_server_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["eks:DescribeCluster"],
-                resources=[self.cluster.cluster_arn],
-            )
-        )
-
-        # s3:GetObject on model weights buckets. Bucket name is auto-generated
-        # in the global stack, so we match the same prefix pattern used by the
-        # service account role.
-        self.mcp_server_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["s3:GetObject", "s3:ListBucket"],
-                resources=[
-                    f"arn:{self.partition}:s3:::{project_name}-*",
-                    f"arn:{self.partition}:s3:::{project_name}-*/*",
-                ],
-            )
-        )
-
-        # CloudWatch read-only metrics APIs. These APIs do not support
-        # resource-level IAM so wildcard is required.
-        self.mcp_server_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "cloudwatch:GetMetricData",
-                    "cloudwatch:GetMetricStatistics",
-                    "cloudwatch:ListMetrics",
-                ],
-                resources=["*"],
-            )
-        )
-
-        # sqs:SendMessage scoped to the regional job queue only
-        self.mcp_server_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["sqs:SendMessage", "sqs:GetQueueUrl", "sqs:GetQueueAttributes"],
-                resources=[self.job_queue.queue_arn],
-            )
+        # Read-only Kubernetes access to this Region's cluster for the
+        # kubectl-backed default tools: AmazonEKSViewPolicy (no Secrets, exec,
+        # port-forward or writes) plus the group 02-rbac.yaml binds to reading
+        # nodes and NodePools, which the view policy does not cover.
+        eks_l1.CfnAccessEntry(
+            self,
+            "McpServerAccessEntry",
+            cluster_name=self.cluster.cluster_name,
+            principal_arn=self.mcp_server_role.role_arn,
+            type="STANDARD",
+            kubernetes_groups=[MCP_KUBERNETES_GROUP],
+            access_policies=[
+                eks_l1.CfnAccessEntry.AccessPolicyProperty(
+                    policy_arn=(
+                        f"arn:{self.partition}:eks::aws:cluster-access-policy/"
+                        f"{MCP_EKS_ACCESS_POLICY}"
+                    ),
+                    access_scope=eks_l1.CfnAccessEntry.AccessScopeProperty(type="cluster"),
+                )
+            ],
         )
 
         # Export the role ARN so operators can set GCO_MCP_ROLE_ARN in their
@@ -8024,28 +8022,26 @@ class GCORegionalStack(Stack):
             export_name=f"{project_name}-mcp-server-role-arn-{self.deployment_region}",
         )
 
-        # cdk-nag suppressions: CloudWatch metrics APIs cannot be scoped.
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
         acknowledge_nag_findings(
             self.mcp_server_role,
             [
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The CloudWatch metrics APIs (GetMetricData, "
-                        "GetMetricStatistics, ListMetrics) do not support "
-                        "resource-level IAM; wildcard resource is required. "
-                        "The S3 permissions use the {project_name}-* prefix "
-                        "pattern because the model weights bucket name is "
-                        "auto-generated by CDK in the global stack and a "
-                        "cross-stack ARN export would create tight stack "
-                        "coupling. All actions are read-only or scoped "
-                        "send-only (SQS)."
+                        "Read-only calls without resource-level permissions (EC2 "
+                        "capacity and zone describes, Pricing, Cost Explorer, "
+                        "CloudWatch metrics, Logs Insights results, ECR repository "
+                        "and registry listings, EFS/FSx describes, SageMaker and "
+                        "Service Quotas listings) use Resource:*. The other "
+                        "wildcards stay inside GCO: <project>-* stacks, clusters and "
+                        "Container Insights log groups, /<project>/ parameters, the "
+                        "<project>/ ECR repositories, the capacity-history table's "
+                        "indexes, the GCO APIs' prod stage paths, and HyperPod, PCS, "
+                        "training-plan, Cognito pool and Bedrock model ARNs, whose "
+                        "names are generated ids. Nothing lets the role assume or "
+                        "pass a role or write a stack, image, model or object."
                     ),
-                    "appliesTo": [
-                        "Resource::*",
-                    ],
+                    "appliesTo": wildcard_resources(statements),
                 },
             ],
         )

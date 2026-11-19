@@ -445,3 +445,42 @@ subjects:
   - kind: ServiceAccount
     name: gco-inference-monitor-sa
     namespace: gco-system
+
+# ─── MCP server role: cluster-wide read the EKS view policy lacks ─────
+# The regional stack gives McpServerRole (GCO_MCP_ROLE_ARN) an EKS access
+# entry with AmazonEKSViewPolicy and this group (gco/stacks/
+# mcp_role_permissions.py MCP_KUBERNETES_GROUP). The view policy covers the
+# namespaced objects the default MCP tools read; nodepools_list /
+# nodepools_describe also read NodePools and cost_workloads reads nodes, which
+# are cluster-scoped. Read only: no Secrets, exec, port-forward or writes.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gco-mcp-server-read
+  labels:
+    app: mcp-server
+    project: gco
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodepools"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gco-mcp-server-read
+  labels:
+    app: mcp-server
+    project: gco
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gco-mcp-server-read
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: gco:mcp-server-read

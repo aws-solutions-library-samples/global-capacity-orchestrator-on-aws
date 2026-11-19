@@ -455,8 +455,8 @@ def add_iam_suppressions(
         regions: List of regional deployment regions (for EKS addon patterns)
         global_region: Global region for SSM parameters and DynamoDB tables
         project_name: Deployment prefix (#139). Every allow-list ARN pattern
-            below (``/<project>/`` SSM tree, ``<project>-*`` DynamoDB tables
-            and S3 buckets) is scoped to this so the suppression matches the
+            below (``/<project>/`` SSM tree, ``<project>-*`` DynamoDB tables)
+            is scoped to this so the suppression matches the
             deployment's actual, project-scoped resource names. Defaults to
             ``"gco"`` so the rendered patterns are byte-for-byte identical to
             the pre-#139 literals for the stock deployment.
@@ -524,19 +524,10 @@ def add_iam_suppressions(
             ]
         )
 
-    # Add S3 wildcard patterns for the project's buckets. CDK auto-generates
-    # some bucket names from the stack name (``<project_name>-<region>``), and
-    # the always-on buckets use explicit ``<project_name>-...`` names, so a
-    # single ``<project_name>-*`` prefix covers both.
-    applies_to.extend(
-        [
-            f"Resource::arn:<AWS::Partition>:s3:::{project_name}-*",
-            f"Resource::arn:<AWS::Partition>:s3:::{project_name}-*/*",
-        ]
-    )
-
-    # KMS wildcard scoped to S3 via condition for model weights bucket decryption
-    applies_to.append("Resource::arn:<AWS::Partition>:kms:*:<AWS::AccountId>:key/*")
+    # No stack grants S3 on a ``<project_name>-*`` bucket pattern or KMS on
+    # ``key/*`` any more: the workload role reads the buckets it uses by their
+    # resolved names and the MCP server role lists the model bucket only, so
+    # neither pattern is acknowledged.
 
     acknowledge_nag_findings(
         stack,
@@ -571,9 +562,8 @@ def add_iam_suppressions(
                     "dynamic Kubernetes resources, (2) Custom resource providers to invoke Lambda versions, "
                     "(3) SSM parameter access for cross-region coordination, (4) EKS addon management, "
                     "(5) VPC Flow Logs to write to CloudWatch, (6) DynamoDB GSI access for the job "
-                    "queue, templates, and webhooks tables, (7) S3 access for model "
-                    "weights bucket (auto-generated name). All wildcards are scoped to specific "
-                    "patterns. (8) KMS decrypt scoped to S3 via condition for model weights bucket."
+                    "queue, templates, and webhooks tables. All wildcards are scoped to specific "
+                    "patterns."
                 ),
                 applies_to=applies_to,
             ),

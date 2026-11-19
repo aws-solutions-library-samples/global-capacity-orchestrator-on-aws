@@ -32,7 +32,9 @@ that access:
 - **GCO's own roles** carry what they call: the cross-region aggregator's role
   (named in each bridge's resource policy as well), the analytics SageMaker
   execution role (`/api/v1/*` and `/inference/*` on the global API) and the
-  MCP server role.
+  MCP server role (`/api/v1/*` and `/inference/*` on the global API and every
+  regional bridge; see
+  [gco_mcp/README.md → IAM role](../../gco_mcp/README.md#iam-role-gco_mcp_role_arn)).
 - **Applications and teams** get the narrower templates below.
 
 ## Policy Templates
