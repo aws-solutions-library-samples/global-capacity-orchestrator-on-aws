@@ -463,9 +463,10 @@ Checks performed:
 - No orphaned retained analytics resources are left from a previous
   `retain`-policy destroy: a Studio EFS file system or Cognito user pool
   that a deleted `{project}-analytics` stack skipped on delete
-  (CloudFormation lists a deleted stack's resources for 90 days), or a file
+  (CloudFormation lists a deleted stack's resources for 90 days), a file
   system tagged `Name={project}-analytics/StudioEfs` (the tag CDK gives
-  it) or `gco:analytics:managed=true` with `gco:project={project}`. The live
+  it), or a file system or user pool tagged `gco:analytics:managed=true`
+  with `gco:project={project}` (the tags the analytics stack gives both). The live
   stack's resources are never reported. The remediation lists the delete
   commands in order, with `--region`: access points and mount targets
   before the file system, hosted UI domains before the user pool. When the

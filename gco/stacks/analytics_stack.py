@@ -33,6 +33,7 @@ from aws_cdk import (
     Duration,
     RemovalPolicy,
     Stack,
+    Tags,
 )
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_ec2 as ec2
@@ -344,6 +345,19 @@ class GCOAnalyticsStack(Stack):
             )
         )
 
+    def _tag_retainable(self, construct: Construct) -> None:
+        """Tag a resource ``removal_policy: retain`` can leave behind as this project's.
+
+        ``gco analytics doctor`` reports a Studio EFS file system or Cognito
+        user pool tagged ``gco:analytics:managed=true`` and
+        ``gco:project=<project>`` as an orphan once no live analytics stack
+        owns it (``cli/analytics_user_mgmt.scan_orphan_analytics_resources``),
+        including after CloudFormation has forgotten the deleted stack. Both
+        resources take tag changes in place.
+        """
+        Tags.of(construct).add("gco:analytics:managed", "true")
+        Tags.of(construct).add("gco:project", self.project_name)
+
     # ==================================================================
     # Studio EFS
     # ==================================================================
@@ -400,6 +414,7 @@ class GCOAnalyticsStack(Stack):
             removal_policy=self.efs_removal,
             security_group=self.studio_efs_security_group,
         )
+        self._tag_retainable(self.studio_efs)
 
     # ==================================================================
     # SageMaker execution role + grants
@@ -1416,6 +1431,7 @@ class GCOAnalyticsStack(Stack):
             standard_threat_protection_mode=(cognito.StandardThreatProtectionMode.NO_ENFORCEMENT),
             removal_policy=self.cognito_removal,
         )
+        self._tag_retainable(self.cognito_pool)
 
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
