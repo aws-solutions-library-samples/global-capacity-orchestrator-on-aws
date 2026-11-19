@@ -275,7 +275,11 @@ aws cloudformation delete-stack \
 
 **Causes**:
 
-- A Helm chart task exceeded its 14-minute Lambda budget or the 2-hour state-machine budget
+- A Helm chart task ran out of time on every attempt, or the whole convergence ran out of its 2-hour
+  state-machine budget. Each chart is one Helm installer invocation: Helm's own `--timeout` (the
+  chart's `wait_timeout`, 10 minutes by default) inside a 13-minute process cap
+  (`HELM_CMD_TIMEOUT_SECONDS`, 780) and the 15-minute Lambda limit, and the state machine retries
+  a failed chart up to four times
 - VPC networking or DNS prevented a Lambda from reaching EKS/AWS APIs
 - EKS authentication or access-entry failures
 - A Kubernetes resource never became ready
