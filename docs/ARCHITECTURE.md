@@ -633,7 +633,11 @@ applier and cluster administrators included:
   it cannot be made to adopt an object it never created, and the
   `gco.io/endpoint` label on the objects it manages, so none of them can be
   relabelled for another endpoint, which the monitor would then neither repair
-  nor delete with its own endpoint.
+  nor delete with its own endpoint. The same holds for their `project` label:
+  with `gco.io/type: inference` it is the provenance label the monitor checks
+  before it deletes a stale object of an earlier lifecycle of the endpoint, so
+  stripping it would leave the old object running and keep the new lifecycle
+  from taking over its name.
 - Only cert-manager's controller may create or update
   `gco-inference/gco-inference-tls`. Nobody can plant that Secret, with a
   `ca.crt` every PD proxy would trust, before cert-manager first issues it.
