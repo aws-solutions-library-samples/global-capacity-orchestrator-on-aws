@@ -37,7 +37,9 @@ def list_jobs(
     """List jobs across GCO clusters.
 
     Args:
-        region: AWS region (e.g. us-east-1). If omitted, lists across all regions.
+        region: AWS region (e.g. us-east-1). If omitted, lists across all regions;
+            a region that cannot be read is listed under ``errors`` and fails
+            the call, with the other regions' jobs returned under ``output``.
         namespace: Filter by Kubernetes namespace.
         status: Filter by job status: pending, running, succeeded, or failed
             (the values ``gco jobs list --status`` accepts).

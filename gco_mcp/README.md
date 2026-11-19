@@ -629,6 +629,7 @@ Each regional stack creates `McpServerRole` and exports its ARN as the `McpServe
 | Cost Explorer reads | No resource-level permissions | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_allocation_status`, `fleet_status` |
 | ECR reads | `<project>/*` repositories; the repository and registry listings are account-wide | `images_list`, `images_tags`, `images_describe`, `images_orphans`, `images_mirror_plan`, `images_mirror_status`, `images_replication_get`, `images_replication_status`, `images_lifecycle_get` |
 | EFS and FSx describes, DynamoDB `Query` on `<project>-capacity-history`, Cognito user pool metadata | Describes and listings; no Cognito users | `list_file_systems`, `files_get`, `files_access_points`, `capacity_history_*`, `analytics_status`, `analytics_doctor` |
+| DynamoDB `Scan` | `<project>-inference-endpoints` in the global Region | `images_orphans` (the images every inference endpoint names), `list_inference_endpoints` |
 
 No statement lets the role assume or pass a role, so it cannot use the CDK bootstrap roles that deploy, destroy and bootstrap need, and it writes no stack, image, model or bucket object. Every gated tool that deploys, destroys, builds, pushes, uploads, deletes or buys capacity, and these default tools, need your own credentials (unset `GCO_MCP_ROLE_ARN`) or a role you extend with the permission:
 

@@ -1035,7 +1035,13 @@ class TestVectorDemoCorpusDriver:
     """The vector precondition ingests the documented way and reverts exactly."""
 
     def _driver(self, session=None):
-        return drivers.VectorDemoCorpus(repo_root=REPO_ROOT, session=session, region="us-east-1")
+        return drivers.VectorDemoCorpus(
+            repo_root=REPO_ROOT,
+            session=session,
+            region="us-east-1",
+            project_name="acme",
+            global_region="eu-west-1",
+        )
 
     def test_create_runs_the_documented_command_and_records_keys(self, monkeypatch) -> None:
         import json as _json
@@ -1118,9 +1124,11 @@ class TestVectorDemoCorpusDriver:
             def client(self, service, region_name=None):
                 return fake_dynamo if service == "dynamodb" else FakeS3()
 
+        built: list[dict] = []
+
         class FakeClient:
-            def __init__(self, query_region=None):
-                pass
+            def __init__(self, **kwargs):
+                built.append(kwargs)
 
             def _resolve_table_name(self):
                 return "gco-vector-store"
@@ -1137,6 +1145,12 @@ class TestVectorDemoCorpusDriver:
         driver.uploaded = ["vector-corpus/a.md", "vector-corpus/b.md"]
         driver.destroy()
 
+        # The names resolve for the run's project and global Region, as
+        # `gco vector ingest --demo` resolved them from the CLI config; from
+        # the environment alone a non-default deployment left its corpus behind.
+        assert built == [
+            {"project_name": "acme", "global_region": "eu-west-1", "query_region": "us-east-1"}
+        ]
         doc_ids = [
             request["DeleteRequest"]["Key"]["doc_id"]["S"]
             for batch in deleted_items
@@ -1150,7 +1164,7 @@ class TestVectorDemoCorpusDriver:
 
     def test_destroy_refuses_a_changed_bucket(self, monkeypatch) -> None:
         class FakeClient:
-            def __init__(self, query_region=None):
+            def __init__(self, **_kwargs):
                 pass
 
             def _resolve_table_name(self):
@@ -2642,7 +2656,9 @@ def _live_ctx(session=None, *, run_id: str = "run-1"):
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        settings=SimpleNamespace(repo_root=REPO_ROOT, run_id=run_id), session=session
+        settings=SimpleNamespace(repo_root=REPO_ROOT, run_id=run_id),
+        session=session,
+        config=SimpleNamespace(project_name="gco", global_region="us-east-2"),
     )
 
 
@@ -3075,8 +3091,10 @@ class TestRunOneExample:
         events: list[str] = []
 
         class FakeCorpus:
-            def __init__(self, *, repo_root, session, region):
+            def __init__(self, *, repo_root, session, region, project_name, global_region):
                 assert (repo_root, session, region) == (REPO_ROOT, "session", "us-east-1")
+                # The run's CLI config, which `gco vector ingest --demo` resolves from.
+                assert (project_name, global_region) == ("gco", "us-east-2")
 
             def create(self):
                 events.append("create")

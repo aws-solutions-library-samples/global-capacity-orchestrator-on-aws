@@ -105,6 +105,7 @@ from gco.job_admission import (
     hyperpod_routing,
     parse_cpu_millicores,
     parse_memory_bytes,
+    pod_tolerations,
     resource_totals,
     within_nesting_depth,
 )
@@ -476,9 +477,11 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
     A TrainJob has no single pod spec: checks 2-5 run over its decomposition
     (synthetic ``spec.trainer`` view plus every pod spec embedded in
     ``runtimePatches`` — see ``manifest_processor.TrainJobPodSpecs``), with
-    the trainer view's resources counted once per ``numNodes`` for check 5
-    and accelerator tolerations unioned across views for the toleration
-    check.
+    the trainer view's resources counted once per ``numNodes`` for check 5,
+    accelerator requests unioned across views for the toleration check,
+    and the tolerations those its pod templates carry once Trainer merges
+    the patches (``gco.job_admission.pod_tolerations``, shared with the
+    REST path).
 
     Before any of these, the manifest must nest no deeper than
     ``YAML_MAX_DEPTH`` levels (``yaml_max_depth``, default 50), checked by
@@ -549,14 +552,15 @@ def validate_manifest(m: dict[str, Any]) -> tuple[bool, str]:
         # stay Pending forever on tainted accelerator nodes. For a TrainJob the
         # request usually lives in spec.trainer.resourcesPerNode while the
         # toleration can only be expressed through a runtimePatches pod spec,
-        # so requests and tolerations are each unioned across every view
-        # before matching.
+        # so requests are unioned across every view, and the tolerations are
+        # those the pod templates carry once Trainer merges the patches (a
+        # later patch's list replaces an earlier one for the same replicated
+        # job). One definition with the REST path: pod_tolerations.
         if REQUIRE_ACCELERATOR_TOLERATION:
             requested_taints: set[str] = set()
-            tolerations: list[dict[str, Any]] = []
             for pod_spec, _multiplier in weighted_pod_specs:
                 requested_taints.update(_requested_accelerators(pod_spec))
-                tolerations.extend(pod_spec.get("tolerations", []) or [])
+            tolerations = pod_tolerations(m, [spec for spec, _ in weighted_pod_specs])
             # A workload routed to SageMaker HyperPod nodes meets none of the
             # accelerator taints, only gco.aws/hyperpod: the Kueue queue path
             # has the ResourceFlavor inject that toleration, the node-selector

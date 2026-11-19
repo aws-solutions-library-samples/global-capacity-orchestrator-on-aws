@@ -60,6 +60,17 @@ class TestModelManager:
         ):
             manager._get_bucket_name()
 
+    def test_the_missing_bucket_hint_names_the_projects_global_stack(self):
+        """The deploy hint named gco-global whatever the project was called."""
+        from cli.config import GCOConfig
+
+        manager = ModelManager(config=GCOConfig(project_name="acme"))
+        with (
+            patch("gco.services.aws_ssm.get_ssm_parameter", side_effect=Exception("SSM error")),
+            pytest.raises(RuntimeError, match="'gco stacks deploy acme-global'"),
+        ):
+            manager._get_bucket_name()
+
     # -- _get_s3_client --
 
     def test_get_s3_client(self, manager):

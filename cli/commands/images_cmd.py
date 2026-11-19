@@ -567,7 +567,8 @@ def replication_get(config: Any) -> None:
     formatter = get_output_formatter(config)
     try:
         result = get_image_manager(config).replication_get()
-        if not result:
+        if config.output_format == "table" and not result["policy"]["rules"]:
+            # JSON/YAML keep the document's shape: no rules is `"rules": []`.
             formatter.print_info("No replication policy configured.")
             return
         formatter.print(result)
@@ -585,7 +586,8 @@ def replication_status(config: Any) -> None:
     formatter = get_output_formatter(config)
     try:
         rows = get_image_manager(config).replication_status()
-        if not rows:
+        if config.output_format == "table" and not rows:
+            # JSON/YAML keep the list shape: an empty result is `[]`.
             formatter.print_info("No replication status entries.")
             return
         formatter.print(rows)

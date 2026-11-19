@@ -201,6 +201,14 @@ class TestSearch:
         assert "mission_memory.enabled" in result.output
         assert "mission_memory_unavailable" in result.output
 
+    def test_the_unavailable_hint_names_the_projects_global_stack(self, monkeypatch) -> None:
+        """The deploy hint named gco-global whatever the project was called."""
+        monkeypatch.setenv("GCO_PROJECT_NAME", "acme")
+        _StubStore.raise_on_search = MissionMemoryUnavailableError("table not found")
+        result = _invoke("search", "anything")
+        assert result.exit_code == 1
+        assert "'gco stacks deploy acme-global'" in result.output
+
     def test_hard_error_envelopes_and_exits_1(self) -> None:
         _StubStore.raise_on_search = MissionMemoryError("embedding exploded")
         result = _invoke("search", "anything")

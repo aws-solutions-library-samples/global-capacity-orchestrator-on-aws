@@ -155,6 +155,9 @@ def mcp_server_role_statements(scope: McpRoleScope) -> list[iam.PolicyStatement]
     capacity_table = _arn(
         scope, "dynamodb", scope.global_region, f"table/{project}-capacity-history"
     )
+    inference_endpoints_table = _arn(
+        scope, "dynamodb", scope.global_region, f"table/{project}-inference-endpoints"
+    )
     return [
         # Jobs, queue, templates, webhooks, inference, Slurm, DAG runs, cost
         # reports and health go through the GCO API, which authorizes and
@@ -210,6 +213,10 @@ def mcp_server_role_statements(scope: McpRoleScope) -> list[iam.PolicyStatement]
         iam.PolicyStatement(
             actions=["dynamodb:Query"], resources=[capacity_table, f"{capacity_table}/index/*"]
         ),
+        # images_orphans reads every inference endpoint record for the images
+        # they name (and fails when it cannot); list_inference_endpoints makes
+        # the same scan.
+        iam.PolicyStatement(actions=["dynamodb:Scan"], resources=[inference_endpoints_table]),
         # images_tags, images_describe, images_orphans, images_mirror_*,
         # images_replication_status, images_lifecycle_get.
         iam.PolicyStatement(

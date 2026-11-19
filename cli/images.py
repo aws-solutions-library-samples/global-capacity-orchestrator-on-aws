@@ -49,6 +49,7 @@ from ._image_uri import (
     rewrite_image_uri_for_region as _rewrite_image_uri_for_region,
 )
 from .config import GCOConfig, _load_cdk_json, get_config
+from .costs import PROJECT_TAG_KEY, project_tag_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-11-19T12:23:38Z
@@ -709,15 +710,15 @@ class ImageManager:
         return registry_id, {"rules": rules}
 
     def replication_get(self) -> dict[str, Any]:
-        """Return the current ECR replication configuration, or ``{}``.
+        """Return the registry's ECR replication configuration.
 
-        The historical ``policy`` response key is retained for CLI/API
-        compatibility, but its value now comes from the replication API rather
-        than the unrelated registry-permissions policy API.
+        ``{"registryId": ..., "policy": {"rules": [...]}}``, with an empty
+        ``rules`` list when none are configured. The historical ``policy``
+        response key is retained for CLI/API compatibility, but its value now
+        comes from the replication API rather than the unrelated
+        registry-permissions policy API.
         """
         registry_id, configuration = self._current_replication_configuration(self._ecr_client())
-        if not configuration.get("rules"):
-            return {}
         return {
             "registryId": registry_id,
             "policy": configuration,
@@ -781,7 +782,9 @@ class ImageManager:
         """Create the project repository idempotently with default lifecycle.
 
         ``CreateRepository`` is invoked with ``imageTagMutability=MUTABLE``
-        and ``scanOnPush=True``. If the repository already exists, the
+        and ``scanOnPush=True``, and tags the repository ``Project`` with the
+        value the stacks carry (:func:`cli.costs.project_tag_value`), the tag
+        ``gco costs`` filters on. If the repository already exists, the
         method becomes a no-op for repository creation but still applies
         the default lifecycle policy and the optional ``gco:retain`` tag.
         """
@@ -796,7 +799,7 @@ class ImageManager:
                 imageTagMutability="MUTABLE",
                 imageScanningConfiguration={"scanOnPush": True},
                 tags=[
-                    {"Key": "Project", "Value": self.config.project_name},
+                    {"Key": PROJECT_TAG_KEY, "Value": project_tag_value()},
                 ],
             )
             created = True

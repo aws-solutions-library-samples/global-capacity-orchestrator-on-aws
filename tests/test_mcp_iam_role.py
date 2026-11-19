@@ -52,7 +52,7 @@ NON_READ_ACTIONS = {
     "bedrock:InvokeModel",
     "logs:StartQuery",
 }
-READ_VERBS = ("Describe", "List", "Get", "Search", "Query")
+READ_VERBS = ("Describe", "List", "Get", "Search", "Query", "Scan")
 
 
 def _synth(app: cdk.App, construct_id: str) -> assertions.Template:
@@ -151,6 +151,7 @@ class TestMcpServerRole:
 
         bucket = "arn:<AWS::Partition>:s3:::<ReadModelBucketName5A20EEB7.Parameter.Value>"
         table = arn("dynamodb", "us-east-2", "table/gco-test-capacity-history")
+        endpoints = arn("dynamodb", "us-east-2", "table/gco-test-inference-endpoints")
         log_group = "log-group:/aws/containerinsights/gco-test-*/application"
         expected = {
             (
@@ -211,6 +212,7 @@ class TestMcpServerRole:
             ),
             (frozenset({"s3:ListBucket"}), (bucket,)),
             (frozenset({"dynamodb:Query"}), tuple(sorted([table, f"{table}/index/*"]))),
+            (frozenset({"dynamodb:Scan"}), (endpoints,)),
             (
                 frozenset(
                     {
@@ -413,6 +415,55 @@ class TestMcpRolePermissionsModule:
         assert operations == ["ListServiceQuotas", "ListAWSDefaultServiceQuotas"]
         for operation in operations:
             assert f"servicequotas:{operation}" in UNSCOPED_READ_ACTIONS, operation
+
+    def test_images_orphans_endpoint_reads_are_granted(self, monkeypatch):
+        """Every DynamoDB call ``images_orphans`` makes for the endpoint records is granted.
+
+        The orphan listing collects the images every inference endpoint names
+        and fails when it cannot read them, so on a role without ``dynamodb:Scan``
+        on the endpoints table every ``images_orphans`` call failed.
+        """
+        import boto3
+        from botocore.stub import Stubber
+
+        import gco.services.inference_store as inference_store
+        from cli.config import GCOConfig
+        from cli.images import ImageManager
+
+        config = GCOConfig()
+        resource = boto3.resource("dynamodb", region_name=config.global_region)
+        client = resource.meta.client
+        calls: list[tuple[str, str, str]] = []
+        client.meta.events.register(
+            "before-parameter-build.dynamodb",
+            lambda params, model, **_: calls.append(
+                (model.name, client.meta.region_name, params["TableName"])
+            ),
+        )
+        stubber = Stubber(client)
+        stubber.add_response("scan", {"Items": []})
+        monkeypatch.setattr(inference_store.boto3, "resource", lambda *a, **k: resource)
+        with stubber:
+            assert ImageManager(config, region="us-east-1")._collect_inference_image_refs() == set()
+        stubber.assert_no_pending_responses()
+
+        scope = McpRoleScope(
+            partition="aws",
+            account="123456789012",
+            project_name=config.project_name,
+            global_region=config.global_region,
+            api_regions=(config.global_region,),
+            workload_regions=("us-east-1",),
+            model_bucket_arn="arn:aws:s3:::gco-global-modelbucket-example",
+        )
+        statements = mcp_server_role_statements(scope)
+        assert calls == [("Scan", "us-east-2", "gco-inference-endpoints")]
+        for operation, region, table in calls:
+            arn = f"arn:aws:dynamodb:{region}:123456789012:table/{table}"
+            assert any(
+                f"dynamodb:{operation}" in statement.actions and arn in statement.resources
+                for statement in statements
+            ), (operation, arn)
 
 
 _DEFAULT_TOOLS = (

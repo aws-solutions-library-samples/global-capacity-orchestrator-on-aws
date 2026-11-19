@@ -2440,6 +2440,10 @@ List EFS access points for a file system. Useful for inspecting which
 namespaces have been provisioned and for confirming the POSIX UID/GID
 each access point enforces.
 
+A file system that does not exist has no access points (an empty list, `[]` in
+JSON). Any other failure to read them, such as access denied or throttling,
+prints the error on stderr and exits 1.
+
 ```bash
 gco files access-points FILE_SYSTEM_ID [OPTIONS]
 ```
@@ -2600,6 +2604,10 @@ other `gco images` commands) is a lowercase letter, then lowercase letters and
 digits joined by single dashes, at most 63 characters: it becomes the
 `<project>/NAME` repository, and ECR rejects a name that ends in a dash or
 holds two in a row.
+
+A new repository is tagged `Project` with the value the stacks carry
+(`context.tags.Project` in cdk.json, `GCO` without one), the tag `gco costs`
+filters on.
 
 ```bash
 gco images init NAME [OPTIONS]
@@ -2913,8 +2921,10 @@ gco images replication COMMAND
 **Subcommands:**
 
 - `get` - Print the current ECR replication configuration (the registry's
-  rules, read with `ecr:DescribeRegistry`)
-- `status` - Print per-image replication status across project repos
+  rules, read with `ecr:DescribeRegistry`); with no rules JSON/YAML print the
+  same document with an empty `rules` list
+- `status` - Print per-image replication status across project repos (`[]` in
+  JSON/YAML when there is none)
 - `sync` - Apply the project's standard replication rule (`gco/*` to all deployed regions):
   reads the rules with `ecr:DescribeRegistry`, keeps every rule for other
   repository prefixes, and writes the result with `ecr:PutReplicationConfiguration`
@@ -3669,6 +3679,11 @@ gco jobs list [OPTIONS]
 With `--region`, a read that fails (an HTTP error from the regional API, a Region
 without the regional API bridge, missing credentials) prints the error on stderr and
 exits 1 in every output mode; it is never reported as an empty job list.
+
+With `--all-regions`, the global API reads every Region. Each Region it cannot read
+is listed under `errors` (`{"region", "error"}`) in the JSON output and named on
+stderr in table mode; the jobs of the other Regions are still printed, and the
+command exits 1.
 
 **Example:**
 

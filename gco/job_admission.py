@@ -863,19 +863,23 @@ def check_security_context(
 
 
 def _trainjob_pod_templates(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    """The pod templates a TrainJob's runtime patches set, each with its merged ``nodeSelector``.
+    """The pod templates a TrainJob's runtime patches set, merged the way Trainer merges them.
 
     Kubeflow Trainer applies ``spec.runtimePatches`` in order, each one a
     strategic merge patch onto the runtime's JobSet spec. Replicated jobs merge
     by name, so every patch naming the same replicated job patches the same
-    pod template, and a ``nodeSelector`` merges key by key, the later patch's
-    value winning. Only string values count: the CRD types them as strings,
-    and the API server prunes a null. One entry per replicated job named by any
-    patch, carrying only the ``nodeSelector`` routing reads.
+    pod template. A ``nodeSelector`` merges key by key, the later patch's value
+    winning; only string values count: the CRD types them as strings, and the
+    API server prunes a null. ``tolerations`` has no patch merge key
+    (``+listType=atomic`` in ``PodSpec``), so a patch that sets the list
+    replaces the earlier one, and an empty list sets nothing (the patch type
+    marshals it with ``omitempty``). One entry per replicated job named by any
+    patch, carrying its ``nodeSelector`` and, when a patch set them, its
+    ``tolerations``.
     """
     spec = manifest.get("spec")
     patches = spec.get("runtimePatches") if isinstance(spec, dict) else None
-    templates: dict[str, dict[str, str]] = {}
+    templates: dict[str, dict[str, Any]] = {}
     for patch in patches if isinstance(patches, list) else []:
         replicated_jobs = _nested(
             patch, "trainingRuntimeSpec", "template", "spec", "replicatedJobs"
@@ -883,11 +887,17 @@ def _trainjob_pod_templates(manifest: dict[str, Any]) -> list[dict[str, Any]]:
         for job in replicated_jobs if isinstance(replicated_jobs, list) else []:
             if not isinstance(job, dict):
                 continue
-            selector = templates.setdefault(str(job.get("name")), {})
-            patched = _nested(job, "template", "spec", "template", "spec", "nodeSelector")
+            template = templates.setdefault(str(job.get("name")), {"nodeSelector": {}})
+            pod_spec = _nested(job, "template", "spec", "template", "spec")
+            patched = _nested(pod_spec, "nodeSelector")
             if isinstance(patched, dict):
-                selector.update({k: v for k, v in patched.items() if isinstance(v, str)})
-    return [{"nodeSelector": selector} for selector in templates.values()]
+                template["nodeSelector"].update(
+                    {k: v for k, v in patched.items() if isinstance(v, str)}
+                )
+            tolerations = _nested(pod_spec, "tolerations")
+            if isinstance(tolerations, list) and tolerations:
+                template["tolerations"] = tolerations
+    return list(templates.values())
 
 
 def _nested(node: Any, *keys: str) -> Any:
@@ -932,6 +942,32 @@ def hyperpod_routing(manifest: dict[str, Any], pod_specs: list[dict[str, Any]]) 
     return None
 
 
+def pod_tolerations(
+    manifest: dict[str, Any], pod_specs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The tolerations *manifest*'s pods carry, for matching against node taints.
+
+    For every kind but a TrainJob, those of *pod_specs* (the callers'
+    validation views; one pod spec for those kinds). A TrainJob's pods carry
+    the tolerations Trainer builds from its runtime patches
+    (:func:`_trainjob_pod_templates`): for each pod template the list the last
+    patch naming it set, never a list a later patch replaced, and nothing from
+    a toleration anywhere else in the manifest (the CRD has no other
+    tolerations field and prunes unknown ones). The lists of every pod
+    template are combined, as each patch's were before: which replicated job
+    runs the trainer and takes ``spec.trainer``'s accelerator request is the
+    runtime's choice, and admission does not read the runtime.
+
+    Shared by the REST and SQS paths so the two cannot drift.
+    """
+    if manifest.get("kind") == "TrainJob":
+        pod_specs = _trainjob_pod_templates(manifest)
+    tolerations: list[dict[str, Any]] = []
+    for pod_spec in pod_specs:
+        tolerations.extend(pod_spec.get("tolerations", []) or [])
+    return tolerations
+
+
 def check_tolerations(
     manifest: dict[str, Any], policy: JobValidationPolicy | None = None
 ) -> tuple[bool, str | None]:
@@ -956,8 +992,11 @@ def check_tolerations(
 
     For a TrainJob the accelerator request usually lives in
     ``spec.trainer.resourcesPerNode`` while the toleration can only be expressed
-    through a ``runtimePatches`` pod spec, so the requested set and the
-    tolerations are each unioned across every pod-spec view before matching.
+    through a ``runtimePatches`` pod spec, so the requested set is unioned
+    across every pod-spec view, and the tolerations are those the pod templates
+    carry once Trainer merges the patches (:func:`pod_tolerations`): a later
+    patch that sets tolerations for the same replicated job replaces the
+    earlier list.
 
     *policy* is accepted for signature symmetry with the other checks and is
     unused: which taints exist is a property of how GCO builds nodepools, not of
@@ -978,10 +1017,9 @@ def check_tolerations(
         return True, None
 
     requested: set[str] = set()
-    tolerations: list[dict[str, Any]] = []
     for pod_spec in pod_specs:
         requested.update(requested_accelerators(pod_spec))
-        tolerations.extend(pod_spec.get("tolerations", []) or [])
+    tolerations = pod_tolerations(manifest, pod_specs)
 
     routing = hyperpod_routing(manifest, pod_specs)
     if routing == "queue":

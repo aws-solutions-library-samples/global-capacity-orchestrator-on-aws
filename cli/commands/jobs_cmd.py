@@ -589,7 +589,11 @@ def list_jobs(
     """List jobs in GCO clusters.
 
     You must specify either --region for a specific cluster or --all-regions
-    to query all clusters via the global aggregation API.
+    to query all clusters via the global aggregation API. A region that
+    cannot be read fails the command (exit 1): with --region the error is
+    printed on stderr; with --all-regions the other regions' jobs are still
+    printed and each unreadable region is listed under "errors" (named on
+    stderr in table mode).
 
     Examples:
         gco jobs list --region us-east-1
@@ -606,6 +610,7 @@ def list_jobs(
         formatter.print_info("  Use --all-regions/-a to query all clusters")
         sys.exit(1)
 
+    unread_regions = False
     try:
         if all_regions:
             # Use global aggregation API
@@ -651,6 +656,9 @@ def list_jobs(
                         formatter.print_warning(f"  {err['region']}: {err['error']}")
             else:
                 formatter.print(result)
+            # A region the aggregator could not read is not a region with no
+            # jobs: report the others, then fail like `gco costs workloads`.
+            unread_regions = bool(result.get("errors"))
         else:
             # Query specific region
             jobs_list = job_manager.list_jobs(
@@ -668,6 +676,9 @@ def list_jobs(
 
     except Exception as e:
         formatter.print_error(f"Failed to list jobs: {e}")
+        sys.exit(1)
+
+    if unread_regions:
         sys.exit(1)
 
 
