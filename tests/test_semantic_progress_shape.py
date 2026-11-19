@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 # ``gco_mcp/run_mcp.py`` puts ``gco_mcp/`` on ``sys.path`` at runtime; mirror that
@@ -354,15 +354,15 @@ def test_validate_output_name_round_trips_valid_and_rejects_invalid(
 # not validate the code, so the full range of text exercises it.
 _error_codes = st.text(max_size=64)
 
-# An identifier-like detail key safe to splat through ``**details``. Keys are
-# drawn from ASCII letters and the underscore so every key is a legal keyword
-# name, and "code" is excluded so it cannot collide with the positional
-# ``code`` parameter the builder already binds.
+# An identifier-like detail key to splat through ``**details``. Keys are drawn
+# from ASCII letters and the underscore so every key is a legal keyword name.
+# ``code`` is positional-only in the builder, so a key named ``code`` (or
+# ``metrics``) is fair game and must end up nested under ``details``.
 _detail_keys = st.text(
     alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
     min_size=1,
     max_size=24,
-).filter(lambda key: key != "code")
+)
 
 # Arbitrary detail values: the assorted JSON-ish payloads a failure might
 # attach — strings, ints, finite floats, None, and nested lists/dicts. NaN is
@@ -390,6 +390,9 @@ _details_payloads = st.dictionaries(_detail_keys, _detail_values, max_size=6)
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
 )
 @given(code=_error_codes, details=_details_payloads)
+# A details field named like the builder's ``code`` parameter must not collide
+# with it.
+@example(code="sampling_transport_error", details={"code": "AccessDenied"})
 def test_error_envelope_never_carries_top_level_metrics(
     code: str,
     details: dict[str, object],
