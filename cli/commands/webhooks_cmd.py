@@ -6,9 +6,15 @@ from typing import Any
 import click
 
 from ..config import GCOConfig
-from ..output import confirm, get_output_formatter
+from ..output import confirm, get_output_formatter, prompt
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
+
+
+def _stdin_is_interactive() -> bool:
+    """Whether a person on a terminal can answer a prompt."""
+    stdin = sys.stdin
+    return stdin is not None and stdin.isatty()
 
 
 @click.group()
@@ -144,7 +150,12 @@ def webhooks_get(config: Any, webhook_id: Any, region: Any) -> None:
     "--secret",
     "-s",
     envvar="GCO_WEBHOOK_SECRET",
-    help="Secret for HMAC signature verification (also read from $GCO_WEBHOOK_SECRET)",
+    help=(
+        "Secret for HMAC signature verification. Also read from "
+        "$GCO_WEBHOOK_SECRET; without either, a terminal asks for it with hidden "
+        "input (Enter for none), which keeps it out of shell history and the "
+        "process list. --secret '' registers without one and never asks."
+    ),
 )
 @click.option("--region", "-r", help="Region to use (any region works)")
 @pass_config
@@ -153,11 +164,29 @@ def webhooks_create(
 ) -> None:
     """Register a new webhook for job events.
 
+    The HMAC secret comes from --secret, $GCO_WEBHOOK_SECRET, or, when stdin
+    is a terminal and neither is set, a hidden prompt. Without a terminal
+    (scripts, CI, the MCP server) the command never asks.
+
     Examples:
         gco webhooks create --url https://example.com/webhook -e job.completed -e job.failed
         gco webhooks create -u https://slack.com/webhook -e job.failed -n gco-jobs
+        GCO_WEBHOOK_SECRET=... gco webhooks create -u https://example.com/hook -e job.failed
     """
     formatter = get_output_formatter(config)
+
+    if secret is None and _stdin_is_interactive():
+        # A value typed into the command line lands in shell history and the
+        # process list; a hidden prompt keeps it in neither. stderr keeps the
+        # prompt out of the command's own output in every format.
+        secret = prompt(
+            "Webhook secret for HMAC signing (input hidden; Enter for none)",
+            default="",
+            show_default=False,
+            hide_input=True,
+            confirmation_prompt=True,
+            err=True,
+        )
 
     try:
         from ..aws_client import get_aws_client
@@ -173,7 +202,7 @@ def webhooks_create(
                 "url": url,
                 "events": list(event),
                 "namespace": namespace,
-                "secret": secret,
+                "secret": secret or None,
             },
         )
 

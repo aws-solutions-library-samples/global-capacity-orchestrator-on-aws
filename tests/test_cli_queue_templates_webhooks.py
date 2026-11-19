@@ -13,6 +13,7 @@ import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 
@@ -1080,6 +1081,102 @@ class TestWebhooksCommands:
             assert result.exit_code == 0
             call_kwargs = mock_aws.call_api.call_args.kwargs
             assert call_kwargs["body"]["secret"] == "my-secret-key"
+
+    @staticmethod
+    def _create_webhook(*, interactive, input=None, env=None, extra=()):
+        """Run `webhooks create` with stdin's terminal check pinned."""
+        from cli.main import cli
+
+        runner = CliRunner()
+        with (
+            patch("cli.aws_client.get_aws_client") as mock_client,
+            patch(
+                "cli.commands.webhooks_cmd._stdin_is_interactive",
+                return_value=interactive,
+            ),
+        ):
+            mock_aws = MagicMock()
+            mock_aws.call_api.return_value = {"webhook": {"id": "abc123"}}
+            mock_client.return_value = mock_aws
+            result = runner.invoke(
+                cli,
+                [
+                    "webhooks",
+                    "create",
+                    "--url",
+                    "https://example.com/webhook",
+                    "-e",
+                    "job.completed",
+                    *extra,
+                ],
+                input=input,
+                env=env or {"GCO_WEBHOOK_SECRET": None},
+            )
+        return result, mock_aws
+
+    def test_webhooks_create_prompts_for_a_hidden_secret_on_a_terminal(self):
+        """No --secret and no $GCO_WEBHOOK_SECRET on a terminal: ask, hidden (N42)."""
+        result, mock_aws = self._create_webhook(interactive=True, input="hmac-key\nhmac-key\n")
+
+        assert result.exit_code == 0, result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] == "hmac-key"
+        # The prompt goes to stderr so stdout stays the command's own output,
+        # and hidden input is never echoed.
+        assert "Webhook secret" in result.stderr
+        assert "Webhook secret" not in result.stdout
+        assert "hmac-key" not in result.output
+
+    def test_webhooks_create_empty_prompt_answer_registers_without_a_secret(self):
+        result, mock_aws = self._create_webhook(interactive=True, input="\n\n")
+
+        assert result.exit_code == 0, result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] is None
+
+    def test_webhooks_create_does_not_prompt_without_a_terminal(self):
+        """Scripts and the MCP server (stdin not a TTY) never block on a prompt."""
+        result, mock_aws = self._create_webhook(interactive=False)
+
+        assert result.exit_code == 0, result.output
+        assert "Webhook secret" not in result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] is None
+
+    @pytest.mark.parametrize(
+        ("env", "extra"),
+        [
+            ({"GCO_WEBHOOK_SECRET": "from-env"}, ()),
+            ({"GCO_WEBHOOK_SECRET": None}, ("--secret", "from-flag")),
+        ],
+    )
+    def test_webhooks_create_given_secret_skips_the_prompt(self, env, extra):
+        result, mock_aws = self._create_webhook(interactive=True, env=env, extra=extra)
+
+        assert result.exit_code == 0, result.output
+        assert "Webhook secret" not in result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] in {"from-env", "from-flag"}
+
+    def test_webhooks_create_explicit_empty_secret_skips_the_prompt(self):
+        """`--secret ''` is how a script on a terminal registers without one."""
+        result, mock_aws = self._create_webhook(interactive=True, extra=("--secret", ""))
+
+        assert result.exit_code == 0, result.output
+        assert "Webhook secret" not in result.output
+        assert mock_aws.call_api.call_args.kwargs["body"]["secret"] is None
+
+    @pytest.mark.parametrize(
+        ("stdin", "expected"),
+        [(None, False), (MagicMock(isatty=lambda: False), False)],
+    )
+    def test_stdin_is_interactive_needs_a_terminal(self, stdin, expected):
+        from cli.commands import webhooks_cmd
+
+        with patch.object(webhooks_cmd.sys, "stdin", stdin):
+            assert webhooks_cmd._stdin_is_interactive() is expected
+
+    def test_stdin_is_interactive_on_a_terminal(self):
+        from cli.commands import webhooks_cmd
+
+        with patch.object(webhooks_cmd.sys, "stdin", MagicMock(isatty=lambda: True)):
+            assert webhooks_cmd._stdin_is_interactive() is True
 
     def test_webhooks_create_error(self):
         """Test webhooks create with error."""

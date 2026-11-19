@@ -6954,14 +6954,24 @@ gco webhooks create [OPTIONS]
 | `--url` | `-u` | Webhook URL (required; also read from `$GCO_WEBHOOK_URL`, which keeps a URL that embeds a token off the command line) |
 | `--event` | `-e` | Event type (job.started, job.completed, job.failed), can be repeated |
 | `--namespace` | `-n` | Filter events by namespace |
-| `--secret` | `-s` | HMAC secret for signature verification (also read from `$GCO_WEBHOOK_SECRET`) |
+| `--secret` | `-s` | HMAC secret for signature verification (also read from `$GCO_WEBHOOK_SECRET`; see below) |
 | `--region` | `-r` | Region to create in |
+
+A secret typed after `--secret` lands in shell history and in the process list
+while the command runs. Two ways keep it out of both: set `$GCO_WEBHOOK_SECRET`,
+or leave both unset on a terminal, and the command asks for the secret with
+hidden input (typed twice; press Enter at both prompts to register without a
+secret). The prompt is written to stderr, so it never mixes with JSON or YAML
+output. Without a terminal on stdin (scripts, CI, the MCP server) it never asks
+and registers the webhook without a secret. A script that runs on a terminal
+and wants no secret passes `--secret ''`.
 
 **Example:**
 
 ```bash
 gco webhooks create --url https://example.com/webhook -e job.completed -e job.failed
 gco webhooks create -u https://slack.com/webhook -e job.failed -n gco-jobs
+GCO_WEBHOOK_SECRET="$(cat secret.txt)" gco webhooks create -u https://example.com/hook -e job.failed
 ```
 
 #### `gco webhooks delete`
