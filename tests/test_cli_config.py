@@ -238,16 +238,44 @@ class TestGCOConfigSave:
         assert data["verbose"] is True
 
     def test_save_creates_directory(self, tmp_path):
-        """Should create parent directory if it doesn't exist."""
+        """save() created ~/.gco only when no path was passed, so an explicit
+        path in a missing directory raised FileNotFoundError (N3)."""
         config = GCOConfig()
-        config_path = str(tmp_path / "subdir" / "config.yaml")
+        config_path = tmp_path / "subdir" / "config.yaml"
 
-        # save() only creates ~/.gco when config_path is None
-        # When explicit path is given, parent must exist
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        config.save(config_path)
+        config.save(str(config_path))
 
-        assert os.path.exists(config_path)
+        assert config_path.is_file()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_save_writes_an_owner_only_file(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("old: value\n")
+        config_path.chmod(0o644)
+
+        GCOConfig().save(str(config_path))
+
+        assert config_path.stat().st_mode & 0o777 == 0o600
+        assert "old" not in config_path.read_text()
+
+    def test_config_init_on_a_fresh_home(self, tmp_path, monkeypatch):
+        """`gco config-cmd init` is often the first command a new user runs; it
+        crashed with FileNotFoundError when ~/.gco did not exist yet (N3)."""
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(tmp_path)
+
+        result = CliRunner().invoke(cli, ["config-cmd", "init"])
+
+        assert result.exit_code == 0, result.output
+        config_path = home / ".gco" / "config.yaml"
+        assert config_path.is_file()
+        assert f"Configuration saved to {config_path}" in result.output
 
     def test_round_trip(self, tmp_path):
         """Config should survive save/load round-trip."""

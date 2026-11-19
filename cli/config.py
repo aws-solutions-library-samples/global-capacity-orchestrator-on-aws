@@ -260,13 +260,21 @@ class GCOConfig:
         }
 
     def save(self, config_path: str | None = None) -> None:
-        """Save configuration to file."""
-        if config_path is None:
-            config_dir = Path.home() / ".gco"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            config_path = str(config_dir / "config.yaml")
+        """Save configuration to ``config_path`` (default ``~/.gco/config.yaml``).
 
-        with open(config_path, "w", encoding="utf-8") as f:
+        Creates the parent directory when it is missing and leaves the file
+        readable by its owner only.
+        """
+        path = (
+            Path(config_path).expanduser()
+            if config_path is not None
+            else Path.home() / ".gco" / "config.yaml"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
+            # The creation mode does not apply to a file that already exists.
+            os.chmod(path, 0o600)
             yaml.dump(self.to_dict(), f, default_flow_style=False)
 
 
