@@ -165,7 +165,7 @@ def slurm_backends(config: Any, region: str | None) -> None:
 
     Examples:
         gco slurm backends -r us-east-1
-        gco -r us-east-1 slurm backends --output json
+        gco -o json -r us-east-1 slurm backends
     """
     from ..slurm import render_backends
 
@@ -191,7 +191,7 @@ def slurm_status(config: Any, region: str | None, backend: str | None) -> None:
     Examples:
         gco slurm status -r us-east-1
         gco slurm status -r us-east-1 --backend pcs
-        gco -r us-east-1 slurm status --output json
+        gco -o json -r us-east-1 slurm status
     """
     from ..slurm import render_status
 

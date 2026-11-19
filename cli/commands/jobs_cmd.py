@@ -1306,7 +1306,7 @@ def job_policy(config: Any, region: Any) -> None:
 
     Examples:
         gco jobs policy --region us-east-1
-        gco jobs policy -r us-east-1 -o json
+        gco -o json jobs policy -r us-east-1
     """
     formatter = get_output_formatter(config)
     job_manager = get_job_manager(config)
