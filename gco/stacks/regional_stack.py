@@ -1250,12 +1250,6 @@ class GCORegionalStack(Stack):
         # (tracing.enabled + tracing.enable_transaction_search).
         self._create_transaction_search_resource()
 
-        # Create CloudFormation drift detection (daily schedule + SNS alerts)
-        self._create_drift_detection()
-
-        # Create dedicated IAM role for MCP server
-        self._create_mcp_role()
-
         # CloudWatch alarms must live in the Region of their metrics, so this
         # Region's queue, cluster and manifest-processor alarms (and their SNS
         # topic) are created here rather than in the monitoring stack.
@@ -1269,6 +1263,14 @@ class GCORegionalStack(Stack):
             job_queue=self.job_queue,
             job_dlq=self.job_dlq,
         )
+
+        # Create CloudFormation drift detection (daily schedule + SNS alerts).
+        # It grants reads for every resource type the stack holds when it
+        # runs, so only the MCP role and the outputs may come after it.
+        self._create_drift_detection()
+
+        # Create dedicated IAM role for MCP server
+        self._create_mcp_role()
 
         # Export cluster information
         self._create_outputs()

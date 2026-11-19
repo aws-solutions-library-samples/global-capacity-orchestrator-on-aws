@@ -56,6 +56,11 @@ _S3_BUCKET_READS = (
 )
 
 DRIFT_READ_ACTIONS: Mapping[str, tuple[str, ...]] = {
+    "AWS::CloudWatch::Alarm": ("cloudwatch:DescribeAlarms", "cloudwatch:ListTagsForResource"),
+    "AWS::CloudWatch::CompositeAlarm": (
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:ListTagsForResource",
+    ),
     "AWS::EC2::EIP": ("ec2:DescribeAddresses",),
     "AWS::EC2::FlowLog": ("ec2:DescribeFlowLogs",),
     "AWS::EC2::InternetGateway": ("ec2:DescribeInternetGateways",),
