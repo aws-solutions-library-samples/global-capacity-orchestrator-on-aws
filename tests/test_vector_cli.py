@@ -5,16 +5,20 @@
 # keeps query vectors and corpus vectors from ever diverging in request
 # shape.
 
+import functools
 import hashlib
 import io
 import json
 import re
 import subprocess
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 from click.testing import CliRunner
+from hypothesis import given
+from hypothesis import strategies as st
 
 import cli.vector_store as vector_store_module
 from cli.main import cli
@@ -321,6 +325,83 @@ class TestIngest:
         assert summary["chunks_by_source"] == {"vector-corpus/a.txt": 3}
         (_, second) = store._dynamodb_client.scan_requests
         assert second["ExclusiveStartKey"] == {"doc_id": {"S": "x"}}
+
+
+@functools.cache
+def _ingest_lambda() -> ModuleType:
+    """``lambda/vector-ingest/handler.py`` (pure chunking code, loaded once)."""
+    from tests._lambda_imports import load_lambda_module
+
+    return load_lambda_module("vector-ingest")
+
+
+@st.composite
+def _corpus_texts(draw: st.DrawFn) -> str:
+    """Paragraph-shaped text around the chunker's 2,000-character boundaries."""
+    lengths = draw(st.lists(st.integers(min_value=0, max_value=4_500), max_size=12))
+    separators = st.sampled_from(["\n\n", "\r\n\r\n", "\n\n\n", "\n", " \n \n"])
+    text = ""
+    for length in lengths:
+        text += "x" * length + draw(separators)
+    return text + draw(st.text(max_size=40))
+
+
+class TestIngestLimits:
+    """``ingest`` refuses what the ingest Lambda would refuse, before any upload.
+
+    The Lambda fails an object over ``MAX_OBJECT_BYTES`` or with more than
+    ``MAX_CHUNKS_PER_OBJECT`` chunks without writing a chunk, so ``--wait``
+    could only time out on it.
+    """
+
+    def test_the_limits_are_the_ingest_lambdas(self):
+        handler = _ingest_lambda()
+        assert vector_store_module._INGEST_MAX_OBJECT_BYTES == handler.MAX_OBJECT_BYTES
+        assert vector_store_module._INGEST_MAX_CHUNKS == handler.MAX_CHUNKS_PER_OBJECT
+        assert vector_store_module._INGEST_MAX_CHUNK_CHARS == handler.MAX_CHUNK_CHARS
+
+    @given(text=_corpus_texts())
+    def test_the_chunk_count_is_the_ingest_lambdas(self, text):
+        assert vector_store_module._text_chunk_count(text) == len(_ingest_lambda().chunk_text(text))
+
+    @pytest.mark.parametrize(
+        ("name", "body", "message"),
+        [
+            pytest.param(
+                "big.txt",
+                b"x" * (4 * 1024 * 1024 + 1),
+                "4194305 bytes, over the 4194304-byte",
+                id="size",
+            ),
+            pytest.param(
+                "long.md", "\n\n".join(["x" * 1999] * 501).encode(), "501 chunks", id="text-chunks"
+            ),
+            pytest.param("lines.jsonl", b'{"text": "x"}\n' * 501, "501 chunks", id="jsonl-chunks"),
+        ],
+    )
+    def test_refuses_an_oversized_file_before_any_upload(self, tmp_path, name, body, message):
+        small = tmp_path / "small.md"
+        small.write_text("# Small\n\nBody.")
+        doc = tmp_path / name
+        doc.write_bytes(body)
+        store = _client()
+        store._s3_client = _FakeS3()
+
+        with pytest.raises(VectorStoreError, match=re.escape(f"{name}: {message}")):
+            store.ingest([small, doc])
+        assert store._s3_client.puts == []
+
+    def test_a_file_at_the_limits_is_uploaded(self, tmp_path):
+        text = tmp_path / "long.md"
+        text.write_text("\n\n".join(["x" * 1999] * 500))
+        lines = tmp_path / "lines.jsonl"
+        lines.write_bytes(b'{"text": "x"}\n' * 500 + b"\n\n")
+        store = _client()
+        store._s3_client = _FakeS3()
+
+        summary = store.ingest([text, lines])
+
+        assert summary["uploaded"] == ["vector-corpus/long.md", "vector-corpus/lines.jsonl"]
 
 
 class TestSsmResolution:

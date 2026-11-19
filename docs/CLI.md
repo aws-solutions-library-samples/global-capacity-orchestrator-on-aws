@@ -6912,9 +6912,12 @@ characters).
 
 The ingest Lambda refuses an object over 4 MiB, or one that makes more
 than 500 chunks (about 1 MB of text), before any Bedrock call; split a
-longer document into several files. A refused object never becomes
-searchable, so `--wait` times out on it; the Lambda's log names the reason
-(`too_large`), and the S3 event ends up in its dead-letter queue. See [Configure the Vector
+longer document into several files. `gco vector ingest` applies both limits
+before it uploads anything and refuses such a file by name. An object the
+Lambda refuses anyway (an invalid `.jsonl` line, text that is not UTF-8, or
+an object put under the prefix some other way) never becomes searchable, so
+`--wait` times out on it; the Lambda's log names the reason (for example
+`too_large`), and the S3 event ends up in its dead-letter queue. See [Configure the Vector
 Store](CUSTOMIZATION.md#configure-the-vector-store) for every limit.
 
 ```bash
