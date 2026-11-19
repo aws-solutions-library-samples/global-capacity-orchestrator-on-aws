@@ -856,6 +856,14 @@ def test_dcgm_exporter_tolerates_reserved_nvidia_efa_capacity(dcgm_pod_spec) -> 
         assert _tolerates(dcgm_pod_spec["tolerations"], taint), taint
 
 
+def test_dcgm_exporter_header_names_the_pinned_image_tag(dcgm_pod_spec) -> None:
+    """The header's "Pinned to" note names the tag the DaemonSet runs."""
+    (image,) = {container["image"] for container in dcgm_pod_spec["containers"]}
+    header = (_MANIFESTS_DIR / "50-dcgm-exporter.yaml").read_text(encoding="utf-8")
+    pinned = re.findall(r"Pinned to the plain-semver ``([^`]+)`` tag", header)
+    assert pinned == [image.rsplit(":", 1)[1]], (pinned, image)
+
+
 def test_dcgm_exporter_tolerates_only_the_nvidia_pools_taints(dcgm_pod_spec) -> None:
     """No blanket toleration: the selector, not a wildcard, decides placement."""
     assert sorted(

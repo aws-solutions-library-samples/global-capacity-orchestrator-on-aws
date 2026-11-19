@@ -29,13 +29,14 @@
 #     initialize ("the third-party Profiling module returned an unrecoverable
 #     error"); scoping to device fields keeps the dashboard's four panels while
 #     side-stepping that failure.
-#   - Image. Pinned to the plain-semver ``4.8.3`` tag (nvcr.io) — a multi-arch
-#     (amd64/arm64) distroless build, validated on a live T4 on this platform.
-#     The older 4.0.0-4.0.1 image segfaulted on Auto Mode enumerating CPU
-#     topology (GetCpuHierarchy); 4.8.3 is well past that. The bare-semver tag
-#     is deliberate: it lets the monthly dependency scan (dependency-scan.sh)
-#     track this image for drift through its generic image check — the earlier
-#     compound ``X.Y.Z-A.B.C-ubuntu22.04`` tag was invisible to that scan.
+#   - Image. Pinned to the plain-semver ``4.8.4`` tag (nvcr.io) — a multi-arch
+#     (amd64/arm64) distroless build. Its predecessor 4.8.3 was validated on a
+#     live T4 on this platform. The older 4.0.0-4.0.1 image segfaulted on Auto
+#     Mode enumerating CPU topology (GetCpuHierarchy); 4.8.x is well past that.
+#     The bare-semver tag is deliberate: it lets the monthly dependency scan
+#     (dependency-scan.sh) track this image for drift through its generic
+#     image check — the earlier compound ``X.Y.Z-A.B.C-ubuntu22.04`` tag was
+#     invisible to that scan.
 #
 # Only applied when cdk.json cluster_observability.enabled = true: GCORegional
 # Stack substitutes {{CLUSTER_OBSERVABILITY_ENABLED}} only then, so when
