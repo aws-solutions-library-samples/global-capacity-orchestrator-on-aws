@@ -455,9 +455,12 @@ SRP flow explained:
 4. CLI sends the `IdToken` in the `Authorization` header to
    `/studio/login`. API Gateway's Cognito authorizer validates the
    JWT against the user-pool ARN.
-5. Presigned-URL Lambda looks up the Studio domain, creates the user
-   profile if it doesn't exist, and calls
-   `CreatePresignedDomainUrl` with a 300-second expiry.
+5. Presigned-URL Lambda reads the Studio domain id from its
+   environment and creates the user profile if it doesn't exist
+   (replacing a `Failed` one). While the profile provisions it answers
+   `202` and the CLI polls; a profile it cannot recover is a `409`. Once
+   the profile is `InService` it calls `CreatePresignedDomainUrl` with a
+   300-second expiry.
 6. Lambda returns `{url, expires_in}`; API Gateway returns it to
    the CLI; the CLI prints `url` on its own line.
 

@@ -1498,11 +1498,16 @@ class GCOApiGatewayGlobalStack(Stack):
             authorization_type=apigateway.AuthorizationType.COGNITO,
             authorizer=authorizer,
             request_validator=studio_request_validator,
+            # Every status the presigned-URL Lambda returns (202 while the
+            # caller's Studio profile is provisioning, 409 for a profile it
+            # cannot recover), plus the request validator's 400.
             method_responses=[
                 apigateway.MethodResponse(status_code="200"),
+                apigateway.MethodResponse(status_code="202"),
                 apigateway.MethodResponse(status_code="400"),
                 apigateway.MethodResponse(status_code="401"),
                 apigateway.MethodResponse(status_code="404"),
+                apigateway.MethodResponse(status_code="409"),
                 apigateway.MethodResponse(status_code="500"),
             ],
         )

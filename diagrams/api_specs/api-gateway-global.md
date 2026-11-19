@@ -513,9 +513,11 @@ Authenticated with a Cognito ID token from the Studio user pool rather than SigV
 | Status | Description | Content |
 |---|---|---|
 | `200` | Success; the backend's response is returned unchanged. | — |
+| `202` | Accepted: the caller's SageMaker Studio user profile is still being created or updated (`{"status": "provisioning"}`); retry until the response is 200. | — |
 | `400` | Bad request: rejected by the proxy before forwarding (for example an `X-GCO-Target-Region` header or a base64-encoded body) or by the backend. | — |
 | `401` | Unauthorized: the Cognito ID token is missing, expired or not from the Studio pool. | — |
 | `404` | Not found: the endpoint does not exist in this region or the path is outside the inference serving-path allowlist. | — |
+| `409` | Conflict: the caller's SageMaker Studio user profile is in a failed state the backend cannot recover from (`{"error": "UserProfileFailed"}`); an operator must delete it, and the next login creates it again. | — |
 | `500` | Internal error in the proxy Lambda or the backend. | — |
 
 ## Schemas

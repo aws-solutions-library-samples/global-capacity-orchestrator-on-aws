@@ -188,6 +188,23 @@ class TestAnalyticsApiConfigPresent:
             },
         )
 
+    def test_studio_login_declares_every_status_the_lambda_returns(
+        self, present_template: assertions.Template
+    ) -> None:
+        """``/studio/login`` documents the presigned-URL Lambda's 202 and 409.
+
+        The Lambda answers 202 while the caller's Studio profile provisions
+        and 409 for a profile it cannot recover; the method's responses (and
+        so docs/openapi/api-gateway-global.json) listed neither.
+        """
+        (login,) = [
+            method["Properties"]
+            for method in present_template.find_resources("AWS::ApiGateway::Method").values()
+            if method["Properties"].get("AuthorizationType") == "COGNITO_USER_POOLS"
+        ]
+        statuses = [response["StatusCode"] for response in login["MethodResponses"]]
+        assert statuses == ["200", "202", "400", "401", "404", "409", "500"]
+
     def test_cognito_authorizer_created(self, present_template: assertions.Template) -> None:
         """An authorizer of type ``COGNITO_USER_POOLS`` exists on the REST API."""
         present_template.resource_count_is("AWS::ApiGateway::Authorizer", 1)

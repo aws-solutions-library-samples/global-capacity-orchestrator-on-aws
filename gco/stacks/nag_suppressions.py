@@ -1514,60 +1514,6 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
     )
 
 
-def add_presigned_url_lambda_suppressions(
-    stack: Stack, api_gateway_region: str | None = None
-) -> None:
-    """Add suppressions for the analytics presigned-URL Lambda role.
-
-    The Lambda needs wildcard access to SageMaker domain and user-profile
-    ARNs because ``CreatePresignedDomainUrl``, ``DescribeUserProfile``,
-    and ``CreateUserProfile`` all take ARN shapes that can only be
-    resolved at invoke time from the incoming Cognito username. At synth
-    time, ``domain/*`` and ``user-profile/*/*`` are the tightest literal
-    ARN shapes we can bind in the IAM policy.
-    """
-    region = api_gateway_region or "*"
-    acknowledge_nag_findings(
-        stack,
-        [
-            NagSuppression(
-                id="AwsSolutions-IAM5",
-                reason=(
-                    "The presigned-URL Lambda role uses SageMaker ARN "
-                    "wildcards on ``domain/*`` and ``user-profile/*/*`` "
-                    "because DomainId and UserProfileName are only "
-                    "resolvable at invoke time from the incoming Cognito "
-                    "username. ``ListDomains`` does not support resource-"
-                    "level scoping — the AWS API only accepts Resource::* "
-                    "— so a ``Resource::*`` suppression is required for "
-                    "that specific action. The effective blast radius is "
-                    "a single paginated list call per Lambda invocation "
-                    "against this account's SageMaker control plane in "
-                    "the api-gateway region."
-                ),
-                applies_to=[
-                    "Resource::*",
-                    (
-                        f"Resource::arn:<AWS::Partition>:sagemaker:{region}:<AWS::AccountId>:domain/*"
-                    ),
-                    (
-                        f"Resource::arn:<AWS::Partition>:sagemaker:{region}:<AWS::AccountId>:user-profile/*/*"
-                    ),
-                    # Generic shapes — catch tokenized-region variants
-                    # (``<AWS::Region>``) produced when CDK synthesizes
-                    # the policy without pinning the stack's env region.
-                    (
-                        "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:<AWS::AccountId>:domain/*"
-                    ),
-                    (
-                        "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:<AWS::AccountId>:user-profile/*/*"
-                    ),
-                ],
-            ),
-        ],
-    )
-
-
 def add_emr_serverless_suppressions(stack: Stack) -> None:
     """Add suppressions for EMR Serverless Application findings.
 
@@ -1615,7 +1561,7 @@ def apply_all_suppressions(
         regions: List of regional deployment regions (for dynamic IAM suppression patterns)
         global_region: Global region for SSM parameters (for dynamic IAM suppression patterns)
         api_gateway_region: API Gateway region (for analytics stack — used to
-            scope SageMaker execute-api and presigned-URL Lambda ARN patterns)
+            scope the SageMaker execution role's ARN patterns)
         project_name: Deployment prefix (#139), forwarded to
             ``add_iam_suppressions`` so the IAM allow-list ARN patterns match
             the deployment's project-scoped resource names. Defaults to
@@ -1666,4 +1612,3 @@ def apply_all_suppressions(
         add_emr_serverless_suppressions(stack)
         add_analytics_vpc_suppressions(stack)
         add_analytics_s3_suppressions(stack)
-        add_presigned_url_lambda_suppressions(stack, api_gateway_region=api_gateway_region)

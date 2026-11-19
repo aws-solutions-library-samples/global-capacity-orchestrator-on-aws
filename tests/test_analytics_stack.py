@@ -875,6 +875,51 @@ class TestSageMakerExecutionRole:
             f"attached statements={statements!r}"
         )
 
+    def test_presigned_url_role_acts_only_on_this_studio_domain(self) -> None:
+        """The presigned-URL role's SageMaker grant names this stack's domain.
+
+        The handler reads the domain id from ``STUDIO_DOMAIN_ID`` and never
+        lists domains, so ``ListDomains`` on ``*`` and the ``domain/*`` and
+        ``user-profile/*/*`` wildcards are gone; ``DeleteUserProfile`` is
+        granted because the handler replaces a ``Failed`` profile.
+        """
+        resources = _synth_analytics().to_json()["Resources"]
+        (role_id,) = [
+            logical_id
+            for logical_id, resource in resources.items()
+            if resource["Type"] == "AWS::IAM::Role"
+            and logical_id.startswith("PresignedUrlLambdaRole")
+        ]
+        statements = [
+            statement
+            for resource in resources.values()
+            if resource["Type"] == "AWS::IAM::Policy"
+            and {"Ref": role_id} in resource["Properties"]["Roles"]
+            for statement in resource["Properties"]["PolicyDocument"]["Statement"]
+        ]
+        (sagemaker,) = [
+            statement
+            for statement in statements
+            if any(str(action).startswith("sagemaker:") for action in statement["Action"])
+        ]
+        assert "sagemaker:DeleteUserProfile" in sagemaker["Action"]
+        assert "sagemaker:ListDomains" not in json.dumps(statements)
+        domain = {"Fn::GetAtt": ["StudioDomain", "DomainId"]}
+        rendered = json.dumps(sagemaker["Resource"])
+        assert rendered.count(json.dumps(domain)) == 2, rendered
+        assert ":domain/*" not in rendered and ":user-profile/*/*" not in rendered
+        wildcard_actions = {
+            action
+            for statement in statements
+            if statement["Resource"] == "*"
+            for action in (
+                statement["Action"]
+                if isinstance(statement["Action"], list)
+                else [statement["Action"]]
+            )
+        }
+        assert wildcard_actions == {"xray:PutTraceSegments", "xray:PutTelemetryRecords"}
+
     def test_cluster_shared_arn_reader_reads_only_its_parameter(self) -> None:
         """The cross-Region SSM reader's policy names the one parameter it reads.
 

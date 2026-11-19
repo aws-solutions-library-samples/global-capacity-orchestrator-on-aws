@@ -1323,14 +1323,14 @@ class GCOAnalyticsStack(Stack):
 
         IAM scoping:
 
-        * ``sagemaker:ListDomains`` — no resource-level scoping available;
-          scoped with a documented ``Resource::*`` nag suppression.
         * ``sagemaker:DescribeDomain`` + ``CreatePresignedDomainUrl`` +
-          ``DescribeUserProfile`` + ``CreateUserProfile`` + ``ListTags`` +
-          ``AddTags`` scoped to the domain and user-profile ARN families
-          in this region+account. We cannot pin the ``DomainId`` at synth
-          time because ``list_domains`` runs at invoke time, so the ARN
-          shape includes a wildcard segment covering "any domain id".
+          ``DescribeUserProfile`` + ``CreateUserProfile`` +
+          ``DeleteUserProfile`` + ``ListTags`` + ``AddTags`` on this
+          stack's Studio domain and its user profiles
+          (``user-profile/<domain-id>/*``: a profile is named after the
+          Cognito user and created at first login). ``DeleteUserProfile``
+          lets the handler replace a ``Failed`` profile. The handler reads
+          the domain id from ``STUDIO_DOMAIN_ID``, so it lists no domains.
         * ``iam:PassRole`` on ``SageMaker_Execution_Role.role_arn`` with a
           ``StringEquals iam:PassedToService=sagemaker.amazonaws.com``
           condition so the role can only ever be handed to SageMaker.
@@ -1363,28 +1363,12 @@ class GCOAnalyticsStack(Stack):
             ],
         )
 
-        # ListDomains does not support resource-level scoping (AWS API
-        # constraint). We use Resource::* and document the effective
-        # blast radius in the nag suppression below — one list call per
-        # invocation against the region's SageMaker control plane.
-        self.presigned_url_lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["sagemaker:ListDomains"],
-                resources=["*"],
-            )
-        )
-
-        # Domain + user-profile actions. At synth time we don't know the
-        # DomainId (list_domains is an invoke-time call), so the ARN
-        # wildcards cover "any domain in this region+account" and "any
-        # user profile under any domain in this region+account". The
-        # account is still pinned, so the blast radius is bounded to
-        # this account's SageMaker Studio installation.
-        domain_arn_prefix = f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:domain/*"
-        user_profile_arn_prefix = (
-            f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:user-profile/*/*"
-        )
+        # Domain + user-profile actions on this stack's Studio domain. A
+        # profile is named after the Cognito user and created at first
+        # login, so the profile name is the one wildcard.
+        # DeleteUserProfile lets the handler replace a Failed profile.
+        domain_id = self.studio_domain.attr_domain_id
+        sagemaker_arn_prefix = f"arn:{self.partition}:sagemaker:{self.region}:{self.account}"
         self.presigned_url_lambda_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -1393,10 +1377,14 @@ class GCOAnalyticsStack(Stack):
                     "sagemaker:CreatePresignedDomainUrl",
                     "sagemaker:DescribeUserProfile",
                     "sagemaker:CreateUserProfile",
+                    "sagemaker:DeleteUserProfile",
                     "sagemaker:ListTags",
                     "sagemaker:AddTags",
                 ],
-                resources=[domain_arn_prefix, user_profile_arn_prefix],
+                resources=[
+                    f"{sagemaker_arn_prefix}:domain/{domain_id}",
+                    f"{sagemaker_arn_prefix}:user-profile/{domain_id}/*",
+                ],
             )
         )
 
@@ -1485,29 +1473,17 @@ class GCOAnalyticsStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "sagemaker:ListDomains does not support resource-"
-                        "level scoping — the AWS API only accepts "
-                        "Resource: *. Effective blast radius: a single "
-                        "paginated list call per Lambda invocation "
-                        "against this account's SageMaker control plane "
-                        "in this region. The remaining SageMaker actions "
-                        "(DescribeDomain, CreatePresignedDomainUrl, "
-                        "DescribeUserProfile, CreateUserProfile, "
-                        "ListTags, AddTags) are scoped to the literal "
-                        "arn:<partition>:sagemaker:<region>:<account>:domain/* "
-                        "and arn:<partition>:sagemaker:<region>:<account>:"
-                        "user-profile/*/* ARN families, which is the "
-                        "tightest we can achieve at synth time because "
-                        "DomainId is only resolvable at invoke time."
+                        "The SageMaker profile actions take user-profile/<domain-id>/* "
+                        "on this stack's Studio domain: each profile is named after "
+                        "the Cognito user and created at first login, so its name is "
+                        "known only at invoke time. Resource: * is only on the X-Ray "
+                        "actions that active tracing adds, which take no resource."
                     ),
                     "appliesTo": [
                         "Resource::*",
                         (
-                            "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:<AWS::AccountId>:domain/*"
-                        ),
-                        (
                             "Resource::arn:<AWS::Partition>:sagemaker:<AWS::Region>:"
-                            "<AWS::AccountId>:user-profile/*/*"
+                            "<AWS::AccountId>:user-profile/<StudioDomain.DomainId>/*"
                         ),
                     ],
                 },
