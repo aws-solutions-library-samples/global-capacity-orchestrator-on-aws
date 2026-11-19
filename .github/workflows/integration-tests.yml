@@ -34,7 +34,7 @@
 #   - integration:kind:cost-pipeline              — kind + Calico + pinned kube-prometheus-stack/OpenCost + real cost-monitor report to Floci S3
 #   - integration:kind:examples-smoke             — kind + pinned trainer/mlflow/trust-manager + TrainJob e2e + SAR sweep + mlflow over HTTPS
 #   - integration:kind:platform-addons            — kind + pinned Argo CD/Crossplane/Crossview + repo-server HPA + PR-commit sync + fences + captures
-#   - integration:lambda:imports                  — import each Lambda handler
+#   - integration:lambda:imports                  — import each Lambda handler with only the runtime's packages + what it deploys
 #   - integration:mcp:server                      — pytest tests/test_mcp_integration.py
 #   - integration:pytest:cross-module             — pytest tests/test_integration.py
 #
@@ -319,13 +319,20 @@ jobs:
 
   integration-lambda-imports:
     name: "integration:lambda:imports"
+    # x86_64, the architecture every GCO Python Lambda runs on: the build
+    # action stages kubectl-applier-simple's wheels for manylinux x86_64.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # Several Lambda modules (notably lambda/api-gateway-proxy/proxy_utils.py)
-    # instantiate boto3 clients at module import time, so boto3 needs a
-    # region even though no AWS calls are made. Matches the top-level
-    # AWS_DEFAULT_REGION=us-east-1 variable from the retired GitLab pipeline.
+    # Each handler is imported in an environment of only what it deploys
+    # with: the Lambda runtime's packages, pinned in
+    # .github/config/lambda-python-runtime.txt, plus the files (and, for the
+    # kubectl build and the two images, the requirements.txt) its deployment
+    # ships. The project install below runs the build action and the script;
+    # no handler imports from it. Several Lambda modules (notably
+    # lambda/api-gateway-proxy/proxy_utils.py) instantiate boto3 clients at
+    # module import time, so boto3 needs a region even though no AWS calls
+    # are made.
     env:
       AWS_DEFAULT_REGION: us-east-1
       AWS_REGION: us-east-1
@@ -334,6 +341,12 @@ jobs:
         # /tmp is a quota-limited tmpfs on Ubuntu 26.04 runners; see .github/CI.md.
         run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: ".nvmrc"
+          # Nothing here installs from the root lockfile; the build action's
+          # npm ci of the streaming Lambda fetches its own three packages.
+          package-manager-cache: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version-file: ".python-version"
@@ -342,8 +355,23 @@ jobs:
       - name: Install project
         run: |
           pip install -c requirements-lock.txt -e .
+      - uses: ./.github/actions/build-lambda-package
+      - name: Install uv (builds the per-Lambda import environments)
+        # Dockerfile.dev's UV_VERSION, the repository's one uv pin.
+        run: bash .github/scripts/use-pinned-uv.sh
+      - name: Cache the import environments' wheels
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/uv-cache
+          key: >-
+            lambda-imports-uv-${{ runner.os }}-${{ hashFiles('.python-version',
+            '.github/config/lambda-python-runtime.txt', 'lambda/*/requirements.txt') }}
+          restore-keys: |
+            lambda-imports-uv-${{ runner.os }}-
       - name: Import each Lambda handler
-        run: python3 .github/scripts/verify_lambda_imports.py
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+        run: python3 .github/scripts/verify_lambda_imports.py --require-all
 
   integration-pytest-cross-module:
     name: "integration:pytest:cross-module"

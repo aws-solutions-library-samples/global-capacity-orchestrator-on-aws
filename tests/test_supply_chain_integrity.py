@@ -2433,7 +2433,22 @@ def test_workflows_invoke_behaviorally_tested_runtime_verifiers() -> None:
         ".github/workflows/integration-tests.yml", "Verify pinned toolchain versions"
     )
 
-    assert "python3 .github/scripts/verify_lambda_imports.py" in lambda_step
+    assert "python3 .github/scripts/verify_lambda_imports.py --require-all" in lambda_step
+    # Finding C19: the handlers import from the build action's staged
+    # directories, in uv-built environments whose wheels are cached.
+    lambda_job = yaml.safe_load(_read(".github/workflows/integration-tests.yml"))["jobs"][
+        "integration-lambda-imports"
+    ]
+    steps = [step.get("uses") or step.get("run") or "" for step in lambda_job["steps"]]
+    staged = steps.index("./.github/actions/build-lambda-package")
+    pinned_uv = steps.index("bash .github/scripts/use-pinned-uv.sh")
+    cached = next(i for i, step in enumerate(steps) if step.startswith("actions/cache@"))
+    verified = next(i for i, step in enumerate(steps) if "verify_lambda_imports.py" in step)
+    assert staged < verified and pinned_uv < cached < verified
+    cache = lambda_job["steps"][cached]
+    assert cache["with"]["path"] == "${{ runner.temp }}/uv-cache"
+    assert ".github/config/lambda-python-runtime.txt" in cache["with"]["key"]
+    assert lambda_job["steps"][verified]["env"]["UV_CACHE_DIR"] == cache["with"]["path"]
     assert "verify_container_tool_versions.py helm-installer --image helm-installer:ci" in (
         " ".join(helm_step.split())
     )
@@ -3010,7 +3025,7 @@ def test_ci_installs_uv_at_the_dockerfile_dev_pin() -> None:
             assert not re.search(r"pip install\s+['\"]?uv\b", run), f"{path}: {run}"
             if "use-pinned-uv.sh" in run:
                 installs.append(path.name)
-    assert sorted(installs) == ["integration-tests.yml"] * 3 + ["unit-tests.yml"]
+    assert sorted(installs) == ["integration-tests.yml"] * 4 + ["unit-tests.yml"]
     assert re.search(r"^ARG UV_VERSION=\d+\.\d+\.\d+$", _read("Dockerfile.dev"), re.MULTILINE)
 
 

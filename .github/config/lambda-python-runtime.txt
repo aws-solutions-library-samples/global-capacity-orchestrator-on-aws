@@ -1,0 +1,35 @@
+# The packages the AWS Lambda python3.14 runtime gives handler code: boto3,
+# botocore and the packages they depend on, at the versions the runtime ships
+# in /var/lang/lib/python3.14/site-packages. .github/scripts/verify_lambda_imports.py
+# installs exactly this set (uv, --no-deps) as the base of every Lambda's
+# import environment, so a handler that imports anything else must deploy it.
+#
+# Source: the x86_64 python3.14 base image (public.ecr.aws/lambda/python:3.14)
+# as AWS snapshots it to the python3.14 branch of
+# https://github.com/aws/aws-lambda-base-images; read 2026-11-19 from commit
+# 54901131 ("Update source for python3.14 image"), layer
+# 0291a373473837ff79e1d758bc79a4147d43c9adda3cef90edc4effbc0e8b20d.tar.xz, whose
+# var/lang/lib/python3.14/site-packages holds the *.dist-info directories
+# below. AWS describes the base images as matching the managed runtimes, and
+# notes that the runtime's SDK version moves over time and can differ by Region
+# (https://docs.aws.amazon.com/lambda/latest/dg/lambda-python.html, section
+# "Runtime-included SDK versions"). Every GCO Python Lambda runs on x86_64.
+#
+# Left out on purpose: pip and the runtime's own interface client
+# (awslambdaric, simplejson, snapshot-restore-py). Handlers must not rely on
+# them.
+#
+# Refresh this file when LAMBDA_PYTHON_RUNTIME (gco/stacks/constants.py)
+# changes (tests/test_ci_runtime_verifiers.py holds the line below to it), or
+# to follow a newer runtime build:
+#   docker run --rm --entrypoint pip public.ecr.aws/lambda/python:3.14 list
+# prints the same set.
+#
+# lambda-runtime: python3.14
+boto3==1.43.127
+botocore==1.43.127
+jmespath==1.1.0
+python-dateutil==2.9.0.post0
+s3transfer==0.19.3
+six==1.17.0
+urllib3==2.8.0

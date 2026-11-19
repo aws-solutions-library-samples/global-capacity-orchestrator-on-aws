@@ -46,6 +46,18 @@ than `lambda_.Code.from_asset`; `tests/test_asset_permissions.py` enforces
 this. Only the generated `*-build` directories below use `from_asset`
 directly.
 
+A zipped source directory installs nothing: its `requirements.txt` is not
+installed, so its handler can import only its own files, the standard library and
+the packages the Lambda Python runtime provides (boto3, botocore and their
+dependencies; CI pins the runtime's versions in
+`.github/config/lambda-python-runtime.txt`). A handler that needs anything else
+must ship it, as `kubectl-applier-simple` does through the build step below and
+the two container images (`helm-installer`, `tls-certificate-manager`) do by
+installing their `requirements.txt` in the Dockerfile.
+`integration:lambda:imports` (`.github/scripts/verify_lambda_imports.py`)
+imports every deployed handler in exactly that environment, so a missing
+package fails CI rather than the first invocation in AWS.
+
 The `kubectl-applier-simple` Lambda requires a build step to package dependencies.
 `gco stacks deploy` runs it automatically (`StackManager._build_kubectl_lambda`
 in `cli/stacks.py`); this is the equivalent by hand, pinned by the package's

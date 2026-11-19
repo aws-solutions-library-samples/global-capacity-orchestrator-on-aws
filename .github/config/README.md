@@ -18,6 +18,7 @@ every consumer now points at them explicitly — each section below says where.
 - [`.pip-audit-ignore`](#pip-audit-ignore)
 - [`.trivyignore`](#trivyignore)
 - [`.yamllint.yml`](#yamllintyml)
+- [`lambda-python-runtime.txt`](#lambda-python-runtimetxt)
 - [`semgrep-excluded-rules.txt`](#semgrep-excluded-rulestxt)
 - [Why `.semgrepignore` is not here](#why-semgrepignore-is-not-here)
 
@@ -98,6 +99,22 @@ yamllint rule overrides — line length, indentation, and ignored paths.
 
 - **Used by:** `lint:yamllint:yaml` in `.github/workflows/lint.yml` via
   `yamllint -c .github/config/.yamllint.yml`, and the `yamllint` pre-commit hook.
+
+## `lambda-python-runtime.txt`
+
+The packages the AWS Lambda Python runtime gives handler code (boto3, botocore
+and the packages they depend on), pinned at the versions the runtime ships.
+The header records where they were read (the x86_64 Lambda base image, as AWS
+publishes it to `aws/aws-lambda-base-images`), when, and how to refresh them;
+its `# lambda-runtime:` line names the runtime.
+
+- **Used by:** `integration:lambda:imports` in
+  `.github/workflows/integration-tests.yml`, through
+  `.github/scripts/verify_lambda_imports.py`, which installs exactly this set as
+  the base of every handler's import environment. A package the runtime does not
+  ship belongs in the Lambda's own deployment, not here:
+  `tests/test_ci_runtime_verifiers.py` holds the package names to the runtime's
+  set and the runtime line to `LAMBDA_PYTHON_RUNTIME`.
 
 ## `semgrep-excluded-rules.txt`
 
