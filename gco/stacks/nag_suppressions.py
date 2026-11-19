@@ -330,11 +330,65 @@ def add_eks_suppressions(stack: Stack) -> None:
     )
 
 
-def add_lambda_suppressions(stack: Stack) -> None:
-    """Add suppressions for Lambda-related cdk-nag findings.
+#: The function families every stack-wide Lambda acknowledgment below covers:
+#:
+#: * deployment-time functions: CDK's own custom-resource handlers and provider
+#:   frameworks, GCO's custom-resource handlers, and the functions the Helm
+#:   convergence and teardown state machines call during a stack operation;
+#: * request-path functions, which API Gateway invokes synchronously: the global
+#:   API's proxy, inference streaming proxy and aggregator, each regional
+#:   bridge's proxy and inference streaming proxy, and the analytics stack's
+#:   Studio presigned-URL function;
+#: * scheduled functions, invoked by EventBridge (capacity poller, traffic dial,
+#:   backend TLS certificate manager, drift detection) or by Secrets Manager
+#:   rotation (secret rotation);
+#: * the optional vector-store ingest function, which S3 invokes per object.
+_LAMBDA_RUNTIME_REASON = (
+    "GCO's functions take their runtime from LAMBDA_PYTHON_RUNTIME and "
+    "LAMBDA_NODEJS_RUNTIME in gco/stacks/constants.py, which the monthly dependency scan "
+    "keeps at the newest runtime aws-cdk-lib offers. The functions aws-cdk-lib creates for "
+    "custom resources use the runtime aws-cdk-lib chooses."
+)
+_LAMBDA_CONCURRENCY_REASON = (
+    "Every function's concurrency is bounded without a reservation: deployment-time "
+    "functions run only during stack operations; scheduled functions run once per "
+    "EventBridge interval or secret rotation; API Gateway invokes the request-path "
+    "functions synchronously under the stage's throttling limits "
+    "(api_gateway.throttle_rate_limit and throttle_burst_limit); and the optional "
+    "vector-store ingest function runs once per object written under the corpus prefix. "
+    "Reserving concurrency would take capacity from the account's shared pool. The backend "
+    "TLS certificate manager reserves 1 so two runs never overlap."
+)
+_LAMBDA_DLQ_REASON = (
+    "No event is lost without a function dead-letter queue: deployment-time functions "
+    "return their result to CloudFormation or to the Step Functions execution that called "
+    "them, which fails the stack operation; API Gateway invokes the request-path functions "
+    "synchronously and returns their errors to the caller; Secrets Manager retries a failed "
+    "rotation; and each scheduled function's EventBridge target retries twice and keeps "
+    "events it cannot deliver in a dead-letter queue, while the next scheduled run repeats "
+    "the work. The vector-store ingest function, invoked asynchronously with an object to "
+    "process, has a dead-letter queue of its own."
+)
+_LAMBDA_OUTSIDE_VPC_REASON = (
+    "Functions outside a VPC call only AWS service APIs and public endpoints (the Global "
+    "Accelerator and the regional API bridges' IAM-authorized execute-api endpoints), never "
+    "a private address, so a VPC would add NAT or VPC endpoint cost without isolating "
+    "anything. The functions that reach a private cluster endpoint or the internal ALB "
+    "(kubectl applier, Helm installer, GA registration, and each regional bridge's proxy "
+    "and inference streaming proxy) run in the regional VPC."
+)
+_LAMBDA_DEFAULT_MEMORY_REASON = (
+    "Only the functions aws-cdk-lib creates for custom resources (provider frameworks and "
+    "CDK's singleton handlers) use the default memory size, which aws-cdk-lib chooses; "
+    "every function GCO defines sets its memory size."
+)
 
-    Lambda functions used for CDK custom resources and infrastructure
-    automation have specific requirements that trigger cdk-nag warnings.
+
+def add_lambda_suppressions(stack: Stack) -> None:
+    """Add the stack-wide acknowledgments for Lambda-related cdk-nag findings.
+
+    Each reason holds for every function family it covers (see the comment
+    above ``_LAMBDA_RUNTIME_REASON``), whichever of them the stack contains.
     """
     lambda_managed_policies = [
         "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
@@ -353,88 +407,23 @@ def add_lambda_suppressions(stack: Stack) -> None:
                 ),
                 applies_to=lambda_managed_policies,
             ),
+            NagSuppression(id="AwsSolutions-L1", reason=_LAMBDA_RUNTIME_REASON),
             NagSuppression(
-                id="AwsSolutions-L1",
-                reason=(
-                    "CDK Provider framework Lambda functions use a specific runtime version "
-                    "managed by CDK. These are internal functions not exposed to users."
-                ),
+                id="HIPAA.Security-LambdaConcurrency", reason=_LAMBDA_CONCURRENCY_REASON
             ),
-            # HIPAA Lambda suppressions
+            NagSuppression(id="HIPAA.Security-LambdaDLQ", reason=_LAMBDA_DLQ_REASON),
+            NagSuppression(id="HIPAA.Security-LambdaInsideVPC", reason=_LAMBDA_OUTSIDE_VPC_REASON),
             NagSuppression(
-                id="HIPAA.Security-LambdaConcurrency",
-                reason=(
-                    "Infrastructure Lambda functions (custom resources) are invoked only during "
-                    "stack deployment and do not require concurrency limits. They are not user-facing."
-                ),
+                id="NIST.800.53.R5-LambdaConcurrency", reason=_LAMBDA_CONCURRENCY_REASON
             ),
+            NagSuppression(id="NIST.800.53.R5-LambdaDLQ", reason=_LAMBDA_DLQ_REASON),
+            NagSuppression(id="NIST.800.53.R5-LambdaInsideVPC", reason=_LAMBDA_OUTSIDE_VPC_REASON),
+            NagSuppression(id="PCI.DSS.321-LambdaInsideVPC", reason=_LAMBDA_OUTSIDE_VPC_REASON),
+            NagSuppression(id="Serverless-LambdaLatestVersion", reason=_LAMBDA_RUNTIME_REASON),
             NagSuppression(
-                id="HIPAA.Security-LambdaDLQ",
-                reason=(
-                    "CDK custom resource Lambda functions have built-in retry logic and report "
-                    "failures directly to CloudFormation. DLQ is not applicable for this pattern."
-                ),
+                id="Serverless-LambdaDefaultMemorySize", reason=_LAMBDA_DEFAULT_MEMORY_REASON
             ),
-            NagSuppression(
-                id="HIPAA.Security-LambdaInsideVPC",
-                reason=(
-                    "CDK Provider framework Lambda functions need internet access to communicate "
-                    "with CloudFormation. VPC placement would require NAT Gateway configuration. "
-                    "User-facing Lambda functions (kubectl applier) ARE placed in VPC."
-                ),
-            ),
-            # NIST 800-53 Lambda suppressions
-            NagSuppression(
-                id="NIST.800.53.R5-LambdaConcurrency",
-                reason=(
-                    "Infrastructure Lambda functions (custom resources) are invoked only during "
-                    "stack deployment and do not require concurrency limits."
-                ),
-            ),
-            NagSuppression(
-                id="NIST.800.53.R5-LambdaDLQ",
-                reason=(
-                    "CDK custom resource Lambda functions have built-in retry logic and report "
-                    "failures directly to CloudFormation. DLQ is not applicable."
-                ),
-            ),
-            NagSuppression(
-                id="NIST.800.53.R5-LambdaInsideVPC",
-                reason=(
-                    "CDK Provider framework Lambda functions need internet access to communicate "
-                    "with CloudFormation. User-facing Lambda functions ARE placed in VPC."
-                ),
-            ),
-            # PCI DSS Lambda suppressions
-            NagSuppression(
-                id="PCI.DSS.321-LambdaInsideVPC",
-                reason=(
-                    "CDK Provider framework Lambda functions need internet access to communicate "
-                    "with CloudFormation. User-facing Lambda functions ARE placed in VPC."
-                ),
-            ),
-            # Serverless Lambda suppressions
-            NagSuppression(
-                id="Serverless-LambdaLatestVersion",
-                reason=(
-                    "CDK Provider framework Lambda functions use a specific runtime version "
-                    "managed by CDK. These are internal functions not exposed to users."
-                ),
-            ),
-            NagSuppression(
-                id="Serverless-LambdaDefaultMemorySize",
-                reason=(
-                    "CDK Provider framework Lambda functions have appropriate memory for their "
-                    "workload. Custom Lambda functions have explicit memory configuration."
-                ),
-            ),
-            NagSuppression(
-                id="Serverless-LambdaDLQ",
-                reason=(
-                    "CDK custom resource Lambda functions have built-in retry logic and report "
-                    "failures directly to CloudFormation. DLQ is not applicable."
-                ),
-            ),
+            NagSuppression(id="Serverless-LambdaDLQ", reason=_LAMBDA_DLQ_REASON),
         ],
     )
 

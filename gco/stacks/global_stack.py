@@ -2464,6 +2464,7 @@ class GCOGlobalStack(Stack):
             handler="handler.lambda_handler",
             code=lambda_source_code("lambda/image-lookup"),
             timeout=Duration.minutes(5),
+            memory_size=128,
             description=(
                 "Lookup-or-create custom resource handler for ECR "
                 "repositories under the project's gco/* prefix."

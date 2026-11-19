@@ -1036,6 +1036,7 @@ class GCOAnalyticsStack(Stack):
             # security-group cleanup. In the common case (a handful of
             # users) this finishes in well under a minute.
             timeout=Duration.minutes(15),
+            memory_size=128,
             environment={
                 "DOMAIN_ID": self.studio_domain.attr_domain_id,
                 "EFS_ID": self.studio_efs.file_system_id,
