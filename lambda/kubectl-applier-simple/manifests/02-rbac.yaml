@@ -4,7 +4,7 @@
 # Roles:
 #   gco-health-monitor-role          (ClusterRole)  — read-only cluster-wide
 #   gco-manifest-processor-role      (Role)         — write in gco-jobs namespace
-#   gco-manifest-processor-cluster-read (ClusterRole) — read namespaces + CRDs
+#   gco-manifest-processor-cluster-read (ClusterRole) — the cluster-scoped reads it makes
 #   gco-inference-monitor-role       (Role)         — write in gco-inference namespace
 #
 # ServiceAccounts (all in gco-system):
@@ -72,27 +72,25 @@ metadata:
   labels:
     app: health-monitor
     project: gco
+# Exactly the calls the health-monitor pod makes (gco.services.health_api and
+# the modules it runs in-process); tests/test_rbac_manifest.py reads them from
+# the source and fails when a grant and a call disagree.
 rules:
-  # Core resources — read-only
+  # health_monitor: utilization and pending demand, from one node list and
+  # one pod list across the cluster.
   - apiGroups: [""]
-    resources: ["pods", "nodes", "services", "events"]
-    verbs: ["get", "list", "watch"]
+    resources: ["nodes", "pods"]
+    verbs: ["list"]
 
-  # Apps resources — read-only
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch"]
-
-  # Batch resources — read-only (webhook_dispatcher watches jobs to fire
-  # lifecycle events; runs in-process inside the health-monitor pod)
+  # webhook_dispatcher: lists jobs, then watches them for lifecycle events.
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list", "watch"]
 
-  # Metrics — read-only
+  # health_monitor: node CPU and memory from metrics-server.
   - apiGroups: ["metrics.k8s.io"]
-    resources: ["nodes", "pods"]
-    verbs: ["get", "list"]
+    resources: ["nodes"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -184,10 +182,14 @@ metadata:
   labels:
     app: manifest-processor
     project: gco
+# Every resource here is a kind the submission paths accept (each has a pinned
+# apiVersion in gco.job_admission.RESOURCE_API_VERSIONS; any other kind is
+# refused before an API call) or the target of one of the services' own
+# calls. tests/test_rbac_manifest.py checks both against the source.
 rules:
   # Core resources
   - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    resources: ["pods", "services", "configmaps"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
 
   # Pod logs (subresource) — required for GET /api/v1/jobs/.../logs endpoints
@@ -233,7 +235,7 @@ rules:
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
   # Kubeflow Trainer v2 — TrainJob is the first CRD submitted through the
   # SQS path (the Ray/Volcano examples submit direct with the caller's own
-  # credentials, so their groups only appear in the cluster-READ role).
+  # credentials, so the service account holds no grant on their groups).
   # The queue processor creates TrainJobs from queued manifests, and the
   # manifest processor's generic-manifest REST endpoints (the CLI's
   # status/logs/delete fallback for TrainJobs) need read + delete on the
@@ -260,7 +262,7 @@ subjects:
     name: gco-manifest-processor-sa
     namespace: gco-system
 
-# ─── Manifest Processor: cluster-wide read for namespaces + CRDs ───
+# ─── Manifest Processor: the cluster-scoped reads it makes ─────────
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -269,18 +271,22 @@ metadata:
   labels:
     app: manifest-processor
     project: gco
+# Exactly the cluster-scoped calls the REST service and the queue processor
+# make; tests/test_rbac_manifest.py reads them from the source and fails when
+# a grant and a call disagree.
 rules:
-  # Namespace read — verify namespace existence before applying manifests
+  # Namespace list — /readyz lists one namespace to prove the API server
+  # answers (gco.services.manifest_api).
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list"]
+    verbs: ["list"]
 
   # Node read — GET /api/v1/jobs/.../{name} and .../pods report which node a
   # pod landed on and that node's instance-type / capacity-type labels. Nodes
   # are cluster-scoped, so this cannot live in the namespaced Role.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list"]
+    verbs: ["get"]
 
   # Event read beyond gco-jobs — GET /api/v1/jobs/.../events returns the Node
   # and NodeClaim events behind an evicted pod (Karpenter / EKS Auto Mode's
@@ -290,7 +296,7 @@ rules:
   # gco-jobs Role above (gco.services.api_shared._collect_job_events).
   - apiGroups: [""]
     resources: ["events"]
-    verbs: ["get", "list"]
+    verbs: ["list"]
 
   # NodeClaim read — the same endpoint resolves each node a Job's pods ran on
   # to its Karpenter NodeClaim (status.nodeName) to include that NodeClaim's
@@ -298,13 +304,13 @@ rules:
   # selectable fields.
   - apiGroups: ["karpenter.sh"]
     resources: ["nodeclaims"]
-    verbs: ["get", "list"]
+    verbs: ["list"]
 
-  # Metrics — required for GET /api/v1/jobs/.../metrics endpoint
-  # (uses metrics.k8s.io/v1beta1 via custom_objects API)
+  # Metrics — GET /api/v1/jobs/.../metrics reads each pod's metrics.k8s.io
+  # PodMetrics by name (custom_objects API).
   - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods", "nodes"]
-    verbs: ["get", "list"]
+    resources: ["pods"]
+    verbs: ["get"]
 
   # RuntimeClass read — both submission paths refuse a manifest that asks for
   # an AWS Nitro Sandbox on a cluster without that RuntimeClass, rather than
@@ -315,21 +321,6 @@ rules:
     resources: ["runtimeclasses"]
     resourceNames: ["confidential-sandbox", "isolated-sandbox"]
     verbs: ["get"]
-
-  # CRD read — Kueue resources
-  - apiGroups: ["kueue.x-k8s.io"]
-    resources: ["*"]
-    verbs: ["get", "list"]
-
-  # CRD read — KubeRay resources
-  - apiGroups: ["ray.io"]
-    resources: ["*"]
-    verbs: ["get", "list"]
-
-  # CRD read — Volcano resources
-  - apiGroups: ["scheduling.volcano.sh", "batch.volcano.sh", "bus.volcano.sh"]
-    resources: ["*"]
-    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

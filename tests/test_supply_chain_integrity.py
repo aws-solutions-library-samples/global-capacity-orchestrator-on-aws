@@ -935,6 +935,11 @@ def test_kind_cluster_e2e_runs_the_platform_on_internal_ca_tls() -> None:
     assert 'app=inference-proxy,gco.aws/ci-only=true "$model_ip" 8000 blocked' in netpol
     foreign = 'netpol-test-model-foreign app=netpol-probe-client "$model_ip" 8443 blocked'
     assert f"probe default {foreign}" in netpol
+    # A gco-inference pod without the model label is refused by the
+    # namespace's default-deny ingress.
+    assert "start_target gco-inference netpol-target-tenant app=netpol-tenant 8080" in netpol
+    tenant = 'netpol-test-inference-tenant app=netpol-probe-client "$tenant_ip" 8080 blocked'
+    assert f"probe default {tenant}" in netpol
 
 
 def test_kind_cost_pipeline_runs_the_real_monitor_against_the_pinned_charts() -> None:

@@ -458,6 +458,9 @@ class TestHyperpodOn:
         assert replacements["{{HYPERPOD_HMA_IMAGE}}"] == hp.health_monitoring_agent_image(_REGION)
         assert replacements["{{HYPERPOD_QUEUE_MAX_GPU}}"] == "32"
         assert replacements["{{HYPERPOD_QUEUE_MAX_MEMORY}}"] == "8Ti"
+        assert replacements["{{HYPERPOD_QUEUE_MAX_EFA}}"] == "160"
+        # The default queue's EFA quota follows resource_quota.max_gpu ("32").
+        assert replacements["{{QUOTA_MAX_EFA}}"] == "160"
         charts = stack._get_enabled_helm_charts()
         assert "nvidia-device-plugin" in charts
         assert charts.index("nvidia-device-plugin") > charts.index("kueue") or charts[-1] in (

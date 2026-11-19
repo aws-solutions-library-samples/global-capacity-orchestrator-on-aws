@@ -1,7 +1,12 @@
 # NVIDIA DCGM exporter — per-GPU Prometheus metrics (DCGM_FI_DEV_*)
 #
-# Runs as a DaemonSet on GPU nodes only (nodeSelector workload-type=gpu, which
-# the GPU NodePools set) and tolerates the nvidia.com/gpu taint. Exposes GPU
+# Runs as a DaemonSet on every NVIDIA GPU node and only there: the nodeSelector
+# is eks.amazonaws.com/instance-gpu-manufacturer=nvidia, the label EKS Auto Mode
+# puts on every node with an NVIDIA GPU whichever pool launched it (the
+# training, Arm, inference, EFA and Mooncake EFA pools in 40-46 require it; the
+# reserved-capacity pools `gco nodepools` creates pin NVIDIA instance types),
+# and it tolerates the taints those pools carry (nvidia.com/gpu, plus
+# vpc.amazonaws.com/efa on the EFA pools). Exposes GPU
 # utilization, memory, temperature, and power on :9400 /metrics for the DCGM
 # ServiceMonitor (post-helm-monitoring-servicemonitors) to scrape and the GPU
 # dashboard to render.
@@ -108,12 +113,17 @@ spec:
         app: dcgm-exporter
         project: gco
     spec:
-      # GPU nodes only — the GPU NodePools label nodes workload-type=gpu and
-      # taint them nvidia.com/gpu, so restrict scheduling and tolerate the taint.
+      # Every NVIDIA GPU node, whichever pool launched it (see the header):
+      # the pools' workload-type labels differ (gpu, inference, gpu-efa,
+      # gpu-efa-mooncake, reserved-capacity), the Auto Mode GPU label does
+      # not. The EFA pools add the vpc.amazonaws.com/efa taint.
       nodeSelector:
-        workload-type: gpu
+        eks.amazonaws.com/instance-gpu-manufacturer: nvidia
       tolerations:
         - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: vpc.amazonaws.com/efa
           operator: Exists
           effect: NoSchedule
       # DCGM talks to the driver through NVML and never calls the Kubernetes

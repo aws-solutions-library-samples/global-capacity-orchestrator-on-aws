@@ -71,9 +71,10 @@ cluster unless you opt out. The drivers, per region:
   `"50GB"`), and Prometheus retention (default `15d`) bounds how much of the
   50 GiB fills.
 - **Compute** — the component pods (Prometheus, Grafana, Alertmanager, operator,
-  `kube-state-metrics`) plus a `node-exporter` and DCGM-exporter DaemonSet pod on
-  each node. These are small (tens to low-hundreds of millicores) but scale with
-  node count because the DaemonSets run one pod per node.
+  `kube-state-metrics`) plus a `node-exporter` DaemonSet pod on each node and a
+  DCGM-exporter DaemonSet pod on each NVIDIA GPU node. These are small (tens to
+  low-hundreds of millicores) but scale with node count because the DaemonSets
+  run one pod per node.
 - **Data transfer** — scrape traffic stays in-cluster (no cross-AZ storage
   reads), so egress cost is negligible. There is no public endpoint and no ALB,
   so no load-balancer hours.
@@ -117,7 +118,10 @@ Per regional cluster, when enabled:
   (`eks.amazonaws.com/instance-memory`): EKS Auto Mode's 2-vCPU/4 GiB
   general-purpose nodes cannot carry one of them next to the host footprint
   (see `_LARGE_MEMORY_NODE_AFFINITY` in `gco/stacks/regional_stack.py`).
-- A standalone DCGM exporter DaemonSet on GPU nodes for per-GPU metrics.
+- A standalone DCGM exporter DaemonSet on every NVIDIA GPU node (selected by
+  the Auto Mode `eks.amazonaws.com/instance-gpu-manufacturer` label, so the
+  training, Arm, inference, EFA and reserved-capacity pools are all covered)
+  for per-GPU metrics.
 - Curated Grafana dashboards (see [below](#curated-dashboards)).
 - A credential-rotation CronJob (see
   [Admin credential rotation](#admin-credential-rotation)).

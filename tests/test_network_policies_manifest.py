@@ -12,9 +12,10 @@ single source of truth for three namespaces:
 - ``gco-jobs``: default-deny ingress from other namespaces, everything allowed
   between job pods, egress DNS + HTTPS anywhere + the in-VPC ranges from
   ``vpc_endpoint_cidrs`` on any port.
-- ``gco-inference``: model pods reachable only from each other and from the
-  authenticated proxy, which may use only their TLS sidecar's 8443; egress
-  DNS + HTTPS.
+- ``gco-inference``: default-deny ingress; model pods reachable only from
+  each other and from the authenticated proxy, which may use only their TLS
+  sidecar's 8443, the Mooncake master only from model pods, any other pod from
+  nobody; egress DNS + HTTPS.
 
 The rules that make it real on EKS Auto Mode live in
 ``06-network-policy-controller.yaml`` (the enforcement ConfigMap, rendered from
@@ -25,11 +26,15 @@ they parse the same YAML the applier would.
 
 from __future__ import annotations
 
+import ipaddress
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from kubernetes import client
 
 MANIFESTS_DIR = Path("lambda/kubectl-applier-simple/manifests")
 NETPOL_MANIFEST_PATH = MANIFESTS_DIR / "03-network-policies.yaml"
@@ -140,21 +145,24 @@ def _ingress_rules_selecting(docs, namespace: str, labels: dict[str, str]) -> li
 # ─── Default Deny Ingress ──────────────────────────────────────────
 
 
-class TestDefaultDenyIngress:
-    """Verify default-deny-ingress is present for gco-system and gco-jobs."""
+GCO_NAMESPACES = ["gco-system", "gco-jobs", "gco-inference"]
 
-    @pytest.mark.parametrize("namespace", ["gco-system", "gco-jobs"])
+
+class TestDefaultDenyIngress:
+    """Verify default-deny-ingress is present in every namespace GCO owns."""
+
+    @pytest.mark.parametrize("namespace", GCO_NAMESPACES)
     def test_default_deny_ingress_exists(self, netpol_docs, namespace):
         policy = _find_netpol(netpol_docs, "default-deny-ingress", namespace)
         assert policy is not None, f"default-deny-ingress NetworkPolicy must exist in {namespace}"
 
-    @pytest.mark.parametrize("namespace", ["gco-system", "gco-jobs"])
+    @pytest.mark.parametrize("namespace", GCO_NAMESPACES)
     def test_default_deny_ingress_selects_all_pods(self, netpol_docs, namespace):
         """An empty podSelector `{}` selects every pod in the namespace."""
         policy = _find_netpol(netpol_docs, "default-deny-ingress", namespace)
         assert policy["spec"].get("podSelector") == {}
 
-    @pytest.mark.parametrize("namespace", ["gco-system", "gco-jobs"])
+    @pytest.mark.parametrize("namespace", GCO_NAMESPACES)
     def test_default_deny_ingress_has_ingress_type_and_no_rules(self, netpol_docs, namespace):
         """No ingress rules + policyTypes containing Ingress == default deny."""
         policy = _find_netpol(netpol_docs, "default-deny-ingress", namespace)
@@ -598,6 +606,457 @@ class TestInferenceNamespacePosture:
         ):
             for peer_labels in inference_peers:
                 assert peer_labels.items() <= selector.items(), (peer_labels, selector)
+
+
+# ─── gco-inference: who reaches what ───────────────────────────────
+#
+# The checks above pin individual rules. The ones below evaluate the posture as
+# a whole: every NetworkPolicy GCO ships (all manifests, placeholders rendered)
+# decides each flow the way the NetworkPolicy API does, with the source's egress
+# and the destination's ingress both required, against the Services and pods
+# the inference monitor really renders.
+
+#: The rendered vpc_endpoint_cidrs default. VPC CNI pod IPs come from the VPC,
+#: so pods and non-pod addresses (the ALB, other nodes, peered hosts) alike fall
+#: inside it.
+_VPC_CIDR = "10.0.0.0/16"
+_POD_IP = "10.0.1.10"
+_NON_POD_IP = "10.0.42.42"
+_INFERENCE_NS = "gco-inference"
+
+
+@dataclass
+class _Endpoint:
+    """One end of a flow: a pod (namespace + labels + ports) or a bare address."""
+
+    name: str
+    namespace: str | None
+    labels: dict[str, str] = field(default_factory=dict)
+    ports: dict[str, int] = field(default_factory=dict)
+    ip: str = _POD_IP
+
+
+def _all_shipped_network_policies() -> list[dict]:
+    """Every NetworkPolicy in the manifest directory, rendered like the applier does."""
+    policies: list[dict] = []
+    for path in sorted(MANIFESTS_DIR.glob("*.yaml")):
+        text = path.read_text(encoding="utf-8")
+        if "kind: NetworkPolicy" not in text:
+            continue
+        text = text.replace(CIDR_PLACEHOLDER, _render_cidr_block_substitution([_VPC_CIDR]))
+        text = text.replace("{{PCS_RESTAPI_CIDR}}", _VPC_CIDR)
+        text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "placeholder", text)
+        policies.extend(
+            doc
+            for doc in yaml.safe_load_all(text)
+            if isinstance(doc, dict) and doc.get("kind") == "NetworkPolicy"
+        )
+    return policies
+
+
+def _namespace_labels(namespace: str) -> dict[str, str]:
+    labels = {"kubernetes.io/metadata.name": namespace}
+    for doc in _stubbed_documents(MANIFESTS_DIR / "00-namespaces.yaml"):
+        if doc["kind"] == "Namespace" and doc["metadata"]["name"] == namespace:
+            labels.update(doc["metadata"].get("labels") or {})
+    return labels
+
+
+def _selector_matches(selector: dict | None, labels: dict[str, str]) -> bool:
+    selector = selector or {}
+    assert set(selector) <= {"matchLabels"}, f"evaluator does not model {selector}"
+    return all(
+        labels.get(key) == value for key, value in (selector.get("matchLabels") or {}).items()
+    )
+
+
+def _peer_matches(peer: dict, policy_namespace: str, endpoint: _Endpoint) -> bool:
+    assert set(peer) <= {"podSelector", "namespaceSelector", "ipBlock"}, peer
+    if "ipBlock" in peer:
+        block = peer["ipBlock"]
+        address = ipaddress.ip_address(endpoint.ip)
+        excluded = any(address in ipaddress.ip_network(cidr) for cidr in block.get("except", []))
+        return address in ipaddress.ip_network(block["cidr"]) and not excluded
+    if endpoint.namespace is None:
+        return False
+    if "namespaceSelector" in peer:
+        namespace_ok = _selector_matches(
+            peer["namespaceSelector"], _namespace_labels(endpoint.namespace)
+        )
+    else:
+        namespace_ok = endpoint.namespace == policy_namespace
+    return namespace_ok and _selector_matches(peer.get("podSelector"), endpoint.labels)
+
+
+def _port_matches(rule: dict, destination: _Endpoint, port: int) -> bool:
+    entries = rule.get("ports")
+    if not entries:
+        return True
+    for entry in entries:
+        if entry.get("protocol", "TCP") != "TCP":
+            continue
+        first = entry.get("port")
+        if first is None:
+            return True
+        if isinstance(first, str):
+            first = destination.ports.get(first)
+        if first is not None and first <= port <= entry.get("endPort", first):
+            return True
+    return False
+
+
+def _direction_allows(
+    policies: list[dict],
+    direction: str,
+    subject: _Endpoint,
+    peer: _Endpoint,
+    destination: _Endpoint,
+    port: int,
+) -> bool:
+    """One half of a flow: ``subject``'s policies for ``direction`` admit ``peer``."""
+    rules_key, peers_key = ("ingress", "from") if direction == "Ingress" else ("egress", "to")
+    isolated = False
+    for policy in policies:
+        if policy["metadata"]["namespace"] != subject.namespace:
+            continue
+        spec = policy["spec"]
+        types = spec.get("policyTypes") or ["Ingress"] + (["Egress"] if "egress" in spec else [])
+        if direction not in types or not _selector_matches(spec.get("podSelector"), subject.labels):
+            continue
+        isolated = True
+        for rule in spec.get(rules_key) or []:
+            peers = rule.get(peers_key)
+            peer_ok = not peers or any(
+                _peer_matches(candidate, subject.namespace, peer) for candidate in peers
+            )
+            if peer_ok and _port_matches(rule, destination, port):
+                return True
+    return not isolated
+
+
+def _admits(policies: list[dict], source: _Endpoint, destination: _Endpoint, port: int) -> bool:
+    """Whether ``source`` may open a TCP connection to ``destination`` on ``port``."""
+    if source.namespace is not None and not _direction_allows(
+        policies, "Egress", source, destination, destination, port
+    ):
+        return False
+    return destination.namespace is None or _direction_allows(
+        policies, "Ingress", destination, source, destination, port
+    )
+
+
+def _pod_endpoint(name: str, namespace: str, template: client.V1PodTemplateSpec) -> _Endpoint:
+    ports = {
+        port.name: port.container_port
+        for container in template.spec.containers
+        for port in container.ports or []
+        if port.name
+    }
+    numbered = {
+        f"{container.name}:{port.container_port}": port.container_port
+        for container in template.spec.containers
+        for port in container.ports or []
+    }
+    return _Endpoint(name, namespace, dict(template.metadata.labels), {**numbered, **ports})
+
+
+def _manifest_pod_template_labels(filename: str) -> list[tuple[str, dict[str, str]]]:
+    """``(name, pod template labels)`` for each workload a manifest ships."""
+    found = []
+    for doc in _stubbed_documents(MANIFESTS_DIR / filename):
+        if doc["kind"] == "Deployment":
+            found.append((doc["metadata"]["name"], doc["spec"]["template"]["metadata"]["labels"]))
+        elif doc["kind"] == "ScaledJob":
+            template = doc["spec"]["jobTargetRef"]["template"]
+            found.append((doc["metadata"]["name"], template["metadata"]["labels"]))
+    return found
+
+
+@dataclass
+class _RenderedInference:
+    """What the inference monitor creates in gco-inference, as it sends it."""
+
+    services: list[client.V1Service]
+    pods: list[_Endpoint]
+    policies: list[client.V1NetworkPolicy]
+
+
+def _render_inference_objects() -> _RenderedInference:
+    """Drive the monitor's real create paths against mocked clients.
+
+    One endpoint of each shape: classic with a canary, a disaggregated
+    prefill/decode pair behind its PD proxy, a store endpoint, and the shared
+    Mooncake master; plus the intra-namespace allow rules the monitor maintains.
+    """
+    from kubernetes.client.rest import ApiException
+
+    from gco.services.inference_monitor import InferenceMonitor
+
+    with (
+        patch("gco.services.inference_monitor.config.load_incluster_config"),
+        patch("gco.services.inference_monitor.client.AppsV1Api") as apps,
+        patch("gco.services.inference_monitor.client.CoreV1Api") as core,
+        patch("gco.services.inference_monitor.client.NetworkingV1Api") as networking,
+        patch("gco.services.inference_monitor.client.AutoscalingV2Api"),
+    ):
+        monitor = InferenceMonitor(
+            cluster_id="test-cluster",
+            region="us-east-1",
+            store=MagicMock(),
+            namespace=_INFERENCE_NS,
+            reconcile_interval=5,
+        )
+    monitor.apps_v1 = apps.return_value
+    monitor.core_v1 = core.return_value
+    monitor.networking_v1 = networking.return_value
+    absent = ApiException(status=404)
+    for read in (
+        monitor.apps_v1.read_namespaced_deployment,
+        monitor.apps_v1.read_namespaced_stateful_set,
+        monitor.core_v1.read_namespaced_service,
+        monitor.core_v1.read_namespaced_config_map,
+        monitor.networking_v1.read_namespaced_network_policy,
+    ):
+        read.side_effect = absent
+    monitor.core_v1.read_namespaced_secret.return_value = client.V1Secret(
+        string_data={"ADMIN_API_KEY": "router-key"}
+    )
+
+    model_image = "vllm/vllm-openai:v0.6.0"
+    canary = {"image": "vllm/vllm-openai:v0.7.0", "weight": 10, "replicas": 1}
+    monitor._create_deployment("chat", _INFERENCE_NS, {"image": model_image, "port": 8000})
+    monitor._create_service("chat", _INFERENCE_NS, {})
+    monitor._reconcile_canary(
+        "chat", _INFERENCE_NS, {"image": model_image, "port": 8000, "canary": canary}, canary, {}
+    )
+    disaggregated = {
+        "image": model_image,
+        "port": 8100,
+        "mooncake": {
+            "mode": "disaggregated",
+            "transfer": {"protocol": "rdma"},
+            "proxy": {"image": "vllm/vllm-openai:v0.23.0", "admin_api_key_secret": "pd-admin"},
+        },
+    }
+    for role in ("prefill", "decode"):
+        monitor._create_role_deployment("pd", _INFERENCE_NS, disaggregated, role)
+        monitor._create_role_service("pd", _INFERENCE_NS, role)
+    monitor._create_pd_proxy("pd", _INFERENCE_NS, disaggregated, {"lifecycle_id": "life-1"})
+    store = {"image": model_image, "port": 8200, "mooncake": {"mode": "store"}}
+    monitor._create_role_deployment("kv", _INFERENCE_NS, store, "single")
+    monitor._create_service("kv", _INFERENCE_NS, {})
+    monitor._ensure_mooncake_store(_INFERENCE_NS, {"mooncake": {"store": {"master_image": "m:v1"}}})
+    monitor._ensure_intra_namespace_network_policies(_INFERENCE_NS, {})
+
+    workloads = [
+        call.args[1]
+        for creator in (
+            monitor.apps_v1.create_namespaced_deployment,
+            monitor.apps_v1.create_namespaced_stateful_set,
+        )
+        for call in creator.call_args_list
+    ]
+    for call in monitor.core_v1.create_namespaced_service.call_args_list:
+        assert call.args[0] == _INFERENCE_NS
+    return _RenderedInference(
+        services=[
+            call.args[1] for call in monitor.core_v1.create_namespaced_service.call_args_list
+        ],
+        pods=[
+            _pod_endpoint(workload.metadata.name, _INFERENCE_NS, workload.spec.template)
+            for workload in workloads
+        ],
+        policies=[
+            call.args[1]
+            for call in monitor.networking_v1.create_namespaced_network_policy.call_args_list
+        ],
+    )
+
+
+@pytest.fixture(scope="module")
+def rendered_inference() -> _RenderedInference:
+    return _render_inference_objects()
+
+
+@pytest.fixture(scope="module", params=["manifest", "monitor"])
+def policy_world(request, rendered_inference) -> list[dict]:
+    """The shipped policies, or the same set with the monitor's copies of its four rules.
+
+    Both writers create the four intra-namespace rules create-if-absent, so a
+    cluster ends up with whichever landed first; every verdict must hold for
+    either.
+    """
+    shipped = _all_shipped_network_policies()
+    if request.param == "manifest":
+        return shipped
+    wire = [client.ApiClient().sanitize_for_serialization(p) for p in rendered_inference.policies]
+    replaced = {(p["metadata"]["namespace"], p["metadata"]["name"]) for p in wire}
+    assert len(replaced) == 4
+    kept = [
+        p for p in shipped if (p["metadata"]["namespace"], p["metadata"]["name"]) not in replaced
+    ]
+    assert len(kept) == len(shipped) - 4, "the monitor maintains rules the manifest ships"
+    return kept + wire
+
+
+def _candidate_sources(rendered: _RenderedInference) -> list[_Endpoint]:
+    """Every client a model Service could be dialled from, documented or not."""
+    platform = [
+        _Endpoint(name, "gco-system", dict(labels))
+        for filename in (
+            "30-health-monitor.yaml",
+            "31-manifest-processor.yaml",
+            "32-inference-monitor.yaml",
+            "33-inference-proxy.yaml",
+            "34-cost-monitor.yaml",
+            "post-helm-sqs-consumer.yaml",
+        )
+        for name, labels in _manifest_pod_template_labels(filename)
+    ]
+    assert {source.name for source in platform} >= {"inference-proxy", "manifest-processor"}
+    spoofed = {"app": "inference-proxy", "project": "gco", "gco.io/type": "inference"}
+    return [
+        *platform,
+        *rendered.pods,
+        _Endpoint(
+            "tenant-pod-in-gco-inference", _INFERENCE_NS, {"app": "tenant-api", "project": "gco"}
+        ),
+        _Endpoint("job-pod", "gco-jobs", {"app": "trainer"}),
+        _Endpoint("job-pod-wearing-model-and-proxy-labels", "gco-jobs", dict(spoofed)),
+        _Endpoint("default-pod-wearing-model-and-proxy-labels", "default", dict(spoofed)),
+        _Endpoint("prometheus", "monitoring", {"app.kubernetes.io/name": "prometheus"}),
+        _Endpoint("in-vpc-address", None, ip=_NON_POD_IP),
+    ]
+
+
+def _is_model_pod(endpoint: _Endpoint) -> bool:
+    return endpoint.namespace == _INFERENCE_NS and endpoint.labels.get("gco.io/type") == "inference"
+
+
+def _clients(policies, sources, destination: _Endpoint, port: int) -> set[str]:
+    return {source.name for source in sources if _admits(policies, source, destination, port)}
+
+
+class TestInferenceReachability:
+    """Every Service the monitor creates is reachable from its documented clients only.
+
+    docs/ARCHITECTURE.md (Network Security) documents the clients: model pods'
+    Services publish only the TLS sidecar's 8443, for the authenticated
+    inference proxy and the other model pods (the PD proxy dials the prefill and
+    decode Services); the shared Mooncake master's RPC and metadata ports are
+    for model pods. Everything else, including a pod in another namespace that
+    wears the same labels and any address that is not a pod, is refused.
+    """
+
+    def test_the_monitor_renders_every_service_shape(self, rendered_inference):
+        names = {service.metadata.name for service in rendered_inference.services}
+        assert names == {
+            "chat",
+            "chat-canary",
+            "pd-prefill",
+            "pd-decode",
+            "pd-proxy",
+            "kv",
+            "mooncake-master",
+        }
+
+    def test_every_service_port_admits_exactly_its_documented_clients(
+        self, rendered_inference, policy_world
+    ):
+        sources = _candidate_sources(rendered_inference)
+        model_pods = {pod.name for pod in rendered_inference.pods if _is_model_pod(pod)}
+        assert model_pods == {"chat", "chat-canary", "pd-prefill", "pd-decode", "pd-proxy", "kv"}
+        checked = 0
+        for service in rendered_inference.services:
+            selector = service.spec.selector
+            backends = [
+                pod for pod in rendered_inference.pods if selector.items() <= pod.labels.items()
+            ]
+            assert backends, f"{service.metadata.name} selects no pod the monitor creates"
+            if service.metadata.name == "mooncake-master":
+                expected = model_pods
+            else:
+                expected = model_pods | {"inference-proxy"}
+            for service_port in service.spec.ports:
+                for pod in backends:
+                    target = pod.ports[service_port.target_port]
+                    # The VPC CNI sees egress before the DNAT and ingress after
+                    # it, so one rule holds on both sides only when they agree.
+                    assert service_port.port == target, (service.metadata.name, service_port)
+                    clients = _clients(policy_world, sources, pod, target)
+                    assert clients - {pod.name} == expected - {pod.name}, (
+                        service.metadata.name,
+                        pod.name,
+                        target,
+                    )
+                    checked += 1
+        assert checked >= 8
+
+    def test_model_servers_own_ports_admit_only_other_model_pods(
+        self, rendered_inference, policy_world
+    ):
+        """The plaintext ports behind the sidecar never admit the proxy or anyone outside."""
+        sources = _candidate_sources(rendered_inference)
+        model_pods = {pod.name for pod in rendered_inference.pods if _is_model_pod(pod)}
+        for pod in rendered_inference.pods:
+            if not _is_model_pod(pod):
+                continue
+            for port in {number for number in pod.ports.values() if number != 8443}:
+                assert _clients(policy_world, sources, pod, port) - {pod.name} == model_pods - {
+                    pod.name
+                }, (pod.name, port)
+
+    @pytest.mark.parametrize("port", [8000, 8443, 50051])
+    def test_any_other_pod_in_the_namespace_accepts_nothing(
+        self, rendered_inference, policy_world, port
+    ):
+        """A pod the monitor did not label, such as a tenant's own Deployment.
+
+        Without ``gco-inference/default-deny-ingress`` no policy selected it,
+        so job pods (through their in-VPC egress), pods in unpoliced namespaces
+        and in-VPC addresses all reached it on any port.
+        """
+        tenant = _Endpoint(
+            "tenant-target",
+            _INFERENCE_NS,
+            {"app": "tenant-target"},
+            {"http": 8000, "https": 8443, "rpc": 50051},
+        )
+        sources = _candidate_sources(rendered_inference)
+        assert _clients(policy_world, sources, tenant, port) == set()
+
+
+class TestDataServiceConfigMapsMatchEgress:
+    """A namespace gets a data service's connection ConfigMap only if it can reach it.
+
+    Valkey and Aurora are in-VPC endpoints (ENIs, not pods). The ConfigMaps
+    that hand their address to workloads were published into gco-system and
+    gco-inference too, whose egress (DNS, 443, the Pod Identity Agent) can
+    never reach 6379 or 5432: a workload that followed the ConfigMap there
+    timed out.
+    """
+
+    @pytest.mark.parametrize(
+        ("filename", "name", "port"),
+        [
+            ("23-storage-valkey.yaml", "gco-valkey", 6379),
+            ("24-storage-aurora-pgvector.yaml", "gco-aurora-pgvector", 5432),
+        ],
+    )
+    def test_published_only_where_egress_reaches_the_service(self, filename, name, port):
+        published = {
+            doc["metadata"]["namespace"]
+            for doc in _stubbed_documents(MANIFESTS_DIR / filename)
+            if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == name
+        }
+        assert published, f"{filename} publishes no {name}"
+        policies = _all_shipped_network_policies()
+        service = _Endpoint(name, None, ip=_NON_POD_IP)
+        for namespace in published:
+            workload = _Endpoint("workload", namespace, {"app": "workload"})
+            assert _admits(policies, workload, service, port), (namespace, name, port)
+        # The documented consumers are jobs: gco-jobs keeps its copy.
+        assert "gco-jobs" in published
 
 
 # ─── Enforcement switch ────────────────────────────────────────────

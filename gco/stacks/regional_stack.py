@@ -160,7 +160,7 @@ from gco.inference_proxy_config import (
 )
 from gco.manifest_security_policy import validate_manifest_security_policy
 from gco.pcs_config import compute_pcs_replacements, pcs_enabled, validate_pcs_config
-from gco.resource_governance import validated_resource_quota
+from gco.resource_governance import kueue_efa_quota, validated_resource_quota
 from gco.service_images import discover_service_dockerfiles, service_dockerfile
 from gco.slurm_config import (
     SLURM_ACCOUNTING_BACKUP_PREFIX,
@@ -4723,6 +4723,7 @@ class GCORegionalStack(Stack):
         image_replacements["{{QUOTA_MAX_CPU}}"] = resource_quota["max_cpu"]
         image_replacements["{{QUOTA_MAX_MEMORY}}"] = resource_quota["max_memory"]
         image_replacements["{{QUOTA_MAX_GPU}}"] = resource_quota["max_gpu"]
+        image_replacements["{{QUOTA_MAX_EFA}}"] = kueue_efa_quota(resource_quota["max_gpu"])
         image_replacements["{{QUOTA_MAX_PODS}}"] = resource_quota["max_pods"]
         image_replacements["{{LIMIT_MAX_CPU}}"] = resource_quota["container_max_cpu"]
         image_replacements["{{LIMIT_MAX_MEMORY}}"] = resource_quota["container_max_memory"]

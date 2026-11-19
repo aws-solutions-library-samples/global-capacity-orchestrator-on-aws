@@ -499,6 +499,41 @@ class TestDisabledFeaturePruning:
 class TestLegacyRemovedResources:
     """Objects shipped by earlier releases are swept from upgraded clusters."""
 
+    @pytest.mark.parametrize(
+        ("gate", "filename", "name"),
+        [
+            ("{{VALKEY_ENDPOINT}}", "23-storage-valkey.yaml", "gco-valkey"),
+            (
+                "{{AURORA_PGVECTOR_ENDPOINT}}",
+                "24-storage-aurora-pgvector.yaml",
+                "gco-aurora-pgvector",
+            ),
+        ],
+    )
+    def test_data_service_configmaps_live_only_where_they_are_shipped(
+        self, handler_module, gate, filename, name
+    ):
+        # Valkey and Aurora are reachable from gco-jobs only, so only gco-jobs
+        # gets their ConfigMap: disabling the feature prunes exactly that copy,
+        # and the copies earlier releases put in gco-system and gco-inference
+        # are swept whether the feature is on or off.
+        manifests_dir = (
+            Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
+        )
+        shipped = {
+            (doc["apiVersion"], doc["kind"], doc["metadata"]["namespace"], doc["metadata"]["name"])
+            for doc in _parse_manifest_documents(manifests_dir / filename)
+        }
+        assert shipped == {("v1", "ConfigMap", "gco-jobs", name)}
+        assert set(handler_module._FEATURE_RESOURCE_INVENTORY[(gate, False)]) == shipped
+        for namespace in ("gco-system", "gco-inference"):
+            assert (
+                "v1",
+                "ConfigMap",
+                namespace,
+                name,
+            ) in handler_module._LEGACY_REMOVED_RESOURCES
+
     def test_inventory_targets_the_removed_nvidia_device_plugin(self, handler_module):
         # EKS Auto Mode provides the NVIDIA device plugin built into the node;
         # the community DaemonSet GCO used to ship crash-loops there (NVML
@@ -634,20 +669,26 @@ class TestLegacyRemovedResources:
         )
 
     def test_no_legacy_entry_still_ships_as_a_manifest(self, handler_module):
-        # Compared by kind and name, not as text: the IngressClass name "alb"
-        # also occurs inside shipped names (gco-aws-alb, allow-alb-to-*).
+        # Compared by kind, namespace and name, not as text: the IngressClass
+        # name "alb" also occurs inside shipped names (gco-aws-alb,
+        # allow-alb-to-*), and a ConfigMap swept from one namespace may still
+        # ship in another (gco-valkey stays in gco-jobs).
         manifests_dir = (
             Path(__file__).parent.parent / "lambda" / "kubectl-applier-simple" / "manifests"
         )
         shipped = {
-            (doc.get("kind"), (doc.get("metadata") or {}).get("name"))
+            (
+                doc.get("kind"),
+                (doc.get("metadata") or {}).get("namespace"),
+                (doc.get("metadata") or {}).get("name"),
+            )
             for path in sorted(manifests_dir.glob("*.yaml"))
             for doc in _parse_manifest_documents(path)
         }
-        assert ("Gateway", "gco-gateway") in shipped
-        for _, kind, _, name in handler_module._LEGACY_REMOVED_RESOURCES:
-            assert (kind, name) not in shipped, (
-                f"{kind} {name} is swept as legacy but still shipped"
+        assert ("Gateway", "gco-system", "gco-gateway") in shipped
+        for _, kind, namespace, name in handler_module._LEGACY_REMOVED_RESOURCES:
+            assert (kind, namespace, name) not in shipped, (
+                f"{kind} {namespace}/{name} is swept as legacy but still shipped"
             )
 
     def test_sweep_deletes_exact_resource(self, handler_module):

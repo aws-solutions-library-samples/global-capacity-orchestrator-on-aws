@@ -648,9 +648,10 @@ reference.
 ### Network Policy Enforcement
 
 GCO ships Kubernetes NetworkPolicies for every namespace it owns (default-deny
-ingress in `gco-system` and `gco-jobs`, per-service allow rules, DNS + HTTPS
-egress; see [Network Security](ARCHITECTURE.md#network-security)). On EKS Auto
-Mode those objects are only enforced once the cluster's network policy
+ingress in `gco-system`, `gco-jobs` and `gco-inference`, per-service allow
+rules, DNS + HTTPS egress; see
+[Network Security](ARCHITECTURE.md#network-security)). On EKS Auto Mode those
+objects are only enforced once the cluster's network policy
 controller is switched on, which the regional stack does through the
 `kube-system/amazon-vpc-cni` ConfigMap it applies
 (`06-network-policy-controller.yaml`):
@@ -1208,6 +1209,15 @@ If you need users to submit NetworkPolicy resources:
 ```json
 "allowed_kinds": ["Job", "CronJob", "Deployment", "StatefulSet", "DaemonSet", "Service", "ConfigMap", "Pod", "TrainJob", "NetworkPolicy"]
 ```
+
+The list only decides what the processors accept. Creating the object also
+needs a Kubernetes grant: `gco-manifest-processor-sa` holds create, get,
+patch and delete in `gco-jobs` for the default kinds only
+(`gco-manifest-processor-role` in
+`lambda/kubectl-applier-simple/manifests/02-rbac.yaml`). For an added kind,
+bind it to a Role of your own in each allowed namespace, for example one
+granting `networking.k8s.io` `networkpolicies` the same verbs; without it the
+create is refused with 403.
 
 After changing any security policy or allowed_kinds settings, redeploy the regional stack:
 
@@ -1926,7 +1936,7 @@ gco stacks deploy gco-us-east-1 -y
 
 ### Using Valkey in Jobs
 
-When Valkey is enabled, GCO creates a `gco-valkey` ConfigMap in each namespace with the endpoint and port. Reference it in your pod spec — no need to look up or hardcode endpoint URLs:
+When Valkey is enabled, GCO creates a `gco-valkey` ConfigMap in `gco-jobs` with the endpoint and port. Reference it in your pod spec — no need to look up or hardcode endpoint URLs:
 
 ```yaml
 env:
@@ -1942,7 +1952,7 @@ env:
       key: port
 ```
 
-The same manifest works in any region — the ConfigMap resolves to the local Valkey endpoint automatically.
+The same manifest works in any region — the ConfigMap resolves to the local Valkey endpoint automatically. The ConfigMap lives in `gco-jobs` only because that namespace's in-VPC egress rule (`allow-vpc-egress`) is the one path to the cache: `gco-system` and `gco-inference` pods can reach DNS, HTTPS and the Pod Identity Agent and nothing else (see [Network Security](ARCHITECTURE.md#network-security)). To use Valkey from `gco-inference`, add a NetworkPolicy that admits egress to the cache's port and create your own ConfigMap there.
 
 For use outside the cluster (scripts, Lambda functions), the endpoint is also stored in SSM at `/{project}/valkey-endpoint-{region}`.
 
@@ -2010,7 +2020,7 @@ gco stacks deploy gco-us-east-1 -y
 
 ### Using Aurora pgvector in Jobs
 
-When Aurora pgvector is enabled, GCO creates a `gco-aurora-pgvector` ConfigMap in each namespace with the endpoint, port, secret ARN, and database name. Reference it in your pod spec:
+When Aurora pgvector is enabled, GCO creates a `gco-aurora-pgvector` ConfigMap in `gco-jobs` with the endpoint, port, secret ARN, and database name (only there, for the same reason as `gco-valkey`: `gco-jobs` is the one namespace whose egress reaches in-VPC endpoints). Reference it in your pod spec:
 
 ```yaml
 env:
@@ -3013,6 +3023,12 @@ Overrides are validated at synth: unknown keys, unparseable quantities, a
 container ceiling above its namespace ceiling, or a manifest cap outside the
 `container_max_* <= *_per_manifest <= max_*` ordering all fail the deploy
 with a message naming the offending pair.
+
+With Kueue enabled, the same values size the default `gco-cluster-queue`:
+`max_cpu`, `max_memory` and `max_gpu` are its CPU, memory and GPU quotas,
+`max_gpu` is also its `aws.amazon.com/neuron` quota and, times five, its
+`vpc.amazonaws.com/efa` quota, and `max_pods` bounds Nitro Sandbox slots
+(see [KUEUE.md → Submitting Jobs](KUEUE.md#submitting-jobs)).
 
 ### Disabling the Built-In Consumer
 

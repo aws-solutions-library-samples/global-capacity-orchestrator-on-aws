@@ -47,6 +47,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from gco.k8s_quantity import parse_quantity
+from gco.resource_governance import kueue_efa_quota
 
 #: The cdk.json block and its per-Region overlay.
 HYPERPOD_FEATURE_KEY = "hyperpod"
@@ -483,6 +484,7 @@ HYPERPOD_GATED_TOKENS: tuple[str, ...] = (
     "{{HYPERPOD_QUEUE_MAX_CPU}}",
     "{{HYPERPOD_QUEUE_MAX_MEMORY}}",
     "{{HYPERPOD_QUEUE_MAX_GPU}}",
+    "{{HYPERPOD_QUEUE_MAX_EFA}}",
 )
 
 
@@ -504,4 +506,5 @@ def compute_hyperpod_replacements(
         "{{HYPERPOD_QUEUE_MAX_CPU}}": str(queue["max_cpu"]),
         "{{HYPERPOD_QUEUE_MAX_MEMORY}}": str(queue["max_memory"]),
         "{{HYPERPOD_QUEUE_MAX_GPU}}": str(queue["max_gpu"]),
+        "{{HYPERPOD_QUEUE_MAX_EFA}}": kueue_efa_quota(queue["max_gpu"]),
     }

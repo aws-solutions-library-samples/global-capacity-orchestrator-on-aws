@@ -138,6 +138,18 @@ slots, so a ClusterQueue without it never admits a sandboxed Job. A custom
 ClusterQueue that should take sandboxed Jobs needs the same entry under
 `coveredResources`.
 
+Both shipped ClusterQueues cover the Neuron and EFA resources too, for the
+same reason: Kueue never admits a workload that requests a resource its
+ClusterQueue does not cover, so a labelled Trainium, Inferentia or EFA Job
+would stay suspended. `aws.amazon.com/neuron` gets the same nominal quota as
+`nvidia.com/gpu` (`resource_quota.max_gpu`, or `hyperpod.queue.max_gpu` for
+`gco-hyperpod-queue`). `vpc.amazonaws.com/efa` gets the most interfaces those
+accelerators can attach, five per unit of that quota (four per GPU, as on a
+p5.48xlarge, plus one per Neuron device, as on a trn2.48xlarge), so the
+accelerator quotas are always reached first: 160 with the default
+`max_gpu` of 32. A custom ClusterQueue needs the same entries for Neuron or
+EFA Jobs.
+
 Add the `kueue.x-k8s.io/queue-name` label and set resource limits to your Job:
 
 ```yaml

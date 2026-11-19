@@ -31,6 +31,9 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [API calls need an IAM permission](#api-calls-need-an-iam-permission)
   - [Workload alarms move to their Regions](#workload-alarms-move-to-their-regions)
   - [ECR replication rules of your own are kept](#ecr-replication-rules-of-your-own-are-kept)
+  - [Default-deny ingress in `gco-inference`](#default-deny-ingress-in-gco-inference)
+  - [Valkey and Aurora ConfigMaps only in `gco-jobs`](#valkey-and-aurora-configmaps-only-in-gco-jobs)
+  - [Narrower platform service-account RBAC](#narrower-platform-service-account-rbac)
 
 ## How an upgrade works
 
@@ -595,3 +598,49 @@ stack, or turning `images.replication` off, deleted all of them.
   check.
 - **Destroy removes only GCO's rule.** After the global stack is deleted, the
   CLI removes this project's `<project>/` rule and keeps every other rule.
+
+### Default-deny ingress in `gco-inference`
+
+Earlier releases isolated only the pods the inference monitor labels
+(`gco.io/type: inference`) and the shared Mooncake master. Any other pod in
+`gco-inference`, such as a Deployment of your own whose pods lack that label,
+accepted connections from every namespace on every port.
+
+- **BREAKING: unlabelled pods in `gco-inference` accept no connections.** The
+  base pass adds `gco-inference/default-deny-ingress`. Managed endpoints and the
+  inference example manifests are unaffected: their pods carry
+  `gco.io/type: inference`. Before redeploying, give such a workload's pod
+  template that label (its pods then get the model pods' rules: the inference
+  proxy on 8443 and the other model pods), or add a NetworkPolicy that admits
+  its clients. The kubelet's probes and `kubectl port-forward` keep working.
+
+### Valkey and Aurora ConfigMaps only in `gco-jobs`
+
+Earlier releases published the `gco-valkey` and `gco-aurora-pgvector`
+ConfigMaps in `gco-system`, `gco-jobs` and `gco-inference`, but only
+`gco-jobs` has an egress rule that reaches the cache and the database.
+
+- **BREAKING: the `gco-system` and `gco-inference` copies are deleted.** The
+  base pass sweeps them. A pod there that references either ConfigMap without
+  `optional: true` no longer starts. Run such a workload in `gco-jobs`, or give
+  it a NetworkPolicy that admits egress to the endpoint's port and a
+  ConfigMap of your own.
+
+### Narrower platform service-account RBAC
+
+The health monitor's and the manifest processor's Kubernetes roles now grant
+exactly the calls those services make.
+
+- **The health monitor** lists nodes, pods and node metrics and lists and
+  watches Jobs; it lost get and watch on pods and nodes and every grant on
+  services, events, deployments and pod metrics.
+- **The manifest processor** lost its read grants on every Kueue, KubeRay and
+  Volcano object (nothing in GCO read them), the unused second verb on
+  namespaces, nodes, events, NodeClaims and pod metrics, and every grant on
+  PersistentVolumeClaims in `gco-jobs`.
+- **BREAKING: a kind you added to `job_validation_policy.allowed_kinds` needs
+  its own grant.** `gco-manifest-processor-sa` can create only the default
+  kinds; for PersistentVolumeClaim (or NetworkPolicy, as before), bind it to a
+  Role of your own in each allowed namespace, or the create is refused with
+  403. Tooling that borrowed either service account's token for other reads
+  needs a role of its own too.

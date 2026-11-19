@@ -906,13 +906,9 @@ _FEATURE_RESOURCE_INVENTORY: dict[
         ("v1", "PersistentVolume", None, "gco-fsx-pv-system"),
         ("storage.k8s.io/v1", "StorageClass", None, "fsx-sc"),
     ),
-    ("{{VALKEY_ENDPOINT}}", False): tuple(
-        ("v1", "ConfigMap", namespace, "gco-valkey")
-        for namespace in ("gco-system", "gco-jobs", "gco-inference")
-    ),
-    ("{{AURORA_PGVECTOR_ENDPOINT}}", False): tuple(
-        ("v1", "ConfigMap", namespace, "gco-aurora-pgvector")
-        for namespace in ("gco-system", "gco-jobs", "gco-inference")
+    ("{{VALKEY_ENDPOINT}}", False): (("v1", "ConfigMap", "gco-jobs", "gco-valkey"),),
+    ("{{AURORA_PGVECTOR_ENDPOINT}}", False): (
+        ("v1", "ConfigMap", "gco-jobs", "gco-aurora-pgvector"),
     ),
     ("{{VECTOR_STORE_TABLE_NAME}}", False): tuple(
         ("v1", "ConfigMap", namespace, "gco-vector-store")
@@ -1266,6 +1262,14 @@ _LEGACY_REMOVED_RESOURCES: tuple[tuple[str, str, str | None, str], ...] = (
     ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-vpc-endpoint-egress"),
     ("networking.k8s.io/v1", "NetworkPolicy", "gco-jobs", "allow-ray-cluster-internal"),
     ("cert-manager.io/v1", "Issuer", "gco-system", "gco-api-selfsigned"),
+    # The Valkey and Aurora connection ConfigMaps releases up to v8.23.0 also
+    # published where no egress rule reaches either endpoint
+    # (23-storage-valkey.yaml, 24-storage-aurora-pgvector.yaml).
+    *(
+        ("v1", "ConfigMap", namespace, name)
+        for namespace in ("gco-system", "gco-inference")
+        for name in ("gco-valkey", "gco-aurora-pgvector")
+    ),
     ("networking.k8s.io/v1", "Ingress", "gco-system", "gco-ingress"),
     ("networking.k8s.io/v1", "IngressClass", None, "alb"),
     ("eks.amazonaws.com/v1", "IngressClassParams", None, "alb"),
