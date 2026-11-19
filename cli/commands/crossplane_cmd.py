@@ -45,7 +45,7 @@ def crossplane_status(config: Any) -> None:
 
     Examples:
         gco crossplane status
-        gco crossplane status --output json
+        gco -o json crossplane status
     """
     from ..crossplane import crossplane_status as _crossplane_status
 

@@ -606,6 +606,100 @@ class TestStacksExamplesParse:
             _parse_gco_command_line("gco stacks capabilities status --output json")
 
 
+_INLINE_GCO_COMMAND = re.compile(r"`(gco [^`]+)`")
+
+
+def _documented_gco_examples() -> list[tuple[str, str]]:
+    """``gco ...`` lines in the code blocks and inline code of every scanned Markdown file."""
+    from tests.test_markdown_links import markdown_files
+
+    examples: list[tuple[str, str]] = []
+    for path in markdown_files():
+        where = path.relative_to(PROJECT_ROOT).as_posix()
+        in_block = False
+        for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if raw.strip().startswith("```"):
+                in_block = not in_block
+                continue
+            if in_block and raw.strip().startswith("gco "):
+                examples.append((f"{where}:{number}", raw.strip()))
+            examples.extend(
+                (f"{where}:{number}", match.group(1)) for match in _INLINE_GCO_COMMAND.finditer(raw)
+            )
+    return examples
+
+
+def _output_option_misplaced(line: str) -> bool:
+    """Whether Click refuses the root ``-o``/``--output`` where *line* puts it.
+
+    Synopsis brackets and alternatives are flattened first, so
+    ``gco x status [--output json]`` is checked like an example. Any other
+    parse failure (a placeholder, a pipeline) is not this check's concern.
+    """
+    flattened = line.replace("[", " ").replace("]", " ").replace("|", " ")
+    try:
+        _parse_gco_command_line(flattened)
+    except click.NoSuchOption as exc:
+        return exc.option_name in ("-o", "--output")
+    except click.ClickException, click.exceptions.Exit, ValueError:
+        # Exit: an eager option such as --help or --version ends the parse.
+        return False
+    return False
+
+
+class TestRootOutputOptionPlacement:
+    """``-o/--output`` is the root ``gco`` group's option and goes before the subcommand.
+
+    Click refuses it after a subcommand ("No such option") unless that
+    subcommand defines an ``--output`` of its own, as ``gco mission status``
+    and ``gco vector search`` do, so an example that puts it there fails when
+    copied.
+    """
+
+    def test_documented_examples_are_collected(self):
+        assert len(_documented_gco_examples()) > 1000
+
+    def test_no_documented_example_puts_the_output_option_after_a_subcommand(self):
+        misplaced = [
+            f"{where}: {line}"
+            for where, line in _documented_gco_examples()
+            if _output_option_misplaced(line)
+        ]
+        assert misplaced == []
+
+    @pytest.mark.parametrize("group", ["status", "crossplane", "gitops"])
+    def test_help_examples_put_the_output_option_first(self, group):
+        pending: list[click.Command] = [cli.commands[group]]
+        examples: list[str] = []
+        while pending:
+            command = pending.pop()
+            examples.extend(
+                raw.strip()
+                for raw in (command.help or "").splitlines()
+                if raw.strip().startswith("gco ")
+            )
+            if isinstance(command, click.Group):
+                pending.extend(command.commands.values())
+        assert any("-o json" in line for line in examples)
+        assert [line for line in examples if _output_option_misplaced(line)] == []
+
+    @pytest.mark.parametrize(
+        ("line", "misplaced"),
+        [
+            ("gco crossplane status --output json", True),
+            ("gco gitops status [--region REGION] [--output json]", True),
+            ("gco jobs policy -r us-east-1 -o json | jq .policy", True),
+            ("gco -o json crossplane status", False),
+            ("gco [-o json] slurm status -r REGION [--backend slinky|pcs]", False),
+            ("gco mission status mission-abc123 --output table", False),
+            ("gco jobs logs <job-name> -o json", True),
+            ("gco no-such-command --output json", False),
+        ],
+    )
+    def test_the_check_tells_a_misplaced_option_from_a_valid_one(self, line, misplaced):
+        assert _output_option_misplaced(line) is misplaced
+
+
 class TestFilesHelpExtended:
     """Extended tests for files subcommands."""
 

@@ -294,7 +294,7 @@ finalizer, so deleting the Application deletes what it synced.
 
 ```bash
 gco gitops status                     # every regional deployment region
-gco gitops status -r us-west-2 --output json
+gco -o json gitops status -r us-west-2
 ```
 
 The command reads `cdk.json` and `charts.yaml` only: the toggle, the chart

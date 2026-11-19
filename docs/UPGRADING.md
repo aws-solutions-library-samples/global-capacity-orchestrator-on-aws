@@ -962,7 +962,7 @@ data.
 | `gco capacity ai-recommend` | The recommendation's fields |
 | `gco capacity check --enrich-historical` | `{"estimates": [...], "historical": {...}}` |
 | `gco capacity spot-prices` with no data | `[]` |
-| `gco deps scan -o yaml` | The same envelope as `-o json`; `--report` now writes its file in every mode |
+| `gco -o yaml deps scan` | The same envelope as `-o json`; `--report` now writes its file in every mode |
 | `gco jobs submit --check-policy` | The submission document; the policy findings go to stderr |
 | Every command | Datetimes in ISO 8601 at any depth (`2026-01-15T10:30:00+00:00`); those inside job, stack and file records printed as `2026-01-15 10:30:00+00:00` |
 

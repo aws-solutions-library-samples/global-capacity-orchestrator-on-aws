@@ -2082,7 +2082,7 @@ dashboard. No AWS or cluster access. The
 the same document.
 
 ```bash
-gco crossplane status [--output json]
+gco [-o json] crossplane status
 ```
 
 #### `gco crossplane open`
@@ -2491,7 +2491,7 @@ autoscaler, and how to reach the UI. No AWS or cluster access; a
 document.
 
 ```bash
-gco gitops status [--region REGION] [--output json]
+gco [-o json] gitops status [--region REGION]
 ```
 
 #### `gco gitops open`
@@ -5151,7 +5151,7 @@ Work with a region's Slurm cluster(s): the [Slinky](https://slinky.schedmd.com/)
 The backends enabled in the region, from `GET /api/v1/slurm/backends`: for each, its kind and endpoint, and for PCS the cluster id, status, Slurm version, accounting mode, default partition, the Slurm identity the API submits as, and the login kind (`ssm`). The header says whether `--backend` is required (both on) or which one is the default (one on). A backend whose discovery fails is listed as `unavailable` with the reason, so one broken backend never hides the other.
 
 ```bash
-gco slurm backends -r REGION [--output json]
+gco [-o json] slurm backends -r REGION
 ```
 
 #### `gco slurm status`
@@ -5159,7 +5159,7 @@ gco slurm backends -r REGION [--output json]
 Controller reachability (`ping`), every partition with its node and CPU totals, and node and job counts by state. The default partition is marked `*`. The header names the backend that answered when the API resolved one (`[pcs]`).
 
 ```bash
-gco slurm status -r REGION [--backend slinky|pcs] [--output json]
+gco [-o json] slurm status -r REGION [--backend slinky|pcs]
 ```
 
 #### `gco slurm partitions`
