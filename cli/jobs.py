@@ -322,6 +322,19 @@ class JobInfo:
         return None
 
 
+class JobsReadError(RuntimeError):
+    """The jobs of one or more Regions could not be read.
+
+    ``errors`` holds one ``{"region", "error"}`` entry per Region that was not
+    read, in the order queried; ``jobs`` holds the jobs of every Region that was.
+    """
+
+    def __init__(self, jobs: list[JobInfo], errors: list[dict[str, str]]) -> None:
+        super().__init__("; ".join(f"{entry['region']}: {entry['error']}" for entry in errors))
+        self.jobs = jobs
+        self.errors = errors
+
+
 class JobManager:
     """
     Manages jobs across GCO clusters.
@@ -678,22 +691,27 @@ class JobManager:
             API's default order)
 
         Raises:
+            JobsReadError: With ``all_regions``, once every region has been
+                queried, when any could not be read; it carries the jobs of
+                the regions that were read and names each one that was not.
             Exception: Whatever the single-region read raised (HTTP error,
-                missing regional API, credentials). With ``all_regions`` a
-                region that cannot be read is logged and skipped instead.
+                missing regional API, credentials).
         """
         jobs = []
 
         if all_regions:
             # Query all discovered regional stacks
             stacks = self._aws_client.discover_regional_stacks()
+            errors: list[dict[str, str]] = []
             for stack_region in stacks:
                 try:
                     region_jobs = self._query_jobs_in_region(stack_region, namespace, status, limit)
                     jobs.extend(region_jobs)
                 except Exception as e:
-                    logger.warning("Failed to query jobs in %s: %s", stack_region, e)
-                    continue
+                    # Returning the others alone would pass the region off as empty.
+                    errors.append({"region": stack_region, "error": str(e)})
+            if errors:
+                raise JobsReadError(jobs, errors)
         elif region:
             jobs = self._query_jobs_in_region(region, namespace, status, limit)
         else:
@@ -721,7 +739,7 @@ class JobManager:
         caller the region has no jobs when it was never read, and a
         single-region ``gco jobs list`` would print "No results" and exit 0
         on a 403. The all-regions fan-out in :meth:`list_jobs` catches the
-        error per region, logs it, and carries on with the others.
+        error per region, reads the others, and raises :class:`JobsReadError`.
         """
         jobs: list[JobInfo] = []
         offset = 0

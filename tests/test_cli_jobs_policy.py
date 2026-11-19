@@ -1264,24 +1264,34 @@ class TestRenderingAndConfirmations:
 
         result, _, formatter = _invoke(["jobs", "list", "--all-regions", "--limit", "1"], manager)
 
-        assert result.exit_code == 0, result.output
+        # The Regions that were read are printed; the unreadable one is named
+        # on stderr and fails the command, as with `gco costs workloads`.
+        assert result.exit_code == 1, result.output
         assert "Global Jobs Summary" in result.output
         assert "Regions successful: 2" in result.output
         assert "a-very-long-training-job-name" in result.output
         assert "second" not in result.output
         formatter.print_warning.assert_called_once_with("  eu-west-1: bridge unavailable")
 
-    def test_global_list_structured_output_forwards_original_result(self) -> None:
+    @pytest.mark.parametrize(
+        ("errors", "exit_code"),
+        [(None, 0), ([], 0), ([{"region": "eu-west-1", "error": "bridge unavailable"}], 1)],
+    )
+    def test_global_list_structured_output_forwards_original_result(
+        self, errors: Any, exit_code: int
+    ) -> None:
         manager = MagicMock()
-        payload = {"total": 0, "jobs": [], "region_summaries": []}
+        payload = {"total": 0, "jobs": [], "region_summaries": [], "errors": errors}
         manager.list_jobs_global.return_value = payload
 
         result, _, formatter = _invoke(
             ["--output", "json", "jobs", "list", "--all-regions"], manager
         )
 
-        assert result.exit_code == 0, result.output
+        # Every unreadable Region is in the document's `errors`; any fails the command.
+        assert result.exit_code == exit_code, result.output
         formatter.print.assert_called_once_with(payload)
+        formatter.print_warning.assert_not_called()
 
     @pytest.mark.parametrize(
         ("subcommand", "manager_method", "payload", "message"),

@@ -1518,11 +1518,15 @@ class TestJobManagerQueryJobsInRegion:
         with pytest.raises(RuntimeError, match="403 Forbidden"):
             manager.list_jobs(region="us-east-1")
 
-    def test_list_jobs_all_regions_skips_a_failed_region(self):
-        """The fan-out keeps the regions that answered and skips the one that failed."""
+    def test_list_jobs_all_regions_reports_a_failed_region(self):
+        """The fan-out reads every region, then names the one that failed.
+
+        It used to log the failure and return the other regions' jobs, so a
+        caller could not tell a region it never read from one with no jobs.
+        """
         from unittest.mock import MagicMock
 
-        from cli.jobs import JobManager
+        from cli.jobs import JobManager, JobsReadError
 
         manager = JobManager()
         manager._aws_client = MagicMock()
@@ -1538,9 +1542,11 @@ class TestJobManagerQueryJobsInRegion:
 
         manager._aws_client.get_jobs.side_effect = get_jobs
 
-        jobs = manager.list_jobs(all_regions=True)
+        with pytest.raises(JobsReadError, match=r"^us-east-1: 403 Forbidden$") as excinfo:
+            manager.list_jobs(all_regions=True)
 
-        assert [(job.name, job.region) for job in jobs] == [("j", "us-west-2")]
+        assert [(job.name, job.region) for job in excinfo.value.jobs] == [("j", "us-west-2")]
+        assert excinfo.value.errors == [{"region": "us-east-1", "error": "403 Forbidden"}]
 
     def test_query_jobs_in_region_envelope_without_jobs_key(self):
         """An envelope that carries no ``jobs`` key (an empty page) yields no jobs."""
@@ -1855,11 +1861,11 @@ class TestJobManagerListJobsAllRegions:
     """Tests for list_jobs with all_regions=True."""
 
     def test_list_jobs_all_regions_with_errors(self):
-        """Test list_jobs continues when some regions have errors."""
+        """list_jobs reads the other regions when one fails, then raises with both."""
         from unittest.mock import MagicMock
 
         from cli.aws_client import RegionalStack
-        from cli.jobs import JobManager
+        from cli.jobs import JobManager, JobsReadError
 
         manager = JobManager()
         manager._aws_client = MagicMock()
@@ -1895,11 +1901,12 @@ class TestJobManagerListJobsAllRegions:
 
         manager._aws_client.get_jobs.side_effect = get_jobs_side_effect
 
-        result = manager.list_jobs(all_regions=True)
+        with pytest.raises(JobsReadError) as excinfo:
+            manager.list_jobs(all_regions=True)
 
-        # Should have job from us-east-1, us-west-2 error is skipped
-        assert len(result) == 1
-        assert result[0].name == "job1"
+        # The job from us-east-1 is kept; us-west-2's failure is reported.
+        assert [job.name for job in excinfo.value.jobs] == ["job1"]
+        assert excinfo.value.errors == [{"region": "us-west-2", "error": "API error"}]
 
 
 class TestJobManagerSQSSubmitSuccess:

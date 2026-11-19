@@ -2614,14 +2614,16 @@ def test_cli_direct_submission_handles_nonjobs_multiple_output_and_no_job() -> N
 
 
 def test_cli_list_parse_trainjob_logs_cloudwatch_and_wait_paths(capsys: Any) -> None:
-    from cli.jobs import JobInfo
+    from cli.jobs import JobInfo, JobsReadError
 
     manager = _manager()
     manager._aws_client.discover_regional_stacks.return_value = ["bad", "good"]
     manager._query_jobs_in_region = MagicMock(
         side_effect=[RuntimeError("region unavailable"), [MagicMock(name="job")]]
     )
-    assert len(manager.list_jobs(all_regions=True)) == 1
+    with pytest.raises(JobsReadError, match=r"^bad: region unavailable$") as excinfo:
+        manager.list_jobs(all_regions=True)
+    assert len(excinfo.value.jobs) == 1
 
     parsed = manager._parse_job_info(
         {

@@ -3674,6 +3674,11 @@ With `--region`, a read that fails (an HTTP error from the regional API, a Regio
 without the regional API bridge, missing credentials) prints the error on stderr and
 exits 1 in every output mode; it is never reported as an empty job list.
 
+With `--all-regions`, the global API reads every Region. Each Region it cannot read
+is listed under `errors` (`{"region", "error"}`) in the JSON output and named on
+stderr in table mode; the jobs of the other Regions are still printed, and the
+command exits 1.
+
 **Example:**
 
 ```bash
