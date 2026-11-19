@@ -3715,6 +3715,11 @@ class TestActionDestroy:
             "deleted": ["/gco-live/traffic-dial/state"],
             "errors": [],
         }
+        manager._cleanup_bastion_iam.return_value = {
+            "completed_steps": 4,
+            "absent_steps": 0,
+            "errors": [],
+        }
 
         with self._teardown_helpers(absence=[dict(self._ABSENT), dict(self._ABSENT)]) as helpers:
             result = actions_destroy.destroy_deployment(ctx)
@@ -3727,11 +3732,15 @@ class TestActionDestroy:
             "gco-live-us-east-1", region="us-east-1"
         )
         manager._cleanup_traffic_dial_parameters.assert_called_once_with()
+        # The bastions' shared IAM pair outlives every tunnel, so a resumed
+        # teardown retires it too.
+        manager._cleanup_bastion_iam.assert_called_once_with()
         sweeps = result["post_absence_sweeps"]
         assert [sweep["name"] for sweep in sweeps] == [
             "dynamic-pvs",
             "addon-parameters",
             "traffic-dial-parameters",
+            "bastion-iam",
         ]
         assert {sweep["source"] for sweep in sweeps} == {source}
         assert sweeps[2]["details"]["deleted"] == ["/gco-live/traffic-dial/state"]
@@ -3760,7 +3769,7 @@ class TestActionDestroy:
 
         helpers["retained"].assert_not_called()
         assert ctx.checkpoint.destroyed is False
-        assert len(ctx.checkpoint.state["post_absence_sweeps"]) == 3
+        assert len(ctx.checkpoint.state["post_absence_sweeps"]) == 4
 
 
 class TestActionFinalInventory:

@@ -1905,12 +1905,14 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
 
         worker.assert_called_once_with("gco-us-east-1", region=None, retain=True)
 
-    def test_strict_teardown_skips_log_and_iam_sweeps_but_purges_dial_tree(self):
-        """The live-validation harness owns fenced log-group deletion and
-        audits IAM itself — strict mode must skip both. The runtime
-        traffic-dial parameters are different: they are untagged, so the
-        harness's tagging-index audit cannot see them and nothing else owns
-        their removal. A fully successful strict teardown purges them too."""
+    def test_strict_teardown_skips_the_log_sweep_but_retires_bastion_iam_and_dial_tree(self):
+        """The live-validation harness owns fenced log-group deletion, so strict
+        mode skips that sweep. Two things nothing else removes still go: the
+        runtime traffic-dial parameters (untagged, so the harness's
+        tagging-index audit cannot see them) once the whole teardown
+        succeeds, and the bastions' shared IAM role and instance profile,
+        which closing a tunnel leaves in place. A live run's final inventory
+        found that pair after a strict teardown that skipped it."""
         (ok, _successful, failed), collect, cleanup, bastion_iam, dial, cleanups = self._run(
             destroy_results=[True, True],
             strict=True,
@@ -1919,9 +1921,9 @@ class TestDestroyOrchestratedImplicitCleanupWiring:
         assert ok is True and failed == []
         collect.assert_not_called()
         cleanup.assert_not_called()
-        bastion_iam.assert_not_called()
+        bastion_iam.assert_called_once_with()
         dial.assert_called_once()
-        assert "traffic-dial-parameters" in {name for name, _ in cleanups}
+        assert {"bastion-iam", "traffic-dial-parameters"} <= {name for name, _ in cleanups}
 
     def test_regenerated_log_groups_are_swept_only_for_destroyed_stacks(self):
         """gco-us-east-1 deletes and gco-global fails: only the former is swept."""

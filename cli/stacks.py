@@ -5544,11 +5544,14 @@ class StackManager:
         )
         record_cleanup("bastions", {"terminated_instances": bastions})
 
-        # Non-strict teardowns also retire the bastion's standing IAM
-        # role/profile and, below, the implicit log groups CloudFormation
-        # never modeled. Strict (live-validation) teardowns skip both: the
-        # harness owns fenced log-group deletion and audits IAM itself.
-        if not strict_identity and not keep_control_plane:
+        # A full teardown also retires the bastions' shared IAM role and
+        # instance profile. Every ``--via-ssm auto`` bastion of the project
+        # uses the pair and closing a tunnel leaves it in place, so nothing
+        # else removes it; strict (live-validation) teardowns retire it too,
+        # and the harness's final inventory proves it gone. Only non-strict
+        # teardowns sweep the implicit log groups below: the harness owns
+        # fenced log-group deletion.
+        if not keep_control_plane:
             record_cleanup("bastion-iam", self._cleanup_bastion_iam())
 
         # A regional stack's role that something outside the stack put into an
@@ -6432,7 +6435,7 @@ class StackManager:
         return remaining
 
     # ------------------------------------------------------------------
-    # Implicit log-group + bastion IAM cleanup (non-strict destroy only)
+    # Implicit log-group cleanup (non-strict destroy only) and bastion IAM
     # ------------------------------------------------------------------
     #
     # CloudFormation only deletes the log groups it modeled. Lambda default

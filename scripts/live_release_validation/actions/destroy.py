@@ -156,11 +156,12 @@ def _post_absence_sweeps(ctx: RunContext, *, source: str) -> list[dict[str, Any]
 
     ``destroy_orchestrated`` deletes a destroyed cluster's leftover EBS volumes
     and its add-on parameters (``/<project>/addons/<region>``) once the regional
-    stacks are absent, and the traffic-dial parameters once every stack is. A
-    run interrupted after the stacks were deleted never reached them, and on
-    resume, with the stacks absent, the orchestrator is not called again. The
-    sweeps act only on exact derived names and are idempotent, so they run on
-    every resume that finds the stacks gone.
+    stacks are absent, the traffic-dial parameters once every stack is, and the
+    shared bastion IAM role and instance profile. A run interrupted after the
+    stacks were deleted never reached them, and on resume, with the stacks
+    absent, the orchestrator is not called again. The sweeps act only on exact
+    derived names and are idempotent, so they run on every resume that finds
+    the stacks gone.
     """
     manager = ctx.stack_manager
     outcomes: list[dict[str, Any]] = []
@@ -181,6 +182,7 @@ def _post_absence_sweeps(ctx: RunContext, *, source: str) -> list[dict[str, Any]
     outcomes.append(
         {"name": "traffic-dial-parameters", "details": manager._cleanup_traffic_dial_parameters()}
     )
+    outcomes.append({"name": "bastion-iam", "details": manager._cleanup_bastion_iam()})
     recorded = [{"source": source, "at": utc_now(), **to_jsonable(item)} for item in outcomes]
     ctx.checkpoint.state.setdefault("post_absence_sweeps", []).extend(copy.deepcopy(recorded))
     ctx.persist()
