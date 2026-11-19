@@ -322,7 +322,13 @@ class FileSystemClient:
             region: AWS region
 
         Returns:
-            List of access point information
+            List of access point information; empty when the file system
+            has none or does not exist (``FileSystemNotFound``)
+
+        Raises:
+            ClientError: Any other failure (access denied, throttling, a
+                malformed ID, a service error): none of them says the file
+                system has no access points.
         """
         try:
             efs = self._session.client("efs", region_name=region)
@@ -342,8 +348,10 @@ class FileSystemClient:
                 for page in pages
                 for ap in page.get("AccessPoints", [])
             ]
-        except ClientError:
-            return []
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "FileSystemNotFound":
+                return []
+            raise
 
     def download_from_pod(
         self,

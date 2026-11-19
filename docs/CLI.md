@@ -2440,6 +2440,10 @@ List EFS access points for a file system. Useful for inspecting which
 namespaces have been provisioned and for confirming the POSIX UID/GID
 each access point enforces.
 
+A file system that does not exist has no access points (an empty list, `[]` in
+JSON). Any other failure to read them, such as access denied or throttling,
+prints the error on stderr and exits 1.
+
 ```bash
 gco files access-points FILE_SYSTEM_ID [OPTIONS]
 ```

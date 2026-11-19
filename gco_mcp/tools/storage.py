@@ -120,7 +120,9 @@ async def files_get(region: str, fs_type: str = "efs") -> str:
 async def files_access_points(file_system_id: str, region: str) -> str:
     """`gco files access-points` — list the access points of one EFS file system.
 
-    ``files_get`` returns the file system ID for a region.
+    ``files_get`` returns the file system ID for a region. A file system that
+    does not exist has none (``[]``); any other read failure (access denied,
+    throttling) is returned as an error.
 
     Args:
         file_system_id: EFS file system ID (e.g. ``fs-0123456789abcdef0``).

@@ -474,6 +474,40 @@ class TestFileSystemClientAccessPoints:
         with stubber:
             assert client.get_access_point_info("fs-12345678", "us-east-1") == []
 
+    def test_a_missing_file_system_has_no_access_points(self):
+        efs, stubber = _stubbed("efs")
+        stubber.add_client_error(
+            "describe_access_points", "FileSystemNotFound", http_status_code=404
+        )
+        client = self._client(efs)
+        with stubber:
+            assert client.get_access_point_info("fs-12345678", "us-east-1") == []
+
+    @pytest.mark.parametrize(
+        ("code", "status"),
+        [
+            ("AccessDeniedException", 403),
+            ("ThrottlingException", 400),
+            ("BadRequest", 400),
+            ("InternalServerError", 500),
+        ],
+    )
+    def test_any_other_error_is_raised(self, code: str, status: int):
+        """Only a missing file system means "none"; denial and throttling are not.
+
+        Every ClientError used to become an empty list, so `gco files
+        access-points` answered an AccessDenied with "No access points found"
+        and exit 0.
+        """
+        from botocore.exceptions import ClientError
+
+        efs, stubber = _stubbed("efs")
+        stubber.add_client_error("describe_access_points", code, http_status_code=status)
+        client = self._client(efs)
+        with stubber, pytest.raises(ClientError) as excinfo:
+            client.get_access_point_info("fs-12345678", "us-east-1")
+        assert excinfo.value.response["Error"]["Code"] == code
+
 
 class TestGetFileSystemClient:
     """Tests for get_file_system_client factory function."""
