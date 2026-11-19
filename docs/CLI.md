@@ -5172,7 +5172,7 @@ gco slurm submit SCRIPT --auto-region [OPTIONS]
 | `--tasks`, `-n` | Task count (`--ntasks`). |
 | `--cpus-per-task`, `-c` | CPUs per task. |
 | `--gpus-per-node` | GPUs per node (`gres/gpu:N`); the `gpu` partitions are whole-node, so match the instance's GPU count. |
-| `--mem` | Memory per node: MiB, or a `K`/`M`/`G`/`T` suffix such as `64G`. |
+| `--mem` | Memory per node: MiB, or a `K`/`M`/`G`/`T` suffix such as `64G`; a `K` size rounds up to whole MiB, as in sbatch. `--mem=0` (sbatch's "all of each node's memory") is refused, as a flag or an `#SBATCH` directive, because the API can only request an explicit size; an explicit `--mem` flag overrides the directive. |
 | `--time`, `-t` | Wall time: minutes, `HH:MM:SS` or `D-HH:MM:SS`. |
 | `--chdir`, `-D` | Working directory on the worker (default `/tmp` on Slinky, where `/home/slurm/...` is on the shared EFS; the identity's home on PCS). |
 | `--env`, `-e` | Extra environment variable `NAME=VALUE` (repeatable). |
