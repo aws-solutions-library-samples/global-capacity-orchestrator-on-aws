@@ -896,10 +896,79 @@ class TestRunnerGuaranteedCleanup:
         assert recorded.error == "RuntimeError: residue remains"
         assert recorded.duration_seconds == 25.5
         assert instance._final_inventory_recheck is None
-        assert "final_inventory_recheck" not in instance.report.cleanup
+        assert instance.report.cleanup["final_inventory_recheck"] == {
+            "status": "failed",
+            "started_at": recorded.started_at,
+            "ended_at": recorded.ended_at,
+            "duration_seconds": 25.5,
+            "error": "RuntimeError: residue remains",
+            "recorded_as_action_result": True,
+        }
         assert instance.checkpoint.completed_actions == ["destroy"]
         instance._refresh_report_results()
         assert instance.report.final_inventory is None
+
+    def test_a_recheck_whose_scan_failed_drops_the_earlier_inventory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The report must not show the clean scan the failed re-check superseded."""
+        instance = _build_runner(tmp_path, monkeypatch)
+        instance.checkpoint.deployment_attempted = True
+        instance.checkpoint.baseline = dict(_BASELINE)
+        instance.checkpoint.completed_actions.extend(["destroy", "final-inventory"])
+        instance._identity_verified = True
+        earlier = {"summary": {"total": 0}, "scan": "action"}
+        instance.checkpoint.action_results["final-inventory"] = ActionResult(
+            name="final-inventory",
+            description="d",
+            status="passed",
+            started_at="s",
+            ended_at="e",
+            duration_seconds=583.157,
+            details=earlier,
+        )
+        # What the passed action left: its scan is the report's final inventory.
+        instance._refresh_report_results()
+        assert instance.report.final_inventory == earlier
+
+        with (
+            patch.object(runner, "destroy_deployment", return_value={"needed": True}),
+            patch.object(
+                runner,
+                "action_final_inventory",
+                side_effect=RuntimeError("Project resource inventory did not run every scanner"),
+            ),
+        ):
+            instance._guaranteed_cleanup()
+        instance._refresh_report_results()
+
+        assert instance.report.final_inventory is None
+        assert instance.report.cleanup["final_inventory_recheck"]["status"] == "failed"
+        markdown = instance.report.to_markdown()
+        assert '"total": 0' not in markdown.split("## Final inventory", 1)[1]
+
+    def test_a_recheck_that_found_residue_keeps_its_own_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        instance = _build_runner(tmp_path, monkeypatch)
+        instance.checkpoint.deployment_attempted = True
+        instance.checkpoint.baseline = dict(_BASELINE)
+        instance._identity_verified = True
+        instance.report.final_inventory = {"summary": {"total": 0}, "scan": "action"}
+        residue = {"summary": {"total": 1}, "scan": "recheck"}
+
+        def scan_with_residue(ctx: Any) -> dict[str, Any]:
+            ctx.report.final_inventory = residue
+            raise RuntimeError("Project resources remain after teardown")
+
+        with (
+            patch.object(runner, "destroy_deployment", return_value={"needed": True}),
+            patch.object(runner, "action_final_inventory", side_effect=scan_with_residue),
+        ):
+            instance._guaranteed_cleanup()
+        instance._refresh_report_results()
+
+        assert instance.report.final_inventory is residue
 
     def test_final_inventory_failure_is_checkpointed_as_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1180,7 +1249,10 @@ class TestRunnerRun:
         assert exit_code == 1
         assert instance.report.status == "failed"
         assert instance.report.fatal_error is None
+        recheck = instance.report.cleanup.pop("final_inventory_recheck")
         assert instance.report.cleanup == {"completed": True, "needed": True}
+        assert recheck["status"] == "failed"
+        assert recheck["error"] == "RuntimeError: residue remains"
         result = instance.checkpoint.action_results["final-inventory"]
         assert result.status == "failed"
         assert instance.report.final_inventory is None
@@ -1414,11 +1486,13 @@ class TestModelSerialization:
         assert "ValueError: boom" in (failed.traceback or "")
         restored = ActionResult.from_dict(models.to_jsonable(failed))
         assert restored == failed
-        minimal = ActionResult.from_dict({"name": "x", "status": "skipped", "details": None})
-        assert minimal.description == ""
-        assert minimal.duration_seconds == 0.0
-        assert minimal.details == {}
-        assert minimal.error is None
+        # A partial record is not filled in with defaults.
+        with pytest.raises(ValueError, match="missing description, duration_seconds"):
+            ActionResult.from_dict({"name": "x", "status": "skipped", "details": None})
+        with pytest.raises(ValueError, match="must be an object"):
+            ActionResult.from_dict(["not", "a", "result"])
+        skipped = ActionResult.from_dict({**models.to_jsonable(passed), "status": "skipped"})
+        assert skipped.status == "skipped"
 
 
 class TestCheckpointLoading:
@@ -1461,35 +1535,87 @@ class TestCheckpointLoading:
         with pytest.raises(ValueError, match="invalid action_results"):
             RunCheckpoint.from_path(path)
 
-    def test_loader_keeps_only_object_action_results_and_fills_defaults(
-        self, tmp_path: Path
-    ) -> None:
-        path = self._write(
-            tmp_path,
-            {
-                "schema_version": models.SCHEMA_VERSION,
-                "identity": None,
-                "created_at": "",
-                "completed_actions": ["preflight", 7],
-                "action_results": {
-                    "preflight": {"name": "preflight", "status": "passed"},
-                    "garbage": "not-an-object",
-                },
-                "deployment_attempted": 1,
-                "baseline": ["not", "a", "dict"],
-            },
+    @staticmethod
+    def _valid() -> dict[str, Any]:
+        checkpoint = RunCheckpoint(identity={"run_id": "run-123"}, deployment_attempted=True)
+        checkpoint.action_results["preflight"] = ActionResult(
+            name="preflight",
+            description="d",
+            status="passed",
+            started_at="2026-01-01T00:00:00+00:00",
+            ended_at="2026-01-01T00:00:01+00:00",
+            duration_seconds=1.0,
         )
+        checkpoint.completed_actions.append("preflight")
+        return checkpoint.to_dict()
 
-        loaded = RunCheckpoint.from_path(path)
+    def test_a_checkpoint_as_written_loads_unchanged(self, tmp_path: Path) -> None:
+        payload = self._valid()
+        loaded = RunCheckpoint.from_path(self._write(tmp_path, payload))
+        assert models.to_jsonable(loaded) == payload
 
-        assert loaded.identity == {}
-        assert loaded.created_at
-        assert loaded.completed_actions == ["preflight", "7"]
-        assert list(loaded.action_results) == ["preflight"]
-        assert loaded.deployment_attempted is True
-        assert loaded.destroyed is False
-        assert loaded.baseline is None
-        assert loaded.state == {}
+    @pytest.mark.parametrize(
+        ("mutate", "message"),
+        [
+            # The field that decides whether teardown runs: missing or not a
+            # boolean must never read as "nothing was deployed".
+            (lambda raw: raw.pop("deployment_attempted"), "missing deployment_attempted"),
+            (lambda raw: raw.update(deployment_attempted="false"), "deployment_attempted must"),
+            (lambda raw: raw.update(deployment_attempted=1), "deployment_attempted must"),
+            (lambda raw: raw.update(destroyed=None), "destroyed must be true or false"),
+            (lambda raw: raw.update(identity=None), "identity must be an object"),
+            (lambda raw: raw.update(created_at=""), "created_at must be a non-empty string"),
+            (lambda raw: raw.update(updated_at=7), "updated_at must be a non-empty string"),
+            (lambda raw: raw.update(completed_actions="preflight"), "completed_actions must"),
+            (lambda raw: raw.update(completed_actions=["preflight", 7]), "completed_actions must"),
+            (lambda raw: raw.update(baseline=["not", "a", "dict"]), "baseline must be"),
+            (lambda raw: raw.pop("state"), "missing state"),
+            (
+                lambda raw: raw["action_results"].update(garbage="not-an-object"),
+                "action_results.garbage is invalid",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].pop("description"),
+                r"action_results.preflight is invalid \(missing description\)",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(status="done"),
+                "action_results.preflight is invalid .*status",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(duration_seconds=True),
+                "action_results.preflight is invalid .*duration_seconds",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(details=None),
+                "action_results.preflight is invalid .*details",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(error=3),
+                "action_results.preflight is invalid .*error",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(name=1),
+                "action_results.preflight is invalid .*name",
+            ),
+            (
+                lambda raw: raw["action_results"]["preflight"].update(name="baseline"),
+                "action_results.preflight names another action",
+            ),
+            (
+                lambda raw: raw.update(completed_actions=["preflight", "baseline"]),
+                "baseline is completed without a passed result",
+            ),
+        ],
+        ids=lambda value: value if isinstance(value, str) else "",
+    )
+    def test_a_corrupt_field_is_an_error_not_a_default(
+        self, tmp_path: Path, mutate: Callable[[dict[str, Any]], Any], message: str
+    ) -> None:
+        payload = self._valid()
+        mutate(payload)
+        with pytest.raises(ValueError, match=f"is corrupt: {message}"):
+            RunCheckpoint.from_path(self._write(tmp_path, payload))
 
 
 class TestReportMarkdown:
@@ -1533,6 +1659,44 @@ class TestReportMarkdown:
         assert "```text\nRuntimeError: a|b\nsecond line\n```" in markdown
         assert "### `baseline`" in markdown
         assert markdown.count("```text") == 1
+
+    def test_an_error_renders_as_one_literal_table_cell(self) -> None:
+        # Raw text in a row could end the cell early (an escaped backslash
+        # before a pipe), break the row (a carriage return), or render as
+        # emphasis, a code span, a link or HTML.
+        error = (
+            "RuntimeError: C:\\temp\\|x `kubectl get` *all* __init__ ~~gone~~ "
+            "[link](https://example.com) <b>bold</b> &amp;\r\nnext"
+        )
+        report = ValidationReport(
+            run_id="run-123",
+            identity={},
+            selected_actions=["baseline"],
+            started_at="2026-07-18T00:00:00+00:00",
+            action_results=[
+                ActionResult(
+                    name="baseline",
+                    description="d",
+                    status="failed",
+                    started_at="s",
+                    ended_at="e",
+                    duration_seconds=0.5,
+                    error=error,
+                )
+            ],
+        )
+
+        row = next(
+            line for line in report.to_markdown().splitlines() if line.startswith("| `baseline`")
+        )
+
+        # Exactly four cells: no unescaped pipe inside the error.
+        assert len(re.split(r"(?<!\\)\|", row)) == 6
+        assert row.endswith(
+            "| RuntimeError: C:\\\\temp\\\\\\|x \\`kubectl get\\` \\*all\\* "
+            "\\_\\_init\\_\\_ \\~\\~gone\\~\\~ "
+            "\\[link\\](https://example.com) \\<b\\>bold\\</b\\> \\&amp; next |"
+        )
 
     def test_fatal_error_and_tracebacks_are_rendered(self) -> None:
         report = ValidationReport(
@@ -2679,7 +2843,7 @@ class TestMainEntryPoint:
         "checkpoint_payload",
         [
             {"schema_version": 1},
-            {"schema_version": models.SCHEMA_VERSION, "deployment_attempted": False},
+            RunCheckpoint(identity={}, deployment_attempted=False).to_dict(),
         ],
         ids=["unreadable", "not-deployed"],
     )
@@ -3457,6 +3621,131 @@ class TestActionDestroy:
         assert attempt["log_cleanup_helper_cleanup"] == {"deleted": True}
         helpers["delete_helper"].assert_called_once_with(ctx)
         assert ctx.checkpoint.destroyed is False
+
+    @staticmethod
+    def _reporting(*helper_errors: list[str]) -> Callable[..., tuple[bool, list[str], list[str]]]:
+        """A teardown that succeeds and reports one helper outcome per call."""
+        calls = iter(helper_errors)
+
+        def destroy_orchestrated(**kwargs: Any) -> tuple[bool, list[str], list[str]]:
+            kwargs["on_cleanup_complete"]("bastions", {"terminated_instances": 0})
+            kwargs["on_cleanup_complete"]("eks-security-group", None)
+            kwargs["on_cleanup_complete"](
+                "addon-parameters", {"deleted": [], "errors": next(calls)}
+            )
+            return True, ["gco-live-global"], []
+
+        return destroy_orchestrated
+
+    def test_a_helper_step_that_reported_errors_fails_the_attempt(self) -> None:
+        ctx = self._ctx()
+        ctx.stack_manager.destroy_orchestrated.side_effect = self._reporting(
+            ["/gco-live/addons/us-east-1: AccessDeniedException"]
+        )
+
+        with (
+            self._teardown_helpers(absence=[dict(self._RESIDUAL)]) as helpers,
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"last failure: RuntimeError: Teardown helper steps reported errors: "
+                    r'addon-parameters: \["/gco-live/addons/us-east-1: AccessDeniedException"\]'
+                ),
+            ),
+        ):
+            actions_destroy.destroy_deployment(ctx)
+
+        attempt = ctx.checkpoint.state["destroy_attempts"][0]
+        assert attempt["overall_success"] is False
+        assert attempt["helper_errors"] == [
+            'addon-parameters: ["/gco-live/addons/us-east-1: AccessDeniedException"]'
+        ]
+        helpers["retained"].assert_not_called()
+        helpers["delete_helper"].assert_called_once_with(ctx)
+        assert ctx.checkpoint.destroyed is False
+
+    def test_a_retry_whose_helper_steps_succeed_completes_the_teardown(self) -> None:
+        ctx = self._ctx()
+        ctx.settings.destroy_attempts = 2
+        ctx.stack_manager.destroy_orchestrated.side_effect = self._reporting(
+            ["ThrottlingException"], []
+        )
+
+        with self._teardown_helpers(
+            absence=[dict(self._RESIDUAL), dict(self._ABSENT), dict(self._ABSENT)]
+        ) as helpers:
+            result = actions_destroy.destroy_deployment(ctx)
+
+        assert [attempt["overall_success"] for attempt in result["attempts"]] == [False, True]
+        assert "helper_errors" not in result["attempts"][1]
+        helpers["retained"].assert_called_once_with(ctx)
+        assert ctx.checkpoint.destroyed is True
+
+    @pytest.mark.parametrize(
+        ("destroyed", "source"),
+        [(False, "destroy-resume"), (True, "destroy-already-destroyed")],
+        ids=["resumed-after-absence", "already-destroyed"],
+    )
+    def test_a_resumed_teardown_with_the_stacks_gone_runs_the_sweeps_itself(
+        self, destroyed: bool, source: str
+    ) -> None:
+        ctx = self._ctx(destroyed=destroyed)
+        manager = ctx.stack_manager
+        manager._cleanup_cluster_volumes.return_value = {"deleted": [], "errors": []}
+        manager._cleanup_addon_parameters.return_value = {
+            "deleted": ["/gco-live/addons/us-east-1/_input"],
+            "errors": [],
+        }
+        manager._cleanup_traffic_dial_parameters.return_value = {
+            "deleted": ["/gco-live/traffic-dial/state"],
+            "errors": [],
+        }
+
+        with self._teardown_helpers(absence=[dict(self._ABSENT), dict(self._ABSENT)]) as helpers:
+            result = actions_destroy.destroy_deployment(ctx)
+
+        manager.destroy_orchestrated.assert_not_called()
+        manager._cleanup_cluster_volumes.assert_called_once_with(
+            "gco-live-us-east-1", region="us-east-1"
+        )
+        manager._cleanup_addon_parameters.assert_called_once_with(
+            "gco-live-us-east-1", region="us-east-1"
+        )
+        manager._cleanup_traffic_dial_parameters.assert_called_once_with()
+        sweeps = result["post_absence_sweeps"]
+        assert [sweep["name"] for sweep in sweeps] == [
+            "dynamic-pvs",
+            "addon-parameters",
+            "traffic-dial-parameters",
+        ]
+        assert {sweep["source"] for sweep in sweeps} == {source}
+        assert sweeps[2]["details"]["deleted"] == ["/gco-live/traffic-dial/state"]
+        assert ctx.checkpoint.state["post_absence_sweeps"] == sweeps
+        helpers["retained"].assert_called_once_with(ctx)
+        assert ctx.checkpoint.destroyed is True
+
+    def test_a_sweep_error_on_resume_fails_before_the_retained_cleanup(self) -> None:
+        ctx = self._ctx()
+        ctx.stack_manager._cleanup_traffic_dial_parameters.return_value = {
+            "deleted": [],
+            "errors": ["AccessDeniedException: ssm:DeleteParameters"],
+        }
+
+        with (
+            self._teardown_helpers(absence=[dict(self._ABSENT)]) as helpers,
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"Teardown sweeps after stack absence reported errors: "
+                    r"traffic-dial-parameters: .*ssm:DeleteParameters"
+                ),
+            ),
+        ):
+            actions_destroy.destroy_deployment(ctx)
+
+        helpers["retained"].assert_not_called()
+        assert ctx.checkpoint.destroyed is False
+        assert len(ctx.checkpoint.state["post_absence_sweeps"]) == 3
 
 
 class TestActionFinalInventory:

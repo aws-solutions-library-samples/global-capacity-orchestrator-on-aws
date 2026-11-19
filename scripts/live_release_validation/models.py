@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import time
 import traceback as traceback_module
 from collections.abc import Callable, Mapping
@@ -389,18 +390,103 @@ class ActionResult:
         )
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> ActionResult:
+    def from_dict(cls, value: Any) -> ActionResult:
+        """Rebuild a result exactly as the checkpoint wrote it; raise on anything else."""
+        if not isinstance(value, dict):
+            raise ValueError("an action result must be an object")
+        missing = sorted(_ACTION_RESULT_FIELDS - set(value))
+        if missing:
+            raise ValueError("missing " + ", ".join(missing))
+        for key in ("name", "description", "started_at", "ended_at"):
+            if not isinstance(value[key], str):
+                raise ValueError(f"{key} must be a string")
+        if value["status"] not in ("passed", "failed", "skipped"):
+            raise ValueError(f"status {value['status']!r} is not passed, failed or skipped")
+        duration = value["duration_seconds"]
+        if isinstance(duration, bool) or not isinstance(duration, int | float):
+            raise ValueError("duration_seconds must be a number")
+        if not isinstance(value["details"], dict):
+            raise ValueError("details must be an object")
+        for key in ("error", "traceback"):
+            if value[key] is not None and not isinstance(value[key], str):
+                raise ValueError(f"{key} must be a string or null")
         return cls(
-            name=str(value["name"]),
-            description=str(value.get("description", "")),
+            name=value["name"],
+            description=value["description"],
             status=value["status"],
-            started_at=str(value.get("started_at", "")),
-            ended_at=str(value.get("ended_at", "")),
-            duration_seconds=float(value.get("duration_seconds", 0.0)),
-            details=dict(value.get("details") or {}),
-            error=value.get("error"),
-            traceback=value.get("traceback"),
+            started_at=value["started_at"],
+            ended_at=value["ended_at"],
+            duration_seconds=float(duration),
+            details=dict(value["details"]),
+            error=value["error"],
+            traceback=value["traceback"],
         )
+
+
+#: Every field :class:`ActionResult` serializes; a checkpoint entry lacking one is corrupt.
+_ACTION_RESULT_FIELDS = frozenset(
+    {
+        "name",
+        "description",
+        "status",
+        "started_at",
+        "ended_at",
+        "duration_seconds",
+        "details",
+        "error",
+        "traceback",
+    }
+)
+
+
+#: Every field :class:`RunCheckpoint` serializes; a checkpoint lacking one is corrupt.
+_CHECKPOINT_FIELDS = frozenset(
+    {
+        "identity",
+        "created_at",
+        "updated_at",
+        "completed_actions",
+        "action_results",
+        "deployment_attempted",
+        "destroyed",
+        "baseline",
+        "state",
+        "schema_version",
+    }
+)
+
+
+def _checkpoint_problem(raw: dict[str, Any]) -> str | None:
+    """What makes ``raw`` other than a checkpoint :meth:`RunCheckpoint.to_dict` wrote."""
+    missing = sorted(_CHECKPOINT_FIELDS - set(raw))
+    if missing:
+        return "missing " + ", ".join(missing)
+    if not isinstance(raw["identity"], dict):
+        return "identity must be an object"
+    for key in ("created_at", "updated_at"):
+        if not isinstance(raw[key], str) or not raw[key]:
+            return f"{key} must be a non-empty string"
+    completed = raw["completed_actions"]
+    if not isinstance(completed, list) or any(not isinstance(item, str) for item in completed):
+        return "completed_actions must be a list of action names"
+    for key in ("deployment_attempted", "destroyed"):
+        if not isinstance(raw[key], bool):
+            return f"{key} must be true or false"
+    if raw["baseline"] is not None and not isinstance(raw["baseline"], dict):
+        return "baseline must be an object or null"
+    results = raw["action_results"]
+    for name, value in results.items():
+        try:
+            result = ActionResult.from_dict(value)
+        except ValueError as exc:
+            return f"action_results.{name} is invalid ({exc})"
+        if result.name != name:
+            return f"action_results.{name} names another action, {result.name}"
+    for name in completed:
+        result_value = results.get(name)
+        if not isinstance(result_value, dict) or result_value.get("status") != "passed":
+            return f"{name} is completed without a passed result"
+    return None
 
 
 @dataclass
@@ -437,28 +523,41 @@ class RunCheckpoint:
             raise ValueError(f"Unable to read checkpoint {path}: {exc}") from exc
         if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
             raise ValueError(f"Checkpoint {path} does not use supported schema {SCHEMA_VERSION}")
-        results_raw = raw.get("action_results") or {}
-        if not isinstance(results_raw, dict):
+        if "action_results" in raw and not isinstance(raw["action_results"], dict):
             raise ValueError(f"Checkpoint {path} has invalid action_results")
-        state_raw = raw.get("state", {})
-        if not isinstance(state_raw, dict):
+        if "state" in raw and not isinstance(raw["state"], dict):
             raise ValueError(f"Checkpoint {path} state must be an object")
+        # A field read with a default would turn a damaged checkpoint into a
+        # different run: a deployment_attempted that reads as false skips the
+        # teardown of whatever the run deployed.
+        problem = _checkpoint_problem(raw)
+        if problem is not None:
+            raise ValueError(f"Checkpoint {path} is corrupt: {problem}; it cannot be resumed")
         return cls(
-            identity=dict(raw.get("identity") or {}),
-            created_at=str(raw.get("created_at") or utc_now()),
-            updated_at=str(raw.get("updated_at") or utc_now()),
-            completed_actions=[str(item) for item in raw.get("completed_actions") or []],
+            identity=dict(raw["identity"]),
+            created_at=raw["created_at"],
+            updated_at=raw["updated_at"],
+            completed_actions=list(raw["completed_actions"]),
             action_results={
-                str(name): ActionResult.from_dict(value)
-                for name, value in results_raw.items()
-                if isinstance(value, dict)
+                name: ActionResult.from_dict(value) for name, value in raw["action_results"].items()
             },
-            deployment_attempted=bool(raw.get("deployment_attempted", False)),
-            destroyed=bool(raw.get("destroyed", False)),
-            baseline=dict(raw["baseline"]) if isinstance(raw.get("baseline"), dict) else None,
-            state=dict(state_raw),
+            deployment_attempted=raw["deployment_attempted"],
+            destroyed=raw["destroyed"],
+            baseline=None if raw["baseline"] is None else dict(raw["baseline"]),
+            state=dict(raw["state"]),
             schema_version=SCHEMA_VERSION,
         )
+
+
+#: Characters that change how a Markdown table cell renders: the escape
+#: character, the cell separator, code spans, emphasis and strikethrough, links
+#: and images, raw HTML and autolinks, and entity references.
+_MARKDOWN_CELL_SPECIALS = re.compile(r"([\\|`*_~\[\]<>&])")
+
+
+def _markdown_table_cell(text: str) -> str:
+    """``text`` as one Markdown table cell that renders literally, on one line."""
+    return _MARKDOWN_CELL_SPECIALS.sub(r"\\\1", " ".join(text.split()))
 
 
 @dataclass
@@ -520,7 +619,7 @@ class ValidationReport:
             "|---|---:|---:|---|",
         ]
         for result in self.action_results:
-            error = (result.error or "").replace("|", "\\|").replace("\n", " ")
+            error = _markdown_table_cell(result.error or "")
             lines.append(
                 f"| `{result.name}` | {result.status} | {result.duration_seconds:.3f}s | {error} |"
             )

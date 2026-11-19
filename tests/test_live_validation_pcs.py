@@ -603,10 +603,12 @@ class TestPcsNodeDrain:
                     _ec2_pages(),
                     _ec2_pages(),
                 ],
+                # The listing filters on the non-terminal states, so a volume
+                # leaves it once EBS starts deleting it.
                 "describe_volumes": [
                     _volume_pages(("vol-aaa", "in-use"), ("vol-bbb", "in-use")),
-                    _volume_pages(("vol-aaa", "deleting")),
-                    _volume_pages(("vol-aaa", "deleting")),
+                    _volume_pages(("vol-aaa", "in-use")),
+                    _volume_pages(("vol-aaa", "in-use")),
                     _volume_pages(),
                 ],
             }
@@ -640,7 +642,7 @@ class TestPcsNodeDrain:
         assert {"Name": "tag-key", "Values": ["gco:pcs-node-group"]} in volume_filters
         assert {
             "Name": "status",
-            "Values": ["creating", "available", "in-use", "deleting", "error"],
+            "Values": ["creating", "available", "in-use", "error"],
         } in volume_filters
         ctx.session.client.assert_called_with("ec2", region_name=_REGION)
 
@@ -669,8 +671,8 @@ class TestPcsNodeDrain:
                     _ec2_pages(("i-aaa", "shutting-down")),
                 ],
                 "describe_volumes": [
-                    _volume_pages(("vol-aaa", "deleting")),
-                    _volume_pages(("vol-aaa", "deleting")),
+                    _volume_pages(("vol-aaa", "available")),
+                    _volume_pages(("vol-aaa", "available")),
                 ],
             }
         )
@@ -679,18 +681,18 @@ class TestPcsNodeDrain:
             RuntimeError,
             match=(
                 r"still present after 0s: us-east-1: i-aaa \(shutting-down\), "
-                r"vol-aaa \(deleting\)"
+                r"vol-aaa \(available\)"
             ),
         ):
             cleanup_pcs_nodes._wait_for_pcs_nodes_terminated(ctx, timeout_seconds=0)
 
-    def test_a_lone_deleting_volume_is_waited_for(self) -> None:
+    def test_a_lone_volume_still_attached_is_waited_for(self) -> None:
         """What the first full run saw: instances gone, the login node's root volume not yet."""
         ctx = _ctx()
         ctx.session, _paginators = _ec2_session(
             {
                 "describe_instances": [_ec2_pages(), _ec2_pages()],
-                "describe_volumes": [_volume_pages(("vol-login", "deleting")), _volume_pages()],
+                "describe_volumes": [_volume_pages(("vol-login", "in-use")), _volume_pages()],
             }
         )
 
@@ -698,8 +700,27 @@ class TestPcsNodeDrain:
 
         entry = result["regions"][_REGION]
         assert entry["initial_instances"] == [] and entry["remaining_instances"] == []
-        assert entry["initial_volumes"] == [{"volume_id": "vol-login", "state": "deleting"}]
+        assert entry["initial_volumes"] == [{"volume_id": "vol-login", "state": "in-use"}]
         assert entry["remaining_volumes"] == [] and entry["polls"] == 1 and entry["terminated"]
+
+    def test_the_wait_and_the_final_inventory_agree_on_which_volumes_are_gone(self) -> None:
+        """A volume EBS is already deleting is no residue to the inventory, so none to wait for.
+
+        The wait used to keep polling a ``deleting`` volume, and fail the
+        retained cleanup at its deadline, although the tagged-volume strip and
+        the cluster-volume scanner accept that state.
+        """
+        from scripts.live_release_validation.inventory import _shared as inventory_shared
+        from scripts.live_release_validation.inventory import scanners as inventory_scanners
+        from scripts.live_release_validation.ownership import ebs_volumes
+
+        terminal = inventory_shared._TERMINAL_VOLUME_STATES
+        assert terminal == {"deleting", "deleted"}
+        assert ebs_volumes._TERMINAL_VOLUME_STATES is terminal
+        assert inventory_scanners._TERMINAL_VOLUME_STATES is terminal
+        assert set(cleanup_pcs_nodes._VOLUME_STATES) == (
+            set(inventory_shared._EBS_VOLUME_STATES) - terminal
+        )
 
     def test_an_instance_or_volume_without_an_id_fails_closed(self) -> None:
         ctx = _ctx()

@@ -1,8 +1,9 @@
 """The upgrade-validation action registry.
 
 Reuses the live-release-validation handlers verbatim for ``baseline``,
-``topology``, ``destroy`` and ``final-inventory``; the other actions live in
-``actions.py``. The runner requires the names ``deploy``, ``destroy`` and
+``destroy`` and ``final-inventory``; the other actions live in ``actions.py``,
+``topology`` among them (the release check, read against the upgraded
+checkout's preserved cdk.json). The runner requires the names ``deploy``, ``destroy`` and
 ``final-inventory``. ``tests/test_upgrade_validation.py`` holds this registry
 in lockstep with the contract table in ``docs/UPGRADE_VALIDATION.md``.
 """
@@ -13,7 +14,6 @@ from scripts.live_release_validation.actions import (
     action_baseline,
     action_destroy,
     action_final_inventory,
-    action_topology,
 )
 from scripts.live_release_validation.registry import ActionDefinition
 
@@ -23,6 +23,7 @@ from .actions import (
     action_sentinels,
     action_upgrade,
     action_upgrade_preflight,
+    action_upgraded_topology,
     action_verify_upgrade,
 )
 
@@ -70,7 +71,7 @@ def build_action_registry() -> dict[str, ActionDefinition]:
             "topology",
             "Verify the upgraded stacks, EKS, HTTPS ALB targets, APIs, queues, and DynamoDB",
             ("upgrade",),
-            action_topology,
+            action_upgraded_topology,
         ),
         ActionDefinition(
             "verify-upgrade",

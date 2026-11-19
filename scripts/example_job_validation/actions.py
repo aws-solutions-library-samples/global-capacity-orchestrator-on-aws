@@ -38,7 +38,12 @@ def action_static(ctx: RunContext) -> dict[str, Any]:
 
 
 def _capacity_skip_reason(ctx: RunContext, region: str, quota_code: str) -> str | None:
-    """Return a skip reason when the account has zero quota for the family."""
+    """Return a skip reason when the account has zero quota for the family.
+
+    Only a quota the account reports as zero is a skip. A lookup that fails
+    raises: the run cannot tell whether the example could have run, and a
+    "skipped" row would let it pass with nothing proven.
+    """
     if not quota_code:
         return None
     with drivers.BOTO_CLIENT_LOCK:
@@ -46,8 +51,11 @@ def _capacity_skip_reason(ctx: RunContext, region: str, quota_code: str) -> str 
     try:
         quota = client.get_service_quota(ServiceCode="ec2", QuotaCode=quota_code)
         value = float(quota["Quota"]["Value"])
-    except Exception as exc:  # quota lookup failing must not fail the run
-        return f"quota {quota_code} lookup failed ({type(exc).__name__}); treating as unavailable"
+    except Exception as exc:  # any failure leaves the capacity unknown
+        raise ExampleValidationError(
+            f"the EC2 quota {quota_code} could not be read ({type(exc).__name__}: {exc}), "
+            "so whether this account can run the example is unknown"
+        ) from exc
     if value <= 0:
         name = quota["Quota"].get("QuotaName", quota_code)
         return f"account quota '{name}' is {value:g} vCPUs — no capacity for this example"
@@ -122,7 +130,16 @@ def _run_one_example(
             detail=f"companion artifact: {spec.notes}",
         )
 
-    skip_reason = _capacity_skip_reason(ctx, region, spec.capacity_quota_code)
+    try:
+        skip_reason = _capacity_skip_reason(ctx, region, spec.capacity_quota_code)
+    except ExampleValidationError as exc:
+        return ExampleRunResult(
+            name=name,
+            status="failed",
+            submission=spec.submission,
+            duration_seconds=time.monotonic() - started,
+            detail=str(exc)[:1500],
+        )
     if skip_reason:
         return ExampleRunResult(
             name=name, status="skipped", submission=spec.submission, detail=skip_reason

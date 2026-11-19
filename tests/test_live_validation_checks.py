@@ -63,7 +63,9 @@ from tests.test_live_validation_inference import (
     TRITON_STATS,
     _lifecycle,
     _owned_item,
+    _prove_leg,
     _settings,
+    _verified_shared_proxy,
 )
 from tests.test_live_validation_inference import (
     TestSharedProxyAutoscalingProof as _SharedProxyFixtures,
@@ -3576,6 +3578,7 @@ class TestExecuteMatrix:
         cli = _FakeCli(runner, plans, runner.table)
         kubectl.reconfigured = cli.reconfigured
         monkeypatch.setattr(lifecycle_module.subprocess, "run", cli)
+        _verified_shared_proxy(runner)
 
         evidence = runner.execute()
 
@@ -3583,8 +3586,9 @@ class TestExecuteMatrix:
         assert evidence["validated_or_resumed"] == 6
         assert evidence["newly_validated"] == 6
         assert evidence["all_endpoints_absent"] is True
-        assert evidence["shared_proxy_autoscaling_verified"] is False
+        assert evidence["shared_proxy_autoscaling_verified"] is True
         assert evidence["invocations"]["completed"] == 6
+        assert evidence["restart_audits"] == {"required": 6, "clean": 6}
         assert evidence["frameworks"] == {
             "vllm": {
                 "baseline": True,
@@ -3648,25 +3652,28 @@ class TestExecuteMatrix:
         _inference_clock(monkeypatch)
         launched = MagicMock()
         monkeypatch.setattr(lifecycle_module.subprocess, "run", launched)
-        for record in records:
+        for plan, record in zip(runner.plans, records, strict=True):
+            # A leg recorded complete carries the evidence its steps left.
+            _prove_leg(plan, record)
             record["validation_complete"] = True
+        _verified_shared_proxy(runner)
 
         evidence = runner.execute()
 
         launched.assert_not_called()
         assert evidence["validated_or_resumed"] == 6
         assert evidence["newly_validated"] == 0
-        assert evidence["invocations"]["completed"] == 0
+        assert evidence["invocations"]["completed"] == 6
         assert evidence["frameworks"] == {
             "vllm": {
                 "baseline": True,
                 "hpa": True,
                 "store": True,
-                "invocations": 0,
-                "model_info": 0,
+                "invocations": 3,
+                "model_info": 3,
             },
-            "sglang": {"baseline": True, "hpa": True, "invocations": 0, "model_info": 0},
-            "triton": {"baseline": True, "invocations": 0, "model_info": 0},
+            "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 2},
+            "triton": {"baseline": True, "invocations": 1, "model_info": 1},
         }
         assert all(record["absence_proven"] is True for record in records)
         inventory_reads = [call for call in kubectl.calls if call[0] == "get"]

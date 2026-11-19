@@ -1524,6 +1524,52 @@ class TestMainEntryPoint:
         markdown = (report_dir / "example-job-validation.md").read_text(encoding="utf-8")
         assert markdown.startswith("# GCO Example Job Validation")
         assert "**FAILED**" in markdown
+        # Nothing was deployed, so there is no cleanup to report as blocked.
+        assert payload["cleanup"] == {}
+
+    def test_a_startup_failure_after_a_deploy_names_the_resume_that_cleans_up(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import json
+
+        from scripts.live_release_validation.models import RunCheckpoint, atomic_write_json
+
+        main_module = self._main_module()
+        root = _fake_repo(tmp_path)
+        report_dir = tmp_path / "report"
+        argv = [
+            *_IDENTITY_ARGS,
+            "--repo-root",
+            str(root),
+            "--run-id",
+            "run-7",
+            "--report-dir",
+            str(report_dir),
+        ]
+        parser = main_module._build_parser()
+        settings = main_module._settings_from_args(parser, parser.parse_args(argv))
+        report_dir.mkdir(mode=0o700)
+        atomic_write_json(
+            settings.checkpoint_path,
+            RunCheckpoint(identity=settings.identity(), deployment_attempted=True).to_dict(),
+        )
+
+        def exploding(*_args, **_kwargs):
+            raise RuntimeError("cdk context unreadable")
+
+        monkeypatch.setattr(main_module, "require_local_execution", lambda: None)
+        monkeypatch.setattr(main_module, "LiveValidationRunner", exploding)
+        self._argv(monkeypatch, *argv)
+        assert main_module.main() == 1
+
+        payload = json.loads(
+            (report_dir / "example-job-validation.json").read_text(encoding="utf-8")
+        )
+        cleanup = payload["cleanup"]
+        assert cleanup["needed"] is True and cleanup["completed"] is False
+        assert "could not be initialized" in cleanup["blocked"]
+        assert "-m scripts.example_job_validation" in cleanup["recovery_command"]
+        assert cleanup["recovery_command"].endswith("--resume")
 
 
 # ---------------------------------------------------------------------------
@@ -2683,15 +2729,39 @@ class TestCapacitySkipReason:
         session = _FakeSession(**{"service-quotas": quotas})
         assert actions._capacity_skip_reason(_live_ctx(session), "us-east-1", "L-1945791B") is None
 
-    def test_lookup_failure_skips_rather_than_failing_the_run(self) -> None:
+    def test_a_failed_lookup_is_an_error_not_a_skip(self) -> None:
         from scripts.example_job_validation import actions
 
         quotas = _FakeQuotas(PermissionError("AccessDenied"))
         session = _FakeSession(**{"service-quotas": quotas})
-        reason = actions._capacity_skip_reason(_live_ctx(session), "us-east-1", "L-2C3B7624")
-        assert reason == (
-            "quota L-2C3B7624 lookup failed (PermissionError); treating as unavailable"
+        with pytest.raises(
+            drivers.ExampleValidationError,
+            match=(
+                r"^the EC2 quota L-2C3B7624 could not be read \(PermissionError: AccessDenied\), "
+                r"so whether this account can run the example is unknown$"
+            ),
+        ):
+            actions._capacity_skip_reason(_live_ctx(session), "us-east-1", "L-2C3B7624")
+
+    def test_a_failed_lookup_fails_the_example_before_anything_is_submitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.example_job_validation import actions
+
+        quotas = _FakeQuotas(KeyError("Quota"))
+        session = _FakeSession(**{"service-quotas": quotas})
+        monkeypatch.setattr(
+            actions.kube,
+            "ensure_tunnel",
+            lambda kubectl: pytest.fail("nothing may run after a failed quota lookup"),
         )
+
+        result = actions._run_one_example(
+            _live_ctx(session), "trainium-job", "us-east-1", lambda *_a, **_k: (0, "", "")
+        )
+
+        assert result.status == "failed"
+        assert result.detail.startswith("the EC2 quota L-2C3B7624 could not be read (KeyError")
 
 
 class TestKedaPlumbing:
