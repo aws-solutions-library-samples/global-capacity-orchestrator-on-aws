@@ -28,17 +28,26 @@ emulator before touching anything (see
 release with that release's own ``gco``, upgrades it to this checkout with
 ``gco upgrade``, verifies the result, and destroys it (see
 docs/UPGRADE_VALIDATION.md).
+
+Both commands, and ``gco examples validate``, run their harness through
+``_run_harness``, which passes Ctrl-C, ``SIGTERM`` and ``SIGHUP`` on to the
+harness and waits for the cleanup they start instead of killing it.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
+from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn
+from types import FrameType
+from typing import Any, NoReturn
 
 import click
 
@@ -52,6 +61,27 @@ _KUBERNETES_MINOR_RE = re.compile(r"\d+\.\d+")
 
 #: The consent flag's exact name, referenced from error messages and docs.
 CONSENT_FLAG = "--i-understand-this-deploys-and-destroys-infrastructure"
+
+#: After passing an interrupt on to a harness, how long the command waits for
+#: the cleanup it starts: the teardown of everything the run deployed, the
+#: final inventory and the report. A teardown normally takes under an hour;
+#: this leaves room for slow stack deletions and the harness's retries.
+HARNESS_INTERRUPT_TIMEOUT_SECONDS = 6 * 60 * 60
+#: Once that has passed, the command interrupts the harness again, which stops
+#: the teardown and still writes the report, and kills it if it has not exited
+#: this long afterwards (the harness gives the commands it runs up to two
+#: minutes to stop).
+HARNESS_REPORT_TIMEOUT_SECONDS = 5 * 60
+#: How often the wait wakes to pass on the signals that arrived.
+_HARNESS_POLL_SECONDS = 0.2
+#: What ``signal.signal`` returns and accepts.
+_SignalHandler = Callable[[int, FrameType | None], Any] | int | None
+#: The signals every harness turns into its controlled cleanup.
+_HARNESS_INTERRUPTS: tuple[int, ...] = tuple(
+    signum
+    for signum in (getattr(signal, name, None) for name in ("SIGINT", "SIGTERM", "SIGHUP"))
+    if signum is not None
+)
 
 
 def _fail(message: str) -> NoReturn:
@@ -79,6 +109,120 @@ def _repo_root() -> Path:
             "run from inside the repository"
         )
     return root
+
+
+def _describe_seconds(seconds: float) -> str:
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f"{seconds / 3600:g} hours"
+    if seconds >= 60 and seconds % 60 == 0:
+        return f"{seconds / 60:g} minutes"
+    return f"{seconds:g} seconds"
+
+
+def _notice(message: str) -> None:
+    # A closed terminal (the SIGHUP case) must not end the wait for the harness.
+    with suppress(OSError):
+        click.echo(f"gco: {message}", err=True)
+
+
+def _signal_harness(process: subprocess.Popen[bytes], signum: int) -> None:
+    """Send ``signum`` to the harness's process group, as a terminal would."""
+    # killpg raises ProcessLookupError, or PermissionError on macOS when only
+    # the group's zombie leader is left: the harness has exited, and the next
+    # wait reaps it.
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signum)
+
+
+def _exit_status(returncode: int) -> int:
+    """The harness's exit status; ``128 + N`` when signal N ended it, as in a shell."""
+    return returncode if returncode >= 0 else 128 - returncode
+
+
+def _run_harness(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    resume_hint: str,
+    interrupt_timeout: float = HARNESS_INTERRUPT_TIMEOUT_SECONDS,
+    report_timeout: float = HARNESS_REPORT_TIMEOUT_SECONDS,
+) -> int:
+    """Run a validation harness to the end and return its exit status.
+
+    Every harness turns SIGINT, SIGTERM and SIGHUP into a controlled cleanup:
+    it tears down what the run deployed and writes its report, and a second
+    interrupt stops the teardown but still writes the report.
+    ``subprocess.run`` defeated that. On Ctrl-C the terminal interrupted the
+    harness and this process together, and ``subprocess.run`` then gave the
+    harness 0.25 seconds before killing it, so the deployment stayed up and
+    no report was written.
+
+    The harness now runs in its own session, so a terminal's signals reach
+    this process only, and each interrupt this process receives is passed on
+    to the harness's process group once, as the terminal would have delivered
+    it. A signal ignored when the command started (``nohup`` ignores SIGHUP)
+    stays ignored and is not passed on. The wait after the first interrupt is
+    bounded: ``interrupt_timeout`` seconds later the harness is interrupted
+    once more, and ``report_timeout`` seconds after that it is killed.
+    ``resume_hint`` tells the operator how to finish the teardown then.
+    """
+    received: list[int] = []
+
+    def record(signum: int, _frame: FrameType | None) -> None:
+        received.append(signum)
+
+    previous: dict[int, _SignalHandler] = {}
+    for signum in _HARNESS_INTERRUPTS:
+        if signal.getsignal(signum) != signal.SIG_IGN:
+            previous[signum] = signal.signal(signum, record)
+    try:
+        # nosemgrep: dangerous-subprocess-use-audit - argv built by the commands in this package; list form, no shell
+        process = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
+        passed_on = 0
+        stop_cleanup_at: float | None = None
+        kill_at: float | None = None
+        while True:
+            try:
+                return _exit_status(process.wait(timeout=_HARNESS_POLL_SECONDS))
+            except subprocess.TimeoutExpired:
+                pass
+            now = time.monotonic()
+            while passed_on < len(received):
+                signum = received[passed_on]
+                passed_on += 1
+                _signal_harness(process, signum)
+                if stop_cleanup_at is None:
+                    stop_cleanup_at = now + interrupt_timeout
+                    _notice(
+                        f"passed {signal.Signals(signum).name} on to the validation harness, "
+                        "which tears down what this run deployed and writes its report. "
+                        f"Waiting up to {_describe_seconds(interrupt_timeout)} for it; "
+                        "interrupt again to stop the teardown (the report is still written)."
+                    )
+            if kill_at is not None and now >= kill_at:
+                _signal_harness(process, signal.SIGKILL)
+                _notice(f"the validation harness did not exit, so it was killed. {resume_hint}")
+                return _exit_status(process.wait())
+            if kill_at is None and stop_cleanup_at is not None and now >= stop_cleanup_at:
+                _signal_harness(process, received[0])
+                kill_at = now + report_timeout
+                _notice(
+                    "the validation harness is still running "
+                    f"{_describe_seconds(interrupt_timeout)} after the interrupt; interrupting "
+                    "it again to stop the teardown and write the report (waiting up to "
+                    f"{_describe_seconds(report_timeout)})."
+                )
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+
+
+def _resume_hint(run_id: str, report_dir: Path) -> str:
+    return (
+        "Finish the teardown by running the same command again with "
+        f"--resume --run-id {run_id} --report-dir {report_dir}."
+    )
 
 
 @click.group()
@@ -251,6 +395,11 @@ def release_validate(
     generates a run id and a private report directory outside the worktree,
     and executes ``python -m scripts.live_release_validation``. Exits with
     the harness's exit code; reports land in the report directory.
+
+    Ctrl-C, SIGTERM and SIGHUP are passed on to the harness, which tears down
+    what the run deployed and writes its report; the command waits up to 6
+    hours for that, then stops the teardown. Interrupt again to stop it sooner
+    (the report is still written).
     """
     if not _ACCOUNT_RE.fullmatch(expected_account):
         _fail("--expected-account must be an exact 12-digit AWS account id")
@@ -434,8 +583,14 @@ def release_validate(
 
     # Stream harness output directly; operators watch progress live and the
     # harness owns its own reporting/cleanup guarantees.
-    result = subprocess.run(command, cwd=repo_root, env=env, check=False)
-    sys.exit(result.returncode)
+    sys.exit(
+        _run_harness(
+            command,
+            cwd=repo_root,
+            env=env,
+            resume_hint=_resume_hint(resolved_run_id, resolved_report_dir),
+        )
+    )
 
 
 @release.command("validate-upgrade")
@@ -515,6 +670,9 @@ def release_validate_upgrade(
     everything and verifies the account is back to its baseline. Executes
     ``python -m scripts.upgrade_validation`` and exits with its code. See
     docs/UPGRADE_VALIDATION.md.
+
+    Ctrl-C, SIGTERM and SIGHUP are passed on to the harness and its cleanup
+    is awaited, as for `gco release validate`.
     """
     if not _ACCOUNT_RE.fullmatch(expected_account):
         _fail("--expected-account must be an exact 12-digit AWS account id")
@@ -591,5 +749,11 @@ def release_validate_upgrade(
     click.echo(f"actions:    {','.join(sorted(selected))}")
     click.echo(f"report-dir: {resolved_report_dir}")
 
-    result = subprocess.run(command, cwd=repo_root, env=dict(os.environ), check=False)
-    sys.exit(result.returncode)
+    sys.exit(
+        _run_harness(
+            command,
+            cwd=repo_root,
+            env=dict(os.environ),
+            resume_hint=_resume_hint(resolved_run_id, resolved_report_dir),
+        )
+    )

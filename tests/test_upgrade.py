@@ -9,6 +9,7 @@ detached checkout), because those are the behaviours a mock would merely echo.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,12 +21,31 @@ import pytest
 from cli import upgrade as engine
 from cli.upgrade import (
     CheckoutState,
+    ConfigurationCheck,
     InstallProbe,
     ReleaseTag,
     StackCycleResult,
     UpgradeError,
     UpgradePlan,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+#: The real check; the autouse fixture below stands in for it everywhere else.
+_CHECK_PRESERVED_CONFIGURATION = engine.check_preserved_configuration
+
+
+@pytest.fixture(autouse=True)
+def accepted_configuration(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, Any]]:
+    """The stack-cycle tests' managers are mocks: their cdk.json is accepted, warning-free."""
+    calls: list[tuple[Path, Any]] = []
+
+    def accept(root: Path, overrides: Any = None) -> ConfigurationCheck:
+        calls.append((root, overrides))
+        return ConfigurationCheck()
+
+    monkeypatch.setattr(engine, "check_preserved_configuration", accept)
+    return calls
+
 
 # ---------------------------------------------------------------------------
 # Release tags
@@ -749,6 +769,7 @@ def _manager(
     deploy_result: tuple[bool, list[str], list[str]] = (True, ["gco-global", "gco-us-east-1"], []),
 ) -> MagicMock:
     manager = MagicMock()
+    manager.project_root = Path("/checkout")
     manager.destroy_orchestrated.side_effect = list(destroy_results)
     manager.deploy_orchestrated.return_value = deploy_result
     return manager
@@ -782,7 +803,8 @@ def test_run_stack_cycle_happy_path_passes_the_callbacks_through() -> None:
     assert deploy_kwargs["require_approval"] is False
     assert deploy_kwargs["on_stack_complete"] is on_complete
     manager.cleanup_orphaned_network_interfaces.assert_not_called()
-    assert log[0].startswith("Phase 1/2") and log[-1].startswith("Phase 2/2")
+    assert log[0].startswith("Checking cdk.json") and log[1].startswith("Phase 1/2")
+    assert log[-1].startswith("Phase 2/2")
     assert result.to_dict()["ok"] is True
 
 
@@ -809,6 +831,256 @@ def test_an_owner_only_checkout_stops_the_cycle_before_any_stack_is_touched() ->
     manager.destroy_orchestrated.assert_not_called()
     manager.deploy_orchestrated.assert_not_called()
     assert log == []
+
+
+def test_run_stack_cycle_checks_the_configuration_before_the_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new release's loader reads cdk.json, with the run's overrides, before Phase 1."""
+    manager = _manager([(True, ["gco-us-east-1"], [])])
+    order: list[str] = []
+    manager.ensure_asset_sources_readable.side_effect = lambda: order.append("sources")
+    manager.destroy_orchestrated.side_effect = lambda **_kw: (
+        order.append("teardown") or (True, ["gco-us-east-1"], [])
+    )
+    seen: list[tuple[Path, Any]] = []
+
+    def check(root: Path, overrides: Any = None) -> ConfigurationCheck:
+        order.append("configuration")
+        seen.append((root, overrides))
+        return ConfigurationCheck(warnings=("images.lifecycle is deprecated and ignored: x",))
+
+    monkeypatch.setattr(engine, "check_preserved_configuration", check)
+    log: list[str] = []
+    warnings: list[str] = []
+
+    result = engine.run_stack_cycle(
+        manager,
+        log=log.append,
+        warn=warnings.append,
+        cdk_context={"feature_enabled_overrides": "fsx_lustre"},
+        sleep=lambda _s: None,
+    )
+
+    assert result.ok is True
+    assert order == ["sources", "configuration", "teardown"]
+    assert seen == [(Path("/checkout"), {"feature_enabled_overrides": "fsx_lustre"})]
+    assert warnings == ["cdk.json: images.lifecycle is deprecated and ignored: x"]
+    assert log[0] == "Checking cdk.json with the checked-out release's configuration loader..."
+
+
+def test_configuration_warnings_go_to_the_log_without_a_warn_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        engine,
+        "check_preserved_configuration",
+        lambda root, overrides=None: ConfigurationCheck(warnings=("w",)),
+    )
+    log: list[str] = []
+
+    engine.run_stack_cycle(_manager([(True, [], [])]), log=log.append, sleep=lambda _s: None)
+
+    assert "cdk.json: w" in log
+
+
+def test_a_cdk_json_the_new_release_rejects_stops_before_any_stack_is_touched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        engine,
+        "check_preserved_configuration",
+        lambda root, overrides=None: ConfigurationCheck(
+            warnings=("first warning", "second warning"),
+            error="the checked-out release rejects cdk.json: kubernetes_version is wrong.",
+        ),
+    )
+    manager = _manager([(True, ["gco-us-east-1"], [])])
+    log: list[str] = []
+    warnings: list[str] = []
+
+    with pytest.raises(UpgradeError) as raised:
+        engine.run_stack_cycle(manager, log=log.append, warn=warnings.append, sleep=lambda _s: None)
+
+    assert str(raised.value) == (
+        "Stopped before the teardown: the checked-out release rejects cdk.json: "
+        "kubernetes_version is wrong. No stack was changed. Fix cdk.json (the upgrade kept it "
+        "byte for byte), then run 'gco upgrade --skip-checkout' to cycle the stacks on this "
+        "checkout."
+    )
+    assert warnings == ["cdk.json: first warning", "cdk.json: second warning"]
+    manager.destroy_orchestrated.assert_not_called()
+    manager.deploy_orchestrated.assert_not_called()
+    assert not any(line.startswith("Phase") for line in log)
+
+
+# The check itself runs a fresh interpreter in a checkout. These stand-in
+# packages make it fast and say exactly what the loader saw; the last tests
+# run this checkout's real ConfigLoader.
+_STAND_IN_AWS_CDK = """
+import atexit
+import os
+import time
+
+behaviour = os.environ.get("STAND_IN_CDK", "")
+if behaviour == "broken":
+    raise ImportError("No module named 'jsii'")
+if behaviour == "hang":
+    time.sleep(60)
+if behaviour == "silent":
+    os._exit(0)
+print("jsii: some unrelated output on stdout")
+atexit.register(print, "jsii: more of it, after the check's result line")
+
+
+class _Node:
+    def __init__(self, context):
+        self._context = context
+
+    def try_get_context(self, key):
+        return self._context.get(key)
+
+
+class App:
+    def __init__(self, context=None):
+        self.node = _Node(dict(context or {}))
+"""
+_STAND_IN_LOADER = """
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class ConfigValidationError(Exception):
+    pass
+
+
+class ConfigLoader:
+    def __init__(self, app):
+        context = app.node._context
+        logger.warning("saw %s", json.dumps(context, sort_keys=True))
+        logger.warning("saw %s", json.dumps(context, sort_keys=True))
+        if context.get("project_name") == "bad name":
+            raise ConfigValidationError("project_name 'bad name' is invalid; use letters only.")
+"""
+
+
+def _stand_in_checkout(tmp_path: Path, cdk_json: str) -> Path:
+    root = tmp_path / "checkout"
+    (root / "aws_cdk").mkdir(parents=True)
+    (root / "aws_cdk" / "__init__.py").write_text(_STAND_IN_AWS_CDK, encoding="utf-8")
+    (root / "gco" / "config").mkdir(parents=True)
+    (root / "gco" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "gco" / "config" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "gco" / "config" / "config_loader.py").write_text(_STAND_IN_LOADER, encoding="utf-8")
+    (root / "cdk.json").write_text(cdk_json, encoding="utf-8")
+    return root
+
+
+def test_the_check_runs_the_checkouts_loader_on_cdk_json_and_the_overrides(tmp_path) -> None:
+    root = _stand_in_checkout(
+        tmp_path, json.dumps({"app": "python3 app.py", "context": {"project_name": "gco"}})
+    )
+
+    check = _CHECK_PRESERVED_CONFIGURATION(root, {"feature_enabled_overrides": "valkey"})
+
+    # The loader's warnings arrive once each, among unrelated stdout lines.
+    assert check == ConfigurationCheck(
+        warnings=('saw {"feature_enabled_overrides": "valkey", "project_name": "gco"}',)
+    )
+
+
+def test_the_loaders_error_comes_back_with_its_warnings(tmp_path) -> None:
+    root = _stand_in_checkout(tmp_path, json.dumps({"context": {"project_name": "bad name"}}))
+
+    check = _CHECK_PRESERVED_CONFIGURATION(root)
+
+    assert check.warnings == ('saw {"project_name": "bad name"}',)
+    assert check.error == (
+        "the checked-out release rejects cdk.json: "
+        "project_name 'bad name' is invalid; use letters only."
+    )
+
+
+def test_a_cdk_json_without_a_context_object_checks_the_overrides_alone(tmp_path) -> None:
+    root = _stand_in_checkout(tmp_path, json.dumps(["not", "an", "object"]))
+
+    check = _CHECK_PRESERVED_CONFIGURATION(root, {"k": "v"})
+
+    assert check == ConfigurationCheck(warnings=('saw {"k": "v"}',))
+
+
+def test_a_cdk_json_that_is_not_json_is_the_error(tmp_path) -> None:
+    root = _stand_in_checkout(tmp_path, '{"context": {"project_name": "gco",}}')
+
+    check = _CHECK_PRESERVED_CONFIGURATION(root)
+
+    assert check.warnings == ()
+    assert check.error is not None
+    assert check.error.startswith("cdk.json could not be read as JSON: ")
+
+
+@pytest.mark.parametrize(
+    ("behaviour", "detail"),
+    [
+        ("broken", "could not run (exit status 1): ImportError: No module named 'jsii'"),
+        ("silent", "could not run (exit status 0): no output"),
+    ],
+)
+def test_a_check_that_cannot_run_is_the_error(tmp_path, monkeypatch, behaviour, detail) -> None:
+    root = _stand_in_checkout(tmp_path, json.dumps({"context": {}}))
+    monkeypatch.setenv("STAND_IN_CDK", behaviour)
+
+    check = _CHECK_PRESERVED_CONFIGURATION(root)
+
+    assert check.error == f"the checked-out release's configuration check {detail}"
+
+
+def test_a_check_that_hangs_is_the_error(tmp_path, monkeypatch) -> None:
+    root = _stand_in_checkout(tmp_path, json.dumps({"context": {}}))
+    monkeypatch.setenv("STAND_IN_CDK", "hang")
+    monkeypatch.setattr(engine, "CONFIGURATION_CHECK_TIMEOUT_SECONDS", 1.0)
+
+    check = _CHECK_PRESERVED_CONFIGURATION(root)
+
+    assert check.error == "the checked-out release's configuration check did not finish within 1s"
+
+
+def _real_checkout(tmp_path: Path, edit: Any) -> Path:
+    """This checkout's gco package and CDK library, with an edited copy of its cdk.json."""
+    root = tmp_path / "real-checkout"
+    root.mkdir()
+    (root / "gco").symlink_to(REPO_ROOT / "gco", target_is_directory=True)
+    document = json.loads((REPO_ROOT / "cdk.json").read_text(encoding="utf-8"))
+    edit(document["context"])
+    (root / "cdk.json").write_text(json.dumps(document), encoding="utf-8")
+    return root
+
+
+def test_the_real_loader_accepts_cdk_json_and_reports_a_deprecated_key(tmp_path) -> None:
+    def deprecate(context: dict[str, Any]) -> None:
+        context.setdefault("images", {})["lifecycle"] = {"max_image_count": 10}
+
+    check = _CHECK_PRESERVED_CONFIGURATION(_real_checkout(tmp_path, deprecate))
+
+    assert check.error is None, check.error
+    assert any(warning.startswith("images.lifecycle is deprecated") for warning in check.warnings)
+
+
+def test_the_real_loader_rejects_a_value_it_validates_strictly(tmp_path) -> None:
+    def break_it(context: dict[str, Any]) -> None:
+        context.setdefault("images", {})["lifecycle"] = {"max_image_count": 10}
+        context["kubernetes_version"] = 1.30
+
+    check = _CHECK_PRESERVED_CONFIGURATION(_real_checkout(tmp_path, break_it))
+
+    assert check.error is not None
+    assert check.error.startswith(
+        'the checked-out release rejects cdk.json: kubernetes_version must be a "<major>.<minor>"'
+    )
+    # A warning the loader logged before the error stopped it is still reported.
+    assert any(warning.startswith("images.lifecycle is deprecated") for warning in check.warnings)
 
 
 def test_run_stack_cycle_retries_the_teardown_and_merges_destroyed_stacks() -> None:

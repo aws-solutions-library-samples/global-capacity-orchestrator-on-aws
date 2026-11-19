@@ -185,10 +185,12 @@ def upgrade(
          npm ci for a checkout-local CDK toolchain, and a rebuild of the
          gco-dev container image when it exists;
       3. checks that the checkout's deployable sources are readable by every
-         user (stopping, with no stack touched, when they are not), then
-         scales the workload tier to zero — the monitoring stack is updated
-         in place so it stops referencing the regional stacks, then every
-         regional API bridge and regional stack is DESTROYED;
+         user and that the new release's configuration loader accepts
+         cdk.json, printing its warnings (stopping, with no stack touched,
+         when either fails), then scales the workload tier to zero — the
+         monitoring stack is updated in place so it stops referencing the
+         regional stacks, then every regional API bridge and regional stack
+         is DESTROYED;
       4. updates the global, API Gateway, monitoring and (when enabled)
          analytics stacks in place and recreates the regional stacks from
          cdk.json on the new release.
@@ -362,6 +364,8 @@ def upgrade(
             on_stack_start=on_start,
             on_stack_complete=on_complete,
             log=formatter.print_info,
+            warn=formatter.print_warning,
+            cdk_context=dict(enable),
         )
         steps["stacks"] = cycle.to_dict()
     except AssetPermissionError as e:

@@ -637,7 +637,7 @@ class TestParallelExamples:
         barrier = threading.Barrier(len(names), timeout=15)
         finished: list[str] = []
 
-        def fake_run(_ctx, name, _region, _kubectl):
+        def fake_run(_ctx, name, _region, _kubectl, **_kwargs):
             # Every example must be inside its thread simultaneously for the
             # barrier to release; a serial loop would deadlock and break it.
             barrier.wait()
@@ -663,6 +663,43 @@ class TestParallelExamples:
         }
         assert sessions[0]["bastion_ttl_minutes"] == summary["tunnel"]["bastion_ttl_minutes"]
         assert sessions[0]["tunnel_events"] is summary["tunnel"]["reopens"]
+        # The session's access entry is granted by this checkout's CLI.
+        assert sessions[0]["gco_command"] == drivers.CHECKOUT_GCO_COMMAND
+
+    def test_a_submission_is_journaled_and_an_earlier_record_reaches_its_example(
+        self, monkeypatch, tmp_path
+    ):
+        from scripts.example_job_validation import actions
+
+        first, second, third = sorted(EXAMPLE_SPECS)[:3]
+        self._fake_session(monkeypatch)
+        prior = {
+            first: {"name": first, "status": "submitting", "submission": "s"},
+            second: "not a record",
+        }
+        ctx = self._ctx(tmp_path, [first, second, third], max_parallel=1, prior=prior)
+        persisted: list[dict] = []
+        ctx.persist = lambda: persisted.append(dict(ctx.checkpoint.state["examples"]))
+        seen: dict[str, object] = {}
+
+        def fake_run(_ctx, name, _region, _kubectl, *, earlier: object, journal) -> object:
+            seen[name] = earlier
+            journal()
+            return drivers.ExampleRunResult(name=name, status="passed", submission="s")
+
+        monkeypatch.setattr(actions, "_run_one_example", fake_run)
+        actions.action_examples(ctx)
+
+        assert seen == {first: prior[first], second: None, third: None}
+        # Each example's journal record is checkpointed before its result.
+        journal = {
+            "name": first,
+            "status": "submitting",
+            "submission": EXAMPLE_SPECS[first].submission,
+        }
+        assert persisted[0][first] == journal
+        assert persisted[1][first]["status"] == "passed"
+        assert ctx.checkpoint.state["examples"][first]["status"] == "passed"
 
     def test_max_parallel_one_runs_serially(self, monkeypatch, tmp_path):
         import threading
@@ -675,7 +712,7 @@ class TestParallelExamples:
         peak = 0
         gauge = threading.Lock()
 
-        def fake_run(_ctx, name, _region, _kubectl):
+        def fake_run(_ctx, name, _region, _kubectl, **_kwargs):
             nonlocal active, peak
             with gauge:
                 active += 1
@@ -698,7 +735,7 @@ class TestParallelExamples:
         self._fake_session(monkeypatch)
         ran: list[str] = []
 
-        def fake_run(_ctx, name, _region, _kubectl):
+        def fake_run(_ctx, name, _region, _kubectl, **_kwargs):
             ran.append(name)
             return drivers.ExampleRunResult(name=name, status="passed", submission="s")
 
@@ -718,7 +755,7 @@ class TestParallelExamples:
         names = sorted(EXAMPLE_SPECS)[:2]
         self._fake_session(monkeypatch)
 
-        def fake_run(_ctx, name, _region, _kubectl):
+        def fake_run(_ctx, name, _region, _kubectl, **_kwargs):
             status = "failed" if name == names[0] else "passed"
             return drivers.ExampleRunResult(
                 name=name, status=status, submission="s", detail=f"{name} detail"
@@ -748,7 +785,7 @@ class TestParallelExamples:
         names = sorted(EXAMPLE_SPECS)[:2]
         self._fake_session(monkeypatch)
 
-        def fake_run(_ctx, name, _region, _kubectl):
+        def fake_run(_ctx, name, _region, _kubectl, **_kwargs):
             if name == names[1]:
                 raise ValueError("boom")
             return drivers.ExampleRunResult(name=name, status="passed", submission="s")
@@ -1740,6 +1777,7 @@ def _synthetic_parsed(name: str, spec, documents: list[dict]) -> static_checks.P
 class TestRunCli:
     def test_runs_in_the_checkout_with_captured_text_output(self, monkeypatch, tmp_path):
         import subprocess
+        import sys
 
         seen: dict[str, object] = {}
 
@@ -1755,7 +1793,8 @@ class TestRunCli:
             "warn",
         )
         assert seen == {
-            "args": ["gco", "jobs", "submit"],
+            # The checkout's CLI module, run by this interpreter, replaces ``gco``.
+            "args": [sys.executable, "-m", "cli.main", "jobs", "submit"],
             "cwd": tmp_path,
             "capture_output": True,
             "text": True,
@@ -2607,6 +2646,36 @@ def _live_ctx(session=None, *, run_id: str = "run-1"):
     )
 
 
+class TestCheckoutCli:
+    """Every ``gco`` the example harness runs is the checkout's own CLI."""
+
+    def test_the_command_prefix_is_this_interpreter_running_the_checkout(self) -> None:
+        import sys
+
+        expected = (sys.executable, "-m", "cli.main")
+        assert expected == drivers.CHECKOUT_GCO_COMMAND
+
+    def test_a_gco_on_path_is_never_the_one_that_runs(self, tmp_path: Path) -> None:
+        import os
+
+        decoy = tmp_path / "bin"
+        decoy.mkdir()
+        script = decoy / "gco"
+        script.write_text("#!/bin/sh\necho 'the gco on PATH ran'\n", encoding="utf-8")
+        script.chmod(0o755)
+        environment = {**os.environ, "PATH": f"{decoy}{os.pathsep}{os.environ['PATH']}"}
+
+        code, out, err = drivers._run_cli(["gco", "--version"], REPO_ROOT, env=environment)
+
+        assert (code, err) == (0, "")
+        assert "the gco on PATH ran" not in out
+        assert out.startswith("gco, version ")
+
+    def test_only_a_gco_command_line_is_run(self) -> None:
+        with pytest.raises(ValueError, match="must start with gco"):
+            drivers._run_cli(["kubectl", "version"], REPO_ROOT)
+
+
 def _record_run_cli(monkeypatch, respond) -> list[tuple[list[str], Path, int]]:
     calls: list[tuple[list[str], Path, int]] = []
 
@@ -3136,6 +3205,95 @@ class TestRunOneExample:
         assert cli_calls[0][0][:3] == ["gco", "jobs", "submit-direct"]
         assert kubectl.calls[0][0][:3] == ("get", "deployment", "mlflow")
         assert kubectl.calls[1][0][:3] == ("get", "configmap", "gco-internal-ca")
+
+    @pytest.mark.parametrize("status", ["submitting", "failed"])
+    def test_what_an_earlier_attempt_may_have_submitted_is_deleted_before_resubmitting(
+        self, monkeypatch, status
+    ) -> None:
+        from scripts.example_job_validation import actions
+
+        kubectl = _ScriptedKubectl(
+            {
+                ("get", "job", "efs-output-example"): (0, _JOB_COMPLETE, ""),
+                ("get", "events"): (0, "", ""),
+                ("delete",): (0, "job.batch/efs-output-example deleted", ""),
+            }
+        )
+        before_submission: list[list[str]] = []
+        cli_calls = _record_run_cli(
+            monkeypatch,
+            lambda args: (
+                before_submission.append([call[0] for call, _ in kubectl.calls])
+                or (0, "job.batch/efs-output-example created", "")
+            ),
+        )
+        journaled: list[int] = []
+
+        result = actions._run_one_example(
+            _live_ctx(),
+            "efs-output-job",
+            "us-east-1",
+            kubectl,
+            earlier={"name": "efs-output-job", "status": status},
+            journal=lambda: journaled.append(len(cli_calls)),
+        )
+
+        assert result.status == "passed", result.detail
+        assert result.evidence["earlier_attempt_cleanup"] == {
+            "deleted": ["job.batch/efs-output-example deleted"]
+        }
+        # Deleted first, journaled, then submitted once.
+        assert before_submission == [["delete"]]
+        assert journaled == [0] and len(cli_calls) == 1
+
+    @pytest.mark.parametrize("earlier", [None, {"status": "skipped"}])
+    def test_an_example_no_earlier_attempt_submitted_is_submitted_directly(
+        self, monkeypatch, earlier
+    ) -> None:
+        from scripts.example_job_validation import actions
+
+        kubectl = _ScriptedKubectl(
+            {
+                ("get", "job", "efs-output-example"): (0, _JOB_COMPLETE, ""),
+                ("get", "events"): (0, "", ""),
+                ("delete",): (0, "job.batch/efs-output-example deleted", ""),
+            }
+        )
+        before_submission: list[list[str]] = []
+        _record_run_cli(
+            monkeypatch,
+            lambda args: (
+                before_submission.append([call[0] for call, _ in kubectl.calls])
+                or (0, "job.batch/efs-output-example created", "")
+            ),
+        )
+
+        result = actions._run_one_example(
+            _live_ctx(), "efs-output-job", "us-east-1", kubectl, earlier=earlier
+        )
+
+        assert result.status == "passed", result.detail
+        assert "earlier_attempt_cleanup" not in result.evidence
+        assert before_submission == [[]]
+
+    def test_a_failed_earlier_attempt_cleanup_stops_the_resubmission(self, monkeypatch) -> None:
+        from scripts.example_job_validation import actions
+
+        kubectl = _ScriptedKubectl({("delete",): (1, "", "error: the server is unavailable")})
+        cli_calls = _record_run_cli(monkeypatch, lambda args: pytest.fail("no resubmission"))
+
+        result = actions._run_one_example(
+            _live_ctx(),
+            "efs-output-job",
+            "us-east-1",
+            kubectl,
+            earlier={"status": "submitting"},
+            journal=lambda: pytest.fail("nothing is journaled when nothing is submitted"),
+        )
+
+        assert result.status == "failed"
+        assert result.detail.startswith("cleanup failed for efs-output-job")
+        assert cli_calls == []
 
     def test_dag_example_has_no_waiter_and_cleans_up_its_step_manifests(self, monkeypatch):
         from scripts.example_job_validation import actions

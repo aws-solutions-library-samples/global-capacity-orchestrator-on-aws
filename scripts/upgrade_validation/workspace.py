@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
+from cli.stacks import serialize_cdk_json
 from cli.upgrade import ReleaseTag
 
 #: File whose content (the run id) marks a directory as this run's workspace.
@@ -264,6 +265,8 @@ def write_run_context(
     The app applies ``context.tags`` to every stack (``cdk.Tags.of(app)``),
     and ``gco upgrade`` writes cdk.json back byte for byte after its
     checkout, so both the base deploy and the upgrade's redeploy carry them.
+    The file is written in the CLI's own cdk.json format
+    (:func:`cli.stacks.serialize_cdk_json`).
     """
     path = clone / "cdk.json"
     document = json.loads(path.read_text(encoding="utf-8"))
@@ -275,7 +278,7 @@ def write_run_context(
         raise RuntimeError(f"{path} context.tags must be an object")
     settings["tags"] = {**tags, run_tag_key: run_id}
     settings.update(context)
-    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_bytes(serialize_cdk_json(document))
     return {"path": str(path), "sha256": sha256_file(path), "keys": sorted(context)}
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import math
 import time
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -112,12 +113,33 @@ def _pin_argocd_revision(parsed: Any, revision: str, manifest_path: Path) -> Pat
     return drivers.write_temp_manifest(documents, f"-{parsed.name}.yaml")
 
 
+#: The checkpoint statuses an earlier attempt of this run leaves for an example
+#: it may have submitted: the journal record written just before submitting
+#: (the attempt was interrupted before its result was saved), and a failure,
+#: whose own cleanup may not have finished.
+_EARLIER_SUBMISSION_STATUSES = frozenset({"submitting", "failed"})
+
+
 def _run_one_example(
     ctx: RunContext,
     name: str,
     region: str,
     kubectl: kube.KubectlRunner,
+    *,
+    earlier: Mapping[str, Any] | None = None,
+    journal: Callable[[], None] | None = None,
 ) -> ExampleRunResult:
+    """Run one example through its documented lifecycle and return its result.
+
+    ``earlier`` is the record an earlier attempt of this run checkpointed for
+    the example. When that attempt may have submitted it, the example's
+    objects are deleted before it is submitted again: ``gco jobs
+    submit-direct`` and the manifest API rename a second submission of a Job
+    that is still running, and the harness would never clean that duplicate
+    up. ``journal`` runs just before the submission, so the checkpoint says
+    the example was being submitted if the run stops before its result is
+    saved.
+    """
     spec = EXAMPLE_SPECS[name]
     parsed = parse_example(ctx.settings.repo_root, name)
     started = time.monotonic()
@@ -220,6 +242,12 @@ def _run_one_example(
             ack_queues = drivers.AckSqsQueues(session=ctx.session, region=region)
             evidence["setup"] = ack_queues.wait_ready(kubectl)
 
+        if earlier is not None and earlier.get("status") in _EARLIER_SUBMISSION_STATUSES:
+            evidence["earlier_attempt_cleanup"] = drivers.cleanup_example(
+                parsed, manifest_path, kubectl
+            )
+        if journal is not None:
+            journal()
         evidence["submission"] = drivers.submit_example(
             parsed, manifest_path, repo_root=ctx.settings.repo_root, region=region, kubectl=kubectl
         )
@@ -329,7 +357,25 @@ def action_examples(ctx: RunContext) -> dict[str, Any]:
 
     def run_example(name: str, kubectl: kube.KubectlRunner) -> None:
         print(f"[example] {name} ({EXAMPLE_SPECS[name].submission}) started")
-        result = _run_one_example(ctx, name, region, kubectl)
+        earlier = state.get(name)
+
+        def journal() -> None:
+            with ctx.state_lock:
+                state[name] = {
+                    "name": name,
+                    "status": "submitting",
+                    "submission": EXAMPLE_SPECS[name].submission,
+                }
+                ctx.persist()
+
+        result = _run_one_example(
+            ctx,
+            name,
+            region,
+            kubectl,
+            earlier=earlier if isinstance(earlier, dict) else None,
+            journal=journal,
+        )
         with ctx.state_lock:
             results[name] = result
             state[name] = result.to_dict()
@@ -352,6 +398,7 @@ def action_examples(ctx: RunContext) -> dict[str, Any]:
             cluster_name,
             region,
             kubeconfig_path=ctx.settings.kubeconfig_path,
+            gco_command=drivers.CHECKOUT_GCO_COMMAND,
             bastion_ttl_minutes=tunnel["bastion_ttl_minutes"],
             tunnel_events=tunnel["reopens"],
         ) as kubectl:

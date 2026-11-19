@@ -1443,12 +1443,16 @@ def _owned_inventory_item(summary_key: str, endpoint_name: str) -> dict[str, Any
         return {"metadata": {"name": f"{endpoint_name}-admin"}}
     if summary_key == "legacy_ingresses":
         return {"metadata": {"name": f"inference-{endpoint_name}-proxy"}}
-    if summary_key == "legacy_http_routes":
-        return {"metadata": {"name": f"{endpoint_name}-proxy"}}
     raise AssertionError(f"Unhandled inventory kind: {summary_key}")
 
 
 class TestStrongAbsence:
+    def test_the_inventory_reads_no_http_route_because_no_release_created_one(self) -> None:
+        # The only HTTPRoute any release shipped is the shared gco-system/gco-routes;
+        # the inference monitor's matching per-endpoint cleanup is gone too.
+        assert all("httproutes" not in kind.resource for kind in KUBERNETES_INVENTORY_KINDS)
+        assert "legacy_http_routes" not in {kind.summary_key for kind in KUBERNETES_INVENTORY_KINDS}
+
     def test_complete_inventory_queries_every_endpoint_owned_kind(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
         endpoint_name = ""

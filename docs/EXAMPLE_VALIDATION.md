@@ -80,8 +80,11 @@ Action pipeline: `preflight → static → baseline → deploy → examples →
 destroy → final-inventory`. Consent, identity verification (account, SHA,
 branch, clean worktree), checkpoint/resume, KMS-deletion authorization,
 and report privacy all behave exactly as documented for
-[live release validation](LIVE_RELEASE_VALIDATION.md). A failed example
-never skips teardown — `destroy` and `final-inventory` run regardless.
+[live release validation](LIVE_RELEASE_VALIDATION.md), and so does an
+interruption: `gco examples validate` passes Ctrl-C, `SIGTERM` and `SIGHUP`
+on to the harness and waits, up to 6 hours, for its teardown and report. A
+failed example never skips teardown — `destroy` and `final-inventory` run
+regardless.
 
 Per-run enablement is **derived from the selection**: examples that need
 off-by-default charts thread `helm_enabled_overrides` (`argocd`,
@@ -117,6 +120,13 @@ enablement, capacity gates, timeouts, and any disclosed mutations.
 | `gco dag run` | pipeline-dag (+ its two step files) | DAG run exits 0, steps complete |
 | `kubectl apply` (documented for CRDs) | kueue, volcano, yunikorn, slurm, ray, keda, multi-gpu, model-download | Jobs complete / vcjob Completed / RayCluster ready / ScaledJob spawns Jobs |
 | `kubectl apply` (platform add-ons) | argocd-gitops-job, crossplane-batch-job, kro-batch-job (+ their companion API files), ack-sqs-queue | Application Synced + Healthy at the pinned commit with its Git Jobs complete / the composed Job completes / `ACK.ResourceSynced` and the queue resolves in SQS |
+
+Every `gco` command in that table, and the `gco stacks access` and
+`gco vector ingest` calls the harness makes, runs this checkout's CLI:
+`python -m cli.main` with the harness's own interpreter, from the repository
+root. A `gco` on your `PATH` is never used, because it can be another
+release or another checkout, and the run exists to prove this commit's
+documented paths.
 
 `kubectl` reaches the PRIVATE EKS endpoint through the CLI's own
 SSM-tunnel machinery (`gco cluster tunnel --via-ssm auto` internals). A
@@ -245,6 +255,14 @@ gco examples validate --skip-examples efa-distributed-training,multi-gpu-trainin
 # Resume an interrupted run (exact identity required):
 gco examples validate --resume --run-id <id> --report-dir <dir> ...
 ```
+
+Each example's submission is checkpointed just before it is made. When a
+resumed run reaches an example an interrupted attempt may have submitted
+(its record still says it was being submitted, or it failed), the run deletes
+that example's objects first and then submits it once: `gco jobs
+submit-direct` and the manifest API rename a second submission of a Job that
+is still running, and the harness would never clean up that duplicate. A
+failed deletion fails the example without submitting it.
 
 `--examples` also narrows the derived enablement: selecting only
 `valkey-cache-job` deploys with Valkey forced on but leaves Aurora, FSx,

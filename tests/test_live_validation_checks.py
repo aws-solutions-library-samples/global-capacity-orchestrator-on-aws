@@ -118,7 +118,9 @@ def _job_context(tmp_path: Path) -> Any:
     ctx = _real_context(tmp_path)
     ctx.job_manager = _offline_job_manager()
     ctx.session.get_partition_for_region.return_value = "aws"
-    ctx.cdk_context = {"api_gateway": {"regional_api_enabled": True}}
+    # Two Regions: each Job is reached through its own Region's API bridge,
+    # whatever cdk.json says (it carries no api_gateway block here).
+    ctx.deployment_regions = ("us-east-1", "eu-west-1")
     return ctx
 
 
@@ -171,6 +173,48 @@ _FAILED = {"conditions": [{"type": "Failed", "status": "True"}]}
 def _logs_payload(record: dict[str, Any], logs: str) -> dict[str, Any]:
     name, namespace = checks_jobs._job_reference_identity(record)
     return {"region": record["region"], "job_name": name, "namespace": namespace, "logs": logs}
+
+
+def _job_container(**overrides: Any) -> dict[str, Any]:
+    """A completed container as the pods route reports it (the API prints ``+00:00``)."""
+    return {
+        "name": "smoke",
+        "ready": False,
+        "restartCount": 0,
+        "state": "terminated",
+        "exitCode": 0,
+        "reason": "Completed",
+        "startedAt": "2026-07-17T00:01:00+00:00",
+        "finishedAt": "2026-07-17T00:01:07+00:00",
+        "lastState": None,
+        **overrides,
+    }
+
+
+def _job_pod(
+    name: str = "smoke-abcde",
+    *,
+    uid: str = "uid-1",
+    phase: str = "Succeeded",
+    containers: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "metadata": {"name": name, "labels": {"batch.kubernetes.io/controller-uid": uid}},
+        "status": {
+            "phase": phase,
+            "containerStatuses": [_job_container()] if containers is None else containers,
+        },
+    }
+
+
+def _job_pods_payload(record: dict[str, Any], *pods: dict[str, Any]) -> dict[str, Any]:
+    name, namespace = checks_jobs._job_reference_identity(record)
+    return {
+        "region": record["region"],
+        "job_name": name,
+        "namespace": namespace,
+        "pods": list(pods) if pods else [_job_pod()],
+    }
 
 
 # --------------------------------------------------------------------------- jobs
@@ -859,6 +903,7 @@ class TestCompleteJobLifecycle:
             _response(200, _job_payload(record, uid="uid-1", status=_SUCCEEDED)),
             _response(200, job),
             _response(200, _logs_payload(record, logs)),
+            _response(200, _job_pods_payload(record)),
             _response(200, job),
             _response(200, {"region": "us-east-1", "uid": "uid-1"}),
             _response(404),
@@ -881,6 +926,20 @@ class TestCompleteJobLifecycle:
         assert evidence["appearance"] == {"region": "us-east-1", "uid": "uid-1"}
         assert evidence["deletion"] == {"region": "us-east-1", "uid": "uid-1"}
         assert evidence["requested_name"] == "gco-live-api-run-123"
+        assert evidence["pods"] == [
+            {
+                "name": "smoke-abcde",
+                "containers": [
+                    {
+                        "name": "smoke",
+                        "state": "terminated",
+                        "exitCode": 0,
+                        "startedAt": "2026-07-17T00:01:00+00:00",
+                        "finishedAt": "2026-07-17T00:01:07+00:00",
+                    }
+                ],
+            }
+        ]
         assert record["validation_evidence"]["marker"] == "GCO_LIVE_API_run-123"
         assert "deletion" not in record["validation_evidence"]
 
@@ -913,6 +972,118 @@ class TestCompleteJobLifecycle:
             checks_jobs._complete_job_lifecycle(ctx, record=record, marker="M")
 
 
+class TestCompletedPodTimes:
+    """A completed Job's containers, as ``GET /api/v1/jobs/{ns}/{name}/pods`` reports them."""
+
+    @staticmethod
+    def _record(tmp_path: Path) -> tuple[Any, dict[str, Any]]:
+        ctx = _job_context(tmp_path)
+        record = _register(ctx)
+        record["uid"] = "uid-1"
+        return ctx, record
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("2026-07-17T00:01:07+00:00", "2026-07-17T00:01:07+00:00"),
+            # kubectl's spelling of the same instant.
+            ("2026-07-17T00:01:07Z", "2026-07-17T00:01:07+00:00"),
+            ("2026-07-17T00:01:07", None),
+            ("yesterday", None),
+            (None, None),
+            (1752710467, None),
+        ],
+    )
+    def test_instants_need_an_offset(self, value: object, expected: str | None) -> None:
+        parsed = checks_jobs._api_instant(value)
+        assert (parsed.isoformat() if parsed else None) == expected
+
+    def test_succeeded_pods_of_the_job_are_reported_and_others_left_out(
+        self, tmp_path: Path
+    ) -> None:
+        ctx, record = self._record(tmp_path)
+        disrupted = _job_pod(
+            "smoke-evicted", phase="Failed", containers=[_job_container(exitCode=137)]
+        )
+        foreign = _job_pod("smoke-other", uid="uid-2", containers=[_job_container(exitCode=1)])
+        legacy = {
+            **_job_pod("smoke-legacy"),
+            "metadata": {"name": "smoke-legacy", "labels": {"controller-uid": "uid-1"}},
+        }
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200, _job_pods_payload(record, disrupted, foreign, _job_pod(), legacy, "junk")
+        )
+
+        evidence = checks_jobs._owned_job_pod_times(ctx, record)
+
+        assert [pod["name"] for pod in evidence] == ["smoke-abcde", "smoke-legacy"]
+        request = ctx.aws_client.make_authenticated_request.call_args.kwargs
+        assert request["path"] == "/api/v1/jobs/gco-jobs/gco-live-api-run-123/pods"
+        assert request["target_region"] == "us-east-1"
+
+    @pytest.mark.parametrize(
+        ("container", "problem"),
+        [
+            (_job_container(state="running"), "smoke-abcde/smoke is 'running', not terminated"),
+            (_job_container(exitCode=2), "smoke-abcde/smoke exited 2, not 0"),
+            (_job_container(exitCode=False), "smoke-abcde/smoke exited False, not 0"),
+            (
+                _job_container(startedAt=None),
+                "smoke-abcde/smoke startedAt None is not an ISO 8601 instant",
+            ),
+            (
+                _job_container(finishedAt="2026-07-17T00:01:07"),
+                "smoke-abcde/smoke finishedAt '2026-07-17T00:01:07' is not an ISO 8601 instant",
+            ),
+            (
+                _job_container(finishedAt="2026-07-17T00:00:59Z"),
+                "smoke-abcde/smoke finished before it started",
+            ),
+        ],
+    )
+    def test_a_misreported_container_fails_with_what_is_wrong(
+        self, tmp_path: Path, container: dict[str, Any], problem: str
+    ) -> None:
+        ctx, record = self._record(tmp_path)
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200, _job_pods_payload(record, _job_pod(containers=[container]))
+        )
+
+        with pytest.raises(RuntimeError, match="misreports its completed containers") as raised:
+            checks_jobs._owned_job_pod_times(ctx, record)
+        assert problem in str(raised.value)
+
+    def test_a_pod_without_container_statuses_fails(self, tmp_path: Path) -> None:
+        ctx, record = self._record(tmp_path)
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200, _job_pods_payload(record, _job_pod(containers=[]))
+        )
+        with pytest.raises(RuntimeError, match="smoke-abcde reports no container status"):
+            checks_jobs._owned_job_pod_times(ctx, record)
+
+    def test_no_succeeded_pod_of_the_job_fails(self, tmp_path: Path) -> None:
+        ctx, record = self._record(tmp_path)
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200,
+            _job_pods_payload(
+                record, _job_pod(phase="Failed"), _job_pod("smoke-other", uid="uid-2")
+            ),
+        )
+        with pytest.raises(RuntimeError, match=r"no Succeeded pod of it \(phases: \['Failed'\]\)"):
+            checks_jobs._owned_job_pod_times(ctx, record)
+
+    def test_the_lookup_must_answer_for_this_job(self, tmp_path: Path) -> None:
+        ctx, record = self._record(tmp_path)
+        ctx.aws_client.make_authenticated_request.return_value = _response(502, text="bad")
+        with pytest.raises(RuntimeError, match="Job pod lookup failed: 502 bad"):
+            checks_jobs._owned_job_pod_times(ctx, record)
+
+        other = {**_job_pods_payload(record), "job_name": "other"}
+        ctx.aws_client.make_authenticated_request.return_value = _response(200, other)
+        with pytest.raises(RuntimeError, match="Job pod lookup returned a different Job identity"):
+            checks_jobs._owned_job_pod_times(ctx, record)
+
+
 class TestApiTransportLifecycle:
     MARKER = "GCO_LIVE_API_run-123"
 
@@ -931,6 +1102,7 @@ class TestApiTransportLifecycle:
             _response(200, _job_payload(record, uid="uid-1", status=_SUCCEEDED)),
             _response(200, job),
             _response(200, _logs_payload(record, f"log {self.MARKER}")),
+            _response(200, _job_pods_payload(record)),
             _response(200, job),
             _response(200, {"region": "us-east-1", "uid": "uid-1"}),
             _response(404),
@@ -4212,8 +4384,10 @@ class TestInventoryAndAbsence:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         runner, plan, record, kubectl, clock = self._runner(tmp_path, monkeypatch)
-        # Twelve 0.17s reads: the last one ends past the 2s deletion budget.
-        kubectl.clock, kubectl.tick = clock, 0.17
+        # One read per inventory kind, together just past the 2s deletion budget,
+        # so the sweep's last read ends after the deadline.
+        kubectl.clock = clock
+        kubectl.tick = 2.1 / len(inventory_module.KUBERNETES_INVENTORY_KINDS)
         runner.table.item = _owned_item(runner.settings, plan, runner.owner_nonce)
         with pytest.raises(ManagedInferenceValidationError, match="absence was not proven"):
             runner.prove_absence(record)

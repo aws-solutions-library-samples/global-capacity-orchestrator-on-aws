@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -42,8 +43,12 @@ def _ctx(
     overrides: str = _OVERRIDES,
     regions: tuple[str, ...] = (_REGION,),
     job_timeout_seconds: int = 30,
+    state: dict[str, Any] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        checkpoint=SimpleNamespace(state=dict(state or {})),
+        state_lock=threading.RLock(),
+        persist=MagicMock(),
         settings=SimpleNamespace(
             run_id="run-123",
             pcs_overrides_json=overrides,
@@ -301,6 +306,109 @@ class TestProbe:
                 "pcs",
             ]
         ]
+
+    def test_the_submission_is_journaled_before_the_post_and_with_its_answer(self) -> None:
+        ctx = _ctx()
+        api = _Api(_happy_script())
+        seen_at_post: list[dict[str, Any]] = []
+
+        def request(**kwargs: Any) -> SimpleNamespace:
+            if kwargs["method"] == "POST":
+                seen_at_post.append(dict(ctx.checkpoint.state[checks_pcs.PCS_PROBE_STATE_KEY]))
+            return api(**kwargs)
+
+        ctx.aws_client.make_authenticated_request.side_effect = request
+        with patch.object(
+            checks_pcs.subprocess, "run", return_value=_completed(stdout=_output_document())
+        ):
+            evidence = checks_pcs.probe_pcs(ctx)
+
+        assert seen_at_post == [{"name": _NAME, "region": _REGION}]
+        journal = ctx.checkpoint.state[checks_pcs.PCS_PROBE_STATE_KEY]
+        assert journal == {"name": _NAME, "region": _REGION, "job": evidence["job"]}
+        assert evidence["job"]["job_id"] == 42 and "resumed" not in evidence["job"]
+        assert ctx.persist.call_count == 2
+
+    def test_a_resumed_probe_waits_for_the_journaled_job_without_submitting(self) -> None:
+        job = {"job_id": 42, "name": _NAME, "submitted_at": 1700000000.0}
+        ctx = _ctx(
+            state={checks_pcs.PCS_PROBE_STATE_KEY: {"name": _NAME, "region": _REGION, "job": job}}
+        )
+        script = [entry for entry in _happy_script() if entry[0] != "POST"]
+
+        evidence, api, _ = _probe(
+            ctx, script, lambda *_a, **_k: _completed(stdout=_output_document())
+        )
+
+        assert evidence["job"] == {**job, "resumed": "journaled job id"}
+        assert evidence["completion"]["states"] == ["COMPLETED"]
+        assert all(method != "POST" for method, _path, _body in api.calls)
+        ctx.persist.assert_not_called()
+
+    def test_a_probe_interrupted_mid_post_adopts_the_job_it_finds_by_name(self) -> None:
+        ctx = _ctx(state={checks_pcs.PCS_PROBE_STATE_KEY: {"name": _NAME, "region": _REGION}})
+        happy = _happy_script()
+        script = [
+            happy[0],
+            (
+                "GET",
+                f"/api/v1/slurm/jobs?backend=pcs&name={_NAME}",
+                {"jobs": [{"job_id": 42, "name": _NAME}, "junk"]},
+            ),
+            (
+                "GET",
+                _ACCOUNTING_PATH,
+                {"jobs": [{"job_id": 42, "name": _NAME}, {"job_id": 7, "name": "another-job"}]},
+            ),
+            *happy[2:],
+        ]
+
+        evidence, api, _ = _probe(
+            ctx, script, lambda *_a, **_k: _completed(stdout=_output_document())
+        )
+
+        assert evidence["job"] == {
+            "job_id": 42,
+            "name": _NAME,
+            "submitted_at": None,
+            "resumed": "found by name (job ids [42])",
+        }
+        assert all(method != "POST" for method, _path, _body in api.calls)
+        assert ctx.checkpoint.state[checks_pcs.PCS_PROBE_STATE_KEY]["job"]["job_id"] == 42
+
+    def test_a_probe_interrupted_before_its_post_landed_submits_once(self) -> None:
+        ctx = _ctx(state={checks_pcs.PCS_PROBE_STATE_KEY: {"name": _NAME, "region": _REGION}})
+        happy = _happy_script()
+        script = [
+            happy[0],
+            ("GET", f"/api/v1/slurm/jobs?backend=pcs&name={_NAME}", {"jobs": []}),
+            ("GET", _ACCOUNTING_PATH, {}),
+            *happy[1:],
+        ]
+
+        evidence, api, _ = _probe(
+            ctx, script, lambda *_a, **_k: _completed(stdout=_output_document())
+        )
+
+        assert [method for method, _path, _body in api.calls].count("POST") == 1
+        assert evidence["job"]["job_id"] == 42 and "resumed" not in evidence["job"]
+
+    def test_a_journal_for_another_probe_name_is_not_this_probes(self) -> None:
+        ctx = _ctx(
+            state={
+                checks_pcs.PCS_PROBE_STATE_KEY: {
+                    "name": "gco-live-pcs-other",
+                    "job": {"job_id": 9, "name": "gco-live-pcs-other"},
+                }
+            }
+        )
+
+        evidence, api, _ = _probe(
+            ctx, _happy_script(), lambda *_a, **_k: _completed(stdout=_output_document())
+        )
+
+        assert evidence["job"]["job_id"] == 42
+        assert [method for method, _path, _body in api.calls].count("POST") == 1
 
     def test_both_backends_require_a_selection(self) -> None:
         ctx = _ctx()

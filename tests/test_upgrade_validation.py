@@ -528,6 +528,18 @@ class TestRunScopedCdkJson:
             "keys": ["feature"],
         }
 
+    def test_the_file_is_written_in_the_clis_cdk_json_format(self, tmp_path: Path) -> None:
+        from cli.stacks import serialize_cdk_json
+
+        (tmp_path / "cdk.json").write_text(_cdk_json(note="→ ü"), encoding="utf-8")
+        workspace_module.write_run_context(
+            tmp_path, run_tag_key="GcoLiveValidationRun", run_id=_RUN_ID, context={"k": "v"}
+        )
+        written = (tmp_path / "cdk.json").read_bytes()
+        # The same bytes the CLI's own cdk.json writers produce for the document.
+        assert written == serialize_cdk_json(json.loads(written))
+        assert workspace_module.serialize_cdk_json is serialize_cdk_json
+
     def test_a_cdk_json_without_tags_gets_the_run_tag(self, tmp_path: Path) -> None:
         (tmp_path / "cdk.json").write_text(json.dumps({"context": {}}), encoding="utf-8")
         workspace_module.write_run_context(
@@ -1975,6 +1987,9 @@ class TestUpgradedTopology:
         ctx.aws_client.get_api_endpoint.return_value = SimpleNamespace(
             url="https://api.example.com"
         )
+        ctx.aws_client.get_regional_api_endpoint.return_value = SimpleNamespace(
+            url="https://regional.example.com"
+        )
         ctx.job_manager = MagicMock(name="job_manager")
         ctx.job_manager.get_queue_status.return_value = {}
         seen: list[dict[str, Any]] = []
@@ -1984,7 +1999,10 @@ class TestUpgradedTopology:
 
         def health(ctx: Any, **_kwargs: Any) -> list[dict[str, Any]]:
             seen.append(ctx.cdk_context)
-            return [{"scope": "global", "region": None, "payload": {"status": "healthy"}}]
+            return [
+                {"scope": "global", "region": None, "payload": {"status": "healthy"}},
+                {"scope": "regional", "region": _REGION, "payload": {"status": "healthy"}},
+            ]
 
         for name, replacement in {
             "_reconcile_stack_ownership": lambda ctx: None,

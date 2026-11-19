@@ -46,8 +46,18 @@ def effective_scheduler_enablement(ctx: RunContext) -> dict[str, dict[str, Any]]
 
     Mirrors ``gco.stacks.regional_stack._helm_chart_enabled`` semantics for
     the probed keys: a run override wins, then the cdk.json toggle, and a
-    missing key defaults to enabled (the historical chart_map behavior).
+    missing key defaults to enabled (the historical chart_map behavior). The
+    toggle is read strictly, with the stacks' own
+    :func:`~gco.config.config_loader.read_block_flag`: ``"true"`` reads as
+    true and every other string fails, where ``bool("false")`` was true.
+
+    Raises:
+        ConfigValidationError: If a probed scheduler's ``enabled`` is neither
+            a JSON boolean nor the string ``"true"``.
     """
+    # The config loader imports the CDK library; only this read needs it.
+    from gco.config.config_loader import read_block_flag
+
     helm_config = ctx.cdk_context.get("helm")
     if not isinstance(helm_config, dict):
         helm_config = {}
@@ -66,7 +76,9 @@ def effective_scheduler_enablement(ctx: RunContext) -> dict[str, dict[str, Any]]
             continue
         chart_config = helm_config.get(helm_key)
         configured = (
-            bool(chart_config.get("enabled", True)) if isinstance(chart_config, dict) else True
+            read_block_flag(chart_config, f"helm.{helm_key}.enabled", default=True)
+            if isinstance(chart_config, dict)
+            else True
         )
         enablement[scheduler] = {"enabled": configured, "source": f"cdk.json helm.{helm_key}"}
     return enablement

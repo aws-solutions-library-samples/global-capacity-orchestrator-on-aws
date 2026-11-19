@@ -73,7 +73,13 @@ release, while the control plane is updated in place and keeps its state:
 4. **Scale the workload tier to zero.** First the checkout's deployable sources
    are checked: the redeploy refuses files other users cannot read, so the
    command stops here, with no stack touched, rather than after the teardown
-   (see [If it stops halfway](#if-it-stops-halfway)). The monitoring stack is
+   (see [If it stops halfway](#if-it-stops-halfway)). Then the new release's
+   configuration loader reads the preserved `cdk.json`, with any `--enable`
+   overrides: each warning it has (a deprecated key, a key that no longer takes
+   effect) is printed with what to do instead, and a `cdk.json` it rejects stops
+   the command here too, with the loader's message. Upgrades from v8.23.0 or
+   earlier skip this check; their teardown's first synth stops on the same
+   error before deleting anything. The monitoring stack is
    then updated in place with `--context gco:control-plane-only=true` so it
    stops referencing the regional stacks, and every regional API bridge and
    regional stack is destroyed — the same teardown as
@@ -214,6 +220,16 @@ Every step reports what it did, and the command tells you where it stopped.
   requirements-lock.txt` from the repository root; see
   [TROUBLESHOOTING.md → Deploy Refuses Owner-Only Sources](TROUBLESHOOTING.md#deploy-refuses-owner-only-sources-restrictive-umask)
   — then `gco upgrade --skip-checkout`.
+- **At the configuration check, before the teardown** (`Stopped before the
+  teardown: the checked-out release rejects cdk.json: ...`): the checkout and
+  local install are on the new release and no stack has changed. The message
+  is the new release's validation error and names the key to change; the
+  warnings printed above it name every deprecated or ignored key. Edit
+  `cdk.json`, then run `gco upgrade --skip-checkout`. The loader stops at the
+  first error, so a
+  second problem shows on the next run. The same check also stops the command
+  when it cannot run at all, for example when the CDK library is missing
+  (`... configuration check could not run`).
 - **At the first stack step, with `npm X is required to package the inference
   streaming Lambda; found Y`**: the new release pins a different npm (the
   `packageManager` field of its `package.json`), and the CDK app packages the
