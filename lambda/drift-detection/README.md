@@ -18,9 +18,11 @@ alert when detection fails or managed resources differ from the template.
 2. Poll `DescribeStackDriftDetectionStatus` to a bounded terminal state.
 3. If the detection is still running when polling gives up, publish a
    "did not finish" notice and stop: the stack's drift status is not final yet.
-4. Return without notification unless the stack is `DRIFTED` (`IN_SYNC`,
-   `NOT_CHECKED` and `UNKNOWN` are not drift).
-5. List the drifted resources and publish a compact JSON SNS notification.
+4. After a completed detection, return without notification unless the stack
+   is `DRIFTED` (`IN_SYNC`, `NOT_CHECKED` and `UNKNOWN` are not drift). A
+   failed detection (`DETECTION_FAILED`: it failed for at least one resource,
+   and the results of the others are available) is always reported.
+5. List the resource drifts and publish a compact JSON SNS notification.
 
 ## Environment
 
@@ -36,11 +38,16 @@ alert when detection fails or managed resources differ from the template.
 
 Detection failures, detections that did not finish within the polling window,
 and detected drift publish JSON summaries, each under its own subject. Drift
-alerts list the `MODIFIED` and `DELETED` resources with logical ID, physical
-ID, resource type, and drift status, and list apart (`not_checked_resources`)
-the resources drift detection did not check, such as types it does not
-support. SNS subjects are truncated defensively to the service's 100-character
-limit.
+and failure alerts list the `MODIFIED` and `DELETED` resources with logical
+ID, physical ID, resource type, and drift status (`drifted_resources`), the
+resources detection could not check, with CloudFormation's
+`DriftStatusReason` (`failed_resources`), and apart (`not_checked_resources`)
+the resources whose type it does not support (`UNSUPPORTED`). A failed
+detection that found drift among the resources it did check, such as a
+regional stack whose Aurora secret it cannot read, is published under the
+drift subject with the failure's `reason`; without drift it is published as
+a failure. SNS subjects are truncated defensively to the service's
+100-character limit.
 
 ## IAM Permissions
 

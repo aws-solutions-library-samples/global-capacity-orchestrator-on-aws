@@ -133,13 +133,14 @@ class TestOutcomes:
             "detection_status": "DETECTION_COMPLETE",
             "stack_drift_status": "DRIFTED",
             "drifted_resource_count": 2,
+            "failed_resource_count": 0,
             "not_checked_resource_count": 0,
             "drift_published": True,
         }
         # Filtered server-side so large stacks only return what drifted.
         cfn.get_paginator.return_value.paginate.assert_called_once_with(
             StackName=_STACK,
-            StackResourceDriftStatusFilters=["MODIFIED", "DELETED", "NOT_CHECKED"],
+            StackResourceDriftStatusFilters=["MODIFIED", "DELETED", "UNKNOWN", "UNSUPPORTED"],
         )
         publish = sns.publish.call_args.kwargs
         assert publish["TopicArn"] == _TOPIC
@@ -162,22 +163,39 @@ class TestOutcomes:
             },
         ]
 
-    def test_failed_detection_is_alerted_as_a_failure(self, handler, aws):
+    def test_failed_detection_without_drift_is_alerted_as_a_failure(self, handler, aws):
+        """The resources detection could not check are listed with CloudFormation's reason."""
         cfn, sns = aws
         cfn.describe_stack_drift_detection_status.return_value = {
             "DetectionStatus": "DETECTION_FAILED",
-            "DetectionStatusReason": "Stack is being updated",
+            "DetectionStatusReason": "Failed to detect drift on resource [AuroraSecret]",
+            "StackDriftStatus": "UNKNOWN",
         }
+        cfn.get_paginator.return_value.paginate.return_value = [
+            {
+                "StackResourceDrifts": [
+                    {
+                        "LogicalResourceId": "AuroraSecret",
+                        "PhysicalResourceId": "arn:aws:secretsmanager:us-east-1:123456789012:secret:x",
+                        "ResourceType": "AWS::SecretsManager::Secret",
+                        "StackResourceDriftStatus": "UNKNOWN",
+                        "DriftStatusReason": "Access denied for secretsmanager:GetSecretValue",
+                    }
+                ]
+            }
+        ]
 
         result = handler.lambda_handler({}, None)
 
         assert result == {
             "stack_name": _STACK,
             "detection_status": "DETECTION_FAILED",
-            "stack_drift_status": None,
+            "stack_drift_status": "UNKNOWN",
+            "drifted_resource_count": 0,
+            "failed_resource_count": 1,
+            "not_checked_resource_count": 0,
             "drift_published": True,
         }
-        cfn.get_paginator.assert_not_called()
         assert sns.publish.call_args.kwargs["Subject"] == (
             f"[GCO] Drift detection FAILED for {_STACK}"
         )
@@ -185,8 +203,103 @@ class TestOutcomes:
             "stack_name": _STACK,
             "region": "us-east-1",
             "detection_status": "DETECTION_FAILED",
-            "reason": "Stack is being updated",
+            "stack_drift_status": "UNKNOWN",
+            "reason": "Failed to detect drift on resource [AuroraSecret]",
+            "drifted_resource_count": 0,
+            "drifted_resources": [],
+            "failed_resource_count": 1,
+            "failed_resources": [
+                {
+                    "logical_id": "AuroraSecret",
+                    "resource_type": "AWS::SecretsManager::Secret",
+                    "reason": "Access denied for secretsmanager:GetSecretValue",
+                }
+            ],
+            "not_checked_resource_count": 0,
+            "not_checked_resources": [],
         }
+
+    def test_failed_detection_still_reports_the_drift_it_found(self, handler, aws):
+        """Before: DETECTION_FAILED returned before reading any resource drift.
+
+        A stack with one resource detection cannot read (the Aurora secret, by
+        design) then never reported drift on the others. CloudFormation keeps
+        the results of every resource it checked, so they are read and the
+        alert goes out under the drift subject.
+        """
+        cfn, sns = aws
+        cfn.describe_stack_drift_detection_status.return_value = {
+            "DetectionStatus": "DETECTION_FAILED",
+            "DetectionStatusReason": "Failed to detect drift on resource [AuroraSecret]",
+        }
+        cfn.get_paginator.return_value.paginate.return_value = [
+            {
+                "StackResourceDrifts": [
+                    {
+                        "LogicalResourceId": "JobsQueue",
+                        "PhysicalResourceId": "gco-jobs-us-east-1",
+                        "ResourceType": "AWS::SQS::Queue",
+                        "StackResourceDriftStatus": "MODIFIED",
+                    },
+                    {
+                        "LogicalResourceId": "AuroraSecret",
+                        "ResourceType": "AWS::SecretsManager::Secret",
+                        "StackResourceDriftStatus": "UNKNOWN",
+                    },
+                    {
+                        "LogicalResourceId": "KubectlApply",
+                        "ResourceType": "Custom::KubectlApply",
+                        "StackResourceDriftStatus": "UNSUPPORTED",
+                    },
+                ]
+            }
+        ]
+
+        result = handler.lambda_handler({}, None)
+
+        assert result["drifted_resource_count"] == 1
+        assert result["failed_resource_count"] == 1
+        assert result["not_checked_resource_count"] == 1
+        assert sns.publish.call_count == 1
+        assert sns.publish.call_args.kwargs["Subject"] == f"[GCO] Drift detected in stack {_STACK}"
+        message = _published_message(sns)
+        assert message["detection_status"] == "DETECTION_FAILED"
+        assert message["reason"] == "Failed to detect drift on resource [AuroraSecret]"
+        assert message["drifted_resources"] == [
+            {
+                "logical_id": "JobsQueue",
+                "physical_id": "gco-jobs-us-east-1",
+                "resource_type": "AWS::SQS::Queue",
+                "drift_status": "MODIFIED",
+            }
+        ]
+        assert message["failed_resources"] == [
+            {
+                "logical_id": "AuroraSecret",
+                "resource_type": "AWS::SecretsManager::Secret",
+                "reason": "",
+            }
+        ]
+        assert message["not_checked_resources"] == [
+            {"logical_id": "KubectlApply", "resource_type": "Custom::KubectlApply"}
+        ]
+
+    def test_resource_drift_filters_are_a_request_the_api_accepts(self, handler):
+        """At most four filters, each a StackResourceDriftStatus (botocore's model)."""
+        import botocore.session
+        from botocore.validate import ParamValidator
+
+        model = botocore.session.get_session().get_service_model("cloudformation")
+        operation = model.operation_model("DescribeStackResourceDrifts")
+        report = ParamValidator().validate(
+            {
+                "StackName": _STACK,
+                "StackResourceDriftStatusFilters": list(handler.RESOURCE_DRIFT_FILTERS),
+            },
+            operation.input_shape,
+        )
+        assert not report.has_errors(), report.generate_report()
+        assert "UNKNOWN" in handler.RESOURCE_DRIFT_FILTERS
 
     def test_failed_detection_without_a_reason_still_alerts(self, handler, aws):
         cfn, sns = aws
