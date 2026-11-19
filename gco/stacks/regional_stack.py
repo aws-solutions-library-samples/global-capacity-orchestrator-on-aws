@@ -516,21 +516,35 @@ _MANDATORY_CHART_KEYS = frozenset({"aws_load_balancer_controller", "keda"})
 #: never start installing Argo CD or Crossplane on its next deploy.
 _OFF_BY_DEFAULT_CHART_KEYS = frozenset({"argocd", "crossplane"})
 
-#: Stack-delete Helm uninstall task budgets (minutes) for charts whose
-#: installer first deletes their custom resources (every discovered type,
-#: namespaced then cluster-scoped, with a finalizer-strip retry) before the
-#: ``helm uninstall`` itself. Every other non-LBC chart gets two minutes.
+#: Stack-delete Helm uninstall task budgets (minutes) for the charts whose
+#: installer deletes their custom resources before ``helm uninstall``
+#: (``CHART_CUSTOM_RESOURCE_API_GROUPS`` in lambda/helm-installer/handler.py).
+#: Every other chart but the LBC gets two minutes, which covers the 75-second
+#: Helm process cap. A budget covers the handler's sequence with every call at
+#: its own timeout: the 10 s release lookup, one 10 s discovery call per API
+#: group and scope (namespaced and cluster-scoped, or the release namespace
+#: alone for Argo CD), one 55 s delete per pass (a scope's last-deleted types
+#: get a pass of their own) and the Helm uninstall's process cap. A pass whose
+#: delete stalls goes on to strip finalizers and delete again, which can take
+#: longer; the task then times out and the stack delete is retried.
+#: tests/test_platform_addon_charts.py recomputes each sum from the handler.
 _UNINSTALL_TIMEOUT_MINUTES: dict[str, int] = {
-    # KEDA also gets a dedicated three-minute Helm deadline: it is the last
-    # chart in the chain, and Helm's wait covers finalizing its CRDs (see
-    # KEDA_UNINSTALL_TIMEOUT in lambda/helm-installer/handler.py).
+    # 10 + 4 x 10 + 2 x 55 + 195 = 355 s: KEDA also gets a dedicated
+    # three-minute Helm deadline (195 s cap), as the last chart in the chain
+    # whose Helm wait covers finalizing its CRDs (KEDA_UNINSTALL_TIMEOUT).
     "keda": 6,
+    # 10 + 2 x 10 + 2 x 55 + 75 = 215 s.
+    "kueue": 4,
+    # 10 + 1 x 10 + 2 x 55 + 75 = 205 s (release namespace only; AppProjects
+    # in a pass after the Applications).
     "argocd": 4,
-    "crossplane": 6,
-    # The Slinky cluster's NodeSets drain their Slurm nodes and carry
-    # job-protection PDBs; the installer deletes every slinky.slurm.net
-    # resource before `helm uninstall` so the controller is still there to
-    # clear the finalizers.
+    # 10 + 8 x 10 + 4 x 55 + 75 = 385 s (four API groups; packages in a pass
+    # after the definitions and Compositions, in both scopes).
+    "crossplane": 7,
+    # 10 + 2 x 10 + 2 x 55 + 75 = 215 s. The Slinky cluster's NodeSets drain
+    # their Slurm nodes and carry job-protection PDBs; the installer deletes
+    # every slinky.slurm.net resource before `helm uninstall` so the
+    # controller is still there to clear the finalizers.
     SLURM_CLUSTER_CHART_NAME: 4,
 }
 
