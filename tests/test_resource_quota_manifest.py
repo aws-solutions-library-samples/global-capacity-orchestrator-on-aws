@@ -393,3 +393,153 @@ class TestManifestCapsMatchCdkJson:
         # drift apart; the stack must not carry its own values.
         assert '"max_gpu_per_manifest", 4' not in source
         assert '.get("max_cpu_per_manifest", "10")' not in source
+
+
+# ─── Kueue ClusterQueues cover what GCO's jobs request ───────────────────────
+
+KUEUE_DEFAULT_QUEUES = Path(
+    "lambda/kubectl-applier-simple/manifests/post-helm-kueue-default-queues.yaml"
+)
+KUEUE_HYPERPOD_QUEUE = Path(
+    "lambda/kubectl-applier-simple/manifests/post-helm-kueue-hyperpod-queue.yaml"
+)
+EXAMPLES_DIR = Path("examples")
+
+
+def _cluster_queue(path: Path, replacements: dict[str, str]) -> dict:
+    content = path.read_text(encoding="utf-8")
+    for token, value in replacements.items():
+        content = content.replace(token, value)
+    assert "{{" not in content, "every quota token must be rendered"
+    (queue,) = [doc for doc in yaml.safe_load_all(content) if doc and doc["kind"] == "ClusterQueue"]
+    return queue
+
+
+def _default_queue() -> dict:
+    from gco.resource_governance import DEFAULT_RESOURCE_QUOTA, kueue_efa_quota
+
+    return _cluster_queue(
+        KUEUE_DEFAULT_QUEUES,
+        {
+            "{{KUEUE_ENABLED}}": "true",
+            "{{QUOTA_MAX_CPU}}": DEFAULT_RESOURCE_QUOTA["max_cpu"],
+            "{{QUOTA_MAX_MEMORY}}": DEFAULT_RESOURCE_QUOTA["max_memory"],
+            "{{QUOTA_MAX_GPU}}": DEFAULT_RESOURCE_QUOTA["max_gpu"],
+            "{{QUOTA_MAX_EFA}}": kueue_efa_quota(DEFAULT_RESOURCE_QUOTA["max_gpu"]),
+            "{{QUOTA_MAX_PODS}}": DEFAULT_RESOURCE_QUOTA["max_pods"],
+        },
+    )
+
+
+def _hyperpod_queue() -> dict:
+    from gco.hyperpod_config import compute_hyperpod_replacements, validate_hyperpod_config
+
+    config = validate_hyperpod_config(
+        {
+            "enabled": True,
+            "instance_groups": [{"name": "workers", "instance_type": "ml.p5.48xlarge"}],
+        }
+    )
+    replacements = compute_hyperpod_replacements(config, enabled=True, region="us-east-1")
+    return _cluster_queue(KUEUE_HYPERPOD_QUEUE, {"{{KUEUE_ENABLED}}": "true", **replacements})
+
+
+def _quotas(queue: dict) -> dict[str, str]:
+    (group,) = queue["spec"]["resourceGroups"]
+    (flavor,) = group["flavors"]
+    quotas = {resource["name"]: str(resource["nominalQuota"]) for resource in flavor["resources"]}
+    assert set(quotas) == set(group["coveredResources"])
+    return quotas
+
+
+def _example_job_requests() -> list[tuple[str, dict[str, int]]]:
+    """``(example, total requests)`` for every batch Job the examples ship.
+
+    Kueue charges a Job its pods' requests (a container's limits stand in for
+    requests it omits) times ``parallelism``.
+    """
+    from gco.k8s_quantity import parse_quantity
+
+    jobs = []
+    for path in sorted(EXAMPLES_DIR.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if not isinstance(doc, dict) or doc.get("apiVersion") != "batch/v1":
+                continue
+            if doc.get("kind") != "Job":
+                continue
+            pods = int(doc["spec"].get("parallelism") or 1)
+            totals: dict[str, int] = {}
+            for container in doc["spec"]["template"]["spec"]["containers"]:
+                resources = container.get("resources") or {}
+                merged = {**(resources.get("limits") or {}), **(resources.get("requests") or {})}
+                for name, value in merged.items():
+                    totals[name] = totals.get(name, 0) + parse_quantity(value) * pods
+            jobs.append((f"{path.name}:{doc['metadata']['name']}", totals))
+    return jobs
+
+
+class TestKueueQueueCoverage:
+    """Kueue never admits a workload that requests a resource its ClusterQueue
+    does not cover, so a labelled Trainium, Inferentia or EFA Job stayed
+    suspended forever on the queues GCO ships."""
+
+    ACCELERATOR_RESOURCES = {"nvidia.com/gpu", "aws.amazon.com/neuron", "vpc.amazonaws.com/efa"}
+
+    def test_every_accelerator_resource_a_nodepool_taints_for_is_covered(self):
+        """The NodePools taint their nodes with the resource names they offer."""
+        taint_keys = set()
+        for path in sorted(
+            Path("lambda/kubectl-applier-simple/manifests").glob("4*-nodepool-*.yaml")
+        ):
+            text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "placeholder", path.read_text(encoding="utf-8"))
+            for doc in yaml.safe_load_all(text):
+                if isinstance(doc, dict) and doc.get("kind") == "NodePool":
+                    taint_keys |= {
+                        t["key"] for t in doc["spec"]["template"]["spec"].get("taints", [])
+                    }
+        assert taint_keys == self.ACCELERATOR_RESOURCES
+        for queue in (_default_queue(), _hyperpod_queue()):
+            assert taint_keys <= set(_quotas(queue)), queue["metadata"]["name"]
+
+    @pytest.mark.parametrize("queue_factory", [_default_queue, _hyperpod_queue])
+    def test_neuron_shares_the_gpu_quota_and_efa_follows_both(self, queue_factory):
+        from gco.resource_governance import kueue_efa_quota
+
+        quotas = _quotas(queue_factory())
+        assert quotas["aws.amazon.com/neuron"] == quotas["nvidia.com/gpu"]
+        assert quotas["vpc.amazonaws.com/efa"] == kueue_efa_quota(quotas["nvidia.com/gpu"])
+
+    @pytest.mark.parametrize("queue_factory", [_default_queue, _hyperpod_queue])
+    def test_every_shipped_example_job_is_admissible_once_labelled(self, queue_factory):
+        from gco.k8s_quantity import parse_quantity
+
+        quotas = _quotas(queue_factory())
+        jobs = _example_job_requests()
+        requested = {name for _example, totals in jobs for name in totals}
+        assert requested >= self.ACCELERATOR_RESOURCES, "the examples exercise every accelerator"
+        for example, totals in jobs:
+            for name, total in totals.items():
+                assert name in quotas, f"{example}: {name} is not covered"
+                assert total <= parse_quantity(quotas[name]), (example, name, total)
+
+
+class TestKueueEfaQuota:
+    def test_four_interfaces_per_gpu_plus_one_per_neuron_device(self):
+        from gco.resource_governance import kueue_efa_quota
+
+        # 32 GPUs on p5.48xlarge attach 4 x 32 interfaces; 32 Trainium2
+        # devices another 32.
+        assert kueue_efa_quota("32") == "160"
+        assert kueue_efa_quota(64) == "320"
+        assert kueue_efa_quota("0") == "0"
+
+    def test_a_fractional_budget_rounds_up_to_whole_interfaces(self):
+        from gco.resource_governance import kueue_efa_quota
+
+        assert kueue_efa_quota("0.5") == "3"
+
+    def test_a_non_quantity_is_rejected(self):
+        from gco.resource_governance import kueue_efa_quota
+
+        with pytest.raises(ValueError, match="not a Kubernetes quantity"):
+            kueue_efa_quota("lots")

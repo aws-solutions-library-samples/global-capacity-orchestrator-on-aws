@@ -302,6 +302,8 @@ class TestReplacements:
         )
         assert replacements["{{HYPERPOD_QUEUE_MAX_GPU}}"] == "16"
         assert replacements["{{HYPERPOD_QUEUE_MAX_MEMORY}}"] == "4Ti"
+        # EFA: 4 interfaces per GPU plus 1 per Neuron device, each budget 16.
+        assert replacements["{{HYPERPOD_QUEUE_MAX_EFA}}"] == "80"
 
     def test_unsupported_region_fails_the_synth_instead_of_deploying_without_the_agent(
         self,

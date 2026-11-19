@@ -24,6 +24,7 @@ names for synth-side callers.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import ROUND_CEILING
 from types import MappingProxyType
 
 from gco.k8s_quantity import parse_quantity
@@ -84,6 +85,31 @@ DEFAULT_MANIFEST_RESOURCE_CAPS: Mapping[str, object] = MappingProxyType(
     }
 )
 """Default ``job_validation_policy.resource_quotas`` for submitted manifests."""
+
+#: The most EFA interfaces an instance type pairs with each accelerator: a
+#: p5.48xlarge attaches 32 to its 8 GPUs, a trn1n.32xlarge or trn2.48xlarge 16
+#: to its 16 Neuron devices.
+EFA_INTERFACES_PER_GPU = 4
+EFA_INTERFACES_PER_NEURON_DEVICE = 1
+
+
+def kueue_efa_quota(accelerator_quota: object) -> str:
+    """The ``vpc.amazonaws.com/efa`` nominal quota of a shipped Kueue ClusterQueue.
+
+    Kueue never admits a workload that requests a resource its ClusterQueue
+    does not cover, so the shipped queues cover EFA next to the accelerators,
+    and give ``nvidia.com/gpu`` and ``aws.amazon.com/neuron`` the same nominal
+    quota, ``accelerator_quota``. EFA interfaces are a node's network devices,
+    not a budget of their own: the quota is the most interfaces the instance
+    types pair with that many GPUs plus that many Neuron devices, so the
+    accelerator quotas are always reached first.
+
+    Raises:
+        ValueError: If ``accelerator_quota`` is not a quantity.
+    """
+    per_accelerator = EFA_INTERFACES_PER_GPU + EFA_INTERFACES_PER_NEURON_DEVICE
+    interfaces = parse_quantity(accelerator_quota) * per_accelerator
+    return str(int(interfaces.to_integral_value(rounding=ROUND_CEILING)))
 
 
 #: (container ceiling, namespace ceiling) pairs the resource-quota invariant

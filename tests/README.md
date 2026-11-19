@@ -877,7 +877,7 @@ Static analysis tests act as guardrails against regressions in specific drift di
 | `test_regional_api_gateway_stack.py` | Tests for gco/stacks/regional_api_gateway_stack.GCORegionalApiGatewayStack: the REST API, its VPC Lambdas and roles, and a resource policy that names only the aggregator role for its routes, whatever `regional_api_enabled` and the partition say. |
 | `test_request_size_limit.py` | Tests for the RequestSizeLimitMiddleware on the Manifest API. |
 | `test_resource_quota_config.py` | End-to-end tests that cdk.json resource quota values flow into the Kubernetes manifests applied on the cluster. |
-| `test_resource_quota_manifest.py` | Tests for the ResourceQuota + LimitRange manifest (lambda/kubectl-applier-simple/manifests/04-resource-quotas.yaml). |
+| `test_resource_quota_manifest.py` | Tests for the ResourceQuota + LimitRange manifest (lambda/kubectl-applier-simple/manifests/04-resource-quotas.yaml), and for the Kueue ClusterQueues that mirror it: both shipped queues cover every accelerator resource a NodePool taints for, give Neuron the GPU quota and EFA `kueue_efa_quota`'s five interfaces per unit, and admit every shipped example Job once labelled. |
 | `test_stacks_access.py` | Tests for `gco stacks access` — the kubectl bootstrap command in cli/commands/stacks_cmd.py. |
 | `test_stacks_ordering_fsx.py` | Tests for stack ordering helpers and FSx configuration in cli/stacks.py. |
 | `test_task_status.py` | Tests for the disk-backed task status writer. |

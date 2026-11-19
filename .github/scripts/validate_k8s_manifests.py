@@ -280,6 +280,9 @@ _QUANTITY_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
         "{{QUOTA_MAX_CPU}}",
         "{{QUOTA_MAX_MEMORY}}",
         "{{QUOTA_MAX_GPU}}",
+        # The default ClusterQueue's vpc.amazonaws.com/efa quota
+        # (gco.resource_governance.kueue_efa_quota).
+        "{{QUOTA_MAX_EFA}}",
         # The default ClusterQueue's eks.amazonaws.com/nitro-sandbox quota,
         # one slot per pod (the namespace pod quota).
         "{{QUOTA_MAX_PODS}}",
@@ -288,6 +291,7 @@ _QUANTITY_PLACEHOLDER_TOKENS: frozenset[str] = frozenset(
         "{{HYPERPOD_QUEUE_MAX_CPU}}",
         "{{HYPERPOD_QUEUE_MAX_MEMORY}}",
         "{{HYPERPOD_QUEUE_MAX_GPU}}",
+        "{{HYPERPOD_QUEUE_MAX_EFA}}",
         # The Slurm accounting database's volumeClaimTemplate size
         # (29-slurm-accounting-db.yaml).
         "{{SLURM_ACCOUNTING_DB_STORAGE_SIZE}}",

@@ -3006,6 +3006,12 @@ container ceiling above its namespace ceiling, or a manifest cap outside the
 `container_max_* <= *_per_manifest <= max_*` ordering all fail the deploy
 with a message naming the offending pair.
 
+With Kueue enabled, the same values size the default `gco-cluster-queue`:
+`max_cpu`, `max_memory` and `max_gpu` are its CPU, memory and GPU quotas,
+`max_gpu` is also its `aws.amazon.com/neuron` quota and, times five, its
+`vpc.amazonaws.com/efa` quota, and `max_pods` bounds Nitro Sandbox slots
+(see [KUEUE.md → Submitting Jobs](KUEUE.md#submitting-jobs)).
+
 ### Disabling the Built-In Consumer
 
 If you want to implement your own SQS consumer (e.g., with custom validation logic, different scaling behavior, or a different processing pipeline), set `enabled` to `false`:
