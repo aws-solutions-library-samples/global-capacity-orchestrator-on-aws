@@ -413,6 +413,27 @@ def test_drift_role_inline_policies_fit_the_iam_limit(request, fixture):
     assert len(rendered) < 10_240
 
 
+def test_fsx_csi_driver_role_describes_only_its_file_system(all_features_resources):
+    """The statically provisioned file system's DescribeFileSystems, nothing else.
+
+    The driver calls no FSx volume (OpenZFS/ONTAP) or EC2 API, and with static
+    PersistentVolumes it never creates, resizes, tags or deletes a file system.
+    """
+    resources = all_features_resources
+    [file_system] = [lid for lid, r in resources.items() if r["Type"] == "AWS::FSx::FileSystem"]
+    statements = _statements(resources, _role_id(resources, "FsxCsiDriverRole"))
+    assert _by_actions(statements) == {
+        frozenset({"fsx:DescribeFileSystems"}): [
+            {
+                "Fn::Join": [
+                    "",
+                    ["arn:aws:fsx:us-east-1:123456789012:file-system/", {"Ref": file_system}],
+                ]
+            }
+        ]
+    }
+
+
 def test_unmapped_types_are_refused():
     from gco.stacks.drift_read_permissions import drift_read_actions
 

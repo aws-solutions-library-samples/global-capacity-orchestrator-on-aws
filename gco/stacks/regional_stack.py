@@ -7129,7 +7129,7 @@ class GCORegionalStack(Stack):
         self.fsx_file_system.node.add_dependency(self.fsx_security_group)
 
         # Create FSx CSI Driver add-on for Kubernetes integration
-        self._create_fsx_csi_driver_addon()
+        self._create_fsx_csi_driver_addon(self.fsx_file_system)
 
         # Output FSx information
         CfnOutput(
@@ -7502,11 +7502,11 @@ class GCORegionalStack(Stack):
         # so pods can retrieve credentials via the ConfigMap + Secrets Manager.
         self.aurora_secret.grant_read(self.service_account_role)
 
-    def _create_fsx_csi_driver_addon(self) -> None:
+    def _create_fsx_csi_driver_addon(self, file_system: fsx.CfnFileSystem) -> None:
         """Create FSx CSI Driver add-on for Kubernetes integration.
 
         The FSx CSI driver enables Kubernetes pods to mount FSx for Lustre
-        file systems as persistent volumes.
+        file systems as persistent volumes; ``file_system`` is the one it mounts.
         """
         # Create IAM role for FSx CSI Driver using IRSA + Pod Identity
         self.fsx_csi_role = GCORegionalStack._create_irsa_role(
@@ -7518,53 +7518,22 @@ class GCORegionalStack(Stack):
             namespaces=["kube-system"],
         )
 
-        # Add FSx CSI driver permissions
+        # The PersistentVolumes in 21-storage-fsx.yaml provision this file
+        # system statically, so the driver's controller never creates, resizes,
+        # tags or deletes one (and fsx-sc carries none of the parameters dynamic
+        # provisioning needs); the node plugin mounts with the Lustre client
+        # and calls no AWS API. What is left is DescribeFileSystems on this file
+        # system, which the controller's ValidateVolumeCapabilities calls. The
+        # driver calls no FSx volume (OpenZFS/ONTAP) or EC2 API.
         self.fsx_csi_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=[
-                    "fsx:DescribeFileSystems",
-                    "fsx:DescribeVolumes",
-                    "fsx:CreateVolume",
-                    "fsx:DeleteVolume",
-                    "fsx:TagResource",
+                actions=["fsx:DescribeFileSystems"],
+                resources=[
+                    f"arn:{self.partition}:fsx:{self.deployment_region}:{self.account}:"
+                    f"file-system/{file_system.ref}"
                 ],
-                resources=["*"],
             )
-        )
-
-        self.fsx_csi_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "ec2:DescribeInstances",
-                    "ec2:DescribeVolumes",
-                    "ec2:DescribeVpcs",
-                    "ec2:DescribeSubnets",
-                    "ec2:DescribeSecurityGroups",
-                ],
-                resources=["*"],
-            )
-        )
-
-        # cdk-nag suppression: the FSx CSI driver role grants
-        # ec2:Describe* APIs that don't support resource-level scoping.
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
-        acknowledge_nag_findings(
-            self.fsx_csi_role,
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "The FSx CSI driver role grants ec2:Describe* for volume "
-                        "and network discovery. These AWS APIs do not support "
-                        "resource-level IAM scoping — Resource: * is the only "
-                        "valid form."
-                    ),
-                    "appliesTo": ["Resource::*"],
-                },
-            ],
         )
 
         # Create FSx CSI Driver add-on
