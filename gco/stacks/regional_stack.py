@@ -2111,6 +2111,7 @@ class GCORegionalStack(Stack):
             "Pcs",
             config=config,
             project_name=self.config.get_project_name(),
+            project_tag=self._project_tag(),
             vpc=self.vpc,
             eks_cluster_security_group=self.cluster.cluster_security_group,
             api_role=self.manifest_processor_role,
@@ -2159,6 +2160,7 @@ class GCORegionalStack(Stack):
             "Hyperpod",
             config=config,
             project_name=self.config.get_project_name(),
+            project_tag=self._project_tag(),
             region=self.deployment_region,
             vpc=self.vpc,
             # The private subnets EKS accepted for the control plane, recorded by
@@ -2183,6 +2185,20 @@ class GCORegionalStack(Stack):
     def _network_policy_enforcement(self) -> bool:
         """Whether ``eks_cluster.network_policy_enforcement`` keeps the policy controller on (default on)."""
         return bool(self.config.get_eks_cluster_config().get("network_policy_enforcement", True))
+
+    def _project_tag(self) -> str:
+        """The value of every explicit ``Project`` tag: cdk.json ``context.tags.Project``.
+
+        app.py tags the whole app with ``context.tags``, and the cost reports
+        filter on that ``Project`` value. The app-level tag overrides an L1
+        resource's own ``Project`` tag, but not a tag the app's tagging never
+        reaches: the PCS launch templates' tag specifications (the instances
+        and volumes PCS launches) and the tags a construct adds itself. Those
+        use this value too. ``project_name`` stands in when ``context.tags``
+        sets no ``Project``.
+        """
+        value = self.config.get_tags().get("Project")
+        return value if isinstance(value, str) else self.config.get_project_name()
 
     def _tracing_config(self) -> dict[str, Any]:
         """The validated ``tracing`` block (``enabled``, ``sample_ratio``, ...).
@@ -7108,7 +7124,7 @@ class GCORegionalStack(Stack):
             lustre_configuration=lustre_config,
             tags=[
                 {"key": "Name", "value": f"{project_name}-fsx-{self.deployment_region}"},
-                {"key": "Project", "value": project_name},
+                {"key": "Project", "value": self._project_tag()},
             ],
         )
 
@@ -7222,7 +7238,7 @@ class GCORegionalStack(Stack):
             ),
             snapshot_retention_limit=valkey_config.get("snapshot_retention_limit", 1),
             tags=[
-                CfnTag(key="Project", value=self.config.get_project_name()),
+                CfnTag(key="Project", value=self._project_tag()),
                 CfnTag(key="gco:project", value=self.config.get_project_name()),
                 CfnTag(key="Region", value=self.deployment_region),
             ],

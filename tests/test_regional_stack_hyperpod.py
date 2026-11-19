@@ -230,11 +230,14 @@ class TestHyperpodOn:
         assert sg_ref["Fn::GetAtt"][0].startswith("HyperpodSecurityGroup")
         assert sg_ref["Fn::GetAtt"][1] == "GroupId"
         assert len(props["VpcConfig"]["Subnets"]) == 1
-        assert sorted(tag["Key"] for tag in props["Tags"]) == [
-            "Project",
-            "gco:hyperpod-cluster",
-            "gco:project",
-        ]
+        # ``Project`` is cdk.json ``context.tags.Project`` (MockConfigLoader:
+        # ``gco``), the value the cost reports filter on; ``gco:project`` is
+        # the project name.
+        assert {tag["Key"]: tag["Value"] for tag in props["Tags"]} == {
+            "Project": "gco",
+            "gco:hyperpod-cluster": "research-hyperpod",
+            "gco:project": "gco-test",
+        }
         assert cluster["DeletionPolicy"] == "Retain"
         assert cluster["UpdateReplacePolicy"] == "Retain"
         # Created after the convergence trigger, the access entry, the SG and the script.
@@ -563,6 +566,7 @@ class TestConstructGuards:
                 "Hyperpod",
                 config=hp.validate_hyperpod_config({"enabled": True}),
                 project_name="gco",
+                project_tag="GCO",
                 region=_REGION,
                 **kwargs,
             )
@@ -575,6 +579,7 @@ class TestConstructGuards:
             "Hyperpod",
             config=hp.validate_hyperpod_config({"enabled": True}),
             project_name="gco",
+            project_tag="GCO",
             region=_REGION,
             **kwargs,
         )
@@ -598,7 +603,13 @@ class TestConstructGuards:
             ValueError, match=r"us-east-1f.*EKS-supported zones: us-east-1a, us-east-1b"
         ):
             hc.HyperpodCluster(
-                stack, "Hyperpod", config=config, project_name="gco", region=_REGION, **kwargs
+                stack,
+                "Hyperpod",
+                config=config,
+                project_name="gco",
+                project_tag="GCO",
+                region=_REGION,
+                **kwargs,
             )
 
     def test_no_subnets_is_refused(self) -> None:
@@ -610,6 +621,7 @@ class TestConstructGuards:
                 "Hyperpod",
                 config=hp.validate_hyperpod_config({"enabled": True}),
                 project_name="gco",
+                project_tag="GCO",
                 region=_REGION,
                 **kwargs,
             )
