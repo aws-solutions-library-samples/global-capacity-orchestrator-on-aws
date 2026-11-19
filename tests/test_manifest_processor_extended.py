@@ -2332,6 +2332,41 @@ class TestTrainJobValidation:
         assert not is_valid
         assert "hostPath" in error
 
+    def test_hostpath_in_a_runtime_patch_without_containers_rejected(self, manifest_processor):
+        """A patch may set pod-level fields alone: a hostPath volume in one
+        patch and its mount in another must still be refused."""
+        manifest = _trainjob_manifest(
+            runtime_patches=[
+                {
+                    "manager": "volume",
+                    **_runtime_patch_with_pod_spec(
+                        {
+                            "volumes": [
+                                {"name": "scratch", "emptyDir": {}},
+                                {"name": "host", "hostPath": {"path": "/"}},
+                            ]
+                        }
+                    ),
+                },
+                {
+                    "manager": "mount",
+                    **_runtime_patch_with_pod_spec(
+                        {
+                            "containers": [
+                                {
+                                    "name": "node",
+                                    "volumeMounts": [{"name": "host", "mountPath": "/host"}],
+                                }
+                            ]
+                        }
+                    ),
+                },
+            ],
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert not is_valid
+        assert "hostPath" in error
+
     def test_privileged_container_in_runtime_patch_rejected(self, manifest_processor):
         manifest = _trainjob_manifest(
             runtime_patches=[
@@ -2416,6 +2451,34 @@ class TestTrainJobValidation:
                         ],
                     }
                 )
+            ],
+        )
+        is_valid, error = manifest_processor.validate_manifest(manifest)
+        assert is_valid, error
+
+    def test_toleration_in_a_runtime_patch_without_containers_satisfies_gpu_request(
+        self, manifest_processor
+    ):
+        """The documented GPU variant: the patch sets scheduling fields only."""
+        manifest = _trainjob_manifest(
+            num_nodes=1,
+            resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
+            runtime_patches=[
+                {
+                    "manager": "gco-example",
+                    **_runtime_patch_with_pod_spec(
+                        {
+                            "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                            "tolerations": [
+                                {
+                                    "key": "nvidia.com/gpu",
+                                    "operator": "Exists",
+                                    "effect": "NoSchedule",
+                                }
+                            ],
+                        }
+                    ),
+                }
             ],
         )
         is_valid, error = manifest_processor.validate_manifest(manifest)

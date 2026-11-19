@@ -13,9 +13,12 @@
 # < dump.sql` against the database Service with the root password from the
 # slinky-slurm-mariadb Secret (docs/SLURM_OPERATOR.md, "Accounting").
 #
-# Identity is gco-service-account (01-serviceaccounts.yaml): its EKS Pod
-# Identity association grants read/write on exactly the regional bucket and
-# use of its KMS key, and nothing else. The database password is mounted from
+# Identity is gco-service-account (01-serviceaccounts.yaml), the shared
+# service account for job workloads. Of its EKS Pod Identity grants this job
+# uses only read/write on the regional bucket and its KMS key; the role also
+# carries the other job grants (the cluster-shared bucket, model weights
+# reads, workload metrics, and the vector store or Aurora secret when those
+# add-ons are on). The database password is mounted from
 # the slinky-slurm-mariadb Secret as a file (never a container env var, so it
 # is absent from the pod spec and `kubectl describe`) and reaches mariadb-dump
 # through MYSQL_PWD set for that one process (never a command-line argument,

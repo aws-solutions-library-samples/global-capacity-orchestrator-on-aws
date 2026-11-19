@@ -122,7 +122,10 @@ is enabled: ResourceFlavor `gco-default-flavor`, ClusterQueue
 LocalQueue `gco-default` in `gco-jobs` (applied by
 `post-helm-kueue-default-queues.yaml`). Label a Job with
 `kueue.x-k8s.io/queue-name: gco-default` and it queues immediately — no
-hand-applied queue objects required. With [SageMaker HyperPod](HYPERPOD.md)
+hand-applied queue objects required. Kueue manages only labelled workloads:
+the chart GCO installs leaves `manageJobsWithoutQueueName` at its default,
+false, so a Job without the label is not queued and starts at once, limited
+only by the namespace ResourceQuota. With [SageMaker HyperPod](HYPERPOD.md)
 on as well, a second topology is applied next to it: ResourceFlavor
 `gco-hyperpod-flavor` (the HyperPod node label as `nodeLabels`, the HyperPod
 taint as a toleration), ClusterQueue `gco-hyperpod-queue` (quotas from

@@ -5,7 +5,8 @@ optional kro, Argo CD and Crossplane tenant roles leave: they may write
 ConfigMaps, Secrets, Services, Deployments and StatefulSets in the two tenant
 namespaces, and RBAC cannot tell a tenant's object there from GCO's. The
 policy keeps what the inference monitor manages its own (the objects it
-labels and the ``gco.io/endpoint`` label naming their endpoint, the shared
+labels, the ``gco.io/endpoint`` label naming their endpoint and the
+``project`` label its provenance check reads with ``gco.io/type``, the shared
 Mooncake master, the ConfigMaps its pods mount by name, its provenance
 annotations), the model endpoints' keypair cert-manager's, and the
 CA bundle trust-manager publishes in gco-jobs trust-manager's.
@@ -75,6 +76,7 @@ ONLY_THE_MONITOR = (
 MANAGED_CONTENT = "is managed by the inference monitor: only"
 POD_PROGRAM = "the inference monitor mounts ConfigMaps named"
 ENDPOINT_LABEL_OWNED = "may set, change or remove the gco.io/endpoint label"
+PROJECT_LABEL_OWNED = "may set, change or remove the project label"
 PROVENANCE_OWNED = "may set, change or remove the gco.io/lifecycle-id"
 KEYPAIR_OWNED = "only the cert-manager controller (system:serviceaccount:cert-manager:cert-manager)"
 BUNDLE_OWNED = "only trust-manager (system:serviceaccount:trust-manager:trust-manager)"
@@ -430,7 +432,7 @@ class TestFencePolicy:
 
     def test_every_rule_is_forbidden_with_a_one_line_message(self) -> None:
         validations = _policy()["spec"]["validations"]
-        assert len(validations) == 7
+        assert len(validations) == 8
         for validation in validations:
             assert validation["reason"] == "Forbidden"
             assert validation["message"].strip() and "\n" not in validation["message"]
@@ -539,6 +541,42 @@ class TestNamesMatchTheirOwners:
         ):
             _assert_verdict(_review(obj, user=TENANT), ONLY_THE_MONITOR)
             assert _review(obj, user=MONITOR) == [], kind
+
+    def test_the_project_label_is_the_other_half_of_that_provenance(self) -> None:
+        """Without ``project: gco`` the monitor will not hand off its own stale object."""
+        from unittest.mock import MagicMock, patch
+
+        from gco.services.inference_monitor import ReconcileFencedError
+
+        monitor = object.__new__(InferenceMonitor)
+        monitor._active_authority = ReconcileAuthority(
+            endpoint_name="ep", lifecycle_id="new", region_generation="r", leader_epoch="e"
+        )
+        stripped = {key: value for key, value in MANAGED_LABELS.items() if key != "project"}
+        assert not InferenceMonitor._has_monitor_provenance({"metadata": {"labels": stripped}})
+        for labels, deleted in ((MANAGED_LABELS, True), (stripped, False)):
+            stale = {"metadata": {"labels": labels, "annotations": PROVENANCE}}
+            delete = MagicMock()
+            with (
+                patch.object(monitor, "_strong_authority_matches", return_value=True),
+                patch.object(monitor, "_assert_current_leadership"),
+                patch.object(monitor, "_delete_options_for", return_value={}),
+                pytest.raises(ReconcileFencedError),
+            ):
+                monitor._handoff_stale_resource(
+                    stale,
+                    kind="deployment",
+                    resource_name="ep",
+                    delete_resource=delete,
+                    reason="belongs to another endpoint lifecycle",
+                )
+            assert delete.called is deleted
+        verdict = _review(
+            _changed(_LABELLED_DEPLOYMENT, _drop_label("project")),
+            user=TENANT,
+            old=_LABELLED_DEPLOYMENT,
+        )
+        _assert_verdict(verdict, PROJECT_LABEL_OWNED)
 
     def test_the_endpoint_label_is_the_one_the_monitor_owns_objects_by(self) -> None:
         """The monitor labels what it creates and refuses objects labelled for another endpoint."""
@@ -820,6 +858,35 @@ UPDATE_CASES = [
         _drop_label(ENDPOINT_LABEL),
         ENDPOINT_LABEL_OWNED,
     ),
+    # The project label, the other half of the monitor's provenance label.
+    (
+        "a tenant strips the project label from a managed Service",
+        TENANT,
+        _MANAGED_SERVICE,
+        _drop_label("project"),
+        PROJECT_LABEL_OWNED,
+    ),
+    (
+        "a tenant changes the project label of a pod program",
+        TENANT,
+        _LABELLED_CONFIG_MAP,
+        _set_label("project", "other"),
+        PROJECT_LABEL_OWNED,
+    ),
+    (
+        "a tenant sets a project label on a pod program from before the fence",
+        TENANT,
+        _LEGACY_POD_PROGRAM,
+        _set_label("project", "gco"),
+        PROJECT_LABEL_OWNED,
+    ),
+    (
+        "the applier is not the monitor for the project label",
+        APPLIER,
+        _MASTER,
+        _drop_label("project"),
+        PROJECT_LABEL_OWNED,
+    ),
     # Provenance, on any object.
     (
         "a tenant stamps provenance",
@@ -877,6 +944,20 @@ UPDATE_CASES = [
         TENANT,
         _TENANT_CONFIG_MAP,
         _set_label(ENDPOINT_LABEL, "ep"),
+        None,
+    ),
+    (
+        "a tenant labels its own ConfigMap with a project",
+        TENANT,
+        _TENANT_CONFIG_MAP,
+        _set_label("project", "gco"),
+        None,
+    ),
+    (
+        "the monitor relabels its own object's project",
+        MONITOR,
+        _MANAGED_DEPLOYMENT,
+        _set_label("project", "gco-next"),
         None,
     ),
     (

@@ -166,6 +166,76 @@ class TestQueueProcessorEnvVars:
         assert 'value: "{{QP_ALLOWED_KINDS}}"' in manifest_content
 
 
+_MANIFESTS = Path("lambda/kubectl-applier-simple/manifests")
+
+
+def _workload_env(file_name: str) -> dict[str, str | None]:
+    """``name -> value`` of the one workload container's env in a shipped manifest."""
+    text = re.sub(
+        r"\{\{[A-Z0-9_]+\}\}", lambda m: f'"{m.group(0)}"', (_MANIFESTS / file_name).read_text()
+    )
+    # Tokens already inside quotes became doubly quoted; undo that.
+    text = text.replace('""{{', '"{{').replace('}}""', '}}"')
+    (workload,) = [
+        doc
+        for doc in yaml.safe_load_all(text)
+        if doc and doc.get("kind") in {"Deployment", "ScaledJob"}
+    ]
+    spec = workload["spec"]
+    pod = (spec.get("jobTargetRef") or spec)["template"]["spec"]
+    (container,) = [
+        c for c in pod["containers"] if c["name"] in {"manifest-processor", "queue-processor"}
+    ]
+    return {item["name"]: item.get("value") for item in container["env"]}
+
+
+def _queue_processor_env_names() -> set[str]:
+    """Every environment variable gco/services/queue_processor.py reads by name."""
+    import ast
+
+    readers = {("environ", "get"), ("os", "getenv"), (None, "parse_boolean_environment")}
+    names = set()
+    tree = ast.parse(Path("gco/services/queue_processor.py").read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            owner = (
+                func.value.attr
+                if isinstance(func.value, ast.Attribute)
+                else getattr(func.value, "id", None)
+            )
+            key = (owner, func.attr)
+        else:
+            key = (None, getattr(func, "id", None))
+        first = node.args[0]
+        if key in readers and isinstance(first, ast.Constant) and isinstance(first.value, str):
+            names.add(first.value)
+    return names
+
+
+class TestSubmissionPathEnvParity:
+    """The SQS consumer gets every setting it shares with the REST Deployment.
+
+    The queue processor falls back to its built-in defaults for an unset
+    variable, so a setting the REST Deployment renders from cdk.json but the
+    ScaledJob omits silently diverges once an operator changes it.
+    """
+
+    def test_every_setting_both_processors_read_is_set_on_the_scaled_job(self):
+        rest = _workload_env("31-manifest-processor.yaml")
+        sqs = _workload_env("post-helm-sqs-consumer.yaml")
+        shared = _queue_processor_env_names() & set(rest)
+        assert {"YAML_MAX_DEPTH", "BLOCK_HOST_PATH", "MAX_GPU_PER_MANIFEST"} <= shared
+        assert sorted(shared - set(sqs)) == []
+
+    def test_yaml_max_depth_renders_from_the_rest_deployments_token(self):
+        rest = _workload_env("31-manifest-processor.yaml")
+        sqs = _workload_env("post-helm-sqs-consumer.yaml")
+        assert sqs["YAML_MAX_DEPTH"] == rest["YAML_MAX_DEPTH"] == "{{MP_YAML_MAX_DEPTH}}"
+
+
 class TestResourceQuotaErrorMessages:
     """Verify resource limit errors include specific details and hints."""
 

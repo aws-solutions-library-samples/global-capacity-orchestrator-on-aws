@@ -71,7 +71,7 @@ spec:
     command: ["torchrun", "/workspace/train.py"]
 ```
 
-`torchrun` inherits the rendezvous configuration (`PET_*` environment) the controller injects, so your training script only needs `torch.distributed.init_process_group()`.
+`torchrun` inherits the rendezvous configuration (`PET_*` environment) the controller injects, so your training script only needs `torch.distributed.init_process_group()`. This image is linux/amd64 only, so the shipped runtime pins its pods to amd64 nodes, and the shipped example repeats the pin in a runtime patch (see [GPU Training](#gpu-training)).
 
 ### What the controller creates
 
@@ -90,14 +90,14 @@ TrainJobs pass the same security pipeline as every other submission, on both the
 
 - **Image trust:** `spec.trainer.image` plus every container reachable through `runtimePatches` must clear the trusted-registry allowlist.
 - **Resource caps:** the per-manifest CPU/memory/GPU budget counts `resourcesPerNode` multiplied by `numNodes` — a 16-node job is sixteen nodes of spend, not one.
-- **Security policy:** hostPath volumes, privileged containers, added capabilities, and the other `manifest_security_policy` toggles are enforced across every pod-spec view a TrainJob can produce, including complete pod specs nested inside `runtimePatches`.
+- **Security policy:** hostPath volumes, privileged containers, added capabilities, and the other `manifest_security_policy` toggles are enforced across every pod-spec view a TrainJob can produce, including every pod spec a `runtimePatches` entry carries, with or without containers. Kubeflow Trainer merges all patches into one pod template, so a hostPath volume in one patch and its mount in another are both checked.
 - **Accelerator tolerations:** a GPU request must carry a matching toleration; for TrainJobs the toleration lives in a runtime patch (see below) while the request lives in `spec.trainer`, and the validators union both sides across views.
 
 If the trainer addon is disabled, submission fails with an actionable message pointing at the `helm.kubeflow_trainer` toggle instead of an inscrutable discovery error.
 
 ## GPU Training
 
-`spec.trainer` carries images and per-node resources but not tolerations, so accelerator jobs add them through a runtime patch:
+`spec.trainer` carries images and per-node resources but no scheduling fields, so accelerator jobs add the toleration through a runtime patch on the `node` pod template:
 
 ```yaml
 spec:
@@ -110,7 +110,8 @@ spec:
       limits:
         nvidia.com/gpu: "1"
   runtimePatches:
-    - trainingRuntimeSpec:
+    - manager: gco-example
+      trainingRuntimeSpec:
         template:
           spec:
             replicatedJobs:
@@ -119,11 +120,15 @@ spec:
                   spec:
                     template:
                       spec:
+                        nodeSelector:
+                          kubernetes.io/arch: amd64
                         tolerations:
                           - key: nvidia.com/gpu
                             operator: Exists
                             effect: NoSchedule
 ```
+
+Every runtime patch names its owner in `manager` (any non-empty string; the TrainJob CRD requires it and keys the list by it). The `kubernetes.io/arch: amd64` selector is there because the runtime's `pytorch/pytorch` image is published for linux/amd64 only, while the GPU NodePools also launch arm64 (Graviton g5g) nodes; the shipped `torch-distributed` runtime sets the same selector (see [Runtimes](#runtimes)), and the patch repeats it so the pods stay on amd64 with a custom runtime that does not. The shipped CPU example carries the same patch, because the CPU pool launches both architectures too.
 
 EKS Auto Mode provisions GPU capacity on demand; check availability first with `gco capacity check --instance-type g4dn.xlarge --region us-east-1`. For multi-node GPU training use `nccl` as the process-group backend (the CPU example uses `gloo`).
 
@@ -156,7 +161,7 @@ Distributed training on Spot is a cost/interruption trade:
 kubectl get clustertrainingruntime
 ```
 
-Platform operators can add custom runtimes (different base images, initContainers, node selectors) by applying additional `ClusterTrainingRuntime` objects; user-facing TrainJobs stay unchanged. Runtime pod templates ship with `automountServiceAccountToken: false` — training pods get no Kubernetes API token unless a TrainJob opts back in through a runtime patch.
+Platform operators can add custom runtimes (different base images, initContainers, node selectors) by applying additional `ClusterTrainingRuntime` objects; user-facing TrainJobs stay unchanged. Runtime pod templates ship with `automountServiceAccountToken: false` — training pods get no Kubernetes API token unless a TrainJob opts back in through a runtime patch. They also carry a `kubernetes.io/arch: amd64` node selector, because the pinned `pytorch/pytorch` image is published for linux/amd64 only; a TrainJob whose image also has an arm64 build can change the selector through a runtime patch.
 
 ## Troubleshooting
 
