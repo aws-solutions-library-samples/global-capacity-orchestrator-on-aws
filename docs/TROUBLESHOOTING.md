@@ -439,9 +439,11 @@ kubectl describe nodes
 # Solution: Increase nodepool limits or reduce pod requests
 
 # 3. "serviceaccount not found"
-kubectl get sa -n gco-system
-# Solution: Apply service account manifest
-kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
+kubectl get sa -n gco-system                          # the platform services' accounts
+kubectl get sa gco-service-account -n gco-jobs        # job pods (also in gco-inference)
+# Solution: re-run the convergence, which applies the base manifests with their
+# role ARNs filled in (see Service Account Issues below)
+gco stacks addons install -r <region>
 ```
 
 ### Pods Stuck in ContainerCreating
@@ -515,12 +517,19 @@ kubectl describe pod POD-NAME -n NAMESPACE
 **Solution**:
 
 ```bash
-# 1. Verify service account exists
-kubectl get sa gco-service-account -n gco-system
+# 1. Verify the service accounts exist: the platform services' accounts in
+#    gco-system, and gco-service-account (job and model pods) in gco-jobs and
+#    gco-inference
+kubectl get sa -n gco-system
+kubectl get sa gco-service-account -n gco-jobs
+kubectl get sa gco-service-account -n gco-inference
 
-# 2. If missing, apply manifests
-kubectl apply -f lambda/kubectl-applier-simple/manifests/01-serviceaccounts.yaml
-kubectl apply -f lambda/kubectl-applier-simple/manifests/02-rbac.yaml
+# 2. If one is missing, re-run the convergence. It applies the base manifests,
+#    service accounts and RBAC included, with their {{...}} placeholders (the
+#    IAM role ARNs and other deploy-time values) filled in. Do not kubectl apply
+#    the files under lambda/kubectl-applier-simple/manifests/ yourself: they are
+#    templates, and the literal placeholders would replace the role annotations.
+gco stacks addons install -r <region>
 
 # 3. Restart pods to pick up service account
 kubectl rollout restart deployment/health-monitor -n gco-system
