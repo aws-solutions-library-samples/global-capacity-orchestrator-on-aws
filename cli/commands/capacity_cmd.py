@@ -2299,10 +2299,11 @@ def traffic_dial_show(config: Any) -> None:
 def traffic_dial_set(config: Any, region: Any, percentage: Any, yes: Any) -> None:
     """Manually dial REGION to PERCENTAGE and pin it against the controller.
 
-    Applies UpdateEndpointGroup immediately and records an override parameter
-    so the scheduled controller leaves the region alone until
-    `gco capacity traffic-dial clear` removes it. Dial changes converge to the
-    accelerator's edge locations over a few minutes.
+    Records an override parameter, so the scheduled controller leaves the
+    region alone until `gco capacity traffic-dial clear` removes it, then
+    applies UpdateEndpointGroup. If the dial update fails, the override is
+    put back as it was. Dial changes converge to the accelerator's edge
+    locations over a few minutes.
     """
     from ..capacity.traffic_dial import TrafficDialError, get_traffic_dial_manager
 

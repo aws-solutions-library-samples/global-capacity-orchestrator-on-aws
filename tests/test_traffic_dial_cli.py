@@ -271,6 +271,93 @@ class TestSetDial:
         with pytest.raises(TrafficDialError, match="Failed to update"):
             dial_manager.set_dial("us-west-2", 25)
 
+    def test_records_the_override_before_changing_the_dial(self, manager):
+        """The dial used to change first: a failed override write then left the
+        Region drained with nothing telling the controller to leave it alone."""
+        dial_manager, ssm, ga = manager
+        _registry_pages(ssm)
+        _describe_groups(ga, {EAST_ARN: 100.0, WEST_ARN: 100.0})
+        ssm.get_parameter.side_effect = _client_error("ParameterNotFound", "GetParameter")
+        calls = []
+        ssm.put_parameter.side_effect = lambda **kwargs: calls.append("put_override")
+        ga.update_endpoint_group.side_effect = lambda **kwargs: (
+            calls.append("update_dial") or {"EndpointGroup": {"TrafficDialPercentage": 0.0}}
+        )
+
+        dial_manager.set_dial("us-west-2", 0)
+
+        assert calls == ["put_override", "update_dial"]
+
+    def test_failed_override_write_leaves_the_dial_unchanged(self, manager):
+        dial_manager, ssm, ga = manager
+        _registry_pages(ssm)
+        _describe_groups(ga, {EAST_ARN: 100.0, WEST_ARN: 100.0})
+        ssm.get_parameter.side_effect = _client_error("ParameterNotFound", "GetParameter")
+        ssm.put_parameter.side_effect = _client_error("AccessDeniedException", "PutParameter")
+
+        with pytest.raises(TrafficDialError, match="the dial was not changed"):
+            dial_manager.set_dial("us-west-2", 0)
+
+        ga.update_endpoint_group.assert_not_called()
+
+    def test_failed_dial_update_removes_the_new_override(self, manager):
+        dial_manager, ssm, ga = manager
+        _registry_pages(ssm)
+        _describe_groups(ga, {EAST_ARN: 100.0, WEST_ARN: 100.0})
+        ssm.get_parameter.side_effect = _client_error("ParameterNotFound", "GetParameter")
+        ga.update_endpoint_group.side_effect = _client_error(
+            "AccessDeniedException", "UpdateEndpointGroup"
+        )
+
+        with pytest.raises(TrafficDialError, match="the override was removed"):
+            dial_manager.set_dial("us-west-2", 25)
+
+        ssm.delete_parameter.assert_called_once_with(Name="/gco/traffic-dial/override-us-west-2")
+
+    def test_failed_dial_update_restores_a_previous_override(self, manager):
+        dial_manager, ssm, ga = manager
+        _registry_pages(ssm)
+        _describe_groups(ga, {EAST_ARN: 100.0, WEST_ARN: 100.0})
+        ssm.get_parameter.return_value = {"Parameter": {"Value": "50"}}
+        ga.update_endpoint_group.side_effect = _client_error(
+            "AccessDeniedException", "UpdateEndpointGroup"
+        )
+
+        with pytest.raises(TrafficDialError, match="the override was restored to 50"):
+            dial_manager.set_dial("us-west-2", 25)
+
+        assert [call.kwargs["Value"] for call in ssm.put_parameter.call_args_list] == ["25", "50"]
+        ssm.delete_parameter.assert_not_called()
+
+    def test_failed_rollback_names_the_state_left_behind(self, manager):
+        dial_manager, ssm, ga = manager
+        _registry_pages(ssm)
+        _describe_groups(ga, {EAST_ARN: 100.0, WEST_ARN: 100.0})
+        ssm.get_parameter.side_effect = _client_error("ParameterNotFound", "GetParameter")
+        ga.update_endpoint_group.side_effect = _client_error(
+            "AccessDeniedException", "UpdateEndpointGroup"
+        )
+        ssm.delete_parameter.side_effect = _client_error("ThrottlingException", "DeleteParameter")
+
+        with pytest.raises(TrafficDialError) as excinfo:
+            dial_manager.set_dial("us-west-2", 25)
+
+        message = str(excinfo.value)
+        assert "the override now reads 25 while the dial is unchanged" in message
+        assert "gco capacity traffic-dial clear us-west-2" in message
+
+    def test_unreadable_previous_override_changes_nothing(self, manager):
+        dial_manager, ssm, ga = manager
+        _registry_pages(ssm)
+        _describe_groups(ga, {EAST_ARN: 100.0, WEST_ARN: 100.0})
+        ssm.get_parameter.side_effect = _client_error("AccessDeniedException", "GetParameter")
+
+        with pytest.raises(TrafficDialError, match="nothing was changed"):
+            dial_manager.set_dial("us-west-2", 25)
+
+        ssm.put_parameter.assert_not_called()
+        ga.update_endpoint_group.assert_not_called()
+
 
 class TestClearOverride:
     def test_returns_true_when_an_override_existed(self, manager):

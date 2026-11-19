@@ -1277,6 +1277,14 @@ registered ALB endpoint is untouched. Prompts for confirmation unless
 accelerator's edge locations over a few minutes. Warns when the change would
 leave no fully dialed region on the listener.
 
+The override (`/{project}/traffic-dial/override-{region}` in SSM) is written
+before the dial changes, so the controller already skips the region when it does.
+If the override cannot be written, the dial is not touched. If the dial update
+fails, the override is put back as it was (removed, or its previous value) and
+the command exits 1 saying so; if that also fails, the error says the override
+now holds the new value while the dial is unchanged, and names
+`gco capacity traffic-dial clear REGION`.
+
 ```bash
 gco capacity traffic-dial set REGION PERCENTAGE [OPTIONS]
 ```
