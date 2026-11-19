@@ -61,8 +61,10 @@ class _AnalyticsMockConfig:
         hyperpod_enabled: bool = False,
         canvas_enabled: bool = False,
         region: str = "us-east-2",
+        workload_regions: tuple[str, ...] = ("us-east-1", "us-west-2"),
     ) -> None:
         self._enabled = enabled
+        self._workload_regions = workload_regions
         self._efs_removal = efs_removal
         self._cognito_removal = cognito_removal
         self._hyperpod_enabled = hyperpod_enabled
@@ -91,6 +93,10 @@ class _AnalyticsMockConfig:
         scope the ``execute-api:Invoke`` statement on the SageMaker role.
         """
         return self._region
+
+    def get_regions(self) -> list[str]:
+        """Workload Regions, whose job queues the SageMaker role may send to."""
+        return list(self._workload_regions)
 
     def get_analytics_config(self) -> dict[str, Any]:
         return {
@@ -931,35 +937,48 @@ class TestSageMakerExecutionRole:
                     f"to GET — got {res!r}; blocks POST submissions"
                 )
 
-    def test_role_has_sqs_sendmessage_on_jobs_queue_pattern(self) -> None:
-        """``sqs:SendMessage`` on the regional job-queue naming
-        pattern ``<project>-jobs-*``."""
-        template = _synth_analytics()
-        role_lid, _ = self._find_sagemaker_role(template)
-        statements = self._collect_role_statements(template, role_lid)
-
-        matches = []
+    @staticmethod
+    def _sqs_send_resources(statements: list[dict]) -> list[Any]:
+        resources: list[Any] = []
         for stmt in statements:
-            if stmt.get("Effect") != "Allow":
-                continue
             actions = stmt.get("Action")
             action_set = set(actions) if isinstance(actions, list) else {actions}
-            if "sqs:SendMessage" not in action_set:
-                continue
-            resources = stmt.get("Resource") or []
-            if not isinstance(resources, list):
-                resources = [resources]
-            for res in resources:
-                rendered = res if isinstance(res, str) else json.dumps(res, sort_keys=True)
-                if "-jobs-*" in rendered and ":sqs:" in rendered:
-                    matches.append(stmt)
-                    break
+            if stmt.get("Effect") == "Allow" and "sqs:SendMessage" in action_set:
+                granted = stmt.get("Resource") or []
+                resources.extend(granted if isinstance(granted, list) else [granted])
+        return resources
 
-        assert matches, (
-            "expected an Allow statement granting sqs:SendMessage on a "
-            "resource matching the <project>-jobs-* ARN pattern; "
-            f"attached statements={statements!r}"
-        )
+    def test_role_sends_only_to_each_workload_regions_job_queue(self) -> None:
+        """``sqs:SendMessage`` names each workload Region's job queue.
+
+        It used to be ``sqs:*:<account>:<project>-jobs-*``, which also
+        matched every Region's dead-letter queue
+        (``<project>-jobs-dlq-<region>``), broader than the job queues the
+        role needs.
+        """
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        resources = self._sqs_send_resources(self._collect_role_statements(template, role_lid))
+        assert resources == [
+            {
+                "Fn::Join": [
+                    "",
+                    [
+                        "arn:",
+                        {"Ref": "AWS::Partition"},
+                        f":sqs:{region}:123456789012:gco-test-jobs-{region}",
+                    ],
+                ]
+            }
+            for region in ("us-east-1", "us-west-2")
+        ]
+
+    def test_role_has_no_sqs_grant_without_workload_regions(self) -> None:
+        """With no workload Region there is no queue, so no statement (an
+        empty Resource list would be an invalid policy)."""
+        template = _synth_analytics(config=_AnalyticsMockConfig(workload_regions=()))
+        role_lid, _ = self._find_sagemaker_role(template)
+        assert self._sqs_send_resources(self._collect_role_statements(template, role_lid)) == []
 
     def test_role_has_ssm_getparameter_on_cluster_shared_bucket_prefix(self) -> None:
         """``ssm:GetParameter`` on the ``Cluster_Shared_Bucket`` metadata

@@ -407,8 +407,13 @@ class GCOAnalyticsStack(Stack):
         attached here:
 
         * RW on ``Studio_Only_Bucket`` + KMS on ``Analytics_KMS_Key``
-        * Read-only ``execute-api:Invoke`` on GCO API Gateway ``/api/v1/*`` GET routes
-        * ``sqs:SendMessage`` on regional job queues (wildcard ARN pattern)
+        * ``execute-api:Invoke`` with every HTTP method on the GCO API's
+          ``/prod/*/api/v1/*`` and ``/prod/*/inference/*`` routes in the API
+          Gateway Region, so notebooks can submit and delete jobs and manage
+          inference endpoints as well as read (any REST API id: this stack
+          deploys before the API Gateway stack, whose API id it cannot know)
+        * ``sqs:SendMessage`` on each workload Region's job queue
+          (``<project>-jobs-<region>``; not the dead-letter queues)
         * ``ssm:GetParameter`` on the ``Cluster_Shared_Bucket`` metadata
           parameters in the global region — lets notebooks look up the
           bucket name/arn/region at runtime without a per-user export step
@@ -445,9 +450,10 @@ class GCOAnalyticsStack(Stack):
             description=(
                 "SageMaker_Execution_Role - assumed by notebooks in the Studio "
                 "domain. Grants RW on Studio_Only_Bucket and (via a separate "
-                "cross-region policy) Cluster_Shared_Bucket, plus read-only GCO "
-                "API access, SQS job submission, and cross-region ssm:GetParameter "
-                "on the Cluster_Shared_Bucket metadata parameters."
+                "cross-region policy) Cluster_Shared_Bucket, plus GCO API access "
+                "(every method under /api/v1 and /inference), SQS job submission, "
+                "and cross-region ssm:GetParameter on the Cluster_Shared_Bucket "
+                "metadata parameters."
             ),
         )
 
@@ -475,11 +481,11 @@ class GCOAnalyticsStack(Stack):
         # tear things down from inside a notebook without bouncing
         # through a service account.
         #
-        # The exact API id is not known here (it lives in the api-gateway
-        # stack and is discovered through SSM or CfnOutput at synth time
-        # — see the api_gateway_global_stack wiring). Scope to the
-        # api-gateway region with any REST API id for now; tighter scope
-        # is applied once ``AnalyticsApiConfig`` is wired in.
+        # The API id cannot be named: the API Gateway stack depends on this
+        # stack (it wires this stack's presigned-URL Lambda into
+        # /studio/login), so this stack deploys first and the API does not
+        # exist yet. The grant takes any REST API id in the API Gateway
+        # Region and account, under the prod stage and the two path trees.
         api_gw_region = self.config.get_api_gateway_region()
         self.sagemaker_execution_role.add_to_policy(
             iam.PolicyStatement(
@@ -502,21 +508,24 @@ class GCOAnalyticsStack(Stack):
             )
         )
 
-        # SQS job submission — scoped to the regional queue name pattern
-        # ``<project>-jobs-<region>`` written by
-        # ``GCORegionalStack._create_sqs_queue``. The exact region isn't
-        # known at synth time (queues live in regional stacks), so we use
-        # ``*`` in the region component with the project name fixed.
+        # SQS job submission — each workload Region's job queue, named
+        # ``<project>-jobs-<region>`` by ``GCORegionalStack._create_sqs_queue``.
+        # The queues live in the regional stacks, so the ARNs are built from
+        # the names; the dead-letter queues (``<project>-jobs-dlq-<region>``)
+        # are not included.
         project_name = self.config.get_project_name()
-        self.sagemaker_execution_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["sqs:SendMessage"],
-                resources=[
-                    f"arn:{self.partition}:sqs:*:{self.account}:{project_name}-jobs-*",
-                ],
+        job_queue_arns = [
+            f"arn:{self.partition}:sqs:{region}:{self.account}:{project_name}-jobs-{region}"
+            for region in self.config.get_regions()
+        ]
+        if job_queue_arns:
+            self.sagemaker_execution_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["sqs:SendMessage"],
+                    resources=job_queue_arns,
+                )
             )
-        )
 
         # ssm:GetParameter on the Cluster_Shared_Bucket metadata params. The
         # three parameters (name/arn/region) live in the global region where

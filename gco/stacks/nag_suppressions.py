@@ -1047,12 +1047,11 @@ def add_sagemaker_suppressions(
 
     The analytics stack uses a private-VPC SageMaker Studio domain whose
     execution role needs wildcard access to a known set of ARN patterns:
-    regional SQS job queues (one per regional stack, name pattern
-    ``<project>-jobs-<region>``), GCO API Gateway GET routes (any REST API
-    id under ``/prod/GET/api/v1/*``), and ``Cluster_Shared_Bucket`` objects
-    resolved from cross-region SSM. Each wildcard is scoped on the literal
-    patterns below so cdk-nag's ``AwsSolutions-IAM5`` check surfaces only
-    the documented escape hatches.
+    the GCO API's routes (any REST API id under ``/prod/*/api/v1/*`` and
+    ``/prod/*/inference/*``) and ``Cluster_Shared_Bucket`` objects resolved
+    from cross-region SSM, among others. Each wildcard is scoped on the
+    literal patterns below so cdk-nag's ``AwsSolutions-IAM5`` check surfaces
+    only the documented escape hatches.
 
     Args:
         stack: The analytics stack to apply suppressions to.
@@ -1067,10 +1066,6 @@ def add_sagemaker_suppressions(
     gbl_region = global_region or "*"
 
     applies_to: list[str] = [
-        # SageMaker execution role — SQS submit to any regional queue under
-        # the project's ``<project>-jobs-*`` pattern. The SQS queue ARNs
-        # are owned by the regional stacks and not directly importable.
-        f"Resource::arn:<AWS::Partition>:sqs:*:<AWS::AccountId>:{project_name}-jobs-*",
         # SageMaker execution role — ``ssm:GetParameter`` on the
         # Cluster_Shared_Bucket metadata parameters under
         # ``/gco/cluster-shared-bucket/*`` in the global region. The path
@@ -1149,30 +1144,29 @@ def add_sagemaker_suppressions(
                 id="AwsSolutions-IAM5",
                 reason=(
                     "SageMaker_Execution_Role uses wildcard ARNs and actions for: "
-                    "(1) SQS SendMessage on any regional job queue matching "
-                    "``<project>-jobs-<region>``, (2) execute-api:Invoke on "
+                    "(1) execute-api:Invoke on "
                     "any REST API id under /prod/*/api/v1/* and "
                     "/prod/*/inference/* in the api-gateway region (all "
                     "HTTP methods, so notebooks can submit jobs and "
                     "manage inference endpoints in addition to read-only "
-                    "GETs), (3) KMS Decrypt/GenerateDataKey "
+                    "GETs), (2) KMS Decrypt/GenerateDataKey "
                     "scoped by kms:ViaService=s3.<global-region>.<AWS::URLSuffix> "
                     "condition (the cluster-shared KMS key ARN is not known "
                     "to the analytics stack — it lives in the global region), "
-                    "(4) S3 action wildcards (``s3:Abort*``, ``s3:DeleteObject*``, "
+                    "(3) S3 action wildcards (``s3:Abort*``, ``s3:DeleteObject*``, "
                     "``s3:GetBucket*``, ``s3:GetObject*``, ``s3:List*``) produced "
                     "by ``bucket.grant_read_write(role)`` on the literal "
-                    "Studio_Only_Bucket ARN, (5) KMS action wildcards "
+                    "Studio_Only_Bucket ARN, (4) KMS action wildcards "
                     "(``kms:GenerateDataKey*``, ``kms:ReEncrypt*``) produced by "
                     "``kms_key.grant_encrypt_decrypt(role)`` on the literal "
-                    "Analytics_KMS_Key ARN, (6) ``<StudioOnlyBucket.Arn>/*`` "
+                    "Analytics_KMS_Key ARN, (5) ``<StudioOnlyBucket.Arn>/*`` "
                     "object-key wildcard on the single literal bucket, and "
-                    "(7) ``ssm:GetParameter`` on "
+                    "(6) ``ssm:GetParameter`` on "
                     "``/gco/cluster-shared-bucket/*`` in the global region "
                     "(covers exactly three literal parameter names — "
                     "name/arn/region — defined by ``GCOGlobalStack``; lets "
                     "Studio notebooks resolve the shared-bucket metadata at "
-                    "runtime without a per-user export step), (8) "
+                    "runtime without a per-user export step), (7) "
                     "``sagemaker-mlflow:*`` on MLflow tracking server and "
                     "MLflow App ARN wildcards in the api-gateway region + "
                     "account so notebooks can log experiments, runs, "
@@ -1181,7 +1175,7 @@ def add_sagemaker_suppressions(
                     "``sagemaker:*Mlflow*`` / ``sagemaker:*ModelPackage*`` "
                     "control-plane actions are now attached via the "
                     "``AmazonSageMakerFullAccess`` managed policy instead "
-                    "of enumerated inline), and (9) "
+                    "of enumerated inline), and (8) "
                     "``sts:GetCallerIdentity`` on ``*`` which is required "
                     "by MLflow's SigV4 plug-in and does not support "
                     "resource-level scoping. Each wildcard is scoped on a "
