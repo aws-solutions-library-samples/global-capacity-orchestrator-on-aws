@@ -418,10 +418,19 @@ class HyperpodCluster(Construct):
             description="HyperPod nodes to the EKS control plane and cluster pods",
         )
         security_group.apply_removal_policy(self.removal_policy)
+        # CDK files the rule that names this group as its source under the
+        # (imported) EKS cluster security group, so that group's children are
+        # searched too, for the one rule whose source is this group.
         all_traffic_rules = [
             child
             for child in security_group.node.children
             if isinstance(child, ec2.CfnSecurityGroupIngress) and child.ip_protocol == "-1"
+        ] + [
+            child
+            for child in self.eks_cluster_security_group.node.children
+            if isinstance(child, ec2.CfnSecurityGroupIngress)
+            and child.ip_protocol == "-1"
+            and child.source_security_group_id == security_group.security_group_id
         ]
         for rule in all_traffic_rules:
             acknowledge_nag_findings(
@@ -431,11 +440,12 @@ class HyperpodCluster(Construct):
                         id=rule_id,
                         reason=(
                             "The HyperPod node security group admits all traffic from itself "
-                            "and from the EKS cluster security group only (security-group "
-                            "sources, no CIDR): the AWS-documented shape for HyperPod nodes, "
-                            "which carries EFA's SRD protocol and the kubelet/control-plane "
-                            "traffic in both directions. The rule packs flag protocol -1 "
-                            "regardless of source."
+                            "and from the EKS cluster security group, and the cluster "
+                            "security group admits all traffic from the node group "
+                            "(security-group sources, no CIDR): the AWS-documented shape for "
+                            "HyperPod nodes, which carries EFA's SRD protocol and the "
+                            "kubelet/control-plane traffic in both directions. The rule "
+                            "packs flag protocol -1 regardless of source."
                         ),
                     )
                     for rule_id in _ALL_TRAFFIC_RULES

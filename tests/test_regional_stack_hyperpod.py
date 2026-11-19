@@ -365,6 +365,38 @@ class TestHyperpodOn:
         assert len(targets) == 2
         assert sg["DeletionPolicy"] == "Retain"
 
+    def test_each_all_traffic_rule_carries_its_restricted_ports_acknowledgment(
+        self, synthesized
+    ) -> None:
+        """All three rules, the one CDK files under the cluster security group included.
+
+        The cluster security group's rule from the HyperPod group sits under the
+        EKS cluster construct; it was covered only by the cluster-wide token-CIDR
+        acknowledgment until that was removed, so the rule packs failed it.
+        """
+        from gco.stacks.nag_suppressions import _ACK_METADATA_KEY
+
+        stack, _resources = synthesized
+        assert stack.hyperpod is not None
+        hyperpod_group_id = stack.hyperpod.security_group.security_group_id
+        rules = [
+            c
+            for c in stack.node.find_all()
+            if isinstance(c, ec2.CfnSecurityGroupIngress)
+            and c.ip_protocol == "-1"
+            and hyperpod_group_id in (c.group_id, c.source_security_group_id)
+        ]
+        assert len(rules) == 3
+        assert any("GCOEksCluster" in rule.node.path for rule in rules)
+        for rule in rules:
+            acknowledged = {
+                key
+                for entry in rule.node.metadata
+                if entry.type == _ACK_METADATA_KEY
+                for key in entry.data
+            }
+            assert set(hc._ALL_TRAFFIC_RULES) <= acknowledged, rule.node.path
+
     def test_lifecycle_script_is_published_to_the_shared_bucket(self, synthesized) -> None:
         _stack, resources = synthesized
         [(_logical_id, resource)] = [
