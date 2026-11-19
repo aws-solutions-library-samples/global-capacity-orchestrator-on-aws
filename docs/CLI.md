@@ -6108,7 +6108,10 @@ gco status --fail-on-findings
 | `--fail-on-findings` | Exit 1 after rendering when any `error`-severity finding is present |
 
 **Sections.** Each is gathered independently, in parallel, under a 30-second
-per-section timeout. The default set is Tier 1: free control-plane reads that
+per-section timeout, or 50 seconds with `--with-policy`: the `policy` section
+waits up to 45 seconds for each region's policy read and then reports a region
+still reading as unreadable, and the longer timeout lets it report the regions
+that answered. The default set is Tier 1: free control-plane reads that
 need no cluster reachability. Tier 2 costs money per call and Tier 3 needs the
 Kubernetes API, so both are opt-in flags.
 
