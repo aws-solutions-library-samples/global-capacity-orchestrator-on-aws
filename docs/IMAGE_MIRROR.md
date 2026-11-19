@@ -74,14 +74,13 @@ If none is available the mirror fails fast with guidance rather than producing a
 
 The mirror is **on by default**, so a fresh `gco stacks deploy` auto-mirrors the images into ECR with no extra step — the `cdk.json` block below is the shipped default. To turn it off, set `enabled` to `false`.
 
-**1. Default `cdk.json` config** (already on; the default `ecr_namespace` of `gco/dockerhub` is fine for most setups):
+**1. Default `cdk.json` config** (already on). `ecr_namespace` defaults to `<project_name>/dockerhub`, `gco/dockerhub` for the stock project, which is fine for most setups:
 
 ```json
 {
   "context": {
     "volcano_image_mirror": {
-      "enabled": true,
-      "ecr_namespace": "gco/dockerhub"
+      "enabled": true
     }
   }
 }
@@ -100,7 +99,7 @@ gco stacks addons install -r us-east-1
 gco stacks addons status -r us-east-1
 ```
 
-`ecr_namespace` must start with `gco/` so the mirrored repos inherit the project's `gco/*` node-pull access, ECR replication, and trusted-registry allow-list. The toggle is validated at synth time — an `ecr_namespace` outside `gco/`, or an invalid ECR path, fails the synth fast.
+`ecr_namespace` must start with `<project_name>/` (`gco/` for the stock project) so the mirrored repos inherit the project's `<project_name>/*` node-pull access, ECR replication, and trusted-registry allow-list. The toggle is validated at synth time — an `ecr_namespace` outside that prefix, or an invalid ECR path, fails the synth fast.
 
 ## Mirror Manually
 
@@ -172,7 +171,7 @@ Via MCP, `images_mirror_status` returns the same presence check (`all_mirrored` 
 
 **Deploy aborted with a mirror error before CloudFormation.** That is the fail-fast guard. Check that the machine running the deploy has a container runtime (Docker Buildx, Finch, or skopeo) and valid AWS credentials, then re-run the deploy.
 
-**A node can't pull a mirrored image.** Confirm `ecr_namespace` starts with `gco/` (only `gco/*` repos inherit the node-pull access and trusted-registry allow-list) and that the image is present with `images_mirror_status` or `aws ecr describe-images`.
+**A node can't pull a mirrored image.** Confirm `ecr_namespace` starts with `<project_name>/` (only `<project_name>/*` repos inherit the node-pull access and trusted-registry allow-list) and that the image is present with `images_mirror_status` or `aws ecr describe-images`.
 
 ## Reference
 
@@ -181,7 +180,7 @@ Via MCP, `images_mirror_status` returns the same presence check (`all_mirrored` 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `enabled` | `true` in the shipped `cdk.json`, `false` when omitted | Turns the mirror (and the Volcano `image_registry` override + deploy auto-mirror) on. **On in the shipped `cdk.json`**; set to `false` to disable. A [JSON boolean](CUSTOMIZATION.md#boolean-flags): a quoted `"false"` fails validation, because earlier releases read it as on. |
-| `ecr_namespace` | `gco/dockerhub` | Destination namespace under the account's ECR registry. Must start with `gco/`. |
+| `ecr_namespace` | `<project_name>/dockerhub` (`gco/dockerhub` for the stock project) | Destination namespace under the account's ECR registry. Must start with `<project_name>/`. |
 
 **Source map:**
 

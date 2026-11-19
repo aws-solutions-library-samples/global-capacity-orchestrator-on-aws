@@ -1550,14 +1550,14 @@ See [Schedulers & Orchestrators](SCHEDULERS.md) for detailed guidance on each to
 
 Volcano's images live on Docker Hub, whose anonymous pull limit can fail a cold
 cluster's chart install. The regional stack can mirror them into the project's
-ECR and point the chart at the copy. It is on by default:
+ECR and point the chart at the copy. It is on by default, mirroring into
+`<project_name>/dockerhub` (`gco/dockerhub` for the stock project):
 
 ```json
 {
   "context": {
     "volcano_image_mirror": {
-      "enabled": true,
-      "ecr_namespace": "gco/dockerhub"
+      "enabled": true
     }
   }
 }
@@ -1573,8 +1573,9 @@ gco stacks addons install -r <region>
 gco stacks addons status -r <region>
 ```
 
-`ecr_namespace` must start with `gco/` so the copies inherit the project's
-node-pull access, ECR replication and trusted-registry allow-list. For why a
+An `ecr_namespace` of your own must start with `<project_name>/` so the copies
+inherit the project's node-pull access, ECR replication and trusted-registry
+allow-list. For why a
 mirror rather than a pull-through cache, manual `gco images mirror` runs, the
 multi-arch copy strategy, the MCP tools and troubleshooting, see
 [Image Mirror](IMAGE_MIRROR.md).
