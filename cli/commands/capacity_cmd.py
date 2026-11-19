@@ -757,7 +757,7 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
     multiple=True,
     help="Region(s) to check; repeatable (default: all deployed regions)",
 )
-@click.option("--count", "-c", default=1, help="Minimum instances needed")
+@click.option("--count", "-c", default=1, help="Minimum instances needed in one region")
 @click.option(
     "--include-blocks/--no-blocks",
     default=True,
@@ -852,6 +852,14 @@ def reservation_check(
                 f"\n  Total: {odcr['total_available_instances']} available "
                 f"of {odcr['total_reserved_instances']} reserved"
             )
+            # --count is met per Region, so show each Region's share.
+            by_region = odcr.get("by_region") or []
+            if len(by_region) > 1:
+                for row in by_region:
+                    print(
+                        f"    {row['region']}: {row['available_instances']} available "
+                        f"of {row['reserved_instances']} reserved"
+                    )
         else:
             print("  No active ODCRs found for this instance type")
 
@@ -1526,7 +1534,7 @@ def _print_find_reservations_report(result: dict[str, Any]) -> None:
     "--count",
     "-c",
     default=1,
-    help="Minimum available instances to consider the search satisfied",
+    help="Minimum available instances in one region to consider the search satisfied",
 )
 @click.option(
     "--state",

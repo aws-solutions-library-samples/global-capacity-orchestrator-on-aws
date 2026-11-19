@@ -1108,3 +1108,144 @@ class TestFindCapacityReservations:
 
         assert result["instance_type"] is None
         assert result["reservations_found"] == 1
+
+
+def _odcr(region: str, available: int, total: int, suffix: str) -> dict:
+    return {
+        "reservation_id": f"cr-{suffix}",
+        "region": region,
+        "availability_zone": f"{region}a",
+        "instance_type": "p5.48xlarge",
+        "available_instances": available,
+        "total_instances": total,
+    }
+
+
+def test_reservation_check_needs_the_count_in_one_region_not_summed_across_regions():
+    """2 free in us-east-1 plus 2 in us-west-2 used to satisfy --count 4, though
+    no single Region can launch 4 instances into reserved capacity."""
+    from cli.capacity.checker import CapacityChecker
+
+    with patch("cli.capacity.checker.get_config") as mock_config:
+        mock_config.return_value = MagicMock(default_region="us-east-1")
+        checker = CapacityChecker()
+    by_region = {
+        "us-east-1": [_odcr("us-east-1", 2, 4, "east")],
+        "us-west-2": [_odcr("us-west-2", 2, 2, "west")],
+    }
+    with patch.object(
+        checker,
+        "list_capacity_reservations",
+        side_effect=lambda region, instance_type=None: by_region[region],
+    ):
+        report = checker.check_reservation_availability(
+            "p5.48xlarge",
+            min_count=4,
+            include_capacity_blocks=False,
+            regions=["us-east-1", "us-west-2"],
+        )
+
+    odcr = report["odcr"]
+    assert odcr["total_available_instances"] == 4
+    assert odcr["has_availability"] is False
+    assert odcr["by_region"] == [
+        {
+            "region": "us-east-1",
+            "reserved_instances": 4,
+            "available_instances": 2,
+            "has_availability": False,
+        },
+        {
+            "region": "us-west-2",
+            "reserved_instances": 2,
+            "available_instances": 2,
+            "has_availability": False,
+        },
+    ]
+    assert "ODCR capacity available" not in report["recommendation"]
+
+
+def test_reservation_check_names_the_region_that_holds_the_count():
+    from cli.capacity.checker import CapacityChecker
+
+    with patch("cli.capacity.checker.get_config") as mock_config:
+        mock_config.return_value = MagicMock(default_region="us-east-1")
+        checker = CapacityChecker()
+    by_region = {
+        "us-east-1": [_odcr("us-east-1", 1, 4, "east")],
+        "us-west-2": [_odcr("us-west-2", 3, 4, "west-1"), _odcr("us-west-2", 2, 2, "west-2")],
+    }
+    with patch.object(
+        checker,
+        "list_capacity_reservations",
+        side_effect=lambda region, instance_type=None: by_region[region],
+    ):
+        report = checker.check_reservation_availability(
+            "p5.48xlarge",
+            min_count=4,
+            include_capacity_blocks=False,
+            regions=["us-east-1", "us-west-2", "us-east-1"],
+        )
+
+    assert report["regions_checked"] == ["us-east-1", "us-west-2"]
+    assert report["odcr"]["has_availability"] is True
+    assert [row["has_availability"] for row in report["odcr"]["by_region"]] == [False, True]
+    assert report["recommendation"] == (
+        "ODCR capacity available in us-west-2: 5 instances across 2 reservation(s)"
+    )
+
+
+def test_reservation_check_table_lists_each_region_when_several_are_checked():
+    from click.testing import CliRunner
+
+    from cli.main import cli
+
+    report = {
+        "instance_type": "p5.48xlarge",
+        "odcr": {
+            "total_reserved_instances": 6,
+            "total_available_instances": 4,
+            "has_availability": False,
+            "by_region": [
+                {
+                    "region": "us-east-1",
+                    "reserved_instances": 4,
+                    "available_instances": 2,
+                    "has_availability": False,
+                },
+                {
+                    "region": "us-west-2",
+                    "reserved_instances": 2,
+                    "available_instances": 2,
+                    "has_availability": False,
+                },
+            ],
+            "reservations": [_odcr("us-east-1", 2, 4, "east"), _odcr("us-west-2", 2, 2, "west")],
+        },
+        "capacity_blocks": {"offerings": [], "duration_hours": 24},
+        "recommendation": "No reserved capacity or block offerings found.",
+    }
+    checker = MagicMock()
+    checker.check_reservation_availability.return_value = report
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "capacity",
+                "reservation-check",
+                "-i",
+                "p5.48xlarge",
+                "-c",
+                "4",
+                "--no-blocks",
+                "-r",
+                "us-east-1",
+                "-r",
+                "us-west-2",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Total: 4 available of 6 reserved" in result.output
+    assert "    us-east-1: 2 available of 4 reserved" in result.output
+    assert "    us-west-2: 2 available of 2 reserved" in result.output

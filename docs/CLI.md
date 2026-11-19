@@ -793,6 +793,8 @@ gco capacity reservations -r us-east-1
 
 Check reservation availability and Capacity Block offerings for ML workloads. Checks both existing ODCRs and purchasable Capacity Blocks (guaranteed GPU capacity for a fixed duration at a known price). Pass `--region` more than once to check several regions in parallel, and use `--earliest-start`/`--latest-start` to ask for blocks starting near a date. For a full duration-range sweep that returns one consolidated ranked report, use [`gco capacity find-blocks`](#gco-capacity-find-blocks).
 
+ODCR availability is judged per Region: `--count` is met only when one Region has that many free reserved instances, since a workload cannot use reservations in another Region. The table lists each Region's free and reserved instances when more than one Region is checked; the JSON report carries them under `odcr.by_region` (`region`, `reserved_instances`, `available_instances`, `has_availability`), next to the overall `total_available_instances`.
+
 ```bash
 gco capacity reservation-check [OPTIONS]
 ```
@@ -801,7 +803,7 @@ gco capacity reservation-check [OPTIONS]
 |--------|-------------|
 | `-i, --instance-type` | Instance type to check (required) |
 | `-r, --region` | Region(s) to check; repeatable (default: all deployed regions) |
-| `-c, --count` | Minimum instances needed (default: 1) |
+| `-c, --count` | Minimum instances needed in one region (default: 1) |
 | `--include-blocks/--no-blocks` | Include Capacity Block offerings (default: yes) |
 | `--block-duration` | Capacity Block duration in hours (default: 24) |
 | `--block-duration-days` | Capacity Block duration in days (overrides `--block-duration`) |
@@ -991,7 +993,7 @@ gco capacity find-reservations [OPTIONS]
 |--------|-------------|
 | `-i, --instance-type` | Instance type or alias to filter by (e.g. `p6-b200`); omit for all types |
 | `-r, --region` | Region(s) to search; repeatable (default: all deployed regions) |
-| `-c, --count` | Minimum available instances to consider the search satisfied (default: 1) |
+| `-c, --count` | Minimum available instances in one region for the search to count as satisfied (default: 1) |
 | `--state` | Reservation state filter (default: `active`; use `all` for any state) |
 | `--pricing/--no-pricing` | Enrich reservations with On-Demand pricing (default: yes) |
 

@@ -300,6 +300,27 @@ def test_search_summaries_cover_insufficient_capacity_and_longest_only() -> None
     assert "Fewer than the 2 requested" in reservation_summary
     assert "Most available" not in reservation_summary
 
+    # One free instance in each of two Regions does not meet a count of 2.
+    split = [
+        {**reservation, "available_instances": 1},
+        {
+            **reservation,
+            "region": "us-west-2",
+            "availability_zone": "us-west-2a",
+            "available_instances": 1,
+        },
+    ]
+    split_summary = CapacityChecker._summarize_reservation_search(
+        "p5.48xlarge", ["us-east-1", "us-west-2"], split, split[0], 2, None
+    )
+    assert "2 instance(s) available" in split_summary
+    assert "Fewer than the 2 requested are free in any one region" in split_summary
+    together = [{**reservation, "available_instances": 2}]
+    together_summary = CapacityChecker._summarize_reservation_search(
+        "p5.48xlarge", ["us-east-1"], together, together[0], 2, None
+    )
+    assert "Fewer than" not in together_summary
+
     longest = {
         "region": "us-west-2",
         "availability_zone": "us-west-2a",

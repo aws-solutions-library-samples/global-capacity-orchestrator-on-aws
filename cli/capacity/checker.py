@@ -1847,10 +1847,18 @@ class CapacityChecker:
             f"Found {len(reservations)} reservation(s) for {label} across "
             f"{len(regions_with)} region(s); {total_available} instance(s) available."
         ]
-        if total_available < min_count:
+        # A workload draws on reservations in one Region only, so the request
+        # is met when one Region (not the sum of all) has min_count free.
+        available_by_region: dict[str, int] = {}
+        for r in reservations:
+            region = str(r.get("region") or "")
+            available_by_region[region] = available_by_region.get(region, 0) + (
+                r.get("available_instances") or 0
+            )
+        if max(available_by_region.values()) < min_count:
             parts.append(
-                f"Fewer than the {min_count} requested are free — consider creating "
-                "another reservation or a Capacity Block."
+                f"Fewer than the {min_count} requested are free in any one region — "
+                "consider creating another reservation or a Capacity Block."
             )
         if best and (best.get("available_instances") or 0) > 0:
             gpu_hr = best.get("price_per_gpu_hour")
@@ -2128,10 +2136,15 @@ class CapacityChecker:
             max_workers: Override the parallel fan-out width.
 
         Returns:
-            Dictionary with ODCR availability and capacity block offerings
+            Dictionary with ODCR availability and capacity block offerings.
+            ODCR availability is judged per Region: ``odcr.has_availability``
+            means one Region holds ``min_count`` free reserved instances
+            (``odcr.by_region`` has each Region's totals), because instances
+            of one workload cannot draw on reservations in another Region.
         """
         if regions:
-            target_regions = list(regions)
+            # A Region named twice would count its reservations twice.
+            target_regions = list(dict.fromkeys(regions))
         else:
             from cli.aws_client import get_aws_client
 
@@ -2163,6 +2176,8 @@ class CapacityChecker:
         block_offerings: list[dict[str, Any]] = []
         total_available = 0
         total_reserved = 0
+        region_totals: list[dict[str, Any]] = []
+        free_reservation_counts: dict[str, int] = {}
 
         workers = max(1, min(max_workers or _MAX_SEARCH_WORKERS, len(target_regions)))
         if len(target_regions) == 1:
@@ -2171,24 +2186,38 @@ class CapacityChecker:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 region_results = list(executor.map(_check_region, target_regions))
 
-        for reservations, region_blocks in region_results:
-            for res in reservations:
-                avail = res["available_instances"]
-                total_available += avail
-                total_reserved += res["total_instances"]
-                if avail > 0:
-                    odcr_results.append(res)
+        for region_name, (reservations, region_blocks) in zip(
+            target_regions, region_results, strict=True
+        ):
+            region_available = sum(res["available_instances"] for res in reservations)
+            region_reserved = sum(res["total_instances"] for res in reservations)
+            region_totals.append(
+                {
+                    "region": region_name,
+                    "reserved_instances": region_reserved,
+                    "available_instances": region_available,
+                    "has_availability": region_available >= min_count,
+                }
+            )
+            total_available += region_available
+            total_reserved += region_reserved
+            region_free = [res for res in reservations if res["available_instances"] > 0]
+            free_reservation_counts[region_name] = len(region_free)
+            odcr_results.extend(region_free)
             block_offerings.extend(region_blocks)
 
         block_offerings = blocks.sort_offerings(block_offerings)
-        has_odcr = total_available >= min_count
+        # The first Region with the most free reserved instances.
+        best_region = max(region_totals, key=lambda row: row["available_instances"])
+        has_odcr = bool(best_region["has_availability"])
         has_blocks = len(block_offerings) > 0
 
         # Build recommendation
         if has_odcr:
             recommendation = (
-                f"ODCR capacity available: {total_available} instances "
-                f"across {len(odcr_results)} reservation(s)"
+                f"ODCR capacity available in {best_region['region']}: "
+                f"{best_region['available_instances']} instances across "
+                f"{free_reservation_counts[best_region['region']]} reservation(s)"
             )
         elif has_blocks:
             cheapest = min(block_offerings, key=_offering_fee)
@@ -2214,6 +2243,7 @@ class CapacityChecker:
                 "total_reserved_instances": total_reserved,
                 "total_available_instances": total_available,
                 "has_availability": has_odcr,
+                "by_region": region_totals,
                 "reservations": odcr_results,
             },
             "capacity_blocks": {
