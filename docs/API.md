@@ -1174,7 +1174,11 @@ carries `name`, `ready`, `restartCount` and `image`, the container's current
 
 `startedAt` and `finishedAt` are the container's own start and exit times,
 read from the pod status (`state.terminated.startedAt` and
-`state.terminated.finishedAt` in `kubectl get pod -o json`). Use `finishedAt`
+`state.terminated.finishedAt` in `kubectl get pod -o json`). The container
+runtime sets both and Kubernetes keeps them to the second, so a short
+container can show the same instant twice, and a container in an
+[AWS Nitro Sandbox](NITRO_SANDBOXES.md) can show a `finishedAt` before its
+`startedAt`. Use `finishedAt`
 to order the container's exit against the Node and NodeClaim events on
 [Get Job Events](#get-job-events): an event later than `finishedAt` happened
 after the container exited, so it did not cause the exit. `signal` is the

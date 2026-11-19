@@ -363,8 +363,13 @@ def _owned_job_pod_times(ctx: RunContext, record: dict[str, Any]) -> list[dict[s
     ``GET /api/v1/jobs/{namespace}/{name}/pods`` reports each terminated
     container's exit code, ``startedAt`` and ``finishedAt``. Every container
     of every ``Succeeded`` pod the Job's UID owns must be ``terminated`` with
-    exit code 0 and two ISO 8601 instants in order. A pod that did not succeed
-    (one a disruption replaced) is not the completion and is left out.
+    exit code 0 and two ISO 8601 instants. A pod that did not succeed (one a
+    disruption replaced) is not the completion and is left out.
+
+    The order of the two instants is not checked. The container runtime sets
+    both and Kubernetes keeps them to the second, and an AWS Nitro Sandbox
+    container has reported its ``finishedAt`` before its ``startedAt``. The
+    route reports them as the API server holds them, which its unit tests pin.
     """
     actual_name, actual_namespace = _effective_job_identity(record)
     response = ctx.aws_client.make_authenticated_request(
@@ -416,8 +421,6 @@ def _owned_job_pod_times(ctx: RunContext, record: dict[str, Any]) -> list[dict[s
                     problems.append(
                         f"{label} {field} {status.get(field)!r} is not an ISO 8601 instant"
                     )
-            if started is not None and finished is not None and finished < started:
-                problems.append(f"{label} finished before it started")
             containers.append(
                 {
                     key: status.get(key)

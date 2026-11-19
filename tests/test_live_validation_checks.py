@@ -1036,10 +1036,6 @@ class TestCompletedPodTimes:
                 _job_container(finishedAt="2026-07-17T00:01:07"),
                 "smoke-abcde/smoke finishedAt '2026-07-17T00:01:07' is not an ISO 8601 instant",
             ),
-            (
-                _job_container(finishedAt="2026-07-17T00:00:59Z"),
-                "smoke-abcde/smoke finished before it started",
-            ),
         ],
     )
     def test_a_misreported_container_fails_with_what_is_wrong(
@@ -1053,6 +1049,24 @@ class TestCompletedPodTimes:
         with pytest.raises(RuntimeError, match="misreports its completed containers") as raised:
             checks_jobs._owned_job_pod_times(ctx, record)
         assert problem in str(raised.value)
+
+    def test_an_exit_reported_before_the_start_passes(self, tmp_path: Path) -> None:
+        """The runtime sets both instants; their order is not the route's to prove.
+
+        A live run's AWS Nitro Sandbox container reported its ``finishedAt``
+        before its ``startedAt``. The route passes both on as the API server
+        holds them, so the check accepts the pair as it is.
+        """
+        ctx, record = self._record(tmp_path)
+        container = _job_container(
+            startedAt="2026-07-17T00:01:07+00:00", finishedAt="2026-07-17T00:01:06+00:00"
+        )
+        ctx.aws_client.make_authenticated_request.return_value = _response(
+            200, _job_pods_payload(record, _job_pod(containers=[container]))
+        )
+        (pod,) = checks_jobs._owned_job_pod_times(ctx, record)
+        assert pod["containers"][0]["startedAt"] == "2026-07-17T00:01:07+00:00"
+        assert pod["containers"][0]["finishedAt"] == "2026-07-17T00:01:06+00:00"
 
     def test_a_pod_without_container_statuses_fails(self, tmp_path: Path) -> None:
         ctx, record = self._record(tmp_path)
