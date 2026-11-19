@@ -3458,6 +3458,131 @@ class TestActionDestroy:
         helpers["delete_helper"].assert_called_once_with(ctx)
         assert ctx.checkpoint.destroyed is False
 
+    @staticmethod
+    def _reporting(*helper_errors: list[str]) -> Callable[..., tuple[bool, list[str], list[str]]]:
+        """A teardown that succeeds and reports one helper outcome per call."""
+        calls = iter(helper_errors)
+
+        def destroy_orchestrated(**kwargs: Any) -> tuple[bool, list[str], list[str]]:
+            kwargs["on_cleanup_complete"]("bastions", {"terminated_instances": 0})
+            kwargs["on_cleanup_complete"]("eks-security-group", None)
+            kwargs["on_cleanup_complete"](
+                "addon-parameters", {"deleted": [], "errors": next(calls)}
+            )
+            return True, ["gco-live-global"], []
+
+        return destroy_orchestrated
+
+    def test_a_helper_step_that_reported_errors_fails_the_attempt(self) -> None:
+        ctx = self._ctx()
+        ctx.stack_manager.destroy_orchestrated.side_effect = self._reporting(
+            ["/gco-live/addons/us-east-1: AccessDeniedException"]
+        )
+
+        with (
+            self._teardown_helpers(absence=[dict(self._RESIDUAL)]) as helpers,
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"last failure: RuntimeError: Teardown helper steps reported errors: "
+                    r'addon-parameters: \["/gco-live/addons/us-east-1: AccessDeniedException"\]'
+                ),
+            ),
+        ):
+            actions_destroy.destroy_deployment(ctx)
+
+        attempt = ctx.checkpoint.state["destroy_attempts"][0]
+        assert attempt["overall_success"] is False
+        assert attempt["helper_errors"] == [
+            'addon-parameters: ["/gco-live/addons/us-east-1: AccessDeniedException"]'
+        ]
+        helpers["retained"].assert_not_called()
+        helpers["delete_helper"].assert_called_once_with(ctx)
+        assert ctx.checkpoint.destroyed is False
+
+    def test_a_retry_whose_helper_steps_succeed_completes_the_teardown(self) -> None:
+        ctx = self._ctx()
+        ctx.settings.destroy_attempts = 2
+        ctx.stack_manager.destroy_orchestrated.side_effect = self._reporting(
+            ["ThrottlingException"], []
+        )
+
+        with self._teardown_helpers(
+            absence=[dict(self._RESIDUAL), dict(self._ABSENT), dict(self._ABSENT)]
+        ) as helpers:
+            result = actions_destroy.destroy_deployment(ctx)
+
+        assert [attempt["overall_success"] for attempt in result["attempts"]] == [False, True]
+        assert "helper_errors" not in result["attempts"][1]
+        helpers["retained"].assert_called_once_with(ctx)
+        assert ctx.checkpoint.destroyed is True
+
+    @pytest.mark.parametrize(
+        ("destroyed", "source"),
+        [(False, "destroy-resume"), (True, "destroy-already-destroyed")],
+        ids=["resumed-after-absence", "already-destroyed"],
+    )
+    def test_a_resumed_teardown_with_the_stacks_gone_runs_the_sweeps_itself(
+        self, destroyed: bool, source: str
+    ) -> None:
+        ctx = self._ctx(destroyed=destroyed)
+        manager = ctx.stack_manager
+        manager._cleanup_cluster_volumes.return_value = {"deleted": [], "errors": []}
+        manager._cleanup_addon_parameters.return_value = {
+            "deleted": ["/gco-live/addons/us-east-1/_input"],
+            "errors": [],
+        }
+        manager._cleanup_traffic_dial_parameters.return_value = {
+            "deleted": ["/gco-live/traffic-dial/state"],
+            "errors": [],
+        }
+
+        with self._teardown_helpers(absence=[dict(self._ABSENT), dict(self._ABSENT)]) as helpers:
+            result = actions_destroy.destroy_deployment(ctx)
+
+        manager.destroy_orchestrated.assert_not_called()
+        manager._cleanup_cluster_volumes.assert_called_once_with(
+            "gco-live-us-east-1", region="us-east-1"
+        )
+        manager._cleanup_addon_parameters.assert_called_once_with(
+            "gco-live-us-east-1", region="us-east-1"
+        )
+        manager._cleanup_traffic_dial_parameters.assert_called_once_with()
+        sweeps = result["post_absence_sweeps"]
+        assert [sweep["name"] for sweep in sweeps] == [
+            "dynamic-pvs",
+            "addon-parameters",
+            "traffic-dial-parameters",
+        ]
+        assert {sweep["source"] for sweep in sweeps} == {source}
+        assert sweeps[2]["details"]["deleted"] == ["/gco-live/traffic-dial/state"]
+        assert ctx.checkpoint.state["post_absence_sweeps"] == sweeps
+        helpers["retained"].assert_called_once_with(ctx)
+        assert ctx.checkpoint.destroyed is True
+
+    def test_a_sweep_error_on_resume_fails_before_the_retained_cleanup(self) -> None:
+        ctx = self._ctx()
+        ctx.stack_manager._cleanup_traffic_dial_parameters.return_value = {
+            "deleted": [],
+            "errors": ["AccessDeniedException: ssm:DeleteParameters"],
+        }
+
+        with (
+            self._teardown_helpers(absence=[dict(self._ABSENT)]) as helpers,
+            pytest.raises(
+                RuntimeError,
+                match=(
+                    r"Teardown sweeps after stack absence reported errors: "
+                    r"traffic-dial-parameters: .*ssm:DeleteParameters"
+                ),
+            ),
+        ):
+            actions_destroy.destroy_deployment(ctx)
+
+        helpers["retained"].assert_not_called()
+        assert ctx.checkpoint.destroyed is False
+        assert len(ctx.checkpoint.state["post_absence_sweeps"]) == 3
+
 
 class TestActionFinalInventory:
     _PROJECT_INVENTORY = {"cloudformation_stacks": {}, "regional": {}, "global_accelerators": []}

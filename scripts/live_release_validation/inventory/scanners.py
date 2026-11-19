@@ -587,6 +587,33 @@ def _list_secrets(session: Any, region: str, project_name: str) -> list[str]:
     return sorted(secrets)
 
 
+def _list_project_ssm_parameters(session: Any, region: str, project_name: str) -> list[str]:
+    """Parameter Store names under ``/<project>/``, where GCO writes every parameter.
+
+    The stacks publish table, bucket and endpoint-group names there, and the
+    Helm orchestrator, the Helm installer, the kubectl applier, the
+    traffic-dial controller and ``gco capacity traffic-dial`` write runtime
+    records there that CloudFormation never owned. Those carry no tags, so the
+    Tagging API scanner cannot see them. Only the names are kept.
+    """
+    client = session.client("ssm", region_name=region)
+    prefix = f"/{project_name}/"
+    names: set[str] = set()
+    for page in client.get_paginator("get_parameters_by_path").paginate(
+        Path=f"/{project_name}", Recursive=True
+    ):
+        for parameter in page.get("Parameters", []):
+            name = str(parameter.get("Name") or "")
+            if not name:
+                raise RuntimeError(
+                    f"Parameter Store returned a parameter without a name under /{project_name} "
+                    f"in {region}"
+                )
+            if name.startswith(prefix):
+                names.add(name)
+    return sorted(names)
+
+
 def _list_s3_bucket_tags(client: Any, bucket_name: str) -> dict[str, str]:
     try:
         response = client.get_bucket_tagging(Bucket=bucket_name)
