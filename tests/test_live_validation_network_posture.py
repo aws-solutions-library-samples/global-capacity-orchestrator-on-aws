@@ -7,7 +7,8 @@ replaced the plaintext ones and the loopback binds behind them), the Job
 lifecycle around every probe (a clean-slate foreground delete, apply from the
 checked-in manifest with the run token and PROBE_URL substituted, bounded
 waits for a Ready listener or a terminal probe, background delete of every
-recorded Job), the stand-in model listener in ``gco-inference``, the
+recorded Job), the stand-in model listener in ``gco-inference`` and its
+unlabelled twin that only the default deny selects, the
 cost-monitor leg proved over the service path (``GET /api/v1/cost/status``),
 verdict classification from phase plus exit code, disruptions (a probe whose
 pod was evicted is read at once and re-run once from a fresh Job, a second
@@ -48,8 +49,27 @@ _PLACEHOLDER = re.compile(r"\{\{[A-Z0-9_]+\}\}")
 TOKEN = checks_jobs._run_token("run-123")
 TARGET_JOB = f"gco-live-netpol-target-{TOKEN}"
 MODEL_JOB = f"gco-live-netpol-model-{TOKEN}"
-TARGET_IPS = {"gco-system": "10.0.1.5", "gco-jobs": "10.0.2.7", "gco-inference": "10.0.4.2"}
-LISTENER_JOBS = {"gco-system": TARGET_JOB, "gco-jobs": TARGET_JOB, "gco-inference": MODEL_JOB}
+UNLABELLED_JOB = f"gco-live-netpol-unlabelled-{TOKEN}"
+UNLABELLED = "gco-inference-unlabelled"
+#: Per listener key: the namespace it runs in, its Job, and its pod IP.
+LISTENER_NAMESPACES = {
+    "gco-system": "gco-system",
+    "gco-jobs": "gco-jobs",
+    "gco-inference": "gco-inference",
+    UNLABELLED: "gco-inference",
+}
+TARGET_IPS = {
+    "gco-system": "10.0.1.5",
+    "gco-jobs": "10.0.2.7",
+    "gco-inference": "10.0.4.2",
+    UNLABELLED: "10.0.4.3",
+}
+LISTENER_JOBS = {
+    "gco-system": TARGET_JOB,
+    "gco-jobs": TARGET_JOB,
+    "gco-inference": MODEL_JOB,
+    UNLABELLED: UNLABELLED_JOB,
+}
 MONITOR_IP = "10.0.3.9"
 COST_IP = "10.0.5.3"
 PROBE_NAMES = (
@@ -63,6 +83,7 @@ PROBE_NAMES = (
     "model-from-inference",
     "model-from-default",
     "model-from-jobs",
+    "unlabelled-from-default",
     "https-egress",
     "http-egress",
     "pod-identity-agent",
@@ -75,6 +96,7 @@ DENY_PROBES = (
     "cost-from-default",
     "model-from-default",
     "model-from-jobs",
+    "unlabelled-from-default",
     "http-egress",
 )
 #: Loopback binds: blocked whatever the policy controller does.
@@ -92,6 +114,7 @@ ENFORCED = {
     "model-from-inference": ("Succeeded", 0),
     "model-from-default": ("Failed", 42),
     "model-from-jobs": ("Failed", 42),
+    "unlabelled-from-default": ("Failed", 42),
     "https-egress": ("Succeeded", 0),
     "http-egress": ("Failed", 42),
     "pod-identity-agent": ("Succeeded", 0),
@@ -291,10 +314,9 @@ class _FakeCluster:
         self.applied.append(job)
         if name in self.apply_failures:
             return 1, "", f"error creating {namespace}/{name}"
-        if name in (TARGET_JOB, MODEL_JOB):
-            frames = self.listener_frames.get(
-                namespace, [[_pod(f"{name}-pod", ip=TARGET_IPS[namespace])]]
-            )
+        if name in (TARGET_JOB, MODEL_JOB, UNLABELLED_JOB):
+            key = UNLABELLED if name == UNLABELLED_JOB else namespace
+            frames = self.listener_frames.get(key, [[_pod(f"{name}-pod", ip=TARGET_IPS[key])]])
         else:
             probe = _probe_name(name)
             phase, exit_code = self.verdicts[probe]
@@ -334,13 +356,19 @@ def _failure(
 
 
 def _listeners() -> list[tuple[str, str]]:
-    return list(LISTENER_JOBS.items())
+    """``(namespace, Job)`` of every listener, in start order."""
+    return [(LISTENER_NAMESPACES[key], job) for key, job in LISTENER_JOBS.items()]
 
 
 class TestProbeMatrix:
     def test_every_promise_of_the_shipped_policies_has_a_probe(self) -> None:
         specs = checks._probe_specs(
-            "1.1.1.1", "2.2.2.2", "3.3.3.3", model_target_ip="4.4.4.4", cost_monitor_ip="5.5.5.5"
+            "1.1.1.1",
+            "2.2.2.2",
+            "3.3.3.3",
+            model_target_ip="4.4.4.4",
+            unlabelled_target_ip="6.6.6.6",
+            cost_monitor_ip="5.5.5.5",
         )
         assert [spec.name for spec in specs] == list(PROBE_NAMES)
         by_name = {spec.name: spec for spec in specs}
@@ -363,6 +391,14 @@ class TestProbeMatrix:
         assert control.expected == "reachable"
         assert control.enforcement_only is False
         assert {spec.name for spec in specs if spec.pod_labels} == {"model-from-inference"}
+        # A gco-inference pod without the label is the default deny's: its
+        # positive control is the same model-from-inference probe, which shows
+        # that pod shape serving on the pod network in gco-inference.
+        unlabelled = by_name["unlabelled-from-default"]
+        assert unlabelled.url == "http://6.6.6.6:8443/"
+        assert unlabelled.client_namespace == "default"
+        assert unlabelled.expected == "blocked"
+        assert unlabelled.rule.startswith("gco-inference/default-deny-ingress")
         assert by_name["https-egress"].url == "https://checkip.amazonaws.com/"
         assert by_name["http-egress"].url == "http://checkip.amazonaws.com/"
         assert by_name["pod-identity-agent"].url == "http://169.254.170.23/v1/credentials"
@@ -380,7 +416,12 @@ class TestProbeMatrix:
 
     def test_cost_probes_carry_a_placeholder_host_without_a_cost_monitor(self) -> None:
         specs = checks._probe_specs(
-            "1.1.1.1", "2.2.2.2", "3.3.3.3", model_target_ip="4.4.4.4", cost_monitor_ip=None
+            "1.1.1.1",
+            "2.2.2.2",
+            "3.3.3.3",
+            model_target_ip="4.4.4.4",
+            unlabelled_target_ip="6.6.6.6",
+            cost_monitor_ip=None,
         )
         by_name = {spec.name: spec for spec in specs}
         assert by_name["cost-from-default"].url == "https://cost-monitor-not-deployed:8443/"
@@ -410,9 +451,13 @@ class TestEnforcedCluster:
         assert evidence["enforcement_configured"] is True
         assert evidence["cost_monitoring_configured"] is True
         assert evidence["targets"] == {
-            "gco-system": {"job": TARGET_JOB, "pod": f"{TARGET_JOB}-pod", "ip": "10.0.1.5"},
-            "gco-jobs": {"job": TARGET_JOB, "pod": f"{TARGET_JOB}-pod", "ip": "10.0.2.7"},
-            "gco-inference": {"job": MODEL_JOB, "pod": f"{MODEL_JOB}-pod", "ip": "10.0.4.2"},
+            key: {
+                "namespace": LISTENER_NAMESPACES[key],
+                "job": job,
+                "pod": f"{job}-pod",
+                "ip": TARGET_IPS[key],
+            }
+            for key, job in LISTENER_JOBS.items()
         }
         assert evidence["inference_monitor"] == {"pod": "inference-monitor-x", "ip": MONITOR_IP}
         assert evidence["cost_monitor"] == {"pod": "cost-monitor-x", "ip": COST_IP}
@@ -446,17 +491,17 @@ class TestEnforcedCluster:
         assert control["spec"]["template"]["metadata"]["labels"]["gco.io/type"] == "inference"
         assert all(
             "gco.io/type" not in job["spec"]["template"]["metadata"]["labels"]
-            for job in cluster.applied[3:]
+            for job in cluster.applied[4:]
             if job is not control
         )
 
-        # Three listeners then thirteen probes, each cleared before creation and
+        # Four listeners then fourteen probes, each cleared before creation and
         # deleted afterwards; the record holds every Job before it exists.
         created = [
             (job["metadata"]["namespace"], job["metadata"]["name"]) for job in cluster.applied
         ]
-        assert created[:3] == _listeners()
-        assert created[3:] == [
+        assert created[:4] == _listeners()
+        assert created[4:] == [
             ("gco-jobs", f"gco-live-netpol-same-namespace-{TOKEN}"),
             ("default", f"gco-live-netpol-cross-jobs-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-cross-system-{TOKEN}"),
@@ -467,6 +512,7 @@ class TestEnforcedCluster:
             ("gco-inference", f"gco-live-netpol-model-from-inference-{TOKEN}"),
             ("default", f"gco-live-netpol-model-from-default-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-model-from-jobs-{TOKEN}"),
+            ("default", f"gco-live-netpol-unlabelled-from-default-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-https-egress-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-http-egress-{TOKEN}"),
             ("gco-jobs", f"gco-live-netpol-pod-identity-agent-{TOKEN}"),
@@ -527,7 +573,18 @@ class TestEnforcedCluster:
         assert model["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
         assert model["spec"]["activeDeadlineSeconds"] == 1800
 
-        probe = cluster.applied[3]
+        # Its unlabelled twin is the same Job without the label the model
+        # policies select: only gco-inference/default-deny-ingress selects it.
+        unlabelled = cluster.applied[3]
+        assert unlabelled["metadata"]["namespace"] == "gco-inference"
+        assert unlabelled["metadata"]["name"] == UNLABELLED_JOB
+        assert "gco.io/type" not in unlabelled["spec"]["template"]["metadata"]["labels"]
+        twin = json.loads(json.dumps(model))
+        twin["metadata"]["name"] = UNLABELLED_JOB
+        del twin["spec"]["template"]["metadata"]["labels"]["gco.io/type"]
+        assert unlabelled == twin
+
+        probe = cluster.applied[4]
         env = {
             entry["name"]: entry["value"]
             for entry in probe["spec"]["template"]["spec"]["containers"][0]["env"]
@@ -719,7 +776,7 @@ class TestEnforcementDisabled:
         skipped = next(probe for probe in evidence["probes"] if probe["name"] == "cross-jobs")
         assert "network_policy_enforcement is false" in skipped["reason"]
         assert "observed" not in skipped
-        launched = {_probe_name(job["metadata"]["name"]) for job in cluster.applied[3:]}
+        launched = {_probe_name(job["metadata"]["name"]) for job in cluster.applied[4:]}
         assert launched == {
             "same-namespace",
             "metrics-open",
@@ -757,7 +814,7 @@ class TestCostMonitoringDisabled:
         } == {"matched"}
         assert not any("app=cost-monitor" in call for call in cluster.calls)
         ctx.aws_client.make_authenticated_request.assert_not_called()
-        launched = {_probe_name(job["metadata"]["name"]) for job in cluster.applied[3:]}
+        launched = {_probe_name(job["metadata"]["name"]) for job in cluster.applied[4:]}
         assert launched.isdisjoint(COST_PROBES)
 
 
@@ -843,11 +900,12 @@ class TestVerdictMismatches:
         assert f"cost-plaintext (default -> http://{COST_IP}:8080/)" in failure
         assert "model-from-default (default -> http://10.0.4.2:8443/)" in failure
         assert "model-from-jobs (gco-jobs -> http://10.0.4.2:8443/)" in failure
+        assert "unlabelled-from-default (default -> http://10.0.4.3:8443/)" in failure
         assert "same-namespace" not in failure
         assert API_PROBE not in failure
         # Everything the run created was still deleted.
         assert all(job["deleted"] for job in record["jobs"])
-        assert len(record["jobs"]) == 16
+        assert len(record["jobs"]) == 18
         assert "evidence" not in record
 
     def test_a_model_listener_no_admitted_peer_reaches_voids_its_denies(
@@ -995,7 +1053,7 @@ class TestFailClosed:
         _failure(ctx, cluster, monkeypatch, match="no ready inference-monitor pod to probe")
 
         # Every listener had been created and is torn down again.
-        assert len([entry for entry in cluster.deleted if entry[0] == "cleanup"]) == 3
+        assert len([entry for entry in cluster.deleted if entry[0] == "cleanup"]) == 4
 
     def test_no_ready_cost_monitor_to_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         ctx = _context()
@@ -1004,7 +1062,7 @@ class TestFailClosed:
 
         _failure(ctx, cluster, monkeypatch, match="no ready cost-monitor pod to probe")
 
-        assert len([entry for entry in cluster.deleted if entry[0] == "cleanup"]) == 3
+        assert len([entry for entry in cluster.deleted if entry[0] == "cleanup"]) == 4
         ctx.aws_client.make_authenticated_request.assert_not_called()
 
     def test_clean_slate_delete_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1138,7 +1196,7 @@ class TestDisruptions:
         ]
         assert [item["metadata"]["name"] for item in cluster.applied].count(job) == 2
         assert [entry["name"] for entry in record["jobs"]].count(job) == 1
-        assert len(record["jobs"]) == 16
+        assert len(record["jobs"]) == 18
         assert all(entry["deleted"] for entry in record["jobs"])
 
     def test_a_second_disruption_is_reported_as_one_not_as_a_verdict(
@@ -1204,7 +1262,7 @@ class TestDisruptions:
         assert "disruptions" not in ctx.checkpoint.state["network_posture"][REGION]
 
     @pytest.mark.parametrize(
-        ("namespace", "final_frame"),
+        ("key", "final_frame"),
         [
             ("gco-jobs", []),
             ("gco-jobs", [_pod(f"{TARGET_JOB}-pod", deleting=True, ip="10.0.2.7")]),
@@ -1212,20 +1270,30 @@ class TestDisruptions:
             ("gco-system", [_pod(f"{TARGET_JOB}-pod", phase="Failed", ready=False)]),
             ("gco-jobs", [_pod(f"{TARGET_JOB}-pod", ip="10.0.2.7", conditions=_evicted())]),
             ("gco-inference", []),
+            (UNLABELLED, []),
         ],
-        ids=["gone", "terminating", "replaced", "failed", "marked-for-disruption", "model-gone"],
+        ids=[
+            "gone",
+            "terminating",
+            "replaced",
+            "failed",
+            "marked-for-disruption",
+            "model-gone",
+            "unlabelled-gone",
+        ],
     )
     def test_a_listener_that_did_not_last_the_matrix_voids_its_verdicts(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        namespace: str,
+        key: str,
         final_frame: list[dict[str, Any]],
     ) -> None:
         ctx = _context()
         cluster = _FakeCluster()
-        job = LISTENER_JOBS[namespace]
-        cluster.listener_frames[namespace] = [
-            [_pod(f"{job}-pod", ip=TARGET_IPS[namespace])],
+        job = LISTENER_JOBS[key]
+        namespace = LISTENER_NAMESPACES[key]
+        cluster.listener_frames[key] = [
+            [_pod(f"{job}-pod", ip=TARGET_IPS[key])],
             final_frame,
         ]
 
@@ -1309,6 +1377,30 @@ class TestShippedManifests:
     def test_the_model_listener_is_selected_by_the_model_ingress_policies(self) -> None:
         ingress = _shipped_network_policies()[("gco-inference", "allow-inference-proxy-ingress")]
         assert ingress["spec"]["podSelector"] == {"matchLabels": {"gco.io/type": "inference"}}
+
+    def test_only_the_default_deny_selects_the_unlabelled_listener(self) -> None:
+        """The unlabelled stand-in's "blocked" is gco-inference's default deny.
+
+        Every gco-inference ingress policy whose pod selector matches the model
+        listener's pod labels without ``gco.io/type`` admits nothing, and the
+        only one is default-deny-ingress.
+        """
+        manifest = Path(checks.__file__).resolve().parents[1] / "manifests"
+        (job,) = yaml.safe_load_all(
+            (manifest / checks._MODEL_TARGET_MANIFEST).read_text(encoding="utf-8")
+        )
+        labels = dict(job["spec"]["template"]["metadata"]["labels"])
+        del labels[checks._MODEL_POD_LABEL[0]]
+        selecting = {
+            name: policy["spec"].get("ingress") or []
+            for (namespace, name), policy in _shipped_network_policies().items()
+            if namespace == "gco-inference"
+            and "Ingress" in policy["spec"]["policyTypes"]
+            and set(policy["spec"]["podSelector"].get("matchLabels", {}).items())
+            <= set(labels.items())
+            and not policy["spec"]["podSelector"].get("matchExpressions")
+        }
+        assert selecting == {"default-deny-ingress": []}
 
     def test_the_model_positive_control_rides_the_internal_inference_policy(self) -> None:
         """The control probe is admitted by allow-inference-internal, both ways."""

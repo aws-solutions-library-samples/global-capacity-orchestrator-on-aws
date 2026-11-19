@@ -206,8 +206,12 @@ stack is absent, and `final-inventory` compares the account with the record
 again. `platform-workloads` also reads the internal PKI in the same session
 (`checks/internal_pki.py`: the `gco-internal-ca` ClusterIssuer, its CA
 Certificate, and every GCO leaf), and `network-posture` dials the TLS-sidecar
-ports, the loopback-bound plaintext ports, and a stand-in model pod
-(`manifests/netpol-model-target-job.yaml`).
+ports, the loopback-bound plaintext ports, a stand-in model pod
+(`manifests/netpol-model-target-job.yaml`), and the same stand-in started
+without its `gco.io/type: inference` label, which `gco-inference`'s default
+deny must keep unreachable from another namespace. The labelled stand-in
+answering a labelled peer (`model-from-inference`) is the positive control for
+both.
 
 ## How a run executes
 
