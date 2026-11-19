@@ -2235,7 +2235,7 @@ gco deps scan [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--nodepools-only` | Run only the accelerator-catalog / Karpenter NodePool freshness check (offline policy validation always; live EC2 catalog comparison when AWS credentials resolve). Fast, and the only network it may touch is EC2. |
-| `--report FILE` | Write the Markdown report to `FILE` instead of stdout. |
+| `--report FILE` | Write the Markdown report to `FILE` instead of stdout. With `-o json` or `-o yaml` the envelope still goes to stdout and the report is also written to `FILE`. |
 
 **Examples:**
 
@@ -2248,7 +2248,7 @@ gco deps scan --nodepools-only
 
 # Machine-readable envelope (has_drift, scan_complete, report_markdown,
 # findings: the same rows as JSON, one record per surface) —
-# the same shape the MCP deps_scan tool returns
+# the same shape the MCP deps_scan tool returns; -o yaml renders it as YAML
 gco -o json deps scan
 
 # Save the report for a PR description

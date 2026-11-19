@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from cli.commands import deps_cmd
@@ -155,6 +156,61 @@ class TestFullScan:
         assert result.exit_code == 0
         assert "fake drift" in target.read_text(encoding="utf-8")
         assert "fake drift" not in result.output
+
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_report_option_writes_file_in_machine_modes(self, monkeypatch, tmp_path, output_format):
+        """--report was ignored with -o json: the envelope went to stdout and
+        no file was written (CM14)."""
+        monkeypatch.setattr(deps_cmd.subprocess, "run", _FakeScan(has_drift=True))
+        target = tmp_path / "report.md"
+
+        result = _invoke(["scan", "--report", str(target)], output_format=output_format)
+
+        assert result.exit_code == 0, result.output
+        assert target.read_text(encoding="utf-8") == "# Dependency Update Report\n\nfake drift\n"
+        assert f"report:        {target}" in result.stderr
+        loader = json.loads if output_format == "json" else yaml.safe_load
+        assert loader(result.stdout)["has_drift"] is True
+
+    def test_yaml_is_a_machine_mode(self, monkeypatch):
+        """-o yaml streamed the scanner log and printed the bare Markdown, which
+        the root wrapped as {status: ok, output: ...}; it now gets the same
+        envelope as -o json, rendered as YAML (CM14)."""
+        from cli.main import cli
+
+        fake = _FakeScan(has_drift=True)
+        captured: list[bool] = []
+
+        def run(argv, **kwargs):
+            captured.append(bool(kwargs.get("capture_output")))
+            return fake(argv, **kwargs)
+
+        monkeypatch.setattr(deps_cmd.subprocess, "run", run)
+
+        result = CliRunner().invoke(cli, ["-o", "yaml", "deps", "scan"])
+
+        assert result.exit_code == 0, result.output
+        document = yaml.safe_load(result.stdout)
+        assert set(document) == {
+            "has_drift",
+            "scan_complete",
+            "report_markdown",
+            "findings",
+            "log_tail",
+        }
+        assert document["log_tail"] == ["scan log line"]
+        assert captured == [True]
+
+    def test_nodepools_only_yaml_envelope(self, monkeypatch):
+        monkeypatch.setattr(deps_cmd, "_sts_identity_available", lambda: False)
+        monkeypatch.setattr(deps_cmd.subprocess, "run", _FakeCatalogRuns())
+
+        result = _invoke(["scan", "--nodepools-only"], output_format="yaml")
+
+        assert result.exit_code == 0, result.output
+        document = yaml.safe_load(result.stdout)
+        assert document["nodepools_only"] is True
+        assert document["online"]["status"] == "skipped"
 
     def test_scanner_failure_is_an_error(self, monkeypatch):
         monkeypatch.setattr(deps_cmd.subprocess, "run", _FakeScan(returncode=3))
