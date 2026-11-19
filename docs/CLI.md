@@ -2601,6 +2601,10 @@ digits joined by single dashes, at most 63 characters: it becomes the
 `<project>/NAME` repository, and ECR rejects a name that ends in a dash or
 holds two in a row.
 
+A new repository is tagged `Project` with the value the stacks carry
+(`context.tags.Project` in cdk.json, `GCO` without one), the tag `gco costs`
+filters on.
+
 ```bash
 gco images init NAME [OPTIONS]
 ```

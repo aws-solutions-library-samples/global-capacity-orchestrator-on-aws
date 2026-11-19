@@ -27,6 +27,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from cli._image_uri import aws_partition, aws_url_suffix, ecr_registry_host
+from cli.costs import project_tag_value
 from cli.images import (
     _NAME_RE,
     _TAG_RE,
@@ -259,6 +260,29 @@ def test_images_init_idempotent(manager: ImageManager) -> None:
     assert first["created"] is True
     assert second["created"] is False
     assert mock_ecr.put_lifecycle_policy.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("cdk_tags", "expected"),
+    [({"Project": "Acme-Platform", "Owner": "ml"}, "Acme-Platform"), ({}, "GCO")],
+)
+def test_images_init_tags_the_repository_like_the_stacks(
+    manager: ImageManager, monkeypatch: pytest.MonkeyPatch, cdk_tags: Any, expected: str
+) -> None:
+    """A new repository's Project tag is the stacks' (cdk.json context.tags), not project_name.
+
+    ``gco costs`` filters Cost Explorer on that value ("GCO" in the committed
+    cdk.json, and the default without one), so a repository tagged with the
+    project name ("gco") was missing from every cost report.
+    """
+    # The cdk.json context.tags project_tag_value reads (imported with cli.images).
+    monkeypatch.setitem(project_tag_value.__globals__, "_load_cdk_tags", lambda: cdk_tags)
+    mock_ecr, _repo_exists = _ecr_with_repo_already_exists()
+    with patch.object(manager, "_ecr_client", return_value=mock_ecr):
+        manager.init("my-app")
+    assert mock_ecr.create_repository.call_args.kwargs["tags"] == [
+        {"Key": "Project", "Value": expected}
+    ]
 
 
 def test_images_uri_default_tag(manager: ImageManager) -> None:

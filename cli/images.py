@@ -49,6 +49,7 @@ from ._image_uri import (
     rewrite_image_uri_for_region as _rewrite_image_uri_for_region,
 )
 from .config import GCOConfig, _load_cdk_json, get_config
+from .costs import PROJECT_TAG_KEY, project_tag_value
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
 # Generated at (UTC): 2026-11-19T12:23:38Z
@@ -781,7 +782,9 @@ class ImageManager:
         """Create the project repository idempotently with default lifecycle.
 
         ``CreateRepository`` is invoked with ``imageTagMutability=MUTABLE``
-        and ``scanOnPush=True``. If the repository already exists, the
+        and ``scanOnPush=True``, and tags the repository ``Project`` with the
+        value the stacks carry (:func:`cli.costs.project_tag_value`), the tag
+        ``gco costs`` filters on. If the repository already exists, the
         method becomes a no-op for repository creation but still applies
         the default lifecycle policy and the optional ``gco:retain`` tag.
         """
@@ -796,7 +799,7 @@ class ImageManager:
                 imageTagMutability="MUTABLE",
                 imageScanningConfiguration={"scanOnPush": True},
                 tags=[
-                    {"Key": "Project", "Value": self.config.project_name},
+                    {"Key": PROJECT_TAG_KEY, "Value": project_tag_value()},
                 ],
             )
             created = True
