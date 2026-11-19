@@ -49,8 +49,8 @@ from starlette.types import ASGIApp
 from gco.unauthenticated_paths import UNAUTHENTICATED_PATHS as UNAUTHENTICATED_PATHS
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-28T07:34:51Z
-# Generated from Git commit: 95213a3dfe214f41ea8e3977b79711b1be061ac0
+# Generated at (UTC): 2026-11-19T00:26:15Z
+# Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03
 # Flowchart(s) generated from this file:
 #   * ``AuthenticationMiddleware.dispatch`` -> ``diagrams/code_diagrams/gco/services/auth_middleware.AuthenticationMiddleware_dispatch.html``
 #     (PNG: ``diagrams/code_diagrams/gco/services/auth_middleware.AuthenticationMiddleware_dispatch.png``)

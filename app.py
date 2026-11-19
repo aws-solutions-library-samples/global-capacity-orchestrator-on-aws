@@ -39,8 +39,8 @@ from gco.stacks.regional_api_gateway_stack import GCORegionalApiGatewayStack
 from gco.stacks.regional_stack import GCORegionalStack
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-10-16T16:57:50Z
-# Generated from Git commit: 3458f76ef1541be718c00458b8ecc8f7c770c6ad
+# Generated at (UTC): 2026-11-19T00:26:15Z
+# Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03
 # Flowchart(s) generated from this file:
 #   * ``main`` -> ``diagrams/code_diagrams/app.main.html``
 #     (PNG: ``diagrams/code_diagrams/app.main.png``)

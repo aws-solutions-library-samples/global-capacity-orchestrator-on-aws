@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
-        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
-        <meta name="gco-flow-digest" content="17e8db8047798458">
+        <meta name="gco-generated-at" content="2026-11-19T00:26:15Z">
+        <meta name="gco-source-commit" content="b6581899649d40769798e294f2ea42237f493c03">
+        <meta name="gco-flow-digest" content="7699a9c18c039aad">
         <title>MCP audit_logged decorator (sync + async dispatch, Context capture)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,70 +208,86 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op3364=>operation: 'Decorator that emits structured JSON audit entries for tool invocations.\n\n    Dispatches on ``inspect.iscoroutinefunction(func)``: async tools get an\n    async wrapper that ``await``s the call, sync tools keep the existing\n    sync path. Both wrappers share ``_build_audit_entry``.\n    '
-cond3367=>condition: if inspect.iscoroutinefunction(func)
-st3372=>start: start async_wrapper
-io3374=>inputoutput: input:
-op3377=>operation: start = time.time()
-op3379=>operation: sanitized_args = _sanitize_arguments(kwargs)
-op3382=>operation: result = await func(*args, **kwargs)
+        <div><textarea id="code" style="width: 100%;" rows="11">op1497=>operation: 'Decorator that emits structured JSON audit entries for tool invocations.\n\n    Dispatches on ``inspect.iscoroutinefunction(func)``: async tools get an\n    async wrapper that ``await``s the call, sync tools keep the existing\n    sync path. Both wrappers share ``_build_audit_entry``. A call that is\n    cancelled or interrupted is recorded with status ``cancelled`` before\n    the exception propagates.\n    '
+cond1500=>condition: if inspect.iscoroutinefunction(func)
+st1505=>start: start async_wrapper
+io1507=>inputoutput: input:
+op1510=>operation: start = time.time()
+op1512=>operation: sanitized_args = _sanitize_arguments(kwargs)
+op1515=>operation: result = await func(*args, **kwargs)
 duration_ms = (time.time() - start) * 1000
 audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'success', duration_ms, None, result)))
 return result
-cond3381=>condition: exception raised?
-cond3384=>condition: except Exception as e
-op3388=>operation: duration_ms = (time.time() - start) * 1000
-sub3390=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
-sub3392=>subroutine: raise
-e3397=>end: end async_wrapper
-io3403=>inputoutput: output: async_wrapper
-e3401=>end: end function return
-st3410=>start: start sync_wrapper
-io3412=>inputoutput: input:
-op3415=>operation: start = time.time()
-op3417=>operation: sanitized_args = _sanitize_arguments(kwargs)
-op3420=>operation: result = func(*args, **kwargs)
+cond1514=>condition: exception raised?
+cond1517=>condition: except Exception as e
+op1521=>operation: duration_ms = (time.time() - start) * 1000
+sub1523=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
+sub1525=>subroutine: raise
+cond1527=>condition: except BaseException as e
+op1531=>operation: duration_ms = (time.time() - start) * 1000
+sub1533=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, _interrupted_status(e), duration_ms, str(e) or type(e).__name__, None)))
+sub1535=>subroutine: raise
+e1540=>end: end async_wrapper
+io1546=>inputoutput: output: async_wrapper
+e1544=>end: end function return
+st1553=>start: start sync_wrapper
+io1555=>inputoutput: input:
+op1558=>operation: start = time.time()
+op1560=>operation: sanitized_args = _sanitize_arguments(kwargs)
+op1563=>operation: result = func(*args, **kwargs)
 duration_ms = (time.time() - start) * 1000
 audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'success', duration_ms, None, result)))
 return result
-cond3419=>condition: exception raised?
-cond3422=>condition: except Exception as e
-op3426=>operation: duration_ms = (time.time() - start) * 1000
-sub3428=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
-sub3430=>subroutine: raise
-e3435=>end: end sync_wrapper
-io3441=>inputoutput: output: sync_wrapper
-e3439=>end: end function return
+cond1562=>condition: exception raised?
+cond1565=>condition: except Exception as e
+op1569=>operation: duration_ms = (time.time() - start) * 1000
+sub1571=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, 'error', duration_ms, str(e), None)))
+sub1573=>subroutine: raise
+cond1575=>condition: except BaseException as e
+op1579=>operation: duration_ms = (time.time() - start) * 1000
+sub1581=>subroutine: audit_logger.info(json.dumps(_build_audit_entry(func.__name__, sanitized_args, _interrupted_status(e), duration_ms, str(e) or type(e).__name__, None)))
+sub1583=>subroutine: raise
+e1588=>end: end sync_wrapper
+io1594=>inputoutput: output: sync_wrapper
+e1592=>end: end function return
 
-op3364->cond3367
-cond3367(yes)->st3372
-st3372->io3374
-io3374->op3377
-op3377->op3379
-op3379->op3382
-op3382->cond3381
-cond3381(yes)->cond3384
-cond3384(yes)->op3388
-op3388->sub3390
-sub3390->sub3392
-cond3384(no)->e3397
-e3397->io3403
-io3403->e3401
-cond3381(no)->e3397
-cond3367(no)->st3410
-st3410->io3412
-io3412->op3415
-op3415->op3417
-op3417->op3420
-op3420->cond3419
-cond3419(yes)->cond3422
-cond3422(yes)->op3426
-op3426->sub3428
-sub3428->sub3430
-cond3422(no)->e3435
-e3435->io3441
-io3441->e3439
-cond3419(no)->e3435
+op1497->cond1500
+cond1500(yes)->st1505
+st1505->io1507
+io1507->op1510
+op1510->op1512
+op1512->op1515
+op1515->cond1514
+cond1514(yes)->cond1517
+cond1517(yes)->op1521
+op1521->sub1523
+sub1523->sub1525
+cond1517(no)->cond1527
+cond1527(yes)->op1531
+op1531->sub1533
+sub1533->sub1535
+cond1527(no)->e1540
+e1540->io1546
+io1546->e1544
+cond1514(no)->e1540
+cond1500(no)->st1553
+st1553->io1555
+io1555->op1558
+op1558->op1560
+op1560->op1563
+op1563->cond1562
+cond1562(yes)->cond1565
+cond1565(yes)->op1569
+op1569->sub1571
+sub1571->sub1573
+cond1565(no)->cond1575
+cond1575(yes)->op1579
+op1579->sub1581
+sub1581->sub1583
+cond1575(no)->e1588
+e1588->io1594
+io1594->e1592
+cond1562(no)->e1588
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -281,17 +297,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
-        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
+        <!-- Generated at (UTC): 2026-11-19T00:26:15Z -->
+        <!-- Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T00:26:15Z">2026-11-19T00:26:15Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
+            Source commit: <code>b6581899649d40769798e294f2ea42237f493c03</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>17e8db8047798458</code>
+            Flow content SHA-256: <code>7699a9c18c039aad</code>
           </p>
           <div id="canvas"></div>
         </div>

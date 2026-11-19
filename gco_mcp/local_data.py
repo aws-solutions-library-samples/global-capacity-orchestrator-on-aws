@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-09-29T11:35:23Z
-# Generated from Git commit: a081fbf678ca3f3fa3f7edb74687de923efe6657
+# Generated at (UTC): 2026-11-19T00:26:15Z
+# Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03
 # Flowchart(s) generated from this file:
 #   * ``resolve_local_path`` -> ``diagrams/code_diagrams/gco_mcp/local_data.resolve_local_path.html``
 #     (PNG: ``diagrams/code_diagrams/gco_mcp/local_data.resolve_local_path.png``)
