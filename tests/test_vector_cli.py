@@ -12,11 +12,14 @@ import re
 import subprocess
 from pathlib import Path
 
+import boto3
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 from click.testing import CliRunner
+from moto import mock_aws
 
 import cli.vector_store as vector_store_module
+from cli.commands.vector_cmd import vector as vector_group
 from cli.main import cli
 from cli.vector_store import (
     DEFAULT_CORPUS_PREFIX,
@@ -353,6 +356,166 @@ class TestSsmResolution:
         assert store._dynamodb_client.search_requests[0]["TableName"] == (
             "resolved-vector-store-table-name"
         )
+
+
+_ACME_CDK = {
+    "app": "python3 app.py",
+    "context": {
+        "project_name": "acme",
+        "deployment_regions": {
+            "global": "us-east-2",
+            "api_gateway": "us-east-2",
+            "monitoring": "us-east-2",
+            "regional": ["us-west-2"],
+        },
+    },
+}
+
+
+def _vector_store(region="us-east-2", *, project="acme", items=0, parameters=True):
+    """Create what a global stack creates for the vector store in ``region``.
+
+    ``parameters=False`` creates only the table, the shape of a replica
+    Region: the global stack publishes the SSM names in its own Region.
+    """
+    table_name = f"{project}-vector-store"
+    if parameters:
+        ssm = boto3.client("ssm", region_name=region)
+        ssm.put_parameter(
+            Name=f"/{project}/vector-store-table-name", Value=table_name, Type="String"
+        )
+        ssm.put_parameter(
+            Name=f"/{project}/vector-store-index-name",
+            Value="corpus-embedding-index",
+            Type="String",
+        )
+    dynamodb = boto3.client("dynamodb", region_name=region)
+    dynamodb.create_table(
+        TableName=table_name,
+        KeySchema=[{"AttributeName": "doc_id", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "doc_id", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    for index in range(items):
+        dynamodb.put_item(TableName=table_name, Item={"doc_id": {"S": f"chunk#{index:04d}"}})
+
+
+class TestDeploymentTarget:
+    """``gco vector`` reaches the deployment the CLI configuration names.
+
+    The global stack publishes ``/<project>/vector-store-*`` in
+    ``deployment_regions.global`` only. moto stands in for an ``acme``
+    deployment whose global stack is in us-east-2, while the operator's
+    default Region (``AWS_REGION``) is us-west-2, the regional Region. The
+    CLI used to look up ``/gco/...`` in the default Region and report the
+    deployed store as absent.
+    """
+
+    @pytest.fixture
+    def acme_root(self, tmp_path, monkeypatch):
+        root = tmp_path / "acme"
+        root.mkdir()
+        (root / "cdk.json").write_text(json.dumps(_ACME_CDK), encoding="utf-8")
+        for name, value in {
+            "AWS_ACCESS_KEY_ID": "testing",
+            "AWS_SECRET_ACCESS_KEY": "testing",
+            "AWS_SESSION_TOKEN": "testing",
+            "AWS_DEFAULT_REGION": "us-west-2",
+            "AWS_REGION": "us-west-2",
+        }.items():
+            monkeypatch.setenv(name, value)
+        for name in ("GCO_PROJECT_NAME", "GCO_GLOBAL_REGION", "DYNAMODB_REGION", "GLOBAL_REGION"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("HOME", str(root))  # no ~/.gco/config.yaml of the host
+        with mock_aws():
+            yield root
+
+    def test_status_reads_the_cdk_json_project_in_the_global_region(self, acme_root):
+        _vector_store(items=1)
+
+        result = CliRunner().invoke(cli, ["vector", "status"])
+
+        assert result.exit_code == 0, result.output
+        status = json.loads(result.stdout)
+        assert status["table_name"] == "acme-vector-store"
+        assert status["index_name"] == "corpus-embedding-index"
+        # The data client also defaults to the global Region (no table
+        # exists in the operator's us-west-2 here).
+        assert (status["region"], status["item_count"]) == ("us-east-2", 1)
+
+    def test_region_option_retargets_only_the_data_client(self, acme_root):
+        _vector_store(items=1)
+        _vector_store("us-west-2", items=2, parameters=False)
+
+        result = CliRunner().invoke(cli, ["vector", "status", "--region", "us-west-2"])
+
+        assert result.exit_code == 0, result.output
+        status = json.loads(result.stdout)
+        # Names still come from the global Region's SSM parameters; the
+        # replica's own item count proves which table was described.
+        assert status["table_name"] == "acme-vector-store"
+        assert (status["region"], status["item_count"]) == ("us-west-2", 2)
+
+    def test_cli_environment_overrides_reach_the_client(self, acme_root, monkeypatch):
+        _vector_store()
+        _vector_store("eu-west-1", project="beta", items=3)
+        monkeypatch.setenv("GCO_PROJECT_NAME", "beta")
+        monkeypatch.setenv("GCO_GLOBAL_REGION", "eu-west-1")
+
+        result = CliRunner().invoke(cli, ["vector", "status"])
+
+        assert result.exit_code == 0, result.output
+        status = json.loads(result.stdout)
+        assert (status["table_name"], status["region"]) == ("beta-vector-store", "eu-west-1")
+
+    @pytest.mark.parametrize("variable", ["DYNAMODB_REGION", "GLOBAL_REGION"])
+    def test_store_region_variables_still_come_first(self, acme_root, monkeypatch, variable):
+        # The convention every DynamoDB store in the tree shares
+        # (gco/services/template_store.py) keeps precedence over the
+        # configured global Region.
+        _vector_store("ap-south-1")
+        monkeypatch.setenv(variable, "ap-south-1")
+
+        result = CliRunner().invoke(cli, ["vector", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["region"] == "ap-south-1"
+
+    def test_the_unavailable_hint_names_the_projects_global_stack(self, acme_root):
+        # acme has no vector store: the lookup names acme's parameter and
+        # the hint names the stack an acme checkout deploys.
+        result = CliRunner().invoke(cli, ["vector", "status"])
+
+        assert result.exit_code == 1
+        assert "/acme/vector-store-table-name not found" in result.stderr
+        assert "'gco stacks deploy acme-global'" in result.stderr
+
+    def test_the_group_alone_loads_the_working_directory_configuration(self, acme_root):
+        _vector_store()
+
+        result = CliRunner().invoke(vector_group, ["status"])
+
+        assert result.exit_code == 0, result.output
+        status = json.loads(result.stdout)
+        assert (status["table_name"], status["region"]) == ("acme-vector-store", "us-east-2")
+
+    def test_a_client_built_without_a_deployment_keeps_the_environment_chain(self, acme_root):
+        # Library callers that pass neither a project nor a global Region
+        # (the Floci suite, the example harness) resolve as before:
+        # GCO_PROJECT_NAME else gco, and AWS_REGION after the store variables.
+        _vector_store("us-west-2", project="gco")
+
+        status = VectorStoreClient().status()
+
+        assert (status["table_name"], status["region"]) == ("gco-vector-store", "us-west-2")
+
+    def test_an_explicit_deployment_beats_aws_region(self, acme_root):
+        _vector_store()
+
+        status = VectorStoreClient(project_name="acme", global_region="us-east-2").status()
+
+        assert (status["table_name"], status["region"]) == ("acme-vector-store", "us-east-2")
 
 
 class TestDefaultsAgreeWithCdkJson:

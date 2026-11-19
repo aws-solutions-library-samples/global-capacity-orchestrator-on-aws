@@ -22,14 +22,22 @@ Three operations:
 
 Resolution conventions, copied from their precedents:
 
-* **Region** follows the store convention documented in
-  ``gco/services/template_store.py``: ``DYNAMODB_REGION`` →
-  ``GLOBAL_REGION`` → ``AWS_REGION``, else the SDK default chain. A
-  ``query_region`` override retargets ONLY the DynamoDB data client —
-  that is how ``gco vector search --region`` reads a specific replica —
-  while SSM discovery and embedding stay on the default chain (the
-  parameters live in the global region; the query vector can be
-  produced anywhere).
+* **Project** is the ``project_name`` argument (``gco vector`` passes the
+  CLI configuration's: cdk.json ``project_name``, the config file,
+  ``GCO_PROJECT_NAME``), else ``GCO_PROJECT_NAME``, else ``gco``.
+* **Region** of the SSM names and of the DynamoDB data client follows the
+  store convention documented in ``gco/services/template_store.py``, with
+  the deployment's global Region ahead of ``AWS_REGION``:
+  ``DYNAMODB_REGION`` → ``GLOBAL_REGION`` → the ``global_region``
+  argument (``gco vector`` passes the configuration's: cdk.json
+  ``deployment_regions.global``, the config file, ``GCO_GLOBAL_REGION``)
+  → ``AWS_REGION``, else the SDK default chain. The global stack
+  publishes the parameters in the global Region only. A ``query_region``
+  override retargets ONLY the DynamoDB data client — that is how ``gco
+  vector search --region`` reads a specific replica — while SSM discovery
+  stays in the global Region and embedding stays on the environment
+  chain (``DYNAMODB_REGION`` → ``GLOBAL_REGION`` → ``AWS_REGION``; the
+  query vector can be produced anywhere).
 * **Names** resolve lazily from SSM (``/{project}/vector-store-table-name``,
   ``/{project}/vector-store-index-name``, and the cluster-shared bucket
   metadata under ``/{project}/cluster-shared-bucket/``) on first use and
@@ -109,8 +117,10 @@ _UNAVAILABLE_HINT = (
     "index may still be building after the first deploy (several minutes)"
 )
 
-#: Region resolution order shared with the sibling DynamoDB stores.
-_REGION_ENV_ORDER = ("DYNAMODB_REGION", "GLOBAL_REGION", "AWS_REGION")
+#: Region variables read first, the convention shared with the sibling
+#: DynamoDB stores. The deployment's global Region comes after them, then
+#: ``AWS_REGION`` (see :func:`_resolve_region`).
+_REGION_ENV_ORDER = ("DYNAMODB_REGION", "GLOBAL_REGION")
 
 
 class VectorStoreError(RuntimeError):
@@ -127,13 +137,20 @@ class VectorStoreUnavailableError(VectorStoreError):
     """
 
 
-def _resolve_region() -> str | None:
-    """Return the first configured region env var, else ``None``."""
+def _resolve_region(global_region: str | None = None) -> str | None:
+    """Return the Region to use, or ``None`` for the SDK's default chain.
+
+    ``DYNAMODB_REGION``, then ``GLOBAL_REGION``, then ``global_region``
+    (the deployment's global Region, when the caller knows it), then
+    ``AWS_REGION``. The global Region used to be missing from the chain,
+    so an operator whose ``AWS_REGION`` or profile Region was not the
+    global one could not reach the store.
+    """
     for env_var in _REGION_ENV_ORDER:
         value = os.environ.get(env_var)
         if value:
             return value
-    return None
+    return global_region or os.environ.get("AWS_REGION") or None
 
 
 def _number_attr(value: float) -> dict[str, str]:
@@ -179,9 +196,17 @@ class VectorStoreClient:
         table_name: Table name override; ``None`` resolves from SSM.
         index_name: Index name override; ``None`` resolves from SSM.
         bucket_name: Corpus bucket override; ``None`` resolves from SSM.
+        project_name: Project whose ``/{project}/...`` SSM names to read
+            (``gco vector`` passes its configuration's). ``None`` reads
+            ``GCO_PROJECT_NAME``, else ``gco``.
+        global_region: The deployment's global Region, where the SSM
+            names and the table the data client reads by default live
+            (``gco vector`` passes its configuration's).
+            ``DYNAMODB_REGION`` and ``GLOBAL_REGION`` still come first;
+            ``None`` falls back to ``AWS_REGION``, then the SDK default.
         query_region: Region whose replica the DynamoDB data client
             reads (``gco vector search --region``). ``None`` follows the
-            default chain. SSM and embedding never follow this override.
+            chain above. SSM and embedding never follow this override.
         embedding_model_id: Embedding model override. Must match the
             model the corpus was ingested with.
         dimensions: Requested embedding width. Must match the deployed
@@ -195,6 +220,8 @@ class VectorStoreClient:
         index_name: str | None = None,
         *,
         bucket_name: str | None = None,
+        project_name: str | None = None,
+        global_region: str | None = None,
         query_region: str | None = None,
         embedding_model_id: str = DEFAULT_EMBEDDING_MODEL_ID,
         dimensions: int = DEFAULT_DIMENSIONS,
@@ -204,6 +231,8 @@ class VectorStoreClient:
         self._index_name = index_name
         self._bucket_name = bucket_name
         self._bucket_region: str | None = None
+        self._project_name = project_name
+        self._global_region = global_region
         self._query_region = query_region
         self._embedding_model_id = embedding_model_id
         self._dimensions = int(dimensions)
@@ -216,16 +245,20 @@ class VectorStoreClient:
     # internals
     # ------------------------------------------------------------------ #
 
+    def _home_region(self) -> str | None:
+        """Return the Region of the SSM names and of the default data client."""
+        return _resolve_region(self._global_region)
+
     def _resolve_ssm_name(self, suffix: str) -> str:
         """Fetch ``/{project}/{suffix}`` from SSM, mapping absence to unavailable."""
         from botocore.exceptions import BotoCoreError, ClientError
 
         from gco.services.aws_ssm import get_ssm_parameter
 
-        project_name = os.environ.get("GCO_PROJECT_NAME", "gco")
+        project_name = self._project_name or os.environ.get("GCO_PROJECT_NAME") or "gco"
         param_name = f"/{project_name}/{suffix}"
         try:
-            return get_ssm_parameter(param_name, region=_resolve_region())
+            return get_ssm_parameter(param_name, region=self._home_region())
         except ClientError as err:
             code = err.response.get("Error", {}).get("Code")
             if code == "ParameterNotFound":
@@ -260,7 +293,7 @@ class VectorStoreClient:
             import boto3
 
             self._dynamodb_client = boto3.client(
-                "dynamodb", region_name=self._query_region or _resolve_region()
+                "dynamodb", region_name=self._query_region or self._home_region()
             )
         return self._dynamodb_client
 
@@ -470,7 +503,7 @@ class VectorStoreClient:
         return {
             "table_name": table_name,
             "index_name": index_name,
-            "region": self._query_region or _resolve_region() or "sdk-default",
+            "region": self._query_region or self._home_region() or "sdk-default",
             "table_status": table.get("TableStatus"),
             "item_count": int(table.get("ItemCount", 0)),
             "index_status": index_status,
