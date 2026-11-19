@@ -630,7 +630,7 @@ def _read_pcs_output(
         return pcs_login.read_file(node, reader)
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
-        sys.exit(1)
+        raise SystemExit(1) from exc
 
 
 @slurm.command("shell")
