@@ -1076,7 +1076,7 @@ gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2
 
 #### `gco capacity cancel-reservation`
 
-Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing. A refused cancellation exits 1 in every output mode, with the result document on stdout in JSON/YAML mode.
+Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing. A refused cancellation exits 1 in every output mode, with the result document on stdout in JSON/YAML mode. The command asks for confirmation first (on stderr in JSON/YAML mode) and declining exits 1. Pass `--yes` in scripts: without a terminal on stdin and without `--yes` the command exits 2 before calling EC2 instead of waiting for an answer; `--dry-run` never asks.
 
 ```bash
 gco capacity cancel-reservation [OPTIONS]
@@ -1087,7 +1087,7 @@ gco capacity cancel-reservation [OPTIONS]
 | `--reservation-id` | `-o` | Capacity Reservation ID (`cr-…`) to cancel (required) |
 | `--region` | `-r` | AWS region where the reservation exists (required) |
 | `--dry-run` | | Check your permission without cancelling; does not verify the reservation exists |
-| `--yes` | `-y` | Skip confirmation |
+| `--yes` | `-y` | Skip the confirmation prompt; required when stdin is not a terminal |
 
 ```bash
 gco capacity cancel-reservation -o cr-0123456789abcdef0 -r us-east-1 --dry-run

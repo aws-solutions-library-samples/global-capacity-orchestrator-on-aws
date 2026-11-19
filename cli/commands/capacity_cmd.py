@@ -17,7 +17,7 @@ from ..output import confirm, format_capacity_table, get_output_formatter, inter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
-_CHARGE_CONFIRMATION_HELP = (
+_CONFIRMATION_HELP = (
     "Skip the confirmation prompt; required when stdin is not a terminal (scripts, CI)"
 )
 
@@ -28,10 +28,10 @@ def _stdin_is_interactive() -> bool:
     return stdin is not None and stdin.isatty()
 
 
-def _confirm_charges(question: str, *, yes: bool, dry_run: bool) -> None:
-    """Ask before a request that starts charges.
+def _confirm_request(question: str, *, yes: bool, dry_run: bool, request: str) -> None:
+    """Ask before a request that changes the account; ``request`` says what it does.
 
-    A dry run costs nothing and ``--yes`` answers in advance. Without a
+    A dry run changes nothing and ``--yes`` answers in advance. Without a
     terminal on stdin nobody can answer, and a prompt reading an open pipe
     would wait forever, so the command stops before calling EC2 instead.
     A declined prompt aborts with exit status 1.
@@ -40,10 +40,15 @@ def _confirm_charges(question: str, *, yes: bool, dry_run: bool) -> None:
         return
     if not _stdin_is_interactive():
         raise click.UsageError(
-            "this request incurs charges and stdin is not a terminal, so it cannot be "
+            f"{request} and stdin is not a terminal, so it cannot be "
             "confirmed; pass --yes to confirm it, or --dry-run to check it first"
         )
     confirm(question, abort=True)
+
+
+def _confirm_charges(question: str, *, yes: bool, dry_run: bool) -> None:
+    """Ask before a request that starts charges (see :func:`_confirm_request`)."""
+    _confirm_request(question, yes=yes, dry_run=dry_run, request="this request incurs charges")
 
 
 @click.group()
@@ -1395,7 +1400,7 @@ def runai_capacity(
         "EC2 does not verify the offering exists until the real purchase."
     ),
 )
-@click.option("--yes", "-y", is_flag=True, help=_CHARGE_CONFIRMATION_HELP)
+@click.option("--yes", "-y", is_flag=True, help=_CONFIRMATION_HELP)
 @pass_config
 def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any, yes: Any) -> None:
     """Purchase a Capacity Block offering by its ID.
@@ -1682,7 +1687,7 @@ def _create_reservation_command(
         "EC2 does not check capacity or the Availability Zone until the real request."
     ),
 )
-@click.option("--yes", "-y", is_flag=True, help=_CHARGE_CONFIRMATION_HELP)
+@click.option("--yes", "-y", is_flag=True, help=_CONFIRMATION_HELP)
 @pass_config
 def create_reservation(
     config: Any,
@@ -1821,7 +1826,7 @@ def create_reservation(
         "EC2 does not verify the reservation exists until the real request."
     ),
 )
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.option("--yes", "-y", is_flag=True, help=_CONFIRMATION_HELP)
 @pass_config
 def cancel_reservation(
     config: Any, reservation_id: Any, region: Any, dry_run: Any, yes: Any
@@ -1840,8 +1845,12 @@ def cancel_reservation(
     formatter = get_output_formatter(config)
     checker = get_capacity_checker(config)
 
-    if not dry_run and not yes:
-        confirm(f"Cancel capacity reservation '{reservation_id}' in {region}?", abort=True)
+    _confirm_request(
+        f"Cancel capacity reservation '{reservation_id}' in {region}?",
+        yes=yes,
+        dry_run=dry_run,
+        request="cancelling releases the reserved capacity",
+    )
 
     try:
         if dry_run:
