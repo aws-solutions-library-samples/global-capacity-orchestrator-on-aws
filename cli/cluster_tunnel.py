@@ -32,10 +32,14 @@ modules (not ``from ... import``) so tests can monkeypatch them at the source.
 
 from __future__ import annotations
 
+import contextlib
+import signal
 import subprocess
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from types import FrameType
 from typing import Any
 
 from . import ephemeral_bastion, kubectl_helpers, ssm_tunnel
@@ -315,26 +319,84 @@ def provision_bastion(
     return instance_id
 
 
+def _report(emit: Callable[[str], object], message: str) -> None:
+    """Print a teardown message, dropping it when the output can no longer be written.
+
+    After SIGHUP every write to the closed terminal raises, and a message must
+    never stop the teardown it describes.
+    """
+    with contextlib.suppress(OSError):
+        emit(message)
+
+
 def teardown_bastion(
     formatter: Any,
     instance_id: str,
     region: str,
     project_name: str = ephemeral_bastion.DEFAULT_PROJECT_NAME,
 ) -> None:
-    """Tear down an ephemeral bastion; on failure, print the orphan-check command."""
+    """Tear down an ephemeral bastion; on failure, print the orphan-check command.
+
+    The instance is terminated even when the progress output fails.
+    """
+    _report(formatter.print_info, f"Tearing down ephemeral bastion {instance_id}...")
     try:
-        formatter.print_info(f"Tearing down ephemeral bastion {instance_id}...")
         ephemeral_bastion.destroy_ephemeral_bastion(instance_id, region, project_name=project_name)
-        formatter.print_success(f"Ephemeral bastion {instance_id} terminated.")
     except Exception as exc:  # never crash teardown; guide the operator
-        formatter.print_error(
+        _report(
+            formatter.print_error,
             f"Failed to tear down bastion {instance_id}: {exc}\n"
             "Check for and terminate any orphan with:\n"
             f"  aws ec2 describe-instances --region {region} "
             "--filters Name=tag:gco:ephemeral,Values=true "
             "Name=instance-state-name,Values=running,pending "
-            "--query 'Reservations[].Instances[].InstanceId' --output text"
+            "--query 'Reservations[].Instances[].InstanceId' --output text",
         )
+        return
+    _report(formatter.print_success, f"Ephemeral bastion {instance_id} terminated.")
+
+
+class TunnelTerminated(SystemExit):
+    """SIGTERM or SIGHUP ended a command holding a cluster tunnel; exits 128 + signal.
+
+    A ``SystemExit`` so a command's ``except Exception`` cannot swallow it,
+    while every ``finally`` on the way out (the port-forward, the SSM tunnel,
+    the bastion) still runs.
+    """
+
+
+@contextmanager
+def _termination_signals_raise() -> Iterator[None]:
+    """Turn SIGTERM and SIGHUP into :class:`TunnelTerminated` while a tunnel may be up.
+
+    The SSM child runs in its own session, so neither the terminal's SIGHUP
+    nor a signal sent to this process reaches it, and the default actions end
+    this process without its cleanup: the local port stays bound and an
+    ``auto`` bastion runs until its TTL. Only signals still at their default
+    action are taken over (a caller's own handler, or the SIGHUP ``nohup``
+    ignores, stays), only on the main thread, where Python runs handlers, and
+    only the first signal raises, so a repeat cannot interrupt the cleanup.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    received: list[int] = []
+
+    def raise_terminated(signum: int, frame: FrameType | None) -> None:
+        received.append(signum)
+        if len(received) == 1:
+            raise TunnelTerminated(128 + signum)
+
+    previous: dict[int, Any] = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is not None and signal.getsignal(signum) == signal.SIG_DFL:
+            previous[signum] = signal.signal(signum, raise_terminated)
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 @dataclass(frozen=True)
@@ -387,87 +449,91 @@ def open_api_server_tunnel(
     Every route is announced through ``formatter``. Yields a
     :class:`TunnelSession`, and tears the tunnel and any bastion it provisioned
     down on exit — including when setup fails before the ``yield`` (so a failed
-    tunnel never leaks a bastion).
+    tunnel never leaks a bastion), and when SIGTERM or SIGHUP arrives, which
+    raises :class:`TunnelTerminated` (see :func:`_termination_signals_raise`).
     """
-    if bastion_ttl_minutes is None:
-        bastion_ttl_minutes = ephemeral_bastion.DEFAULT_TTL_MINUTES
-    # The bastion's IAM role/profile are scoped to the deployment's project key,
-    # recovered from the cluster name (which is f"{project_name}-{region}").
-    project_name = _project_name_from_cluster(cluster, region)
+    # SIGTERM and SIGHUP end the session through the cleanup below instead of
+    # killing this process and leaving the tunnel and the bastion behind.
+    with _termination_signals_raise():
+        if bastion_ttl_minutes is None:
+            bastion_ttl_minutes = ephemeral_bastion.DEFAULT_TTL_MINUTES
+        # The bastion's IAM role/profile are scoped to the deployment's project key,
+        # recovered from the cluster name (which is f"{project_name}-{region}").
+        project_name = _project_name_from_cluster(cluster, region)
 
-    posture_known = True
-    try:
-        plan = resolve_tunnel_plan(cluster, region, local_port=local_port)
-    except (RuntimeError, ValueError) as exc:
-        if via_ssm and not allow_public_fallback:
-            raise RuntimeError(
-                f"--via-ssm {via_ssm} needs {cluster}'s API endpoint, but its access mode "
-                f"could not be read: {exc}"
-            ) from exc
-        # Endpoint posture unknown — fall back to a direct attempt.
-        formatter.print_warning(
-            f"Could not determine endpoint access mode: {exc}. Trying the endpoint in "
-            "your kubeconfig directly."
-        )
-        posture_known = False
-        plan = TunnelPlan(
-            cluster=cluster,
-            region=region,
-            endpoint="",
-            public=True,
-            private=False,
-            local_port=local_port,
-        )
-    if via_ssm and not allow_public_fallback:
-        require_private_access(plan, via_ssm)
-
-    server: str | None = None
-    tls_server_name: str | None = None
-    tunnel = None
-    tunnel_target: str | None = None
-    created_bastion: str | None = None
-    route = ROUTE_UNVERIFIED
-    try:
-        if via_ssm and plan.private_access:
-            if not plan.endpoint_host:
-                raise RuntimeError(
-                    f"EKS reported no usable API endpoint for {cluster} ({plan.endpoint!r}), "
-                    "so there is nothing for an SSM tunnel to reach."
-                )
-            instance_id = via_ssm
-            if via_ssm == AUTO_BASTION:
-                created_bastion = provision_bastion(
-                    formatter, cluster, region, bastion_ttl_minutes, assume_yes, project_name
-                )
-                instance_id = created_bastion
-
-            formatter.print_info(_ssm_route_message(plan, instance_id))
-            tunnel = ssm_tunnel.start_api_tunnel(instance_id, plan.endpoint, local_port, region)
-            tunnel_target = instance_id
-            server = f"https://{ssm_tunnel.LOCAL_TUNNEL_HOST}:{local_port}"
-            tls_server_name = plan.endpoint_host
-            route = ROUTE_SSM
-        elif not posture_known:
-            pass  # the warning above already named the direct attempt
-        elif plan.public:
-            formatter.print_info(_direct_route_message(plan, via_ssm))
-            route = ROUTE_DIRECT
-        else:
-            formatter.print_warning(private_endpoint_guidance(cluster, region))
-
-        yield TunnelSession(
-            server=server,
-            tls_server_name=tls_server_name,
-            plan=plan,
-            active=tunnel is not None,
-            process=tunnel,
-            instance_id=tunnel_target,
-            route=route,
-        )
-    finally:
+        posture_known = True
         try:
-            if tunnel is not None:
-                ssm_tunnel.stop_api_tunnel(tunnel)
+            plan = resolve_tunnel_plan(cluster, region, local_port=local_port)
+        except (RuntimeError, ValueError) as exc:
+            if via_ssm and not allow_public_fallback:
+                raise RuntimeError(
+                    f"--via-ssm {via_ssm} needs {cluster}'s API endpoint, but its access mode "
+                    f"could not be read: {exc}"
+                ) from exc
+            # Endpoint posture unknown — fall back to a direct attempt.
+            formatter.print_warning(
+                f"Could not determine endpoint access mode: {exc}. Trying the endpoint in "
+                "your kubeconfig directly."
+            )
+            posture_known = False
+            plan = TunnelPlan(
+                cluster=cluster,
+                region=region,
+                endpoint="",
+                public=True,
+                private=False,
+                local_port=local_port,
+            )
+        if via_ssm and not allow_public_fallback:
+            require_private_access(plan, via_ssm)
+
+        server: str | None = None
+        tls_server_name: str | None = None
+        tunnel = None
+        tunnel_target: str | None = None
+        created_bastion: str | None = None
+        route = ROUTE_UNVERIFIED
+        try:
+            if via_ssm and plan.private_access:
+                if not plan.endpoint_host:
+                    raise RuntimeError(
+                        f"EKS reported no usable API endpoint for {cluster} ({plan.endpoint!r}), "
+                        "so there is nothing for an SSM tunnel to reach."
+                    )
+                instance_id = via_ssm
+                if via_ssm == AUTO_BASTION:
+                    created_bastion = provision_bastion(
+                        formatter, cluster, region, bastion_ttl_minutes, assume_yes, project_name
+                    )
+                    instance_id = created_bastion
+
+                formatter.print_info(_ssm_route_message(plan, instance_id))
+                tunnel = ssm_tunnel.start_api_tunnel(instance_id, plan.endpoint, local_port, region)
+                tunnel_target = instance_id
+                server = f"https://{ssm_tunnel.LOCAL_TUNNEL_HOST}:{local_port}"
+                tls_server_name = plan.endpoint_host
+                route = ROUTE_SSM
+            elif not posture_known:
+                pass  # the warning above already named the direct attempt
+            elif plan.public:
+                formatter.print_info(_direct_route_message(plan, via_ssm))
+                route = ROUTE_DIRECT
+            else:
+                formatter.print_warning(private_endpoint_guidance(cluster, region))
+
+            yield TunnelSession(
+                server=server,
+                tls_server_name=tls_server_name,
+                plan=plan,
+                active=tunnel is not None,
+                process=tunnel,
+                instance_id=tunnel_target,
+                route=route,
+            )
         finally:
-            if created_bastion is not None:
-                teardown_bastion(formatter, created_bastion, region, project_name)
+            try:
+                if tunnel is not None:
+                    ssm_tunnel.stop_api_tunnel(tunnel)
+            finally:
+                if created_bastion is not None:
+                    teardown_bastion(formatter, created_bastion, region, project_name)

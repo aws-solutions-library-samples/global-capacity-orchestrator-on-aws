@@ -1400,6 +1400,15 @@ in another shell. With `--print` it instead emits the ready-to-run tunnel +
 `kubectl` commands (a connection plan) without opening anything — JSON under
 `gco --output json`, copy-paste shell commands otherwise.
 
+SIGTERM and SIGHUP (`kill`, a supervisor's timeout, closing the terminal) end
+this command, and every other command that holds a tunnel (`monitoring open`,
+`costs dashboard`, `gitops`, `crossplane`, `slurm shell|output`, `nodepools`
+with `--via-ssm`), the way Ctrl-C does: the port-forward and the SSM session
+are stopped and an `auto` bastion is terminated, also while it is still
+waiting to register with SSM, before the command exits with status 143 or
+129. A handler a calling program installed for those signals, or the SIGHUP
+`nohup` ignores, is left in place.
+
 The tunnel needs the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html),
 which `aws ssm start-session` hands the session to; the `gco-dev` image ships a
 pinned copy. Run through the `gco` shell function, the tunnel listens on the
