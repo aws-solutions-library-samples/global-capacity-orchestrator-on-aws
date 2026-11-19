@@ -17,6 +17,34 @@ from ..output import confirm, format_capacity_table, get_output_formatter
 
 pass_config = click.make_pass_decorator(GCOConfig, ensure=True)
 
+_CHARGE_CONFIRMATION_HELP = (
+    "Skip the confirmation prompt; required when stdin is not a terminal (scripts, CI)"
+)
+
+
+def _stdin_is_interactive() -> bool:
+    """Whether a person on a terminal can answer a confirmation prompt."""
+    stdin = sys.stdin
+    return stdin is not None and stdin.isatty()
+
+
+def _confirm_charges(question: str, *, yes: bool, dry_run: bool) -> None:
+    """Ask before a request that starts charges.
+
+    A dry run costs nothing and ``--yes`` answers in advance. Without a
+    terminal on stdin nobody can answer, and a prompt reading an open pipe
+    would wait forever, so the command stops before calling EC2 instead.
+    A declined prompt aborts with exit status 1.
+    """
+    if yes or dry_run:
+        return
+    if not _stdin_is_interactive():
+        raise click.UsageError(
+            "this request incurs charges and stdin is not a terminal, so it cannot be "
+            "confirmed; pass --yes to confirm it, or --dry-run to check it first"
+        )
+    confirm(question, abort=True)
+
 
 @click.group()
 @pass_config
@@ -1296,17 +1324,19 @@ def runai_capacity(
         "EC2 does not verify the offering exists until the real purchase."
     ),
 )
+@click.option("--yes", "-y", is_flag=True, help=_CHARGE_CONFIRMATION_HELP)
 @pass_config
-def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -> None:
+def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any, yes: Any) -> None:
     """Purchase a Capacity Block offering by its ID.
 
     Use 'gco capacity find-blocks' or 'gco capacity reservation-check' first to
     find available offerings and their IDs, then purchase with this command.
 
     ⚠️  WARNING: This command purchases capacity and incurs charges.
-    Use --dry-run to check the request and your permission first. EC2's dry
-    run does not look the offering up, so it cannot tell you whether the
-    offering still exists; only the purchase itself does.
+    It asks for confirmation first; pass --yes in scripts. Use --dry-run to
+    check the request and your permission first. EC2's dry run does not look
+    the offering up, so it cannot tell you whether the offering still exists;
+    only the purchase itself does.
 
     Examples:
         # First, find offerings:
@@ -1315,9 +1345,15 @@ def reserve_capacity(config: Any, offering_id: Any, region: Any, dry_run: Any) -
         # Check the request and your permission without purchasing:
         gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --dry-run
 
-        # Purchase:
+        # Purchase (asks for confirmation; -y skips the prompt):
         gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1
     """
+    _confirm_charges(
+        f"Purchase Capacity Block {offering_id} in {region}? "
+        "You are charged for the block's whole term.",
+        yes=yes,
+        dry_run=dry_run,
+    )
     formatter = get_output_formatter(config)
     checker = get_capacity_checker(config)
 
@@ -1574,6 +1610,7 @@ def _create_reservation_command(
         "EC2 does not check capacity or the Availability Zone until the real request."
     ),
 )
+@click.option("--yes", "-y", is_flag=True, help=_CHARGE_CONFIRMATION_HELP)
 @pass_config
 def create_reservation(
     config: Any,
@@ -1587,6 +1624,7 @@ def create_reservation(
     end_date: Any,
     ebs_optimized: Any,
     dry_run: Any,
+    yes: Any,
 ) -> None:
     """Create a new On-Demand Capacity Reservation (ODCR).
 
@@ -1595,15 +1633,22 @@ def create_reservation(
 
     ⚠️  WARNING: creating a reservation incurs On-Demand charges for the reserved
     capacity whether or not it is used, until the reservation is cancelled.
-    Use --dry-run to check the request and your permission first; EC2's dry
-    run does not check capacity or the Availability Zone.
+    It asks for confirmation first; pass --yes in scripts. Use --dry-run to
+    check the request and your permission first; EC2's dry run does not check
+    capacity or the Availability Zone.
 
     Examples:
         gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2 --dry-run
         gco capacity create-reservation -i p6-b200 -r us-east-1 -z us-east-1a -c 1
         gco capacity create-reservation -i p4d.24xlarge -r us-west-2 -z us-west-2b \\
-            --end-date 2026-08-01
+            --end-date 2026-08-01 --yes
     """
+    _confirm_charges(
+        f"Create an On-Demand Capacity Reservation for {count}x {instance_type} in "
+        f"{availability_zone}? Charges accrue until it is cancelled.",
+        yes=yes,
+        dry_run=dry_run,
+    )
     formatter = get_output_formatter(config)
     checker = get_capacity_checker(config)
 

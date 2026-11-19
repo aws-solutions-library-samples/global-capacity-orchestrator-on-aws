@@ -578,7 +578,9 @@ if is_enabled(FLAG_CAPACITY_PURCHASE):
             dry_run: If True, check the request and permission without
                 purchasing (no cost). Does not verify the offering exists.
         """
-        args = ["capacity", "reserve", "-o", offering_id, "-r", region]
+        # The CLI asks before a purchase and refuses without a terminal; this
+        # tool is the operator's opt-in (GCO_ENABLE_CAPACITY_PURCHASE).
+        args = ["capacity", "reserve", "-o", offering_id, "-r", region, "-y"]
         if dry_run:
             args.append("--dry-run")
         return cli_runner._run_cli(*args)
@@ -629,6 +631,7 @@ if is_enabled(FLAG_CAPACITY_PURCHASE):
             availability_zone,
             "-c",
             str(count),
+            "-y",
         ]
         if platform != "Linux/UNIX":
             args += ["--platform", platform]

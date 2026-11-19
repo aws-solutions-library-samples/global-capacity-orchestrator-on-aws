@@ -863,6 +863,11 @@ Only the purchase itself does. When EC2 refuses the purchase or the dry run, the
 command exits 1 in every output mode; with `--output json` or `--output yaml` the
 result document (`success: false`, `error_code`, `error`) is still printed on stdout.
 
+A purchase asks for confirmation first (on stderr in JSON/YAML mode); declining
+exits 1 without calling EC2. Pass `--yes` in scripts: when stdin is not a terminal
+and `--yes` is missing, the command exits 2 before calling EC2 instead of waiting
+for an answer. `--dry-run` never asks.
+
 ```bash
 gco capacity reserve [OPTIONS]
 ```
@@ -874,14 +879,18 @@ gco capacity reserve [OPTIONS]
 | `--offering-id` | `-o` | Capacity Block offering ID (`cb-…`) (required) |
 | `--region` | `-r` | AWS region where the offering exists (required) |
 | `--dry-run` | | Check the request and your permission without purchasing; does not verify the offering exists |
+| `--yes` | `-y` | Skip the confirmation prompt; required when stdin is not a terminal |
 
 **Example:**
 
 ```bash
-# Find offerings, validate, then purchase
+# Find offerings, validate, then purchase (asks for confirmation)
 gco capacity reservation-check -i p4d.24xlarge -r us-east-1
 gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --dry-run
 gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1
+
+# In a script
+gco --output json capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --yes
 ```
 
 #### `gco capacity find-training-plans`
@@ -980,7 +989,7 @@ gco capacity find-reservations -i p6-b200 -r us-east-1 -r us-west-2 --no-pricing
 
 #### `gco capacity create-reservation`
 
-Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Run with `--dry-run` first to check the request and your permission; EC2's dry run does not check capacity or the Availability Zone, only the real request does. A refused request exits 1 in every output mode, with the result document on stdout in JSON/YAML mode, as for [`gco capacity reserve`](#gco-capacity-reserve).
+Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Run with `--dry-run` first to check the request and your permission; EC2's dry run does not check capacity or the Availability Zone, only the real request does. A refused request exits 1 in every output mode, with the result document on stdout in JSON/YAML mode, as for [`gco capacity reserve`](#gco-capacity-reserve). Creating a reservation asks for confirmation the same way: pass `--yes` in scripts, since without a terminal on stdin and without `--yes` the command exits 2 before calling EC2; `--dry-run` never asks.
 
 ```bash
 gco capacity create-reservation [OPTIONS]
@@ -998,9 +1007,10 @@ gco capacity create-reservation [OPTIONS]
 | `--end-date` | | Optional end date (`YYYY-MM-DD` or ISO); omit for an unlimited reservation |
 | `--ebs-optimized` | | Reserve EBS-optimized capacity |
 | `--dry-run` | | Check the request and your permission without creating (no cost); does not check capacity or the AZ |
+| `--yes` | `-y` | Skip the confirmation prompt; required when stdin is not a terminal |
 
 ```bash
-# Validate, then create
+# Validate, then create (asks for confirmation; -y skips the prompt)
 gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2 --dry-run
 gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2
 ```

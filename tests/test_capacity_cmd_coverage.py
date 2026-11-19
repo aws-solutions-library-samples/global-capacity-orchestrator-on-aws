@@ -313,7 +313,9 @@ class TestCapacityCmdReserve:
         }
 
         runner = CliRunner()
-        result = runner.invoke(cli, ["capacity", "reserve", "-o", "cb-123", "-r", "us-east-1"])
+        result = runner.invoke(
+            cli, ["capacity", "reserve", "-o", "cb-123", "-r", "us-east-1", "-y"]
+        )
         assert result.exit_code == 0
         assert "purchased successfully" in result.output
 
@@ -331,7 +333,7 @@ class TestCapacityCmdReserve:
         }
 
         runner = CliRunner()
-        result = runner.invoke(cli, ["capacity", "reserve", "-o", "cb-x", "-r", "us-east-1"])
+        result = runner.invoke(cli, ["capacity", "reserve", "-o", "cb-x", "-r", "us-east-1", "-y"])
         assert result.exit_code == 1
 
     @patch("cli.commands.capacity_cmd.get_capacity_checker")
@@ -343,7 +345,7 @@ class TestCapacityCmdReserve:
         mock_checker_fn.return_value.purchase_capacity_block.side_effect = RuntimeError("err")
 
         runner = CliRunner()
-        result = runner.invoke(cli, ["capacity", "reserve", "-o", "cb-x", "-r", "us-east-1"])
+        result = runner.invoke(cli, ["capacity", "reserve", "-o", "cb-x", "-r", "us-east-1", "-y"])
         assert result.exit_code == 1
 
 
@@ -564,6 +566,7 @@ class TestCapacityCmdCreateReservation:
                 "us-east-1",
                 "-z",
                 "us-east-1a",
+                "-y",
             ],
         )
         assert result.exit_code == 0
@@ -594,6 +597,7 @@ class TestCapacityCmdCreateReservation:
                 "us-east-1",
                 "-z",
                 "us-east-1a",
+                "-y",
             ],
         )
         assert result.exit_code == 1

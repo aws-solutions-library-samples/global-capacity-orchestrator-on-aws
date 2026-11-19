@@ -1064,6 +1064,8 @@ class TestCapacityTools:
             cmd = mock.call_args[0][0]
             assert "reserve" in cmd
             assert "--dry-run" not in cmd
+            # The child has no terminal, so the CLI's purchase prompt needs -y.
+            assert "-y" in cmd
 
 
 class TestInferenceTools:

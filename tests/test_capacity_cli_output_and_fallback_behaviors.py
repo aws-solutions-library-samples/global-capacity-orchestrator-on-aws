@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -386,7 +387,7 @@ _RESERVATION_FAILURE = {
     [
         (
             "purchase_capacity_block",
-            ["reserve", "-o", "cb-0123456789abcdef0", "-r", "us-east-1"],
+            ["reserve", "-o", "cb-0123456789abcdef0", "-r", "us-east-1", "-y"],
         ),
         (
             "create_capacity_reservation",
@@ -398,6 +399,7 @@ _RESERVATION_FAILURE = {
                 "us-east-1",
                 "-z",
                 "us-east-1a",
+                "-y",
             ],
         ),
         (
@@ -422,3 +424,113 @@ def test_reservation_commands_exit_nonzero_on_failure_in_machine_modes(
     document = (json.loads if output_format == "json" else yaml.safe_load)(result.stdout)
     assert document == _RESERVATION_FAILURE
     assert "Failed: InsufficientInstanceCapacity: sold out" in result.stderr
+
+
+_CHARGING_COMMANDS = [
+    pytest.param(
+        "purchase_capacity_block",
+        ["reserve", "-o", "cb-0123456789abcdef0", "-r", "us-east-1"],
+        id="reserve",
+    ),
+    pytest.param(
+        "create_capacity_reservation",
+        ["create-reservation", "-i", "p5.48xlarge", "-r", "us-east-1", "-z", "us-east-1a"],
+        id="create-reservation",
+    ),
+]
+_CHARGED = {"success": True, "dry_run": False, "reservation_id": "cr-0123456789abcdef0"}
+
+
+@pytest.mark.parametrize(("checker_method", "arguments"), _CHARGING_COMMANDS)
+def test_charging_commands_refuse_to_run_unconfirmed_without_a_terminal(
+    checker_method: str, arguments: list[str]
+) -> None:
+    """Both commands used to spend money with no confirmation at all. Without
+    a terminal nobody can answer a prompt (and one reading an open pipe would
+    wait forever), so the command stops before calling EC2."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(cli, ["capacity", *arguments])
+
+    assert result.exit_code == 2, result.output
+    assert "pass --yes" in result.stderr
+    getattr(checker, checker_method).assert_not_called()
+
+
+@pytest.mark.parametrize(("checker_method", "arguments"), _CHARGING_COMMANDS)
+def test_charging_commands_ask_first_and_a_declined_prompt_exits_1(
+    checker_method: str, arguments: list[str]
+) -> None:
+    from cli.main import cli
+
+    checker = MagicMock()
+    with (
+        patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker),
+        patch("cli.commands.capacity_cmd._stdin_is_interactive", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, ["capacity", *arguments], input="n\n")
+
+    assert result.exit_code == 1, result.output
+    assert "[y/N]" in result.output
+    assert "Aborted" in result.stderr
+    getattr(checker, checker_method).assert_not_called()
+
+
+@pytest.mark.parametrize(("checker_method", "arguments"), _CHARGING_COMMANDS)
+def test_charging_commands_proceed_after_an_accepted_prompt(
+    checker_method: str, arguments: list[str]
+) -> None:
+    """In JSON mode the prompt goes to stderr, so stdout stays one document."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    getattr(checker, checker_method).return_value = dict(_CHARGED)
+    with (
+        patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker),
+        patch("cli.commands.capacity_cmd._stdin_is_interactive", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, ["-o", "json", "capacity", *arguments], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "[y/N]" in result.stderr
+    assert json.loads(result.stdout) == _CHARGED
+    getattr(checker, checker_method).assert_called_once()
+
+
+@pytest.mark.parametrize("skip_flag", ["--yes", "-y", "--dry-run"])
+@pytest.mark.parametrize(("checker_method", "arguments"), _CHARGING_COMMANDS)
+def test_charging_commands_skip_the_prompt_for_yes_and_dry_run(
+    checker_method: str, arguments: list[str], skip_flag: str
+) -> None:
+    """--yes answers in advance and a dry run costs nothing, so neither asks,
+    even without a terminal."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    getattr(checker, checker_method).return_value = dict(_CHARGED)
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(cli, ["-o", "json", "capacity", *arguments, skip_flag])
+
+    assert result.exit_code == 0, result.output
+    assert "[y/N]" not in result.output
+    getattr(checker, checker_method).assert_called_once()
+    assert getattr(checker, checker_method).call_args.kwargs["dry_run"] is (
+        skip_flag == "--dry-run"
+    )
+
+
+def test_stdin_is_interactive_needs_a_terminal_on_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cli.commands import capacity_cmd
+
+    monkeypatch.setattr(sys, "stdin", None)
+    assert capacity_cmd._stdin_is_interactive() is False
+
+    terminal = MagicMock()
+    terminal.isatty.return_value = True
+    monkeypatch.setattr(sys, "stdin", terminal)
+    assert capacity_cmd._stdin_is_interactive() is True
+
+    terminal.isatty.return_value = False
+    assert capacity_cmd._stdin_is_interactive() is False
