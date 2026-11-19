@@ -947,8 +947,12 @@ aws cloudwatch get-metric-statistics \
 # 2. Check EKS API server metrics
 kubectl get --raw /metrics | grep apiserver_request_duration
 
-# 3. Scale up services
-kubectl scale deployment/manifest-processor --replicas=5 -n gco-system
+# 3. Scale up the manifest processor in cdk.json, not with kubectl scale: the
+#    next deploy or convergence resets the Deployment to
+#    manifest_processor.replicas (3 by default). Raise replicas, or set
+#    manifest_processor.autoscaling.enabled to true for a CPU
+#    HorizontalPodAutoscaler up to autoscaling.max_replicas, then redeploy:
+gco stacks deploy gco-REGION -y
 
 # 4. Check for resource constraints
 kubectl describe nodes | grep -A 5 "Allocated resources"
