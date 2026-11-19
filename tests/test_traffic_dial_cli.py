@@ -511,13 +511,27 @@ class TestCommands:
         assert "Dialed us-west-2 to 20%" in result.output
         assert "no fully dialed region remains" in result.output
 
-    def test_set_without_confirmation_aborts(self, mock_manager):
+    def test_set_declined_confirmation_exits_1(self, mock_manager):
+        """A declined prompt printed "Aborted" and exited 0, so a script could
+        not tell a declined dial change from an applied one; it exits 1 like
+        the other confirmations in cli/commands (confirm(abort=True))."""
         result = CliRunner().invoke(
             cli, ["capacity", "traffic-dial", "set", "us-west-2", "20"], input="n\n"
         )
-        assert result.exit_code == 0
-        assert "Aborted" in result.output
+        assert result.exit_code == 1, result.output
+        assert "Aborted" in result.stderr
         mock_manager.set_dial.assert_not_called()
+
+    def test_set_accepted_confirmation_applies(self, mock_manager):
+        mock_manager.set_dial.return_value = RegionDialStatus(
+            region="us-west-2", traffic_dial=20, endpoint_health="1/1 healthy", override="20"
+        )
+        result = CliRunner().invoke(
+            cli, ["capacity", "traffic-dial", "set", "us-west-2", "20"], input="y\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert "Dial us-west-2 to 20%" in result.output
+        mock_manager.set_dial.assert_called_once_with("us-west-2", 20)
 
     def test_set_surfaces_traffic_dial_errors(self, mock_manager):
         mock_manager.set_dial.side_effect = TrafficDialError("unknown region")

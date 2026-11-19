@@ -2308,9 +2308,9 @@ def traffic_dial_set(config: Any, region: Any, percentage: Any, yes: Any) -> Non
     from ..capacity.traffic_dial import TrafficDialError, get_traffic_dial_manager
 
     formatter = get_output_formatter(config)
-    if not yes and not confirm(f"Dial {region} to {percentage}% of its optimally routed traffic?"):
-        formatter.print_info("Aborted; no changes made.")
-        return
+    if not yes:
+        # A declined prompt aborts with exit status 1, like the other commands.
+        confirm(f"Dial {region} to {percentage}% of its optimally routed traffic?", abort=True)
 
     manager = get_traffic_dial_manager(config)
     try:

@@ -1293,9 +1293,10 @@ Manually dial `REGION` to `PERCENTAGE` (0-100) and record an override the
 scheduled controller honors: the region is left alone until the override is
 cleared. Applies `UpdateEndpointGroup` carrying only the dial, so the
 registered ALB endpoint is untouched. Prompts for confirmation unless
-`--yes` is passed; changes apply to new connections only and converge to the
-accelerator's edge locations over a few minutes. Warns when the change would
-leave no fully dialed region on the listener.
+`--yes` is passed (declining exits 1 and changes nothing); changes apply to
+new connections only and converge to the accelerator's edge locations over a
+few minutes. Warns when the change would leave no fully dialed region on the
+listener.
 
 The override (`/{project}/traffic-dial/override-{region}` in SSM) is written
 before the dial changes, so the controller already skips the region when it does.
