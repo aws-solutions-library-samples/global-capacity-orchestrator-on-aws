@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T00:26:15Z">
-        <meta name="gco-source-commit" content="b6581899649d40769798e294f2ea42237f493c03">
-        <meta name="gco-flow-digest" content="2f337976e5dd60d9">
+        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
+        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
+        <meta name="gco-flow-digest" content="6a853f040e0007fd">
         <title>Regional volcano image-mirror config (project-prefix + ECR-path validation, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,34 +208,34 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2305=>operation: 'Parse the ``volcano_image_mirror`` block from cdk.json.\n\n        Returns a normalized dict ``{enabled, ecr_namespace}``. Validation is\n        strict so a misconfiguration fails at synth rather than silently leaving\n        Volcano pointed at docker.io.\n\n        - ``enabled`` (default False) — master toggle.\n        - ``ecr_namespace`` (default ``"<project_name>/dockerhub"``, i.e.\n          ``gco/dockerhub`` for the stock project) — the ECR repository\n          namespace the mirrored Volcano images live under. Must start with\n          ``<project_name>/`` so it inherits the project\'s existing\n          ``<project_name>/*`` machinery (node pull access, replication rule,\n          trusted-registry allow-list) with no extra IAM, and must be a valid\n          (possibly nested) ECR repository path.\n        '
-op2307=>operation: raw = self.node.try_get_context('volcano_image_mirror') or {}
-cond2310=>operation: raise ValueError(f'volcano_image_mirror must be a mapping, got {type(raw).__name__}') if  not isinstance(raw, dict)
-op2320=>operation: project_prefix = f'{self.config.get_project_name()}/'
-op2322=>operation: enabled = read_block_flag(raw, 'volcano_image_mirror.enabled', default=False)
-op2324=>operation: ecr_namespace = str(raw.get('ecr_namespace', f'{project_prefix}dockerhub')).strip().strip('/')
-cond2327=>condition: if not enabled
-io2334=>inputoutput: output: {'enabled': False, 'ecr_namespace': ecr_namespace}
-e2332=>end: end function return
-cond2341=>operation: raise ValueError(f"volcano_image_mirror.ecr_namespace must start with {project_prefix!r} so it inherits the project's {project_prefix}* ECR access/replication, got {ecr_namespace!r}") if  not ecr_namespace.startswith(project_prefix)
-op2351=>operation: segment = '[a-z0-9]+(?:[._-][a-z0-9]+)*'
-cond2354=>operation: raise ValueError(f'volcano_image_mirror.ecr_namespace must be a valid ECR repository path (lowercase alphanumerics + . _ - per slash-separated segment), got {ecr_namespace!r}') if  not re.fullmatch(f'{segment}(?:/{segment})+', ecr_namespace)
-io2367=>inputoutput: output: {'enabled': True, 'ecr_namespace': ecr_namespace}
-e2365=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op1017=>operation: 'Parse the ``volcano_image_mirror`` block from cdk.json.\n\n        Returns a normalized dict ``{enabled, ecr_namespace}``. Validation is\n        strict so a misconfiguration fails at synth rather than silently leaving\n        Volcano pointed at docker.io.\n\n        - ``enabled`` (default False) — master toggle.\n        - ``ecr_namespace`` (default ``"<project_name>/dockerhub"``, i.e.\n          ``gco/dockerhub`` for the stock project) — the ECR repository\n          namespace the mirrored Volcano images live under. Must start with\n          ``<project_name>/`` so it inherits the project\'s existing\n          ``<project_name>/*`` machinery (node pull access, replication rule,\n          trusted-registry allow-list) with no extra IAM, and must be a valid\n          (possibly nested) ECR repository path.\n        '
+op1019=>operation: raw = self.node.try_get_context('volcano_image_mirror') or {}
+cond1022=>operation: raise ValueError(f'volcano_image_mirror must be a mapping, got {type(raw).__name__}') if  not isinstance(raw, dict)
+op1032=>operation: project_prefix = f'{self.config.get_project_name()}/'
+op1034=>operation: enabled = read_block_flag(raw, 'volcano_image_mirror.enabled', default=False)
+op1036=>operation: ecr_namespace = str(raw.get('ecr_namespace', f'{project_prefix}dockerhub')).strip().strip('/')
+cond1039=>condition: if not enabled
+io1046=>inputoutput: output: {'enabled': False, 'ecr_namespace': ecr_namespace}
+e1044=>end: end function return
+cond1053=>operation: raise ValueError(f"volcano_image_mirror.ecr_namespace must start with {project_prefix!r} so it inherits the project's {project_prefix}* ECR access/replication, got {ecr_namespace!r}") if  not ecr_namespace.startswith(project_prefix)
+op1063=>operation: segment = '[a-z0-9]+(?:[._-][a-z0-9]+)*'
+cond1066=>operation: raise ValueError(f'volcano_image_mirror.ecr_namespace must be a valid ECR repository path (lowercase alphanumerics + . _ - per slash-separated segment), got {ecr_namespace!r}') if  not re.fullmatch(f'{segment}(?:/{segment})+', ecr_namespace)
+io1079=>inputoutput: output: {'enabled': True, 'ecr_namespace': ecr_namespace}
+e1077=>end: end function return
 
-op2305->op2307
-op2307->cond2310
-cond2310->op2320
-op2320->op2322
-op2322->op2324
-op2324->cond2327
-cond2327(yes)->io2334
-io2334->e2332
-cond2327(no)->cond2341
-cond2341->op2351
-op2351->cond2354
-cond2354->io2367
-io2367->e2365
+op1017->op1019
+op1019->cond1022
+cond1022->op1032
+op1032->op1034
+op1034->op1036
+op1036->cond1039
+cond1039(yes)->io1046
+io1046->e1044
+cond1039(no)->cond1053
+cond1053->op1063
+op1063->cond1066
+cond1066->io1079
+io1079->e1077
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -245,17 +245,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T00:26:15Z -->
-        <!-- Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03 -->
+        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
+        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T00:26:15Z">2026-11-19T00:26:15Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b6581899649d40769798e294f2ea42237f493c03</code>
+            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>2f337976e5dd60d9</code>
+            Flow content SHA-256: <code>6a853f040e0007fd</code>
           </p>
           <div id="canvas"></div>
         </div>

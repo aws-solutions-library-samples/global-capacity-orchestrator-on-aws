@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-18T16:59:04Z">
-        <meta name="gco-source-commit" content="3d3ba1381c5c16d0c44942f3b542591f571c3f1f">
-        <meta name="gco-flow-digest" content="04681405e9f77ef3">
+        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
+        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
+        <meta name="gco-flow-digest" content="f343c04360b2982c">
         <title>Kubectl Applier Lambda (CFN custom resource)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,16 +208,16 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op527=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which applies the\n      manifests and raises on any failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    '
-cond530=>condition: if event.get('Action')
-sub534=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
-io539=>inputoutput: output: handle_task(event)
-e537=>end: end function return
-sub545=>subroutine: print(f"[HANDLER] Received event type: {event.get('RequestType')}")
-sub547=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
-op549=>operation: request_type = event['RequestType']
-op551=>operation: physical_resource_id = event.get('PhysicalResourceId', f"kubectl-{event['LogicalResourceId']}")
-op554=>operation: properties = event['ResourceProperties']
+        <div><textarea id="code" style="width: 100%;" rows="11">op320=>operation: 'Main Lambda handler.\n\n    Two entrypoints share this function:\n\n    - **Step Functions task** (the convergence pipeline): the event carries an\n      ``Action`` key and is dispatched to :func:`handle_task`, which applies the\n      manifests and raises on any failure.\n    - **CloudFormation custom resource** (legacy/fallback): the event carries a\n      ``RequestType`` and the result is POSTed back to CloudFormation.\n    '
+cond323=>condition: if event.get('Action')
+sub327=>subroutine: logger.info(f'Task event: {json.dumps(event)}')
+io332=>inputoutput: output: handle_task(event)
+e330=>end: end function return
+sub338=>subroutine: print(f"[HANDLER] Received event type: {event.get('RequestType')}")
+sub340=>subroutine: logger.info(f'Received event: {json.dumps(event)}')
+op342=>operation: request_type = event['RequestType']
+op344=>operation: physical_resource_id = event.get('PhysicalResourceId', f"kubectl-{event['LogicalResourceId']}")
+op347=>operation: properties = event['ResourceProperties']
 cluster_name = properties['ClusterName']
 region = properties['Region']
 if request_type == 'Create' or request_type == 'Update':
@@ -238,28 +238,28 @@ elif request_type == 'Delete':
     send_response(event, context, SUCCESS, response_data, physical_resource_id)
 else:
     raise ValueError(f'Unsupported RequestType: {request_type}')
-cond553=>condition: exception raised?
-cond556=>condition: except Exception as e
-sub560=>subroutine: logger.error(f'Error: {e}', exc_info=True)
-cond563=>condition: if request_type == 'Delete'
-sub567=>subroutine: send_response(event, context, SUCCESS, {'Status': 'Forced success on delete'}, physical_resource_id)
-sub571=>subroutine: send_response(event, context, FAILED, {}, physical_resource_id, str(e))
+cond346=>condition: exception raised?
+cond349=>condition: except Exception as e
+sub353=>subroutine: logger.error(f'Error: {e}', exc_info=True)
+cond356=>condition: if request_type == 'Delete'
+sub360=>subroutine: send_response(event, context, SUCCESS, {'Status': 'Forced success on delete'}, physical_resource_id)
+sub364=>subroutine: send_response(event, context, FAILED, {}, physical_resource_id, str(e))
 
-op527->cond530
-cond530(yes)->sub534
-sub534->io539
-io539->e537
-cond530(no)->sub545
-sub545->sub547
-sub547->op549
-op549->op551
-op551->op554
-op554->cond553
-cond553(yes)->cond556
-cond556(yes)->sub560
-sub560->cond563
-cond563(yes)->sub567
-cond563(no)->sub571
+op320->cond323
+cond323(yes)->sub327
+sub327->io332
+io332->e330
+cond323(no)->sub338
+sub338->sub340
+sub340->op342
+op342->op344
+op344->op347
+op347->cond346
+cond346(yes)->cond349
+cond349(yes)->sub353
+sub353->cond356
+cond356(yes)->sub360
+cond356(no)->sub364
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -269,17 +269,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-18T16:59:04Z -->
-        <!-- Generated from Git commit: 3d3ba1381c5c16d0c44942f3b542591f571c3f1f -->
+        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
+        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-18T16:59:04Z">2026-11-18T16:59:04Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>3d3ba1381c5c16d0c44942f3b542591f571c3f1f</code>
+            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>04681405e9f77ef3</code>
+            Flow content SHA-256: <code>f343c04360b2982c</code>
           </p>
           <div id="canvas"></div>
         </div>

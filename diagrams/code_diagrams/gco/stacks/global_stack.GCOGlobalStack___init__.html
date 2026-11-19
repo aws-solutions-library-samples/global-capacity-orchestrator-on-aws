@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T00:26:15Z">
-        <meta name="gco-source-commit" content="b6581899649d40769798e294f2ea42237f493c03">
-        <meta name="gco-flow-digest" content="d68e5561abb0d562">
+        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
+        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
+        <meta name="gco-flow-digest" content="c9ab629f9839f00c">
         <title>Global stack constructor (Global Accelerator, SSM, DynamoDB)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,74 +208,76 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1048=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1050=>operation: self.config = config
-op1052=>operation: self.endpoint_groups: dict[str, ga.EndpointGroup] = {}
-op1054=>operation: supports_global_accelerator = getattr(config, 'supports_global_accelerator', None)
-op1056=>operation: self.global_accelerator_enabled = bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
-op1058=>operation: ga_config = self.config.get_global_accelerator_config()
-op1060=>operation: self.accelerator_name = ga_config.get('name') or f'{self.config.get_project_name()}-accelerator'
-sub1062=>subroutine: self._create_dynamodb_tables()
-sub1064=>subroutine: self._create_model_bucket()
-sub1066=>subroutine: self._create_cluster_shared_kms_key()
-sub1068=>subroutine: self._create_cluster_shared_bucket()
-sub1070=>subroutine: self._publish_cluster_shared_bucket_ssm_params()
-sub1072=>subroutine: self._create_backup_plan()
-op1074=>operation: self.images_config = _parse_images_config(self.node.try_get_context('images'))
-sub1076=>subroutine: self._create_image_replication_rule()
-sub1078=>subroutine: self._create_image_lookup_lambda()
-cond1081=>operation: self._create_capacity_poller() if  self.config.get_capacity_history_enabled()
-cond1092=>operation: self._create_mission_memory() if  self.config.get_mission_memory_enabled()
-cond1103=>condition: if self.config.get_vector_store_enabled()
-sub1107=>subroutine: self._create_vector_store()
-sub1109=>subroutine: self._create_vector_ingest()
-op1114=>operation: self.accelerator: ga.Accelerator | None = None
-op1116=>operation: self.listener: ga.Listener | None = None
-op1118=>operation: self.accelerator_id: str | None = None
-cond1121=>condition: if self.global_accelerator_enabled
-op1125=>operation: self.accelerator = ga.Accelerator(self, 'GCOAccelerator', accelerator_name=self.accelerator_name, enabled=True)
-op1127=>operation: self.accelerator_id = Fn.select(1, Fn.split('/', self.accelerator.accelerator_arn))
-op1129=>operation: self.listener = self.accelerator.add_listener('GCOListener', port_ranges=[ga.PortRange(from_port=443, to_port=443)], protocol=ga.ConnectionProtocol.TCP, client_affinity=self._resolve_client_affinity(ga_config))
-cond1132=>operation: self._create_endpoint_group(region) while  region in self.config.get_regions()
-sub1141=>subroutine: self._create_outputs()
-op1143=>operation: traffic_dial_config = ga_config.get('traffic_dial') or {}
-cond1146=>operation: self._create_traffic_dial_controller(ga_config) if  bool(traffic_dial_config.get('enabled', False))
-sub1159=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub480=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op482=>operation: self.config = config
+op484=>operation: self.endpoint_groups: dict[str, ga.EndpointGroup] = {}
+op486=>operation: supports_global_accelerator = getattr(config, 'supports_global_accelerator', None)
+op488=>operation: self.global_accelerator_enabled = bool(supports_global_accelerator()) if callable(supports_global_accelerator) else True
+op490=>operation: ga_config = self.config.get_global_accelerator_config()
+op492=>operation: self.accelerator_name = ga_config.get('name') or f'{self.config.get_project_name()}-accelerator'
+sub494=>subroutine: self._create_dynamodb_tables()
+cond497=>operation: self._create_jobs_table_alarms() if  config.get_global_region() != config.get_monitoring_region()
+sub507=>subroutine: self._create_model_bucket()
+sub509=>subroutine: self._create_cluster_shared_kms_key()
+sub511=>subroutine: self._create_cluster_shared_bucket()
+sub513=>subroutine: self._publish_cluster_shared_bucket_ssm_params()
+sub515=>subroutine: self._create_backup_plan()
+op517=>operation: self.images_config = _parse_images_config(self.node.try_get_context('images'))
+sub519=>subroutine: self._create_image_replication_rule()
+sub521=>subroutine: self._create_image_lookup_lambda()
+cond524=>operation: self._create_capacity_poller() if  self.config.get_capacity_history_enabled()
+cond535=>operation: self._create_mission_memory() if  self.config.get_mission_memory_enabled()
+cond546=>condition: if self.config.get_vector_store_enabled()
+sub550=>subroutine: self._create_vector_store()
+sub552=>subroutine: self._create_vector_ingest()
+op557=>operation: self.accelerator: ga.Accelerator | None = None
+op559=>operation: self.listener: ga.Listener | None = None
+op561=>operation: self.accelerator_id: str | None = None
+cond564=>condition: if self.global_accelerator_enabled
+op568=>operation: self.accelerator = ga.Accelerator(self, 'GCOAccelerator', accelerator_name=self.accelerator_name, enabled=True)
+op570=>operation: self.accelerator_id = Fn.select(1, Fn.split('/', self.accelerator.accelerator_arn))
+op572=>operation: self.listener = self.accelerator.add_listener('GCOListener', port_ranges=[ga.PortRange(from_port=443, to_port=443)], protocol=ga.ConnectionProtocol.TCP, client_affinity=self._resolve_client_affinity(ga_config))
+cond575=>operation: self._create_endpoint_group(region) while  region in self.config.get_regions()
+sub584=>subroutine: self._create_outputs()
+op586=>operation: traffic_dial_config = ga_config.get('traffic_dial') or {}
+cond589=>operation: self._create_traffic_dial_controller(ga_config) if  bool(traffic_dial_config.get('enabled', False))
+sub602=>subroutine: self._apply_nag_suppressions()
 
-sub1048->op1050
-op1050->op1052
-op1052->op1054
-op1054->op1056
-op1056->op1058
-op1058->op1060
-op1060->sub1062
-sub1062->sub1064
-sub1064->sub1066
-sub1066->sub1068
-sub1068->sub1070
-sub1070->sub1072
-sub1072->op1074
-op1074->sub1076
-sub1076->sub1078
-sub1078->cond1081
-cond1081->cond1092
-cond1092->cond1103
-cond1103(yes)->sub1107
-sub1107->sub1109
-sub1109->op1114
-op1114->op1116
-op1116->op1118
-op1118->cond1121
-cond1121(yes)->op1125
-op1125->op1127
-op1127->op1129
-op1129->cond1132
-cond1132->sub1141
-sub1141->op1143
-op1143->cond1146
-cond1146->sub1159
-cond1121(no)->sub1159
-cond1103(no)->op1114
+sub480->op482
+op482->op484
+op484->op486
+op486->op488
+op488->op490
+op490->op492
+op492->sub494
+sub494->cond497
+cond497->sub507
+sub507->sub509
+sub509->sub511
+sub511->sub513
+sub513->sub515
+sub515->op517
+op517->sub519
+sub519->sub521
+sub521->cond524
+cond524->cond535
+cond535->cond546
+cond546(yes)->sub550
+sub550->sub552
+sub552->op557
+op557->op559
+op559->op561
+op561->cond564
+cond564(yes)->op568
+op568->op570
+op570->op572
+op572->cond575
+cond575->sub584
+sub584->op586
+op586->cond589
+cond589->sub602
+cond564(no)->sub602
+cond546(no)->op557
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -285,17 +287,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T00:26:15Z -->
-        <!-- Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03 -->
+        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
+        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T00:26:15Z">2026-11-19T00:26:15Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b6581899649d40769798e294f2ea42237f493c03</code>
+            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>d68e5561abb0d562</code>
+            Flow content SHA-256: <code>c9ab629f9839f00c</code>
           </p>
           <div id="canvas"></div>
         </div>

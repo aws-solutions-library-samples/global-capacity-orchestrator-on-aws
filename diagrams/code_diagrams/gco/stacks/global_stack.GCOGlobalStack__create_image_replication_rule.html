@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T00:26:15Z">
-        <meta name="gco-source-commit" content="b6581899649d40769798e294f2ea42237f493c03">
-        <meta name="gco-flow-digest" content="e8ef95f0998c8ebd">
+        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
+        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
+        <meta name="gco-flow-digest" content="876c98f5059fee21">
         <title>Global ECR replication rule (project-scoped PREFIX_MATCH filter, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,22 +208,22 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op2372=>operation: "Provision the ECR replication rule for ``gco/*`` repositories.\n\n        When ``images.replication.enabled`` is True and at least one\n        non-source destination resolves, creates one\n        ``aws_ecr.CfnReplicationConfiguration`` rule with a single\n        ``PREFIX_MATCH`` filter on ``gco/`` and one destination per resolved\n        region. When replication is disabled or the destination list is\n        empty (e.g. single-region deploy), no replication resource is\n        provisioned and the method becomes a no-op.\n\n        The resource is the registry's single replication configuration for\n        this Region, not just GCO's rule: its update writes this rule over\n        every rule in the registry and its delete clears all of them. It is\n        therefore retained (``DeletionPolicy`` and ``UpdateReplacePolicy``),\n        so removing it or deleting the stack never deletes rules GCO did not\n        create, and the CLI (``cli/ecr_replication.py``) refuses deploys that\n        would overwrite such rules and removes only GCO's rule after the stack\n        is destroyed. Keep the logical id: a stack last deployed without the\n        retain policy deletes the configuration if the resource is removed or\n        replaced.\n        "
-cond2375=>condition: if not self.images_config['replication']['enabled']
-e2380=>end: end function return
-op2386=>operation: destinations = self._resolve_replication_destinations(self.images_config['replication']['destinations'])
-cond2389=>condition: if not destinations
-e2394=>end: end function return
-op2400=>operation: replication = ecr.CfnReplicationConfiguration(self, 'GcoImageReplicationConfig', replication_configuration=ecr.CfnReplicationConfiguration.ReplicationConfigurationProperty(rules=[ecr.CfnReplicationConfiguration.ReplicationRuleProperty(destinations=[ecr.CfnReplicationConfiguration.ReplicationDestinationProperty(region=region, registry_id=self.account) for region in destinations], repository_filters=[ecr.CfnReplicationConfiguration.RepositoryFilterProperty(filter=f'{self.config.get_project_name()}/', filter_type='PREFIX_MATCH')])]))
-sub2402=>subroutine: replication.apply_removal_policy(RemovalPolicy.RETAIN)
+        <div><textarea id="code" style="width: 100%;" rows="11">op1084=>operation: "Provision the ECR replication rule for ``gco/*`` repositories.\n\n        When ``images.replication.enabled`` is True and at least one\n        non-source destination resolves, creates one\n        ``aws_ecr.CfnReplicationConfiguration`` rule with a single\n        ``PREFIX_MATCH`` filter on ``gco/`` and one destination per resolved\n        region. When replication is disabled or the destination list is\n        empty (e.g. single-region deploy), no replication resource is\n        provisioned and the method becomes a no-op.\n\n        The resource is the registry's single replication configuration for\n        this Region, not just GCO's rule: its update writes this rule over\n        every rule in the registry and its delete clears all of them. It is\n        therefore retained (``DeletionPolicy`` and ``UpdateReplacePolicy``),\n        so removing it or deleting the stack never deletes rules GCO did not\n        create, and the CLI (``cli/ecr_replication.py``) refuses deploys that\n        would overwrite such rules and removes only GCO's rule after the stack\n        is destroyed. Keep the logical id: a stack last deployed without the\n        retain policy deletes the configuration if the resource is removed or\n        replaced.\n        "
+cond1087=>condition: if not self.images_config['replication']['enabled']
+e1092=>end: end function return
+op1098=>operation: destinations = self._resolve_replication_destinations(self.images_config['replication']['destinations'])
+cond1101=>condition: if not destinations
+e1106=>end: end function return
+op1112=>operation: replication = ecr.CfnReplicationConfiguration(self, 'GcoImageReplicationConfig', replication_configuration=ecr.CfnReplicationConfiguration.ReplicationConfigurationProperty(rules=[ecr.CfnReplicationConfiguration.ReplicationRuleProperty(destinations=[ecr.CfnReplicationConfiguration.ReplicationDestinationProperty(region=region, registry_id=self.account) for region in destinations], repository_filters=[ecr.CfnReplicationConfiguration.RepositoryFilterProperty(filter=f'{self.config.get_project_name()}/', filter_type='PREFIX_MATCH')])]))
+sub1114=>subroutine: replication.apply_removal_policy(RemovalPolicy.RETAIN)
 
-op2372->cond2375
-cond2375(yes)->e2380
-cond2375(no)->op2386
-op2386->cond2389
-cond2389(yes)->e2394
-cond2389(no)->op2400
-op2400->sub2402
+op1084->cond1087
+cond1087(yes)->e1092
+cond1087(no)->op1098
+op1098->cond1101
+cond1101(yes)->e1106
+cond1101(no)->op1112
+op1112->sub1114
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -233,17 +233,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T00:26:15Z -->
-        <!-- Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03 -->
+        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
+        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T00:26:15Z">2026-11-19T00:26:15Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b6581899649d40769798e294f2ea42237f493c03</code>
+            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>e8ef95f0998c8ebd</code>
+            Flow content SHA-256: <code>876c98f5059fee21</code>
           </p>
           <div id="canvas"></div>
         </div>

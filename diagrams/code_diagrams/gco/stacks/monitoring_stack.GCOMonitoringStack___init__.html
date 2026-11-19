@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T00:26:15Z">
-        <meta name="gco-source-commit" content="b6581899649d40769798e294f2ea42237f493c03">
-        <meta name="gco-flow-digest" content="0c92c698aa33ac5b">
+        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
+        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
+        <meta name="gco-flow-digest" content="77d9be4dac72f817">
         <title>Monitoring stack constructor (CloudWatch + alarms + SNS)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,43 +208,39 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">sub1357=>subroutine: kwargs.setdefault('cross_region_references', True)
-sub1359=>subroutine: super().__init__(scope, construct_id, **kwargs)
-op1361=>operation: self.config = config
-op1363=>operation: self.global_stack = global_stack
-op1365=>operation: self.regional_stacks = regional_stacks
-op1367=>operation: self.api_gateway_stack = api_gateway_stack
-op1369=>operation: self.project_name = config.get_project_name()
-op1371=>operation: self.regions = config.get_regions()
-op1373=>operation: self.alert_topic = self._create_alert_topic()
-cond1376=>condition: if self.config.get_cost_monitoring_enabled()
-sub1380=>subroutine: self._create_cost_report_storage()
-sub1382=>subroutine: self._create_cost_analytics()
-op1387=>operation: self.dashboard = self._create_dashboard()
-sub1389=>subroutine: self._create_alarms()
-sub1391=>subroutine: self._create_composite_alarms()
-sub1393=>subroutine: self._create_custom_metrics()
-sub1395=>subroutine: self._create_outputs()
-sub1397=>subroutine: self._apply_nag_suppressions()
+        <div><textarea id="code" style="width: 100%;" rows="11">sub783=>subroutine: kwargs.setdefault('cross_region_references', True)
+sub785=>subroutine: super().__init__(scope, construct_id, **kwargs)
+op787=>operation: self.config = config
+op789=>operation: self.global_stack = global_stack
+op791=>operation: self.regional_stacks = regional_stacks
+op793=>operation: self.api_gateway_stack = api_gateway_stack
+op795=>operation: self.project_name = config.get_project_name()
+op797=>operation: self.regions = config.get_regions()
+op799=>operation: self.alert_topic = self._create_alert_topic()
+cond802=>condition: if self.config.get_cost_monitoring_enabled()
+sub806=>subroutine: self._create_cost_report_storage()
+sub808=>subroutine: self._create_cost_analytics()
+op813=>operation: self.dashboard = self._create_dashboard()
+sub815=>subroutine: self._create_alarms()
+sub817=>subroutine: self._create_outputs()
+sub819=>subroutine: self._apply_nag_suppressions()
 
-sub1357->sub1359
-sub1359->op1361
-op1361->op1363
-op1363->op1365
-op1365->op1367
-op1367->op1369
-op1369->op1371
-op1371->op1373
-op1373->cond1376
-cond1376(yes)->sub1380
-sub1380->sub1382
-sub1382->op1387
-op1387->sub1389
-sub1389->sub1391
-sub1391->sub1393
-sub1393->sub1395
-sub1395->sub1397
-cond1376(no)->op1387
+sub783->sub785
+sub785->op787
+op787->op789
+op789->op791
+op791->op793
+op793->op795
+op795->op797
+op797->op799
+op799->cond802
+cond802(yes)->sub806
+sub806->sub808
+sub808->op813
+op813->sub815
+sub815->sub817
+sub817->sub819
+cond802(no)->op813
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -254,17 +250,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T00:26:15Z -->
-        <!-- Generated from Git commit: b6581899649d40769798e294f2ea42237f493c03 -->
+        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
+        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T00:26:15Z">2026-11-19T00:26:15Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b6581899649d40769798e294f2ea42237f493c03</code>
+            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>0c92c698aa33ac5b</code>
+            Flow content SHA-256: <code>77d9be4dac72f817</code>
           </p>
           <div id="canvas"></div>
         </div>
