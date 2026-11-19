@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 # ``gco_mcp/run_mcp.py`` puts ``gco_mcp/`` on ``sys.path`` at runtime; mirror that
@@ -108,6 +108,10 @@ def _provenance(draw: st.DrawFn) -> dict[str, Any]:
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
 )
 @given(key=_metric_keys, value=_numeric_values, provenance=_provenance())
+# Provenance fields named like the builder's own parameters must not collide
+# with them (Hypothesis found ``{"key": None}``).
+@example(key="loss", value=0.5, provenance={"key": None})
+@example(key="loss", value=0.5, provenance={"key": "raw", "value": "raw", "metrics": 1})
 def test_metrics_result_isolates_numeric_metric_from_provenance(
     key: str,
     value: float,
@@ -449,14 +453,14 @@ _error_codes = st.one_of(
     st.text(max_size=40),
 )
 
-# Details keys are passed as keyword arguments, so the reserved positional
-# ``code`` parameter name is excluded; everything else (including a key named
-# ``metrics``) is fair game and must end up nested under ``details``.
+# Details keys are passed as keyword arguments. ``code`` is positional-only in
+# the builder, so every key (including ``code`` and ``metrics``) is fair game
+# and must end up nested under ``details``.
 _detail_keys = st.text(
     alphabet=st.characters(whitelist_categories=("Ll", "Lu", "Nd"), max_codepoint=127),
     min_size=1,
     max_size=16,
-).filter(lambda k: k != "code")
+)
 
 _detail_scalars = st.one_of(
     st.none(),
@@ -496,6 +500,9 @@ def _details(draw: st.DrawFn) -> dict[str, Any]:
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
 )
 @given(code=_error_codes, details=_details())
+# A details field named like the builder's ``code`` parameter must not collide
+# with it.
+@example(code=ErrorCode.AWS_UNREACHABLE, details={"code": "AccessDenied"})
 def test_error_envelope_never_carries_top_level_metrics(
     code: str,
     details: dict[str, Any],
