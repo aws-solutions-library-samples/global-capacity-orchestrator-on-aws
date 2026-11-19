@@ -224,11 +224,16 @@ def costs_trend(config: Any, days: Any, show_all: Any) -> None:
 def costs_workloads(config: Any, region: Any) -> None:
     """Estimate costs for running workloads (jobs and inference endpoints).
 
+    Reads each region's cluster with your kubeconfig credentials, so its API
+    endpoint must be reachable from here. A region that cannot be read is
+    named on stderr and the command exits 1; the other regions are still
+    printed.
+
     Examples:
         gco costs workloads
         gco costs workloads -r us-east-1
     """
-    from ..costs import get_cost_tracker
+    from ..costs import WorkloadReadError, get_cost_tracker
 
     formatter = get_output_formatter(config)
 
@@ -237,59 +242,78 @@ def costs_workloads(config: Any, region: Any) -> None:
 
         regions = [region] if region else _get_deployment_regions(config)
         all_workloads = []
+        unread: list[str] = []
 
         for r in regions:
-            workloads = tracker.estimate_running_workloads(r)
+            try:
+                workloads = tracker.estimate_running_workloads(r)
+            except WorkloadReadError as e:
+                workloads = e.workloads
+                unread.append(r)
+                for error in e.errors:
+                    formatter.print_error(f"{r}: {error}")
             all_workloads.extend(workloads)
 
-        if config.output_format != "table":
-            formatter.print(
-                [
-                    {
-                        "name": w.name,
-                        "type": w.workload_type,
-                        "instance_type": w.instance_type,
-                        "gpu_count": w.gpu_count,
-                        "hourly_rate": w.hourly_rate,
-                        "runtime_hours": w.runtime_hours,
-                        "estimated_cost": w.estimated_cost,
-                        "region": w.region,
-                    }
-                    for w in all_workloads
-                ]
-            )
-            return
-
-        if not all_workloads:
-            formatter.print_info("No running workloads found")
-            return
-
-        print(f"\n  Running Workload Costs ({len(all_workloads)} workloads)")
-        print("  " + "-" * 95)
-        print(
-            f"  {'NAME':<30} {'TYPE':<10} {'INSTANCE':<15} {'GPU':>3} {'$/HR':>8} {'HOURS':>7} {'COST':>10}"
-        )
-        print("  " + "-" * 95)
-
-        total = 0.0
-        for w in sorted(all_workloads, key=lambda x: x.estimated_cost, reverse=True):
-            name = w.name[:29]
-            print(
-                f"  {name:<30} {w.workload_type:<10} {w.instance_type:<15} "
-                f"{w.gpu_count:>3} ${w.hourly_rate:>7.3f} {w.runtime_hours:>7.1f} ${w.estimated_cost:>9.4f}"
-            )
-            total += w.estimated_cost
-
-        total_hourly = sum(w.hourly_rate for w in all_workloads)
-        print("  " + "-" * 95)
-        print(
-            f"  {'TOTAL':<30} {'':10} {'':15} {'':>3} ${total_hourly:>7.3f} {'':>7} ${total:>9.4f}"
-        )
-        print()
-
+        _report_workloads(config, formatter, all_workloads, regions, unread)
     except Exception as e:
         formatter.print_error(f"Failed to estimate workload costs: {e}")
         sys.exit(1)
+
+    if unread:
+        # The estimate above leaves these regions out.
+        sys.exit(1)
+
+
+def _report_workloads(
+    config: Any, formatter: Any, all_workloads: list[Any], regions: list[str], unread: list[str]
+) -> None:
+    """Print the workload estimates; the ``unread`` regions are already reported."""
+    if config.output_format != "table":
+        formatter.print(
+            [
+                {
+                    "name": w.name,
+                    "type": w.workload_type,
+                    "instance_type": w.instance_type,
+                    "gpu_count": w.gpu_count,
+                    "hourly_rate": w.hourly_rate,
+                    "runtime_hours": w.runtime_hours,
+                    "estimated_cost": w.estimated_cost,
+                    "region": w.region,
+                }
+                for w in all_workloads
+            ]
+        )
+        return
+
+    if not all_workloads:
+        read = [r for r in regions if r not in unread]
+        if not unread:
+            formatter.print_info("No running workloads found")
+        elif read:
+            formatter.print_info(f"No running workloads found in {', '.join(read)}")
+        return
+
+    print(f"\n  Running Workload Costs ({len(all_workloads)} workloads)")
+    print("  " + "-" * 95)
+    print(
+        f"  {'NAME':<30} {'TYPE':<10} {'INSTANCE':<15} {'GPU':>3} {'$/HR':>8} {'HOURS':>7} {'COST':>10}"
+    )
+    print("  " + "-" * 95)
+
+    total = 0.0
+    for w in sorted(all_workloads, key=lambda x: x.estimated_cost, reverse=True):
+        name = w.name[:29]
+        print(
+            f"  {name:<30} {w.workload_type:<10} {w.instance_type:<15} "
+            f"{w.gpu_count:>3} ${w.hourly_rate:>7.3f} {w.runtime_hours:>7.1f} ${w.estimated_cost:>9.4f}"
+        )
+        total += w.estimated_cost
+
+    total_hourly = sum(w.hourly_rate for w in all_workloads)
+    print("  " + "-" * 95)
+    print(f"  {'TOTAL':<30} {'':10} {'':15} {'':>3} ${total_hourly:>7.3f} {'':>7} ${total:>9.4f}")
+    print()
 
 
 @costs.command("forecast")

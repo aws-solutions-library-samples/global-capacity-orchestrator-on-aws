@@ -84,6 +84,27 @@ class WorkloadCost:
     status: str
 
 
+#: Namespaces ``gco costs workloads`` prices, with the workload kind each holds.
+_WORKLOAD_NAMESPACES: tuple[tuple[str, str], ...] = (
+    ("gco-inference", "inference"),
+    ("gco-jobs", "job"),
+)
+
+
+class WorkloadReadError(RuntimeError):
+    """Some or all of a region's running workloads could not be read.
+
+    ``errors`` names each read that failed; ``workloads`` holds the estimates
+    for what was read.
+    """
+
+    def __init__(self, region: str, errors: list[str], workloads: list[WorkloadCost]) -> None:
+        super().__init__("; ".join(errors))
+        self.region = region
+        self.errors = errors
+        self.workloads = workloads
+
+
 class CostTracker:
     """Track and estimate costs for GCO resources."""
 
@@ -230,99 +251,120 @@ class CostTracker:
         return trend
 
     def estimate_running_workloads(self, region: str) -> list[WorkloadCost]:
-        """Estimate costs for currently running workloads in a region."""
+        """Estimate costs for currently running workloads in a region.
+
+        Lists the pods of the job and inference namespaces in the region's
+        cluster with the caller's kubeconfig credentials, so the cluster's
+        API endpoint must be reachable from here. Every request goes through
+        :class:`~gco.services.k8s_client.BoundedApiClient`, which bounds it by
+        ``K8S_API_TIMEOUT`` (default 30 s).
+
+        Raises:
+            WorkloadReadError: access to the cluster could not be set up, or
+                a namespace could not be listed. Its ``workloads`` holds the
+                estimates for the namespaces that were read, so a cluster that
+                cannot be reached never reads as one with nothing running.
+        """
         try:
             from .capacity import get_capacity_checker
         except ImportError:
             return []
 
+        from kubernetes import client as k8s_client
+        from kubernetes import config as k8s_config
+        from kubernetes.client.exceptions import ApiException
+
+        from gco.services.k8s_client import BoundedApiClient
+
+        from .kubectl_helpers import update_kubeconfig
+
         checker = get_capacity_checker(self._config)
         estimates: list[WorkloadCost] = []
+        project_name = (self._config or get_config()).project_name
+        cluster_name = f"{project_name}-{region}"
 
-        # Get running pods from EKS
         try:
-            project_name = (self._config or get_config()).project_name
-            cluster_name = f"{project_name}-{region}"
-
-            from .kubectl_helpers import update_kubeconfig
-
             update_kubeconfig(cluster_name, region)
-
-            from kubernetes import client as k8s_client
-            from kubernetes import config as k8s_config
-
             k8s_config.load_kube_config()
-            v1 = k8s_client.CoreV1Api()
-
-            # Check inference namespace
-            for ns in ["gco-inference", "gco-jobs"]:
-                try:
-                    pods = v1.list_namespaced_pod(namespace=ns)
-                except Exception as e:
-                    logger.debug("Failed to list pods in %s: %s", ns, e)
-                    continue
-
-                for pod in pods.items:
-                    status = present(pod.status, "pod.status")
-                    phase = status.phase
-
-                    if phase not in ("Running", "Pending"):
-                        continue
-                    name = present(present(pod.metadata, "pod.metadata").name, "pod.metadata.name")
-
-                    spec = present(pod.spec, "pod.spec")
-                    gpu_count = 0
-                    instance_type = "unknown"
-                    # Get GPU requests
-                    for container in spec.containers or []:
-                        resources = present(container.resources, "container.resources")
-                        requests = resources.requests or {}
-                        gpu_req = requests.get(  # nosec B113  # dict.get(), not HTTP requests
-                            "nvidia.com/gpu", "0"
-                        )
-                        gpu_count += int(gpu_req)
-
-                    # Get node instance type
-                    if spec.node_name:
-                        try:
-                            node = v1.read_node(spec.node_name)
-                            node_labels = present(node.metadata, "node.metadata").labels or {}
-                            instance_type = node_labels.get(
-                                "node.kubernetes.io/instance-type", "unknown"
-                            )
-                        except Exception as e:
-                            logger.debug("Failed to get node info for %s: %s", spec.node_name, e)
-
-                    # Calculate cost
-                    hourly_rate = checker.get_on_demand_price(instance_type, region) or 0.0
-
-                    # Calculate runtime
-                    start_time = status.start_time
-                    if start_time:
-                        runtime = datetime.now(UTC) - start_time
-                        runtime_hours = runtime.total_seconds() / 3600
-                    else:
-                        runtime_hours = 0.0
-
-                    workload_type = "inference" if ns == "gco-inference" else "job"
-
-                    estimates.append(
-                        WorkloadCost(
-                            name=name,
-                            workload_type=workload_type,
-                            instance_type=instance_type,
-                            gpu_count=gpu_count,
-                            hourly_rate=hourly_rate,
-                            runtime_hours=round(runtime_hours, 2),
-                            estimated_cost=round(hourly_rate * runtime_hours, 4),
-                            region=region,
-                            status=phase,
-                        )
-                    )
-
+            v1 = k8s_client.CoreV1Api(BoundedApiClient())
         except Exception as e:
-            logger.debug("Failed to estimate workload costs: %s", e)
+            raise WorkloadReadError(
+                region, [f"cannot set up access to cluster {cluster_name}: {e}"], estimates
+            ) from e
 
+        errors: list[str] = []
+        for ns, workload_type in _WORKLOAD_NAMESPACES:
+            try:
+                pods = v1.list_namespaced_pod(namespace=ns)
+            except ApiException as e:
+                # The API server answered; access may cover only some namespaces.
+                errors.append(
+                    f"cannot list pods in {ns} on cluster {cluster_name}: HTTP {e.status} {e.reason}"
+                )
+                continue
+            except Exception as e:
+                # No answer: the next namespace would wait out the same timeouts.
+                errors.append(f"cannot reach the API server of cluster {cluster_name}: {e}")
+                break
+
+            for pod in pods.items:
+                status = present(pod.status, "pod.status")
+                phase = status.phase
+
+                if phase not in ("Running", "Pending"):
+                    continue
+                name = present(present(pod.metadata, "pod.metadata").name, "pod.metadata.name")
+
+                spec = present(pod.spec, "pod.spec")
+                gpu_count = 0
+                instance_type = "unknown"
+                # Get GPU requests
+                for container in spec.containers or []:
+                    resources = present(container.resources, "container.resources")
+                    requests = resources.requests or {}
+                    gpu_req = requests.get(  # nosec B113  # dict.get(), not HTTP requests
+                        "nvidia.com/gpu", "0"
+                    )
+                    gpu_count += int(gpu_req)
+
+                # Get node instance type
+                if spec.node_name:
+                    try:
+                        node = v1.read_node(spec.node_name)
+                        node_labels = present(node.metadata, "node.metadata").labels or {}
+                        instance_type = node_labels.get(
+                            "node.kubernetes.io/instance-type", "unknown"
+                        )
+                    except Exception as e:
+                        logger.debug("Failed to get node info for %s: %s", spec.node_name, e)
+
+                # Calculate cost
+                hourly_rate = checker.get_on_demand_price(instance_type, region) or 0.0
+
+                # Calculate runtime
+                start_time = status.start_time
+                if start_time:
+                    runtime = datetime.now(UTC) - start_time
+                    runtime_hours = runtime.total_seconds() / 3600
+                else:
+                    runtime_hours = 0.0
+
+                estimates.append(
+                    WorkloadCost(
+                        name=name,
+                        workload_type=workload_type,
+                        instance_type=instance_type,
+                        gpu_count=gpu_count,
+                        hourly_rate=hourly_rate,
+                        runtime_hours=round(runtime_hours, 2),
+                        estimated_cost=round(hourly_rate * runtime_hours, 4),
+                        region=region,
+                        status=phase,
+                    )
+                )
+
+        if errors:
+            raise WorkloadReadError(region, errors, estimates)
         return estimates
 
     def get_forecast(self, days_ahead: int = 30) -> dict[str, Any]:

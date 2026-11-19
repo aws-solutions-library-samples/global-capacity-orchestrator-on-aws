@@ -565,17 +565,18 @@ class TestEstimateRunningWorkloads:
         assert workloads == []
 
     @patch("cli.costs.boto3.Session")
-    def test_returns_empty_on_kubectl_error(self, mock_session_cls):
+    def test_raises_on_kubectl_error(self, mock_session_cls):
+        from cli.costs import WorkloadReadError
+
         mock_session = MagicMock()
         mock_session_cls.return_value = mock_session
 
-        # Mock update_kubeconfig to raise so we hit the except branch
         with patch("cli.kubectl_helpers.update_kubeconfig", side_effect=Exception("No cluster")):
             tracker = CostTracker()
-            workloads = tracker.estimate_running_workloads("us-east-1")
+            with pytest.raises(WorkloadReadError, match="No cluster") as raised:
+                tracker.estimate_running_workloads("us-east-1")
 
-        assert workloads == []
-        assert isinstance(workloads, list)
+        assert raised.value.workloads == []
 
 
 # =============================================================================
@@ -1627,20 +1628,23 @@ class TestEstimateRunningWorkloadsDetailed:
         assert found[0].gpu_count == 2
 
     def test_namespace_list_exception(self):
+        from cli.costs import WorkloadReadError
+
         tracker = _make_cost_tracker_mocked()
 
         mock_v1 = MagicMock()
-        mock_v1.list_namespaced_pod.side_effect = RuntimeError("forbidden")
+        mock_v1.list_namespaced_pod.side_effect = RuntimeError("connection reset")
 
         with (
             patch("cli.kubectl_helpers.update_kubeconfig"),
             patch("kubernetes.client.CoreV1Api", return_value=mock_v1),
             patch("kubernetes.config.load_kube_config"),
             patch("cli.capacity.checker.CapacityChecker"),
+            pytest.raises(WorkloadReadError, match="connection reset") as raised,
         ):
-            workloads = tracker.estimate_running_workloads("us-east-1")
+            tracker.estimate_running_workloads("us-east-1")
 
-        assert workloads == []
+        assert raised.value.workloads == []
 
     def test_skips_non_running_pods(self):
         tracker = _make_cost_tracker_mocked()
@@ -1661,6 +1665,224 @@ class TestEstimateRunningWorkloadsDetailed:
             workloads = tracker.estimate_running_workloads("us-east-1")
 
         assert all(w.name != "done-job" for w in workloads)
+
+
+def _wire_pod(name: str, namespace: str, *, gpus: str = "1", node: str | None = "node-a"):
+    from kubernetes.client import V1Pod
+
+    spec: dict = {
+        "containers": [
+            {
+                "name": "main",
+                "image": "example.com/train:1",
+                "resources": {"requests": {"nvidia.com/gpu": gpus}},
+            }
+        ]
+    }
+    if node:
+        spec["nodeName"] = node
+    return V1Pod.from_dict(
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": namespace},
+            "spec": spec,
+            "status": {"phase": "Running", "startTime": "2026-11-19T00:00:00Z"},
+        }
+    )
+
+
+def _wire_pod_list(*pods):
+    from kubernetes.client import V1PodList
+
+    return V1PodList(api_version="v1", kind="PodList", items=list(pods))
+
+
+def _wire_node(instance_type: str):
+    from kubernetes.client import V1Node
+
+    return V1Node.from_dict(
+        {
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": {
+                "name": "node-a",
+                "labels": {"node.kubernetes.io/instance-type": instance_type},
+            },
+        }
+    )
+
+
+class TestWorkloadReadFailures:
+    """`gco costs workloads` swallowed every Kubernetes failure (kubeconfig,
+    pod listing) and printed "No running workloads found" with exit 0, and its
+    requests carried no timeout (N37). Failures are now reported per region and
+    the command exits 1; requests go through BoundedApiClient."""
+
+    @staticmethod
+    def _estimate(v1, region="us-east-1", **patches):
+        from cli.costs import CostTracker
+
+        with patch("cli.costs.boto3.Session"):
+            tracker = CostTracker(config=GCOConfig(project_name="gco"))
+        with (
+            patch("cli.kubectl_helpers.update_kubeconfig", **patches),
+            patch("kubernetes.config.load_kube_config"),
+            patch("kubernetes.client.CoreV1Api", return_value=v1) as core_api,
+            patch("cli.capacity.checker.CapacityChecker") as checker,
+        ):
+            checker.return_value.get_on_demand_price.return_value = 2.0
+            try:
+                return tracker.estimate_running_workloads(region), core_api
+            except Exception as error:
+                error.core_api = core_api
+                raise
+
+    def test_requests_are_bounded_by_the_shared_client(self, monkeypatch):
+        from gco.services.k8s_client import BoundedApiClient
+
+        monkeypatch.setenv("K8S_API_TIMEOUT", "12")
+        v1 = MagicMock()
+        v1.list_namespaced_pod.return_value = _wire_pod_list()
+
+        workloads, core_api = self._estimate(v1)
+
+        assert workloads == []
+        (api_client,) = core_api.call_args.args
+        assert isinstance(api_client, BoundedApiClient)
+        assert api_client.default_request_timeout == 12
+
+    def test_kubeconfig_failure_is_an_error_not_an_empty_region(self):
+        from cli.costs import WorkloadReadError
+
+        with pytest.raises(WorkloadReadError) as raised:
+            self._estimate(MagicMock(), side_effect=RuntimeError("AccessDeniedException"))
+
+        assert raised.value.region == "us-east-1"
+        assert raised.value.workloads == []
+        assert "gco-us-east-1" in str(raised.value)
+        assert "AccessDeniedException" in str(raised.value)
+
+    def test_an_unreachable_api_server_stops_after_the_first_namespace(self):
+        from urllib3.exceptions import ConnectTimeoutError, MaxRetryError
+
+        from cli.costs import WorkloadReadError
+
+        v1 = MagicMock()
+        v1.list_namespaced_pod.side_effect = MaxRetryError(
+            None,
+            "/api/v1/namespaces/gco-inference/pods",
+            reason=ConnectTimeoutError("connect timed out"),
+        )
+
+        with pytest.raises(WorkloadReadError) as raised:
+            self._estimate(v1)
+
+        assert "cannot reach the API server of cluster gco-us-east-1" in str(raised.value)
+        # The second namespace would wait out the same timeouts.
+        assert v1.list_namespaced_pod.call_count == 1
+
+    def test_a_refused_namespace_keeps_what_the_other_one_returned(self):
+        from kubernetes.client.exceptions import ApiException
+
+        from cli.costs import WorkloadReadError
+
+        v1 = MagicMock()
+        v1.list_namespaced_pod.side_effect = [
+            ApiException(status=403, reason="Forbidden"),
+            _wire_pod_list(_wire_pod("train-0", "gco-jobs", gpus="8")),
+        ]
+        v1.read_node.return_value = _wire_node("p5.48xlarge")
+
+        with pytest.raises(WorkloadReadError) as raised:
+            self._estimate(v1)
+
+        assert raised.value.errors == [
+            "cannot list pods in gco-inference on cluster gco-us-east-1: HTTP 403 Forbidden"
+        ]
+        (workload,) = raised.value.workloads
+        assert (workload.name, workload.workload_type, workload.gpu_count) == ("train-0", "job", 8)
+        assert workload.instance_type == "p5.48xlarge"
+
+    def _invoke(self, args, outcomes):
+        """Run `gco costs workloads` with each region's estimate scripted."""
+        from cli.main import cli
+
+        def estimate(region):
+            outcome = outcomes[region]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        tracker = MagicMock()
+        tracker.estimate_running_workloads.side_effect = estimate
+        with (
+            patch("cli.costs.get_cost_tracker", return_value=tracker),
+            patch(
+                "cli.commands.costs_cmd._get_deployment_regions",
+                return_value=list(outcomes),
+            ),
+        ):
+            return CliRunner().invoke(cli, args)
+
+    @staticmethod
+    def _unreachable(region):
+        from cli.costs import WorkloadReadError
+
+        return WorkloadReadError(
+            region, [f"cannot reach the API server of cluster gco-{region}: timed out"], []
+        )
+
+    @pytest.mark.parametrize("output_format", ["table", "json"])
+    def test_an_unreachable_cluster_is_not_reported_as_no_workloads(self, output_format):
+        result = self._invoke(
+            ["--output", output_format, "costs", "workloads"],
+            {"us-east-1": self._unreachable("us-east-1")},
+        )
+
+        assert result.exit_code == 1, result.output
+        assert "No running workloads found" not in result.output
+        assert "us-east-1: cannot reach the API server of cluster gco-us-east-1" in result.stderr
+        if output_format == "json":
+            assert json.loads(result.stdout) == []
+
+    def test_partial_failure_prints_the_readable_regions_and_exits_1(self):
+        job = WorkloadCost(
+            name="train-0",
+            workload_type="job",
+            instance_type="p5.48xlarge",
+            gpu_count=8,
+            hourly_rate=2.0,
+            runtime_hours=1.0,
+            estimated_cost=2.0,
+            region="us-west-2",
+            status="Running",
+        )
+        outcomes = {"us-east-1": self._unreachable("us-east-1"), "us-west-2": [job]}
+
+        table = self._invoke(["costs", "workloads"], outcomes)
+        machine = self._invoke(["--output", "json", "costs", "workloads"], outcomes)
+
+        assert table.exit_code == 1, table.output
+        assert "train-0" in table.stdout
+        assert "us-east-1: cannot reach" in table.stderr
+        assert machine.exit_code == 1, machine.output
+        assert [row["region"] for row in json.loads(machine.stdout)] == ["us-west-2"]
+
+    def test_nothing_running_in_the_readable_regions_names_them(self):
+        outcomes = {"us-east-1": self._unreachable("us-east-1"), "us-west-2": []}
+
+        result = self._invoke(["costs", "workloads"], outcomes)
+
+        assert result.exit_code == 1, result.output
+        assert "No running workloads found in us-west-2" in result.stdout
+
+    def test_a_readable_empty_fleet_still_exits_0(self):
+        result = self._invoke(["costs", "workloads"], {"us-east-1": [], "us-west-2": []})
+
+        assert result.exit_code == 0, result.output
+        assert "No running workloads found" in result.stdout
+        assert result.stderr == ""
 
 
 # =============================================================================

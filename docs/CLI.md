@@ -1707,6 +1707,8 @@ gco costs trend --all
 
 Estimate costs for currently running workloads (jobs and inference endpoints) based on instance pricing and runtime.
 
+The command lists the pods in `gco-jobs` and `gco-inference` with your kubeconfig credentials (it runs `aws eks update-kubeconfig` for each region's cluster first), so each cluster's API endpoint must be reachable from where you run it. With the default `PRIVATE` endpoint access that means a host inside the VPC that the cluster security group admits on 443; this command has no `--via-ssm` route (see [Route selection](#route-selection)). Each Kubernetes request attempt is bounded by `K8S_API_TIMEOUT` seconds (default 30). A region whose cluster cannot be read is named on stderr and the command exits 1; the workloads read from the other regions are still printed, so a cluster that cannot be reached never reads as one with nothing running.
+
 ```bash
 gco costs workloads [OPTIONS]
 ```
@@ -7048,6 +7050,7 @@ Set any threshold to `-1` to disable that health check. This is useful when runn
 | `GCO_LOG_LEVEL` | Level for GCO's own loggers (`DEBUG`, `INFO`, `WARNING`, ...); `-v` is `DEBUG`. Leaves the AWS SDK loggers alone |
 | `GCO_CACHE_DIR` | Directory for cached lookups (default `~/.gco/cache`) |
 | `GCO_REGIONAL_API` | Use regional API endpoints (`true`/`false`) |
+| `K8S_API_TIMEOUT` | Seconds one Kubernetes API request attempt from `gco costs workloads` may take (default `30`) |
 | `CDK_DOCKER` | Docker command (`docker` or `finch`) |
 | `GCO_AUTOPILOT_ENGINE` | Select `claude-code` (default), `codex`, or `opencode`; top-level `--engine` wins. |
 | `GCO_AUTOPILOT_MODEL` | Shared Bedrock model override: Claude uses it directly, Codex uses it after `GCO_AUTOPILOT_CODEX_MODEL`, and OpenCode after `GCO_AUTOPILOT_OPENCODE_MODEL`; top-level `--model` wins. See [Autopilot](AUTOPILOT.md). |
