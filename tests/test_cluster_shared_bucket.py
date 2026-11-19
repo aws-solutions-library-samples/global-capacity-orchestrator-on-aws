@@ -347,6 +347,36 @@ class TestClusterSharedBucket:
             f"PendingWindowInDays should be 7, got {props.get('PendingWindowInDays')!r}"
         )
 
+    def test_kms_key_policy_names_no_service_principal(self):
+        """The key policy is CDK's account statement alone.
+
+        S3 calls KMS for SSE-KMS with the permissions of the principal that
+        reads or writes an object (the regional job role, the SageMaker role and
+        the vector-ingest role carry their own grants), the access-logs bucket
+        is SSE-S3, and no log group uses the key: an ``s3.amazonaws.com`` or
+        ``logs.<region>.amazonaws.com`` grant would serve nothing.
+        """
+        template = _synth(cdk.App())
+        _, key = _find_cluster_shared_kms_key(template)
+        statements = key["Properties"]["KeyPolicy"]["Statement"]
+        assert [statement["Principal"] for statement in statements] == [
+            {
+                "AWS": {
+                    "Fn::Join": [
+                        "",
+                        [
+                            "arn:",
+                            {"Ref": "AWS::Partition"},
+                            ":iam::",
+                            {"Ref": "AWS::AccountId"},
+                            ":root",
+                        ],
+                    ]
+                }
+            }
+        ]
+        assert statements[0]["Action"] == "kms:*"
+
     def test_access_logs_bucket_is_separate_and_sse_s3(self):
         """Cluster-shared access-logs bucket is distinct from both other buckets and SSE-S3.
 

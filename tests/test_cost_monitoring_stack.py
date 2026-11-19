@@ -157,7 +157,26 @@ class TestCostReportBucket:
         via_service = grant["Condition"]["StringEquals"]["kms:ViaService"]
         # Rendered with the URL-suffix pseudo parameter: s3.<region>.<suffix>.
         assert via_service["Fn::Join"][1][0] == f"s3.{MONITORING_REGION}."
-        assert "AllowS3ServiceEncryptDecrypt" in statements
+
+    def test_key_policy_names_no_service_principal(self, template):
+        """Only CDK's account statement and the cost-monitor roles.
+
+        S3 (for SSE-KMS objects) and Athena (for SSE_KMS query results) call
+        KMS with the requesting principal's permissions, and the access-logs
+        bucket is SSE-S3, so no service principal needs the key.
+        """
+        (key,) = template.find_resources("AWS::KMS::Key").values()
+        principals = [
+            statement["Principal"] for statement in key["Properties"]["KeyPolicy"]["Statement"]
+        ]
+        assert principals == [
+            {
+                "AWS": {
+                    "Fn::Join": ["", ["arn:", {"Ref": "AWS::Partition"}, f":iam::{ACCOUNT}:root"]]
+                }
+            },
+            {"AWS": EXPECTED_COST_MONITOR_ROLE_ARNS},
+        ]
 
     def test_bucket_is_kms_encrypted_with_rotating_cmk(self, template):
         bucket = _cost_report_bucket(template)
@@ -249,7 +268,7 @@ class TestNoRegionalCostMonitors:
         (key,) = lonely_template.find_resources("AWS::KMS::Key").values()
         key_sids = set(_statements_by_sid(key["Properties"]["KeyPolicy"]))
         assert "AllowRegionalCostMonitorsViaS3" not in key_sids
-        assert "AllowS3ServiceEncryptDecrypt" in key_sids
+        assert "AllowS3ServiceEncryptDecrypt" not in key_sids
 
     def test_bucket_identity_is_still_published(self, lonely_template):
         from gco.stacks.constants import cost_report_ssm_parameter_prefix

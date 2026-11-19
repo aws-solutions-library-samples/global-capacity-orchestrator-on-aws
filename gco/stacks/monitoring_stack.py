@@ -272,23 +272,11 @@ class GCOMonitoringStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        kms_actions = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey",
-        ]
-        self.cost_report_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowS3ServiceEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
+        # The key policy names no service principal: S3 calls KMS for SSE-KMS
+        # with the permissions of the principal that reads or writes an object,
+        # Athena writes query results the same way with the caller's
+        # permissions, and the access-logs bucket is SSE-S3.
+        #
         # Every regional cost-monitor role writes KMS-encrypted objects into
         # the bucket below. The roles live in other regions and their stacks
         # deploy first, so the grant direction is inverted relative to the

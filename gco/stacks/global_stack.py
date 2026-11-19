@@ -2078,12 +2078,11 @@ class GCOGlobalStack(Stack):
           feature while still providing a safety net against accidental deletion.
         - Uses ``RemovalPolicy.DESTROY`` so a ``cdk destroy gco-global`` cleans up
           the key without operator intervention (iteration-loop posture).
-        - Grants encrypt/decrypt in the key policy to the ``s3.amazonaws.com``
-          service principal and to CloudWatch Logs in this Region
-          (``logs.<region>.amazonaws.com``). Neither stands in for the
-          role-side grants: SSE-KMS calls KMS with the permissions of the
-          principal that reads or writes an object, the access-logs bucket is
-          SSE-S3, and no CloudWatch log group uses this key.
+        - Keeps CDK's default key policy (the account statement that lets IAM
+          policies grant use of the key) and names no service principal: S3
+          calls KMS for SSE-KMS with the permissions of the principal that
+          reads or writes an object, the access-logs bucket is SSE-S3, and no
+          CloudWatch log group, trail or other service encrypts with this key.
 
         The key is exposed as ``self.cluster_shared_kms_key`` for tests and for
         ``_create_cluster_shared_bucket`` to reference. Role-side usage grants
@@ -2103,39 +2102,6 @@ class GCOGlobalStack(Stack):
             enable_key_rotation=True,
             pending_window=Duration.days(7),
             removal_policy=RemovalPolicy.DESTROY,
-        )
-
-        # Key-policy grants for the S3 service principal and for CloudWatch Logs
-        # in this Region. Objects in the bucket are encrypted with the
-        # permissions of whoever writes them (the role-side grants), and the
-        # access-logs bucket is SSE-S3. The actions match the standard
-        # service-principal pattern used by cdk's default key policies.
-        kms_actions = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey",
-        ]
-
-        self.cluster_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowS3ServiceEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
-        self.cluster_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchLogsEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("logs.amazonaws.com", region=self.region)],
-                actions=kms_actions,
-                resources=["*"],
-            )
         )
 
     def _create_cluster_shared_bucket(self) -> None:
