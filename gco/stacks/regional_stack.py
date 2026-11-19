@@ -197,8 +197,8 @@ from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.pcs_cluster import PcsCluster
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T06:05:34Z
-# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
+# Generated at (UTC): 2026-11-19T10:51:39Z
+# Generated from Git commit: 3c3b7b5847cb3535bafd70e8319efd8daf4f1212
 # Flowchart(s) generated from this file:
 #   * ``GCORegionalStack.__init__`` -> ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.html``
 #     (PNG: ``diagrams/code_diagrams/gco/stacks/regional_stack.GCORegionalStack___init__.png``)

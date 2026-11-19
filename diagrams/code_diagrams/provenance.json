@@ -37,14 +37,14 @@
       "source_commit": "3d3ba1381c5c16d0c44942f3b542591f571c3f1f"
     },
     "cli/jobs.py": {
-      "digest": "97435825cd921d9be29c2696ec96408498757a82673064f800b7907b57087108",
-      "generated_at": "2026-11-18T16:59:04Z",
-      "source_commit": "3d3ba1381c5c16d0c44942f3b542591f571c3f1f"
+      "digest": "db6617d8d26a5c7fb08f964503953e3e1bc852aeec6a0a0678e808c2d84b78f5",
+      "generated_at": "2026-11-19T10:51:39Z",
+      "source_commit": "3c3b7b5847cb3535bafd70e8319efd8daf4f1212"
     },
     "cli/stacks.py": {
-      "digest": "8c419c1ed81a577db156963548e24778c443a495857f3e7ce86c48b91e733e95",
-      "generated_at": "2026-11-19T00:26:15Z",
-      "source_commit": "b6581899649d40769798e294f2ea42237f493c03"
+      "digest": "b861df29fa01dd186def995c38bf9f55fc9cdc628508948169bd6392ffc85c1e",
+      "generated_at": "2026-11-19T10:51:39Z",
+      "source_commit": "3c3b7b5847cb3535bafd70e8319efd8daf4f1212"
     },
     "cli/upgrade.py": {
       "digest": "99b3e9d70f26d76bb03fcd7490046147bc370a0ea6a132adc86c683b11be94be",
@@ -117,9 +117,9 @@
       "source_commit": "3d3ba1381c5c16d0c44942f3b542591f571c3f1f"
     },
     "gco/stacks/analytics_stack.py": {
-      "digest": "36414b74bea48e1e876a2eae739e044f6bda87030f2f19e7697d60cb5bbab30d",
-      "generated_at": "2026-11-19T06:05:34Z",
-      "source_commit": "1e6de1636d5418ba50126d6619a9bafc70839dad"
+      "digest": "956f2292eaae42f775044e34bf39f9d973ec9a13fc1925ddad98a01885c90ffd",
+      "generated_at": "2026-11-19T10:51:39Z",
+      "source_commit": "3c3b7b5847cb3535bafd70e8319efd8daf4f1212"
     },
     "gco/stacks/api_gateway_global_stack.py": {
       "digest": "2085c228c7ef24bd998afbae74b35b88bb82e4ba6ac7cccf50a9895e4f28da89",
@@ -142,9 +142,9 @@
       "source_commit": "b6581899649d40769798e294f2ea42237f493c03"
     },
     "gco/stacks/regional_stack.py": {
-      "digest": "e7b1e51d269ef93e63c29091b4bbaa7f10feb79646cee769bd39d675ec5334ad",
-      "generated_at": "2026-11-19T06:05:34Z",
-      "source_commit": "1e6de1636d5418ba50126d6619a9bafc70839dad"
+      "digest": "8548038795f4e5f8c1107e37ab2e69a9458cb1dbc3605000bf06a159ff70439c",
+      "generated_at": "2026-11-19T10:51:39Z",
+      "source_commit": "3c3b7b5847cb3535bafd70e8319efd8daf4f1212"
     },
     "gco_mcp/audit.py": {
       "digest": "1f59f38629f4afb688d78240715f616049e222beaae38d5644da14b196e00af5",
