@@ -2673,17 +2673,14 @@ being ignored; see [How cdk.json Is Validated](#how-cdkjson-is-validated).
 
 ### 2. Environment-Specific Configuration
 
-```python
-# In your stack
-env = self.node.try_get_context("environment") or "dev"
-
-if env == "prod":
-    replicas = 5
-    instance_types = ["g5.2xlarge"]
-else:
-    replicas = 2
-    instance_types = ["g4dn.xlarge"]
-```
+GCO's stacks read no `environment` setting, and a top-level key they do not
+read only draws a warning (`environment is not a GCO cdk.json key and is
+ignored`), so per-environment settings live in separate `cdk.json` files: one
+checkout per environment, each with its own `cdk.json`. Give each a different
+`project_name`, which names every stack and resource, if two environments
+share an account, or deploy each to its own account with its own credentials,
+as in step 4. For a single run, `gco stacks deploy-all --enable fsx_lustre`
+turns a feature on without editing `cdk.json`.
 
 ### 3. Version Control
 
