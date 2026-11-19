@@ -515,7 +515,7 @@ gco jobs list -a --namespace gco-jobs --status running
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `namespace` | string | - | Filter by namespace |
-| `status` | string | - | Filter by status |
+| `status` | string | - | Filter by status: `pending`, `running`, `completed` or `failed` (`succeeded` is an alias of `completed`) |
 | `limit` | int | 50 | Maximum jobs to return (1-1000; anything else is a `400`) |
 
 **Response:**

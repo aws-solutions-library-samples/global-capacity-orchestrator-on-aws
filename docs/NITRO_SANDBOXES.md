@@ -33,6 +33,7 @@ gco jobs submit examples/simple-job.yaml --region us-east-1 --sandbox isolated
 gco jobs submit-sqs examples/simple-job.yaml --region us-east-1 --sandbox isolated
 gco jobs submit-direct examples/simple-job.yaml -r us-east-1 --sandbox isolated
 gco jobs submit-queue examples/simple-job.yaml -r us-east-1 --sandbox isolated
+gco queue submit examples/simple-job.yaml -r us-east-1 --sandbox isolated
 ```
 
 `--sandbox isolated` sets `runtimeClassName: isolated-sandbox` on the pod
