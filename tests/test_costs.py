@@ -1406,6 +1406,102 @@ def _tag_filters_of_every_query(mock_ce) -> list:
     return [call.kwargs["Filter"]["Tags"] for call in calls]
 
 
+def _group(key: str, amount: str) -> dict:
+    return {"Keys": [key], "Metrics": {"UnblendedCost": {"Amount": amount}}}
+
+
+def _day(date: str, amount: str) -> dict:
+    return {"TimePeriod": {"Start": date}, "Total": {"UnblendedCost": {"Amount": amount}}}
+
+
+class TestCostExplorerPagination:
+    """GetCostAndUsage returns NextPageToken when a result exceeds one page;
+    the summary, region and trend reads used only the first page (CC23)."""
+
+    @staticmethod
+    def _pages(mock_session_cls, *pages):
+        mock_ce = mock_session_cls.return_value.client.return_value
+        mock_ce.get_cost_and_usage.side_effect = list(pages)
+        return mock_ce
+
+    @staticmethod
+    def _tokens(mock_ce) -> list:
+        return [
+            call.kwargs.get("NextPageToken") for call in mock_ce.get_cost_and_usage.call_args_list
+        ]
+
+    @patch("cli.costs.boto3.Session")
+    def test_summary_reads_every_page(self, mock_session_cls):
+        period = {"Start": "2026-11-01", "End": "2026-11-19"}
+        mock_ce = self._pages(
+            mock_session_cls,
+            {
+                "ResultsByTime": [{"TimePeriod": period, "Groups": [_group("EC2", "100.00")]}],
+                "NextPageToken": "page-2",
+            },
+            {
+                "ResultsByTime": [
+                    {
+                        "TimePeriod": period,
+                        "Groups": [_group("EC2", "50.00"), _group("S3", "5.00")],
+                    }
+                ]
+            },
+        )
+
+        summary = CostTracker().get_cost_summary(days=18)
+
+        assert [(s.service, s.amount) for s in summary.by_service] == [
+            ("EC2", pytest.approx(150.0)),
+            ("S3", pytest.approx(5.0)),
+        ]
+        assert summary.total == pytest.approx(155.0)
+        assert self._tokens(mock_ce) == [None, "page-2"]
+        first, second = mock_ce.get_cost_and_usage.call_args_list
+        assert {k: v for k, v in second.kwargs.items() if k != "NextPageToken"} == first.kwargs
+
+    @patch("cli.costs.boto3.Session")
+    def test_regions_read_every_page(self, mock_session_cls):
+        mock_ce = self._pages(
+            mock_session_cls,
+            {"ResultsByTime": [{"Groups": [_group("us-east-1", "10.00")]}], "NextPageToken": "a"},
+            {"ResultsByTime": [{"Groups": [_group("us-west-2", "30.00")]}], "NextPageToken": "b"},
+            {"ResultsByTime": [{"Groups": [_group("us-east-1", "5.00")]}]},
+        )
+
+        by_region = CostTracker().get_cost_by_region(days=30)
+
+        assert by_region == {"us-west-2": pytest.approx(30.0), "us-east-1": pytest.approx(15.0)}
+        assert self._tokens(mock_ce) == [None, "a", "b"]
+
+    @patch("cli.costs.boto3.Session")
+    def test_trend_reads_every_page(self, mock_session_cls):
+        mock_ce = self._pages(
+            mock_session_cls,
+            {
+                "ResultsByTime": [_day("2026-11-17", "1.00"), _day("2026-11-18", "2.00")],
+                "NextPageToken": "next",
+            },
+            {"ResultsByTime": [_day("2026-11-19", "3.00")]},
+        )
+
+        trend = CostTracker().get_daily_trend(days=3)
+
+        assert [day["date"] for day in trend] == ["2026-11-17", "2026-11-18", "2026-11-19"]
+        assert self._tokens(mock_ce) == [None, "next"]
+
+    @patch("cli.costs.boto3.Session")
+    def test_a_failed_later_page_fails_the_query(self, mock_session_cls):
+        self._pages(
+            mock_session_cls,
+            {"ResultsByTime": [{"Groups": [_group("EC2", "1.00")]}], "NextPageToken": "t"},
+            _ce_client_error("InvalidNextTokenException", "token expired", "GetCostAndUsage"),
+        )
+
+        with pytest.raises(RuntimeError, match="InvalidNextTokenException"):
+            CostTracker().get_cost_summary()
+
+
 class TestProjectTagValueFromCdkJson:
     """Every Cost Explorer query filtered on the literal Project=GCO, while the
     stacks are tagged from cdk.json context.tags (app.py). A deployment whose

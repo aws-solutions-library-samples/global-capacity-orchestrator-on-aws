@@ -60,6 +60,23 @@ def _project_tag_filter() -> dict[str, Any]:
     return {"Tags": {"Key": PROJECT_TAG_KEY, "Values": [project_tag_value()]}}
 
 
+def _results_by_time(ce: Any, request: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every ``ResultsByTime`` entry of a GetCostAndUsage request, across its pages.
+
+    Cost Explorer returns ``NextPageToken`` when a result exceeds one page;
+    the service has no boto3 paginator, so the token is followed here.
+    """
+    results: list[dict[str, Any]] = []
+    token: str | None = None
+    while True:
+        page_request = {**request, "NextPageToken": token} if token else request
+        response = ce.get_cost_and_usage(**page_request)
+        results.extend(response.get("ResultsByTime", []))
+        token = response.get("NextPageToken")
+        if not token:
+            return results
+
+
 def _client_error_code(error: BaseException) -> str:
     """The AWS error code of a botocore ``ClientError``, else an empty string."""
     if isinstance(error, ClientError):
@@ -162,7 +179,7 @@ class CostTracker:
             kwargs["Filter"] = _project_tag_filter()
 
         try:
-            response = ce.get_cost_and_usage(**kwargs)
+            results = _results_by_time(ce, kwargs)
         except Exception as e:
             raise RuntimeError(f"Cost Explorer query failed: {e}") from e
 
@@ -175,7 +192,7 @@ class CostTracker:
         # A window that crosses a month boundary has one ResultsByTime entry
         # per month, each naming the service again: sum per service first.
         by_service: dict[str, float] = {}
-        for result in response.get("ResultsByTime", []):
+        for result in results:
             for group in result.get("Groups", []):
                 service = group["Keys"][0]
                 amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
@@ -199,23 +216,26 @@ class CostTracker:
         start = end - timedelta(days=days)
 
         try:
-            response = ce.get_cost_and_usage(
-                TimePeriod={
-                    "Start": start.isoformat(),
-                    "End": end.isoformat(),
+            results = _results_by_time(
+                ce,
+                {
+                    "TimePeriod": {
+                        "Start": start.isoformat(),
+                        "End": end.isoformat(),
+                    },
+                    "Granularity": "MONTHLY",
+                    "Metrics": ["UnblendedCost"],
+                    "Filter": _project_tag_filter(),
+                    "GroupBy": [
+                        {"Type": "DIMENSION", "Key": "REGION"},
+                    ],
                 },
-                Granularity="MONTHLY",
-                Metrics=["UnblendedCost"],
-                Filter=_project_tag_filter(),
-                GroupBy=[
-                    {"Type": "DIMENSION", "Key": "REGION"},
-                ],
             )
         except Exception as e:
             raise RuntimeError(f"Cost Explorer query failed: {e}") from e
 
         by_region: dict[str, float] = {}
-        for result in response.get("ResultsByTime", []):
+        for result in results:
             for group in result.get("Groups", []):
                 region = group["Keys"][0]
                 amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
@@ -244,12 +264,12 @@ class CostTracker:
             kwargs["Filter"] = _project_tag_filter()
 
         try:
-            response = ce.get_cost_and_usage(**kwargs)
+            results = _results_by_time(ce, kwargs)
         except Exception as e:
             raise RuntimeError(f"Cost Explorer query failed: {e}") from e
 
         trend = []
-        for result in response.get("ResultsByTime", []):
+        for result in results:
             date = result["TimePeriod"]["Start"]
             amount = float(result["Total"]["UnblendedCost"]["Amount"])
             trend.append({"date": date, "amount": amount})
