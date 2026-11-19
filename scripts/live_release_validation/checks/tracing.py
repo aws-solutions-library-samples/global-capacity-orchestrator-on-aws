@@ -23,7 +23,10 @@ check looks. Per regional Region it proves:
 The inference proxy is expected only in the Region where this run's
 ``inference`` action sent real requests through it, counted from that
 action's start; the run has no running endpoint of its own by the time this
-action runs, so anywhere else it is skipped with the reason. Evidence is
+action runs, so anywhere else it is skipped with the reason. Every other
+service is counted only from this action's own traffic: the actions between
+the inference action and this one call the same services, and their spans
+must not stand in for spans of the traffic this action drives. Evidence is
 counts only: no trace, span, or request identifiers.
 
 Every CDK invocation of a release run carries the ``tracing_overrides``
@@ -38,7 +41,7 @@ import contextlib
 import json
 import math
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -329,22 +332,31 @@ def _span_snapshot(
     logs: Any,
     expected: list[str],
     *,
-    window_start_ms: int,
     traffic_start_ms: int,
+    counted_from: Mapping[str, int],
     correlate: bool,
 ) -> tuple[dict[str, int], int | None]:
-    """Return per-service span counts and, when asked, the correlated trace count."""
+    """Return per-service span counts and, when asked, the correlated trace count.
+
+    A service is counted from this action's traffic start unless
+    ``counted_from`` gives it another start (the inference proxy, counted
+    from the inference action's start). One query per distinct window.
+    """
     end_s = int(time.time()) + _WINDOW_MARGIN_SECONDS
     counts = dict.fromkeys(expected, 0)
-    for row in _run_query(
-        logs,
-        _span_count_query(expected),
-        start_s=window_start_ms // 1000 - _WINDOW_MARGIN_SECONDS,
-        end_s=end_s,
-    ):
-        service = row.get("service", "")
-        if service in counts:
-            counts[service] += _count(row.get("spans", ""))
+    windows: dict[int, list[str]] = {}
+    for service in expected:
+        windows.setdefault(counted_from.get(service, traffic_start_ms), []).append(service)
+    for window_start_ms, services in sorted(windows.items()):
+        for row in _run_query(
+            logs,
+            _span_count_query(services),
+            start_s=window_start_ms // 1000 - _WINDOW_MARGIN_SECONDS,
+            end_s=end_s,
+        ):
+            service = row.get("service", "")
+            if service in services:
+                counts[service] += _count(row.get("spans", ""))
     if not correlate:
         return counts, None
     services_by_trace: dict[str, set[str]] = {}
@@ -369,8 +381,8 @@ def _wait_for_spans(
     region: str,
     expected: list[str],
     *,
-    window_start_ms: int,
     traffic_start_ms: int,
+    counted_from: Mapping[str, int],
     correlate: bool,
 ) -> dict[str, Any]:
     """Poll ``aws/spans`` until every expected service (and the cost trace) shows up."""
@@ -386,8 +398,8 @@ def _wait_for_spans(
             counts, correlated = _span_snapshot(
                 logs,
                 expected,
-                window_start_ms=window_start_ms,
                 traffic_start_ms=traffic_start_ms,
+                counted_from=counted_from,
                 correlate=correlate,
             )
         except _TransientQueryError as exc:
@@ -450,17 +462,12 @@ def _verify_region(
     traffic = _drive_traffic(ctx, region, rounds=rounds, cost=cost)
     record["traffic"] = traffic
     ctx.persist()
-    window_start_ms = (
-        traffic_start_ms
-        if inference_start_ms is None
-        else min(traffic_start_ms, inference_start_ms)
-    )
     spans = _wait_for_spans(
         ctx,
         region,
         expected,
-        window_start_ms=window_start_ms,
         traffic_start_ms=traffic_start_ms,
+        counted_from={} if inference_start_ms is None else {"inference-proxy": inference_start_ms},
         correlate=cost,
     )
     return {
