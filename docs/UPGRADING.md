@@ -666,12 +666,15 @@ the role had no EKS access entry.
 - **BREAKING (servers with `GCO_MCP_ROLE_ARN` set): the tools' `gco` and
   `kubectl` processes run as the role.** The role now grants what the tools
   registered without a `GCO_ENABLE_*` flag call: `execute-api:Invoke` on the
-  GCO APIs, CloudFormation, SSM, EKS, ECR and Logs reads scoped to the
-  project, job submission to the regional queues, and read-only Kubernetes
-  access to its own Region's cluster through an access entry. It grants
-  nothing broader, so sixteen default tools, and every gated tool that
-  deploys, destroys, builds, pushes, uploads, deletes or buys capacity, fail
-  under it with `AccessDenied` or `Forbidden`;
+  GCO APIs, CloudFormation, SSM, EKS, ECR, Logs and DynamoDB reads scoped to
+  the project (the inference endpoint reads included), job submission to the
+  regional queues, and read-only Kubernetes access to its own Region's
+  cluster through an access entry. It grants nothing broader, so twenty-nine
+  default tools (among them the thirteen inference tools that create or
+  change an endpoint's record, such as `deploy_inference`, `scale_inference`
+  and `canary_deploy`), and every gated tool that deploys, destroys, builds,
+  pushes, uploads, deletes or buys capacity, fail under it with
+  `AccessDenied` or `Forbidden`;
   [gco_mcp/README.md → IAM role](../gco_mcp/README.md#iam-role-gco_mcp_role_arn)
   lists them. Unset `GCO_MCP_ROLE_ARN` for those tools, or extend the role.
 - **BREAKING: delete an access entry you created for the role.** The stack

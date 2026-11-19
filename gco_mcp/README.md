@@ -629,9 +629,9 @@ Each regional stack creates `McpServerRole` and exports its ARN as the `McpServe
 | Cost Explorer reads | No resource-level permissions | `cost_summary`, `cost_by_region`, `cost_trend`, `cost_forecast`, `cost_allocation_status`, `fleet_status` |
 | ECR reads | `<project>/*` repositories; the repository and registry listings are account-wide | `images_list`, `images_tags`, `images_describe`, `images_orphans`, `images_mirror_plan`, `images_mirror_status`, `images_replication_get`, `images_replication_status`, `images_lifecycle_get` |
 | EFS and FSx describes, DynamoDB `Query` on `<project>-capacity-history`, Cognito user pool metadata | Describes and listings; no Cognito users | `list_file_systems`, `files_get`, `files_access_points`, `capacity_history_*`, `analytics_status`, `analytics_doctor` |
-| DynamoDB `Scan` | `<project>-inference-endpoints` in the global Region | `images_orphans` (the images every inference endpoint names), `list_inference_endpoints` |
+| DynamoDB `Scan` and `GetItem` | `<project>-inference-endpoints` in the global Region | `images_orphans` (the images every inference endpoint names), `list_inference_endpoints` and `fleet_status` (`Scan`); `inference_status`, `mooncake_topology_status`, `invoke_inference`, `chat_inference`, `inference_health`, `list_endpoint_models` and the `gco://inference/{endpoint_name}` resource (`GetItem`) |
 
-No statement lets the role assume or pass a role, so it cannot use the CDK bootstrap roles that deploy, destroy and bootstrap need, and it writes no stack, image, model or bucket object. Every gated tool that deploys, destroys, builds, pushes, uploads, deletes or buys capacity, and these default tools, need your own credentials (unset `GCO_MCP_ROLE_ARN`) or a role you extend with the permission:
+No statement lets the role assume or pass a role, so it cannot use the CDK bootstrap roles that deploy, destroy and bootstrap need, and it writes no stack, image, model, bucket object or inference endpoint record. Every gated tool that deploys, destroys, builds, pushes, uploads, deletes or buys capacity, and these default tools, need your own credentials (unset `GCO_MCP_ROLE_ARN`) or a role you extend with the permission:
 
 - `setup_cluster_access`: creates an EKS access entry for the caller with cluster-admin (AmazonEKSClusterAdminPolicy); the role has its own read-only entry.
 - `monitoring_users_list`: reads the Grafana admin Secret and port-forwards to Grafana.
@@ -649,6 +649,19 @@ No statement lets the role assume or pass a role, so it cannot use the CDK boots
 - `images_init`: creates an ECR repository.
 - `images_lifecycle_set`: writes an ECR lifecycle policy.
 - `images_replication_sync`: writes the registry's ECR replication configuration.
+- `deploy_inference`: creates the endpoint's record in the inference endpoints table (DynamoDB PutItem).
+- `deploy_disaggregated_inference`: creates the endpoint's record in the inference endpoints table (DynamoDB PutItem).
+- `scale_inference`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `update_inference_image`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `stop_inference`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `start_inference`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `add_inference_region`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `remove_inference_region`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `set_mooncake_topology`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `configure_mooncake_store`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `canary_deploy`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `promote_canary`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
+- `rollback_canary`: updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem).
 
 The access entry is on the role's own Region's cluster. In a multi-Region deployment the kubectl-backed tools reach the other Regions' clusters only with your own credentials (or that Region's `McpServerRoleArn`); the GCO API tools work everywhere.
 

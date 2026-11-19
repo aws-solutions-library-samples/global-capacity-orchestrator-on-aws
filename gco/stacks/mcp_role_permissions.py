@@ -6,14 +6,15 @@ server registers with no ``GCO_ENABLE_*`` flag (``safe`` and ``low-risk``
 tags): the read-only AWS calls behind them, ``execute-api:Invoke`` on the GCO
 APIs for everything the GCO API does on their behalf, and job submission to
 the regional job queues. It cannot assume a role (so not CDK's bootstrap
-roles), pass a role, or write a stack, an image, a model or a bucket object.
+roles), pass a role, or write a stack, an image, a model, a bucket object or
+an inference endpoint record.
 
 The gated families (deploy, destroy, build, push, upload, delete, capacity
 purchase, cdk.json edits, Mission, Swarm) and the default tools listed in
 :data:`DEFAULT_TOOLS_OUTSIDE_ROLE` need the operator's own credentials (unset
 ``GCO_MCP_ROLE_ARN``) or a role the operator extends. gco_mcp/README.md
-documents the boundary; ``tests/test_mcp_role_permissions.py`` keeps this
-module, the regional stack and that document in step.
+documents the boundary; ``tests/test_mcp_iam_role.py`` keeps this module, the
+regional stack and that document in step.
 
 Kubernetes access is not IAM: the regional stack gives the role an EKS access
 entry with ``AmazonEKSViewPolicy`` (read most namespaced objects, no Secrets,
@@ -33,6 +34,17 @@ MCP_KUBERNETES_GROUP = "gco:mcp-server-read"
 
 #: EKS access policy the role's access entry carries, cluster-wide.
 MCP_EKS_ACCESS_POLICY = "AmazonEKSViewPolicy"
+
+#: Why the inference tools that change an endpoint are outside the role: they
+#: write the endpoint's record in ``<project>-inference-endpoints`` directly
+#: (the CLI's InferenceEndpointStore, not the GCO API), and the regional
+#: monitors deploy whatever the record says.
+_CREATES_ENDPOINT_RECORD = (
+    "creates the endpoint's record in the inference endpoints table (DynamoDB PutItem)"
+)
+_UPDATES_ENDPOINT_RECORD = (
+    "updates the endpoint's record in the inference endpoints table (DynamoDB UpdateItem)"
+)
 
 #: Default (ungated) MCP tools the role does not cover, and why. Each needs
 #: the operator's credentials or an extended role.
@@ -56,6 +68,19 @@ DEFAULT_TOOLS_OUTSIDE_ROLE: Mapping[str, str] = {
     "images_init": "creates an ECR repository",
     "images_lifecycle_set": "writes an ECR lifecycle policy",
     "images_replication_sync": "writes the registry's ECR replication configuration",
+    "deploy_inference": _CREATES_ENDPOINT_RECORD,
+    "deploy_disaggregated_inference": _CREATES_ENDPOINT_RECORD,
+    "scale_inference": _UPDATES_ENDPOINT_RECORD,
+    "update_inference_image": _UPDATES_ENDPOINT_RECORD,
+    "stop_inference": _UPDATES_ENDPOINT_RECORD,
+    "start_inference": _UPDATES_ENDPOINT_RECORD,
+    "add_inference_region": _UPDATES_ENDPOINT_RECORD,
+    "remove_inference_region": _UPDATES_ENDPOINT_RECORD,
+    "set_mooncake_topology": _UPDATES_ENDPOINT_RECORD,
+    "configure_mooncake_store": _UPDATES_ENDPOINT_RECORD,
+    "canary_deploy": _UPDATES_ENDPOINT_RECORD,
+    "promote_canary": _UPDATES_ENDPOINT_RECORD,
+    "rollback_canary": _UPDATES_ENDPOINT_RECORD,
 }
 
 #: Read-only actions with no resource-level permissions (or, for the listing
@@ -214,9 +239,15 @@ def mcp_server_role_statements(scope: McpRoleScope) -> list[iam.PolicyStatement]
             actions=["dynamodb:Query"], resources=[capacity_table, f"{capacity_table}/index/*"]
         ),
         # images_orphans reads every inference endpoint record for the images
-        # they name (and fails when it cannot); list_inference_endpoints makes
-        # the same scan.
-        iam.PolicyStatement(actions=["dynamodb:Scan"], resources=[inference_endpoints_table]),
+        # they name (and fails when it cannot); list_inference_endpoints and
+        # fleet_status make the same scan. inference_status,
+        # mooncake_topology_status, invoke_inference, chat_inference,
+        # inference_health, list_endpoint_models and the
+        # gco://inference/{endpoint_name} resource read one record. The table
+        # has no index.
+        iam.PolicyStatement(
+            actions=["dynamodb:GetItem", "dynamodb:Scan"], resources=[inference_endpoints_table]
+        ),
         # images_tags, images_describe, images_orphans, images_mirror_*,
         # images_replication_status, images_lifecycle_get.
         iam.PolicyStatement(
