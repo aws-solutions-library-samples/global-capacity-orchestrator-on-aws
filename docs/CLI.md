@@ -406,8 +406,10 @@ gco analytics users set-password --username alice \
 #### `gco analytics studio login`
 
 Sign in to SageMaker Studio via Cognito SRP and print a presigned
-Studio URL on its own line on stdout (pipe-friendly). The password,
-`IdToken`, and URL are never written to disk.
+Studio URL on its own line on stdout (pipe-friendly): the progress shown
+while a first login provisions the user profile (30-60 seconds) goes to
+stderr, so `URL=$(gco analytics studio login ...)` captures only the URL.
+The password, `IdToken`, and URL are never written to disk.
 
 ```bash
 gco analytics studio login [OPTIONS]
