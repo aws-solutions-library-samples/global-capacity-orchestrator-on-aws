@@ -570,6 +570,89 @@ class TestHyperpodRouting:
         assert check_tolerations(tolerating)[0] is True
 
 
+def _gpu_toleration() -> dict[str, str]:
+    return {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
+
+
+def _other_toleration() -> dict[str, str]:
+    return {"key": "example.com/dedicated", "operator": "Exists", "effect": "NoSchedule"}
+
+
+class TestTrainJobTolerationsAreMergedLikeTrainer:
+    """A TrainJob's pods carry the tolerations Trainer builds, not every patch's.
+
+    Kubeflow Trainer v2.3.0 applies ``spec.runtimePatches`` in order as
+    strategic merge patches onto the runtime's JobSet spec (replicated jobs
+    merge by name). ``PodSpec.tolerations`` has no patch merge key
+    (``+listType=atomic``), so a later patch that sets tolerations for a
+    replicated job replaces the earlier list; the patch type marshals with
+    ``omitempty``, so an empty list sets nothing. Both submission paths
+    unioned every patch's tolerations and accepted a TrainJob whose pod would
+    not carry the toleration they had checked.
+    """
+
+    _trainjob = staticmethod(TestHyperpodRouting._trainjob)
+
+    @staticmethod
+    def _verdicts(monkeypatch, manifest: dict[str, Any]) -> tuple[tuple[bool, Any], ...]:
+        """(REST, SQS) verdicts; the SQS path spells "valid" as (True, "")."""
+        import importlib
+
+        import gco.services.queue_processor as qp
+
+        monkeypatch.delenv("REQUIRE_ACCELERATOR_TOLERATION", raising=False)
+        qp = importlib.reload(qp)
+        rest = check_tolerations(manifest)
+        sqs = qp.validate_manifest(manifest)
+        return rest, (sqs[0], sqs[1] or None)
+
+    def test_a_later_patch_replaces_the_gpu_toleration(self, monkeypatch) -> None:
+        manifest = self._trainjob(
+            {"node": {"tolerations": [_gpu_toleration()]}},
+            {"node": {"tolerations": [_other_toleration()]}},
+        )
+        rest, sqs = self._verdicts(monkeypatch, manifest)
+        assert rest[0] is False
+        assert "nvidia.com/gpu=true:NoSchedule" in (rest[1] or "")
+        assert sqs == rest
+
+    def test_the_last_list_set_for_the_pod_template_is_the_one_judged(self, monkeypatch) -> None:
+        last_wins = self._trainjob(
+            {"node": {"tolerations": [_other_toleration()]}},
+            {"node": {"tolerations": [_gpu_toleration()]}},
+        )
+        assert self._verdicts(monkeypatch, last_wins) == ((True, None), (True, None))
+        # An empty list (or null) is dropped by the patch type and replaces nothing.
+        for unset in ([], None):
+            kept = self._trainjob(
+                {"node": {"tolerations": [_gpu_toleration()]}},
+                {"node": {"tolerations": unset, "nodeSelector": {"zone": "a"}}},
+            )
+            assert self._verdicts(monkeypatch, kept) == ((True, None), (True, None)), unset
+
+    def test_the_hyperpod_toleration_replaced_by_a_later_patch_is_missing(
+        self, monkeypatch
+    ) -> None:
+        selector = {"gco.aws/capacity-provider": "hyperpod"}
+        manifest = self._trainjob(
+            {"node": {"nodeSelector": selector, "tolerations": [_hyperpod_toleration()]}},
+            {"node": {"tolerations": [_gpu_toleration()]}},
+        )
+        rest, sqs = self._verdicts(monkeypatch, manifest)
+        assert rest[0] is False
+        assert "gco.aws/hyperpod=true:NoSchedule" in (rest[1] or "")
+        assert sqs == rest
+
+    def test_a_toleration_outside_the_runtime_patches_reaches_no_pod(self, monkeypatch) -> None:
+        """The TrainJob CRD has no other tolerations field and prunes unknown ones."""
+        manifest = self._trainjob()
+        manifest["spec"]["podTemplateOverrides"] = [{"spec": {"tolerations": [_gpu_toleration()]}}]
+        rest, sqs = self._verdicts(monkeypatch, manifest)
+        assert rest[0] is False
+        assert "nvidia.com/gpu=true:NoSchedule" in (rest[1] or "")
+        assert sqs == rest
+
+
 class TestNoKubernetesImport:
     def test_module_is_client_free(self) -> None:
         """The point of the split: importable without the Kubernetes client.

@@ -116,7 +116,9 @@ A `TrainJob` sets them in a runtime patch on its `node` pod template
 Trainer merges every patch that names the same replicated job into one pod
 template, and the job API judges the merged template, so the selector and the
 toleration may sit in different patches. Every pod template the patches set
-must select HyperPod.
+must select HyperPod. Tolerations do not merge: a later patch that sets
+tolerations for the same replicated job replaces the earlier list, so the
+last such patch must carry the HyperPod toleration.
 
 **Inference.** `gco inference deploy --capacity-type hyperpod` (and the MCP
 `deploy_inference` tool) pins an endpoint's model pods to HyperPod nodes the
