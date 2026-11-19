@@ -362,7 +362,15 @@ class ImageManager:
             )
 
     def _apply_retain_tag(self, name: str) -> None:
-        """Apply the ``gco:retain=true`` resource tag to the repository."""
+        """Apply the ``gco:retain=true`` resource tag to the repository.
+
+        A marker only. No GCO stack creates or deletes ``<project>/*``
+        repositories, so every one survives ``gco stacks destroy`` with or
+        without it, and :meth:`delete_repo` deletes a tagged one too. The one
+        reader is the image-lookup custom resource handler
+        (lambda/image-lookup), which keeps a tagged repository on delete; the
+        global stack exports it, but no GCO stack uses it.
+        """
         ecr = self._ecr_client()
         ecr.tag_resource(
             resourceArn=self._repo_arn(name),
@@ -393,8 +401,8 @@ class ImageManager:
             build_args: Optional ``KEY=value`` build args.
             platform: ``--platform`` argument for the build (default
                 ``linux/amd64``).
-            retain: When True, mark the repository with ``gco:retain=true``
-                so it survives stack destroys.
+            retain: When True, tag the repository ``gco:retain=true`` (a
+                marker; see :meth:`_apply_retain_tag`).
             quiet: Capture container build output instead of writing it to the
                 command's output stream. Used for machine-readable CLI output.
 

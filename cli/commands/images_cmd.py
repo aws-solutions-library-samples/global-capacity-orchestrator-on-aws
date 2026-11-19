@@ -38,7 +38,14 @@ def images(config: Any) -> None:
 
 @images.command("init")
 @click.argument("name")
-@click.option("--retain/--no-retain", default=False, help="Apply gco:retain=true tag")
+@click.option(
+    "--retain/--no-retain",
+    default=False,
+    help=(
+        "Tag the repository gco:retain=true. A marker only: no GCO stack deletes "
+        "project repositories, so every one survives a stack destroy."
+    ),
+)
 @pass_config
 def images_init(config: Any, name: Any, retain: Any) -> None:
     """Create a project repository with the default lifecycle policy.
@@ -156,7 +163,14 @@ def images_uri(config: Any, name: Any, tag: Any) -> None:
 @click.option("--dockerfile", "-f", default="Dockerfile", help="Path to Dockerfile")
 @click.option("--build-arg", "build_args", multiple=True, help="Build arg KEY=VALUE")
 @click.option("--platform", default="linux/amd64", help="Target platform")
-@click.option("--retain/--no-retain", default=False, help="Apply gco:retain=true tag")
+@click.option(
+    "--retain/--no-retain",
+    default=False,
+    help=(
+        "Tag the repository gco:retain=true. A marker only: no GCO stack deletes "
+        "project repositories, so every one survives a stack destroy."
+    ),
+)
 @pass_config
 def images_build(
     config: Any,
@@ -213,7 +227,14 @@ def images_build(
 @click.argument("name")
 @click.option("--tag", "-t", required=True, help="Image tag")
 @click.option("--local-image", required=True, help="Existing local image reference")
-@click.option("--retain/--no-retain", default=False, help="Apply gco:retain=true tag")
+@click.option(
+    "--retain/--no-retain",
+    default=False,
+    help=(
+        "Tag the repository gco:retain=true. A marker only: no GCO stack deletes "
+        "project repositories, so every one survives a stack destroy."
+    ),
+)
 @pass_config
 def images_push(
     config: Any,

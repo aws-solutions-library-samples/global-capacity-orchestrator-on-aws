@@ -2609,7 +2609,7 @@ gco images init NAME [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--retain / --no-retain` | Apply `gco:retain=true` so the repo survives stack destroy |
+| `--retain / --no-retain` | Tag the repository `gco:retain=true`. A marker only: no GCO stack creates or deletes project repositories, so every repository survives `gco stacks destroy` with or without it, and `gco images delete-repo` deletes a tagged one too. Its one reader is the image-lookup custom resource handler the global stack exports (no GCO stack uses it), which keeps a tagged repository on delete |
 
 **Example:**
 
@@ -2703,7 +2703,7 @@ gco images build CONTEXT [OPTIONS]
 | `--dockerfile` | `-f` | Path to Dockerfile within the context |
 | `--build-arg` | | Build arg `KEY=VALUE`, repeatable |
 | `--platform` | | Target platform (e.g. `linux/amd64`) |
-| `--retain / --no-retain` | | Apply `gco:retain=true` |
+| `--retain / --no-retain` | | Tag the repository `gco:retain=true`, a marker (see [`gco images init`](#gco-images-init)) |
 
 **Example:**
 
@@ -2728,7 +2728,7 @@ gco images push NAME [OPTIONS]
 |--------|-------|-------------|
 | `--tag` | `-t` | Image tag (required) |
 | `--local-image` | | Existing local image reference (required) |
-| `--retain / --no-retain` | | Apply `gco:retain=true` |
+| `--retain / --no-retain` | | Tag the repository `gco:retain=true`, a marker (see [`gco images init`](#gco-images-init)) |
 
 **Example:**
 

@@ -196,8 +196,9 @@ async def images_init(name: str, retain: bool = False) -> str:
 
     Args:
         name: Repository name (without the ``gco/`` prefix).
-        retain: When True, mark the repository with ``gco:retain=true`` so it
-            survives stack destroys.
+        retain: When True, tag the repository ``gco:retain=true``. A marker
+            only: no GCO stack deletes project repositories, so every one
+            survives a stack destroy with or without it.
     """
     return await asyncio.to_thread(lambda: json.dumps(_get_manager().init(name, retain=retain)))
 
@@ -319,8 +320,9 @@ if is_enabled(FLAG_IMAGE_PUBLISH):
             tag: Image tag (defaults to git short SHA, else ``latest``).
             dockerfile: Path to the Dockerfile, relative to ``context``.
             platform: ``--platform`` argument for the build.
-            retain: When True, mark the repository with ``gco:retain=true``
-                so it survives stack destroys.
+            retain: When True, tag the repository ``gco:retain=true``. A
+                marker only: no GCO stack deletes project repositories, so
+                every one survives a stack destroy with or without it.
         """
         rejected = cli_runner.reject_paths_outside_project_root(context=context)
         if rejected is not None:
@@ -353,8 +355,9 @@ if is_enabled(FLAG_IMAGE_PUBLISH):
                 starting with a letter; max 63 chars).
             tag: Image tag.
             local_image: Source image reference on the local container runtime.
-            retain: When True, mark the repository with ``gco:retain=true``
-                so it survives stack destroys.
+            retain: When True, tag the repository ``gco:retain=true``. A
+                marker only: no GCO stack deletes project repositories, so
+                every one survives a stack destroy with or without it.
         """
         argv = [
             "gco",

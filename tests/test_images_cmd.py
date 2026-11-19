@@ -48,6 +48,17 @@ def _patch_image_manager(mock_mgr: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("command", ["init", "build", "push"])
+def test_retain_help_says_the_tag_is_only_a_marker(runner: CliRunner, command: str) -> None:
+    """IMAGES-RETAIN-TEXT: no GCO stack deletes project repositories, so the
+    flag must not promise that it is what keeps one through a destroy."""
+    result = runner.invoke(cli, ["images", command, "--help"])
+    assert result.exit_code == 0, result.output
+    help_text = " ".join(result.output.split())
+    assert "Tag the repository gco:retain=true. A marker only" in help_text
+    assert "every one survives a stack destroy" in help_text
+
+
 class TestImagesInit:
     def test_init_success_creates_repo(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
