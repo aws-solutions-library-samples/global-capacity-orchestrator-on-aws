@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
+import sys
 import tempfile
 import time
 import traceback
@@ -62,6 +64,88 @@ def require_local_execution() -> None:
             "Live release validation is local-only and must not run in GitHub Actions"
         )
     verify_emulator_endpoint(endpoint)
+
+
+def _startup_failure_cleanup(settings: RunSettings, *, module: str) -> dict[str, Any]:
+    """The ``cleanup`` record of a run whose runner could not be constructed.
+
+    Empty unless the checkpoint records a deployment. Then infrastructure may
+    be standing that no cleanup ran for: the record says so and, when the
+    checkpoint is this invocation's, names the exact command that resumes into
+    the guaranteed cleanup.
+    """
+    if not settings.checkpoint_path.is_file():
+        return {}
+    try:
+        checkpoint = RunCheckpoint.from_path(settings.checkpoint_path)
+    except OSError, ValueError:
+        return {}
+    if not checkpoint.deployment_attempted:
+        return {}
+    if checkpoint.identity != settings.identity():
+        return {
+            "needed": True,
+            "completed": False,
+            "blocked": (
+                "A deployed checkpoint exists, but its identity does not match "
+                "this invocation. No cleanup authority was established; resume "
+                "with the original exact command and checkpoint identity."
+            ),
+        }
+    recovery_argv = [sys.executable, "-m", module, *sys.argv[1:]]
+    if "--resume" not in recovery_argv:
+        recovery_argv.append("--resume")
+    return {
+        "needed": True,
+        "completed": False,
+        "blocked": (
+            "Runner construction failed after an identity-verified deployed "
+            "checkpoint was loaded; safe automatic destruction could not be "
+            "initialized."
+        ),
+        "recovery_command": shlex.join(recovery_argv),
+    }
+
+
+def write_startup_failure_report(
+    settings: RunSettings,
+    error: BaseException,
+    *,
+    module: str,
+    title: str | None = None,
+    report_stem: str | None = None,
+) -> None:
+    """Write the failed report of a run whose runner could not be constructed.
+
+    Every harness entry point (``module`` is the one to resume with) writes
+    the same report, including the blocked-cleanup record when a deployment
+    may be standing, into the validated private report directory.
+    """
+    report = ValidationReport(
+        run_id=settings.run_id,
+        identity=settings.identity(),
+        selected_actions=list(settings.requested_actions),
+        started_at=utc_now(),
+        ended_at=utc_now(),
+        status="failed",
+        fatal_error="".join(traceback.format_exception(type(error), error, error.__traceback__)),
+        cleanup=_startup_failure_cleanup(settings, module=module),
+    )
+    if title is not None:
+        report.title = title
+    if report_stem is not None:
+        report.report_stem = report_stem
+    try:
+        ensure_private_run_directory(settings.report_dir, settings.checkpoint_path)
+        json_path, markdown_path = report.write(settings.report_dir)
+    except (OSError, ValueError) as report_exc:
+        print(
+            f"Failure report was not written because the output directory is unsafe: {report_exc}",
+            file=sys.stderr,
+        )
+    else:
+        print(f"JSON report: {json_path}", file=sys.stderr)
+        print(f"Markdown report: {markdown_path}", file=sys.stderr)
 
 
 class LiveValidationRunner:

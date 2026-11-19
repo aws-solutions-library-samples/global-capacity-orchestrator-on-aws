@@ -2475,6 +2475,55 @@ class TestMain:
         markdown = (report_dir / "upgrade-validation.md").read_text(encoding="utf-8")
         assert markdown.startswith("# GCO Upgrade Validation")
 
+    @pytest.mark.parametrize("identity", ["this-run", "another-run"])
+    def test_a_startup_failure_after_a_deploy_marks_the_cleanup_blocked(
+        self,
+        tmp_path: Path,
+        repo: Repo,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        identity: str,
+    ) -> None:
+        from scripts.live_release_validation.models import RunCheckpoint, atomic_write_json
+
+        main_module = _main_module()
+        args = _identity_args(repo, tmp_path)
+        settings = main_module._settings_from_args(
+            main_module._build_parser(), main_module._build_parser().parse_args(list(args))
+        )
+        settings.report_dir.mkdir(parents=True, mode=0o700)
+        recorded = settings.identity()
+        if identity == "another-run":
+            recorded["base_commit"] = "0" * 40
+        atomic_write_json(
+            settings.checkpoint_path,
+            RunCheckpoint(identity=recorded, deployment_attempted=True).to_dict(),
+        )
+
+        def exploding(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("cdk context unreadable")
+
+        monkeypatch.setattr(main_module, "require_local_execution", lambda: None)
+        monkeypatch.setattr(main_module, "LiveValidationRunner", exploding)
+        _argv(monkeypatch, *args)
+        assert main_module.main() == 1
+
+        payload = json.loads(
+            (settings.report_dir / "upgrade-validation.json").read_text(encoding="utf-8")
+        )
+        cleanup = payload["cleanup"]
+        assert cleanup["needed"] is True and cleanup["completed"] is False
+        if identity == "this-run":
+            assert "safe automatic destruction could not be initialized" in cleanup["blocked"]
+            assert "-m scripts.upgrade_validation" in cleanup["recovery_command"]
+            assert cleanup["recovery_command"].endswith("--resume")
+        else:
+            assert "does not match this invocation" in cleanup["blocked"]
+            assert "recovery_command" not in cleanup
+        markdown = (settings.report_dir / "upgrade-validation.md").read_text(encoding="utf-8")
+        assert '"blocked":' in markdown
+        assert "JSON report:" in capsys.readouterr().err
+
     def test_a_usage_error_writes_no_report(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:

@@ -6,9 +6,7 @@ import argparse
 import json
 import os
 import re
-import shlex
 import sys
-import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,14 +25,10 @@ from .cli_args import path_from_root, repository_root, split_csv_names
 from .inference_contract import TRITON_MODEL_NAME, triton_model_repository_revision
 from .models import (
     InferenceRuntimeSpec,
-    RunCheckpoint,
     RunSettings,
-    ValidationReport,
-    ensure_private_run_directory,
-    utc_now,
 )
 from .registry import build_action_registry
-from .runner import LiveValidationRunner, require_local_execution
+from .runner import LiveValidationRunner, require_local_execution, write_startup_failure_report
 
 # Backwards-compatible aliases for this module's historical private helpers.
 _repository_root = repository_root
@@ -448,62 +442,7 @@ def main() -> int:
     except BaseException as exc:
         print(f"Live validation could not start: {type(exc).__name__}: {exc}", file=sys.stderr)
         if settings is not None:
-            report = ValidationReport(
-                run_id=settings.run_id,
-                identity=settings.identity(),
-                selected_actions=list(settings.requested_actions),
-                started_at=utc_now(),
-                ended_at=utc_now(),
-                status="failed",
-                fatal_error="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
-            )
-            if settings.checkpoint_path.is_file():
-                try:
-                    checkpoint = RunCheckpoint.from_path(settings.checkpoint_path)
-                except OSError, ValueError:
-                    checkpoint = None
-                if checkpoint is not None and checkpoint.deployment_attempted:
-                    if checkpoint.identity == settings.identity():
-                        recovery_argv = [
-                            sys.executable,
-                            "-m",
-                            "scripts.live_release_validation",
-                            *sys.argv[1:],
-                        ]
-                        if "--resume" not in recovery_argv:
-                            recovery_argv.append("--resume")
-                        report.cleanup = {
-                            "needed": True,
-                            "completed": False,
-                            "blocked": (
-                                "Runner construction failed after an identity-verified deployed "
-                                "checkpoint was loaded; safe automatic destruction could not be "
-                                "initialized."
-                            ),
-                            "recovery_command": shlex.join(recovery_argv),
-                        }
-                    else:
-                        report.cleanup = {
-                            "needed": True,
-                            "completed": False,
-                            "blocked": (
-                                "A deployed checkpoint exists, but its identity does not match "
-                                "this invocation. No cleanup authority was established; resume "
-                                "with the original exact command and checkpoint identity."
-                            ),
-                        }
-            try:
-                ensure_private_run_directory(settings.report_dir, settings.checkpoint_path)
-                json_path, markdown_path = report.write(settings.report_dir)
-            except (OSError, ValueError) as report_exc:
-                print(
-                    "Failure report was not written because the output directory is unsafe: "
-                    f"{report_exc}",
-                    file=sys.stderr,
-                )
-            else:
-                print(f"JSON report: {json_path}", file=sys.stderr)
-                print(f"Markdown report: {markdown_path}", file=sys.stderr)
+            write_startup_failure_report(settings, exc, module="scripts.live_release_validation")
         return 1
 
 

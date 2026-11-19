@@ -172,6 +172,12 @@ The workspace is deleted once teardown completes. A run that stops before then
 keeps it, and the report names its path; delete it yourself when the run is
 torn down (it holds no AWS state).
 
+If the harness cannot start on a resume after the base deploy began (an
+unreadable cdk.json, a changed identity), it writes a failed report whose
+`cleanup` is marked blocked, as the release harness does; when the checkpoint
+is this invocation's, the report carries the exact `--resume` command that
+reaches the guaranteed cleanup.
+
 If cleanup cannot finish, follow the release harness's
 [recovery procedure](LIVE_RELEASE_VALIDATION.md#cleanup-retained-resources-and-recovery).
 The checkpoint's `owned_stacks` records list every stack generation the run

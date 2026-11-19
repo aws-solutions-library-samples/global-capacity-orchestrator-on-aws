@@ -24,7 +24,7 @@ guide: how the code is organized and where a new check belongs.
 | Path | Responsibility |
 |---|---|
 | `registry.py` | The ordered action registry: names, descriptions, dependencies, handlers. Single source of truth for `--actions`. |
-| `runner.py` | Executes selected actions, checkpoints after each, and guarantees cleanup + reporting once runtime construction succeeds; bootstrap failures report cleanup blocked with an exact recovery command. |
+| `runner.py` | Executes selected actions, checkpoints after each, and guarantees cleanup + reporting once runtime construction succeeds; bootstrap failures report cleanup blocked with an exact recovery command (`write_startup_failure_report`, which the example and upgrade entry points use too). |
 | `models.py` | Main `RunSettings`, `RunCheckpoint`, `RunContext`, `ActionResult`, and `ValidationReport` types. |
 | `artifact_io.py` | Owner-only report/checkpoint directory validation (the reports, the checkpoint, the isolated `kubeconfig`, and the run's own `model-repositories/` directory are the only entries a resume accepts) and atomic text writes. |
 | `inference_contract.py` | Strict vLLM/SGLang/Triton request, structured-decision (`/v1/systemone`), probe, endpoint, and resume-identity helpers used by main `RunSettings`. |

@@ -226,9 +226,12 @@ mode-`0600` `kubeconfig` the `examples` action reached the cluster with
 carries a per-example row (status, duration, submission command, disclosed
 mutations, criteria evidence, cleanup proof) under the `examples` action's
 `details`, whether the action passed or failed; a failed `static` action
-keeps its failed checks there the same way. Reports contain
-account-specific identifiers — share sanitized summaries only, never the
-raw files.
+keeps its failed checks there the same way. If the harness cannot start
+after a run already deployed, the failure report marks `cleanup` as
+blocked, as the release harness's does, and when the checkpoint is this
+invocation's it names the exact `--resume` command that tears the
+deployment down. Reports contain account-specific identifiers — share
+sanitized summaries only, never the raw files.
 
 ## Scoping and Iteration
 
