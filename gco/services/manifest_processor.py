@@ -1562,11 +1562,15 @@ class ManifestProcessor:
 
         Args:
             namespace: Filter by specific namespace (must be in allowed_namespaces)
-            status_filter: Filter by status: "running", "completed", "failed"
+            status_filter: Filter by status: "pending", "running", "completed"
+                or "failed" (:meth:`_get_job_status`). "succeeded", what the
+                job responses call a finished Job, is an alias of "completed".
 
         Returns:
             List of job dictionaries with metadata and status
         """
+        if status_filter == "succeeded":
+            status_filter = "completed"
         jobs = []
 
         # Determine which namespaces to query

@@ -648,7 +648,7 @@ gco jobs list -r us-east-1 --limit 10
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `namespace` | string | - | Filter by namespace |
-| `status` | string | - | Filter by status (pending, running, completed, succeeded, failed) |
+| `status` | string | - | Filter by status: `pending`, `running`, `completed` or `failed`. `succeeded`, what the responses call a finished Job, is an alias of `completed` |
 | `limit` | int | 50 | Maximum jobs to return (1-1000) |
 | `offset` | int | 0 | Number of jobs to skip |
 | `sort` | string | createdAt:desc | Sort field and order (field:asc\|desc) |
@@ -1307,7 +1307,7 @@ gco jobs bulk-delete --all-regions --status failed --older-than-days 30 --execut
 | Field | Type | Description |
 |-------|------|-------------|
 | `namespace` | string | Filter by namespace |
-| `status` | string | Filter by status |
+| `status` | string | Filter by status: `pending`, `running`, `completed` or `failed` (`succeeded` is an alias of `completed`) |
 | `older_than_days` | int | Delete jobs older than N days (1-365) |
 | `label_selector` | string | Kubernetes label selector |
 | `dry_run` | bool | If true, only return what would be deleted |

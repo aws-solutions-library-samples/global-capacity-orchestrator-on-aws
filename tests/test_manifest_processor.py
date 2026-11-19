@@ -11,6 +11,7 @@ and Job manifests so each test starts from a known-good baseline.
 """
 
 import re
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1777,6 +1778,45 @@ class TestListJobs:
 
         assert len(jobs) == 1
         assert jobs[0]["metadata"]["name"] == "job-completed"
+
+    @pytest.mark.asyncio
+    async def test_list_jobs_status_filter_succeeded_is_completed(self, processor_with_mocks):
+        """``succeeded`` filters like ``completed``.
+
+        The job responses call a finished Job ``succeeded`` (and so do older
+        CLIs and direct API callers, and the bulk-delete ``status`` enum
+        accepts it), while the filter compared against ``completed`` only, so
+        ``?status=succeeded`` listed nothing and a bulk delete with
+        ``"status": "succeeded"`` matched nothing.
+        """
+        from kubernetes.client import V1Job, V1JobList
+
+        def job(name: str, status: dict[str, Any]) -> V1Job:
+            return V1Job.from_dict(
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {"name": name, "namespace": "default", "uid": f"uid-{name}"},
+                    "spec": {"template": {"spec": {"containers": []}}},
+                    "status": status,
+                }
+            )
+
+        done = {
+            "succeeded": 1,
+            "conditions": [{"type": "Complete", "status": "True"}],
+        }
+        processor_with_mocks.batch_v1.list_namespaced_job = MagicMock(
+            return_value=V1JobList(
+                items=[job("job-running", {"active": 1}), job("job-done", done)], metadata={}
+            )
+        )
+
+        for status_filter in ("succeeded", "completed"):
+            jobs = await processor_with_mocks.list_jobs(
+                namespace="default", status_filter=status_filter
+            )
+            assert [j["metadata"]["name"] for j in jobs] == ["job-done"], status_filter
 
     @pytest.mark.asyncio
     async def test_list_jobs_with_status_filter_failed(self, processor_with_mocks):
