@@ -335,9 +335,11 @@ spend** — discounts, Savings Plans, and spot pricing included:
 
 ### Cost allocation tags
 
-Every `gco costs` Cost Explorer query filters on the `Project` tag, which
-only matches spend after the tag key is activated as a cost allocation tag
-in the billing account:
+Every `gco costs` Cost Explorer query filters on the `Project` tag, with the
+value `cdk.json` `context.tags.Project` gives every stack (`GCO` in the
+committed file; the CLI uses `GCO` when it runs outside a checkout). The
+filter only matches spend after the tag key is activated as a cost
+allocation tag in the billing account:
 
 ```bash
 gco costs allocation status    # activation state of GCO's tag keys
@@ -351,6 +353,11 @@ GPU spend: EKS Auto Mode launches EC2 capacity outside CloudFormation, so
 those instances never carry `Project` — but AWS stamps them with
 `aws:eks:cluster-name`, giving per-cluster attribution with zero manifest
 changes. Group by it in Cost Explorer or the CUR to split spend by cluster.
+
+The `Project` value is not derived from `project_name`. Two deployments in
+one account that keep the same value report each other's spend, so give
+each its own `context.tags.Project` value when you need project-scoped
+Cost Explorer figures.
 
 Operational notes:
 

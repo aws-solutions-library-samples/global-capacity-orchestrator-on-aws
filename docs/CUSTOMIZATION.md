@@ -325,6 +325,12 @@ names (namespaces such as `gco-jobs` / `gco-system`, service accounts,
 ConfigMaps): each deployment gets its own EKS cluster, so those live in
 separate Kubernetes API servers and never collide across deployments.
 
+Cost Explorer attribution is not scoped by `project_name` either:
+`gco costs summary|regions|trend|forecast` filter on the `Project` tag from
+`context.tags` (`GCO` in the committed `cdk.json`), so deployments that keep
+the same value report each other's spend. Give each deployment its own
+value, for example `"tags": {"Project": "GCO-staging"}`.
+
 ### `project_name` format
 
 Because the value flows into S3 bucket names, the Cognito domain prefix and

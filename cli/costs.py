@@ -17,7 +17,7 @@ from botocore.exceptions import ClientError
 
 from gco.k8s_objects import present
 
-from .config import GCOConfig, get_config
+from .config import GCOConfig, _load_cdk_tags, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 # GPU spend.
 DEFAULT_COST_ALLOCATION_TAG_KEYS: tuple[str, ...] = ("Project", "aws:eks:cluster-name")
 
+# The cost allocation tag the Cost Explorer queries filter on, and the value
+# the committed cdk.json gives it.
+PROJECT_TAG_KEY = "Project"
+DEFAULT_PROJECT_TAG_VALUE = "GCO"
+
 # UpdateCostAllocationTagsStatus accepts at most 20 entries per call and
 # ListCostAllocationTags at most 20 TagKeys filters; batch both.
 _COST_ALLOCATION_TAG_BATCH_SIZE = 20
@@ -37,6 +42,22 @@ _COST_ALLOCATION_TAG_BATCH_SIZE = 20
 
 class CostDataUnavailableError(RuntimeError):
     """Cost Explorer lacks the history the request needs (``DataUnavailableException``)."""
+
+
+def project_tag_value() -> str:
+    """Value of the ``Project`` tag the stacks carry.
+
+    app.py tags every stack with cdk.json ``context.tags``, so the value is
+    read from there (the project root's cdk.json); outside a checkout, or
+    when cdk.json sets none, it is the committed default ``GCO``.
+    """
+    value = _load_cdk_tags().get(PROJECT_TAG_KEY)
+    return value if isinstance(value, str) and value else DEFAULT_PROJECT_TAG_VALUE
+
+
+def _project_tag_filter() -> dict[str, Any]:
+    """Cost Explorer filter matching spend tagged with this project's ``Project`` value."""
+    return {"Tags": {"Key": PROJECT_TAG_KEY, "Values": [project_tag_value()]}}
 
 
 def _client_error_code(error: BaseException) -> str:
@@ -138,12 +159,7 @@ class CostTracker:
         }
 
         if not unfiltered:
-            kwargs["Filter"] = {
-                "Tags": {
-                    "Key": "Project",
-                    "Values": ["GCO"],
-                }
-            }
+            kwargs["Filter"] = _project_tag_filter()
 
         try:
             response = ce.get_cost_and_usage(**kwargs)
@@ -190,12 +206,7 @@ class CostTracker:
                 },
                 Granularity="MONTHLY",
                 Metrics=["UnblendedCost"],
-                Filter={
-                    "Tags": {
-                        "Key": "Project",
-                        "Values": ["GCO"],
-                    }
-                },
+                Filter=_project_tag_filter(),
                 GroupBy=[
                     {"Type": "DIMENSION", "Key": "REGION"},
                 ],
@@ -230,12 +241,7 @@ class CostTracker:
         }
 
         if not unfiltered:
-            kwargs["Filter"] = {
-                "Tags": {
-                    "Key": "Project",
-                    "Values": ["GCO"],
-                }
-            }
+            kwargs["Filter"] = _project_tag_filter()
 
         try:
             response = ce.get_cost_and_usage(**kwargs)
@@ -382,12 +388,7 @@ class CostTracker:
                 },
                 Metric="UNBLENDED_COST",
                 Granularity="MONTHLY",
-                Filter={
-                    "Tags": {
-                        "Key": "Project",
-                        "Values": ["GCO"],
-                    }
-                },
+                Filter=_project_tag_filter(),
             )
 
         except Exception as e:

@@ -83,6 +83,25 @@ def _load_cdk_project_name() -> str | None:
     return None
 
 
+def _load_cdk_tags() -> dict[str, Any]:
+    """Load ``context.tags`` from cdk.json if present.
+
+    app.py applies these tags to every stack, so they are what billing data
+    carries (the ``Project`` tag the ``gco costs`` queries filter on).
+    """
+    cdk_json_path = _project_dir() / "cdk.json"
+    if cdk_json_path.exists():
+        try:
+            with open(cdk_json_path, encoding="utf-8") as f:
+                data = json.load(f)
+                tags = data.get("context", {}).get("tags")
+                if isinstance(tags, dict):
+                    return tags
+        except Exception as e:
+            logger.debug("Failed to load tags from cdk.json: %s", e)
+    return {}
+
+
 @dataclass
 class GCOConfig:
     """Configuration for GCO CLI."""

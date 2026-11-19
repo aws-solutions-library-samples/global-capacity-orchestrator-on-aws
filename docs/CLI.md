@@ -1578,7 +1578,7 @@ gco config-cmd get default_region
 
 ### Costs Commands
 
-View cost breakdowns and estimates for GCO resources. Uses AWS Cost Explorer filtered by the `Project: GCO` tag applied to all resources.
+View cost breakdowns and estimates for GCO resources. `summary`, `regions`, `trend` and `forecast` use AWS Cost Explorer filtered by the `Project` tag that `cdk.json` `context.tags` applies to every stack (`GCO` in the committed file). The CLI reads the value from the `cdk.json` in the current directory and uses `GCO` outside a checkout. Two deployments in one account that keep the same value see each other's spend; give each deployment its own `context.tags.Project` value to report project-scoped cost.
 
 **Setup (one-time):** To filter costs by the `Project` tag, you must activate cost allocation tags in your AWS account. The CLI can do this for you:
 

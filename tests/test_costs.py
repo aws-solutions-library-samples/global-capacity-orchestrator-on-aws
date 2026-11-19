@@ -1390,6 +1390,81 @@ class TestCostTrackerTagFilter:
         mock_session.client.assert_called_with("ce", region_name="us-east-1")
 
 
+def _write_cdk_json(directory, context: dict) -> None:
+    (directory / "cdk.json").write_text(json.dumps({"app": "python3 app.py", "context": context}))
+
+
+def _tag_filters_of_every_query(mock_ce) -> list:
+    tracker = CostTracker()
+    mock_ce.get_cost_and_usage.return_value = {"ResultsByTime": []}
+    mock_ce.get_cost_forecast.return_value = {"Total": {"Amount": "0"}}
+    tracker.get_cost_summary()
+    tracker.get_cost_by_region()
+    tracker.get_daily_trend()
+    tracker.get_forecast()
+    calls = mock_ce.get_cost_and_usage.call_args_list + mock_ce.get_cost_forecast.call_args_list
+    return [call.kwargs["Filter"]["Tags"] for call in calls]
+
+
+class TestProjectTagValueFromCdkJson:
+    """Every Cost Explorer query filtered on the literal Project=GCO, while the
+    stacks are tagged from cdk.json context.tags (app.py). A deployment whose
+    Project tag differs got $0 from summary/regions/trend/forecast (N44)."""
+
+    @patch("cli.costs.boto3.Session")
+    def test_queries_use_the_value_cdk_json_tags_the_stacks_with(
+        self, mock_session_cls, tmp_path, monkeypatch
+    ):
+        _write_cdk_json(
+            tmp_path,
+            {"project_name": "gco-staging", "tags": {"Project": "GCO-staging", "Owner": "ml"}},
+        )
+        monkeypatch.chdir(tmp_path)
+
+        filters = _tag_filters_of_every_query(mock_session_cls.return_value.client.return_value)
+
+        assert filters == [{"Key": "Project", "Values": ["GCO-staging"]}] * 4
+
+    @patch("cli.costs.boto3.Session")
+    def test_mcp_project_root_is_honoured(self, mock_session_cls, tmp_path):
+        from cli.config import set_project_root
+
+        _write_cdk_json(tmp_path, {"tags": {"Project": "Team-B"}})
+        set_project_root(tmp_path)
+        try:
+            filters = _tag_filters_of_every_query(mock_session_cls.return_value.client.return_value)
+        finally:
+            set_project_root(None)
+
+        assert {tag["Values"][0] for tag in filters} == {"Team-B"}
+
+    @pytest.mark.parametrize(
+        "context",
+        [None, {}, {"tags": {}}, {"tags": {"Project": ""}}, {"tags": ["Project", "x"]}],
+        ids=["no-cdk-json", "no-tags", "empty-tags", "empty-value", "malformed-tags"],
+    )
+    @patch("cli.costs.boto3.Session")
+    def test_falls_back_to_the_committed_default(
+        self, mock_session_cls, context, tmp_path, monkeypatch
+    ):
+        if context is not None:
+            _write_cdk_json(tmp_path, context)
+        monkeypatch.chdir(tmp_path)
+
+        filters = _tag_filters_of_every_query(mock_session_cls.return_value.client.return_value)
+
+        assert filters == [{"Key": "Project", "Values": ["GCO"]}] * 4
+
+    @patch("cli.costs.boto3.Session")
+    def test_unreadable_cdk_json_falls_back(self, mock_session_cls, tmp_path, monkeypatch):
+        (tmp_path / "cdk.json").write_text("{not json")
+        monkeypatch.chdir(tmp_path)
+
+        filters = _tag_filters_of_every_query(mock_session_cls.return_value.client.return_value)
+
+        assert {tag["Values"][0] for tag in filters} == {"GCO"}
+
+
 # =============================================================================
 # Unfiltered (--all) Mode Tests
 # =============================================================================
