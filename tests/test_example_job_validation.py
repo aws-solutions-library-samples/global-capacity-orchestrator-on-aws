@@ -2683,15 +2683,39 @@ class TestCapacitySkipReason:
         session = _FakeSession(**{"service-quotas": quotas})
         assert actions._capacity_skip_reason(_live_ctx(session), "us-east-1", "L-1945791B") is None
 
-    def test_lookup_failure_skips_rather_than_failing_the_run(self) -> None:
+    def test_a_failed_lookup_is_an_error_not_a_skip(self) -> None:
         from scripts.example_job_validation import actions
 
         quotas = _FakeQuotas(PermissionError("AccessDenied"))
         session = _FakeSession(**{"service-quotas": quotas})
-        reason = actions._capacity_skip_reason(_live_ctx(session), "us-east-1", "L-2C3B7624")
-        assert reason == (
-            "quota L-2C3B7624 lookup failed (PermissionError); treating as unavailable"
+        with pytest.raises(
+            drivers.ExampleValidationError,
+            match=(
+                r"^the EC2 quota L-2C3B7624 could not be read \(PermissionError: AccessDenied\), "
+                r"so whether this account can run the example is unknown$"
+            ),
+        ):
+            actions._capacity_skip_reason(_live_ctx(session), "us-east-1", "L-2C3B7624")
+
+    def test_a_failed_lookup_fails_the_example_before_anything_is_submitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.example_job_validation import actions
+
+        quotas = _FakeQuotas(KeyError("Quota"))
+        session = _FakeSession(**{"service-quotas": quotas})
+        monkeypatch.setattr(
+            actions.kube,
+            "ensure_tunnel",
+            lambda kubectl: pytest.fail("nothing may run after a failed quota lookup"),
         )
+
+        result = actions._run_one_example(
+            _live_ctx(session), "trainium-job", "us-east-1", lambda *_a, **_k: (0, "", "")
+        )
+
+        assert result.status == "failed"
+        assert result.detail.startswith("the EC2 quota L-2C3B7624 could not be read (KeyError")
 
 
 class TestKedaPlumbing:

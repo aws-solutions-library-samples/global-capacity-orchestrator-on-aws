@@ -212,7 +212,10 @@ queue or the Argo CD example's commit under validation.
 Capacity-gated examples (`efa-distributed-training` on P-family,
 inferentia/trainium on Inf/Trn) check the account's service quota first
 and record an explicit **skipped** row with the quota evidence when it is
-zero — a skip is never silent.
+zero — a skip is never silent. A quota the run cannot read (no
+`servicequotas:GetServiceQuota` permission, a throttled or malformed answer)
+fails the example instead, because nothing then shows the account lacks the
+capacity.
 
 ## Reports
 
