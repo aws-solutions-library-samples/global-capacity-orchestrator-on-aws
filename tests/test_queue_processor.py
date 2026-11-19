@@ -2126,6 +2126,43 @@ class TestTrainJobValidation:
         assert not ok
         assert "hostPath" in reason
 
+    def test_hostpath_in_a_runtime_patch_without_containers_rejected(self):
+        """A patch may set pod-level fields alone: a hostPath volume in one
+        patch and its mount in another must still be refused."""
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                runtime_patches=[
+                    {
+                        "manager": "volume",
+                        **_patch_with_pod_spec(
+                            {
+                                "volumes": [
+                                    {"name": "scratch", "emptyDir": {}},
+                                    {"name": "host", "hostPath": {"path": "/"}},
+                                ]
+                            }
+                        ),
+                    },
+                    {
+                        "manager": "mount",
+                        **_patch_with_pod_spec(
+                            {
+                                "containers": [
+                                    {
+                                        "name": "node",
+                                        "volumeMounts": [{"name": "host", "mountPath": "/host"}],
+                                    }
+                                ]
+                            }
+                        ),
+                    },
+                ],
+            )
+        )
+        assert not ok
+        assert "hostPath" in reason
+
     def test_privileged_in_runtime_patch_rejected(self):
         qp = _reload()
         ok, reason = qp.validate_manifest(
@@ -2189,6 +2226,34 @@ class TestTrainJobValidation:
                 num_nodes=1,
                 resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
                 runtime_patches=[_GPU_TOLERATION_PATCH],
+            )
+        )
+        assert ok, reason
+
+    def test_toleration_in_a_runtime_patch_without_containers_satisfies_gpu_request(self):
+        """The documented GPU variant: the patch sets scheduling fields only."""
+        qp = _reload()
+        ok, reason = qp.validate_manifest(
+            _trainjob(
+                num_nodes=1,
+                resources_per_node={"limits": {"nvidia.com/gpu": "1"}},
+                runtime_patches=[
+                    {
+                        "manager": "gco-example",
+                        **_patch_with_pod_spec(
+                            {
+                                "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                                "tolerations": [
+                                    {
+                                        "key": "nvidia.com/gpu",
+                                        "operator": "Exists",
+                                        "effect": "NoSchedule",
+                                    }
+                                ],
+                            }
+                        ),
+                    }
+                ],
             )
         )
         assert ok, reason

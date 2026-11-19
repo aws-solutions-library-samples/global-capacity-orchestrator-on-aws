@@ -531,6 +531,16 @@ class TestTrainJobCrudAcceptance:
             "API version 'trainer.kubeflow.org/v1beta1' is not allowed for kind 'TrainJob'" in error
         )
 
+    @pytest.mark.parametrize("source", list(_GPU_VARIANTS))
+    def test_documented_gpu_variant_passes_validation(self, processor, source):
+        # The variant's patch sets only scheduling fields (no containers); its
+        # toleration must still answer the GPU request in spec.trainer.
+        manifest = yaml.safe_load(_TRAINJOB_EXAMPLE.read_text(encoding="utf-8"))
+        variant = _GPU_VARIANTS[source]()["spec"]
+        manifest["spec"]["trainer"].update(variant["trainer"])
+        manifest["spec"]["runtimePatches"] = variant["runtimePatches"]
+        assert processor.validate_manifest(manifest) == (True, None)
+
 
 class TestHelmInstallerConvergence:
     """handle_task converges the trainer chart in both directions."""
