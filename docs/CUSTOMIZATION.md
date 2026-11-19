@@ -1419,16 +1419,18 @@ spec:
 
 ### Lambda Configuration
 
-Edit `gco/stacks/regional_stack.py`:
+The kubectl-applier Lambda (`KubectlApplierFunction` in
+`gco/stacks/regional_stack.py`) already runs with Lambda's maximum timeout of
+15 minutes, so its timeout cannot be raised. Its memory (512 MB) can, which also
+gives it more CPU:
 
 ```python
-kubectl_lambda = lambda_.Function(
-    self, "KubectlApplierFunction",
-    runtime=lambda_.Runtime.PYTHON_3_14,
-    handler="handler.lambda_handler",
-    code=lambda_.Code.from_asset("lambda/kubectl-applier-simple-build"),
-    timeout=Duration.minutes(10),  # Increase from 5
-    memory_size=1024,              # Increase from 512
+self.kubectl_lambda = lambda_.Function(
+    self,
+    "KubectlApplierFunction",
+    ...
+    timeout=Duration.minutes(15),  # already Lambda's maximum
+    memory_size=1024,              # raised from 512
     ...
 )
 ```
