@@ -118,7 +118,9 @@ def _job_context(tmp_path: Path) -> Any:
     ctx = _real_context(tmp_path)
     ctx.job_manager = _offline_job_manager()
     ctx.session.get_partition_for_region.return_value = "aws"
-    ctx.cdk_context = {"api_gateway": {"regional_api_enabled": True}}
+    # Two Regions: each Job is reached through its own Region's API bridge,
+    # whatever cdk.json says (it carries no api_gateway block here).
+    ctx.deployment_regions = ("us-east-1", "eu-west-1")
     return ctx
 
 

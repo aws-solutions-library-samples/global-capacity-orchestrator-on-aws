@@ -139,7 +139,8 @@ class TestStatusPolling:
         assert status["opencost_returning_data"] is True
         request = ctx.aws_client.make_authenticated_request.call_args.kwargs
         assert request["path"] == "/api/v1/cost/status"
-        assert request["target_region"] == "us-east-1"
+        # A single-Region run in the aws partition reads through the global API.
+        assert request["target_region"] is None
 
     def test_polls_until_data_arrives(self):
         ctx = _context()

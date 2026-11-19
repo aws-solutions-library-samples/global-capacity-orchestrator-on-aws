@@ -17,10 +17,7 @@ from ..checks.topology import (
 from ..constants import (
     _HEALTHY_STACK_STATUSES,
 )
-from ..context import (
-    _direct_regional_access_enabled,
-    effective_kubernetes_version,
-)
+from ..context import effective_kubernetes_version
 from ..inventory import (
     describe_stack,
 )
@@ -155,15 +152,15 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
     global_url = str(getattr(global_endpoint, "url", "") or "")
     if not global_url:
         raise RuntimeError("Global API endpoint has no URL")
-    direct_regional_access = _direct_regional_access_enabled(ctx)
+    # Every deployment has a regional API bridge in each regional Region, and
+    # the run's identity may call it, so each one is probed.
     regional_urls: dict[str, str] = {}
-    if direct_regional_access:
-        for region in ctx.deployment_regions:
-            endpoint = ctx.aws_client.get_regional_api_endpoint(region, force_refresh=True)
-            endpoint_url = str(getattr(endpoint, "url", "") or "")
-            if not endpoint_url:
-                raise RuntimeError(f"Direct regional API endpoint is absent in {region}")
-            regional_urls[region] = endpoint_url
+    for region in ctx.deployment_regions:
+        endpoint = ctx.aws_client.get_regional_api_endpoint(region, force_refresh=True)
+        endpoint_url = str(getattr(endpoint, "url", "") or "")
+        if not endpoint_url:
+            raise RuntimeError(f"Direct regional API endpoint is absent in {region}")
+        regional_urls[region] = endpoint_url
 
     health_warmup_samples = _health_warmup_samples(
         ctx,
@@ -186,28 +183,18 @@ def action_topology(ctx: RunContext) -> dict[str, Any]:
         "health": global_samples[-1]["payload"],
         "samples": global_samples,
     }
-    if direct_regional_access:
-        regional_endpoints = {
-            region: {
-                "url": regional_urls[region],
-                "health": next(
-                    sample["payload"]
-                    for sample in reversed(health_samples)
-                    if sample["region"] == region
-                ),
-                "samples": [sample for sample in health_samples if sample["region"] == region],
-            }
-            for region in ctx.deployment_regions
+    regional_endpoints = {
+        region: {
+            "url": regional_urls[region],
+            "health": next(
+                sample["payload"]
+                for sample in reversed(health_samples)
+                if sample["region"] == region
+            ),
+            "samples": [sample for sample in health_samples if sample["region"] == region],
         }
-    else:
-        regional_endpoints = {
-            region: {
-                "skipped": True,
-                "reason": "direct caller access is disabled by cdk.json",
-                "samples": [],
-            }
-            for region in ctx.deployment_regions
-        }
+        for region in ctx.deployment_regions
+    }
 
     queue_baseline: dict[str, Any] = {}
     for region in ctx.deployment_regions:

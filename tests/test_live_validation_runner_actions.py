@@ -2187,39 +2187,54 @@ class TestContextHelpers:
         assert context._topology_regions(ctx) == ("us-west-2", "us-east-1", "eu-west-1")
 
     @pytest.mark.parametrize(
-        ("partition", "configured", "expected"),
-        [("aws", True, True), ("aws-cn", False, True), ("aws", False, False)],
+        "cdk_context",
+        [
+            {},
+            {"api_gateway": {"regional_api_enabled": False}},
+            {"api_gateway": {"regional_api_enabled": True}},
+        ],
+        ids=["no-key", "key-false", "key-true"],
     )
-    def test_direct_regional_access_depends_on_partition_and_configuration(
-        self, partition: str, configured: bool, expected: bool
+    def test_a_single_region_aws_run_drives_the_global_api_whatever_cdk_json_says(
+        self, cdk_context: dict[str, Any]
+    ) -> None:
+        ctx = _context()
+        ctx.session.get_partition_for_region.return_value = "aws"
+        ctx.cdk_context = cdk_context
+
+        assert context._job_transport_region(ctx, "us-east-1") is None
+        ctx.session.get_partition_for_region.assert_called_with("us-east-1")
+
+    @pytest.mark.parametrize("partition", ["aws-cn", "aws-us-gov"])
+    def test_outside_aws_the_regional_bridge_carries_a_single_region_run(
+        self, partition: str
     ) -> None:
         ctx = _context()
         ctx.session.get_partition_for_region.return_value = partition
-        ctx.cdk_context = {"api_gateway": {"regional_api_enabled": configured}}
+        ctx.cdk_context = {}
 
-        assert context._direct_regional_access_enabled(ctx) is expected
-        ctx.session.get_partition_for_region.assert_called_with("us-east-1")
+        assert context._job_transport_region(ctx, "us-east-1") == "us-east-1"
 
-    def test_direct_regional_access_requires_a_resolvable_partition(self) -> None:
+    @pytest.mark.parametrize("cdk_context", [{}, {"api_gateway": {"regional_api_enabled": False}}])
+    def test_a_multi_region_run_pins_each_call_to_its_region_without_the_key(
+        self, cdk_context: dict[str, Any]
+    ) -> None:
+        ctx = _context()
+        ctx.session.get_partition_for_region.return_value = "aws"
+        ctx.cdk_context = cdk_context
+        ctx.deployment_regions = ("us-east-1", "eu-west-1")
+
+        assert context._job_transport_region(ctx, "us-east-1") == "us-east-1"
+        assert context._job_transport_region(ctx, "eu-west-1") == "eu-west-1"
+        ctx.session.get_partition_for_region.assert_not_called()
+
+    def test_the_single_region_choice_requires_a_resolvable_partition(self) -> None:
         ctx = _context()
         ctx.session.get_partition_for_region.return_value = None
         ctx.cdk_context = {}
 
         with pytest.raises(RuntimeError, match="Could not resolve AWS partition for us-east-1"):
-            context._direct_regional_access_enabled(ctx)
-
-    def test_job_transport_region_prefers_direct_access_then_single_region(self) -> None:
-        ctx = _context()
-        ctx.session.get_partition_for_region.return_value = "aws"
-
-        assert context._job_transport_region(ctx, "us-east-1") == "us-east-1"
-
-        ctx.cdk_context = {}
-        assert context._job_transport_region(ctx, "us-east-1") is None
-
-        ctx.deployment_regions = ("us-east-1", "eu-west-1")
-        with pytest.raises(RuntimeError, match="regional_api_enabled=true"):
-            context._job_transport_region(ctx, "eu-west-1")
+            context._job_transport_region(ctx, "us-east-1")
 
     @pytest.mark.parametrize(
         ("name", "expected"),
@@ -4289,7 +4304,7 @@ class TestActionPreflight:
         regions: tuple[str, ...] = ("us-east-1",),
         deployment_attempted: bool = False,
         state: dict[str, Any] | None = None,
-        direct_access: bool = True,
+        api_gateway: dict[str, Any] | None = None,
     ) -> Any:
         ctx = _context(state=dict(state or {}))
         ctx.settings.repo_root = tmp_path
@@ -4299,10 +4314,9 @@ class TestActionPreflight:
         ctx.settings.resume = deployment_attempted
         ctx.checkpoint.deployment_attempted = deployment_attempted
         ctx.deployment_regions = regions
-        ctx.cdk_context = {
-            **_cdk_context(regions),
-            "api_gateway": {"regional_api_enabled": direct_access},
-        }
+        ctx.cdk_context = _cdk_context(regions)
+        if api_gateway is not None:
+            ctx.cdk_context["api_gateway"] = api_gateway
         ctx.report = SimpleNamespace(selected_actions=list(selected))
         sts = MagicMock()
         sts.get_caller_identity.return_value = {
@@ -4386,7 +4400,7 @@ class TestActionPreflight:
             "us-west-2": self._TOOLKIT,
         }
         assert result["expected_ecr_images"] == self._ECR_IMAGES
-        assert result["direct_regional_access"] is True
+        assert "direct_regional_access" not in result
         assert result["session_manager_plugin"] == "not-required"
         assert result["asset_sources_readable"] is True
         assert result["kms_key_deletion_confirmed"] is True
@@ -4398,7 +4412,7 @@ class TestActionPreflight:
         assert state["topology_regions"] == result["topology_regions"]
         assert state["bootstrap_stacks"] == result["bootstrap_stacks"]
         assert state["expected_ecr_images"] == self._ECR_IMAGES
-        assert state["direct_regional_access"] is True
+        assert "direct_regional_access" not in state
         assert state["preexisting_project_stacks"] == {}
         ctx.persist.assert_called_once_with()
         boundaries["reconcile"].assert_not_called()
@@ -4624,33 +4638,26 @@ class TestActionPreflight:
 
         boundaries["discover"].assert_not_called()
 
-    def test_multi_region_job_actions_require_direct_regional_access(self, tmp_path: Path) -> None:
-        ctx = self._ctx(
-            tmp_path,
-            selected=("preflight", "baseline", "deploy", "topology", "sqs"),
-            regions=("us-east-1", "eu-west-1"),
-            direct_access=False,
-        )
-
-        with (
-            self._boundaries(),
-            pytest.raises(RuntimeError, match="Multi-Region Job actions require"),
-        ):
-            actions_preflight.action_preflight(ctx)
-
-    def test_multi_region_without_job_actions_is_allowed_without_direct_access(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        "api_gateway",
+        [None, {"regional_api_enabled": False}, {"regional_api_enabled": True}],
+        ids=["no-key", "key-false", "key-true"],
+    )
+    def test_multi_region_job_actions_need_no_regional_api_setting(
+        self, tmp_path: Path, api_gateway: dict[str, Any] | None
     ) -> None:
+        # Every deployment has a regional API bridge in each Region, so the Job
+        # actions reach their Region whatever cdk.json says about the old key.
         ctx = self._ctx(
             tmp_path,
+            selected=("preflight", "baseline", "deploy", "topology", "sqs", "central-queue"),
             regions=("us-east-1", "eu-west-1"),
-            direct_access=False,
+            api_gateway=api_gateway,
         )
 
         with self._boundaries():
             result = actions_preflight.action_preflight(ctx)
 
-        assert result["direct_regional_access"] is False
         assert result["deployment_regions"] == ["us-east-1", "eu-west-1"]
         assert set(result["bootstrap_stacks"]) == {"eu-west-1", "us-east-1", "us-west-2"}
 
@@ -4757,7 +4764,7 @@ class TestActionTopology:
         "gco-live-us-east-1": {"name": "gco-live-us-east-1", "status": "UPDATE_COMPLETE"},
     }
 
-    def _ctx(self, *, direct_access: bool = True) -> Any:
+    def _ctx(self, *, api_gateway: dict[str, Any] | None = None) -> Any:
         ctx = _context(
             state={
                 "target_stack_regions": {
@@ -4767,10 +4774,9 @@ class TestActionTopology:
             }
         )
         ctx.session.get_partition_for_region.return_value = "aws"
-        ctx.cdk_context = {
-            "api_gateway": {"regional_api_enabled": direct_access},
-            "kubernetes_version": "1.33",
-        }
+        ctx.cdk_context = {"kubernetes_version": "1.33"}
+        if api_gateway is not None:
+            ctx.cdk_context["api_gateway"] = api_gateway
         eks = MagicMock()
         eks.describe_cluster.return_value = {
             "cluster": {
@@ -4835,7 +4841,7 @@ class TestActionTopology:
                 "alb": alb,
             }
 
-    def test_full_topology_evidence_with_direct_regional_access(self) -> None:
+    def test_full_topology_evidence_probes_the_regional_api(self) -> None:
         ctx = self._ctx()
 
         with self._checks() as checks:
@@ -4881,20 +4887,25 @@ class TestActionTopology:
         )
         ctx.clients["dynamodb"].describe_table.assert_called_once_with(TableName="gco-live-jobs")
 
-    def test_regional_probes_are_skipped_without_direct_access(self) -> None:
-        ctx = self._ctx(direct_access=False)
+    @pytest.mark.parametrize(
+        "api_gateway",
+        [{"regional_api_enabled": False}, {"regional_api_enabled": True}],
+        ids=["key-false", "key-true"],
+    )
+    def test_the_regional_api_is_probed_whatever_cdk_json_says(
+        self, api_gateway: dict[str, Any]
+    ) -> None:
+        # Every deployment has the bridge, so the old key no longer decides
+        # whether its health is checked.
+        ctx = self._ctx(api_gateway=api_gateway)
 
         with self._checks():
             result = actions_topology.action_topology(ctx)
 
-        assert result["regional_apis"] == {
-            "us-east-1": {
-                "skipped": True,
-                "reason": "direct caller access is disabled by cdk.json",
-                "samples": [],
-            }
-        }
-        ctx.aws_client.get_regional_api_endpoint.assert_not_called()
+        assert result["regional_apis"]["us-east-1"]["url"] == "https://regional.example/api"
+        ctx.aws_client.get_regional_api_endpoint.assert_called_once_with(
+            "us-east-1", force_refresh=True
+        )
 
     def test_absent_or_unhealthy_stacks_fail_before_convergence(self) -> None:
         ctx = self._ctx()

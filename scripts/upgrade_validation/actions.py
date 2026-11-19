@@ -770,9 +770,9 @@ def _upgraded_cdk_context(ctx: RunContext) -> tuple[dict[str, Any], dict[str, An
     ``gco upgrade`` keeps the base checkout's cdk.json byte for byte across its
     checkout, so the redeploy reads the base release's settings plus the run's,
     not this checkout's cdk.json. The topology check compares the deployment
-    with some of them (``kubernetes_version``, the regional API): read from
-    this checkout, a release that changes one would be checked against a value
-    the upgraded deployment never used. The file is read as it is now, which
+    with some of them (``kubernetes_version``): read from this checkout, a
+    release that changes one would be checked against a value the upgraded
+    deployment never used. The file is read as it is now, which
     is what the redeploy read; ``verify-upgrade`` fails the run if it is not
     the one the run wrote.
     """

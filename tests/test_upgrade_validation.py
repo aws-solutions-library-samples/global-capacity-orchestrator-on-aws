@@ -1975,6 +1975,9 @@ class TestUpgradedTopology:
         ctx.aws_client.get_api_endpoint.return_value = SimpleNamespace(
             url="https://api.example.com"
         )
+        ctx.aws_client.get_regional_api_endpoint.return_value = SimpleNamespace(
+            url="https://regional.example.com"
+        )
         ctx.job_manager = MagicMock(name="job_manager")
         ctx.job_manager.get_queue_status.return_value = {}
         seen: list[dict[str, Any]] = []
@@ -1984,7 +1987,10 @@ class TestUpgradedTopology:
 
         def health(ctx: Any, **_kwargs: Any) -> list[dict[str, Any]]:
             seen.append(ctx.cdk_context)
-            return [{"scope": "global", "region": None, "payload": {"status": "healthy"}}]
+            return [
+                {"scope": "global", "region": None, "payload": {"status": "healthy"}},
+                {"scope": "regional", "region": _REGION, "payload": {"status": "healthy"}},
+            ]
 
         for name, replacement in {
             "_reconcile_stack_ownership": lambda ctx: None,

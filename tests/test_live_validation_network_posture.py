@@ -786,12 +786,11 @@ class TestServicePathLeg:
         assert api["status_code"] == 503
         assert all(job["deleted"] for job in record["jobs"])
 
-    def test_no_region_attributable_transport_skips_the_leg(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Two Regions without the regional API: the global endpoint cannot be
-        # pinned to this cluster, so the service-path leg is not attributable.
-        ctx = _context(regions=(REGION, "eu-west-1"))
+    def test_an_unresolvable_partition_skips_the_leg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A single-Region run chooses between the global API and the bridge by
+        # partition; without one, the leg cannot be attributed to this cluster.
+        ctx = _context()
+        ctx.session.get_partition_for_region.return_value = None
         cluster = _FakeCluster()
 
         evidence = _run(ctx, cluster, monkeypatch)
@@ -799,16 +798,19 @@ class TestServicePathLeg:
         api = evidence["probes"][-1]
         assert api["name"] == API_PROBE
         assert api["status"] == "skipped"
-        assert "regional_api_enabled" in api["reason"]
+        assert "Could not resolve AWS partition" in api["reason"]
         ctx.aws_client.make_authenticated_request.assert_not_called()
 
-    def test_the_regional_api_pins_the_leg_to_this_region(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "cdk_context",
+        [{}, {"api_gateway": {"regional_api_enabled": False}}],
+        ids=["no-key", "key-false"],
+    )
+    def test_a_multi_region_run_pins_the_leg_to_this_region(
+        self, monkeypatch: pytest.MonkeyPatch, cdk_context: dict[str, Any]
     ) -> None:
-        ctx = _context(
-            cdk_context={"api_gateway": {"regional_api_enabled": True}},
-            regions=(REGION, "eu-west-1"),
-        )
+        # Every deployment has this Region's API bridge, whatever cdk.json says.
+        ctx = _context(cdk_context=cdk_context, regions=(REGION, "eu-west-1"))
         cluster = _FakeCluster()
 
         evidence = _run(ctx, cluster, monkeypatch)
