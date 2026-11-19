@@ -805,7 +805,13 @@ def costs_report_status(config: Any, region: Any) -> None:
     show_default=True,
     help="grafana opens the GCO Cost dashboard; opencost opens the native OpenCost UI",
 )
-@click.option("--region", help="Cluster region (defaults to the first cdk.json regional entry)")
+@click.option(
+    "--region",
+    help=(
+        "Cluster region (defaults to the CLI's default region: the global -r, "
+        "GCO_DEFAULT_REGION or the config file, else the first cdk.json regional entry)."
+    ),
+)
 @click.option("--local-port", type=int, help="Local port to bind (defaults per-service)")
 @click.option(
     "--via-ssm",

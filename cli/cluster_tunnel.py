@@ -223,15 +223,23 @@ def require_private_access(plan: TunnelPlan, via_ssm: str) -> None:
 
 
 def resolve_region(config: Any, region: str | None) -> str:
-    """Pick the target region: explicit flag, else first cdk.json regional, else default."""
+    """Pick the target region for a cluster-access command.
+
+    The command's ``--region``, else ``config.default_region``: the global
+    ``gco -r``, else ``GCO_DEFAULT_REGION``, else the config file, else the
+    first cdk.json regional entry, which ``get_config`` seeds it with. An empty
+    default falls back to that entry, then ``us-east-1``.
+    """
     if region:
         return str(region)
+    if config.default_region:
+        return str(config.default_region)
     from .config import _load_cdk_json
 
     cdk = _load_cdk_json()
     if isinstance(cdk, dict) and cdk.get("regional"):
         return str(cdk["regional"][0])
-    return str(config.default_region or "us-east-1")
+    return "us-east-1"
 
 
 def _project_name_from_cluster(cluster: str, region: str) -> str:

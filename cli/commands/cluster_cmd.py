@@ -22,6 +22,7 @@ from typing import Any
 
 import click
 
+from .. import cluster_ui
 from ..cluster_tunnel import (
     DEFAULT_API_LOCAL_PORT,
     ROUTE_DIRECT,
@@ -44,7 +45,7 @@ def cluster(config: Any) -> None:
 
 
 @cluster.command("tunnel")
-@click.option("--region", help="Cluster region (defaults to the first cdk.json regional entry).")
+@click.option("--region", help=cluster_ui._REGION_HELP)
 @click.option(
     "--via-ssm",
     "via_ssm",
@@ -244,7 +245,7 @@ _DOCTOR_STATUS_MARKS = {"ok": "✓", "warn": "⚠", "fail": "✗", "unknown": "?
 
 
 @cluster.command("doctor")
-@click.option("--region", help="Cluster region (defaults to the first cdk.json regional entry).")
+@click.option("--region", help=cluster_ui._REGION_HELP)
 @pass_config
 def doctor_cmd(config: Any, region: str | None) -> None:
     """Diagnose EKS API access: reachability, authentication, authorization.

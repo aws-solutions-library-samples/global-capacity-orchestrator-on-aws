@@ -1425,7 +1425,7 @@ gco cluster tunnel [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel through an existing SSM-managed instance, or `auto` to provision a self-terminating ephemeral bastion and tear it down on exit. An existing instance must carry the cluster security group (`ClusterSecurityGroupId` stack output) or one that group admits on 443; the cluster security group admits no VPC CIDR. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included (see [Route selection](#route-selection)). |
 | `--local-port` | Local port to bind for the API tunnel (default `8443`). A port another process already listens on is refused, and the tunnel counts as open only once the Session Manager plugin reports its own listener there, so kubectl never reaches another process by mistake. The other commands that open a tunnel (`monitoring open`, `gitops`, `crossplane`, `costs dashboard`, `slurm`) use `8443` and refuse it the same way while it is taken, for example by a running `gco cluster tunnel`. |
 | `--print` | Print the tunnel + `kubectl` connection plan instead of opening the tunnel. |
@@ -1524,7 +1524,7 @@ gco cluster doctor [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 
 **Example:**
 
@@ -2026,7 +2026,7 @@ gco costs dashboard [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--service` | | `grafana` (default) or `opencost` |
-| `--region` | | Cluster region (defaults to the first cdk.json regional entry) |
+| `--region` | | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry) |
 | `--local-port` | | Local port to bind (defaults per-service) |
 | `--via-ssm` | | Tunnel through an SSM-managed instance: an instance id, or `auto`. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | | Self-terminate backstop for an `auto` bastion (default: 120) |
@@ -2089,7 +2089,7 @@ gco crossplane open [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region`, `-r` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--local-port` | Local port to bind (default `3001`, the port the dashboard's CORS origin names). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -2499,7 +2499,7 @@ gco gitops open [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region`, `-r` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--local-port` | Local port to bind (default `8080`). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -4650,7 +4650,7 @@ gco monitoring open [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--service` | `grafana` (default, `localhost:3000`), `prometheus` (`:9090`), `alertmanager` (`:9093`), `opencost` (the OpenCost UI, `:9091`), `opencost-api` (the OpenCost allocation API, `:9003`), or `mlflow` (the MLflow tracking UI, `:5000`). The OpenCost targets exist when `cost_monitoring.enabled` is on — see [docs/COST_MONITORING.md](COST_MONITORING.md); the MLflow target when `cluster_observability.mlflow.enabled` is on — see [docs/MONITORING.md](MONITORING.md#mlflow-experiment-tracking). |
-| `--region` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--local-port` | Override the local bind port. |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
@@ -5237,7 +5237,7 @@ gco slurm shell [--backend slinky|pcs] [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--backend`, `-b` | `slinky` (login pod) or `pcs` (login instance). |
-| `--region`, `-r` | Cluster region (defaults to the first `deployment_regions.regional` entry). |
+| `--region`, `-r` | Cluster region (defaults to the CLI's default region: the global `--region`, `GCO_DEFAULT_REGION` or the config file, else the first `deployment_regions.regional` entry). |
 | `--via-ssm INSTANCE_ID\|auto` | Tunnel to the private API endpoint through an SSM-managed instance (requires the Session Manager plugin). Pass an instance id to use an existing one, or `auto` to provision a self-terminating ephemeral bastion that is torn down on exit. Used whenever private endpoint access is on, `PUBLIC_AND_PRIVATE` included ([Route selection](#route-selection)). |
 | `--bastion-ttl-minutes` | Self-terminate backstop, in minutes, for an `--via-ssm auto` bastion (default: 120). |
 | `--yes`, `-y` | Skip the confirmation prompt when provisioning an `--via-ssm auto` bastion. |

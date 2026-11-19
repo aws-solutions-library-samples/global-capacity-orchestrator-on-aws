@@ -193,6 +193,92 @@ class TestResolvers:
 
         assert ct.resolve_region(_Cfg(), None) == "us-east-2"
 
+    def test_the_configured_default_region_wins_over_cdk_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """config.default_region already starts as the first cdk.json regional
+        entry; the global -r, GCO_DEFAULT_REGION or the config file replace it."""
+        monkeypatch.setattr(
+            "cli.config._load_cdk_json", lambda: {"regional": ["us-east-1", "us-west-2"]}
+        )
+
+        class _Cfg:
+            default_region = "us-west-2"
+
+        assert ct.resolve_region(_Cfg(), None) == "us-west-2"
+
+    def test_the_last_fallback_is_us_east_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cli.config._load_cdk_json", dict)
+
+        class _Cfg:
+            default_region = ""
+
+        assert ct.resolve_region(_Cfg(), None) == "us-east-1"
+
+
+class TestClusterAccessRegionSelection:
+    """N5: the global -r, GCO_DEFAULT_REGION and the config file pick the cluster."""
+
+    @pytest.fixture
+    def checkout(self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+        (tmp_path / "cdk.json").write_text(
+            json.dumps(
+                {"context": {"deployment_regions": {"regional": ["us-east-1", "us-west-2"]}}}
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("GCO_DEFAULT_REGION", raising=False)
+        monkeypatch.delenv("GCO_PROJECT_NAME", raising=False)
+        monkeypatch.setattr(
+            "cli.kubectl_helpers.describe_cluster_access",
+            lambda c, r: {"endpoint": PRIVATE_ENDPOINT, "public": False, "private": True},
+        )
+        return tmp_path
+
+    def _plan(self, runner: CliRunner, *args: str) -> dict[str, Any]:
+        result = runner.invoke(cli, [*args])
+        assert result.exit_code == 0, result.output
+        return dict(json.loads(result.output))
+
+    def test_global_region_flag(self, runner: CliRunner, checkout: Any) -> None:
+        plan = self._plan(runner, "-r", "us-west-2", "-o", "json", "cluster", "tunnel", "--print")
+        assert (plan["cluster"], plan["region"]) == ("gco-us-west-2", "us-west-2")
+
+    def test_environment_default_region(
+        self, runner: CliRunner, checkout: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GCO_DEFAULT_REGION", "us-west-2")
+        plan = self._plan(runner, "-o", "json", "cluster", "tunnel", "--print")
+        assert (plan["cluster"], plan["region"]) == ("gco-us-west-2", "us-west-2")
+
+    def test_config_file_default_region(self, runner: CliRunner, checkout: Any) -> None:
+        (checkout / ".gco.yaml").write_text("default_region: us-west-2\n", encoding="utf-8")
+        plan = self._plan(runner, "-o", "json", "cluster", "tunnel", "--print")
+        assert plan["region"] == "us-west-2"
+
+    def test_without_any_the_first_regional_entry(self, runner: CliRunner, checkout: Any) -> None:
+        plan = self._plan(runner, "-o", "json", "cluster", "tunnel", "--print")
+        assert plan["region"] == "us-east-1"
+
+    def test_the_command_region_wins_over_the_global_one(
+        self, runner: CliRunner, checkout: Any
+    ) -> None:
+        plan = self._plan(
+            runner,
+            "-r",
+            "us-west-2",
+            "-o",
+            "json",
+            "cluster",
+            "tunnel",
+            "--print",
+            "--region",
+            "us-east-1",
+        )
+        assert plan["region"] == "us-east-1"
+
 
 # ---------------------------------------------------------------------------
 # provision_bastion / teardown_bastion

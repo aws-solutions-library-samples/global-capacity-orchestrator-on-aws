@@ -79,6 +79,13 @@ _INSTALL_HINT = (
 
 _NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 
+#: ``--region`` help shared by the cluster-access commands
+#: (:func:`cli.cluster_tunnel.resolve_region` applies the order).
+_REGION_HELP = (
+    "Cluster region (defaults to the CLI's default region: the global -r, "
+    "GCO_DEFAULT_REGION or the config file, else the first cdk.json regional entry)."
+)
+
 #: charts.yaml as shipped next to this package in a source checkout.
 CHARTS_YAML = Path(__file__).resolve().parents[1] / "lambda" / "helm-installer" / "charts.yaml"
 
@@ -373,9 +380,7 @@ def tunnel_options(func: Any) -> Any:
             "whenever private endpoint access is on, PUBLIC_AND_PRIVATE included."
         ),
     )(func)
-    func = click.option(
-        "--region", "-r", help="Cluster region (defaults to the first cdk.json regional entry)."
-    )(func)
+    func = click.option("--region", "-r", help=_REGION_HELP)(func)
     return func
 
 
