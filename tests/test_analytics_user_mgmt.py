@@ -216,6 +216,21 @@ class TestUserMgmtHelpers:
         assert row["enabled"] in ("True", "False")
 
     @mock_aws
+    def test_list_users_reads_every_page(self):
+        """ListUsers returns at most 60 users per call; the listing used to stop
+        at the first page."""
+        cognito = boto3.client("cognito-idp", region_name="us-east-2")
+        pool_id = cognito.create_user_pool(PoolName="gco-studio")["UserPool"]["Id"]
+        for index in range(65):
+            cognito.admin_create_user(
+                UserPoolId=pool_id, Username=f"user{index:02d}", MessageAction="SUPPRESS"
+            )
+
+        rows = aum.list_users(pool_id, "us-east-2")
+
+        assert sorted(row["username"] for row in rows) == [f"user{i:02d}" for i in range(65)]
+
+    @mock_aws
     def test_admin_delete_user_removes_user(self):
         cognito = boto3.client("cognito-idp", region_name="us-east-2")
         pool = cognito.create_user_pool(PoolName="gco-studio")

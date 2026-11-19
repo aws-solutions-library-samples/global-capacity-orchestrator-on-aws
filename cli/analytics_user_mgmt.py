@@ -291,14 +291,21 @@ def generate_strong_password(length: int = 20) -> str:
 
 
 def list_users(pool_id: str, region: str) -> list[dict[str, str]]:
-    """Return a flat row-per-user list suitable for tabular output."""
+    """Return a flat row-per-user list suitable for tabular output.
+
+    Reads every page: ``ListUsers`` returns at most 60 users per call.
+    """
     import boto3
 
     cognito = boto3.client("cognito-idp", region_name=region)
-    response = cognito.list_users(UserPoolId=pool_id)
+    users = [
+        user
+        for page in cognito.get_paginator("list_users").paginate(UserPoolId=pool_id)
+        for user in page.get("Users", []) or []
+    ]
 
     rows: list[dict[str, str]] = []
-    for user in response.get("Users", []) or []:
+    for user in users:
         row: dict[str, str] = {
             "username": user.get("Username", ""),
             "status": user.get("UserStatus", ""),
