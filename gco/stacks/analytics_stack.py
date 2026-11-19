@@ -54,6 +54,7 @@ from gco.stacks.constants import (
     SAGEMAKER_ROLE_NAME_PREFIX,
     cluster_shared_ssm_parameter_prefix,
     cognito_domain_prefix_default,
+    s3_bucket_kms_conditions,
 )
 from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.nag_suppressions import apply_all_suppressions
@@ -844,8 +845,11 @@ class GCOAnalyticsStack(Stack):
 
         1. S3: ``GetObject``/``PutObject``/``DeleteObject``/``ListBucket``/
            ``GetBucketLocation`` on ``<arn>`` + ``<arn>/*``.
-        2. KMS: ``Decrypt``/``GenerateDataKey`` with a
-           ``kms:ViaService=s3.<global-region>.<AWS::URLSuffix>`` condition.
+        2. KMS: ``Decrypt``/``GenerateDataKey`` with the conditions the
+           regional job role's grant uses (``s3_bucket_kms_conditions``):
+           ``kms:ViaService=s3.<global-region>.<AWS::URLSuffix>`` and
+           ``kms:EncryptionContext:aws:s3:arn`` naming the bucket or one of
+           its objects.
 
         This is a role-side policy — the bucket policy is owned
         exclusively by ``GCOGlobalStack``.
@@ -906,11 +910,9 @@ class GCOAnalyticsStack(Stack):
                     effect=iam.Effect.ALLOW,
                     actions=["kms:Decrypt", "kms:GenerateDataKey"],
                     resources=["*"],
-                    conditions={
-                        "StringEquals": {
-                            "kms:ViaService": f"s3.{global_region}.{self.url_suffix}",
-                        }
-                    },
+                    conditions=s3_bucket_kms_conditions(
+                        region=global_region, bucket_arn=shared_arn, url_suffix=self.url_suffix
+                    ),
                 ),
             ],
         )
@@ -933,7 +935,8 @@ class GCOAnalyticsStack(Stack):
                         "(CloudFormation-generated name). The KMS statement is Resource:* "
                         "because the cluster-shared key lives in the global stack and is "
                         "not exported to this Region; kms:ViaService limits it to S3 in "
-                        "the global Region."
+                        "the global Region and kms:EncryptionContext:aws:s3:arn to this "
+                        "one bucket."
                     ),
                     "appliesTo": [
                         "Resource::*",

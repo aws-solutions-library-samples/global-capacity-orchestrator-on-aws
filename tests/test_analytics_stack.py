@@ -1025,6 +1025,34 @@ class TestSageMakerExecutionRole:
             f"attached statements={statements!r}"
         )
 
+    def test_cluster_shared_kms_statement_is_limited_to_s3_and_the_bucket(self) -> None:
+        """The cluster-shared KMS statement carries the regional job role's conditions.
+
+        The key lives in the global stack, so the statement is ``Resource: *``;
+        ``kms:ViaService`` limits it to S3 in the global Region and
+        ``kms:EncryptionContext:aws:s3:arn`` to the bucket (with an S3 Bucket
+        Key) or its objects (without one), as ``s3_bucket_kms_conditions``
+        builds them for the regional stack.
+        """
+        template = _synth_analytics()
+        role_lid, _ = self._find_sagemaker_role(template)
+        statements = self._collect_role_statements(template, role_lid)
+        (kms,) = [
+            s for s in statements if sorted(s["Action"]) == ["kms:Decrypt", "kms:GenerateDataKey"]
+        ]
+        assert kms["Resource"] == "*"
+        (reader_id,) = [
+            lid
+            for lid, resource in template.to_json()["Resources"].items()
+            if lid.startswith("ReadClusterSharedBucketArn") and resource["Type"] == "Custom::AWS"
+        ]
+        shared = {"Fn::GetAtt": [reader_id, "Parameter.Value"]}
+        via_service = kms["Condition"]["StringEquals"]["kms:ViaService"]
+        assert via_service == {"Fn::Join": ["", ["s3.us-east-2.", {"Ref": "AWS::URLSuffix"}]]}
+        assert kms["Condition"]["StringLike"] == {
+            "kms:EncryptionContext:aws:s3:arn": [shared, {"Fn::Join": ["", [shared, "/*"]]}]
+        }
+
     def test_presigned_url_role_acts_only_on_this_studio_domain(self) -> None:
         """The presigned-URL role's SageMaker grant names this stack's domain.
 

@@ -247,9 +247,9 @@ When `analytics_environment.enabled=true`, `GCOAnalyticsStack` runs
 `/gco/cluster-shared-bucket/arn` via `cr.AwsCustomResource` in the
 global region, then attaches an inline policy to
 `SageMaker_Execution_Role` with the **same two statements** as the
-regional role's grant (its KMS statement carries the `kms:ViaService`
-condition only). This is a role-side grant; the bucket policy is not
-modified.
+regional role's grant, including both KMS conditions (`kms:ViaService`
+and `kms:EncryptionContext:aws:s3:arn`). This is a role-side grant; the
+bucket policy is not modified.
 
 When `analytics_environment.enabled=false`, the SageMaker role does
 not exist and no grant is attached. The regional job-pod grants are

@@ -190,6 +190,7 @@ from gco.stacks.constants import (
     cost_report_ssm_parameter_prefix,
     parse_k8s_quantity,
     regional_shared_ssm_parameter_prefix,
+    s3_bucket_kms_conditions,
 )
 from gco.stacks.hyperpod_cluster import HyperpodCluster
 from gco.stacks.lambda_assets import lambda_source_code
@@ -782,21 +783,6 @@ _TRACING_EXPORT_NAG_REASON = (
     "X-Ray grants only on Resource:* (no resource-level permissions); that "
     "statement is write-only and carries no other action."
 )
-
-
-def _s3_bucket_kms_conditions(*, region: str, bucket_arn: str, url_suffix: str) -> dict[str, Any]:
-    """KMS conditions confining a ``Resource: *`` key grant to S3's use for one bucket.
-
-    For a bucket whose key ARN this stack cannot see (it lives in another
-    stack): ``kms:ViaService`` admits only requests S3 makes in the bucket's
-    region, and ``kms:EncryptionContext:aws:s3:arn`` only those for this
-    bucket. S3 sends the bucket ARN as the context when the bucket uses an
-    S3 Bucket Key and the object ARN when it does not, so both forms match.
-    """
-    return {
-        "StringEquals": {"kms:ViaService": f"s3.{region}.{url_suffix}"},
-        "StringLike": {"kms:EncryptionContext:aws:s3:arn": [bucket_arn, f"{bucket_arn}/*"]},
-    }
 
 
 #: DynamoDB actions the inference monitor's role holds on the inference
@@ -3543,7 +3529,7 @@ class GCORegionalStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["kms:Decrypt", "kms:GenerateDataKey"],
                 resources=["*"],
-                conditions=_s3_bucket_kms_conditions(
+                conditions=s3_bucket_kms_conditions(
                     region=shared.region, bucket_arn=shared.arn, url_suffix=self.url_suffix
                 ),
             )
@@ -3633,7 +3619,7 @@ class GCORegionalStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["kms:Decrypt"],
                 resources=["*"],
-                conditions=_s3_bucket_kms_conditions(
+                conditions=s3_bucket_kms_conditions(
                     region=global_region, bucket_arn=bucket_arn, url_suffix=self.url_suffix
                 ),
             )
