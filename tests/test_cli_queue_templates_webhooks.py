@@ -214,6 +214,29 @@ class TestQueueCommands:
             assert call_kwargs["params"]["status"] == "queued"
             assert call_kwargs["params"]["namespace"] == "gco-jobs"
 
+    def test_queue_list_status_choices_are_every_queue_record_status(self):
+        """Every status a queue record can hold is filterable (QUEUE-STATUS-CHOICES)."""
+        from cli.commands.queue_cmd import queue_list
+        from gco.services.template_store import JobStatus
+
+        status_option = next(param for param in queue_list.params if param.name == "status")
+        assert list(status_option.type.choices) == [status.value for status in JobStatus]
+
+    @pytest.mark.parametrize("status", ["applying", "pending"])
+    def test_queue_list_filters_on_the_dispatch_states(self, status):
+        """A claimed job passes through applying and pending before it runs."""
+        from cli.main import cli
+
+        with patch("cli.aws_client.get_aws_client") as mock_client:
+            mock_aws = MagicMock()
+            mock_aws.call_api.return_value = {"count": 0, "jobs": []}
+            mock_client.return_value = mock_aws
+
+            result = CliRunner().invoke(cli, ["queue", "list", "--status", status])
+
+        assert result.exit_code == 0, result.output
+        assert mock_aws.call_api.call_args.kwargs["params"]["status"] == status
+
     def test_queue_list_empty(self):
         """Test queue list when no jobs found."""
         from cli.main import cli

@@ -19,7 +19,8 @@ async def queue_list(
 
     Args:
         region: Filter by target region.
-        status: Filter by status (queued, claimed, running, succeeded, failed, cancelled).
+        status: Filter by status (queued, claimed, applying, pending, running,
+            succeeded, failed, cancelled).
         namespace: Filter by Kubernetes namespace.
         limit: Maximum results (default 50).
     """

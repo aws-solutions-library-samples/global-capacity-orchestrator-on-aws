@@ -4922,7 +4922,7 @@ gco queue list [OPTIONS]
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--region` | `-r` | Filter by target region |
-| `--status` | `-s` | Filter by status (queued, claimed, running, succeeded, failed, cancelled) |
+| `--status` | `-s` | Filter by status (queued, claimed, applying, pending, running, succeeded, failed, cancelled). A region claims a queued job, applies it (`applying`), and it is `pending` until its pods run |
 | `--namespace` | `-n` | Filter by namespace |
 | `--limit` | `-l` | Maximum jobs in this page, 1-1000 (default: 50) |
 | `--cursor` | | Read the page after a previous one (its `next_cursor`); use the same filters |
