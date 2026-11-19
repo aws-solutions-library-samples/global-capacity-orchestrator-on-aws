@@ -500,9 +500,11 @@ def test_region_capacity_retains_queue_data_when_cloudwatch_client_creation_fail
         capacity = checker.get_region_capacity("us-east-1")
 
     assert capacity.queue_depth == 4
-    assert capacity.running_jobs == 2
+    # The running-job count is a CloudWatch metric too, never the SQS
+    # in-flight count, so it is unknown here.
+    assert capacity.running_jobs == 0
     assert capacity.telemetry_status == "partial"
-    assert capacity.unavailable_signals == ["gpu", "cpu"]
+    assert capacity.unavailable_signals == ["gpu", "cpu", "jobs"]
     assert any("client construction failed" in error for error in capacity.telemetry_errors)
 
 
@@ -531,8 +533,8 @@ def test_all_unavailable_recommendation_prefers_the_configured_default() -> None
 @pytest.mark.parametrize(
     ("status", "unavailable", "expected_reason"),
     [
-        ("unavailable", ["queue", "gpu", "cpu"], "capacity telemetry unavailable"),
-        ("partial", ["queue", "gpu"], "capacity telemetry is partial"),
+        ("unavailable", ["queue", "gpu", "cpu", "jobs"], "capacity telemetry unavailable"),
+        ("partial", ["queue", "gpu", "jobs"], "capacity telemetry is partial"),
     ],
 )
 def test_simple_recommend_uses_provenance_and_skips_unavailable_signals(
@@ -560,8 +562,8 @@ def test_simple_recommend_uses_provenance_and_skips_unavailable_signals(
 @pytest.mark.parametrize(
     ("status", "unavailable", "expected_reason"),
     [
-        ("unavailable", ["queue", "gpu", "cpu"], "cluster telemetry unavailable"),
-        ("partial", ["queue", "gpu"], "cluster telemetry is partial"),
+        ("unavailable", ["queue", "gpu", "cpu", "jobs"], "cluster telemetry unavailable"),
+        ("partial", ["queue", "gpu", "jobs"], "cluster telemetry is partial"),
     ],
 )
 def test_weighted_recommend_uses_provenance_and_skips_unavailable_signals(

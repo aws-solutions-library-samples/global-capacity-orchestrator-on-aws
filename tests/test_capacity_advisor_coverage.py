@@ -7,6 +7,7 @@ These modules back the Bedrock-assisted capacity advisor and the multi-region ca
 * Recommendation tie-breaks (simple and weighted), capacity-block trend up/down signals, the ``compute_price_trend`` zero-mean guard, and the module factory function.
 """
 
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
@@ -192,7 +193,10 @@ def test_get_region_capacity_cloudwatch_client_error():
         mock_get.return_value.get_regional_stack.return_value = _stack()
         capacity = checker.get_region_capacity("us-east-1")
     assert capacity.queue_depth == 3
-    assert capacity.running_jobs == 1
+    # The SQS in-flight count is not a running-job count.
+    assert capacity.running_jobs == 0
+    assert capacity.unavailable_signals == ["gpu", "cpu", "jobs"]
+    assert any("Running-job telemetry failed" in e for e in capacity.telemetry_errors)
     assert capacity.telemetry_status == "partial"
     assert capacity.recommendation_score > 30
 
@@ -293,6 +297,7 @@ def test_cpu_only_missing_does_not_penalize_simple_score():
     mock_cloudwatch.get_metric_statistics.side_effect = [
         {"Datapoints": [{"Average": 25.0}]},
         {"Datapoints": []},
+        {"Datapoints": [{"Timestamp": datetime(2026, 1, 1, tzinfo=UTC), "Maximum": 0.0}]},
     ]
     checker._session.client = _factory(
         {"cloudformation": mock_cfn, "sqs": mock_sqs, "cloudwatch": mock_cloudwatch}
@@ -383,3 +388,82 @@ def test_weighted_recommend_trend_down():
         inst.get_capacity_block_trend.return_value = -0.5
         result = checker._weighted_recommend([cap], "p5.48xlarge", gpu_count=8)
     assert "trending down" in result["reason"]
+
+
+def _region_clients(*, in_flight="7", active_jobs=None):
+    """Regional clients: SQS reports ``in_flight`` invisible messages and the
+    health monitor's ActiveJobs metric answers ``active_jobs`` (None: no data)."""
+    cfn = MagicMock()
+    cfn.describe_stacks.return_value = {
+        "Stacks": [
+            {"Outputs": [{"OutputKey": "JobQueueUrl", "OutputValue": "https://sqs.example/q"}]}
+        ]
+    }
+    sqs = MagicMock()
+    sqs.get_queue_attributes.return_value = {
+        "Attributes": {
+            "ApproximateNumberOfMessages": "3",
+            "ApproximateNumberOfMessagesNotVisible": in_flight,
+        }
+    }
+    cloudwatch = MagicMock()
+
+    def metric(**kwargs):
+        if kwargs["MetricName"] == "ActiveJobs":
+            if active_jobs is None:
+                return {"Datapoints": []}
+            return {
+                "Datapoints": [
+                    {"Timestamp": datetime(2026, 1, 1, 0, 0, tzinfo=UTC), "Maximum": 2.0},
+                    {"Timestamp": datetime(2026, 1, 1, 0, 1, tzinfo=UTC), "Maximum": active_jobs},
+                ]
+            }
+        return {"Datapoints": [{"Average": 40.0}]}
+
+    cloudwatch.get_metric_statistics.side_effect = metric
+    return {"cloudformation": cfn, "sqs": sqs, "cloudwatch": cloudwatch}
+
+
+def test_running_jobs_is_the_health_monitors_active_job_count_not_sqs_in_flight():
+    """running_jobs used to be ApproximateNumberOfMessagesNotVisible: messages
+    being applied or waiting out a failed retry, not Jobs running in the
+    cluster (the queue processor deletes a message once it is applied)."""
+    checker = _make_mr()
+    clients = _region_clients(in_flight="7", active_jobs=12.0)
+    checker._session.client = _factory(clients)
+    with patch("cli.aws_client.get_aws_client") as mock_get:
+        mock_get.return_value.get_regional_stack.return_value = _stack()
+        capacity = checker.get_region_capacity("us-east-1")
+
+    assert capacity.running_jobs == 12  # the newest datapoint
+    assert capacity.queue_depth == 3
+    assert capacity.unavailable_signals == []
+    assert capacity.telemetry_status == "complete"
+    active_jobs_call = next(
+        call.kwargs
+        for call in clients["cloudwatch"].get_metric_statistics.call_args_list
+        if call.kwargs["MetricName"] == "ActiveJobs"
+    )
+    assert active_jobs_call["Namespace"] == "GCO/HealthMonitor"
+    assert active_jobs_call["Dimensions"] == [
+        {"Name": "ClusterName", "Value": "gco-us-east-1"},
+        {"Name": "Region", "Value": "us-east-1"},
+    ]
+
+
+def test_missing_running_job_count_is_an_unavailable_signal_not_zero_jobs():
+    checker = _make_mr()
+    checker._session.client = _factory(_region_clients(in_flight="7", active_jobs=None))
+    with patch("cli.aws_client.get_aws_client") as mock_get:
+        mock_get.return_value.get_regional_stack.return_value = _stack()
+        capacity = checker.get_region_capacity("us-east-1")
+
+    assert capacity.running_jobs == 0
+    assert capacity.unavailable_signals == ["jobs"]
+    assert capacity.telemetry_status == "partial"
+    assert "Running-job telemetry returned no datapoints" in capacity.telemetry_errors
+    # Unknown load must not read as an idle Region.
+    assert capacity.recommendation_score >= 1000
+
+    result = checker._simple_recommend([capacity])
+    assert "no running jobs" not in result["reason"]

@@ -614,7 +614,15 @@ gco --output json capacity check -i g5.xlarge -r us-west-2 --enrich-historical
 
 #### `gco capacity status`
 
-View capacity status across regions.
+View capacity status across regions. `QUEUE` (`queue_depth`) is the Region's SQS job
+queue backlog. `RUNNING` (`running_jobs`) is the health monitor's `ActiveJobs` metric
+(CloudWatch namespace `GCO/HealthMonitor`, published every 30 seconds): Jobs in the
+job namespaces with a pending or running pod. It is not the SQS in-flight message
+count, which only covers messages being applied or waiting to be retried. When the
+metric has no recent datapoint the count is reported as unavailable (`jobs` in
+`unavailable_signals`), and recommendations neither describe the Region as having no
+running jobs nor score it as idle. The same values feed
+[`recommend-region`](#gco-capacity-recommend-region), `gco status` and the capacity advisor.
 
 ```bash
 gco capacity status [OPTIONS]

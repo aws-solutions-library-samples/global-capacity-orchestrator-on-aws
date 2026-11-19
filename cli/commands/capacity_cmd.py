@@ -311,8 +311,9 @@ def instance_info(config: Any, instance_type: Any, region: Any) -> None:
 def capacity_status(config: Any, region: Any, all_regions: Any) -> None:
     """Show comprehensive resource utilization across regions.
 
-    Displays pending/running workloads, GPU/CPU utilization, queue depth,
-    and active job counts for one or all GCO clusters.
+    Displays the SQS job-queue depth, the running (active) Job count the
+    health monitor publishes, and GPU/CPU utilization for one or all GCO
+    clusters.
 
     Examples:
         gco capacity status
