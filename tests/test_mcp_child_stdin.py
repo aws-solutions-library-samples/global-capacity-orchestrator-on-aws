@@ -240,3 +240,24 @@ def test_login_url_runs_the_cli_with_a_password(
     assert json.loads(result) == {"url": "https://example.com"}
     assert run.call_args.args == ("analytics", "studio", "login", "--username", "alice")
     assert run.call_args.kwargs == {"env": child_env}
+
+
+def test_cli_runner_imports_as_a_package_module_without_the_mcp_search_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installed package imports ``gco_mcp.cli_runner`` before ``run_mcp``.
+
+    cli_runner imports its siblings bare (``from iam import ...``), which only
+    resolves once gco_mcp/ is on ``sys.path``; the module must add it itself
+    instead of failing with ``No module named 'iam'``.
+    """
+    import importlib
+
+    mcp_dir = str(Path(cli_runner.__file__).resolve().parent)
+    monkeypatch.setattr(sys, "path", [entry for entry in sys.path if entry != mcp_dir])
+    monkeypatch.delitem(sys.modules, "gco_mcp.cli_runner", raising=False)
+
+    module = importlib.import_module("gco_mcp.cli_runner")
+
+    assert sys.path[0] == mcp_dir
+    assert module.child_environment is sys.modules["iam"].child_environment

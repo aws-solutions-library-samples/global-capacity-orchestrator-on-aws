@@ -18,7 +18,14 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from iam import child_environment
+# gco_mcp's modules import each other bare (see run_mcp.py). An installed
+# package can import this module as ``gco_mcp.cli_runner`` before anything
+# has put gco_mcp/ on the search path, so add it here, at most once.
+_MCP_DIR = str(Path(__file__).resolve().parent)
+if _MCP_DIR not in sys.path:
+    sys.path.insert(0, _MCP_DIR)
+
+from iam import child_environment  # noqa: E402
 
 
 def _resolve_project_root() -> Path:

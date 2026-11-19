@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import configparser
+import http.client
 import json
 import logging
 import os
 import subprocess
 import sys
-import urllib.error
-import urllib.request
+import urllib.parse
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -41,7 +41,7 @@ import iam
 from tools._long_task import _run_long_task
 
 ROLE_ARN = "arn:aws:iam::123456789012:role/gco-mcp"
-AMBIENT_KEY = "AKIAAMBIENTADMIN0000"
+AMBIENT_KEY = "TESTAMBIENTADMIN0000"
 
 #: The operator's AWS files: every profile here would hand a child other
 #: credentials than the role's if the child could read it.
@@ -73,16 +73,16 @@ s3 =
 """
 _CREDENTIALS = """\
 [default]
-aws_access_key_id = AKIADEFAULTPROFILE00
+aws_access_key_id = TESTDEFAULTPROFILE00
 aws_secret_access_key = default-secret
 
 [admin]
-aws_access_key_id = AKIAADMINPROFILE0000
+aws_access_key_id = TESTADMINPROFILE0000
 aws_secret_access_key = admin-secret
 """
 _BOTO = """\
 [Credentials]
-aws_access_key_id = AKIABOTOCONFIG000000
+aws_access_key_id = TESTBOTOCONFIG000000
 aws_secret_access_key = boto-secret
 """
 
@@ -112,7 +112,7 @@ class _FakeSts:
         self.calls.append(kwargs)
         return {
             "Credentials": {
-                "AccessKeyId": f"ASIAROLE{len(self.calls):012d}",
+                "AccessKeyId": f"TESTROLE{len(self.calls):012d}",
                 "SecretAccessKey": "role-secret",
                 "SessionToken": "role-token",
                 "Expiration": datetime.now(UTC) + self.lifetime,
@@ -195,7 +195,7 @@ def test_children_resolve_the_role_whatever_profile_they_select(
         env["AWS_PROFILE"] = profile
     assert _resolve_in_child(env) == {
         "method": "container-role",
-        "access_key": "ASIAROLE000000000001",
+        "access_key": "TESTROLE000000000001",
     }
     # The ambient credentials were the source for AssumeRole, and only that.
     assert sts.source_keys == [AMBIENT_KEY]
@@ -275,7 +275,7 @@ def test_gco_children_of_every_runner_get_the_role(
         asyncio.run(_run_long_task(["gco", "probe"], ctx=None, progress=None, is_stack_op=False))
     assert json.loads(probe.read_text()) == {
         "method": "container-role",
-        "access_key": "ASIAROLE000000000001",
+        "access_key": "TESTROLE000000000001",
     }
 
 
@@ -356,16 +356,39 @@ def test_the_endpoint_document_names_the_account(aws_home: Path, sts: _FakeSts) 
     iam.assume_mcp_role()
     env = iam.child_environment()
     assert env is not None
-    request = urllib.request.Request(
+    status, headers, body = _loopback_get(
         env["AWS_CONTAINER_CREDENTIALS_FULL_URI"],
-        headers={"Authorization": env["AWS_CONTAINER_AUTHORIZATION_TOKEN"]},
+        {"Authorization": env["AWS_CONTAINER_AUTHORIZATION_TOKEN"]},
     )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        document = json.loads(response.read())
-        assert response.headers["Cache-Control"] == "no-store"
-    assert document["AccessKeyId"] == "ASIAROLE000000000001"
+    assert status == 200
+    assert headers["cache-control"] == "no-store"
+    document = json.loads(body)
+    assert document["AccessKeyId"] == "TESTROLE000000000001"
     assert document["AccountId"] == "123456789012"
     assert document["Expiration"].endswith("Z")
+
+
+def _loopback_get(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str], bytes]:
+    """GET the credential endpoint, which listens on plain HTTP on 127.0.0.1.
+
+    ``http.client`` instead of ``urllib``: the URL is asserted to be the
+    loopback endpoint, so no other scheme or host can be reached.
+    """
+    parts = urllib.parse.urlsplit(url)
+    assert parts.scheme == "http"
+    assert parts.hostname == "127.0.0.1"
+    connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=10)
+    try:
+        target = parts.path + (f"?{parts.query}" if parts.query else "")
+        connection.request("GET", target, headers=headers)
+        response = connection.getresponse()
+        return (
+            response.status,
+            {name.lower(): value for name, value in response.getheaders()},
+            response.read(),
+        )
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------------------------
@@ -374,14 +397,8 @@ def test_the_endpoint_document_names_the_account(aws_home: Path, sts: _FakeSts) 
 
 
 def _get(url: str, token: str | None) -> tuple[int, dict[str, Any]]:
-    headers = {} if token is None else {"Authorization": token}
-    try:
-        with urllib.request.urlopen(
-            urllib.request.Request(url, headers=headers), timeout=10
-        ) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
+    status, _, body = _loopback_get(url, {} if token is None else {"Authorization": token})
+    return status, json.loads(body)
 
 
 @pytest.fixture
@@ -446,7 +463,15 @@ def test_child_config_keeps_every_profile_without_credentials(aws_home: Path) ->
     assert dict(parser["profile admin"]) == {"region": "eu-west-1"}
     assert dict(parser["profile sso"]) == {}
     assert dict(parser["services local"]) == {"s3": "\nendpoint_url = http://localhost:4566"}
-    for secret in ("secret", "role_arn", "credential_process", "sso_", "AKIA"):
+    for secret in (
+        "secret",
+        "role_arn",
+        "credential_process",
+        "sso_",
+        "TESTDEFAULTPROFILE00",
+        "TESTADMINPROFILE0000",
+        "TESTBOTOCONFIG000000",
+    ):
         assert secret not in text
 
 
@@ -547,7 +572,8 @@ def test_assuming_again_replaces_the_previous_endpoint(aws_home: Path, sts: _Fak
         first["AWS_CONTAINER_CREDENTIALS_FULL_URI"] != second["AWS_CONTAINER_CREDENTIALS_FULL_URI"]
     )
     assert not Path(first["AWS_CONFIG_FILE"]).exists()
-    with pytest.raises(urllib.error.URLError):
+    # The closed listener refuses the connection.
+    with pytest.raises(ConnectionRefusedError):
         _get(
             first["AWS_CONTAINER_CREDENTIALS_FULL_URI"], first["AWS_CONTAINER_AUTHORIZATION_TOKEN"]
         )

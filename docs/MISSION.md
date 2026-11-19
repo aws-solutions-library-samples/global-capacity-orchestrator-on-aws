@@ -411,8 +411,8 @@ obs.__class__  # → dunder_attribute
 obs.metrics.loss  # → attribute_target_not_allowed (chained attribute)
 obs.metrics  # → attribute_not_allowed (use obs["metrics"])
 sorted(obs["xs"], key=obs.update)  # → attribute_not_allowed (mutating method as a callback)
-10 ** 10 ** 8 > 0  # → exponent_not_bounded
-len("x" * 10 ** 12) > 0  # → repetition_not_bounded
+10**10**8 > 0  # → exponent_not_bounded
+len("x" * 10**12) > 0  # → repetition_not_bounded
 "%0999999999d" % 1  # → string_formatting_not_allowed
 obs["xs"].append(1)  # → call_target_method_not_allowed
 obs["xs"].count(0)  # → call_target_method_not_allowed

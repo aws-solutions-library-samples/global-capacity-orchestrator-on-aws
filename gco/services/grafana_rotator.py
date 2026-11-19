@@ -245,7 +245,7 @@ def settle_staged_password(
         patch_secret_password(core_v1, namespace, secret_name, staged_password)
         logger.warning(
             "Finished an interrupted rotation: Grafana already used the staged admin "
-            "password, now written to %s in secret %s/%s",
+            "login, now stored under key %s of %s/%s",
             _ADMIN_PASSWORD_KEY,
             namespace,
             secret_name,
@@ -270,9 +270,9 @@ def _promote_staged_password(
         except ApiException as exc:
             if attempt >= _PROMOTE_ATTEMPTS:
                 logger.error(
-                    "Grafana now uses the new admin password, but writing it to %s in "
-                    "secret %s/%s failed %s times (%s); it is kept in %s, and the next "
-                    "run moves it into place",
+                    "Grafana now uses the rotated admin login, but storing it under key %s "
+                    "of %s/%s failed %s times (%s); it stays under key %s and the next run "
+                    "moves it into place",
                     _ADMIN_PASSWORD_KEY,
                     namespace,
                     secret_name,

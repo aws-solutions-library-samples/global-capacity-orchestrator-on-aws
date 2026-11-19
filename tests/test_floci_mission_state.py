@@ -70,6 +70,17 @@ def _session(session_id: str, *, status: str = "running", created_at: str) -> di
     }
 
 
+@pytest.fixture(autouse=True)
+def _global_region_is_the_session_region(monkeypatch):
+    """Mission looks for its tables in the global stack's Region.
+
+    That is ``GCO_GLOBAL_REGION``, else cdk.json's ``deployment_regions.global``;
+    this module provisions its tables in the emulator session's Region
+    (tests/_floci.py), so name it.
+    """
+    monkeypatch.setenv("GCO_GLOBAL_REGION", "us-east-1")
+
+
 @pytest.fixture(scope="module")
 def missions_table(verified_floci_endpoint):
     """The missions table as the global stack declares it, plus its SSM name."""
