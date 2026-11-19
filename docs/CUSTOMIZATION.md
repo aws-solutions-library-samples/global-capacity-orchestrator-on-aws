@@ -3125,14 +3125,17 @@ FSx is cheaper per GB but you pay for provisioned capacity (minimum 1.2 TB). EFS
 
 ### Scale-to-Zero Savings
 
-Inference endpoints with KEDA can scale to zero when idle, eliminating GPU costs during off-hours:
+Endpoint autoscaling does not scale to zero: `--min-replicas` is at least 1,
+and nothing starts a pod when a request arrives for an endpoint with none, so
+an idle endpoint keeps at least one GPU node. Stop it instead when nobody needs
+it, for example from a scheduled job at the start and end of off-peak hours:
 
-```yaml
-minReplicaCount: 0   # No GPU cost when idle
-cooldownPeriod: 300  # Scale down after 5 min of no traffic
+```bash
+gco inference stop my-llm -y   # every Deployment of the endpoint scales to zero; the configuration is kept
+gco inference start my-llm     # back on the same spec; the pods need a free GPU node and a model load
 ```
 
-A single `g5.xlarge` (1x A10G GPU) costs ~$1.00/hour on-demand. Scale-to-zero during 12 hours of off-peak saves ~$360/month per endpoint.
+A single `g5.xlarge` (1x A10G GPU) costs ~$1.00/hour on-demand. Stopping an endpoint for 12 hours of off-peak a day saves ~$360/month per endpoint, once EKS Auto Mode has removed the idle node.
 
 ### Sample Monthly Costs
 
