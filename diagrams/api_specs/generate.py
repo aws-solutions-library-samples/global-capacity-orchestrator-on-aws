@@ -644,14 +644,12 @@ def render_gateway_details(document: dict[str, Any]) -> list[str]:
         )
         lines.append("")
         lines.extend(_json_block(policy))
-        direct = document.get("x-gco-resource-policy-direct-access")
-        if isinstance(direct, list) and direct:
-            lines.append(
-                "Added when `api_gateway.regional_api_enabled` is true (and always outside "
-                "the `aws` partition), admitting the deploying account's other principals:"
-            )
-            lines.append("")
-            lines.extend(_json_block(direct))
+        lines.append(
+            "Any other call is allowed only for a principal of the deploying account whose "
+            "identity-based policy allows `execute-api:Invoke` on this API; principals of "
+            "other accounts are refused."
+        )
+        lines.append("")
     waf = document.get("x-gco-waf")
     if isinstance(waf, list) and waf:
         lines.extend(["### WAF", ""])
@@ -940,7 +938,7 @@ def render_index(documents: dict[str, dict[str, Any]], *, site_url: str, repo_ur
         "it — over Global Accelerator from the global API, inside the VPC from the regional",
         "bridge — to the region's internal ALB, the Kubernetes Gateway whose HTTPRoute picks",
         "the Service by longest path prefix. The aggregator answers `/api/v1/global/*` by",
-        "fanning out to the regional API Gateways. Dashed arrows are opt-in or dynamic",
+        "fanning out to the regional API Gateways. Dashed arrows are indirect or dynamic",
         "paths; `†` marks routes that exist only under a deployment condition. Every box",
         "is a document in the table above, and each is a link to its sheet on the site.",
         "",
@@ -1220,8 +1218,7 @@ def topology_model(
 
     for name in gateways:
         document = documents[name]
-        direct = bool(document.get("x-gco-resource-policy-direct-access"))
-        connect("clients", f"doc:{name}", "SigV4 · opt-in" if direct else "SigV4", dashed=direct)
+        connect("clients", f"doc:{name}", "SigV4")
         # One label per path into a Lambda; a path is marked conditional when
         # any of its methods is.
         conditional_paths = {
@@ -1428,7 +1425,7 @@ def render_topology(documents: dict[str, dict[str, Any]], *, site_url: str) -> s
             _MARGIN,
             legend_y + 30,
             "† route exists only under a deployment condition (see the sheet) · dashed arrow: "
-            "opt-in or dynamic path · every box links to its spec sheet",
+            "indirect or dynamic path · every box links to its spec sheet",
             size=10.5,
             fill="#334155",
         )

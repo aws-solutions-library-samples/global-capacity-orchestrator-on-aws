@@ -6129,7 +6129,10 @@ gco status --fail-on-findings
 | `--fail-on-findings` | Exit 1 after rendering when any `error`-severity finding is present |
 
 **Sections.** Each is gathered independently, in parallel, under a 30-second
-per-section timeout. The default set is Tier 1: free control-plane reads that
+per-section timeout, or 50 seconds with `--with-policy`: the `policy` section
+waits up to 45 seconds for each region's policy read and then reports a region
+still reading as unreadable, and the longer timeout lets it report the regions
+that answered. The default set is Tier 1: free control-plane reads that
 need no cluster reachability. Tier 2 costs money per call and Tier 3 needs the
 Kubernetes API, so both are opt-in flags.
 
@@ -6948,9 +6951,12 @@ characters).
 
 The ingest Lambda refuses an object over 4 MiB, or one that makes more
 than 500 chunks (about 1 MB of text), before any Bedrock call; split a
-longer document into several files. A refused object never becomes
-searchable, so `--wait` times out on it; the Lambda's log names the reason
-(`too_large`), and the S3 event ends up in its dead-letter queue. See [Configure the Vector
+longer document into several files. `gco vector ingest` applies both limits
+before it uploads anything and refuses such a file by name. An object the
+Lambda refuses anyway (an invalid `.jsonl` line, text that is not UTF-8, or
+an object put under the prefix some other way) never becomes searchable, so
+`--wait` times out on it; the Lambda's log names the reason (for example
+`too_large`), and the S3 event ends up in its dead-letter queue. See [Configure the Vector
 Store](CUSTOMIZATION.md#configure-the-vector-store) for every limit.
 
 ```bash

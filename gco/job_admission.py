@@ -862,6 +862,43 @@ def check_security_context(
         return False, f"Security context error: {e}"
 
 
+def _trainjob_pod_templates(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """The pod templates a TrainJob's runtime patches set, each with its merged ``nodeSelector``.
+
+    Kubeflow Trainer applies ``spec.runtimePatches`` in order, each one a
+    strategic merge patch onto the runtime's JobSet spec. Replicated jobs merge
+    by name, so every patch naming the same replicated job patches the same
+    pod template, and a ``nodeSelector`` merges key by key, the later patch's
+    value winning. Only string values count: the CRD types them as strings,
+    and the API server prunes a null. One entry per replicated job named by any
+    patch, carrying only the ``nodeSelector`` routing reads.
+    """
+    spec = manifest.get("spec")
+    patches = spec.get("runtimePatches") if isinstance(spec, dict) else None
+    templates: dict[str, dict[str, str]] = {}
+    for patch in patches if isinstance(patches, list) else []:
+        replicated_jobs = _nested(
+            patch, "trainingRuntimeSpec", "template", "spec", "replicatedJobs"
+        )
+        for job in replicated_jobs if isinstance(replicated_jobs, list) else []:
+            if not isinstance(job, dict):
+                continue
+            selector = templates.setdefault(str(job.get("name")), {})
+            patched = _nested(job, "template", "spec", "template", "spec", "nodeSelector")
+            if isinstance(patched, dict):
+                selector.update({k: v for k, v in patched.items() if isinstance(v, str)})
+    return [{"nodeSelector": selector} for selector in templates.values()]
+
+
+def _nested(node: Any, *keys: str) -> Any:
+    """``node[keys[0]][keys[1]]...``, or ``None`` where a level is missing or not a mapping."""
+    for key in keys:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
 def hyperpod_routing(manifest: dict[str, Any], pod_specs: list[dict[str, Any]]) -> str | None:
     """How *manifest* reaches SageMaker HyperPod nodes, or ``None`` if it does not.
 
@@ -873,11 +910,19 @@ def hyperpod_routing(manifest: dict[str, Any], pod_specs: list[dict[str, Any]]) 
     scheduler" path of docs/HYPERPOD.md, where the toleration is the author's
     job. Anything else, including a manifest only some of whose pod specs
     select HyperPod, is ``None``.
+
+    A TrainJob is judged by its pod templates as Trainer builds them, not by
+    *pod_specs* (the callers' validation views, where the synthetic trainer
+    spec and each runtime patch stand alone): every pod template its runtime
+    patches set must select HyperPod once the patches are merged, so the
+    selector and the toleration may sit in different patches.
     """
     metadata = manifest.get("metadata")
     labels = (metadata.get("labels") if isinstance(metadata, dict) else None) or {}
     if isinstance(labels, dict) and labels.get(KUEUE_QUEUE_NAME_LABEL) == HYPERPOD_LOCAL_QUEUE:
         return "queue"
+    if manifest.get("kind") == "TrainJob":
+        pod_specs = _trainjob_pod_templates(manifest)
     if pod_specs and all(
         isinstance(spec.get("nodeSelector"), dict)
         and spec["nodeSelector"].get(CAPACITY_PROVIDER_LABEL) == CAPACITY_PROVIDER_HYPERPOD

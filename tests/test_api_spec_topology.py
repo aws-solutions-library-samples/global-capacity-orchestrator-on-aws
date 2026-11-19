@@ -192,8 +192,17 @@ def _global_gateway() -> dict[str, Any]:
     }
 
 
+#: What every API Gateway sheet says after its resource policy: no statement
+#: admits the account as a whole.
+_IDENTITY_POLICY_NOTE = (
+    "Any other call is allowed only for a principal of the deploying account whose "
+    "identity-based policy allows `execute-api:Invoke` on this API; principals of "
+    "other accounts are refused."
+)
+
+
 def _regional_gateway() -> dict[str, Any]:
-    """A regional bridge: opt-in direct access, no WAF, no stage block, no endpoint type."""
+    """A regional bridge (always deployed): no WAF, no stage block, no endpoint type."""
     return {
         "openapi": "3.0.3",
         "info": {"title": "Regional Gateway", "version": "1.0.0"},
@@ -219,7 +228,6 @@ def _regional_gateway() -> dict[str, Any]:
         "components": {},
         "x-gco-source": {"kind": "aws-api-gateway"},
         "x-gco-resource-policy": [{"Effect": "Allow", "Principal": "aggregator"}],
-        "x-gco-resource-policy-direct-access": [{"Effect": "Allow", "Principal": "*"}],
     }
 
 
@@ -374,7 +382,8 @@ def test_api_gateway_sheet_renders_servers_deployment_and_security(tmp_path: Pat
     ) in deployment
     assert "  - `flag`: only with the flag" in deployment
     assert '"Resource": "execute-api:/*"' in deployment
-    assert "regional_api_enabled" not in deployment, "the global API has no direct-access variant"
+    assert _IDENTITY_POLICY_NOTE in deployment
+    assert "regional_api_enabled" not in deployment
     assert "| 0 | `RateLimit` | block | — |" in deployment
     assert "| 2 | `Common` | group default | `CRS` |" in deployment
     assert "not-a-rule" not in deployment
@@ -435,8 +444,11 @@ def test_regional_gateway_sheet_renders_only_what_it_declares(tmp_path: Path) ->
     assert "- **Stage:**" not in deployment
     assert "- **Conditional routes:**" not in deployment
     assert "### WAF" not in deployment
-    assert "Added when `api_gateway.regional_api_enabled` is true" in deployment
-    assert '"Principal": "*"' in deployment
+    # The bridge is always deployed and its policy names only the aggregator;
+    # api_gateway.regional_api_enabled no longer adds an account-wide statement.
+    assert '"Principal": "aggregator"' in deployment
+    assert _IDENTITY_POLICY_NOTE in deployment
+    assert "regional_api_enabled" not in deployment
     assert "## Security schemes" not in text, "an empty components block renders nothing"
     assert "- **Behaviour:**" not in text, "a null backend description is skipped"
     assert "This api gateway declares no component schemas." in text
@@ -543,7 +555,7 @@ def test_topology_nodes_edges_and_links(tmp_path: Path) -> None:
     )
     assert "GET POST /api/v1/{proxy+} †" in svg, "conditional routes are marked"
     assert ">/api/v1/global/*<" in svg, "sibling aggregator paths collapse to their prefix"
-    assert ">SigV4 · opt-in<" in svg and ">SigV4<" in svg
+    assert ">SigV4<" in svg and "opt-in" not in svg, "clients reach both API Gateways alike"
     assert ">SigV4 fan-out<" in svg and 'marker-end="url(#arrow-fanout)"' in svg
     assert ">/api/v1/c*<" in svg and ">by endpoint name<" in svg
     assert ">/a/deep<" in svg and ">/a<" in svg, "one label line per prefix into a Service"

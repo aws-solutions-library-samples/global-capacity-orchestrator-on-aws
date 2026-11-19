@@ -2988,6 +2988,62 @@ class TestValkeyCache:
         assert valkey_config["max_ecpu_per_second"] == 5000
         assert valkey_config["snapshot_retention_limit"] == 1
 
+    def test_valkey_cache_project_tag_is_the_context_tags_value(self):
+        """The cache's ``Project`` tag is cdk.json ``context.tags.Project``, not ``project_name``.
+
+        The cost reports filter on the ``context.tags`` value app.py applies to
+        the whole app; MockConfigLoader's (``gco``) differs from its project
+        name (``gco-test``), which ``gco:project`` keeps.
+        """
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        class ValkeyConfig(MockConfigLoader):
+            def get_valkey_config(self):
+                return {"enabled": True}
+
+        app = cdk.App()
+        with (
+            patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
+            patch.object(
+                GCORegionalStack,
+                "_create_helm_installer_lambda",
+                TestRegionalStackSynthesis._mock_helm_installer,
+            ),
+        ):
+            mock_image = MagicMock()
+            mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
+            mock_docker.return_value = mock_image
+            stack = GCORegionalStack(
+                app,
+                "test-valkey-tags",
+                config=ValkeyConfig(app),
+                region="us-east-1",
+                auth_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:test-secret",  # nosec B106
+                env=cdk.Environment(account="123456789012", region="us-east-1"),
+            )
+        caches = assertions.Template.from_stack(stack).find_resources(
+            "AWS::ElastiCache::ServerlessCache"
+        )
+        [cache] = caches.values()
+        assert {tag["Key"]: tag["Value"] for tag in cache["Properties"]["Tags"]} == {
+            "Project": "gco",
+            "gco:project": "gco-test",
+            "Region": "us-east-1",
+        }
+
+    def test_project_tag_falls_back_to_the_project_name(self):
+        """Without ``context.tags.Project`` the explicit ``Project`` tags carry ``project_name``."""
+        from types import SimpleNamespace
+
+        from gco.stacks.regional_stack import GCORegionalStack
+
+        class NoProjectTag(MockConfigLoader):
+            def get_tags(self):
+                return {"Environment": "test"}
+
+        assert GCORegionalStack._project_tag(SimpleNamespace(config=MockConfigLoader())) == "gco"
+        assert GCORegionalStack._project_tag(SimpleNamespace(config=NoProjectTag())) == "gco-test"
+
 
 class TestQueueProcessorConfig:
     """Tests for queue_processor configuration in cdk.json."""

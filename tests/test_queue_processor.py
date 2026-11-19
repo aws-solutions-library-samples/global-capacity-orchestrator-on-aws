@@ -2278,7 +2278,15 @@ class TestTrainJobValidation:
         )
         assert ok, reason
 
-    def test_inject_security_defaults_reaches_embedded_pod_specs(self):
+    def test_inject_security_defaults_leaves_a_trainjob_alone(self):
+        """No ``automountServiceAccountToken`` is injected into a runtime patch.
+
+        Kubeflow Trainer 2.3.0's runtime-patch pod spec has no such field, so
+        the API server dropped the injected ``false``; the REST path agrees
+        (tests/test_manifest_processor_extended.py).
+        """
+        import copy
+
         qp = _reload()
         manifest = _trainjob(
             runtime_patches=[
@@ -2287,12 +2295,9 @@ class TestTrainJobValidation:
                 )
             ],
         )
-        qp._inject_security_defaults(manifest)
-        embedded = manifest["spec"]["runtimePatches"][0]["trainingRuntimeSpec"]["template"]["spec"][
-            "replicatedJobs"
-        ][0]["template"]["spec"]["template"]["spec"]
-        assert embedded["automountServiceAccountToken"] is False
-        assert "automountServiceAccountToken" not in manifest["spec"]["trainer"]
+        before = copy.deepcopy(manifest)
+        assert qp._inject_security_defaults(manifest) is manifest
+        assert manifest == before
 
     def test_apply_manifest_missing_addon_hint(self):
         """ResourceNotFoundError for TrainJob keeps the stable DLQ prefix and

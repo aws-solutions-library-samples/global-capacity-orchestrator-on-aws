@@ -110,6 +110,14 @@ tolerations:
     effect: NoSchedule
 ```
 
+A `TrainJob` sets them in a runtime patch on its `node` pod template
+(`spec.trainer` has no scheduling fields; see
+[`examples/kubeflow-trainjob.yaml`](../examples/kubeflow-trainjob.yaml)).
+Trainer merges every patch that names the same replicated job into one pod
+template, and the job API judges the merged template, so the selector and the
+toleration may sit in different patches. Every pod template the patches set
+must select HyperPod.
+
 **Inference.** `gco inference deploy --capacity-type hyperpod` (and the MCP
 `deploy_inference` tool) pins an endpoint's model pods to HyperPod nodes the
 same way.

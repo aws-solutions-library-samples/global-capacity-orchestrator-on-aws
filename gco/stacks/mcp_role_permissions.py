@@ -77,11 +77,13 @@ UNSCOPED_READ_ACTIONS: tuple[str, ...] = (
     "ec2:DescribeCapacityBlockOfferings",
     "ec2:DescribeInstances",
     "pricing:GetProducts",
-    # find_training_plans, list_training_plans, hyperpod_preflight.
+    # find_training_plans, list_training_plans, hyperpod_preflight (which
+    # reads AWS's default quota for an instance type with none applied).
     "sagemaker:ListClusters",
     "sagemaker:ListTrainingPlans",
     "sagemaker:SearchTrainingPlanOfferings",
     "servicequotas:ListServiceQuotas",
+    "servicequotas:ListAWSDefaultServiceQuotas",
     # cost_summary, cost_by_region, cost_trend, cost_forecast,
     # cost_allocation_status, fleet_status.
     "ce:GetCostAndUsage",

@@ -353,6 +353,10 @@ GPU spend: EKS Auto Mode launches EC2 capacity outside CloudFormation, so
 those instances never carry `Project` — but AWS stamps them with
 `aws:eks:cluster-name`, giving per-cluster attribution with zero manifest
 changes. Group by it in Cost Explorer or the CUR to split spend by cluster.
+The instances and volumes AWS PCS launches do carry the same `Project` value:
+the stack writes it into the node groups' launch templates. A HyperPod cluster
+carries it too, and HyperPod propagates its cluster tags to the instances it
+launches.
 
 The `Project` value is not derived from `project_name`. Two deployments in
 one account that keep the same value report each other's spend, so give

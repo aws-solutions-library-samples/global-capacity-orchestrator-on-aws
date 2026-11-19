@@ -52,6 +52,8 @@ Statements deployed on the REST API (`${AWS::AccountId}` is the deploying accoun
 ]
 ```
 
+Any other call is allowed only for a principal of the deploying account whose identity-based policy allows `execute-api:Invoke` on this API; principals of other accounts are refused.
+
 ## Security schemes
 
 ### `sigv4`

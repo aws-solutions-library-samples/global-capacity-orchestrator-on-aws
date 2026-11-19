@@ -111,7 +111,7 @@ Accelerator from the global API, inside the VPC from the regional bridge — to
 the region's internal ALB: the Kubernetes Gateway `gco-system/gco-gateway`,
 whose HTTPRoute picks the Service by longest path prefix. `/api/v1/global/*` is
 answered by the cross-region aggregator, which fans out to every regional API
-Gateway with SigV4 instead. Dashed arrows are opt-in or dynamic paths; `†`
+Gateway with SigV4 instead. Dashed arrows are indirect or dynamic paths; `†`
 marks routes that exist only under a deployment condition (Global Accelerator
 in the commercial `aws` partition, the analytics environment).
 
@@ -648,7 +648,7 @@ gco jobs list -r us-east-1 --limit 10
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `namespace` | string | - | Filter by namespace |
-| `status` | string | - | Filter by status (pending, running, completed, succeeded, failed) |
+| `status` | string | - | Filter by status: `pending`, `running`, `completed` or `failed`. `succeeded`, what the responses call a finished Job, is an alias of `completed` |
 | `limit` | int | 50 | Maximum jobs to return (1-1000) |
 | `offset` | int | 0 | Number of jobs to skip |
 | `sort` | string | createdAt:desc | Sort field and order (field:asc\|desc) |
@@ -1307,7 +1307,7 @@ gco jobs bulk-delete --all-regions --status failed --older-than-days 30 --execut
 | Field | Type | Description |
 |-------|------|-------------|
 | `namespace` | string | Filter by namespace |
-| `status` | string | Filter by status |
+| `status` | string | Filter by status: `pending`, `running`, `completed` or `failed` (`succeeded` is an alias of `completed`) |
 | `older_than_days` | int | Delete jobs older than N days (1-365) |
 | `label_selector` | string | Kubernetes label selector |
 | `dry_run` | bool | If true, only return what would be deleted |
@@ -2531,7 +2531,7 @@ All error responses follow this format:
 |------|-------------|
 | 200 | Success |
 | 201 | Created |
-| 400 | Bad Request - Invalid input |
+| 400 | Bad Request - Invalid input, or a request path with a `.` or `..` segment (literal or percent-encoded), which the API Gateway proxies refuse before forwarding |
 | 403 | Forbidden - Namespace not allowed |
 | 404 | Not Found - Resource doesn't exist |
 | 409 | Conflict - Resource already exists |

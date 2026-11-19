@@ -384,6 +384,36 @@ class TestMcpRolePermissionsModule:
         for action in UNSCOPED_READ_ACTIONS:
             assert action.partition(":")[2].startswith(READ_VERBS), action
 
+    def test_hyperpod_preflight_quota_listings_are_granted(self):
+        """Every Service Quotas listing ``hyperpod_preflight`` pages through is granted.
+
+        The instance-type check lists the applied quotas, then AWS's defaults for
+        an instance type with none applied. Without the second action, a session
+        on the role turned that type's check into a "could not check" warning.
+        """
+        import boto3
+
+        from cli import hyperpod_preflight
+        from cli.pcs_preflight import _Checker
+
+        model = boto3.client("service-quotas", region_name="us-east-1")
+        operations: list[str] = []
+
+        class _RecordingQuotas:
+            def get_paginator(self, method: str) -> Any:
+                operations.append(model.meta.method_to_api_mapping[method])
+                return MagicMock(paginate=MagicMock(return_value=[{"Quotas": []}]))
+
+        quotas = _RecordingQuotas()
+        checker = _Checker("us-east-1", lambda service, **_: quotas)
+        hyperpod_preflight._check_instance_types(
+            checker, {"instance_groups": [{"instance_type": "ml.g5.8xlarge", "instance_count": 1}]}
+        )
+
+        assert operations == ["ListServiceQuotas", "ListAWSDefaultServiceQuotas"]
+        for operation in operations:
+            assert f"servicequotas:{operation}" in UNSCOPED_READ_ACTIONS, operation
+
 
 _DEFAULT_TOOLS = (
     "import asyncio, json, sys; sys.path.insert(0, 'gco_mcp'); import run_mcp; "

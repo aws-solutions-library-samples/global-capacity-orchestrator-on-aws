@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit
 
 import boto3
 import urllib3
@@ -499,6 +499,23 @@ def _build_success_response(response: urllib3.BaseHTTPResponse) -> dict[str, Any
         "headers": response_headers,
         "body": response.data.decode("utf-8"),
     }
+
+
+#: Path segments RFC 3986 (section 5.2.4) removes when it resolves a URL.
+_DOT_SEGMENTS = frozenset({".", ".."})
+
+
+def has_dot_segment(path: str) -> bool:
+    """Whether *path* has a ``.`` or ``..`` segment, literal or percent-encoded.
+
+    urllib3 removes dot segments from the request target it sends, so
+    ``/api/v1/jobs/../../../inference/x`` would reach ``/inference/x``, a
+    route other than the one API Gateway authorized. API Gateway does not
+    document whether the Lambda proxy event's ``path`` is percent-decoded,
+    so ``%2E%2E`` and ``..%2F`` count too. No GCO route has such a segment;
+    the proxies answer 400 instead of forwarding.
+    """
+    return any(segment in _DOT_SEGMENTS for segment in unquote(path).split("/"))
 
 
 def build_target_url(

@@ -36,6 +36,7 @@ from proxy_utils import (
     caller_identity_headers,
     forward_request,
     get_secret_token,
+    has_dot_segment,
     sanitize_request_headers,
 )
 
@@ -91,6 +92,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     http_method = event["httpMethod"]
     path = event["path"]
+    if has_dot_segment(path):
+        return _error_response(400, "The request path must not have a '.' or '..' segment")
     query_string = (
         event.get("multiValueQueryStringParameters") or event.get("queryStringParameters") or {}
     )

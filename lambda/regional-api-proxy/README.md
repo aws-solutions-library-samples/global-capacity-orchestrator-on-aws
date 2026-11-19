@@ -74,6 +74,7 @@ Verified endpoints are cached for 60 seconds by default. `REGIONAL_ENDPOINT_CACH
 - Signing-key retrieval failure returns `503 Backend authentication is temporarily unavailable`.
 - Registry lookup, malformed endpoint, ELB API, or ownership verification failure returns `502 Regional backend is temporarily unavailable`.
 - Base64-encoded request bodies return `415`; the proxy does not reinterpret binary payloads.
+- A request path with a `.` or `..` segment, literal or percent-encoded, returns `400`: the HTTP client would remove the segment and reach a different route than API Gateway authorized.
 - Upstream status codes and bounded transport failures are returned by the shared forwarding utility: `503 Service unavailable` when the connection could not be opened or was dropped, `504 Gateway timeout` when the ALB did not answer in time.
 
 ## IAM Permissions

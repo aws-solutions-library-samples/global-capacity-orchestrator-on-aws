@@ -9,12 +9,13 @@ repos:
       # CI's ruff reads) applies as well. Do not add a CLI --exclude: it
       # replaces that list instead of extending it.
       #
-      # Formatter. Run before ``ruff`` so the check sees formatter output.
+      # Formatter. Run before ``ruff-check`` so the check sees formatter output.
       - id: ruff-format
         exclude: &generated_trees '^(\.venv|cdk\.out|lambda/[^/]+-build)/'
       # Linter, including isort-style import sorting via the ``I`` rule
-      # selected in pyproject.toml.
-      - id: ruff
+      # selected in pyproject.toml. ``ruff`` is only a legacy alias of this
+      # hook in ruff-pre-commit's .pre-commit-hooks.yaml.
+      - id: ruff-check
         args: [--fix]
         exclude: *generated_trees
 

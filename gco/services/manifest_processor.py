@@ -785,14 +785,13 @@ class ManifestProcessor:
 
         The method mutates *manifest* in-place and returns it for convenience.
 
-        For a TrainJob the default is injected into every pod spec embedded
-        in ``runtimePatches`` (live references into the manifest); the base
-        pod template comes from the shipped ClusterTrainingRuntime, which
-        already disables the token.
+        A TrainJob is left as it is: its pod template comes from the runtime,
+        and a runtime patch's pod spec has no ``automountServiceAccountToken``
+        (Kubeflow Trainer 2.3.0's TrainJob CRD), so the API server would drop
+        an injected one. The shipped ``torch-distributed`` ClusterTrainingRuntime
+        sets it to false (docs/DISTRIBUTED_TRAINING.md, Runtimes).
         """
         if manifest.get("kind") == "TrainJob":
-            for embedded in extract_trainjob_pod_specs(manifest).embedded:
-                embedded.setdefault("automountServiceAccountToken", False)
             return manifest
         pod_spec = self._extract_pod_spec(manifest)
         if pod_spec is not None:
@@ -1563,11 +1562,15 @@ class ManifestProcessor:
 
         Args:
             namespace: Filter by specific namespace (must be in allowed_namespaces)
-            status_filter: Filter by status: "running", "completed", "failed"
+            status_filter: Filter by status: "pending", "running", "completed"
+                or "failed" (:meth:`_get_job_status`). "succeeded", what the
+                job responses call a finished Job, is an alias of "completed".
 
         Returns:
             List of job dictionaries with metadata and status
         """
+        if status_filter == "succeeded":
+            status_filter = "completed"
         jobs = []
 
         # Determine which namespaces to query

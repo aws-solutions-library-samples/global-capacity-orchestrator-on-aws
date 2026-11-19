@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, _load_cdk_json
+from cli.job_policy import FETCH_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from cli.capacity.multi_region import RegionCapacity
@@ -123,6 +124,13 @@ HEALTH_UNHEALTHY = "unhealthy"
 #: Wall-clock budget for one section's gather; a section that exceeds it
 #: reports ``error`` instead of holding the whole document.
 SECTION_TIMEOUT_SECONDS = 30
+
+#: The budget with ``--with-policy``. The policy section waits up to
+#: :data:`cli.job_policy.FETCH_TIMEOUT_SECONDS` for the slowest region's
+#: policy read and then reports that region unreachable; the budget covers
+#: that wait plus the section's own work, so a hung region costs one region
+#: instead of the whole section.
+POLICY_SECTION_TIMEOUT_SECONDS = max(SECTION_TIMEOUT_SECONDS, FETCH_TIMEOUT_SECONDS + 5)
 
 #: Cost Explorer window for the opt-in ``costs`` section.
 COST_WINDOW_DAYS = 30
@@ -257,12 +265,15 @@ def _run_section(name: str, gather: Callable[[], Section]) -> Section:
         )
 
 
-def _run_sections_concurrently(gatherers: dict[str, Callable[[], Section]]) -> dict[str, Section]:
+def _run_sections_concurrently(
+    gatherers: dict[str, Callable[[], Section]], timeout_seconds: float
+) -> dict[str, Section]:
     """Run section gatherers in parallel under the shared wall-clock budget.
 
-    Every gatherer gets the full :data:`SECTION_TIMEOUT_SECONDS` of wall
-    clock because they run concurrently. A section that has not finished by
-    the deadline reports ``error`` naming the timeout. Sections run on
+    Every gatherer gets the full *timeout_seconds* of wall clock
+    (:data:`SECTION_TIMEOUT_SECONDS`, or :data:`POLICY_SECTION_TIMEOUT_SECONDS`
+    with ``--with-policy``) because they run concurrently. A section that has
+    not finished by the deadline reports ``error`` naming the timeout. Sections run on
     daemon threads so an abandoned straggler — a hung subprocess probe or
     an unresponsive endpoint — can neither hold the document nor block
     process exit afterwards.
@@ -281,7 +292,7 @@ def _run_sections_concurrently(gatherers: dict[str, Callable[[], Section]]) -> d
     }
     for thread in threads.values():
         thread.start()
-    deadline = time.monotonic() + SECTION_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout_seconds
     for thread in threads.values():
         thread.join(max(0.0, deadline - time.monotonic()))
 
@@ -291,7 +302,7 @@ def _run_sections_concurrently(gatherers: dict[str, Callable[[], Section]]) -> d
             sections[name] = results.get(name) or Section(
                 name=name,
                 status=STATUS_ERROR,
-                reason=f"the gather exceeded the {SECTION_TIMEOUT_SECONDS}s section timeout",
+                reason=f"the gather exceeded the {timeout_seconds:g}s section timeout",
             )
     return sections
 
@@ -1184,7 +1195,8 @@ def gather_fleet_status(
     if not workload:
         for name in sorted(_PER_REGION_SECTIONS):
             sections[name] = _regions_unavailable_section(name)
-    sections.update(_run_sections_concurrently(gatherers))
+    budget = POLICY_SECTION_TIMEOUT_SECONDS if with_policy else SECTION_TIMEOUT_SECONDS
+    sections.update(_run_sections_concurrently(gatherers, budget))
 
     findings = derive_findings(sections)
     overall, degraded = _derive_overall(sections, findings)

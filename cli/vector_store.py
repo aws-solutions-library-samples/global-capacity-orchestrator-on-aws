@@ -111,6 +111,13 @@ _BUCKET_REGION_PARAM_SUFFIX = "cluster-shared-bucket/region"
 #: server-side, so refusing the upload client-side is kinder.
 _INGESTIBLE_SUFFIXES = (".txt", ".md", ".jsonl")
 
+#: The ingest Lambda's limits (``MAX_OBJECT_BYTES``, ``MAX_CHUNKS_PER_OBJECT``
+#: and ``MAX_CHUNK_CHARS`` in lambda/vector-ingest/handler.py, which this CLI
+#: does not ship with; tests/test_vector_cli.py holds the two to each other).
+_INGEST_MAX_OBJECT_BYTES = 4 * 1024 * 1024
+_INGEST_MAX_CHUNKS = 500
+_INGEST_MAX_CHUNK_CHARS = 2000
+
 _UNAVAILABLE_HINT = (
     "the vector store is unavailable — the table or index may not be "
     "provisioned (deploy with vector_store.enabled: true), or the vector "
@@ -182,6 +189,54 @@ def _embedding_request_body(text: str, model_id: str, dimensions: int) -> str:
     if any(marker in model_id for marker in DIMENSIONS_CAPABLE_MODEL_MARKERS):
         body["dimensions"] = dimensions
     return json.dumps(body)
+
+
+def _text_chunk_count(text: str) -> int:
+    """How many chunks the ingest Lambda's ``chunk_text`` makes of a .txt/.md *text*.
+
+    The same greedy packing: blank-line separated paragraphs, joined by a
+    blank line up to ``_INGEST_MAX_CHUNK_CHARS``, a longer paragraph split at
+    exactly that width.
+    """
+    count = 0
+    current = 0  # length of the chunk being packed; 0 when there is none
+    paragraphs = (part.strip() for part in text.replace("\r\n", "\n").split("\n\n"))
+    for paragraph in paragraphs:
+        for start in range(0, len(paragraph), _INGEST_MAX_CHUNK_CHARS):
+            piece = len(paragraph[start : start + _INGEST_MAX_CHUNK_CHARS])
+            if not current:
+                current = piece
+            elif current + 2 + piece <= _INGEST_MAX_CHUNK_CHARS:
+                current += 2 + piece
+            else:
+                count += 1
+                current = piece
+    return count + (1 if current else 0)
+
+
+def _check_ingest_limits(path: Path) -> None:
+    """Refuse a file the ingest Lambda would refuse as too large, before any upload.
+
+    The Lambda fails an object over ``_INGEST_MAX_OBJECT_BYTES`` or with more
+    than ``_INGEST_MAX_CHUNKS`` chunks (one per non-empty .jsonl line) without
+    writing a chunk, so ``--wait`` could only time out on it.
+    """
+    size = path.stat().st_size
+    if size > _INGEST_MAX_OBJECT_BYTES:
+        raise VectorStoreError(
+            f"{path.name}: {size} bytes, over the {_INGEST_MAX_OBJECT_BYTES}-byte limit "
+            "of the ingest Lambda; split it into smaller files"
+        )
+    text = path.read_bytes().decode("utf-8", errors="replace")
+    if path.suffix.lower() == ".jsonl":
+        chunks = sum(1 for line in text.splitlines() if line.strip())
+    else:
+        chunks = _text_chunk_count(text)
+    if chunks > _INGEST_MAX_CHUNKS:
+        raise VectorStoreError(
+            f"{path.name}: {chunks} chunks, over the {_INGEST_MAX_CHUNKS}-chunk limit "
+            "of the ingest Lambda; split it into smaller files"
+        )
 
 
 class VectorStoreClient:
@@ -561,6 +616,7 @@ class VectorStoreClient:
                     f"{path.name}: unsupported suffix {path.suffix!r} — the ingest "
                     f"pipeline reads {', '.join(_INGESTIBLE_SUFFIXES)}"
                 )
+            _check_ingest_limits(path)
         # The key drops the directory: two files with one name would land
         # on one key, and the second upload would replace the first.
         first_by_name: dict[str, Path] = {}

@@ -47,6 +47,10 @@ are still never replayed. A transport failure that ends the request is a
 `503 Service unavailable` when the connection could not be opened or was
 dropped and a `504 Gateway timeout` when the backend did not answer in time.
 
+A request path with a `.` or `..` segment, literal or percent-encoded, is
+refused with `400` before anything is forwarded (`has_dot_segment` in
+`proxy_utils.py`).
+
 ## Input
 
 API Gateway proxy event (httpMethod, path, queryStringParameters, headers, body).
