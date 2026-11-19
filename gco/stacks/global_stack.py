@@ -305,7 +305,7 @@ class GCOGlobalStack(Stack):
 
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        if self.listener is None:
+        if self.listener is None or self.accelerator is None:
             raise RuntimeError("Traffic-dial controller requires the Global Accelerator listener")
 
         project_name = self.config.get_project_name()
@@ -328,22 +328,37 @@ class GCOGlobalStack(Stack):
             ],
         )
 
-        # Global Accelerator APIs do not support resource-level IAM scoping.
-        # UpdateEndpointGroup — the only mutating action — is granted solely
-        # in enforce mode; monitor mode stays read-only against GA.
-        ga_actions = [
-            "globalaccelerator:DescribeAccelerator",
-            "globalaccelerator:ListEndpointGroups",
-        ]
-        if mode == "enforce":
-            ga_actions.append("globalaccelerator:UpdateEndpointGroup")
+        # Each Global Accelerator action takes the resource it acts on (Service
+        # Authorization Reference): DescribeAccelerator the accelerator,
+        # ListEndpointGroups the listener, UpdateEndpointGroup an endpoint
+        # group. UpdateEndpointGroup, the only mutating action, is granted
+        # solely in enforce mode and only on this stack's endpoint groups;
+        # monitor mode stays read-only against GA.
         controller_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=sorted(ga_actions),
-                resources=["*"],
+                actions=["globalaccelerator:DescribeAccelerator"],
+                resources=[self.accelerator.accelerator_arn],
             )
         )
+        controller_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["globalaccelerator:ListEndpointGroups"],
+                resources=[self.listener.listener_arn],
+            )
+        )
+        if mode == "enforce" and self.endpoint_groups:
+            controller_role.add_to_policy(
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["globalaccelerator:UpdateEndpointGroup"],
+                    resources=[
+                        group.endpoint_group_arn
+                        for _, group in sorted(self.endpoint_groups.items())
+                    ],
+                )
+            )
         # Cross-region read of each cluster's ClusterHealthy metric.
         # GetMetricData does not support resource-level permissions.
         controller_role.add_to_policy(
@@ -439,11 +454,13 @@ class GCOGlobalStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The Global Accelerator Describe/List/Update APIs and CloudWatch "
-                        "GetMetricData do not support resource-level permissions and "
-                        "require a wildcard resource; PutMetricData is namespace-"
-                        "conditioned and the SSM wildcard is scoped to this project's "
-                        "traffic-dial parameter tree."
+                        "CloudWatch GetMetricData and PutMetricData and the X-Ray tracing "
+                        "actions support no resource-level permissions, so they take a "
+                        "wildcard resource; PutMetricData is conditioned on the "
+                        "GCO/TrafficDial namespace. The Global Accelerator actions name "
+                        "the accelerator, its listener and this stack's endpoint groups, "
+                        "and the SSM wildcard is scoped to this project's traffic-dial "
+                        "parameter tree."
                     ),
                     "appliesTo": [
                         "Resource::*",
