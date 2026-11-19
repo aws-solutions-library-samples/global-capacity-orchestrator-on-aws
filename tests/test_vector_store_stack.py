@@ -406,6 +406,30 @@ def _convergence_replacements(template):
     return trigger.get("Properties", {}).get("ImageReplacements", {})
 
 
+def _workload_statements(template) -> list[dict]:
+    """Statements of every IAM policy attached to the workload pod role.
+
+    The MCP server role also holds ``bedrock:InvokeModel`` (for the capacity
+    advisor tools), so the vector-store grants are checked on the role
+    workloads run as, ``ServiceAccountRole``.
+    """
+    resources = template.to_json()["Resources"]
+    role_ids = {
+        logical_id
+        for logical_id, res in resources.items()
+        if res["Type"] == "AWS::IAM::Role" and logical_id.startswith("ServiceAccountRole")
+    }
+    assert role_ids, "could not locate the workload pod role"
+    statements: list[dict] = []
+    for res in resources.values():
+        if res["Type"] != "AWS::IAM::Policy":
+            continue
+        roles = res["Properties"].get("Roles", [])
+        if any(isinstance(ref, dict) and ref.get("Ref") in role_ids for ref in roles):
+            statements.extend(res["Properties"]["PolicyDocument"]["Statement"])
+    return statements
+
+
 class TestRegionalWiring:
     """Regional-stack wiring: ConfigMap replacements and workload read grants.
 
@@ -434,9 +458,7 @@ class TestRegionalWiring:
 
     def test_enabled_grants_local_region_read_path_to_workloads(self):
         template = _synth_regional(_EnabledConfig())
-        statements = []
-        for res in template.find_resources("AWS::IAM::Policy").values():
-            statements.extend(res["Properties"]["PolicyDocument"]["Statement"])
+        statements = _workload_statements(template)
 
         search_statements = [
             stmt
@@ -479,8 +501,8 @@ class TestRegionalWiring:
         template = _synth_regional(MockConfigLoader())
         blob = json.dumps(template.to_json())
         assert "dynamodb:SearchVectors" not in blob
-        assert "bedrock:InvokeModel" not in blob
         assert "vector-store" not in blob
+        assert "bedrock:InvokeModel" not in json.dumps(_workload_statements(template))
 
 
 class _BothIndexFeaturesConfig(_EnabledConfig):
