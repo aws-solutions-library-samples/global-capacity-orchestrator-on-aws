@@ -896,10 +896,79 @@ class TestRunnerGuaranteedCleanup:
         assert recorded.error == "RuntimeError: residue remains"
         assert recorded.duration_seconds == 25.5
         assert instance._final_inventory_recheck is None
-        assert "final_inventory_recheck" not in instance.report.cleanup
+        assert instance.report.cleanup["final_inventory_recheck"] == {
+            "status": "failed",
+            "started_at": recorded.started_at,
+            "ended_at": recorded.ended_at,
+            "duration_seconds": 25.5,
+            "error": "RuntimeError: residue remains",
+            "recorded_as_action_result": True,
+        }
         assert instance.checkpoint.completed_actions == ["destroy"]
         instance._refresh_report_results()
         assert instance.report.final_inventory is None
+
+    def test_a_recheck_whose_scan_failed_drops_the_earlier_inventory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The report must not show the clean scan the failed re-check superseded."""
+        instance = _build_runner(tmp_path, monkeypatch)
+        instance.checkpoint.deployment_attempted = True
+        instance.checkpoint.baseline = dict(_BASELINE)
+        instance.checkpoint.completed_actions.extend(["destroy", "final-inventory"])
+        instance._identity_verified = True
+        earlier = {"summary": {"total": 0}, "scan": "action"}
+        instance.checkpoint.action_results["final-inventory"] = ActionResult(
+            name="final-inventory",
+            description="d",
+            status="passed",
+            started_at="s",
+            ended_at="e",
+            duration_seconds=583.157,
+            details=earlier,
+        )
+        # What the passed action left: its scan is the report's final inventory.
+        instance._refresh_report_results()
+        assert instance.report.final_inventory == earlier
+
+        with (
+            patch.object(runner, "destroy_deployment", return_value={"needed": True}),
+            patch.object(
+                runner,
+                "action_final_inventory",
+                side_effect=RuntimeError("Project resource inventory did not run every scanner"),
+            ),
+        ):
+            instance._guaranteed_cleanup()
+        instance._refresh_report_results()
+
+        assert instance.report.final_inventory is None
+        assert instance.report.cleanup["final_inventory_recheck"]["status"] == "failed"
+        markdown = instance.report.to_markdown()
+        assert '"total": 0' not in markdown.split("## Final inventory", 1)[1]
+
+    def test_a_recheck_that_found_residue_keeps_its_own_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        instance = _build_runner(tmp_path, monkeypatch)
+        instance.checkpoint.deployment_attempted = True
+        instance.checkpoint.baseline = dict(_BASELINE)
+        instance._identity_verified = True
+        instance.report.final_inventory = {"summary": {"total": 0}, "scan": "action"}
+        residue = {"summary": {"total": 1}, "scan": "recheck"}
+
+        def scan_with_residue(ctx: Any) -> dict[str, Any]:
+            ctx.report.final_inventory = residue
+            raise RuntimeError("Project resources remain after teardown")
+
+        with (
+            patch.object(runner, "destroy_deployment", return_value={"needed": True}),
+            patch.object(runner, "action_final_inventory", side_effect=scan_with_residue),
+        ):
+            instance._guaranteed_cleanup()
+        instance._refresh_report_results()
+
+        assert instance.report.final_inventory is residue
 
     def test_final_inventory_failure_is_checkpointed_as_failed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1180,7 +1249,10 @@ class TestRunnerRun:
         assert exit_code == 1
         assert instance.report.status == "failed"
         assert instance.report.fatal_error is None
+        recheck = instance.report.cleanup.pop("final_inventory_recheck")
         assert instance.report.cleanup == {"completed": True, "needed": True}
+        assert recheck["status"] == "failed"
+        assert recheck["error"] == "RuntimeError: residue remains"
         result = instance.checkpoint.action_results["final-inventory"]
         assert result.status == "failed"
         assert instance.report.final_inventory is None
@@ -1587,6 +1659,44 @@ class TestReportMarkdown:
         assert "```text\nRuntimeError: a|b\nsecond line\n```" in markdown
         assert "### `baseline`" in markdown
         assert markdown.count("```text") == 1
+
+    def test_an_error_renders_as_one_literal_table_cell(self) -> None:
+        # Raw text in a row could end the cell early (an escaped backslash
+        # before a pipe), break the row (a carriage return), or render as
+        # emphasis, a code span, a link or HTML.
+        error = (
+            "RuntimeError: C:\\temp\\|x `kubectl get` *all* __init__ ~~gone~~ "
+            "[link](https://example.com) <b>bold</b> &amp;\r\nnext"
+        )
+        report = ValidationReport(
+            run_id="run-123",
+            identity={},
+            selected_actions=["baseline"],
+            started_at="2026-07-18T00:00:00+00:00",
+            action_results=[
+                ActionResult(
+                    name="baseline",
+                    description="d",
+                    status="failed",
+                    started_at="s",
+                    ended_at="e",
+                    duration_seconds=0.5,
+                    error=error,
+                )
+            ],
+        )
+
+        row = next(
+            line for line in report.to_markdown().splitlines() if line.startswith("| `baseline`")
+        )
+
+        # Exactly four cells: no unescaped pipe inside the error.
+        assert len(re.split(r"(?<!\\)\|", row)) == 6
+        assert row.endswith(
+            "| RuntimeError: C:\\\\temp\\\\\\|x \\`kubectl get\\` \\*all\\* "
+            "\\_\\_init\\_\\_ \\~\\~gone\\~\\~ "
+            "\\[link\\](https://example.com) \\<b\\>bold\\</b\\> \\&amp; next |"
+        )
 
     def test_fatal_error_and_tracebacks_are_rendered(self) -> None:
         report = ValidationReport(

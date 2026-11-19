@@ -556,7 +556,10 @@ class LiveValidationRunner:
           is recorded under ``cleanup.final_inventory_recheck`` and its details
           become the report's final inventory, being the most recent scan.
         * A failed re-check is authoritative either way: the account is not
-          clean, so it replaces any passed result and drops the completion.
+          clean, so it replaces any passed result and drops the completion,
+          and is recorded under ``cleanup.final_inventory_recheck`` with its
+          error. When the scan itself failed, the report's final inventory
+          (an earlier scan) is dropped rather than shown as current.
 
         Before this method existed the re-check overwrote the action's row with a
         zero-duration result, so every report claimed its 10-minute inventory took
@@ -565,6 +568,7 @@ class LiveValidationRunner:
         definition = self.registry["final-inventory"]
         started_at = utc_now()
         started = time.monotonic()
+        earlier_inventory = self.report.final_inventory
         try:
             details = action_final_inventory(self.context)
         except _LiveValidationSignal, KeyboardInterrupt:
@@ -574,7 +578,7 @@ class LiveValidationRunner:
         # helpers under the scan. Recording it here keeps it a failed inventory
         # instead of run()'s outer handler marking a finished teardown incomplete.
         except BaseException as exc:
-            self.checkpoint.action_results["final-inventory"] = ActionResult.failed(
+            failed = ActionResult.failed(
                 name="final-inventory",
                 description=definition.description,
                 started_at=started_at,
@@ -582,8 +586,21 @@ class LiveValidationRunner:
                 ended_monotonic=time.monotonic(),
                 error=exc,
             )
+            self.checkpoint.action_results["final-inventory"] = failed
             if "final-inventory" in self.checkpoint.completed_actions:
                 self.checkpoint.completed_actions.remove("final-inventory")
+            if self.report.final_inventory is earlier_inventory:
+                # The scan itself failed, so the report still holds an earlier
+                # look at the account that this failure supersedes.
+                self.report.final_inventory = None
+            self.report.cleanup["final_inventory_recheck"] = {
+                "status": failed.status,
+                "started_at": failed.started_at,
+                "ended_at": failed.ended_at,
+                "duration_seconds": failed.duration_seconds,
+                "error": failed.error,
+                "recorded_as_action_result": True,
+            }
             self._persist_checkpoint(self.checkpoint)
             return
 

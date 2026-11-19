@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import time
 import traceback as traceback_module
 from collections.abc import Callable, Mapping
@@ -548,6 +549,17 @@ class RunCheckpoint:
         )
 
 
+#: Characters that change how a Markdown table cell renders: the escape
+#: character, the cell separator, code spans, emphasis and strikethrough, links
+#: and images, raw HTML and autolinks, and entity references.
+_MARKDOWN_CELL_SPECIALS = re.compile(r"([\\|`*_~\[\]<>&])")
+
+
+def _markdown_table_cell(text: str) -> str:
+    """``text`` as one Markdown table cell that renders literally, on one line."""
+    return _MARKDOWN_CELL_SPECIALS.sub(r"\\\1", " ".join(text.split()))
+
+
 @dataclass
 class ValidationReport:
     """Local JSON/Markdown evidence for one run; contains account-specific identifiers."""
@@ -607,7 +619,7 @@ class ValidationReport:
             "|---|---:|---:|---|",
         ]
         for result in self.action_results:
-            error = (result.error or "").replace("|", "\\|").replace("\n", " ")
+            error = _markdown_table_cell(result.error or "")
             lines.append(
                 f"| `{result.name}` | {result.status} | {result.duration_seconds:.3f}s | {error} |"
             )
