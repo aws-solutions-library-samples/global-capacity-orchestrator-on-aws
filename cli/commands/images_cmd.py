@@ -119,19 +119,22 @@ def images_tags(config: Any, name: Any) -> None:
 @click.argument("tag")
 @pass_config
 def images_describe(config: Any, name: Any, tag: Any) -> None:
-    """Print the full ECR details for a single image tag."""
+    """Print the full ECR details for a single image tag.
+
+    A tag the repository does not have is an error (exit 1).
+    """
     from ..images import get_image_manager
 
     formatter = get_output_formatter(config)
     try:
         result = get_image_manager(config).describe(name, tag)
-        if not result:
-            formatter.print_info(f"Tag '{tag}' not found in {name}")
-            return
-        formatter.print(result)
     except Exception as e:
         formatter.print_error(f"Failed to describe image: {e}")
         sys.exit(1)
+    if not result:
+        formatter.print_error(f"Tag '{tag}' not found in {name}")
+        sys.exit(1)
+    formatter.print(result)
 
 
 @images.command("uri")

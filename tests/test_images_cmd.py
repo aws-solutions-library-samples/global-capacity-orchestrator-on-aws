@@ -154,13 +154,20 @@ class TestImagesTags:
 
 
 class TestImagesDescribe:
-    def test_describe_missing_returns_info(self, runner: CliRunner) -> None:
+    @pytest.mark.parametrize("output_format", ["table", "json"])
+    def test_describe_missing_tag_is_an_error(
+        self, runner: CliRunner, mock_config: Any, output_format: str
+    ) -> None:
+        """N43: a missing tag exited 0 (and printed {"status": "ok"} in JSON
+        mode), so a script asking "does this image exist?" got a yes."""
+        mock_config.output_format = output_format
         mock_mgr = MagicMock()
         mock_mgr.describe.return_value = {}
         with _patch_image_manager(mock_mgr):
             result = runner.invoke(cli, ["images", "describe", "svc", "v1"])
-        assert result.exit_code == 0
-        assert "not found" in result.output
+        assert result.exit_code == 1
+        assert "Tag 'v1' not found in svc" in result.stderr
+        assert result.stdout == ""
 
     def test_describe_renders_detail(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()

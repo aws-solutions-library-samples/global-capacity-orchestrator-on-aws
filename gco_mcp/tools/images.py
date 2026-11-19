@@ -86,6 +86,8 @@ async def images_tags(name: str) -> str:
 async def images_describe(name: str, tag: str) -> str:
     """`gco images describe` — full ECR details for a single image tag.
 
+    Returns ``{}`` when the repository has no such tag.
+
     Args:
         name: Repository name (without the ``gco/`` prefix).
         tag: Image tag.

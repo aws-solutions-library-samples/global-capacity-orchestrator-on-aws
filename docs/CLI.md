@@ -2644,7 +2644,8 @@ gco images tags my-app
 #### `gco images describe`
 
 Print the full ECR details for a single image tag — digest, push time,
-size, scan findings.
+size, scan findings. A tag the repository does not have is an error: the
+command says so on stderr and exits 1.
 
 ```bash
 gco images describe NAME TAG

@@ -609,14 +609,22 @@ class ImageManager:
         return rows
 
     def describe(self, name: str, tag: str) -> dict[str, Any]:
-        """Return the full ECR image details for a single tag."""
+        """Return the full ECR image details for a single tag, or ``{}`` without one.
+
+        DescribeImages answers a tag the repository does not have with
+        ImageNotFoundException rather than an empty list; both mean ``{}``.
+        A missing repository still raises.
+        """
         validated_name = self._validate_name(name)
         validated_tag = self._validate_tag(tag)
         ecr = self._ecr_client()
-        resp = ecr.describe_images(
-            repositoryName=f"{self._repo_prefix}/{validated_name}",
-            imageIds=[{"imageTag": validated_tag}],
-        )
+        try:
+            resp = ecr.describe_images(
+                repositoryName=f"{self._repo_prefix}/{validated_name}",
+                imageIds=[{"imageTag": validated_tag}],
+            )
+        except ecr.exceptions.ImageNotFoundException:
+            return {}
         details = resp.get("imageDetails", [])
         if not details:
             return {}

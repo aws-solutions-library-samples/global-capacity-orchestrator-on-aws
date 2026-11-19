@@ -380,6 +380,34 @@ _RULE = {
 }
 
 
+class TestDescribeAgainstTheEcrModel:
+    def test_a_tag_the_repository_lacks_is_empty(self, manager: ImageManager) -> None:
+        """N43: DescribeImages answers a missing tag with ImageNotFoundException,
+        not an empty list; describe reports both as {}."""
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_client_error(
+            "describe_images",
+            service_error_code="ImageNotFoundException",
+            http_status_code=400,
+            expected_params={"repositoryName": "gco/svc", "imageIds": [{"imageTag": "v9"}]},
+        )
+        with stubber, patch.object(manager, "_ecr_client", return_value=ecr):
+            assert manager.describe("svc", "v9") == {}
+        stubber.assert_no_pending_responses()
+
+    def test_a_missing_repository_still_raises(self, manager: ImageManager) -> None:
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_client_error(
+            "describe_images", service_error_code="RepositoryNotFoundException"
+        )
+        with (
+            stubber,
+            patch.object(manager, "_ecr_client", return_value=ecr),
+            pytest.raises(ClientError, match="RepositoryNotFoundException"),
+        ):
+            manager.describe("svc", "v1")
+
+
 class TestReplicationGet:
     """IMAGES-REPLICATION: ECR has no GetReplicationConfiguration; the rules come
     from DescribeRegistry, so `gco images replication get` used to fail."""
