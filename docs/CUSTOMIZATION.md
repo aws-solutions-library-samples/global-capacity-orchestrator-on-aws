@@ -1584,29 +1584,20 @@ multi-arch copy strategy, the MCP tools and troubleshooting, see
 
 ### Enable EKS Logging
 
-Edit `gco/stacks/regional_stack.py`:
-
-```python
-self.cluster = eks.Cluster(
-    self,
-    "GCOEksCluster",
-    cluster_name=cluster_config.cluster_name,
-    version=eks.KubernetesVersion.V1_35,
-    vpc=self.vpc,
-    compute=eks.ComputeConfig(node_pools=["system", "general-purpose"]),
-    endpoint_access=eks.EndpointAccess.PUBLIC_AND_PRIVATE,
-    role=cluster_admin_role,
-    vpc_subnets=[ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)],
-    logging=eks.ClusterLoggingTypes.all(),  # Enable all logging
-)
-```
+EKS control-plane logging is already on. The regional stack creates every
+cluster with all five log types (API server, audit, authenticator, controller
+manager and scheduler; `cluster_logging` in `gco/stacks/regional_stack.py`), so
+there is nothing to enable. EKS writes them to the CloudWatch Logs group
+`/aws/eks/<project>-<region>/cluster`.
 
 ### Add CloudWatch Container Insights
 
-```bash
-# Apply Container Insights DaemonSet
-kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/quickstart/cwagent-fluentd-quickstart.yaml
-```
+Container Insights is already on as well. Each regional stack installs the
+`amazon-cloudwatch-observability` EKS add-on, which publishes the Container
+Insights metrics and sends container logs to
+`/aws/containerinsights/<project>-<region>/application`. Do not also apply the
+standalone Container Insights DaemonSet: it would run a second agent that
+collects the same data.
 
 ### Load Balancer Configuration
 
