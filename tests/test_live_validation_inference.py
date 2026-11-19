@@ -312,6 +312,25 @@ def _owned_item(
     }
 
 
+def _prove_leg(plan: EndpointPlan, record: dict[str, Any]) -> None:
+    """The evidence a leg that ran every one of its steps leaves in its record."""
+    record["invoke_evidence"] = {"generated_text_non_empty": True}
+    record["backend_probe_evidence"] = {"model_info": {"configured_model_present": True}}
+    record["restart_audit"] = {"pods": ["pod"], "restarted": []}
+    if plan.structured_decision:
+        record["structured_decision"] = {"phase": "verified"}
+    if plan.runtime.uses_model_registry:
+        record["model_repository"] = {"phase": "uploaded", "cleanup": "absent"}
+    if plan.mooncake_store:
+        record["cold_tier_verified"] = True
+        record["store_reconfigure"] = {"phase": "verified"}
+
+
+def _verified_shared_proxy(runner: ManagedInferenceLifecycle) -> None:
+    """``action_inference`` proves the shared proxy's autoscaling before ``execute``."""
+    runner.state["shared_proxy_autoscaling"] = {"phase": "verified"}
+
+
 class TestRegistry:
     def test_inference_is_first_class_after_topology(self) -> None:
         registry = build_action_registry()
@@ -904,7 +923,7 @@ class TestSequentialAndFinallyBehavior:
             if plan.ordinal > 1:
                 assert records[plan.ordinal - 2]["absence_proven"] is True
             events.append(f"run-{plan.ordinal}")
-            record["invoke_evidence"] = {"generated_text_non_empty": True}
+            _prove_leg(plan, record)
             return True
 
         def fake_cleanup(plan: EndpointPlan, record: dict[str, Any]) -> dict[str, Any]:
@@ -914,6 +933,7 @@ class TestSequentialAndFinallyBehavior:
 
         monkeypatch.setattr(runner, "run_endpoint", fake_run)
         monkeypatch.setattr(runner, "cleanup_endpoint", fake_cleanup)
+        _verified_shared_proxy(runner)
         summary = runner.execute()
         assert events == [
             *[
@@ -931,16 +951,100 @@ class TestSequentialAndFinallyBehavior:
                 "hpa": True,
                 "store": True,
                 "invocations": 3,
-                "model_info": 0,
+                "model_info": 3,
             },
-            "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 0},
-            "triton": {"baseline": True, "invocations": 1, "model_info": 0},
+            "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 2},
+            "triton": {"baseline": True, "invocations": 1, "model_info": 1},
         }
-        assert summary["model_registry"] == {"uploaded": 0, "removed": 0}
-        assert summary["mooncake_store"] == {"cold_tier_verified": 0, "reconfigure_rolled": 0}
+        assert summary["model_registry"] == {"uploaded": 1, "removed": 1}
+        assert summary["mooncake_store"] == {"cold_tier_verified": 1, "reconfigure_rolled": 1}
+        assert summary["restart_audits"] == {"required": PLAN_COUNT, "clean": PLAN_COUNT}
         assert summary["all_endpoints_absent"] is True
+        assert runner.state["phase"] == "complete"
         serialized = json.dumps(summary)
         assert all(plan.name not in serialized for plan in runner.plans)
+
+    def test_a_matrix_whose_counters_fall_short_fails_after_cleanup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every leg is recorded complete, but the evidence of the steps that
+        # follow the invocation is missing: what a resume that skipped them,
+        # or a checkpoint that lost them, leaves behind.
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        _verified_shared_proxy(runner)
+        for plan, record in zip(plans, records, strict=True):
+            _prove_leg(plan, record)
+            for key in ("restart_audit", "structured_decision", "store_reconfigure"):
+                record.pop(key, None)
+            if plan.runtime.framework == "triton":
+                del record["invoke_evidence"], record["backend_probe_evidence"]
+            record["validation_complete"] = True
+        cleaned: list[int] = []
+        monkeypatch.setattr(runner, "prove_absence", lambda record: {"ddb_absent": True})
+
+        def cleanup(plan: EndpointPlan, record: dict[str, Any]) -> dict[str, Any]:
+            cleaned.append(plan.ordinal)
+            return {}
+
+        monkeypatch.setattr(runner, "cleanup_endpoint", cleanup)
+        with pytest.raises(
+            ManagedInferenceValidationError,
+            match=(
+                r"did not prove its whole contract: invocations: 5 of 6; clean restart "
+                r"audits: 0 of 6; triton invocations: 0 of 1; triton model-info probes: "
+                r"0 of 1; store reconfigurations: 0 of 1; structured decisions: 0 of 1$"
+            ),
+        ):
+            runner.execute()
+        assert runner.state["phase"] == "failed"
+        assert runner.state["contract_shortfalls"] == [
+            "invocations: 5 of 6",
+            "clean restart audits: 0 of 6",
+            "triton invocations: 0 of 1",
+            "triton model-info probes: 0 of 1",
+            "store reconfigurations: 0 of 1",
+            "structured decisions: 0 of 1",
+        ]
+        # The verdict comes after every cleanup, as for any other failure.
+        assert cleaned == [*range(1, PLAN_COUNT + 1), *range(1, PLAN_COUNT + 1)]
+
+    def test_every_counter_short_of_the_matrix_is_named(self, tmp_path: Path) -> None:
+        runner, _, _, _ = _lifecycle(tmp_path)
+        summary = {
+            "validated_or_resumed": 5,
+            "invocations": {"completed": 4},
+            "restart_audits": {"required": PLAN_COUNT, "clean": 3},
+            "frameworks": {
+                "vllm": {
+                    "baseline": True,
+                    "hpa": False,
+                    "store": False,
+                    "invocations": 1,
+                    "model_info": 0,
+                },
+                "sglang": {"baseline": True, "hpa": True, "invocations": 2, "model_info": 2},
+                "triton": {"baseline": True, "invocations": 1, "model_info": 1},
+            },
+            "model_registry": {"uploaded": 1, "removed": 0},
+            "mooncake_store": {"cold_tier_verified": 0, "reconfigure_rolled": 0},
+            "structured_decisions": {"required": 1, "verified": 0},
+            "shared_proxy_autoscaling_verified": False,
+            "all_endpoints_absent": False,
+        }
+        assert runner._contract_shortfalls(summary) == [
+            "validated endpoints: 5 of 6",
+            "invocations: 4 of 6",
+            "clean restart audits: 3 of 6",
+            "vllm roles not validated: hpa, store",
+            "vllm invocations: 1 of 3",
+            "vllm model-info probes: 0 of 3",
+            "model registry removals: 0 of 1",
+            "store cold tiers: 0 of 1",
+            "store reconfigurations: 0 of 1",
+            "structured decisions: 0 of 1",
+            "shared inference-proxy autoscaling was not verified",
+            "not every endpoint was proven absent",
+        ]
 
     @pytest.mark.parametrize(
         ("failing_method", "failing_ordinal"),
@@ -1963,42 +2067,162 @@ class TestAtomicOwnedDelete:
 
 
 class TestAdditionalResumeAndDeadlineSafety:
-    @pytest.mark.parametrize(
-        "record_updates",
-        [
-            {
-                "phase": "invoked",
-                "invoke_evidence": {"generated_text_non_empty": True},
-            },
-            {
-                "phase": "invoked",
-                "validation_steps_complete": True,
-                "absence_proven": True,
-                "invoke_evidence": {"generated_text_non_empty": True},
-            },
-        ],
-    )
-    def test_post_invoke_crash_windows_never_recreate_or_reinvoke(
+    def test_a_crash_after_the_last_step_never_recreates_or_reinvokes(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        record_updates: dict[str, Any],
     ) -> None:
         runner, plans, records, _ = _lifecycle(tmp_path)
-        records[0].update(record_updates)
-        monkeypatch.setattr(
-            runner,
-            "ensure_owned_endpoint",
-            lambda plan, record: (_ for _ in ()).throw(AssertionError("must not create")),
+        records[0].update(
+            phase="restart-audited",
+            validation_steps_complete=True,
+            absence_proven=True,
+            invoke_evidence={"generated_text_non_empty": True},
         )
-        monkeypatch.setattr(
-            runner,
-            "invoke",
-            lambda plan, record: (_ for _ in ()).throw(AssertionError("must not invoke")),
-        )
+        steps: list[str] = []
+        self._serving(runner, plans[0], monkeypatch, steps)
         assert runner.run_endpoint(plans[0], records[0]) is False
+        assert steps == []
         assert records[0]["validation_steps_complete"] is True
         assert records[0]["phase"] == "validation-complete-resume"
+
+    _STEPS_AFTER_INVOKE = (
+        "wait_for_ddb_running",
+        "wait_for_kubernetes_ready",
+        "verify_structured_decision",
+        "verify_store_reconfigure",
+        "verify_no_container_restarts",
+    )
+
+    @staticmethod
+    def _serving(
+        runner: ManagedInferenceLifecycle,
+        plan: EndpointPlan,
+        monkeypatch: pytest.MonkeyPatch,
+        steps: list[str],
+        *,
+        owner_nonce: str | None = None,
+        present: bool = True,
+        invoke: bool = False,
+    ) -> None:
+        """The endpoint that served the invocation (or not), with every later step recorded."""
+        item = _owned_item(runner.settings, plan, owner_nonce or runner.owner_nonce)
+        monkeypatch.setattr(runner, "_strong_get", lambda record: item if present else None)
+        monkeypatch.setattr(runner, "_verify_item_contract", lambda *args: None)
+        for method in TestAdditionalResumeAndDeadlineSafety._STEPS_AFTER_INVOKE:
+            monkeypatch.setattr(
+                runner, method, lambda plan, record, _name=method: steps.append(_name)
+            )
+        refused = ("ensure_owned_endpoint",) if invoke else ("ensure_owned_endpoint", "invoke")
+        for method in refused:
+            monkeypatch.setattr(
+                runner,
+                method,
+                lambda plan, record, _name=method: (_ for _ in ()).throw(
+                    AssertionError(f"a resumed invoked leg must not {_name}")
+                ),
+            )
+
+    @staticmethod
+    def _invoked(record: dict[str, Any], **updates: Any) -> None:
+        record.update(
+            {
+                "phase": "invoked",
+                "invoke_journal": {"status": "succeeded"},
+                "invoke_evidence": {"generated_text_non_empty": True},
+                **updates,
+            }
+        )
+
+    @pytest.mark.parametrize(
+        ("ordinal", "proven", "expected"),
+        [
+            # Interrupted right after the invocation: every later step still runs.
+            (1, {}, _STEPS_AFTER_INVOKE),
+            # The vLLM baseline's structured decision was proven before the crash.
+            (
+                1,
+                {
+                    "phase": "structured-decision-verified",
+                    "structured_decision": {"phase": "verified"},
+                },
+                tuple(step for step in _STEPS_AFTER_INVOKE if step != "verify_structured_decision"),
+            ),
+            # The store leg's reconfiguration had rolled and answered.
+            (
+                3,
+                {"phase": "store-reconfigured", "store_reconfigure": {"phase": "verified"}},
+                tuple(step for step in _STEPS_AFTER_INVOKE if step != "verify_store_reconfigure"),
+            ),
+        ],
+        ids=["right-after-invoke", "after-structured-decision", "after-store-reconfigure"],
+    )
+    def test_a_leg_resumed_after_its_invocation_finishes_the_steps_after_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ordinal: int,
+        proven: dict[str, Any],
+        expected: tuple[str, ...],
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        plan, record = plans[ordinal - 1], records[ordinal - 1]
+        self._invoked(record, **proven)
+        steps: list[str] = []
+        self._serving(runner, plan, monkeypatch, steps)
+
+        assert runner.run_endpoint(plan, record) is False
+
+        assert tuple(steps) == expected
+        assert record["validation_steps_complete"] is True
+
+    @pytest.mark.parametrize(
+        ("updates", "message"),
+        [
+            ({"failed_after_invoke": True}, "failed a step after its invocation"),
+            ({"cleanup_phase": "checking-ownership"}, "cleaned up before the steps"),
+            ({"cleanup_phase": "absent"}, "cleaned up before the steps"),
+            ({"store_reconfigure": {"phase": "rolling"}}, "stopped part-way"),
+        ],
+        ids=["failed-after-invoke", "cleanup-started", "cleaned-up", "reconfigure-part-way"],
+    )
+    def test_a_resumed_invoked_leg_that_cannot_finish_fails_closed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        updates: dict[str, Any],
+        message: str,
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        self._invoked(records[2], **updates)
+        steps: list[str] = []
+        self._serving(runner, plans[2], monkeypatch, steps)
+
+        with pytest.raises(ManagedInferenceValidationError, match=message):
+            runner.run_endpoint(plans[2], records[2])
+
+        assert steps == []
+        assert "validation_steps_complete" not in records[2]
+
+    @pytest.mark.parametrize("endpoint", ["absent", "foreign"])
+    def test_a_resumed_invoked_leg_whose_endpoint_is_gone_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+        self._invoked(records[0])
+        steps: list[str] = []
+        self._serving(
+            runner,
+            plans[0],
+            monkeypatch,
+            steps,
+            present=endpoint != "absent",
+            owner_nonce="0" * 64,
+        )
+
+        with pytest.raises(ManagedInferenceValidationError, match="served the invocation is gone"):
+            runner.run_endpoint(plans[0], records[0])
+        assert steps == []
 
     def test_successful_invoke_journal_recovers_without_replaying(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2023,6 +2247,8 @@ class TestAdditionalResumeAndDeadlineSafety:
                 AssertionError("successful invocation must not be replayed")
             ),
         )
+        steps: list[str] = []
+        self._serving(runner, plan, monkeypatch, steps, invoke=True)
 
         assert runner.run_endpoint(plan, record) is False
         assert record["invoke_evidence"] == {
@@ -2031,7 +2257,56 @@ class TestAdditionalResumeAndDeadlineSafety:
             "generated_text_length": len("recovered"),
             "replayed": False,
         }
+        # The recovered leg still owes, and gets, the steps after its invocation.
+        assert tuple(steps) == self._STEPS_AFTER_INVOKE
         assert record["validation_steps_complete"] is True
+
+    @pytest.mark.parametrize(
+        ("failing", "marked"),
+        [("verify_backend_probes", False), ("verify_no_container_restarts", True)],
+        ids=["before-invoke", "after-invoke"],
+    )
+    def test_a_leg_that_fails_after_its_invocation_never_passes_on_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str, marked: bool
+    ) -> None:
+        runner, plans, records, _ = _lifecycle(tmp_path)
+
+        def invoke(plan: EndpointPlan, record: dict[str, Any]) -> None:
+            record["invoke_journal"] = {"status": "succeeded"}
+            record["invoke_evidence"] = {"generated_text_non_empty": True}
+
+        def fail(plan: EndpointPlan, record: dict[str, Any]) -> None:
+            raise ManagedInferenceValidationError("containers restarted during the leg")
+
+        for method in (
+            "ensure_owned_endpoint",
+            "wait_for_ddb_running",
+            "wait_for_kubernetes_ready",
+            "verify_backend_probes",
+            "verify_structured_decision",
+            "verify_store_reconfigure",
+            "verify_no_container_restarts",
+        ):
+            monkeypatch.setattr(
+                runner, method, fail if method == failing else lambda plan, record: None
+            )
+        monkeypatch.setattr(runner, "invoke", invoke)
+
+        def cleanup(plan: EndpointPlan, record: dict[str, Any]) -> dict[str, Any]:
+            record["cleanup_phase"] = "absent"
+            record["absence_proven"] = True
+            return {}
+
+        monkeypatch.setattr(runner, "cleanup_endpoint", cleanup)
+        with pytest.raises(ManagedInferenceValidationError, match="all cleanup attempts"):
+            runner.execute()
+
+        assert records[0].get("failed_after_invoke", False) is marked
+        if marked:
+            # However the resumed run finds the endpoint, the leg stays failed.
+            records[0]["cleanup_phase"] = "not-started"
+            with pytest.raises(ManagedInferenceValidationError, match="failed a step after"):
+                runner.run_endpoint(plans[0], records[0])
 
     def test_ambiguous_invoke_journal_fails_closed_without_replaying(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3083,12 +3358,7 @@ class TestTritonAndStoreScenarios:
         runner, _, _, _ = _lifecycle(tmp_path)
 
         def fake_run(plan: EndpointPlan, record: dict[str, Any]) -> bool:
-            record["invoke_evidence"] = {"generated_text_non_empty": True}
-            if plan.runtime.uses_model_registry:
-                record["model_repository"] = {"phase": "uploaded", "cleanup": "absent"}
-            if plan.mooncake_store:
-                record["cold_tier_verified"] = True
-                record["store_reconfigure"] = {"phase": "verified"}
+            _prove_leg(plan, record)
             return True
 
         def fake_cleanup(plan: EndpointPlan, record: dict[str, Any]) -> dict[str, Any]:
@@ -3097,13 +3367,14 @@ class TestTritonAndStoreScenarios:
 
         monkeypatch.setattr(runner, "run_endpoint", fake_run)
         monkeypatch.setattr(runner, "cleanup_endpoint", fake_cleanup)
+        _verified_shared_proxy(runner)
         summary = runner.execute()
         assert summary["model_registry"] == {"uploaded": 1, "removed": 1}
         assert summary["mooncake_store"] == {"cold_tier_verified": 1, "reconfigure_rolled": 1}
         assert summary["frameworks"]["triton"] == {
             "baseline": True,
             "invocations": 1,
-            "model_info": 0,
+            "model_info": 1,
         }
 
 
