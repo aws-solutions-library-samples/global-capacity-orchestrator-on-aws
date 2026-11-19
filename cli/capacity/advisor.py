@@ -301,9 +301,7 @@ class BedrockCapacityAdvisor:
                             for r in odcrs
                         ]
                 except Exception as e:
-                    logger.debug(
-                        "Failed to list reservations for %s in %s: %s", instance_type, region, e
-                    )
+                    record_gap(instance_type, region, "capacity reservations", e)
 
                 try:
                     blocks = self._capacity_checker.list_capacity_block_offerings(

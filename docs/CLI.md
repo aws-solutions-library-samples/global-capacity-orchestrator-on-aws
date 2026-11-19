@@ -769,6 +769,15 @@ gco capacity ai-recommend -w "ML training" --model us.anthropic.claude-sonnet-4-
 
 List On-Demand Capacity Reservations (ODCRs) across deployed regions.
 
+A Region whose listing EC2 refuses (a denied `ec2:DescribeCapacityReservations`,
+throttling, a Region that is not enabled) is named with EC2's error code and
+message, and the JSON report lists it under `errors` (`region`, `error_code`,
+`error`); it is never shown as a Region without reservations. The other Regions
+still answer; when every Region refuses, or `--region` names one that does, the
+command exits 1. The same applies to
+[`reservation-check`](#gco-capacity-reservation-check) (under `odcr.errors`) and
+[`find-reservations`](#gco-capacity-find-reservations).
+
 ```bash
 gco capacity reservations [OPTIONS]
 ```

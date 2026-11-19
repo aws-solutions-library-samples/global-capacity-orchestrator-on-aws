@@ -682,6 +682,18 @@ def ai_recommend(
         sys.exit(1)
 
 
+def _print_reservation_errors(errors: list[dict[str, Any]]) -> None:
+    """Name the Regions whose reservation listing EC2 refused."""
+    if errors:
+        print()
+        print(
+            f"  ⚠  EC2 refused the reservation lookup in {len(errors)} Region(s); "
+            "their reservations are missing:"
+        )
+        for error in errors:
+            print(f"     {error['region']}: {error['error_code']}: {error['error']}")
+
+
 @capacity.command("reservations")
 @click.option("--instance-type", "-i", help="Filter by instance type")
 @click.option("--region", "-r", help="Specific region (default: all deployed regions)")
@@ -708,6 +720,7 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
                 "total_reserved_instances": sum(r["total_instances"] for r in reservations),
                 "total_available_instances": sum(r["available_instances"] for r in reservations),
                 "reservations": reservations,
+                "errors": [],
             }
         else:
             result = checker.list_all_reservations(instance_type=instance_type)
@@ -718,6 +731,7 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
 
         reservations = result["reservations"]
         if not reservations:
+            _print_reservation_errors(result.get("errors") or [])
             formatter.print_info("No active capacity reservations found")
             return
 
@@ -741,6 +755,7 @@ def list_reservations(config: Any, instance_type: Any, region: Any) -> None:
             f"  Total: {result['total_reserved_instances']} reserved, "
             f"{result['total_available_instances']} available"
         )
+        _print_reservation_errors(result.get("errors") or [])
         print()
 
     except Exception as e:
@@ -862,6 +877,7 @@ def reservation_check(
                     )
         else:
             print("  No active ODCRs found for this instance type")
+        _print_reservation_errors(odcr.get("errors") or [])
 
         # Capacity Blocks section
         if include_blocks:
@@ -1482,6 +1498,7 @@ def _print_find_reservations_report(result: dict[str, Any]) -> None:
         print(f"\n  ODCR search for {itype}")
     print("  " + "-" * 78)
     print(f"  Regions: {', '.join(result.get('regions_checked', []))}")
+    _print_reservation_errors(result.get("errors") or [])
 
     if req and not result.get("valid_instance_type", True):
         print()

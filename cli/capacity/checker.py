@@ -270,6 +270,27 @@ _CB_RETRY_CONFIG = Config(retries={"max_attempts": 10, "mode": "adaptive"})
 _MAX_SEARCH_WORKERS = 12
 
 
+def _region_error(region: str, error: Exception) -> dict[str, str]:
+    """One Region's refused call, as the multi-Region reports list it."""
+    if isinstance(error, ClientError):
+        details = error.response.get("Error", {})
+        return {
+            "region": region,
+            "error_code": str(details.get("Code") or "ClientError"),
+            "error": str(details.get("Message") or error),
+        }
+    return {"region": region, "error_code": type(error).__name__, "error": str(error)}
+
+
+def _raise_if_every_region_failed(
+    what: str, regions: list[str], errors: list[dict[str, str]]
+) -> None:
+    """A sweep that no Region answered has no result to report; say why instead."""
+    if regions and len(errors) == len(regions):
+        reasons = "; ".join(f"{e['region']}: {e['error_code']}: {e['error']}" for e in errors)
+        raise CapacityCheckError(f"EC2 refused the {what} in every Region ({reasons})")
+
+
 def _instance_desc(instance_type: str, gpu_count: int, gpu_type: str, total_gpu_mem: float) -> str:
     """Build a human-readable instance description."""
     if gpu_count > 0 and gpu_type:
@@ -1303,6 +1324,12 @@ class CapacityChecker:
 
         Returns:
             List of reservation dictionaries with availability details
+
+        Raises:
+            ClientError / BotoCoreError: EC2 refused the call (a denied
+                permission, throttling, a Region not enabled). It is not
+                reported as "no reservations"; multi-Region callers record it
+                per Region.
         """
         ec2 = self._session.client("ec2", region_name=region)
 
@@ -1313,44 +1340,39 @@ class CapacityChecker:
             filters.append({"Name": "instance-type", "Values": [instance_type]})
 
         reservations: list[dict[str, Any]] = []
-        try:
-            paginator = ec2.get_paginator("describe_capacity_reservations")
-            page_kwargs: dict[str, Any] = {}
-            if filters:
-                page_kwargs["Filters"] = filters
+        paginator = ec2.get_paginator("describe_capacity_reservations")
+        page_kwargs: dict[str, Any] = {}
+        if filters:
+            page_kwargs["Filters"] = filters
 
-            for page in paginator.paginate(**page_kwargs):
-                for cr in page.get("CapacityReservations", []):
-                    total = cr.get("TotalInstanceCount", 0)
-                    available = cr.get("AvailableInstanceCount", 0)
-                    used = total - available
+        for page in paginator.paginate(**page_kwargs):
+            for cr in page.get("CapacityReservations", []):
+                total = cr.get("TotalInstanceCount", 0)
+                available = cr.get("AvailableInstanceCount", 0)
+                used = total - available
 
-                    entry = {
-                        "type": "odcr",
-                        "reservation_id": cr.get("CapacityReservationId"),
-                        "instance_type": cr.get("InstanceType"),
-                        "availability_zone": cr.get("AvailabilityZone"),
-                        "region": region,
-                        "state": cr.get("State"),
-                        "total_instances": total,
-                        "available_instances": available,
-                        "used_instances": used,
-                        "utilization_pct": round(used / total * 100, 1) if total else 0,
-                        "instance_platform": cr.get("InstancePlatform"),
-                        "tenancy": cr.get("Tenancy"),
-                        "instance_match_criteria": cr.get("InstanceMatchCriteria"),
-                        "start_date": (
-                            cr["StartDate"].isoformat() if cr.get("StartDate") else None
-                        ),
-                        "end_date": (cr["EndDate"].isoformat() if cr.get("EndDate") else None),
-                        "end_date_type": cr.get("EndDateType"),
-                        "tags": {t["Key"]: t["Value"] for t in cr.get("Tags", [])},
-                    }
-                    if include_pricing:
-                        self._enrich_reservation_pricing(entry, region)
-                    reservations.append(entry)
-        except ClientError as e:
-            logger.debug("Failed to list capacity reservations in %s: %s", region, e)
+                entry = {
+                    "type": "odcr",
+                    "reservation_id": cr.get("CapacityReservationId"),
+                    "instance_type": cr.get("InstanceType"),
+                    "availability_zone": cr.get("AvailabilityZone"),
+                    "region": region,
+                    "state": cr.get("State"),
+                    "total_instances": total,
+                    "available_instances": available,
+                    "used_instances": used,
+                    "utilization_pct": round(used / total * 100, 1) if total else 0,
+                    "instance_platform": cr.get("InstancePlatform"),
+                    "tenancy": cr.get("Tenancy"),
+                    "instance_match_criteria": cr.get("InstanceMatchCriteria"),
+                    "start_date": (cr["StartDate"].isoformat() if cr.get("StartDate") else None),
+                    "end_date": (cr["EndDate"].isoformat() if cr.get("EndDate") else None),
+                    "end_date_type": cr.get("EndDateType"),
+                    "tags": {t["Key"]: t["Value"] for t in cr.get("Tags", [])},
+                }
+                if include_pricing:
+                    self._enrich_reservation_pricing(entry, region)
+                reservations.append(entry)
 
         return reservations
 
@@ -1673,7 +1695,12 @@ class CapacityChecker:
             regions: Regions to query (defaults to deployed GCO regions)
 
         Returns:
-            Summary dict with reservations grouped by region
+            Summary dict with reservations grouped by region. A Region whose
+            listing EC2 refused is reported under ``errors`` (``region``,
+            ``error_code``, ``error``) while the others still answer.
+
+        Raises:
+            CapacityCheckError: every Region refused the listing.
         """
         if not regions:
             from cli.aws_client import get_aws_client
@@ -1683,10 +1710,15 @@ class CapacityChecker:
             regions = list(stacks.keys()) if stacks else [self.config.default_region]
 
         all_reservations: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
         for region in regions:
-            all_reservations.extend(
-                self.list_capacity_reservations(region, instance_type=instance_type)
-            )
+            try:
+                all_reservations.extend(
+                    self.list_capacity_reservations(region, instance_type=instance_type)
+                )
+            except (ClientError, BotoCoreError) as e:
+                errors.append(_region_error(region, e))
+        _raise_if_every_region_failed("capacity reservation lookup", regions, errors)
 
         total_reserved = sum(r["total_instances"] for r in all_reservations)
         total_available = sum(r["available_instances"] for r in all_reservations)
@@ -1698,6 +1730,7 @@ class CapacityChecker:
             "total_reserved_instances": total_reserved,
             "total_available_instances": total_available,
             "reservations": all_reservations,
+            "errors": errors,
         }
 
     def find_capacity_reservations(
@@ -1769,6 +1802,7 @@ class CapacityChecker:
             "total_reserved_instances": 0,
             "total_available_instances": 0,
             "regions_with_reservations": [],
+            "errors": [],
         }
 
         if instance_type and not valid:
@@ -1776,6 +1810,8 @@ class CapacityChecker:
                 note or f"'{instance_type}' is not a recognized EC2 instance type."
             )
             return report
+
+        errors: list[dict[str, str]] = []
 
         def _probe(region: str) -> list[dict[str, Any]]:
             try:
@@ -1786,7 +1822,9 @@ class CapacityChecker:
                     include_pricing=include_pricing,
                 )
             except Exception as e:
+                # Reported per Region below, never as "no reservations there".
                 logger.warning("Reservation probe failed for %s in %s: %s", canonical, region, e)
+                errors.append(_region_error(region, e))
                 return []
 
         collected: list[dict[str, Any]] = []
@@ -1797,6 +1835,8 @@ class CapacityChecker:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 for result in executor.map(_probe, regions):
                     collected.extend(result)
+        errors.sort(key=lambda error: error["region"])
+        _raise_if_every_region_failed("capacity reservation lookup", list(regions), errors)
 
         ranked = blocks.rank_reservations(collected)
         best = ranked[0] if ranked else None
@@ -1814,6 +1854,7 @@ class CapacityChecker:
                 "regions_with_reservations": sorted(
                     {r["region"] for r in collected if r.get("region")}
                 ),
+                "errors": errors,
                 "recommendation": self._summarize_reservation_search(
                     canonical, regions, collected, best, min_count, note
                 ),
@@ -2158,8 +2199,15 @@ class CapacityChecker:
         parsed_earliest = blocks.parse_date_input(earliest_start)
         parsed_latest = blocks.parse_date_input(latest_start, through_end_of_day=True)
 
-        def _check_region(r: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-            reservations = self.list_capacity_reservations(r, instance_type=instance_type)
+        def _check_region(
+            r: str,
+        ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str] | None]:
+            reservations: list[dict[str, Any]] = []
+            refused: dict[str, str] | None = None
+            try:
+                reservations = self.list_capacity_reservations(r, instance_type=instance_type)
+            except (ClientError, BotoCoreError) as e:
+                refused = _region_error(r, e)
             region_blocks: list[dict[str, Any]] = []
             if include_capacity_blocks:
                 region_blocks = self.list_capacity_block_offerings(
@@ -2170,9 +2218,10 @@ class CapacityChecker:
                     earliest_start=parsed_earliest,
                     latest_start=parsed_latest,
                 )
-            return reservations, region_blocks
+            return reservations, region_blocks, refused
 
         odcr_results: list[dict[str, Any]] = []
+        odcr_errors: list[dict[str, str]] = []
         block_offerings: list[dict[str, Any]] = []
         total_available = 0
         total_reserved = 0
@@ -2186,9 +2235,15 @@ class CapacityChecker:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 region_results = list(executor.map(_check_region, target_regions))
 
-        for region_name, (reservations, region_blocks) in zip(
+        for region_name, (reservations, region_blocks, refused) in zip(
             target_regions, region_results, strict=True
         ):
+            block_offerings.extend(region_blocks)
+            if refused is not None:
+                # EC2 refused the listing: the Region's ODCRs are unknown,
+                # which must not read as "none there".
+                odcr_errors.append(refused)
+                continue
             region_available = sum(res["available_instances"] for res in reservations)
             region_reserved = sum(res["total_instances"] for res in reservations)
             region_totals.append(
@@ -2204,7 +2259,7 @@ class CapacityChecker:
             region_free = [res for res in reservations if res["available_instances"] > 0]
             free_reservation_counts[region_name] = len(region_free)
             odcr_results.extend(region_free)
-            block_offerings.extend(region_blocks)
+        _raise_if_every_region_failed("capacity reservation lookup", target_regions, odcr_errors)
 
         block_offerings = blocks.sort_offerings(block_offerings)
         # The first Region with the most free reserved instances.
@@ -2245,6 +2300,7 @@ class CapacityChecker:
                 "has_availability": has_odcr,
                 "by_region": region_totals,
                 "reservations": odcr_results,
+                "errors": odcr_errors,
             },
             "capacity_blocks": {
                 "offerings_found": len(block_offerings),
