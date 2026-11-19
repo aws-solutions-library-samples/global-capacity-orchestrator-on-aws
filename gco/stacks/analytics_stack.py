@@ -25,9 +25,10 @@ The API Gateway ``/studio/*`` wiring that consumes this Lambda lives in
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from aws_cdk import (
+    CfnElement,
     CfnOutput,
     Duration,
     RemovalPolicy,
@@ -53,6 +54,7 @@ from gco.stacks.constants import (
     SAGEMAKER_ROLE_NAME_PREFIX,
     cluster_shared_ssm_parameter_prefix,
     cognito_domain_prefix_default,
+    s3_bucket_kms_conditions,
 )
 from gco.stacks.lambda_assets import lambda_source_code
 from gco.stacks.nag_suppressions import apply_all_suppressions
@@ -184,13 +186,16 @@ class GCOAnalyticsStack(Stack):
             )
 
     def _create_vpc_and_endpoints(self) -> None:
-        """Create a private VPC plus every VPC endpoint Studio needs.
+        """Create the analytics VPC plus every VPC endpoint Studio needs.
 
-        Notebooks never land on public subnets (the VPC has none).
-        The nine interface endpoints plus the S3 gateway endpoint
-        keep all Studio/EMR/EFS traffic on the private network. A NAT
-        gateway provides internet egress so notebooks can pip install,
-        git clone, and access external APIs (HuggingFace, PyPI, etc.).
+        Two subnet tiers in two AZs: private subnets (with egress) for the
+        Studio domain, EMR Serverless, the EFS mount targets and the
+        endpoints, and small public subnets whose only resource is the one NAT
+        gateway. The NAT gateway gives notebooks internet egress (pip install,
+        git clone, HuggingFace, PyPI); notebooks themselves never land on the
+        public subnets. The nine interface endpoints plus the S3 gateway
+        endpoint keep AWS API traffic from Studio, EMR and EFS off the NAT
+        gateway. No flow log is attached (see ``add_analytics_vpc_suppressions``).
         """
         self.vpc = ec2.Vpc(
             self,
@@ -263,14 +268,14 @@ class GCOAnalyticsStack(Stack):
     def _create_access_logs_bucket(self) -> None:
         """Create the dedicated access-logs bucket for ``Studio_Only_Bucket``.
 
-        Server-side encryption uses S3-managed keys (SSE-S3) because S3
-        server-access-log delivery does not support KMS-encrypted destinations
-        without additional log-delivery role plumbing — the standard pattern
-        is SSE-S3 for the log sink plus KMS for the bucket it logs. The
-        resulting ``AwsSolutions-S1`` nag finding for the log sink targeting
-        itself is scoped on the bucket construct by
-        ``add_storage_suppressions`` via the analytics nag branch.
+        Server-side encryption uses S3-managed keys (SSE-S3): S3 server access
+        logging requires an SSE-S3 destination bucket (with SSE-KMS, log
+        objects might be delivered encrypted with a key the owner cannot
+        use), while the bucket it logs is KMS-encrypted. The SSE-KMS
+        default-encryption nag rules are acknowledged on this bucket only.
         """
+        from gco.stacks.nag_suppressions import acknowledge_access_log_destination_encryption
+
         self.access_logs_bucket = s3.Bucket(
             self,
             "AnalyticsAccessLogsBucket",
@@ -288,6 +293,7 @@ class GCOAnalyticsStack(Stack):
                 )
             ],
         )
+        acknowledge_access_log_destination_encryption(self.access_logs_bucket)
 
     def _create_studio_only_bucket(self) -> None:
         """Create ``Studio_Only_Bucket`` for notebook-private scratch + outputs.
@@ -414,9 +420,10 @@ class GCOAnalyticsStack(Stack):
           deploys before the API Gateway stack, whose API id it cannot know)
         * ``sqs:SendMessage`` on each workload Region's job queue
           (``<project>-jobs-<region>``; not the dead-letter queues)
-        * ``ssm:GetParameter`` on the ``Cluster_Shared_Bucket`` metadata
-          parameters in the global region — lets notebooks look up the
-          bucket name/arn/region at runtime without a per-user export step
+        * ``ssm:GetParameter`` on the three ``Cluster_Shared_Bucket`` metadata
+          parameters (``name``, ``arn``, ``region``) in the global region —
+          lets notebooks look up the bucket at runtime without a per-user
+          export step
         * EFS mount actions on ``Studio_EFS`` (specific AP arn is added by
           the presigned-URL Lambda at runtime; the role-level grant here is
           scoped to the EFS ARN)
@@ -529,21 +536,22 @@ class GCOAnalyticsStack(Stack):
 
         # ssm:GetParameter on the Cluster_Shared_Bucket metadata params. The
         # three parameters (name/arn/region) live in the global region where
-        # GCOGlobalStack is deployed, not in the analytics region. Scoping
-        # to the cluster_shared_ssm_parameter_prefix(project_name) tree under
-        # the global region means a notebook can fetch the bucket name at
-        # runtime via
+        # GCOGlobalStack is deployed, not in the analytics region; the grant
+        # names exactly those three, so a notebook can fetch the bucket name
+        # at runtime via
         #   boto3.client('ssm', region_name='<global-region>').get_parameter(
         #       Name='/<project_name>/cluster-shared-bucket/name')['Parameter']['Value']
         # without any JupyterLab-terminal export step.
         global_region = self.config.get_global_region()
+        cluster_shared_prefix = cluster_shared_ssm_parameter_prefix(self.project_name)
         self.sagemaker_execution_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParameter", "ssm:GetParameters"],
                 resources=[
                     f"arn:{self.partition}:ssm:{global_region}:{self.account}:parameter"
-                    f"{cluster_shared_ssm_parameter_prefix(self.project_name)}/*",
+                    f"{cluster_shared_prefix}/{name}"
+                    for name in ("name", "arn", "region")
                 ],
             )
         )
@@ -561,9 +569,9 @@ class GCOAnalyticsStack(Stack):
             )
         )
 
-        # DescribeMountTargets does not support resource-level scoping —
-        # SageMaker calls it during user profile provisioning to validate
-        # the EFS mount configuration.
+        # SageMaker calls DescribeMountTargets during user profile
+        # provisioning to validate the EFS mount configuration. Granted on
+        # Resource: * (acknowledged on the role below).
         self.sagemaker_execution_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
@@ -575,36 +583,9 @@ class GCOAnalyticsStack(Stack):
             )
         )
 
-        # SageMaker Studio UI actions — the execution role is assumed by
-        # the Studio notebook runtime and needs these to render the IDE,
-        # list spaces/apps, and manage its own lifecycle.
-        self.sagemaker_execution_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "sagemaker:DescribeDomain",
-                    "sagemaker:DescribeUserProfile",
-                    "sagemaker:CreatePresignedDomainUrl",
-                    "sagemaker:ListSpaces",
-                    "sagemaker:ListApps",
-                    "sagemaker:DescribeApp",
-                    "sagemaker:DescribeSpace",
-                    "sagemaker:CreateApp",
-                    "sagemaker:DeleteApp",
-                    "sagemaker:CreateSpace",
-                    "sagemaker:DeleteSpace",
-                    "sagemaker:UpdateSpace",
-                    "sagemaker:ListTags",
-                    "sagemaker:AddTags",
-                ],
-                resources=[
-                    f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:domain/*",
-                    f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:user-profile/*/*",
-                    f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:space/*/*",
-                    f"arn:{self.partition}:sagemaker:{self.region}:{self.account}:app/*/*/*/*",
-                ],
-            )
-        )
+        # The Studio UI statement (domain, profile, space and app actions)
+        # names this stack's domain id, so ``_create_studio_domain`` adds it
+        # once the domain exists.
 
         # EMR Serverless — allow the execution role to discover, connect to,
         # and manage the EMR Serverless application from Studio's Data panel.
@@ -788,6 +769,69 @@ class GCOAnalyticsStack(Stack):
             )
         )
 
+        # The wildcards in the statements above, acknowledged on this role
+        # only (its default policy is a child, so nothing else is covered).
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        studio_bucket_id = self.get_logical_id(
+            cast(CfnElement, self.studio_only_bucket.node.default_child)
+        )
+        acknowledge_nag_findings(
+            self.sagemaker_execution_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "SageMaker_Execution_Role wildcards: (1) the S3 and KMS action "
+                        "wildcards grant_read_write and grant_encrypt_decrypt produce, on "
+                        "the one Studio_Only_Bucket and Analytics_KMS_Key, and the bucket's "
+                        "<arn>/* object keys; (2) execute-api:Invoke on any REST API id "
+                        "under prod /api/v1/* and /inference/* in the API Gateway Region, "
+                        "because the API Gateway stack depends on this stack and its API "
+                        "does not exist when this one deploys; (3) sagemaker-mlflow:* on "
+                        "the Region's MLflow tracking servers and apps, which notebooks "
+                        "create after deploy (AmazonSageMakerFullAccess does not cover the "
+                        "sagemaker-mlflow prefix); (4) one Resource:* statement holding "
+                        "sts:GetCallerIdentity (no resource types), the EFS "
+                        "DescribeMountTargets and DescribeFileSystems calls SageMaker makes "
+                        "when it provisions a user profile, the EMR Serverless actions "
+                        "behind Studio's EMR panel (ListApplications takes no resource and "
+                        "CreateApplication creates new applications), and, with "
+                        "analytics_environment.hyperpod.enabled, the HyperPod training-job "
+                        "and cluster-node actions."
+                    ),
+                    "appliesTo": [
+                        "Action::s3:Abort*",
+                        "Action::s3:DeleteObject*",
+                        "Action::s3:GetBucket*",
+                        "Action::s3:GetObject*",
+                        "Action::s3:List*",
+                        "Action::kms:GenerateDataKey*",
+                        "Action::kms:ReEncrypt*",
+                        f"Resource::<{studio_bucket_id}.Arn>/*",
+                        (
+                            f"Resource::arn:<AWS::Partition>:execute-api:{api_gw_region}:"
+                            "<AWS::AccountId>:*/prod/*/api/v1/*"
+                        ),
+                        (
+                            f"Resource::arn:<AWS::Partition>:execute-api:{api_gw_region}:"
+                            "<AWS::AccountId>:*/prod/*/inference/*"
+                        ),
+                        "Action::sagemaker-mlflow:*",
+                        (
+                            f"Resource::arn:<AWS::Partition>:sagemaker:{api_gw_region}:"
+                            "<AWS::AccountId>:mlflow-tracking-server/*"
+                        ),
+                        (
+                            f"Resource::arn:<AWS::Partition>:sagemaker:{api_gw_region}:"
+                            "<AWS::AccountId>:mlflow-app/*"
+                        ),
+                        "Resource::*",
+                    ],
+                },
+            ],
+        )
+
     def _grant_sagemaker_role_on_cluster_shared_bucket(self) -> None:
         """Attach RW + KMS on ``Cluster_Shared_Bucket`` to ``SageMaker_Execution_Role``.
 
@@ -801,8 +845,11 @@ class GCOAnalyticsStack(Stack):
 
         1. S3: ``GetObject``/``PutObject``/``DeleteObject``/``ListBucket``/
            ``GetBucketLocation`` on ``<arn>`` + ``<arn>/*``.
-        2. KMS: ``Decrypt``/``GenerateDataKey`` with a
-           ``kms:ViaService=s3.<global-region>.<AWS::URLSuffix>`` condition.
+        2. KMS: ``Decrypt``/``GenerateDataKey`` with the conditions the
+           regional job role's grant uses (``s3_bucket_kms_conditions``):
+           ``kms:ViaService=s3.<global-region>.<AWS::URLSuffix>`` and
+           ``kms:EncryptionContext:aws:s3:arn`` naming the bucket or one of
+           its objects.
 
         This is a role-side policy — the bucket policy is owned
         exclusively by ``GCOGlobalStack``.
@@ -843,7 +890,7 @@ class GCOAnalyticsStack(Stack):
 
         # Attach the two policy statements as an inline Policy on the role
         # (policy on the role, not the bucket).
-        iam.Policy(
+        grant = iam.Policy(
             self,
             "SagemakerClusterSharedBucketGrant",
             roles=[self.sagemaker_execution_role],
@@ -863,33 +910,37 @@ class GCOAnalyticsStack(Stack):
                     effect=iam.Effect.ALLOW,
                     actions=["kms:Decrypt", "kms:GenerateDataKey"],
                     resources=["*"],
-                    conditions={
-                        "StringEquals": {
-                            "kms:ViaService": f"s3.{global_region}.{self.url_suffix}",
-                        }
-                    },
+                    conditions=s3_bucket_kms_conditions(
+                        region=global_region, bucket_arn=shared_arn, url_suffix=self.url_suffix
+                    ),
                 ),
             ],
         )
 
-        # The S3 statement uses an <arn>/* object-key wildcard on the
-        # literal cluster-shared bucket ARN resolved from SSM — identical
-        # shape to the regional stack's analogous grant, with the same
-        # reason text (bucket-scoped RW).
+        # The policy is a sibling of the role, not its child, so it carries
+        # its own acknowledgment: the S3 statement's <arn>/* object keys on the
+        # one bucket resolved from SSM (the shape of the regional stack's job
+        # role grant) and the KMS statement's Resource: *.
+        reader_id = self.get_logical_id(
+            cast(CfnElement, read_cr.node.find_child("Resource").node.default_child)
+        )
         acknowledge_nag_findings(
-            self.sagemaker_execution_role,
+            grant,
             [
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The SageMaker RW grant on Cluster_Shared_Bucket "
-                        "uses an <arn>/* object-key wildcard on the literal "
-                        "ARN resolved from SSM. The wildcard covers object "
-                        "keys within the single always-on cluster-shared "
-                        "bucket (CloudFormation-generated name, published via SSM)."
+                        "The SageMaker RW grant on Cluster_Shared_Bucket uses an <arn>/* "
+                        "object-key wildcard on the one bucket ARN resolved from SSM "
+                        "(CloudFormation-generated name). The KMS statement is Resource:* "
+                        "because the cluster-shared key lives in the global stack and is "
+                        "not exported to this Region; kms:ViaService limits it to S3 in "
+                        "the global Region and kms:EncryptionContext:aws:s3:arn to this "
+                        "one bucket."
                     ),
                     "appliesTo": [
-                        "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",
+                        "Resource::*",
+                        f"Resource::<{reader_id}.Parameter.Value>/*",
                     ],
                 },
             ],
@@ -977,6 +1028,8 @@ class GCOAnalyticsStack(Stack):
             default_user_settings=default_user_settings,
         )
 
+        self._grant_sagemaker_role_on_studio_domain()
+
         # Canvas sub-toggle (UI side): **IAM-only**. The
         # ``AmazonSageMakerCanvasFullAccess`` managed policy attached to
         # the SageMaker execution role in
@@ -1041,6 +1094,24 @@ class GCOAnalyticsStack(Stack):
         # resource fires during stack deletion. A managed policy attached
         # via the role's managedPolicies property is part of the role
         # resource itself and persists until the role is deleted.
+        #
+        # Each statement names what the handler (lambda/analytics-cleanup)
+        # touches, as far as the template knows it:
+        # * the List calls and DescribeSecurityGroups take no resource;
+        # * the app, space and profile deletes and DescribeDomain name this
+        #   domain (the app, space and profile names are created at run time);
+        # * the access-point lookup names Studio_EFS; the access points are
+        #   created at run time, so DeleteAccessPoint takes this Region's
+        #   access points;
+        # * the home file system SageMaker creates for the domain (its id is
+        #   known only from DescribeDomain at run time) needs its policy,
+        #   mount targets and itself deleted, so those take this Region's file
+        #   systems (DeleteFileSystemPolicy also covers Studio_EFS);
+        # * SageMaker's NFS security groups are revoked and deleted only in
+        #   this stack's VPC (ec2:Vpc).
+        domain_id = self.studio_domain.attr_domain_id
+        sagemaker_arn_prefix = f"arn:{self.partition}:sagemaker:{self.region}:{self.account}"
+        efs_arn_prefix = f"arn:{self.partition}:elasticfilesystem:{self.region}:{self.account}"
         cleanup_policy = iam.ManagedPolicy(
             self,
             "CleanupFunctionPolicy",
@@ -1049,26 +1120,59 @@ class GCOAnalyticsStack(Stack):
                     effect=iam.Effect.ALLOW,
                     actions=[
                         "sagemaker:ListApps",
-                        "sagemaker:DeleteApp",
                         "sagemaker:ListSpaces",
-                        "sagemaker:DeleteSpace",
                         "sagemaker:ListUserProfiles",
-                        "sagemaker:DeleteUserProfile",
+                        "ec2:DescribeSecurityGroups",
+                    ],
+                    resources=["*"],
+                ),
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
                         "sagemaker:DescribeDomain",
-                        "elasticfilesystem:DescribeAccessPoints",
-                        "elasticfilesystem:DeleteAccessPoint",
-                        "elasticfilesystem:DescribeFileSystems",
+                        "sagemaker:DeleteApp",
+                        "sagemaker:DeleteSpace",
+                        "sagemaker:DeleteUserProfile",
+                    ],
+                    resources=[
+                        f"{sagemaker_arn_prefix}:domain/{domain_id}",
+                        f"{sagemaker_arn_prefix}:app/{domain_id}/*",
+                        f"{sagemaker_arn_prefix}:space/{domain_id}/*",
+                        f"{sagemaker_arn_prefix}:user-profile/{domain_id}/*",
+                    ],
+                ),
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["elasticfilesystem:DescribeAccessPoints"],
+                    resources=[self.studio_efs.file_system_arn],
+                ),
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=["elasticfilesystem:DeleteAccessPoint"],
+                    resources=[f"{efs_arn_prefix}:access-point/*"],
+                ),
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
+                        "elasticfilesystem:DeleteFileSystemPolicy",
                         "elasticfilesystem:DescribeMountTargets",
                         "elasticfilesystem:DeleteMountTarget",
                         "elasticfilesystem:DeleteFileSystem",
-                        "elasticfilesystem:DeleteFileSystemPolicy",
-                        "ec2:DescribeSecurityGroups",
-                        "ec2:DeleteSecurityGroup",
+                    ],
+                    resources=[f"{efs_arn_prefix}:file-system/*"],
+                ),
+                iam.PolicyStatement(
+                    effect=iam.Effect.ALLOW,
+                    actions=[
                         "ec2:RevokeSecurityGroupIngress",
                         "ec2:RevokeSecurityGroupEgress",
+                        "ec2:DeleteSecurityGroup",
                     ],
-                    resources=["*"],
-                )
+                    resources=[
+                        f"arn:{self.partition}:ec2:{self.region}:{self.account}:security-group/*"
+                    ],
+                    conditions={"ArnEquals": {"ec2:Vpc": self.vpc.vpc_arn}},
+                ),
             ],
         )
         assert cleanup_fn.role is not None
@@ -1095,28 +1199,45 @@ class GCOAnalyticsStack(Stack):
         # dependency after it creates the presigned-URL Lambda.
         self._cleanup_resource = cleanup_resource
 
-        # Nag suppression for the cleanup Lambda — Resource::* is required
-        # because ListUserProfiles/DeleteUserProfile and
-        # DescribeAccessPoints/DeleteAccessPoint don't support resource-level
-        # scoping (the domain ID and EFS ID are passed via env vars, not ARNs).
+        # The cleanup policy is a sibling of the role, so its wildcards are
+        # acknowledged on the policy itself (see the statement comments above).
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
-        assert cleanup_fn.role is not None  # always set for non-imported functions
+        domain = f"<{self.get_logical_id(self.studio_domain)}.DomainId>"
+        nag_prefix = "Resource::arn:<AWS::Partition>:{service}:" + self.region + ":<AWS::AccountId>"
         acknowledge_nag_findings(
-            cleanup_fn.role,
+            cleanup_policy,
             [
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "Cleanup Lambda needs Resource::* for "
-                        "sagemaker:ListUserProfiles/DeleteUserProfile and "
-                        "efs:DescribeAccessPoints/DeleteAccessPoint. These "
-                        "APIs don't support resource-level scoping. The "
-                        "Lambda only runs on stack deletion and is scoped "
-                        "to the domain ID and EFS ID via environment variables."
+                        "The stack-deletion cleanup Lambda: sagemaker:ListApps, "
+                        "ListSpaces, ListUserProfiles and ec2:DescribeSecurityGroups "
+                        "take no resource (Resource:*); the app, space and user-profile "
+                        "deletes name this domain, under which the names are created "
+                        "at run time; DeleteAccessPoint takes this Region's access "
+                        "points and the home file system's policy, mount-target and "
+                        "file-system deletes take this Region's file systems, because "
+                        "SageMaker creates them at run time and reports their ids only "
+                        "through DescribeDomain; the security-group revokes and deletes "
+                        "are limited to this stack's VPC by ec2:Vpc."
                     ),
-                    "appliesTo": ["Resource::*"],
+                    "appliesTo": [
+                        "Resource::*",
+                        nag_prefix.format(service="sagemaker") + f":app/{domain}/*",
+                        nag_prefix.format(service="sagemaker") + f":space/{domain}/*",
+                        nag_prefix.format(service="sagemaker") + f":user-profile/{domain}/*",
+                        nag_prefix.format(service="elasticfilesystem") + ":access-point/*",
+                        nag_prefix.format(service="elasticfilesystem") + ":file-system/*",
+                        nag_prefix.format(service="ec2") + ":security-group/*",
+                    ],
                 },
+            ],
+        )
+        assert cleanup_fn.role is not None  # always set for non-imported functions
+        acknowledge_nag_findings(
+            cleanup_fn.role,
+            [
                 {
                     "id": "AwsSolutions-IAM4",
                     "reason": (
@@ -1135,11 +1256,10 @@ class GCOAnalyticsStack(Stack):
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "CDK Provider framework uses Resource::* for its "
-                        "internal Lambda invocation policy."
+                        "The CDK Provider framework's invoke policy names the cleanup "
+                        "function's ARN and its versions (<arn>:*)."
                     ),
                     "appliesTo": [
-                        "Resource::*",
                         "Resource::<CleanupFunction1604930F.Arn>:*",
                     ],
                 },
@@ -1150,16 +1270,73 @@ class GCOAnalyticsStack(Stack):
                         "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
                     ],
                 },
-                {
-                    "id": "AwsSolutions-L1",
-                    "reason": ("CDK Provider framework manages its own Lambda runtime version."),
-                },
             ],
         )
 
     # ==================================================================
     # EMR Serverless application
     # ==================================================================
+
+    def _grant_sagemaker_role_on_studio_domain(self) -> None:
+        """Grant the execution role the Studio UI actions on this stack's domain.
+
+        The Studio runtime assumes the role to render the IDE and to create,
+        update and delete its spaces and apps. Domain, user-profile, space and
+        app ARNs all carry the domain id, so the grant names this domain only;
+        the profile, space and app names are the remaining wildcards (they are
+        created at run time). ``ListSpaces`` and ``ListApps`` take no resource,
+        so they are not here: ``AmazonSageMakerFullAccess`` grants them, with
+        the Describe actions, on ``Resource: *``.
+        """
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
+        domain_id = self.studio_domain.attr_domain_id
+        arn_prefix = f"arn:{self.partition}:sagemaker:{self.region}:{self.account}"
+        self.sagemaker_execution_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "sagemaker:DescribeDomain",
+                    "sagemaker:DescribeUserProfile",
+                    "sagemaker:CreatePresignedDomainUrl",
+                    "sagemaker:DescribeApp",
+                    "sagemaker:DescribeSpace",
+                    "sagemaker:CreateApp",
+                    "sagemaker:DeleteApp",
+                    "sagemaker:CreateSpace",
+                    "sagemaker:DeleteSpace",
+                    "sagemaker:UpdateSpace",
+                    "sagemaker:ListTags",
+                    "sagemaker:AddTags",
+                ],
+                resources=[
+                    f"{arn_prefix}:domain/{domain_id}",
+                    f"{arn_prefix}:user-profile/{domain_id}/*",
+                    f"{arn_prefix}:space/{domain_id}/*",
+                    f"{arn_prefix}:app/{domain_id}/*/*/*",
+                ],
+            )
+        )
+        domain = f"<{self.get_logical_id(self.studio_domain)}.DomainId>"
+        nag_prefix = f"Resource::arn:<AWS::Partition>:sagemaker:{self.region}:<AWS::AccountId>"
+        acknowledge_nag_findings(
+            self.sagemaker_execution_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "reason": (
+                        "The Studio UI actions name this stack's domain; the user "
+                        "profile, space and app names under it are created at run "
+                        "time, so they are the wildcards."
+                    ),
+                    "appliesTo": [
+                        f"{nag_prefix}:user-profile/{domain}/*",
+                        f"{nag_prefix}:space/{domain}/*",
+                        f"{nag_prefix}:app/{domain}/*/*/*",
+                    ],
+                },
+            ],
+        )
 
     def _create_emr_app(self) -> None:
         """Create an EMR Serverless Spark application on the private VPC.
@@ -1504,18 +1681,19 @@ class GCOAnalyticsStack(Stack):
     def _apply_nag_suppressions(self) -> None:
         """Dispatch to the analytics branch in ``gco/stacks/nag_suppressions.py``.
 
-        The analytics branch calls ``add_sagemaker_suppressions``,
-        ``add_cognito_suppressions``, ``add_emr_serverless_suppressions``,
-        ``add_storage_suppressions`` (for ``Studio_Only_Bucket`` + access-
-        logs bucket), ``add_lambda_suppressions`` (for the presigned-URL
-        Lambda provider framework), and ``add_iam_suppressions`` (for
-        cross-region SSM reads + CDK custom resources).
+        The analytics branch calls ``add_storage_suppressions`` (EFS backup,
+        log-group encryption), ``add_cognito_suppressions``,
+        ``add_analytics_vpc_suppressions``, ``add_analytics_s3_suppressions``
+        (bucket replication), ``add_lambda_suppressions`` (the stack's
+        Lambda functions) and ``add_iam_suppressions`` (CDK custom
+        resources). The wildcards of the SageMaker execution role, its
+        cluster-shared grant and the cleanup policy are acknowledged on each
+        of them where they are created.
         """
         apply_all_suppressions(
             self,
             stack_type="analytics",
             regions=None,
             global_region=self.config.get_global_region(),
-            api_gateway_region=self.config.get_api_gateway_region(),
             project_name=self.project_name,
         )

@@ -257,7 +257,8 @@ Each Parquet row is one namespace's accumulated allocation for one window:
 Partition columns `region` and `date` come from the object key. The bucket is
 KMS-encrypted (customer-managed key), versioned, blocks public access,
 denies insecure transport, and writes server access logs to a dedicated
-lifecycle-expired log bucket. Each region's cost-monitor role is granted
+lifecycle-expired log bucket (SSE-S3, which S3 server access logging requires
+of a destination bucket). Each region's cost-monitor role is granted
 write access by literal deterministic ARN — no cross-region lookups, and the
 monitoring stack can safely deploy after the regional stacks (the service
 retries its next scheduled write until the bucket exists).

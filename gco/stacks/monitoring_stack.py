@@ -236,7 +236,8 @@ class GCOMonitoringStack(Stack):
            grants every regional cost-monitor role ``GenerateDataKey`` /
            ``Decrypt`` / ``DescribeKey`` through S3 in this region.
         2. ``cost_report_access_logs_bucket`` — the dedicated S3 access-logs
-           destination for the primary bucket.
+           destination for the primary bucket, SSE-S3 because S3 server
+           access logging requires an SSE-S3 destination bucket.
         3. ``cost_report_bucket`` — the primary bucket. Its physical name is
            CloudFormation-generated: S3 bucket names are a global namespace
            and a deleted name is not reliably reusable, so the previous fixed
@@ -271,23 +272,11 @@ class GCOMonitoringStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        kms_actions = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey",
-        ]
-        self.cost_report_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowS3ServiceEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
+        # The key policy names no service principal: S3 calls KMS for SSE-KMS
+        # with the permissions of the principal that reads or writes an object,
+        # Athena writes query results the same way with the caller's
+        # permissions, and the access-logs bucket is SSE-S3.
+        #
         # Every regional cost-monitor role writes KMS-encrypted objects into
         # the bucket below. The roles live in other regions and their stacks
         # deploy first, so the grant direction is inverted relative to the
@@ -318,11 +307,12 @@ class GCOMonitoringStack(Stack):
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
         access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
 
+        # SSE-S3: S3 server access logging requires an SSE-S3 destination
+        # (ACCESS_LOG_DESTINATION_SSE_S3_REASON).
         self.cost_report_access_logs_bucket = s3.Bucket(
             self,
             "CostReportAccessLogsBucket",
-            encryption=s3.BucketEncryption.KMS,
-            encryption_key=self.cost_report_kms_key,
+            encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
             versioned=True,
@@ -464,7 +454,10 @@ class GCOMonitoringStack(Stack):
             description="Home region of the central cost report bucket.",
         )
 
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+        from gco.stacks.nag_suppressions import (
+            acknowledge_access_log_destination_encryption,
+            acknowledge_nag_findings,
+        )
 
         cost_replication_reason = (
             "Cost reports are derived analytics data regenerated continuously "
@@ -526,6 +519,7 @@ class GCOMonitoringStack(Stack):
                 },
             ],
         )
+        acknowledge_access_log_destination_encryption(self.cost_report_access_logs_bucket)
 
         CfnOutput(
             self,

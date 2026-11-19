@@ -393,7 +393,9 @@ Practical consequences under `destroy`:
 
   or flip the region to `retain` and redeploy before the destroy.
 - The access-logs bucket carries a lifecycle rule expiring objects after
-  `s3_access_logs.retention_days` (default 90).
+  `s3_access_logs.retention_days` (default 90). It uses SSE-S3 rather than the
+  KMS key, because S3 server access logging requires an SSE-S3 destination
+  bucket.
 - Versioning is enabled, which protects against accidental overwrite
   *within* the bucket's life, not against stack deletion.
 

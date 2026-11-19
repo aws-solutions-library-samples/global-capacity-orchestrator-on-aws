@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from functools import lru_cache
 from types import MappingProxyType
+from typing import Any
 
 # Resource-governance defaults live in gco.resource_governance (a
 # runtime-shippable module) because the manifest/queue processors need the
@@ -568,6 +569,23 @@ def regional_shared_ssm_parameter_prefix(project_name: str) -> str:
     For ``project_name="gco"`` this renders ``/gco/regional-shared-bucket``.
     """
     return f"/{project_name}/regional-shared-bucket"
+
+
+def s3_bucket_kms_conditions(*, region: str, bucket_arn: str, url_suffix: str) -> dict[str, Any]:
+    """KMS conditions confining a ``Resource: *`` key grant to S3's use for one bucket.
+
+    For a bucket whose key ARN the granting stack cannot see (it lives in
+    another stack): ``kms:ViaService`` admits only requests S3 makes in the
+    bucket's region, and ``kms:EncryptionContext:aws:s3:arn`` only those for
+    this bucket. S3 sends the bucket ARN as the context when the bucket uses
+    an S3 Bucket Key and the object ARN when it does not, so both forms match.
+    Used for the cluster-shared and model buckets by the regional stack's
+    roles and by the analytics stack's SageMaker execution role.
+    """
+    return {
+        "StringEquals": {"kms:ViaService": f"s3.{region}.{url_suffix}"},
+        "StringLike": {"kms:EncryptionContext:aws:s3:arn": [bucket_arn, f"{bucket_arn}/*"]},
+    }
 
 
 MOONCAKE_COLD_TIER_KEY_PREFIX = "mooncake-kv"

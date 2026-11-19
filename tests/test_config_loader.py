@@ -757,6 +757,30 @@ class TestApiGatewayValidation:
         with pytest.raises(ConfigValidationError, match="metrics_enabled must be a boolean"):
             ConfigLoader(app)
 
+    @pytest.mark.parametrize("value", [True, False, "yes"])
+    def test_regional_api_enabled_warns_and_is_ignored(self, valid_context, value):
+        """The resource policies no longer read the flag, so any value only warns.
+
+        It used to admit every principal of the account to the regional
+        bridges; callers now need their own execute-api:Invoke permission
+        whatever it says. Nothing reads it, so not even its type is checked.
+        """
+        valid_context["api_gateway"]["regional_api_enabled"] = value
+        config = ConfigLoader(MockApp(valid_context))
+        assert [w for w in config.warnings if w.startswith("api_gateway.")] == [
+            "api_gateway.regional_api_enabled is deprecated and ignored: it no longer changes "
+            "anything: the API resource policies admit no principal of the account, so a caller "
+            "reaches the global API and every regional API bridge with its own "
+            "execute-api:Invoke permission, whatever this says (docs/UPGRADING.md, API calls "
+            "need an IAM permission). Remove it from cdk.json."
+        ]
+
+    def test_regional_api_enabled_has_no_default(self, valid_context):
+        """Without the key, the loader supplies none: nothing reads it."""
+        config = ConfigLoader(MockApp(valid_context))
+        assert "regional_api_enabled" not in config.get_api_gateway_config()
+        assert not [w for w in config.warnings if "regional_api_enabled" in w]
+
 
 class TestConfigLoaderGetters:
     """Tests for ConfigLoader getter methods."""

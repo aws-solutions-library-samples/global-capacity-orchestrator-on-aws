@@ -8,8 +8,8 @@ HMAC key and the root CA private key are never transmitted.
 ``X-GCO-Target-Region`` is intentionally rejected here. This Lambda is not
 attached to regional VPCs and therefore cannot route directly to private ALBs;
 authorized callers that need region pinning must invoke that region's always-
-deployed API bridge directly. Direct caller access is an explicit opt-in even
-though the bridge itself is required for aggregation.
+deployed API bridge directly, which takes their own ``execute-api:Invoke``
+permission on the bridge (its resource policy admits only the aggregator role).
 
 Environment variables:
     GLOBAL_ACCELERATOR_ENDPOINT: Global Accelerator DNS name.

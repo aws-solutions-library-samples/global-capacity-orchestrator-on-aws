@@ -57,4 +57,5 @@ def test_v8_23_0_deprecations_are_the_expected_keys() -> None:
         "images.removal_policy",
         "images.empty_on_delete",
         "images.lifecycle",
+        "api_gateway.regional_api_enabled",
     }

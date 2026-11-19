@@ -34,6 +34,8 @@ recreates every regional stack, and the data inside those stacks goes with them.
   - [Default-deny ingress in `gco-inference`](#default-deny-ingress-in-gco-inference)
   - [Valkey and Aurora ConfigMaps only in `gco-jobs`](#valkey-and-aurora-configmaps-only-in-gco-jobs)
   - [Narrower platform service-account RBAC](#narrower-platform-service-account-rbac)
+  - [Access-logs buckets use SSE-S3](#access-logs-buckets-use-sse-s3)
+  - [Analytics roles act on their own domain](#analytics-roles-act-on-their-own-domain)
 
 ## How an upgrade works
 
@@ -508,6 +510,7 @@ Warnings (the synth continues; the key is ignored, so remove it):
 | `global_accelerator.health_check_grace_period`, `global_accelerator.health_check_timeout` | Global Accelerator endpoint groups have no such settings |
 | `fsx_lustre.node_group` (also in `fsx_lustre_regions`) | FSx workloads run on the EKS Auto Mode node pools; `gco stacks fsx enable` removes it |
 | `images.removal_policy`, `images.empty_on_delete`, `images.lifecycle` | No stack creates or deletes the `<project_name>/*` ECR repositories (the gco CLI creates them), so they survive a destroy whatever these say, and `gco images init` applies its own lifecycle policy. Delete a repository with `gco images delete-repo <name> --force -y`; change a policy with `gco images lifecycle set` |
+| `api_gateway.regional_api_enabled` | The API resource policies no longer admit the account as a whole, so callers reach the global API and the regional bridges with their own `execute-api:Invoke` permission whatever it says (see [API calls need an IAM permission](#api-calls-need-an-iam-permission)) |
 | An `enabled` flag written as `"true"` | Write the JSON boolean `true` |
 | A top-level key in GCO's `snake_case` style that GCO does not read | Most likely a misspelt block, whose settings would not apply |
 | A `*_regions` overlay for a Region that is not in `deployment_regions.regional` | Nothing reads it until the Region is added |
@@ -544,7 +547,9 @@ IAM-authorized route without an `execute-api:Invoke` permission of its own.
   covers the CLI and [docs/iam-policies](iam-policies/README.md) for narrower
   ones.
 - **`api_gateway.regional_api_enabled` no longer has an effect.** Region-pinned
-  calls reach the bridges with the permission above whatever its value.
+  calls reach the bridges with the permission above whatever its value. The
+  key is deprecated: the synth warns about it and ignores it, and the shipped
+  `cdk.json` no longer has it, so remove it from yours.
 - **The analytics `/studio/*` pages keep working.** Their requests carry no IAM
   identity, so the resource policy still admits `GET /studio/*`; the Cognito
   authorizer decides who signs in.
@@ -644,3 +649,45 @@ exactly the calls those services make.
   Role of your own in each allowed namespace, or the create is refused with
   403. Tooling that borrowed either service account's token for other reads
   needs a role of its own too.
+
+### Access-logs buckets use SSE-S3
+
+Earlier releases encrypted the server access logs of the cluster-shared,
+regional-shared and cost report buckets with each bucket's KMS key. S3 server
+access logging requires the destination bucket to use SSE-S3; with SSE-KMS,
+log objects might be delivered encrypted with a key the account cannot use.
+
+- **The three access-logs buckets switch to SSE-S3 in place.** The redeploy
+  changes only their default encryption and drops the key-policy statement
+  for `logging.s3.amazonaws.com`; no bucket is replaced and no object is
+  touched. Log objects delivered earlier keep their KMS encryption and stay
+  readable to principals with `kms:Decrypt` on the key, which is unchanged.
+- **BREAKING (only for reports you added): the cluster-shared and cost
+  report keys no longer name the `s3.amazonaws.com` service principal, and
+  the cluster-shared key no longer names CloudWatch Logs.** Nothing GCO
+  deploys used those statements: S3 encrypts objects with the permissions of
+  whoever reads or writes them, and no log group uses either key. If you
+  configured S3 Inventory reports or storage class analysis exports that S3
+  writes into the cluster-shared or cost report bucket, add a key-policy
+  statement for `s3.amazonaws.com` (`kms:GenerateDataKey`) to that key
+  before redeploying, or point them at another bucket.
+
+### Analytics roles act on their own domain
+
+With `analytics_environment.enabled`, the analytics stack's roles were scoped
+to what they use.
+
+- **BREAKING (narrow): the SageMaker execution role's Studio actions name
+  this stack's domain.** Creating, updating or deleting spaces and apps,
+  tagging, and describing profiles through the role's own statement now
+  covers `<project>-studio-<region>` only, not every domain in the Region; a
+  notebook that managed another domain's spaces or apps with the execution
+  role needs a role of its own for that. `AmazonSageMakerFullAccess` stays
+  attached, unchanged.
+- **The role reads exactly the three cluster-shared parameters**
+  (`/<project>/cluster-shared-bucket/{name,arn,region}`) and uses the
+  cluster-shared key only through S3 for that bucket
+  (`kms:EncryptionContext:aws:s3:arn`), as the regional job role does.
+- **The stack-deletion cleanup Lambda** holds exactly the API calls it makes,
+  scoped to the domain, `Studio_EFS`, the Region's access points and file
+  systems, and security groups in the analytics VPC.

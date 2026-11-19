@@ -222,6 +222,39 @@ def acknowledge_security_group_cidr_findings(scope: IConstruct, *, reason: str) 
     )
 
 
+#: The rules that require SSE-KMS default encryption on every S3 bucket.
+_S3_DEFAULT_ENCRYPTION_KMS_RULES: tuple[str, ...] = (
+    "HIPAA.Security-S3DefaultEncryptionKMS",
+    "NIST.800.53.R5-S3DefaultEncryptionKMS",
+    "PCI.DSS.321-S3DefaultEncryptionKMS",
+)
+
+#: Why a bucket that receives S3 server access logs uses SSE-S3.
+ACCESS_LOG_DESTINATION_SSE_S3_REASON = (
+    "This bucket is an S3 server access log destination. The S3 User Guide "
+    "(Enabling Amazon S3 server access logging) requires a destination bucket "
+    "to use SSE-S3: with SSE-KMS default encryption, log objects might be "
+    "delivered encrypted with a key the bucket owner cannot access. The bucket "
+    "whose requests it logs is SSE-KMS."
+)
+
+
+def acknowledge_access_log_destination_encryption(bucket: IConstruct) -> None:
+    """Acknowledge the SSE-KMS rules on an S3 server access log destination bucket.
+
+    Server access logging requires an SSE-S3 destination, so the
+    ``S3DefaultEncryptionKMS`` rules cannot be met there. Scope this to the
+    destination bucket, never to a stack.
+    """
+    acknowledge_nag_findings(
+        bucket,
+        [
+            NagSuppression(id=rule, reason=ACCESS_LOG_DESTINATION_SSE_S3_REASON)
+            for rule in _S3_DEFAULT_ENCRYPTION_KMS_RULES
+        ],
+    )
+
+
 def nag_validation_plugins(
     scope: IConstruct, *, verbose: bool = True
 ) -> list[IPolicyValidationPlugin]:
@@ -1014,264 +1047,43 @@ def add_aurora_pgvector_suppressions(stack: Stack) -> None:
     )
 
 
-def add_sagemaker_suppressions(
-    stack: Stack,
-    api_gateway_region: str | None = None,
-    global_region: str | None = None,
-    project_name: str = "gco",
-) -> None:
-    """Add suppressions for SageMaker Studio Domain + execution role findings.
-
-    The analytics stack uses a private-VPC SageMaker Studio domain whose
-    execution role needs wildcard access to a known set of ARN patterns:
-    the GCO API's routes (any REST API id under ``/prod/*/api/v1/*`` and
-    ``/prod/*/inference/*``) and ``Cluster_Shared_Bucket`` objects resolved
-    from cross-region SSM, among others. Each wildcard is scoped on the
-    literal patterns below so cdk-nag's ``AwsSolutions-IAM5`` check surfaces
-    only the documented escape hatches.
-
-    Args:
-        stack: The analytics stack to apply suppressions to.
-        api_gateway_region: Concrete region where the API Gateway stack
-            lives (used to resolve the execute-api ARN pattern).
-        global_region: Concrete global region (used to resolve the
-            KMS ``ViaService`` condition's service endpoint — the KMS
-            decrypt ARN itself is ``*`` because the cluster-shared KMS
-            key lives in a different stack).
-    """
-    api_region = api_gateway_region or "*"
-    gbl_region = global_region or "*"
-
-    applies_to: list[str] = [
-        # SageMaker execution role — ``ssm:GetParameter`` on the
-        # Cluster_Shared_Bucket metadata parameters under
-        # ``/gco/cluster-shared-bucket/*`` in the global region. The path
-        # wildcard covers exactly three literal parameter names
-        # (name / arn / region) defined by ``GCOGlobalStack``; the rest of
-        # the ARN is fully scoped (global region + account).
-        f"Resource::arn:<AWS::Partition>:ssm:{gbl_region}:<AWS::AccountId>:parameter/{project_name}/cluster-shared-bucket/*",
-        # SageMaker execution role — execute-api on any REST API id
-        # under ``/prod/*/api/v1/*`` and ``/prod/*/inference/*`` in the
-        # api-gateway region. The concrete region value is templated in
-        # so the nag match works regardless of which region the user
-        # deploys to. The HTTP-method segment is ``*`` (instead of
-        # pinning ``GET``) so notebooks can submit jobs, update
-        # templates, and manage inference endpoints in addition to
-        # read-only GETs.
-        f"Resource::arn:<AWS::Partition>:execute-api:{api_region}:<AWS::AccountId>:*/prod/*/api/v1/*",
-        f"Resource::arn:<AWS::Partition>:execute-api:{api_region}:<AWS::AccountId>:*/prod/*/inference/*",
-        # KMS decrypt scoped by
-        # ``kms:ViaService=s3.<global-region>.<AWS::URLSuffix>``
-        # condition — the resource ARN is unknown to this stack (cluster-
-        # shared KMS key lives in the global region) so Resource::* is the
-        # documented pattern, narrowed by the ViaService condition.
-        "Resource::*",
-        # S3 grant_read_write on Studio_Only_Bucket produces the AWS-
-        # recommended set of S3 action wildcards. Each one covers a
-        # closed, read-or-write intent on a single literal bucket ARN.
-        "Action::s3:Abort*",
-        "Action::s3:DeleteObject*",
-        "Action::s3:GetBucket*",
-        "Action::s3:GetObject*",
-        "Action::s3:List*",
-        # KMS grant_encrypt_decrypt on Analytics_KMS_Key produces the
-        # AWS-recommended set of KMS action wildcards. Each covers a
-        # single key ARN.
-        "Action::kms:GenerateDataKey*",
-        "Action::kms:ReEncrypt*",
-        # Object-key wildcard on the literal Studio_Only_Bucket ARN — the
-        # RW grant must cover every object key under the bucket.
-        "Resource::<StudioOnlyBucket80FF5E65.Arn>/*",
-        # ``kms:ViaService`` condition-scoped wildcard on the cluster-
-        # shared bucket's KMS key — only matched when s3 is the invoking
-        # service in the global region.
-        f"Condition::kms:ViaService:s3.{gbl_region}.<AWS::URLSuffix>",
-        # Studio UI actions — the execution role is assumed by the Studio
-        # runtime and needs domain/space/app/user-profile wildcards to
-        # render the IDE and manage notebook apps.
-        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:domain/*",
-        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:user-profile/*/*",
-        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:space/*/*",
-        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:app/*/*/*/*",
-        # EMR Serverless — Studio discovers and manages EMR apps via these
-        # actions. Resource::* is required because EMR Serverless does not
-        # support resource-level scoping on most actions.
-        "Action::emr-serverless:*",
-        # SageMaker MLflow tracking servers + MLflow Apps. The
-        # ``sagemaker-mlflow:*`` data-plane namespace is the one the
-        # MLflow SDK talks to via SigV4 (``log_metric``,
-        # ``log_artifact``, ``register_model``, etc.); the managed
-        # ``AmazonSageMakerFullAccess`` policy covers the
-        # ``sagemaker:*`` control-plane namespace (MLflow Apps,
-        # Tracking Servers, Model Registry) but NOT the
-        # ``sagemaker-mlflow`` service prefix, so this statement stays
-        # inline and scoped to the api-gateway region + account.
-        "Action::sagemaker-mlflow:*",
-        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:mlflow-tracking-server/*",
-        f"Resource::arn:<AWS::Partition>:sagemaker:{api_region}:<AWS::AccountId>:mlflow-app/*",
-        # ``sts:GetCallerIdentity`` does not support resource-level
-        # scoping; the MLflow SigV4 plug-in calls it on every request.
-        "Action::sts:GetCallerIdentity",
-    ]
-
-    acknowledge_nag_findings(
-        stack,
-        [
-            NagSuppression(
-                id="AwsSolutions-IAM5",
-                reason=(
-                    "SageMaker_Execution_Role uses wildcard ARNs and actions for: "
-                    "(1) execute-api:Invoke on "
-                    "any REST API id under /prod/*/api/v1/* and "
-                    "/prod/*/inference/* in the api-gateway region (all "
-                    "HTTP methods, so notebooks can submit jobs and "
-                    "manage inference endpoints in addition to read-only "
-                    "GETs), (2) KMS Decrypt/GenerateDataKey "
-                    "scoped by kms:ViaService=s3.<global-region>.<AWS::URLSuffix> "
-                    "condition (the cluster-shared KMS key ARN is not known "
-                    "to the analytics stack — it lives in the global region), "
-                    "(3) S3 action wildcards (``s3:Abort*``, ``s3:DeleteObject*``, "
-                    "``s3:GetBucket*``, ``s3:GetObject*``, ``s3:List*``) produced "
-                    "by ``bucket.grant_read_write(role)`` on the literal "
-                    "Studio_Only_Bucket ARN, (4) KMS action wildcards "
-                    "(``kms:GenerateDataKey*``, ``kms:ReEncrypt*``) produced by "
-                    "``kms_key.grant_encrypt_decrypt(role)`` on the literal "
-                    "Analytics_KMS_Key ARN, (5) ``<StudioOnlyBucket.Arn>/*`` "
-                    "object-key wildcard on the single literal bucket, and "
-                    "(6) ``ssm:GetParameter`` on "
-                    "``/gco/cluster-shared-bucket/*`` in the global region "
-                    "(covers exactly three literal parameter names — "
-                    "name/arn/region — defined by ``GCOGlobalStack``; lets "
-                    "Studio notebooks resolve the shared-bucket metadata at "
-                    "runtime without a per-user export step), (7) "
-                    "``sagemaker-mlflow:*`` on MLflow tracking server and "
-                    "MLflow App ARN wildcards in the api-gateway region + "
-                    "account so notebooks can log experiments, runs, "
-                    "metrics, artifacts, and registered-model versions "
-                    "via the MLflow SDK's SigV4 plug-in (the companion "
-                    "``sagemaker:*Mlflow*`` / ``sagemaker:*ModelPackage*`` "
-                    "control-plane actions are now attached via the "
-                    "``AmazonSageMakerFullAccess`` managed policy instead "
-                    "of enumerated inline), and (8) "
-                    "``sts:GetCallerIdentity`` on ``*`` which is required "
-                    "by MLflow's SigV4 plug-in and does not support "
-                    "resource-level scoping. Each wildcard is scoped on a "
-                    "narrow literal pattern."
-                ),
-                applies_to=applies_to,
-            ),
-            # SageMaker execution role does not require MFA — callers reach
-            # the role through Cognito-gated presigned URLs rather
-            # than direct AssumeRole calls from operator terminals.
-            NagSuppression(
-                id="AwsSolutions-IAM4",
-                reason=(
-                    "SageMaker_Execution_Role does not attach AWS managed "
-                    "policies. The role is assumed only by sagemaker.amazonaws.com "
-                    "and used exclusively by notebooks running inside the "
-                    "Studio domain."
-                ),
-            ),
-            # The Studio domain itself — VpcOnly network mode is the
-            # primary security control; additional HIPAA/NIST checks that
-            # assume a customer-managed image (``AwsSolutions-SM2`` etc.)
-            # are suppressed because this deployment intentionally uses
-            # the stock AWS-published SageMaker Distribution images.
-            NagSuppression(
-                id="AwsSolutions-SM2",
-                reason=(
-                    "The Studio domain uses AWS-published stock SageMaker "
-                    "Distribution images and does not define custom "
-                    "images or app image configs. Per-user EFS access points "
-                    "give POSIX isolation without a custom image."
-                ),
-            ),
-            NagSuppression(
-                id="AwsSolutions-SM3",
-                reason=(
-                    "SageMaker Studio domain is provisioned with "
-                    "``app_network_access_type=VpcOnly`` — all Studio traffic "
-                    "stays on the analytics stack's private-isolated VPC. "
-                    "Direct internet access is structurally unavailable."
-                ),
-            ),
-        ],
-    )
-
-    # The separate SagemakerClusterSharedBucketGrant inline Policy (a
-    # sibling construct to the role, created by
-    # ``_grant_sagemaker_role_on_cluster_shared_bucket``) has its own
-    # ``<ReadClusterSharedBucketArn*.Parameter.Value>/*`` object-key
-    # wildcard on the literal cluster-shared bucket ARN resolved from
-    # cross-region SSM. Resource-level scoping isn't possible here —
-    # the parent role's resource suppression has ``apply_to_children``
-    # semantics that only traverse CDK children, not siblings.
-    acknowledge_nag_findings(
-        stack,
-        [
-            NagSuppression(
-                id="AwsSolutions-IAM5",
-                reason=(
-                    "SagemakerClusterSharedBucketGrant attaches the RW "
-                    "policy on the single literal Cluster_Shared_Bucket "
-                    "ARN resolved from /gco/cluster-shared-bucket/arn. "
-                    "The ``<arn>/*`` object-key wildcard covers every "
-                    "object key inside the single always-on cluster-shared "
-                    "bucket (CloudFormation-generated name, published via SSM), "
-                    "identical in shape and intent to the regional stack's "
-                    "analogous job-pod grant."
-                ),
-                applies_to=[
-                    "Resource::<ReadClusterSharedBucketArn4B0BD291.Parameter.Value>/*",
-                ],
-            ),
-        ],
-    )
-
-
 def add_cognito_suppressions(stack: Stack) -> None:
-    """Add suppressions for Cognito user pool findings.
+    """Add the acknowledgment for the Studio user pool's MFA finding.
 
-    Most Cognito-related checks are handled by
-    ``advanced_security_mode=ENFORCED`` and the password-policy
-    configuration set on the pool itself. Only a small number of
-    structural findings need an explicit suppression — these are the ones
-    that don't apply to a machine-to-machine + presigned-URL model where
-    there is no hosted UI callback to harden.
+    The pool (``GCOAnalyticsStack._create_cognito_pool``) is on the Lite
+    feature plan with threat protection off (``NO_ENFORCEMENT``, its own
+    ``AwsSolutions-COG8`` acknowledgment), has self sign-up disabled, and does
+    not configure MFA.
     """
     acknowledge_nag_findings(
         stack,
         [
-            NagSuppression(
-                id="AwsSolutions-COG3",
-                reason=(
-                    "The Cognito user pool has ``advanced_security_mode=ENFORCED`` "
-                    "which provides adaptive risk-based authentication, replacing "
-                    "the need for an additional MFA enforcement step at this level. "
-                    "Admins add MFA via ``gco analytics users add --require-mfa`` "
-                    "when required."
-                ),
-            ),
-            # COG2 is WARN-level: "The Cognito user pool does not require
-            # MFA." MFA is configured at the per-user level through the
-            # ``gco analytics users add --require-mfa`` CLI path rather
-            # than being enforced pool-wide; enforcing it at the pool
-            # level would lock out admins bootstrapping the first user
-            # during initial deploy.
+            # COG2 is WARN-level: "The Cognito user pool does not require MFA."
             NagSuppression(
                 id="AwsSolutions-COG2",
                 reason=(
-                    "MFA is managed per-user through the ``gco analytics "
-                    "users add --require-mfa`` CLI command rather than "
-                    "enforced pool-wide. ``advanced_security_mode=ENFORCED`` "
-                    "provides adaptive risk-based authentication that "
-                    "triggers MFA challenges on suspicious sign-in attempts. "
-                    "Pool-wide MFA enforcement would lock out the first "
-                    "admin bootstrapping user during initial deploy."
+                    "The Studio user pool does not configure MFA. Users are created "
+                    "by an administrator (self sign-up is disabled) and sign in "
+                    "with SRP from gco analytics studio login, with a password "
+                    "policy of at least 12 characters including digits, symbols, "
+                    "upper and lower case. Turn MFA on for the pool if your policy "
+                    "requires a second factor."
                 ),
             ),
         ],
     )
+
+
+#: Why the analytics VPC has no flow log (an accepted gap, not a property of
+#: the network: notebook egress leaves through a NAT gateway).
+_ANALYTICS_FLOW_LOG_REASON = (
+    "The analytics VPC has no flow log. Its private subnets hold Studio, EMR "
+    "Serverless, the EFS mount targets and the VPC endpoints, and its public "
+    "subnets hold one NAT gateway that gives notebooks internet egress, so "
+    "notebook traffic is not flow-logged (the regional VPCs are). Accepted for "
+    "the optional, off-by-default analytics environment; attach an ec2.FlowLog "
+    "to AnalyticsVpc where flow logs are required."
+)
 
 
 def add_analytics_vpc_suppressions(stack: Stack) -> None:
@@ -1285,53 +1097,22 @@ def add_analytics_vpc_suppressions(stack: Stack) -> None:
     acknowledge_nag_findings(
         stack,
         [
-            # Flow-logs suppressions — analytics VPC is private-isolated,
-            # has no IGW/NAT, and every egress path is a VPC endpoint. The
-            # service endpoints already emit CloudTrail data events that
-            # cover every packet-producing API call on the VPC.
+            # Flow-logs acknowledgments: an accepted gap, see the reason.
             NagSuppression(
                 id="AwsSolutions-VPC7",
-                reason=(
-                    "The analytics VPC is private-isolated (no IGW, no "
-                    "NAT Gateway). All egress flows through VPC interface/"
-                    "gateway endpoints for SageMaker, S3, STS, Logs, ECR, "
-                    "and EFS, each of which emits CloudTrail data events. "
-                    "Flow logs would duplicate that telemetry at "
-                    "significant storage cost without adding visibility."
-                ),
+                reason=_ANALYTICS_FLOW_LOG_REASON,
             ),
             NagSuppression(
                 id="HIPAA.Security-VPCFlowLogsEnabled",
-                reason=(
-                    "The analytics VPC is private-isolated (no IGW, no "
-                    "NAT Gateway). All egress flows through VPC interface/"
-                    "gateway endpoints for SageMaker, S3, STS, Logs, ECR, "
-                    "and EFS, each of which emits CloudTrail data events. "
-                    "Flow logs would duplicate that telemetry at "
-                    "significant storage cost without adding visibility."
-                ),
+                reason=_ANALYTICS_FLOW_LOG_REASON,
             ),
             NagSuppression(
                 id="NIST.800.53.R5-VPCFlowLogsEnabled",
-                reason=(
-                    "The analytics VPC is private-isolated (no IGW, no "
-                    "NAT Gateway). All egress flows through VPC interface/"
-                    "gateway endpoints for SageMaker, S3, STS, Logs, ECR, "
-                    "and EFS, each of which emits CloudTrail data events. "
-                    "Flow logs would duplicate that telemetry at "
-                    "significant storage cost without adding visibility."
-                ),
+                reason=_ANALYTICS_FLOW_LOG_REASON,
             ),
             NagSuppression(
                 id="PCI.DSS.321-VPCFlowLogsEnabled",
-                reason=(
-                    "The analytics VPC is private-isolated (no IGW, no "
-                    "NAT Gateway). All egress flows through VPC interface/"
-                    "gateway endpoints for SageMaker, S3, STS, Logs, ECR, "
-                    "and EFS, each of which emits CloudTrail data events. "
-                    "Flow logs would duplicate that telemetry at "
-                    "significant storage cost without adding visibility."
-                ),
+                reason=_ANALYTICS_FLOW_LOG_REASON,
             ),
             # Public subnet findings — the NAT gateway requires a public
             # subnet with an IGW route. No compute runs in the public
@@ -1396,11 +1177,11 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
        workload; cross-region replication would double storage cost and
        introduce eventual-consistency behavior that breaks notebook
        save/load semantics.
-    2. ``AnalyticsAccessLogsBucket`` — SSE-S3 encrypted because S3
-       server-access-log delivery to a KMS-encrypted bucket requires
-       additional log-delivery role plumbing that the CDK ``s3.Bucket``
-       construct does not wire automatically. Replication is not enabled
-       because the bucket is the log sink, not a data store.
+    2. ``AnalyticsAccessLogsBucket`` — the log sink, SSE-S3 because S3 server
+       access logging requires an SSE-S3 destination (its SSE-KMS rules are
+       acknowledged on the bucket by
+       ``acknowledge_access_log_destination_encryption``). Replication is not
+       enabled because the bucket is the log sink, not a data store.
     """
     acknowledge_nag_findings(
         stack,
@@ -1449,74 +1230,6 @@ def add_analytics_s3_suppressions(stack: Stack) -> None:
                     "the data bucket by construction."
                 ),
             ),
-            # Access-logs bucket KMS encryption suppressions — SSE-S3 is
-            # the AWS-documented pattern for server-access-log delivery
-            # sinks. Switching to SSE-KMS would require an additional
-            # log-delivery role that the CDK ``s3.Bucket`` construct does
-            # not wire automatically.
-            NagSuppression(
-                id="HIPAA.Security-S3DefaultEncryptionKMS",
-                reason=(
-                    "The analytics access-logs bucket uses SSE-S3 because "
-                    "S3 server-access-log delivery to a KMS-encrypted "
-                    "bucket requires an additional log-delivery role "
-                    "plumbing that CDK does not wire by default. Studio_"
-                    "Only_Bucket (the actual data bucket) IS KMS-encrypted "
-                    "with ``Analytics_KMS_Key``."
-                ),
-            ),
-            NagSuppression(
-                id="NIST.800.53.R5-S3DefaultEncryptionKMS",
-                reason=(
-                    "The analytics access-logs bucket uses SSE-S3 because "
-                    "S3 server-access-log delivery to a KMS-encrypted "
-                    "bucket requires an additional log-delivery role "
-                    "plumbing that CDK does not wire by default. Studio_"
-                    "Only_Bucket (the actual data bucket) IS KMS-encrypted "
-                    "with ``Analytics_KMS_Key``."
-                ),
-            ),
-            NagSuppression(
-                id="PCI.DSS.321-S3DefaultEncryptionKMS",
-                reason=(
-                    "The analytics access-logs bucket uses SSE-S3 because "
-                    "S3 server-access-log delivery to a KMS-encrypted "
-                    "bucket requires an additional log-delivery role "
-                    "plumbing that CDK does not wire by default. Studio_"
-                    "Only_Bucket (the actual data bucket) IS KMS-encrypted "
-                    "with ``Analytics_KMS_Key``."
-                ),
-            ),
-        ],
-    )
-
-
-def add_emr_serverless_suppressions(stack: Stack) -> None:
-    """Add suppressions for EMR Serverless Application findings.
-
-    EMR Serverless doesn't have the same set of nag rules as EKS or Lambda;
-    the main structural findings relate to the application's network
-    configuration (which we pin to the private-isolated subnets + a
-    dedicated SG) and the release-label pinning (covered by a constant in
-    ``gco.stacks.constants``).
-    """
-    acknowledge_nag_findings(
-        stack,
-        [
-            # Placeholder — EMR Serverless currently has no nag rules that
-            # fire on a plain ``CfnApplication`` built against private
-            # subnets. This helper exists so the analytics branch in
-            # ``apply_all_suppressions`` has a single, predictable entry
-            # point for EMR Serverless — future EMR-related rules land
-            # here without touching the branch dispatch.
-            NagSuppression(
-                id="AwsSolutions-EMR1",
-                reason=(
-                    "EMR Serverless application is created with explicit "
-                    "private-isolated subnet ids and a dedicated security "
-                    "group — the application never lands on public subnets."
-                ),
-            ),
         ],
     )
 
@@ -1526,7 +1239,6 @@ def apply_all_suppressions(
     stack_type: str = "regional",
     regions: list[str] | None = None,
     global_region: str | None = None,
-    api_gateway_region: str | None = None,
     project_name: str = "gco",
 ) -> None:
     """Apply all relevant suppressions to a stack.
@@ -1537,8 +1249,6 @@ def apply_all_suppressions(
             'regional_api_gateway', 'monitoring', or 'analytics'
         regions: List of regional deployment regions (for dynamic IAM suppression patterns)
         global_region: Global region for SSM parameters (for dynamic IAM suppression patterns)
-        api_gateway_region: API Gateway region (for analytics stack — used to
-            scope the SageMaker execution role's ARN patterns)
         project_name: Deployment prefix (#139), forwarded to
             ``add_iam_suppressions`` so the IAM allow-list ARN patterns match
             the deployment's project-scoped resource names. Defaults to
@@ -1577,15 +1287,9 @@ def apply_all_suppressions(
     elif stack_type == "analytics":
         # Analytics stack has S3 buckets (Studio_Only + access-logs), KMS,
         # EFS, Cognito, SageMaker, EMR Serverless, and the presigned-URL
-        # Lambda. Each helper scopes its own applies_to list.
+        # Lambda. The IAM wildcards of its roles and policies are
+        # acknowledged on each of them in ``gco/stacks/analytics_stack.py``.
         add_storage_suppressions(stack)
-        add_sagemaker_suppressions(
-            stack,
-            api_gateway_region=api_gateway_region,
-            global_region=global_region,
-            project_name=project_name,
-        )
         add_cognito_suppressions(stack)
-        add_emr_serverless_suppressions(stack)
         add_analytics_vpc_suppressions(stack)
         add_analytics_s3_suppressions(stack)

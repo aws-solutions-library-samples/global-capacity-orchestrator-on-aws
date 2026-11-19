@@ -2888,9 +2888,10 @@ caller in the deployment account is authorized by its own identity-based
 policy, which must allow `execute-api:Invoke` on the bridge (see
 [CLI.md → Regional API Mode](CLI.md#regional-api-mode) and
 [docs/iam-policies](iam-policies/README.md)); callers in other accounts are
-refused. `api_gateway.regional_api_enabled` no longer changes this: it used to
-add a statement admitting every principal of the account, including principals
-with no `execute-api:Invoke` permission.
+refused. `api_gateway.regional_api_enabled` is deprecated and no longer changes
+this (the synth warns about it and ignores it; remove it from `cdk.json`): it
+used to add a statement admitting every principal of the account, including
+principals with no `execute-api:Invoke` permission.
 
 ### How It Works
 

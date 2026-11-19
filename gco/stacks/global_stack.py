@@ -2078,13 +2078,11 @@ class GCOGlobalStack(Stack):
           feature while still providing a safety net against accidental deletion.
         - Uses ``RemovalPolicy.DESTROY`` so a ``cdk destroy gco-global`` cleans up
           the key without operator intervention (iteration-loop posture).
-        - Grants encrypt/decrypt in the key policy to the ``s3.amazonaws.com``
-          service principal and to CloudWatch Logs in this Region
-          (``logs.<region>.amazonaws.com``). Neither stands in for the
-          role-side grants: SSE-KMS calls KMS with the permissions of the
-          principal that reads or writes an object, S3 server access logs are
-          written by ``logging.s3.amazonaws.com``, and no CloudWatch log group
-          uses this key.
+        - Keeps CDK's default key policy (the account statement that lets IAM
+          policies grant use of the key) and names no service principal: S3
+          calls KMS for SSE-KMS with the permissions of the principal that
+          reads or writes an object, the access-logs bucket is SSE-S3, and no
+          CloudWatch log group, trail or other service encrypts with this key.
 
         The key is exposed as ``self.cluster_shared_kms_key`` for tests and for
         ``_create_cluster_shared_bucket`` to reference. Role-side usage grants
@@ -2106,40 +2104,6 @@ class GCOGlobalStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # Key-policy grants for the S3 service principal and for CloudWatch Logs
-        # in this Region. Objects in the two buckets are encrypted with the
-        # permissions of whoever writes them (the role-side grants), and the
-        # access-logs bucket is written by the S3 logging service, not by
-        # CloudWatch Logs. The actions match the standard service-principal
-        # pattern used by cdk's default key policies.
-        kms_actions = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey",
-        ]
-
-        self.cluster_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowS3ServiceEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
-        self.cluster_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchLogsEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("logs.amazonaws.com", region=self.region)],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
     def _create_cluster_shared_bucket(self) -> None:
         """Create the always-on ``Cluster_Shared_Bucket`` and its access-logs bucket.
 
@@ -2148,7 +2112,8 @@ class GCOGlobalStack(Stack):
         1. ``cluster_shared_access_logs_bucket`` — dedicated S3 access-logs bucket
            used as ``server_access_logs_bucket`` for the primary bucket. Separate
            from ``model_bucket_access_logs`` so cluster-shared-bucket access logs
-           are not commingled with model-bucket logs.
+           are not commingled with model-bucket logs. SSE-S3, because S3 server
+           access logging requires an SSE-S3 destination bucket.
         2. ``cluster_shared_bucket`` — the primary bucket. Its physical name
            is CloudFormation-generated (``<stack>-clustersharedbucket…``): S3
            bucket names are a global namespace and a deleted name is not
@@ -2175,16 +2140,16 @@ class GCOGlobalStack(Stack):
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
         access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
 
-        # Dedicated access-logs bucket for Cluster_Shared_Bucket, encrypted with
-        # the cluster-shared KMS key. Kept separate from model_bucket_access_logs
-        # so operators can reason about each bucket's logs independently. Matches
-        # the LifecycleRule used on `model_bucket_access_logs` so retention is
-        # consistent across the two log sinks.
+        # Dedicated access-logs bucket for Cluster_Shared_Bucket. Kept separate
+        # from model_bucket_access_logs so operators can reason about each
+        # bucket's logs independently. Matches the LifecycleRule used on
+        # `model_bucket_access_logs` so retention is consistent across the two
+        # log sinks. SSE-S3 like that bucket: S3 server access logging requires
+        # an SSE-S3 destination (ACCESS_LOG_DESTINATION_SSE_S3_REASON).
         self.cluster_shared_access_logs_bucket = s3.Bucket(
             self,
             "ClusterSharedAccessLogsBucket",
-            encryption=s3.BucketEncryption.KMS,
-            encryption_key=self.cluster_shared_kms_key,
+            encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
             versioned=True,
@@ -2244,7 +2209,10 @@ class GCOGlobalStack(Stack):
         # co-located with the construct it applies to, so the reason survives
         # refactors). Every suppression carries an explicit reason
         # string; no blanket ``Resource::*`` bypasses.
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+        from gco.stacks.nag_suppressions import (
+            acknowledge_access_log_destination_encryption,
+            acknowledge_nag_findings,
+        )
 
         shared_replication_reason = (
             "Cluster_Shared_Bucket is a regional scratch sink; cluster jobs "
@@ -2307,6 +2275,7 @@ class GCOGlobalStack(Stack):
                 },
             ],
         )
+        acknowledge_access_log_destination_encryption(self.cluster_shared_access_logs_bucket)
 
     def _publish_cluster_shared_bucket_ssm_params(self) -> None:
         """Publish the three ``/gco/cluster-shared-bucket/*`` SSM parameters.

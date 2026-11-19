@@ -202,9 +202,11 @@ deployed, the following resources appear in the API-gateway region
 - **Cognito user pool** with a strong password policy (12+ chars,
   digits/symbols/uppercase required), SRP auth flow, and a hosted
   `UserPoolDomain` at prefix `gco-studio-<account>`.
-- **Analytics VPC** — private-isolated subnets only, plus interface
-  endpoints for the SageMaker, STS, CloudWatch Logs, ECR, and EFS
-  services; gateway endpoint for S3.
+- **Analytics VPC** — private subnets for Studio, EMR Serverless and the
+  endpoints, and public subnets that hold only the NAT gateway notebooks
+  reach the internet through (pip, git); interface endpoints for the
+  SageMaker, STS, CloudWatch Logs, ECR, and EFS services and a gateway
+  endpoint for S3. It has no VPC flow log (the regional VPCs do).
 - **Studio_EFS** — encrypted EFS file system for per-user home
   folders, one access point per Studio user profile.
 - **Studio_Only_Bucket** — KMS-encrypted S3 bucket scoped to the
@@ -919,9 +921,9 @@ import boto3
 import pandas
 
 # The Studio execution role has RW on Cluster_Shared_Bucket whenever
-# analytics is enabled, plus ssm:GetParameter on the
-# /gco/cluster-shared-bucket/* tree in the global region (default us-east-2),
-# so the bucket name can be resolved at runtime with zero setup.
+# analytics is enabled, plus ssm:GetParameter on the three
+# /gco/cluster-shared-bucket/{name,arn,region} parameters in the global region
+# (default us-east-2), so the bucket can be resolved at runtime with zero setup.
 
 ssm = boto3.client("ssm", region_name="us-east-2")
 bucket = ssm.get_parameter(Name="/gco/cluster-shared-bucket/name")["Parameter"]["Value"]
