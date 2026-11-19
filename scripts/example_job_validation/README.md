@@ -42,7 +42,7 @@ below is what this harness adds on top.
 | `specs.py` | One `ExampleSpec` per example: how it is submitted, what infrastructure it needs, when it counts as passed, and which mutations are applied first. Declarative on purpose. |
 | `static_checks.py` | The offline half: parse, spec/catalog/directory symmetry, transport acceptance, target namespaces (and the Argo CD fence), resource-governance fit, and the same rules for what an Application syncs or an RGD / Composition composes. No AWS, no cluster. |
 | `actions.py` | The two new action handlers: `action_static` and `action_examples` (per-example lifecycle, capacity skips, parallelism). |
-| `drivers.py` | The per-example machinery `actions.py` orchestrates: submission through the real CLI or `kubectl`, the success-criteria waiters, setup drivers, and cleanup. Returns evidence dictionaries for the report. |
+| `drivers.py` | The per-example machinery `actions.py` orchestrates: submission through this checkout's CLI or `kubectl`, the success-criteria waiters, setup drivers, and cleanup. Returns evidence dictionaries for the report. `_run_cli` runs a `gco ...` command line as `CHECKOUT_GCO_COMMAND` (the harness's interpreter running `cli.main` from the repository root), never a `gco` on `PATH`, and the access entry `kube.cluster_session` grants uses the same command. |
 | `kube.py` | Cluster access shared with sibling harnesses: SSM tunnel, kubeconfig handling, and kubectl execution. Both harnesses pass an isolated kubeconfig in their private report dir: AWS CLI and kubectl get `--kubeconfig`, and every `gco` process gets `KUBECONFIG` (`session_environment` hands the drivers the same environment), so a run never reads or rewrites `~/.kube/config` or a `KUBECONFIG` the operator's shell exports. A tunnelled session keeps its tunnel carrying traffic: a TLS-handshake watchdog reopens a stalled or exited SSM session on the same port through the same bastion, and `SessionKubectl.through_tunnel` repeats a call the tunnel broke once it is back (see [Keeping the tunnel up](#keeping-the-tunnel-up)). |
 
 ## How a run executes
@@ -139,7 +139,8 @@ Submission paths are constants in `specs.py` (`SUBMIT_DIRECT`, `SUBMIT_SQS`,
 `SUBMIT_API`, `DAG_RUN`, `KUBECTL_APPLY`, `COMPANION`) with `submit_example`
 in `drivers.py` dispatching on them. A new path means: add the constant to
 `SUBMISSION_PATHS`, teach `submit_example` to travel it **the way the docs
-tell users to** (shell out to the real `gco` command or `kubectl`; never
+tell users to** (run the documented `gco` command line through `_run_cli`,
+which runs it on this checkout's CLI, or shell out to `kubectl`; never
 reimplement the submission), and extend `check_transport_acceptance` in
 `static_checks.py` if the new path has gates of its own.
 

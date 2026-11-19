@@ -663,6 +663,8 @@ class TestParallelExamples:
         }
         assert sessions[0]["bastion_ttl_minutes"] == summary["tunnel"]["bastion_ttl_minutes"]
         assert sessions[0]["tunnel_events"] is summary["tunnel"]["reopens"]
+        # The session's access entry is granted by this checkout's CLI.
+        assert sessions[0]["gco_command"] == drivers.CHECKOUT_GCO_COMMAND
 
     def test_max_parallel_one_runs_serially(self, monkeypatch, tmp_path):
         import threading
@@ -1740,6 +1742,7 @@ def _synthetic_parsed(name: str, spec, documents: list[dict]) -> static_checks.P
 class TestRunCli:
     def test_runs_in_the_checkout_with_captured_text_output(self, monkeypatch, tmp_path):
         import subprocess
+        import sys
 
         seen: dict[str, object] = {}
 
@@ -1755,7 +1758,8 @@ class TestRunCli:
             "warn",
         )
         assert seen == {
-            "args": ["gco", "jobs", "submit"],
+            # The checkout's CLI module, run by this interpreter, replaces ``gco``.
+            "args": [sys.executable, "-m", "cli.main", "jobs", "submit"],
             "cwd": tmp_path,
             "capture_output": True,
             "text": True,
@@ -2605,6 +2609,36 @@ def _live_ctx(session=None, *, run_id: str = "run-1"):
     return SimpleNamespace(
         settings=SimpleNamespace(repo_root=REPO_ROOT, run_id=run_id), session=session
     )
+
+
+class TestCheckoutCli:
+    """Every ``gco`` the example harness runs is the checkout's own CLI."""
+
+    def test_the_command_prefix_is_this_interpreter_running_the_checkout(self) -> None:
+        import sys
+
+        expected = (sys.executable, "-m", "cli.main")
+        assert expected == drivers.CHECKOUT_GCO_COMMAND
+
+    def test_a_gco_on_path_is_never_the_one_that_runs(self, tmp_path: Path) -> None:
+        import os
+
+        decoy = tmp_path / "bin"
+        decoy.mkdir()
+        script = decoy / "gco"
+        script.write_text("#!/bin/sh\necho 'the gco on PATH ran'\n", encoding="utf-8")
+        script.chmod(0o755)
+        environment = {**os.environ, "PATH": f"{decoy}{os.pathsep}{os.environ['PATH']}"}
+
+        code, out, err = drivers._run_cli(["gco", "--version"], REPO_ROOT, env=environment)
+
+        assert (code, err) == (0, "")
+        assert "the gco on PATH ran" not in out
+        assert out.startswith("gco, version ")
+
+    def test_only_a_gco_command_line_is_run(self) -> None:
+        with pytest.raises(ValueError, match="must start with gco"):
+            drivers._run_cli(["kubectl", "version"], REPO_ROOT)
 
 
 def _record_run_cli(monkeypatch, respond) -> list[tuple[list[str], Path, int]]:

@@ -118,6 +118,13 @@ enablement, capacity gates, timeouts, and any disclosed mutations.
 | `kubectl apply` (documented for CRDs) | kueue, volcano, yunikorn, slurm, ray, keda, multi-gpu, model-download | Jobs complete / vcjob Completed / RayCluster ready / ScaledJob spawns Jobs |
 | `kubectl apply` (platform add-ons) | argocd-gitops-job, crossplane-batch-job, kro-batch-job (+ their companion API files), ack-sqs-queue | Application Synced + Healthy at the pinned commit with its Git Jobs complete / the composed Job completes / `ACK.ResourceSynced` and the queue resolves in SQS |
 
+Every `gco` command in that table, and the `gco stacks access` and
+`gco vector ingest` calls the harness makes, runs this checkout's CLI:
+`python -m cli.main` with the harness's own interpreter, from the repository
+root. A `gco` on your `PATH` is never used, because it can be another
+release or another checkout, and the run exists to prove this commit's
+documented paths.
+
 `kubectl` reaches the PRIVATE EKS endpoint through the CLI's own
 SSM-tunnel machinery (`gco cluster tunnel --via-ssm auto` internals). A
 `PUBLIC_AND_PRIVATE` cluster takes the same private route, so a public

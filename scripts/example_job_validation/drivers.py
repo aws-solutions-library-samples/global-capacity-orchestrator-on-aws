@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -76,14 +77,33 @@ class ExampleRunResult:
         }
 
 
+#: The checkout's own CLI: the interpreter running the harness, from the
+#: repository root (``_run_cli``'s working directory, which ``-m`` puts first
+#: on the module path). A ``gco`` found on ``PATH`` can be another install
+#: entirely (an older release, another checkout, a container wrapper), and
+#: the run exists to prove this commit's documented paths.
+CHECKOUT_GCO_COMMAND: tuple[str, ...] = (sys.executable, "-m", "cli.main")
+
+
 def _run_cli(
     args: list[str],
     repo_root: Path,
     timeout: int = 600,
     env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
+    """Run the ``gco`` command line ``args`` with this checkout's CLI."""
+    if args[:1] != ["gco"]:
+        raise ValueError(
+            f"_run_cli runs gco commands; the command line must start with gco: {args}"
+        )
     result = subprocess.run(
-        args, cwd=repo_root, capture_output=True, text=True, timeout=timeout, check=False, env=env
+        [*CHECKOUT_GCO_COMMAND, *args[1:]],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env=env,
     )
     return result.returncode, result.stdout, result.stderr
 

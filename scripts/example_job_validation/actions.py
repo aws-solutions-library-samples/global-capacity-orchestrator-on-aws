@@ -352,6 +352,7 @@ def action_examples(ctx: RunContext) -> dict[str, Any]:
             cluster_name,
             region,
             kubeconfig_path=ctx.settings.kubeconfig_path,
+            gco_command=drivers.CHECKOUT_GCO_COMMAND,
             bastion_ttl_minutes=tunnel["bastion_ttl_minutes"],
             tunnel_events=tunnel["reopens"],
         ) as kubectl:
