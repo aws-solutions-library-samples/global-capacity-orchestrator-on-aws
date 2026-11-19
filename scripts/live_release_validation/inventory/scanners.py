@@ -71,6 +71,18 @@ def _list_dynamodb_tables(session: Any, region: str, project_name: str) -> list[
     return sorted(set(names))
 
 
+#: Tags the AWS Load Balancer Controller and EKS Auto Mode put on the load
+#: balancers and target groups they create for a cluster's Ingresses and
+#: Services, whose generated names (``k8s-<namespace>-<name>-<hash>``) carry
+#: no project prefix.
+_ELBV2_CLUSTER_TAGS = ("elbv2.k8s.aws/cluster", "eks:eks-cluster-name")
+
+
+def _created_for_project_cluster(tags: dict[str, str], project_name: str) -> bool:
+    """Whether an ELBv2 resource's cluster tags name one of the project's clusters."""
+    return any(_project_owned_name(tags.get(key, ""), project_name) for key in _ELBV2_CLUSTER_TAGS)
+
+
 def _list_load_balancers(session: Any, region: str, project_name: str) -> list[str]:
     client = session.client("elbv2", region_name=region)
     load_balancers: list[dict[str, Any]] = []
@@ -88,8 +100,11 @@ def _list_load_balancers(session: Any, region: str, project_name: str) -> list[s
         for load_balancer in batch:
             arn = str(load_balancer["LoadBalancerArn"])
             name = str(load_balancer.get("LoadBalancerName") or "")
-            if _project_owned_name(name, project_name) or _tags_are_project_owned(
-                tags_by_arn.get(arn, {}), project_name
+            tags = tags_by_arn.get(arn, {})
+            if (
+                _project_owned_name(name, project_name)
+                or _tags_are_project_owned(tags, project_name)
+                or _created_for_project_cluster(tags, project_name)
             ):
                 owned.append(arn)
     return sorted(set(owned))
@@ -114,15 +129,11 @@ def _list_target_groups(session: Any, region: str, project_name: str) -> list[st
         }
         for target_group, arn in zip(batch, arns, strict=True):
             tags = tags_by_arn.get(arn, {})
-            cluster_names = {
-                tags.get("elbv2.k8s.aws/cluster", ""),
-                tags.get("eks:eks-cluster-name", ""),
-            }
             name = str(target_group.get("TargetGroupName") or "")
             if (
                 _project_owned_name(name, project_name)
                 or _tags_are_project_owned(tags, project_name)
-                or any(_project_owned_name(cluster, project_name) for cluster in cluster_names)
+                or _created_for_project_cluster(tags, project_name)
             ):
                 owned.add(arn)
     return sorted(owned)

@@ -246,6 +246,44 @@ class TestLoadBalancerScanner:
             len(call.kwargs["ResourceArns"]) for call in client.describe_tags.call_args_list
         ] == [20, 1]
 
+    def test_a_load_balancer_a_project_cluster_created_is_owned(self) -> None:
+        # The AWS Load Balancer Controller and EKS Auto Mode name an Ingress or
+        # Service load balancer k8s-<namespace>-<name>-<hash> and tag it with
+        # the cluster only, as they do its target groups.
+        def arn(index: int) -> str:
+            return (
+                f"arn:aws:elasticloadbalancing:{_REGION}:{_ACCOUNT}:"
+                f"loadbalancer/app/k8s-gcojobs-web-{index}/id"
+            )
+
+        tags_by_arn = {
+            arn(0): _tags(**{"elbv2.k8s.aws/cluster": f"{_PROJECT}-{_REGION}"}),
+            arn(1): _tags(**{"eks:eks-cluster-name": f"{_PROJECT}-{_REGION}"}),
+            arn(2): _tags(**{"elbv2.k8s.aws/cluster": "other-cluster"}),
+            arn(3): _tags(**{"eks:eks-cluster-name": f"{_PROJECT}x-{_REGION}"}),
+        }
+        client = _paginated_client(
+            {
+                "describe_load_balancers": [
+                    {
+                        "LoadBalancers": [
+                            {"LoadBalancerArn": arn(index), "LoadBalancerName": f"k8s-{index}"}
+                            for index in range(4)
+                        ]
+                    }
+                ]
+            }
+        )
+        client.describe_tags.side_effect = lambda *, ResourceArns: {
+            "TagDescriptions": [
+                {"ResourceArn": item, "Tags": tags_by_arn.get(item, [])} for item in ResourceArns
+            ]
+        }
+
+        assert inventory_scanners._list_load_balancers(
+            _session_for(client, "elbv2"), _REGION, _PROJECT
+        ) == [arn(0), arn(1)]
+
 
 class TestInstanceScanner:
     def test_instance_without_an_id_fails_closed(self) -> None:
