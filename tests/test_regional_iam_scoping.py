@@ -467,3 +467,25 @@ def test_unmapped_types_are_refused():
     actions = drift_read_actions(["Custom::AWS", "AWS::CDK::Metadata", "AWS::SQS::Queue"])
     assert actions.unscoped == ("sqs:GetQueueAttributes", "sqs:ListQueueTags")
     assert actions.bucket == actions.parameter == actions.function == ()
+
+
+def test_drift_read_statements_leave_out_groups_with_no_actions() -> None:
+    """A stack with no bucket or parameter of its own gets no statement for them."""
+    from gco.stacks.drift_read_permissions import DriftReadActions, scoped_statements
+
+    actions = DriftReadActions(
+        unscoped=("ec2:DescribeVpcs",),
+        bucket=(),
+        parameter=(),
+        function=("lambda:GetFunction",),
+    )
+    statements = scoped_statements(
+        actions,
+        function_arns=["arn:aws:lambda:us-east-1:123456789012:function:f"],
+        bucket_arns=["arn:aws:s3:::unused"],
+        parameter_arns=["arn:aws:ssm:us-east-1:123456789012:parameter/unused"],
+    )
+    assert statements == [
+        (["ec2:DescribeVpcs"], ["*"]),
+        (["lambda:GetFunction"], ["arn:aws:lambda:us-east-1:123456789012:function:f"]),
+    ]

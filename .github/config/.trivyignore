@@ -418,3 +418,37 @@ CVE-2026-56851 exp:2026-12-14
 # Advisories: https://pkg.go.dev/vuln/GO-2026-6809
 #             https://go.dev/issue/82345
 CVE-2026-111943 exp:2026-12-21
+# -----------------------------------------------------------------------------
+# CVE-2026-97054 (GO-2026-6859): Go's net/http HTTP/1 server can crash on a
+# MaxBytesReader header race. Fixed in Go 1.26.11 and 1.27.4. Reported by
+# security:trivy:container-scan as `stdlib` in Go binaries we do not build:
+# kubectl, docker and docker-buildx in the dev image (Dockerfile.dev), helm,
+# kubectl and aws-lambda-rie in lambda/helm-installer, and aws-lambda-rie in
+# lambda/tls-certificate-manager (the emulator ships in the
+# public.ecr.aws/lambda/python:3.14 base image).
+#
+# Not introduced by any change of ours: the Go advisory was published
+# 2026-11-11 and reached the Trivy DB on 2026-11-19 between two Security runs
+# on PR #542 (green at 01:10Z, failing at 06:10Z on images whose binaries did
+# not change in between).
+#
+# Not clearable by a pin bump today, checked 2026-11-19 against the newest
+# upstream releases: kubectl v1.37.2 (2026-10-28) and aws-lambda-rie v1.38
+# (2026-10-30) predate the Go fix. helm v4.3.2 (2026-11-13) and buildx
+# v0.39.0 (2026-11-11) are newer, but tool bumps are batched in the scheduled
+# dependency sweep, which must confirm with `go version -m` that each binary
+# links a fixed Go before dropping this entry.
+#
+# Low runtime risk: the flaw is in Go's HTTP/1 server. kubectl, helm, docker
+# and buildx run here as HTTP clients. aws-lambda-rie serves the Lambda runtime
+# API only when an image runs outside AWS Lambda (local testing); in Lambda the
+# service's own runtime API is used and the emulator does not start.
+#
+# Clears when every listed binary links Go >= 1.26.11 (or >= 1.27.4): bump
+# KUBECTL_VERSION, DOCKER_VERSION and BUILDX_VERSION in Dockerfile.dev, the
+# helm and kubectl download URLs and checksums in lambda/helm-installer's
+# Dockerfile, and pull a Lambda base image whose aws-lambda-rie links a fixed
+# Go; confirm with `trivy image`, then drop this id.
+# Advisory: https://pkg.go.dev/vuln/GO-2026-6859
+#           https://go.dev/issue/82563
+CVE-2026-97054 exp:2026-12-15

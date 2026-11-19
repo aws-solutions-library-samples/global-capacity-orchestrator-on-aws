@@ -234,3 +234,28 @@ def drift_read_actions(resource_types: Iterable[str]) -> DriftReadActions:
         parameter=_with(_PARAMETER_ACTION_PREFIX),
         function=_with(_FUNCTION_ACTION_PREFIX),
     )
+
+
+def scoped_statements(
+    actions: DriftReadActions,
+    *,
+    function_arns: Iterable[str],
+    bucket_arns: Iterable[str],
+    parameter_arns: Iterable[str],
+) -> list[tuple[list[str], list[str]]]:
+    """The ``(actions, resources)`` statements of the drift role's read policy.
+
+    Unscoped reads go on ``*`` and function reads on the stack's functions;
+    bucket and parameter reads, scoped to the stack's own buckets and
+    parameters, are left out when the stack has no resource of that kind
+    (IAM refuses a statement with no actions).
+    """
+    statements = [
+        (list(actions.unscoped), ["*"]),
+        (list(actions.function), list(function_arns)),
+    ]
+    if actions.bucket:
+        statements.append((list(actions.bucket), list(bucket_arns)))
+    if actions.parameter:
+        statements.append((list(actions.parameter), list(parameter_arns)))
+    return statements

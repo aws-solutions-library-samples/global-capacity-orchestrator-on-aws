@@ -1066,6 +1066,8 @@ def _kubernetes_api_calls(modules) -> set[tuple[str, str | None, str | None]]:
     found: set[tuple[str, str | None, str | None]] = set()
     for name in modules:
         tree = ast.parse(Path(str(_module_file(name))).read_text(encoding="utf-8"))
+        # The names are the service modules this test lists, never external input.
+        # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
         module = importlib.import_module(name)
         custom_calls = {}
         for node in ast.walk(tree):

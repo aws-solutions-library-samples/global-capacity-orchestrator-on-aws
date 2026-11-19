@@ -3166,3 +3166,21 @@ def test_every_kind_calico_install_runs_the_one_script() -> None:
     ):
         assert diagnostic in script, diagnostic
     assert 'echo "Retrying in ${delay}s..."' in script
+
+
+def test_kind_queue_processor_job_renders_every_non_role_token() -> None:
+    """The kind job renders post-helm-sqs-consumer.yaml into a plain Job.
+
+    Every token it does not list becomes ``ci-stub``, which is right only for
+    the role ARNs the Job drops. A new token the consumer reads as a number
+    (``{{MP_YAML_MAX_DEPTH}}``) crashed the queue processor at import time
+    with ``int('ci-stub')`` until it was listed here.
+    """
+    workflow = _read(".github/workflows/integration-tests.yml")
+    start = workflow.index('> "${RUNNER_TEMP}/ci-queue-processor-job.yaml"')
+    block = workflow[start : workflow.index("manifest = Path(", start)]
+    listed = set(re.findall(r'"(\{\{[A-Z0-9_]+\}\})":', block))
+    manifest = _read("lambda/kubectl-applier-simple/manifests/post-helm-sqs-consumer.yaml")
+    tokens = set(re.findall(r"\{\{[A-Z0-9_]+\}\}", manifest))
+    unlisted = {token for token in tokens - listed if not token.endswith("_ROLE_ARN}}")}
+    assert not unlisted, f"list these tokens in the kind queue-processor render: {sorted(unlisted)}"

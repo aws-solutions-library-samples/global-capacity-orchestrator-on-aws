@@ -7814,7 +7814,7 @@ class GCORegionalStack(Stack):
         Lambda depends on its role's default policy, and this policy names
         that Lambda's own ARN.
         """
-        from gco.stacks.drift_read_permissions import drift_read_actions
+        from gco.stacks.drift_read_permissions import drift_read_actions, scoped_statements
         from gco.stacks.nag_suppressions import acknowledge_nag_findings
 
         cfn_resources = [c for c in self.node.find_all() if isinstance(c, CfnResource)]
@@ -7841,20 +7841,14 @@ class GCORegionalStack(Stack):
         ]
         actions = drift_read_actions(c.cfn_resource_type for c in cfn_resources)
         statements = [
-            iam.PolicyStatement(actions=list(actions.unscoped), resources=["*"]),
-            iam.PolicyStatement(
-                actions=list(actions.function), resources=_arns("AWS::Lambda::Function")
-            ),
+            iam.PolicyStatement(actions=statement_actions, resources=statement_resources)
+            for statement_actions, statement_resources in scoped_statements(
+                actions,
+                function_arns=_arns("AWS::Lambda::Function"),
+                bucket_arns=_arns("AWS::S3::Bucket"),
+                parameter_arns=parameter_arns,
+            )
         ]
-        bucket_arns = _arns("AWS::S3::Bucket")
-        if actions.bucket:
-            statements.append(
-                iam.PolicyStatement(actions=list(actions.bucket), resources=bucket_arns)
-            )
-        if actions.parameter:
-            statements.append(
-                iam.PolicyStatement(actions=list(actions.parameter), resources=parameter_arns)
-            )
         read_policy = iam.Policy(
             self, "DriftDetectionReadPolicy", roles=[role], statements=statements
         )

@@ -44,7 +44,7 @@
 #         limits:
 #           nvidia.com/gpu: "1"
 #     runtimePatches:
-#       - manager: gco-example
+#       - manager: gco.io/example
 #         trainingRuntimeSpec:
 #           template:
 #             spec:
@@ -136,7 +136,7 @@ spec:
         torchrun /tmp/allreduce.py
   # See "Architecture pin" above: the training pods run where the image does.
   runtimePatches:
-    - manager: gco-example
+    - manager: gco.io/example
       trainingRuntimeSpec:
         template:
           spec:

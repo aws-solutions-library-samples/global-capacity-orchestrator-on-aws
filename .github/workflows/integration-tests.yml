@@ -2928,6 +2928,9 @@ jobs:
               "{{QP_BLOCK_ADDED_CAPABILITIES}}": "true",
               "{{QP_BLOCK_RUN_AS_ROOT}}": "true",
               "{{QP_REQUIRE_ACCELERATOR_TOLERATION}}": "true",
+              # The YAML nesting-depth limit both submission paths share (the
+              # REST processor above is rendered with the same value).
+              "{{MP_YAML_MAX_DEPTH}}": "50",
               # KEDA-side numbers: unused by the Job below, substituted so the
               # rendered ScaledJob still parses as the shipped document.
               "{{QP_POLLING_INTERVAL}}": "30",

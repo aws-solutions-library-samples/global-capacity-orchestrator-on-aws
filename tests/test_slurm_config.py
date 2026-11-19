@@ -1127,3 +1127,10 @@ class TestConfigLoaderWiring:
                 loader.get_slurm_config()
         finally:
             loader._raw_slurm_config = original  # type: ignore[method-assign]
+
+
+def test_quota_quantity_reads_an_unparseable_value_as_absent() -> None:
+    """The regional stack reports a malformed quota itself; this module stays quiet."""
+    assert sc._quota_quantity({"cpu": "not-a-quantity"}, "cpu") is None
+    assert sc._quota_quantity({}, "cpu") is None
+    assert sc._quota_quantity({"cpu": "2"}, "cpu") == 2.0

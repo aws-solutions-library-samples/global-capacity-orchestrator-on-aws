@@ -1225,3 +1225,16 @@ class TestStaleSnapshots:
         match = local_data._STAGE_NAME_RE.fullmatch(name)
         assert match is not None
         assert match.group("pid") == str(os.getpid())
+
+
+def test_descriptor_argument_is_none_when_the_descriptor_path_does_not_resolve(
+    tmp_path: Path,
+) -> None:
+    """Where ``/dev/fd/<n>/<name>`` does not reach the entry (macOS), the caller passes a path."""
+    entry = tmp_path / "staged"
+    entry.write_text("x", encoding="utf-8")
+    stage_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        assert local_data._descriptor_argument(stage_fd, "missing", entry.stat()) is None
+    finally:
+        os.close(stage_fd)

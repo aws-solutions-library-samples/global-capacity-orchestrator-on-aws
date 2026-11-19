@@ -393,6 +393,8 @@ class TestTrainJobExampleSchema:
         # The Trainer v2.3.0 TrainJob CRD requires runtimePatches[].manager
         # (a non-empty string) and keys the list by it, so an entry without
         # one, or two entries with the same one, fail apiserver validation.
+        # Its admission webhook also requires a domain-prefixed path
+        # ("acme.io/foo"): "gco-example" was refused in the kind smoke test.
         if source == "example":
             spec = yaml.safe_load(_TRAINJOB_EXAMPLE.read_text(encoding="utf-8"))["spec"]
         else:
@@ -400,6 +402,10 @@ class TestTrainJobExampleSchema:
         managers = [patch.get("manager") for patch in spec["runtimePatches"]]
         assert managers and all(isinstance(m, str) and m for m in managers), managers
         assert len(set(managers)) == len(managers), managers
+        domain_prefixed = re.compile(
+            r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/[^/\s]\S*"
+        )
+        assert all(domain_prefixed.fullmatch(m) for m in managers), managers
 
     @pytest.mark.parametrize("source", list(_GPU_VARIANTS))
     def test_documented_gpu_variant_requests_a_gpu_on_amd64_nodes(self, source):

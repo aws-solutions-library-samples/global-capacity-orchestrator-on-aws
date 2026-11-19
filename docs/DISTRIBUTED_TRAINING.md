@@ -110,7 +110,7 @@ spec:
       limits:
         nvidia.com/gpu: "1"
   runtimePatches:
-    - manager: gco-example
+    - manager: gco.io/example
       trainingRuntimeSpec:
         template:
           spec:
