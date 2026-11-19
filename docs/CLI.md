@@ -1814,6 +1814,8 @@ After activation, allow up to 24 hours before tag data appears in Cost Explorer.
 
 Query Kubernetes allocation costs across regions. These commands run [Amazon Athena](https://docs.aws.amazon.com/athena/latest/ug/what-is.html) aggregations over the [Parquet](https://parquet.apache.org/docs/) allocation reports the per-region cost-monitor services write to the central cost report bucket. Requires `cost_monitoring.enabled` in `cdk.json` (the default) and a deployed monitoring stack — see [docs/COST_MONITORING.md](COST_MONITORING.md).
 
+The queries run in the monitoring Region: `deployment_regions.monitoring` from the `cdk.json` in the current directory, overridden by `monitoring_region` in the [config file](#config-file) or `GCO_MONITORING_REGION`. Outside a checkout the CLI uses `us-east-2`, the monitoring stack's default Region, so set one of those when your monitoring stack is elsewhere.
+
 ```bash
 gco costs k8s COMMAND [OPTIONS]
 ```

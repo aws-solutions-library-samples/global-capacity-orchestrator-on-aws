@@ -94,23 +94,16 @@ class CostAnalytics:
     ) -> None:
         self._config = config or get_config()
         self.project_name = self._config.project_name
-        # Athena + Glue live in the monitoring region.
-        self.region = region or self._monitoring_region()
+        # Athena + Glue live in the monitoring region: cdk.json's
+        # deployment_regions.monitoring, the config file or
+        # GCO_MONITORING_REGION, as merged by the CLI config.
+        self.region = region or self._config.monitoring_region
         self.database = _database_name(self.project_name)
         self.workgroup = _workgroup_name(self.project_name)
         self.table = "allocation_reports"
         self.poll_seconds = poll_seconds
         self.timeout_seconds = timeout_seconds
         self._athena = athena_client or boto3.client("athena", region_name=self.region)
-
-    def _monitoring_region(self) -> str:
-        from .config import _load_cdk_json
-
-        regions = _load_cdk_json() or {}
-        monitoring = regions.get("monitoring")
-        if isinstance(monitoring, str) and monitoring:
-            return monitoring
-        return str(self._config.default_region)
 
     # ------------------------------------------------------------------
     # Query execution plumbing
