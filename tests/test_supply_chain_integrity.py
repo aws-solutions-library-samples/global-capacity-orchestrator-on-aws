@@ -1241,11 +1241,13 @@ def test_kind_examples_smoke_proves_the_tenant_write_fence() -> None:
     (so RBAC stops nothing) that is not the inference monitor is refused, with
     the policy's own messages: writing gco-inference-tls (the monitor too is
     refused that), creating a monitor-labelled ConfigMap, rewriting or
-    unlabelling a monitor ConfigMap, recreating a deleted pod program without
-    the label, changing or restarting a monitor Deployment's pod template,
-    creating the shared mooncake-master, and forging a lifecycle id. In
-    between, the same identity annotates, deletes and scales those objects and
-    the monitor's ServiceAccount writes them, all admitted. The probe
+    unlabelling a monitor ConfigMap, changing or removing its gco.io/endpoint
+    and project labels and setting them again once the monitor has removed
+    them, recreating a deleted pod program without the label, changing or
+    restarting a monitor Deployment's pod template, creating the shared
+    mooncake-master, and forging a lifecycle id. In between, the same identity
+    labels, annotates, deletes and scales those objects and the monitor's
+    ServiceAccount writes them (both labels included), all admitted. The probe
     Deployment has zero replicas, so the job pulls nothing for it.
     tests/test_tenant_write_fence.py evaluates the same rules offline.
     """
@@ -1274,6 +1276,15 @@ def test_kind_examples_smoke_proves_the_tenant_write_fence() -> None:
         'kubectl "${monitor[@]}" create -f "${work}/program.json"',
         'refused "a tenant rewriting a monitor ConfigMap"',
         'refused "a tenant unlabelling a monitor ConfigMap"',
+        'refused "a tenant relabelling a monitor ConfigMap for another endpoint"',
+        'refused "a tenant removing a monitor ConfigMap\'s endpoint label"',
+        'refused "a tenant changing a monitor ConfigMap\'s project label"',
+        'refused "a tenant removing a monitor ConfigMap\'s project label"',
+        "label configmap gco-ci-fence-tls-proxy gco.io/endpoint- project-",
+        'refused "a tenant setting a monitor ConfigMap\'s endpoint label"',
+        'refused "a tenant setting a monitor ConfigMap\'s project label"',
+        "gco.io/endpoint=gco-ci-fence project=gco",
+        "label configmap gco-ci-fence-tls-proxy gco-ci/note=admitted",
         "annotate configmap gco-ci-fence-tls-proxy gco-ci/note=admitted",
         "delete configmap gco-ci-fence-tls-proxy",
         'refused "a tenant recreating a deleted pod program unlabelled"',
@@ -1295,9 +1306,18 @@ def test_kind_examples_smoke_proves_the_tenant_write_fence() -> None:
     for message in (
         "only the cert-manager controller",
         "the inference monitor mounts ConfigMaps named",
+        "may set, change or remove the gco.io/endpoint label of an object it manages",
+        "may set, change or remove the project label of an object it manages",
         "may set, change or remove the gco.io/lifecycle-id",
     ):
         assert message in run, message
+    # The relabelled object starts with both labels, and the monitor's own
+    # removal and restore run as the monitor.
+    assert '"gco.io/type":"inference","gco.io/endpoint":"gco-ci-fence"' in run
+    assert (
+        'kubectl "${monitor[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy '
+        "gco.io/endpoint- project-"
+    ) in run
     assert '"replicas":0' in run
 
 

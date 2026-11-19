@@ -5162,13 +5162,15 @@ jobs:
         # the kro, Argo CD and Crossplane tenant roles must not do in
         # gco-inference: write the model endpoints' keypair, create an object
         # carrying the monitor's label, change what a monitor ConfigMap
-        # carries or unlabel it, recreate a deleted <name>-tls-proxy
-        # ConfigMap without the label, change a monitor Deployment's pod
-        # template, create the shared mooncake-master, or forge the monitor's
-        # provenance. The same identity may still annotate, scale and delete
-        # those objects, and the inference monitor's ServiceAccount may do all
-        # of it (it alone does not write the keypair). The probe Deployment
-        # keeps zero replicas, so no image is pulled.
+        # carries or unlabel it, set, change or remove the gco.io/endpoint
+        # label or the project label of an object the monitor manages,
+        # recreate a deleted <name>-tls-proxy ConfigMap without the label,
+        # change a monitor Deployment's pod template, create the shared
+        # mooncake-master, or forge the monitor's provenance. The same
+        # identity may still label, annotate, scale and delete those objects,
+        # and the inference monitor's ServiceAccount may do all of it (it
+        # alone does not write the keypair). The probe Deployment keeps zero
+        # replicas, so no image is pulled.
         # tests/test_tenant_write_fence.py evaluates the same rules offline.
         run: |
           set -euo pipefail
@@ -5179,6 +5181,8 @@ jobs:
           policy="ValidatingAdmissionPolicy 'gco-tenant-write-fence'"
           only_monitor="only the inference monitor (system:serviceaccount:gco-system:gco-inference-monitor-sa) may"
           managed="is managed by the inference monitor: only"
+          endpoint_label="only the inference monitor may set, change or remove the gco.io/endpoint label of an object it manages"
+          project_label="only the inference monitor may set, change or remove the project label of an object it manages"
           # config_map <file> <name> <labels JSON> <data JSON>
           config_map() {
             printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"%s","namespace":"gco-inference","labels":%s},"data":%s}\n' \
@@ -5229,13 +5233,37 @@ jobs:
           # A monitor pod program: its data is the monitor's, and once deleted
           # it cannot come back without the label.
           config_map "${work}/program.json" gco-ci-fence-tls-proxy \
-            '{"app":"gco-ci-fence","project":"gco","gco.io/type":"inference"}' '{"tls_proxy.py":"print(1)"}'
+            '{"app":"gco-ci-fence","project":"gco","gco.io/type":"inference","gco.io/endpoint":"gco-ci-fence"}' \
+            '{"tls_proxy.py":"print(1)"}'
           kubectl "${monitor[@]}" create -f "${work}/program.json"
           refused "a tenant rewriting a monitor ConfigMap" "${managed}" \
             kubectl "${tenant[@]}" -n gco-inference patch configmap gco-ci-fence-tls-proxy --type=merge \
               -p '{"data":{"tls_proxy.py":"print(2)"}}'
           refused "a tenant unlabelling a monitor ConfigMap" "${only_monitor}" \
             kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/type-
+
+          # The label naming the endpoint that owns a monitor object, and the
+          # project label its provenance check reads: the monitor's to set,
+          # change or remove.
+          refused "a tenant relabelling a monitor ConfigMap for another endpoint" "${endpoint_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label --overwrite configmap gco-ci-fence-tls-proxy \
+              gco.io/endpoint=gco-ci-other
+          refused "a tenant removing a monitor ConfigMap's endpoint label" "${endpoint_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/endpoint-
+          refused "a tenant changing a monitor ConfigMap's project label" "${project_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label --overwrite configmap gco-ci-fence-tls-proxy \
+              project=gco-ci-other
+          refused "a tenant removing a monitor ConfigMap's project label" "${project_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy project-
+          kubectl "${monitor[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco.io/endpoint- project-
+          refused "a tenant setting a monitor ConfigMap's endpoint label" "${endpoint_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy \
+              gco.io/endpoint=gco-ci-fence
+          refused "a tenant setting a monitor ConfigMap's project label" "${project_label}" \
+            kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy project=gco
+          kubectl "${monitor[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy \
+            gco.io/endpoint=gco-ci-fence project=gco
+          kubectl "${tenant[@]}" -n gco-inference label configmap gco-ci-fence-tls-proxy gco-ci/note=admitted
           kubectl "${tenant[@]}" -n gco-inference annotate configmap gco-ci-fence-tls-proxy gco-ci/note=admitted
           kubectl "${tenant[@]}" -n gco-inference delete configmap gco-ci-fence-tls-proxy
           config_map "${work}/unlabelled.json" gco-ci-fence-tls-proxy '{"app":"gco-ci-fence"}' '{"tls_proxy.py":"print(3)"}'
