@@ -71,7 +71,7 @@ spec:
     command: ["torchrun", "/workspace/train.py"]
 ```
 
-`torchrun` inherits the rendezvous configuration (`PET_*` environment) the controller injects, so your training script only needs `torch.distributed.init_process_group()`.
+`torchrun` inherits the rendezvous configuration (`PET_*` environment) the controller injects, so your training script only needs `torch.distributed.init_process_group()`. The shipped example also carries one runtime patch that pins the pods to amd64 nodes, because this image is linux/amd64 only (see [GPU Training](#gpu-training)).
 
 ### What the controller creates
 
@@ -97,7 +97,7 @@ If the trainer addon is disabled, submission fails with an actionable message po
 
 ## GPU Training
 
-`spec.trainer` carries images and per-node resources but not tolerations, so accelerator jobs add them through a runtime patch:
+`spec.trainer` carries images and per-node resources but no scheduling fields, so accelerator jobs add the toleration through a runtime patch on the `node` pod template:
 
 ```yaml
 spec:
@@ -110,7 +110,8 @@ spec:
       limits:
         nvidia.com/gpu: "1"
   runtimePatches:
-    - trainingRuntimeSpec:
+    - manager: gco-example
+      trainingRuntimeSpec:
         template:
           spec:
             replicatedJobs:
@@ -119,11 +120,15 @@ spec:
                   spec:
                     template:
                       spec:
+                        nodeSelector:
+                          kubernetes.io/arch: amd64
                         tolerations:
                           - key: nvidia.com/gpu
                             operator: Exists
                             effect: NoSchedule
 ```
+
+Every runtime patch names its owner in `manager` (any non-empty string; the TrainJob CRD requires it and keys the list by it). The `kubernetes.io/arch: amd64` selector is there because the runtime's `pytorch/pytorch` image is published for linux/amd64 only, while the GPU NodePools also launch arm64 (Graviton g5g) nodes; drop it only for a multi-arch image. The shipped CPU example carries the same pin, because the CPU pool launches both architectures too.
 
 EKS Auto Mode provisions GPU capacity on demand; check availability first with `gco capacity check --instance-type g4dn.xlarge --region us-east-1`. For multi-node GPU training use `nccl` as the process-group backend (the CPU example uses `gloo`).
 

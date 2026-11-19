@@ -521,7 +521,7 @@ kubectl delete -f examples/kro-batch-api.yaml
 
 **File:** `kubeflow-trainjob.yaml`
 
-Runs a 2-node distributed PyTorch all-reduce through the Kubeflow Trainer v2 `TrainJob` API against the platform-shipped `torch-distributed` runtime. The runtime supplies the pod template and torchrun rendezvous wiring; the manifest only declares what to run (`spec.trainer`) and how wide (`numNodes`). Trainer v2 supersedes the legacy training-operator (PyTorchJob/TFJob/MPIJob) with one `TrainJob` kind plus runtime blueprints. Deliberately CPU-sized so the distributed plumbing is provable without accelerator quota — the manifest documents the GPU variant (per-node GPU resources plus a toleration delivered via `runtimePatches`).
+Runs a 2-node distributed PyTorch all-reduce through the Kubeflow Trainer v2 `TrainJob` API against the platform-shipped `torch-distributed` runtime. The runtime supplies the pod template and torchrun rendezvous wiring; the manifest only declares what to run (`spec.trainer`) and how wide (`numNodes`). Trainer v2 supersedes the legacy training-operator (PyTorchJob/TFJob/MPIJob) with one `TrainJob` kind plus runtime blueprints. Deliberately CPU-sized so the distributed plumbing is provable without accelerator quota — the manifest documents the GPU variant (per-node GPU resources plus a toleration delivered via `runtimePatches`). A runtime patch also pins the pods to amd64 nodes (`kubernetes.io/arch: amd64`): the runtime's `pytorch/pytorch` image is linux/amd64 only, and the CPU and GPU pools also launch arm64 nodes. Every runtime patch needs a `manager` (any non-empty string), which the TrainJob CRD requires.
 
 The trainer controller compiles the TrainJob into a JobSet whose child Job `<name>-node-0` runs `numNodes` indexed pods (completion index = node rank). The `gco jobs` commands resolve TrainJobs automatically: `gco jobs get`, `gco jobs delete`, and `gco jobs logs` (rank 0 by default, `--node N` for another rank) all work unchanged.
 
@@ -702,7 +702,7 @@ gco inference deploy my-model -i vllm/vllm-openai:v0.32.0 \
 
 **File:** `multi-gpu-training.yaml`
 
-Distributed training across multiple GPUs using PyTorch DistributedDataParallel (DDP). Creates indexed pods with a headless service for DNS-based peer discovery.
+Distributed training across multiple GPUs using PyTorch DistributedDataParallel (DDP). Creates indexed pods with a headless service for DNS-based peer discovery. The pods select one-GPU amd64 nodes (`kubernetes.io/arch: amd64`): the `pytorch/pytorch` CUDA image is linux/amd64 only, and a one-GPU selector alone also matches the arm64 g5g pool.
 
 **Usage:**
 

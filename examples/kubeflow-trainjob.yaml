@@ -24,11 +24,16 @@
 # (all-or-nothing admission for every node at once). Unlabeled TrainJobs
 # run immediately, subject only to namespace quota.
 #
-# GPU variant, via runtimePatches: `spec.trainer` carries images and
-# per-node resources but NOT tolerations — accelerator jobs add them
-# through a runtime patch. Swap the resources below to request GPUs and
-# append the patch (this is the shape the platform's accelerator
-# admission check expects):
+# Architecture pin, via runtimePatches: the image below (the shipped
+# runtime's) is linux/amd64 only, while the CPU pool and the GPU pools also
+# launch arm64 (Graviton) nodes. `spec.trainer` carries images and per-node
+# resources but no scheduling fields, so the nodeSelector rides in a
+# runtime patch on the `node` pod template. Every patch names its owner in
+# `manager` (any string; the CRD requires it).
+#
+# GPU variant: swap the resources below to request GPUs and add the GPU
+# toleration to the same patch (this is the shape the platform's
+# accelerator admission check expects):
 #
 #   spec:
 #     trainer:
@@ -38,7 +43,8 @@
 #         limits:
 #           nvidia.com/gpu: "1"
 #     runtimePatches:
-#       - trainingRuntimeSpec:
+#       - manager: gco-example
+#         trainingRuntimeSpec:
 #           template:
 #             spec:
 #               replicatedJobs:
@@ -47,6 +53,8 @@
 #                     spec:
 #                       template:
 #                         spec:
+#                           nodeSelector:
+#                             kubernetes.io/arch: amd64
 #                           tolerations:
 #                             - key: nvidia.com/gpu
 #                               operator: Exists
@@ -125,3 +133,17 @@ spec:
             print("distributed all-reduce verified across the gang", flush=True)
         EOF
         torchrun /tmp/allreduce.py
+  # See "Architecture pin" above: the training pods run where the image does.
+  runtimePatches:
+    - manager: gco-example
+      trainingRuntimeSpec:
+        template:
+          spec:
+            replicatedJobs:
+              - name: node
+                template:
+                  spec:
+                    template:
+                      spec:
+                        nodeSelector:
+                          kubernetes.io/arch: amd64

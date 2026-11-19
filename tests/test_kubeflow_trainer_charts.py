@@ -43,6 +43,42 @@ _RUNTIME_MANIFEST = (
     / "manifests"
     / "post-helm-kubeflow-trainer-runtimes.yaml"
 )
+_TRAINJOB_EXAMPLE = _REPO_ROOT / "examples" / "kubeflow-trainjob.yaml"
+_TRAINING_DOC = _REPO_ROOT / "docs" / "DISTRIBUTED_TRAINING.md"
+
+
+def _example_header_gpu_variant() -> dict[str, Any]:
+    """The GPU variant the example's header comment documents (a ``spec`` overlay)."""
+    lines = _TRAINJOB_EXAMPLE.read_text(encoding="utf-8").splitlines()
+    block = []
+    for line in lines[lines.index("#   spec:") :]:
+        if not line.startswith("#   "):
+            break
+        block.append(line[len("#   ") :])
+    return yaml.safe_load("\n".join(block))
+
+
+def _doc_gpu_variant() -> dict[str, Any]:
+    """The first YAML snippet under the doc's "GPU Training" heading."""
+    section = _TRAINING_DOC.read_text(encoding="utf-8").split("\n## GPU Training\n", 1)[1]
+    return yaml.safe_load(section.split("```yaml\n", 1)[1].split("```", 1)[0])
+
+
+#: Every documented TrainJob GPU variant, by where it is documented.
+_GPU_VARIANTS = {
+    "example-header": _example_header_gpu_variant,
+    "distributed-training-doc": _doc_gpu_variant,
+}
+
+
+def _node_pod_patches(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """The pod-spec patches a TrainJob spec applies to the ``node`` replicated Job."""
+    return [
+        job["template"]["spec"]["template"]["spec"]
+        for patch in spec.get("runtimePatches") or []
+        for job in patch["trainingRuntimeSpec"]["template"]["spec"]["replicatedJobs"]
+        if job["name"] == "node"
+    ]
 
 
 class _MockNode:
@@ -324,7 +360,9 @@ class TestTrainJobExampleSchema:
     """CRD-schema shapes the example must honor (no kubeconform coverage).
 
     TrainJob has no datreeio catalog schema, so the schema job skips it —
-    these pins encode what the apiserver enforced live instead.
+    these pins encode what the apiserver enforced live instead, for the
+    example and for the GPU variant its header and docs/DISTRIBUTED_TRAINING.md
+    document.
     """
 
     def test_num_proc_per_node_is_a_plain_integer(self):
@@ -337,6 +375,30 @@ class TestTrainJobExampleSchema:
         )
         value = example["spec"]["trainer"]["numProcPerNode"]
         assert isinstance(value, int) and not isinstance(value, bool)
+
+    @pytest.mark.parametrize("source", ["example", *_GPU_VARIANTS])
+    def test_every_runtime_patch_names_a_manager(self, source):
+        # The Trainer v2.3.0 TrainJob CRD requires runtimePatches[].manager
+        # (a non-empty string) and keys the list by it, so an entry without
+        # one, or two entries with the same one, fail apiserver validation.
+        if source == "example":
+            spec = yaml.safe_load(_TRAINJOB_EXAMPLE.read_text(encoding="utf-8"))["spec"]
+        else:
+            spec = _GPU_VARIANTS[source]()["spec"]
+        managers = [patch.get("manager") for patch in spec["runtimePatches"]]
+        assert managers and all(isinstance(m, str) and m for m in managers), managers
+        assert len(set(managers)) == len(managers), managers
+
+    @pytest.mark.parametrize("source", list(_GPU_VARIANTS))
+    def test_documented_gpu_variant_requests_a_gpu_on_amd64_nodes(self, source):
+        # The runtime's pytorch/pytorch image is linux/amd64 only and the GPU
+        # NodePools include an arm64 pool (tests/test_example_architecture_pins.py).
+        spec = _GPU_VARIANTS[source]()["spec"]
+        assert spec["trainer"]["resourcesPerNode"]["limits"]["nvidia.com/gpu"] == "1"
+        assert any(
+            (patch.get("nodeSelector") or {}).get("kubernetes.io/arch") == "amd64"
+            for patch in _node_pod_patches(spec)
+        )
 
 
 class TestRegionalChartWiring:
