@@ -59,10 +59,13 @@ used. The concrete mechanism is chosen at runtime — Docker Buildx
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
+import os
 import shutil
 import subprocess  # invokes container CLI / skopeo with fixed, non-shell argv
-from collections.abc import Callable, Mapping
+import tempfile
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -432,11 +435,33 @@ def runtime_login(
     log(f"  authenticated {runtime} to {registry_host}")
 
 
-def _copy_commands(item: MirrorItem, runtime: str, strategy: str, password: str) -> list[list[str]]:
+@contextlib.contextmanager
+def registry_authfile(registry_host: str, username: str, password: str) -> Iterator[str]:
+    """Yield the path of a containers-auth.json file holding one registry login.
+
+    skopeo reads the ECR token from this file (``--dest-authfile``) instead of
+    from ``--dest-creds`` on its command line, which every local user can read
+    (``ps``, ``/proc/<pid>/cmdline``) while the copy runs. The file is created
+    ``0600`` in a new ``0700`` directory, and both are removed on exit.
+    """
+    auth = base64.b64encode(f"{username}:{password}".encode()).decode()
+    with tempfile.TemporaryDirectory(prefix="gco-registry-auth-") as directory:
+        path = os.path.join(directory, "auth.json")
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"auths": {registry_host: {"auth": auth}}}, handle)
+        yield path
+
+
+def _copy_commands(
+    item: MirrorItem, runtime: str, strategy: str, authfile: str | None = None
+) -> list[list[str]]:
     """Build the argv list(s) for one image copy under the chosen strategy.
 
     Factored out (pure) so the command shape is unit-testable without invoking
     any runtime. All strategies preserve the full multi-arch manifest list.
+    ``authfile`` is the destination login :func:`registry_authfile` wrote; only
+    skopeo takes one (without it skopeo looks up its own stored credentials).
     """
     if strategy == "buildx":
         return [
@@ -449,13 +474,13 @@ def _copy_commands(item: MirrorItem, runtime: str, strategy: str, password: str)
             [runtime, "push", "--all-platforms", item.dest_ref],
         ]
     if strategy == "skopeo":
+        credentials = ["--dest-authfile", authfile] if authfile else []
         return [
             [
                 "skopeo",
                 "copy",
                 "--all",
-                "--dest-creds",
-                f"AWS:{password}",
+                *credentials,
                 f"docker://{item.source_ref}",
                 f"docker://{item.dest_ref}",
             ]
@@ -467,7 +492,7 @@ def copy_image(
     item: MirrorItem,
     runtime: str = "docker",
     strategy: str = "buildx",
-    password: str = "",  # nosec B107  # empty means "no registry login"; callers pass the real token
+    authfile: str | None = None,
     log: LogFn = print,
 ) -> None:
     """Copy one image registry-to-registry, preserving the full manifest list.
@@ -475,9 +500,10 @@ def copy_image(
     Dispatches to the resolved ``strategy`` (``buildx`` / ``all-platforms`` /
     ``skopeo``) — see :func:`resolve_copy_strategy`. Every strategy carries all
     architectures so both amd64 and arm64 (Graviton) nodes find a match.
+    ``authfile`` (skopeo only) is the file :func:`registry_authfile` wrote.
     """
     log(f"  copying {item.source_ref} -> {item.dest_ref}  [{strategy}]")
-    for cmd in _copy_commands(item, runtime, strategy, password):
+    for cmd in _copy_commands(item, runtime, strategy, authfile):
         result = subprocess.run(  # fixed argv, no shell
             cmd, capture_output=True, text=True, check=False
         )
@@ -601,8 +627,8 @@ def mirror_images(
     )
 
     # Auth: every strategy needs ECR push credentials. buildx / all-platforms
-    # use the runtime's credential store (so we `<runtime> login`); skopeo takes
-    # the password inline via --dest-creds.
+    # use the runtime's credential store (so we `<runtime> login`); skopeo
+    # reads them from a private auth file that exists only for the copies.
     username, password = ecr_auth(region)
     if strategy != "skopeo":
         runtime_login(runtime, registry_host, username, password, log=log)
@@ -616,21 +642,27 @@ def mirror_images(
         if on_repository_created is not None
         else None
     )
-    for item in plan:
-        if ensure_repository(
-            ecr_client,
-            item.dest_repo,
-            log=log,
-            repository_tags=repository_tags,
-            on_created=on_created,
-        ):
-            created_repositories.append(item.dest_repo)
-        if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag):
-            log(f"  skip (already mirrored): {item.dest_ref}")
-            skipped.append(item.dest_ref)
-            continue
-        copy_image(item, runtime=runtime, strategy=strategy, password=password, log=log)
-        mirrored.append(item.dest_ref)
+    with contextlib.ExitStack() as scope:
+        authfile = (
+            scope.enter_context(registry_authfile(registry_host, username, password))
+            if strategy == "skopeo"
+            else None
+        )
+        for item in plan:
+            if ensure_repository(
+                ecr_client,
+                item.dest_repo,
+                log=log,
+                repository_tags=repository_tags,
+                on_created=on_created,
+            ):
+                created_repositories.append(item.dest_repo)
+            if skip_existing and tag_exists(ecr_client, item.dest_repo, item.tag):
+                log(f"  skip (already mirrored): {item.dest_ref}")
+                skipped.append(item.dest_ref)
+                continue
+            copy_image(item, runtime=runtime, strategy=strategy, authfile=authfile, log=log)
+            mirrored.append(item.dest_ref)
 
     return {
         "registry": f"{registry_host}/{ecr_namespace}",
