@@ -1100,10 +1100,15 @@ aws efs delete-access-point --access-point-id fsap-xxxxxxxx --region us-east-2
 aws efs delete-file-system --file-system-id fs-xxxxxxxx --region us-east-2
 ```
 
-`gco analytics doctor` flags retained orphans on next
-`analytics enable` and prints these remediation commands inline so
-you don't need to hunt them down — but they are reproduced above so
-you can script the cleanup yourself if you prefer.
+`gco analytics doctor` flags retained orphans and prints these
+remediation commands inline, with the real access point, mount target
+and file system ids, so you don't need to hunt them down — but they are
+reproduced above so you can script the cleanup yourself if you prefer.
+It finds them from the deleted `gco-analytics` stack's resource list
+(CloudFormation keeps it for 90 days after the delete) and, for the file
+system, from its `Name` tag (`gco-analytics/StudioEfs` for the default
+project name); a user pool retained more than 90 days ago is only found
+once the stack tags it `gco:analytics:managed=true` and `gco:project`.
 
 Cognito pools support the same retain opt-in via
 `analytics_environment.cognito.removal_policy = "retain"` with

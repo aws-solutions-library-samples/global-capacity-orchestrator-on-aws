@@ -147,12 +147,15 @@ def test_get_on_demand_price_client_error_returns_none():
 def test_get_spot_price_history_zero_prices_zero_stability():
     checker = _make_checker()
     mock_ec2 = MagicMock()
-    mock_ec2.describe_spot_price_history.return_value = {
-        "SpotPriceHistory": [
-            {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.0"},
-            {"AvailabilityZone": "us-east-1a", "SpotPrice": "0.0"},
-        ]
-    }
+    now = datetime.now(UTC)
+    mock_ec2.get_paginator.return_value.paginate.return_value = [
+        {
+            "SpotPriceHistory": [
+                _spot_record("us-east-1a", "0.0", now - timedelta(hours=1)),
+                _spot_record("us-east-1a", "0.0", now - timedelta(hours=2)),
+            ]
+        }
+    ]
     checker._session.client = MagicMock(return_value=mock_ec2)
     results = checker.get_spot_price_history("g5.xlarge", "us-east-1")
     assert len(results) == 1
@@ -162,7 +165,7 @@ def test_get_spot_price_history_zero_prices_zero_stability():
 def test_get_spot_price_history_reraises_other_client_error():
     checker = _make_checker()
     mock_ec2 = MagicMock()
-    mock_ec2.describe_spot_price_history.side_effect = ClientError(
+    mock_ec2.get_paginator.return_value.paginate.side_effect = ClientError(
         {"Error": {"Code": "Throttling", "Message": "rate exceeded"}}, "DescribeSpotPriceHistory"
     )
     checker._session.client = MagicMock(return_value=mock_ec2)
@@ -189,7 +192,7 @@ def test_estimate_spot_limited_capacity_score_three():
         patch.object(checker, "get_spot_placement_score", return_value={"regional": 3}),
         patch.object(checker, "get_spot_price_history", return_value=[]),
         patch.object(checker, "get_on_demand_price", return_value=None),
-        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+        patch.object(checker, "get_offered_availability_zones", return_value=["us-east-1a"]),
     ):
         estimates = checker._estimate_spot_capacity("g5.xlarge", "us-east-1", None)
     assert estimates[0].availability == "low"
@@ -633,7 +636,7 @@ def test_scored_estimate_names_pool_and_target_capacity():
         patch.object(checker, "get_spot_placement_score", return_value={"regional": 8}),
         patch.object(checker, "get_spot_price_history", return_value=[]),
         patch.object(checker, "get_on_demand_price", return_value=None),
-        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+        patch.object(checker, "get_offered_availability_zones", return_value=["us-east-1a"]),
     ):
         estimates = checker._estimate_spot_capacity("g5.xlarge", "us-east-1", None)
 
@@ -795,3 +798,182 @@ def test_pool_lookup_degrades_when_catalog_is_unavailable(monkeypatch, tmp_path)
         mock_ec2.get_spot_placement_scores.assert_not_called()
     finally:
         checker_module._pool_catalog_lookup.cache_clear()
+
+
+def _offerings_ec2(*zones: str) -> MagicMock:
+    """An EC2 client whose AZ-level offerings list exactly ``zones``."""
+    ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"InstanceTypeOfferings": [{"InstanceType": "g5.xlarge", "Location": z} for z in zones]}
+    ]
+    return ec2
+
+
+def test_scored_spot_estimate_lists_only_zones_that_offer_the_type():
+    """The scored branch used to emit one row per zone of the Region, so a
+    zone that does not sell the type was reported with the regional score."""
+    checker = _make_checker()
+    ec2 = _offerings_ec2("us-east-1a", "us-east-1c")
+    checker._session.client = MagicMock(return_value=ec2)
+    with (
+        patch.object(checker, "get_spot_placement_score", return_value={"regional": 8}),
+        patch.object(checker, "get_spot_price_history", return_value=[]),
+        patch.object(checker, "get_on_demand_price", return_value=None),
+        patch.object(
+            checker,
+            "get_availability_zones",
+            return_value=["us-east-1a", "us-east-1b", "us-east-1c"],
+        ),
+    ):
+        estimates = checker._estimate_spot_capacity("g5.xlarge", "us-east-1", None)
+
+    assert [e.availability_zone for e in estimates] == ["us-east-1a", "us-east-1c"]
+    ec2.get_paginator.assert_called_once_with("describe_instance_type_offerings")
+    ec2.get_paginator.return_value.paginate.assert_called_once_with(
+        LocationType="availability-zone",
+        Filters=[{"Name": "instance-type", "Values": ["g5.xlarge"]}],
+    )
+
+
+def test_offered_zones_lookup_failure_is_a_capacity_check_error():
+    """A failed lookup must not be reported as "offered in every zone"."""
+    from cli.capacity import CapacityCheckError
+
+    checker = _make_checker()
+    ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.side_effect = _client_error("RequestLimitExceeded")
+    checker._session.client = MagicMock(return_value=ec2)
+    with (
+        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+        pytest.raises(CapacityCheckError, match=r"us-east-1 offer g5\.xlarge"),
+    ):
+        checker.get_offered_availability_zones("g5.xlarge", "us-east-1")
+
+
+def _spot_record(az: str, price: str, at: datetime) -> dict:
+    return {
+        "AvailabilityZone": az,
+        "InstanceType": "g5.xlarge",
+        "ProductDescription": "Linux/UNIX",
+        "SpotPrice": price,
+        "Timestamp": at,
+    }
+
+
+def test_spot_price_average_is_weighted_by_the_time_each_price_held():
+    """avg_price_7d used to be the plain mean of the price-change records, so a
+    one-hour spike counted as much as the price that held all week."""
+    checker = _make_checker()
+    now = datetime.now(UTC)
+    ec2 = MagicMock()
+    # EC2 returns the newest change first, plus the change in effect at
+    # StartTime (older than the window).
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"SpotPriceHistory": [_spot_record("us-east-1a", "5.00", now - timedelta(hours=1))]},
+        {"SpotPriceHistory": [_spot_record("us-east-1a", "1.00", now - timedelta(days=8))]},
+    ]
+    checker._session.client = MagicMock(return_value=ec2)
+
+    [info] = checker.get_spot_price_history("g5.xlarge", "us-east-1")
+
+    # 1.00 for 167 of the 168 hours, 5.00 for the last one.
+    assert info.avg_price_7d == pytest.approx((1.00 * 167 + 5.00 * 1) / 168, rel=1e-3)
+    assert info.current_price == 5.00
+    assert (info.min_price_7d, info.max_price_7d) == (1.00, 5.00)
+    assert 0 < info.price_stability < 1
+    ec2.get_paginator.assert_called_once_with("describe_spot_price_history")
+    kwargs = ec2.get_paginator.return_value.paginate.call_args.kwargs
+    assert kwargs["InstanceTypes"] == ["g5.xlarge"]
+    assert kwargs["EndTime"] - kwargs["StartTime"] == timedelta(days=7)
+
+
+def test_spot_price_history_reads_every_page():
+    """Only the newest page used to be read (N17)."""
+    checker = _make_checker()
+    now = datetime.now(UTC)
+    ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"SpotPriceHistory": [_spot_record("us-east-1a", "0.40", now - timedelta(days=1))]},
+        {"SpotPriceHistory": [_spot_record("us-east-1b", "0.60", now - timedelta(days=2))]},
+    ]
+    checker._session.client = MagicMock(return_value=ec2)
+
+    results = checker.get_spot_price_history("g5.xlarge", "us-east-1")
+
+    assert sorted(info.availability_zone for info in results) == ["us-east-1a", "us-east-1b"]
+
+
+def test_time_weighted_stats_fall_back_to_equal_weights_without_elapsed_time():
+    from cli.capacity.checker import _time_weighted_mean_and_std
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = start + timedelta(days=7)
+    # Two changes recorded at the very end of the window hold for no time.
+    mean, std = _time_weighted_mean_and_std([(end, 1.0), (end, 3.0)], start, end)
+    assert (mean, std) == (2.0, 1.0)
+
+    mean, std = _time_weighted_mean_and_std(
+        [(start - timedelta(days=1), 2.0), (start + timedelta(days=6), 4.0)], start, end
+    )
+    assert mean == pytest.approx((2.0 * 6 + 4.0 * 1) / 7)
+
+
+def test_estimate_capacity_describes_the_type_in_the_checked_region():
+    """The description used to come from the default Region, which may not
+    offer the type: GPU facts were dropped for a check in another Region."""
+    checker = _make_checker()  # default region us-east-1
+    info = InstanceTypeInfo("p5.48xlarge", 192, 2048, 8, "H100", 640)
+    with (
+        patch.object(checker, "check_instance_available_in_region", return_value=True),
+        patch.object(checker, "get_instance_info", return_value=info) as describe,
+        patch.object(checker, "_estimate_spot_capacity", return_value=[]),
+        patch.object(checker, "_estimate_on_demand_capacity", return_value=None),
+        patch.object(checker, "get_spot_price_history", return_value=[]),
+        patch.object(checker, "get_spot_placement_score", return_value={}),
+    ):
+        checker.estimate_capacity("p5.48xlarge", "us-west-2", "both")
+        checker.estimate_capacity("p5.48xlarge", "us-west-2", "spot")
+
+    # One description per (type, region), in the Region being checked.
+    describe.assert_called_once_with("p5.48xlarge", region="us-west-2")
+
+
+def test_block_offerings_describe_the_type_in_the_offering_region():
+    checker = _make_checker()  # default region us-east-1
+    info = InstanceTypeInfo("p5.48xlarge", 192, 2048, 8, "H100", 640)
+    ec2 = MagicMock()
+    ec2.describe_capacity_block_offerings.return_value = {"CapacityBlockOfferings": []}
+    checker._session.client = MagicMock(return_value=ec2)
+    with patch.object(checker, "get_instance_info", return_value=info) as describe:
+        checker.list_capacity_block_offerings("us-west-2", instance_type="p5.48xlarge")
+
+    describe.assert_called_once_with("p5.48xlarge", region="us-west-2")
+
+
+def test_capacity_block_trend_follows_next_token():
+    """Only the first page of offerings used to be counted, which biased the
+    slope toward "shrinking" whenever the later days were on page two (N17)."""
+    checker = _make_checker()
+    now = datetime.now(UTC)
+    ec2 = MagicMock()
+    # Page one holds the early days, page two the later, busier days.
+    ec2.describe_capacity_block_offerings.side_effect = [
+        {
+            "CapacityBlockOfferings": [{"StartDate": now + timedelta(days=1, hours=1)}],
+            "NextToken": "page-2",
+        },
+        {
+            "CapacityBlockOfferings": [
+                {"StartDate": now + timedelta(days=150, hours=1)} for _ in range(4)
+            ]
+        },
+    ]
+    checker._session.client = MagicMock(return_value=ec2)
+
+    trend = checker.get_capacity_block_trend("p5.48xlarge", "us-east-1")
+
+    assert trend > 0
+    calls = ec2.describe_capacity_block_offerings.call_args_list
+    assert len(calls) == 2
+    assert "NextToken" not in calls[0].kwargs
+    assert calls[1].kwargs["NextToken"] == "page-2"

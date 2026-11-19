@@ -407,8 +407,10 @@ gco analytics users set-password --username alice \
 #### `gco analytics studio login`
 
 Sign in to SageMaker Studio via Cognito SRP and print a presigned
-Studio URL on its own line on stdout (pipe-friendly). The password,
-`IdToken`, and URL are never written to disk.
+Studio URL on its own line on stdout (pipe-friendly): the progress shown
+while a first login provisions the user profile (30-60 seconds) goes to
+stderr, so `URL=$(gco analytics studio login ...)` captures only the URL.
+The password, `IdToken`, and URL are never written to disk.
 
 ```bash
 gco analytics studio login [OPTIONS]
@@ -459,7 +461,16 @@ Checks performed:
 - The three `/gco/cluster-shared-bucket/*` SSM parameters are
   present in the global region
 - No orphaned retained analytics resources are left from a previous
-  `retain`-policy destroy
+  `retain`-policy destroy: a Studio EFS file system or Cognito user pool
+  that a deleted `{project}-analytics` stack skipped on delete
+  (CloudFormation lists a deleted stack's resources for 90 days), or a file
+  system tagged `Name={project}-analytics/StudioEfs` (the tag CDK gives
+  it) or `gco:analytics:managed=true` with `gco:project={project}`. The live
+  stack's resources are never reported. The remediation lists the delete
+  commands in order, with `--region`: access points and mount targets
+  before the file system, hosted UI domains before the user pool. When the
+  CloudFormation lookup fails, the check fails without suggesting any
+  deletion.
 
 ```bash
 gco analytics doctor
@@ -599,16 +610,31 @@ gco capacity check [OPTIONS]
 | `--type` | `-t` | Capacity type: `spot`, `on-demand`, or `both` |
 | `--enrich-historical` | | Append historical capacity context to the output (requires historical.enabled) |
 
+With `--output json` or `--output yaml`, the command prints the list of estimates;
+with `--enrich-historical` it prints one document instead,
+`{"estimates": [...], "historical": {...}}`, where `historical` is the
+[`gco capacity history stats`](#gco-capacity-history-stats) summary for the last 7 days, or `null`
+when the history cannot be read (the reason goes to stderr).
+
 **Example:**
 
 ```bash
 gco capacity check --instance-type g4dn.xlarge --region us-east-1
 gco capacity check -i g5.xlarge -r us-west-2 -t spot
+gco --output json capacity check -i g5.xlarge -r us-west-2 --enrich-historical
 ```
 
 #### `gco capacity status`
 
-View capacity status across regions.
+View capacity status across regions. `QUEUE` (`queue_depth`) is the Region's SQS job
+queue backlog. `RUNNING` (`running_jobs`) is the health monitor's `ActiveJobs` metric
+(CloudWatch namespace `GCO/HealthMonitor`, published every 30 seconds): Jobs in the
+job namespaces with a pending or running pod. It is not the SQS in-flight message
+count, which only covers messages being applied or waiting to be retried. When the
+metric has no recent datapoint the count is reported as unavailable (`jobs` in
+`unavailable_signals`), and recommendations neither describe the Region as having no
+running jobs nor score it as idle. The same values feed
+[`recommend-region`](#gco-capacity-recommend-region), `gco status` and the capacity advisor.
 
 ```bash
 gco capacity status [OPTIONS]
@@ -658,6 +684,14 @@ gco capacity recommend-region [OPTIONS]
 When `--instance-type` is provided, the recommendation uses weighted multi-signal
 scoring that combines spot placement scores, spot-vs-on-demand pricing, queue depth,
 GPU utilization, and running job counts. Without it, a simpler composite score is used.
+The spot placement score is asked for the number of instances that hold `--gpu-count`
+(or `--min-gpus`) GPUs of the type, rounded up (`-i p4d.24xlarge --gpu-count 16` scores
+2 instances), and for one instance when no GPU count is given or the type's GPU count is
+unknown; each Region's entry reports it as `spot_target_instances`.
+A Region that does not offer the type is left out of the ranking (listed with `--verbose`,
+and under `ineligible_regions` in JSON), and the command fails when no deployed Region
+offers it; a Region whose offering could not be checked is ranked after the Regions
+confirmed to sell the type (`offered: null`). Aliases such as `p6-b200` are expanded first.
 
 `--backend hyperpod` considers only Regions whose regional stack runs a
 [SageMaker HyperPod](HYPERPOD.md#how-work-reaches-hyperpod-nodes) cluster and ranks
@@ -716,6 +750,14 @@ thinking fields.
 - AWS credentials with `bedrock:InvokeModel` permission
 - The specified Bedrock model must be enabled in your account
 
+Bedrock is called in `AWS_REGION`, else `AWS_DEFAULT_REGION`, else the CLI's default
+region (`gco --region`, `GCO_DEFAULT_REGION`, the config file, or the first regional
+Region in `cdk.json`), the same order `gco autopilot` uses. A geography-scoped
+inference profile (`eu.`, `apac.`, `jp.`, `au.`) only answers in its geography's
+Regions, so pick a Region there when passing one with `--model`. Bedrock errors name
+the Region that was called. [`gco capacity predict`](#gco-capacity-predict) uses the
+same Region.
+
 **Options:**
 
 | Option | Short | Description |
@@ -730,6 +772,11 @@ thinking fields.
 | `--max-cost` | | Maximum cost per hour in USD |
 | `--model` | `-m` | Bedrock model ID to use (default: `cdk.json` `context.bedrock.capacity_advisor_default_model_id`) |
 | `--raw` | | Show raw AI response |
+
+With `--output json` or `--output yaml`, the command prints one document with
+`recommended_region`, `recommended_instance_type`, `recommended_capacity_type`,
+`confidence`, `cost_estimate`, `reasoning`, `alternative_options` and `warnings`
+(plus `raw_response` with `--raw`); the disclaimer goes to stderr.
 
 **Example:**
 
@@ -753,6 +800,15 @@ gco capacity ai-recommend -w "ML training" --model us.anthropic.claude-sonnet-4-
 #### `gco capacity reservations`
 
 List On-Demand Capacity Reservations (ODCRs) across deployed regions.
+
+A Region whose listing EC2 refuses (a denied `ec2:DescribeCapacityReservations`,
+throttling, a Region that is not enabled) is named with EC2's error code and
+message, and the JSON report lists it under `errors` (`region`, `error_code`,
+`error`); it is never shown as a Region without reservations. The other Regions
+still answer; when every Region refuses, or `--region` names one that does, the
+command exits 1. The same applies to
+[`reservation-check`](#gco-capacity-reservation-check) (under `odcr.errors`) and
+[`find-reservations`](#gco-capacity-find-reservations).
 
 ```bash
 gco capacity reservations [OPTIONS]
@@ -778,6 +834,8 @@ gco capacity reservations -r us-east-1
 
 Check reservation availability and Capacity Block offerings for ML workloads. Checks both existing ODCRs and purchasable Capacity Blocks (guaranteed GPU capacity for a fixed duration at a known price). Pass `--region` more than once to check several regions in parallel, and use `--earliest-start`/`--latest-start` to ask for blocks starting near a date. For a full duration-range sweep that returns one consolidated ranked report, use [`gco capacity find-blocks`](#gco-capacity-find-blocks).
 
+ODCR availability is judged per Region: `--count` is met only when one Region has that many free reserved instances, since a workload cannot use reservations in another Region. The table lists each Region's free and reserved instances when more than one Region is checked; the JSON report carries them under `odcr.by_region` (`region`, `reserved_instances`, `available_instances`, `has_availability`), next to the overall `total_available_instances`.
+
 ```bash
 gco capacity reservation-check [OPTIONS]
 ```
@@ -786,7 +844,7 @@ gco capacity reservation-check [OPTIONS]
 |--------|-------------|
 | `-i, --instance-type` | Instance type to check (required) |
 | `-r, --region` | Region(s) to check; repeatable (default: all deployed regions) |
-| `-c, --count` | Minimum instances needed (default: 1) |
+| `-c, --count` | Minimum instances needed in one region (default: 1) |
 | `--include-blocks/--no-blocks` | Include Capacity Block offerings (default: yes) |
 | `--block-duration` | Capacity Block duration in hours (default: 24) |
 | `--block-duration-days` | Capacity Block duration in days (overrides `--block-duration`) |
@@ -860,7 +918,14 @@ the `cb-...` ID to this command. Run with `--dry-run` before committing —
 Capacity Block purchases incur charges. A passed dry run means the request is
 well-formed and you hold `ec2:PurchaseCapacityBlock`; EC2's dry run does not
 look the offering up, so it cannot tell you whether the offering still exists.
-Only the purchase itself does.
+Only the purchase itself does. When EC2 refuses the purchase or the dry run, the
+command exits 1 in every output mode; with `--output json` or `--output yaml` the
+result document (`success: false`, `error_code`, `error`) is still printed on stdout.
+
+A purchase asks for confirmation first (on stderr in JSON/YAML mode); declining
+exits 1 without calling EC2. Pass `--yes` in scripts: when stdin is not a terminal
+and `--yes` is missing, the command exits 2 before calling EC2 instead of waiting
+for an answer. `--dry-run` never asks.
 
 ```bash
 gco capacity reserve [OPTIONS]
@@ -873,14 +938,18 @@ gco capacity reserve [OPTIONS]
 | `--offering-id` | `-o` | Capacity Block offering ID (`cb-…`) (required) |
 | `--region` | `-r` | AWS region where the offering exists (required) |
 | `--dry-run` | | Check the request and your permission without purchasing; does not verify the offering exists |
+| `--yes` | `-y` | Skip the confirmation prompt; required when stdin is not a terminal |
 
 **Example:**
 
 ```bash
-# Find offerings, validate, then purchase
+# Find offerings, validate, then purchase (asks for confirmation)
 gco capacity reservation-check -i p4d.24xlarge -r us-east-1
 gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --dry-run
 gco capacity reserve -o cb-0123456789abcdef0 -r us-east-1
+
+# In a script
+gco --output json capacity reserve -o cb-0123456789abcdef0 -r us-east-1 --yes
 ```
 
 #### `gco capacity find-training-plans`
@@ -965,7 +1034,7 @@ gco capacity find-reservations [OPTIONS]
 |--------|-------------|
 | `-i, --instance-type` | Instance type or alias to filter by (e.g. `p6-b200`); omit for all types |
 | `-r, --region` | Region(s) to search; repeatable (default: all deployed regions) |
-| `-c, --count` | Minimum available instances to consider the search satisfied (default: 1) |
+| `-c, --count` | Minimum available instances in one region for the search to count as satisfied (default: 1) |
 | `--state` | Reservation state filter (default: `active`; use `all` for any state) |
 | `--pricing/--no-pricing` | Enrich reservations with On-Demand pricing (default: yes) |
 
@@ -979,7 +1048,7 @@ gco capacity find-reservations -i p6-b200 -r us-east-1 -r us-west-2 --no-pricing
 
 #### `gco capacity create-reservation`
 
-Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Run with `--dry-run` first to check the request and your permission; EC2's dry run does not check capacity or the Availability Zone, only the real request does.
+Create a new On-Demand Capacity Reservation (ODCR) — the ODCR counterpart to [`gco capacity reserve`](#gco-capacity-reserve). Reserves On-Demand capacity for an instance type in a specific Availability Zone. **Charges accrue** for the reserved capacity whether or not it is used, until the reservation is cancelled. Run with `--dry-run` first to check the request and your permission; EC2's dry run does not check capacity or the Availability Zone, only the real request does. A refused request exits 1 in every output mode, with the result document on stdout in JSON/YAML mode, as for [`gco capacity reserve`](#gco-capacity-reserve). Creating a reservation asks for confirmation the same way: pass `--yes` in scripts, since without a terminal on stdin and without `--yes` the command exits 2 before calling EC2; `--dry-run` never asks.
 
 ```bash
 gco capacity create-reservation [OPTIONS]
@@ -997,16 +1066,17 @@ gco capacity create-reservation [OPTIONS]
 | `--end-date` | | Optional end date (`YYYY-MM-DD` or ISO); omit for an unlimited reservation |
 | `--ebs-optimized` | | Reserve EBS-optimized capacity |
 | `--dry-run` | | Check the request and your permission without creating (no cost); does not check capacity or the AZ |
+| `--yes` | `-y` | Skip the confirmation prompt; required when stdin is not a terminal |
 
 ```bash
-# Validate, then create
+# Validate, then create (asks for confirmation; -y skips the prompt)
 gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2 --dry-run
 gco capacity create-reservation -i p5.48xlarge -r us-east-1 -z us-east-1a -c 2
 ```
 
 #### `gco capacity cancel-reservation`
 
-Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing.
+Cancel an On-Demand Capacity Reservation, releasing its capacity so it stops incurring On-Demand charges. Only ODCRs can be cancelled this way; a Capacity Block runs for its fixed term. Instances already running against the reservation are not terminated — they revert to normal On-Demand billing. A refused cancellation exits 1 in every output mode, with the result document on stdout in JSON/YAML mode.
 
 ```bash
 gco capacity cancel-reservation [OPTIONS]
@@ -1078,7 +1148,13 @@ gco -o json capacity instance-info p5.48xlarge | jq '{efa: .efa_supported, gpus:
 
 #### `gco capacity spot-prices`
 
-Get spot price history for an instance type in a region.
+Get spot price history for an instance type in a region: one row per Availability
+Zone with the current price (the newest price change), the average, minimum and
+maximum over the window, and a stability score (1 minus the coefficient of
+variation). The average and the stability are weighted by how long each price was in
+effect, so a price that held all week counts for more than a short spike. Every page
+of `DescribeSpotPriceHistory` is read. The `*_7d` field names are kept for any
+`--days` value.
 
 ```bash
 gco capacity spot-prices [OPTIONS]
@@ -1220,6 +1296,14 @@ registered ALB endpoint is untouched. Prompts for confirmation unless
 `--yes` is passed; changes apply to new connections only and converge to the
 accelerator's edge locations over a few minutes. Warns when the change would
 leave no fully dialed region on the listener.
+
+The override (`/{project}/traffic-dial/override-{region}` in SSM) is written
+before the dial changes, so the controller already skips the region when it does.
+If the override cannot be written, the dial is not touched. If the dial update
+fails, the override is put back as it was (removed, or its previous value) and
+the command exits 1 saying so; if that also fails, the error says the override
+now holds the new value while the dial is unchanged, and names
+`gco capacity traffic-dial clear REGION`.
 
 ```bash
 gco capacity traffic-dial set REGION PERCENTAGE [OPTIONS]

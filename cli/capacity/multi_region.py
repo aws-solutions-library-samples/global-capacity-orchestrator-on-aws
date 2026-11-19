@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -14,6 +15,7 @@ from botocore.exceptions import ClientError
 
 from cli.config import GCOConfig, get_config
 
+from . import blocks
 from .backends import (
     BACKEND_EKS,
     BACKEND_HYPERPOD,
@@ -29,11 +31,16 @@ from .backends import (
     sum_gpus,
 )
 from .checker import CapacityChecker
+from .models import CapacityCheckError
 
 logger = logging.getLogger(__name__)
 
 _TELEMETRY_MISSING_SIGNAL_PENALTY = 1000.0
-_SCORED_TELEMETRY_SIGNALS = frozenset({"queue", "gpu"})
+_SCORED_TELEMETRY_SIGNALS = frozenset({"queue", "gpu", "jobs"})
+#: The health monitor publishes the Region's active Job count (Jobs in the job
+#: namespaces with a pending or running pod) every 30 seconds.
+_ACTIVE_JOBS_NAMESPACE = "GCO/HealthMonitor"
+_ACTIVE_JOBS_METRIC = "ActiveJobs"
 #: The regional API route the PCS ranking reads Slurm's queue from.
 _SLURM_STATUS_PATH = "/api/v1/slurm/status"
 
@@ -43,6 +50,18 @@ def _missing_scored_signal_count(capacity: RegionCapacity) -> int:
     return len(_SCORED_TELEMETRY_SIGNALS.intersection(capacity.unavailable_signals))
 
 
+def _instances_for_gpus(gpu_count: int, gpus_per_instance: int | None) -> int:
+    """Whole instances that hold ``gpu_count`` GPUs, at least one.
+
+    Spot Placement Score's ``TargetCapacity`` counts instances, not GPUs. When
+    no GPU count is asked for or the type's GPU count is unknown in the Region,
+    the score is asked for one instance.
+    """
+    if gpu_count <= 0 or not gpus_per_instance:
+        return 1
+    return math.ceil(gpu_count / gpus_per_instance)
+
+
 def _check_backend(backend: str) -> None:
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {', '.join(BACKENDS)}, not {backend!r}")
@@ -50,7 +69,12 @@ def _check_backend(backend: str) -> None:
 
 @dataclass
 class RegionCapacity:
-    """Capacity information for a region."""
+    """Capacity information for a region.
+
+    ``queue_depth`` is the Region's SQS job queue backlog. ``running_jobs`` is
+    the health monitor's ``ActiveJobs`` metric: Jobs in the job namespaces
+    with a pending or running pod (the ``jobs`` signal).
+    """
 
     region: str
     queue_depth: int = 0
@@ -106,14 +130,14 @@ class MultiRegionCapacityChecker:
 
         if not stack:
             capacity.telemetry_status = "unavailable"
-            capacity.unavailable_signals = ["queue", "gpu", "cpu"]
+            capacity.unavailable_signals = ["queue", "gpu", "cpu", "jobs"]
             capacity.telemetry_errors = ["Regional stack was not found"]
             capacity.recommendation_score = (
                 len(_SCORED_TELEMETRY_SIGNALS) * _TELEMETRY_MISSING_SIGNAL_PENALTY
             )
             return capacity
 
-        available = {"queue": False, "gpu": False, "cpu": False}
+        available = {"queue": False, "gpu": False, "cpu": False, "jobs": False}
         # The stack's outputs, kept for the backend reads below; ``None`` when
         # CloudFormation could not be asked.
         outputs: dict[str, str] | None = None
@@ -130,15 +154,15 @@ class MultiRegionCapacityChecker:
             queue_url = outputs.get("JobQueueUrl")
             if queue_url:
                 sqs = self._session.client("sqs", region_name=region)
+                # In-flight (not visible) messages are being applied right now
+                # or waiting out a failed attempt; the processor deletes a
+                # message once its manifests are applied, so they are not a
+                # running-job count (that comes from ActiveJobs below).
                 attrs = sqs.get_queue_attributes(
                     QueueUrl=queue_url,
-                    AttributeNames=[
-                        "ApproximateNumberOfMessages",
-                        "ApproximateNumberOfMessagesNotVisible",
-                    ],
+                    AttributeNames=["ApproximateNumberOfMessages"],
                 )["Attributes"]
                 capacity.queue_depth = int(attrs.get("ApproximateNumberOfMessages", 0))
-                capacity.running_jobs = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
                 available["queue"] = True
             else:
                 capacity.telemetry_errors.append("Job queue URL was not present in stack outputs")
@@ -188,6 +212,34 @@ class MultiRegionCapacityChecker:
                         "Unexpected error getting %s metrics for %s: %s", signal, region, e
                     )
                     capacity.telemetry_errors.append(f"{signal.upper()} telemetry failed: {e}")
+
+            try:
+                end = datetime.now(UTC)
+                response = cloudwatch.get_metric_statistics(
+                    Namespace=_ACTIVE_JOBS_NAMESPACE,
+                    MetricName=_ACTIVE_JOBS_METRIC,
+                    Dimensions=[
+                        {"Name": "ClusterName", "Value": stack.cluster_name},
+                        {"Name": "Region", "Value": region},
+                    ],
+                    StartTime=end - timedelta(minutes=5),
+                    EndTime=end,
+                    Period=60,
+                    Statistics=["Maximum"],
+                )
+                datapoints = response.get("Datapoints", [])
+                if datapoints:
+                    newest = max(datapoints, key=lambda point: point["Timestamp"])
+                    capacity.running_jobs = round(newest["Maximum"])
+                    available["jobs"] = True
+                else:
+                    capacity.telemetry_errors.append("Running-job telemetry returned no datapoints")
+            except ClientError as e:
+                logger.debug("Failed to get running-job metrics for %s: %s", region, e)
+                capacity.telemetry_errors.append(f"Running-job telemetry failed: {e}")
+            except Exception as e:
+                logger.warning("Unexpected error getting running-job metrics for %s: %s", region, e)
+                capacity.telemetry_errors.append(f"Running-job telemetry failed: {e}")
 
         capacity.unavailable_signals = [
             signal for signal, is_available in available.items() if not is_available
@@ -389,7 +441,7 @@ class MultiRegionCapacityChecker:
             elif best.gpu_utilization < 80:
                 reasons.append(f"moderate GPU utilization ({best.gpu_utilization:.0f}%)")
 
-        if "queue" not in best.unavailable_signals:
+        if "jobs" not in best.unavailable_signals:
             if best.running_jobs == 0:
                 reasons.append("no running jobs")
             elif best.running_jobs < 5:
@@ -428,22 +480,48 @@ class MultiRegionCapacityChecker:
         Workload-aware recommendation using weighted multi-signal scoring.
 
         Gathers per-region capacity data for the specific instance type and
-        combines it with cluster metrics using weighted scoring.
+        combines it with cluster metrics using weighted scoring. A Region that
+        does not offer the type is left out (``ineligible_regions``); one whose
+        offering could not be checked stays in with a missing signal, so it
+        ranks after the Regions confirmed to sell the type.
+
+        Raises:
+            NoEligibleRegionError: no Region offers the type.
         """
+        instance_type, _alias_note = blocks.normalize_instance_type(instance_type)
         capacity_checker = CapacityChecker(self.config)
 
         scored_regions: list[dict[str, Any]] = []
+        ineligible: list[dict[str, str]] = []
 
         for cap in capacities:
             region = cap.region
+            telemetry_errors = list(cap.telemetry_errors)
+
+            # A Region that does not sell the type cannot run the work, however
+            # idle it is; its instance signals would just read as zeros.
+            offered: bool | None = None
+            try:
+                offered = capacity_checker.check_instance_available_in_region(instance_type, region)
+            except CapacityCheckError as e:
+                telemetry_errors.append(str(e))
+            if offered is False:
+                ineligible.append(
+                    {"region": region, "reason": f"{instance_type} is not offered in {region}"}
+                )
+                continue
 
             # Gather instance-specific signals for this region
             spot_score = 0.0
             spot_price_ratio = 1.0  # spot/on-demand ratio (lower = better savings)
+            spot_target_instances = 1
 
             try:
+                spot_target_instances = _instances_for_gpus(
+                    gpu_count, capacity_checker.gpus_per_instance(instance_type, region)
+                )
                 placement_scores = capacity_checker.get_spot_placement_score(
-                    instance_type, region, target_capacity=max(1, gpu_count)
+                    instance_type, region, target_capacity=spot_target_instances
                 )
                 if placement_scores:
                     spot_score = placement_scores.get("regional", 0) / 10.0  # Normalize to 0-1
@@ -480,22 +558,32 @@ class MultiRegionCapacityChecker:
                 running_jobs=cap.running_jobs,
                 capacity_block_trend=cb_trend,
             )
-            missing_scored_signals = _missing_scored_signal_count(cap)
+            missing_scored_signals = _missing_scored_signal_count(cap) + (offered is None)
 
             scored_regions.append(
                 {
                     "region": region,
+                    "offered": offered,
                     "score": weighted_score,
                     "queue_depth": cap.queue_depth,
                     "gpu_utilization": cap.gpu_utilization,
                     "running_jobs": cap.running_jobs,
                     "spot_placement_score": spot_score,
+                    "spot_target_instances": spot_target_instances,
                     "spot_price_ratio": spot_price_ratio,
                     "capacity_block_trend": cb_trend,
                     "telemetry_status": cap.telemetry_status,
-                    "telemetry_errors": cap.telemetry_errors or None,
+                    "telemetry_errors": telemetry_errors or None,
                     "unavailable_scored_signals": missing_scored_signals,
                 }
+            )
+
+        if not scored_regions:
+            details = "; ".join(entry["reason"] for entry in ineligible)
+            raise NoEligibleRegionError(
+                f"No deployed Region offers {instance_type} ({details}). Check the type "
+                "with 'gco capacity instance-info', or deploy a Region that offers it",
+                ineligible,
             )
 
         scored_regions.sort(
@@ -540,7 +628,7 @@ class MultiRegionCapacityChecker:
         ):
             reasons.append(f"{100 - best['gpu_utilization']:.0f}% GPU available")
 
-        if "queue" not in next(
+        if "jobs" not in next(
             cap.unavailable_signals for cap in capacities if cap.region == best["region"]
         ):
             if best["running_jobs"] == 0:
@@ -567,6 +655,7 @@ class MultiRegionCapacityChecker:
             "telemetry_status": best["telemetry_status"],
             "telemetry_errors": best["telemetry_errors"],
             "all_regions": scored_regions,
+            "ineligible_regions": ineligible,
         }
 
     def _no_eligible_region(
@@ -584,18 +673,19 @@ class MultiRegionCapacityChecker:
         )
 
     def _queue_reasons(self, cap: RegionCapacity) -> list[str]:
-        """The shared job-queue notes the backend rankings reuse."""
-        if "queue" in cap.unavailable_signals:
-            return ["job queue telemetry unavailable"]
+        """The shared job-queue and running-job notes the backend rankings reuse."""
         reasons = []
-        if cap.queue_depth == 0:
+        if "queue" in cap.unavailable_signals:
+            reasons.append("job queue telemetry unavailable")
+        elif cap.queue_depth == 0:
             reasons.append("empty queue")
         elif cap.queue_depth < 5:
             reasons.append(f"low queue depth ({cap.queue_depth})")
-        if cap.running_jobs == 0:
-            reasons.append("no running jobs")
-        elif cap.running_jobs < 5:
-            reasons.append(f"few running jobs ({cap.running_jobs})")
+        if "jobs" not in cap.unavailable_signals:
+            if cap.running_jobs == 0:
+                reasons.append("no running jobs")
+            elif cap.running_jobs < 5:
+                reasons.append(f"few running jobs ({cap.running_jobs})")
         return reasons
 
     def _hyperpod_recommend(
@@ -652,8 +742,7 @@ class MultiRegionCapacityChecker:
             if fits is False:
                 penalty += _TELEMETRY_MISSING_SIGNAL_PENALTY
             missing = set(hp.unavailable_signals)
-            if "queue" in cap.unavailable_signals:
-                missing.add("queue")
+            missing.update({"queue", "jobs"}.intersection(cap.unavailable_signals))
             score = (
                 penalty
                 + len(missing) * _TELEMETRY_MISSING_SIGNAL_PENALTY

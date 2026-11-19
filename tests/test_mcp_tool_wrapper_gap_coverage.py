@@ -691,7 +691,7 @@ def test_capacity_runai_wrapper_argv(
             "reserve_capacity",
             ("cb-offering", "us-east-1"),
             {},
-            ("capacity", "reserve", "-o", "cb-offering", "-r", "us-east-1"),
+            ("capacity", "reserve", "-o", "cb-offering", "-r", "us-east-1", "-y"),
         ),
         (
             "reserve_capacity",
@@ -704,6 +704,7 @@ def test_capacity_runai_wrapper_argv(
                 "cb-offering",
                 "-r",
                 "us-east-1",
+                "-y",
                 "--dry-run",
             ),
         ),
@@ -722,6 +723,7 @@ def test_capacity_runai_wrapper_argv(
                 "us-east-1a",
                 "-c",
                 "1",
+                "-y",
             ),
         ),
         (
@@ -747,6 +749,7 @@ def test_capacity_runai_wrapper_argv(
                 "us-west-2b",
                 "-c",
                 "4",
+                "-y",
                 "--platform",
                 "Linux with SQL Server",
                 "--tenancy",

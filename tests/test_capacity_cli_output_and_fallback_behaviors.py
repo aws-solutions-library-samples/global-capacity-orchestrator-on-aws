@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+import yaml
 from botocore.exceptions import ClientError
 from click.testing import CliRunner
 
-from cli.capacity.advisor import CapacityPredictionResult
+from cli.capacity.advisor import BedrockCapacityRecommendation, CapacityPredictionResult
 from cli.capacity.traffic_dial import RegionDialStatus
 from cli.commands.capacity_cmd import (
     _format_patterns_grid,
@@ -366,3 +370,363 @@ def test_traffic_dial_clear_handles_generic_failure() -> None:
 
     assert result.exit_code == 1
     assert "Failed to clear traffic-dial override" in result.output
+
+
+_RESERVATION_FAILURE = {
+    "success": False,
+    "dry_run": False,
+    "region": "us-east-1",
+    "error_code": "InsufficientInstanceCapacity",
+    "error": "sold out",
+}
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+@pytest.mark.parametrize(
+    ("checker_method", "arguments"),
+    [
+        (
+            "purchase_capacity_block",
+            ["reserve", "-o", "cb-0123456789abcdef0", "-r", "us-east-1", "-y"],
+        ),
+        (
+            "create_capacity_reservation",
+            [
+                "create-reservation",
+                "-i",
+                "p5.48xlarge",
+                "-r",
+                "us-east-1",
+                "-z",
+                "us-east-1a",
+                "-y",
+            ],
+        ),
+        (
+            "cancel_capacity_reservation",
+            ["cancel-reservation", "-o", "cr-0123456789abcdef0", "-r", "us-east-1", "-y"],
+        ),
+    ],
+)
+def test_reservation_commands_exit_nonzero_on_failure_in_machine_modes(
+    checker_method: str, arguments: list[str], output_format: str
+) -> None:
+    """A failed purchase/create/cancel used to print its document and exit 0
+    in JSON/YAML mode, so a script checking $? saw a success."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    getattr(checker, checker_method).return_value = dict(_RESERVATION_FAILURE)
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(cli, ["-o", output_format, "capacity", *arguments])
+
+    assert result.exit_code == 1, result.output
+    document = (json.loads if output_format == "json" else yaml.safe_load)(result.stdout)
+    assert document == _RESERVATION_FAILURE
+    assert "Failed: InsufficientInstanceCapacity: sold out" in result.stderr
+
+
+_CHARGING_COMMANDS = [
+    pytest.param(
+        "purchase_capacity_block",
+        ["reserve", "-o", "cb-0123456789abcdef0", "-r", "us-east-1"],
+        id="reserve",
+    ),
+    pytest.param(
+        "create_capacity_reservation",
+        ["create-reservation", "-i", "p5.48xlarge", "-r", "us-east-1", "-z", "us-east-1a"],
+        id="create-reservation",
+    ),
+]
+_CHARGED = {"success": True, "dry_run": False, "reservation_id": "cr-0123456789abcdef0"}
+
+
+@pytest.mark.parametrize(("checker_method", "arguments"), _CHARGING_COMMANDS)
+def test_charging_commands_refuse_to_run_unconfirmed_without_a_terminal(
+    checker_method: str, arguments: list[str]
+) -> None:
+    """Both commands used to spend money with no confirmation at all. Without
+    a terminal nobody can answer a prompt (and one reading an open pipe would
+    wait forever), so the command stops before calling EC2."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(cli, ["capacity", *arguments])
+
+    assert result.exit_code == 2, result.output
+    assert "pass --yes" in result.stderr
+    getattr(checker, checker_method).assert_not_called()
+
+
+@pytest.mark.parametrize(("checker_method", "arguments"), _CHARGING_COMMANDS)
+def test_charging_commands_ask_first_and_a_declined_prompt_exits_1(
+    checker_method: str, arguments: list[str]
+) -> None:
+    from cli.main import cli
+
+    checker = MagicMock()
+    with (
+        patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker),
+        patch("cli.commands.capacity_cmd._stdin_is_interactive", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, ["capacity", *arguments], input="n\n")
+
+    assert result.exit_code == 1, result.output
+    assert "[y/N]" in result.output
+    assert "Aborted" in result.stderr
+    getattr(checker, checker_method).assert_not_called()
+
+
+@pytest.mark.parametrize(("checker_method", "arguments"), _CHARGING_COMMANDS)
+def test_charging_commands_proceed_after_an_accepted_prompt(
+    checker_method: str, arguments: list[str]
+) -> None:
+    """In JSON mode the prompt goes to stderr, so stdout stays one document."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    getattr(checker, checker_method).return_value = dict(_CHARGED)
+    with (
+        patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker),
+        patch("cli.commands.capacity_cmd._stdin_is_interactive", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, ["-o", "json", "capacity", *arguments], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "[y/N]" in result.stderr
+    assert json.loads(result.stdout) == _CHARGED
+    getattr(checker, checker_method).assert_called_once()
+
+
+@pytest.mark.parametrize("skip_flag", ["--yes", "-y", "--dry-run"])
+@pytest.mark.parametrize(("checker_method", "arguments"), _CHARGING_COMMANDS)
+def test_charging_commands_skip_the_prompt_for_yes_and_dry_run(
+    checker_method: str, arguments: list[str], skip_flag: str
+) -> None:
+    """--yes answers in advance and a dry run costs nothing, so neither asks,
+    even without a terminal."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    getattr(checker, checker_method).return_value = dict(_CHARGED)
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(cli, ["-o", "json", "capacity", *arguments, skip_flag])
+
+    assert result.exit_code == 0, result.output
+    assert "[y/N]" not in result.output
+    getattr(checker, checker_method).assert_called_once()
+    assert getattr(checker, checker_method).call_args.kwargs["dry_run"] is (
+        skip_flag == "--dry-run"
+    )
+
+
+def test_stdin_is_interactive_needs_a_terminal_on_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cli.commands import capacity_cmd
+
+    monkeypatch.setattr(sys, "stdin", None)
+    assert capacity_cmd._stdin_is_interactive() is False
+
+    terminal = MagicMock()
+    terminal.isatty.return_value = True
+    monkeypatch.setattr(sys, "stdin", terminal)
+    assert capacity_cmd._stdin_is_interactive() is True
+
+    terminal.isatty.return_value = False
+    assert capacity_cmd._stdin_is_interactive() is False
+
+
+_HISTORICAL_STATS = {
+    "instance_type": "g5.xlarge",
+    "region": "us-east-1",
+    "hours_back": 168,
+    "sample_count": 5,
+    "metrics": {"spot_score": {"p25": 5, "p50": 6, "p75": 7, "min": 3, "max": 9}},
+}
+_ESTIMATE = {"instance_type": "g5.xlarge", "region": "us-east-1", "capacity_type": "spot"}
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_check_enrich_historical_prints_one_machine_document(output_format: str) -> None:
+    """The historical lines used to be printed after the estimates, so the root
+    output transaction wrapped all of stdout as {"status": "ok", "output": ...}."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.estimate_capacity.return_value = [dict(_ESTIMATE)]
+    store = MagicMock()
+    store.get_statistics.return_value = dict(_HISTORICAL_STATS)
+    with (
+        patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker),
+        patch("cli.capacity.history.get_capacity_history_store", return_value=store),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "-o",
+                output_format,
+                "capacity",
+                "check",
+                "-i",
+                "g5.xlarge",
+                "-r",
+                "us-east-1",
+                "--enrich-historical",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    document = (json.loads if output_format == "json" else yaml.safe_load)(result.stdout)
+    assert document == {"estimates": [_ESTIMATE], "historical": _HISTORICAL_STATS}
+
+
+def test_check_enrich_historical_machine_document_has_null_history_when_unreadable() -> None:
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.estimate_capacity.return_value = [dict(_ESTIMATE)]
+    store = MagicMock()
+    store.get_statistics.side_effect = ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "no table"}}, "Query"
+    )
+    with (
+        patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker),
+        patch("cli.capacity.history.get_capacity_history_store", return_value=store),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "-o",
+                "json",
+                "capacity",
+                "check",
+                "-i",
+                "g5.xlarge",
+                "-r",
+                "us-east-1",
+                "--enrich-historical",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"estimates": [_ESTIMATE], "historical": None}
+    assert "optional add-on" in result.stderr
+
+
+def _ai_recommendation() -> BedrockCapacityRecommendation:
+    return BedrockCapacityRecommendation(
+        recommended_region="us-west-2",
+        recommended_instance_type="g5.xlarge",
+        recommended_capacity_type="spot",
+        reasoning="High spot score. Low queue depth.",
+        confidence="high",
+        cost_estimate="$0.40/hr",
+        alternative_options=[
+            {"region": "us-east-1", "instance_type": "g5.xlarge", "capacity_type": "on-demand"}
+        ],
+        warnings=["Spot can be interrupted"],
+        raw_response='{"recommended_region": "us-west-2"}',
+    )
+
+
+_AI_DOCUMENT = {
+    "recommended_region": "us-west-2",
+    "recommended_instance_type": "g5.xlarge",
+    "recommended_capacity_type": "spot",
+    "confidence": "high",
+    "cost_estimate": "$0.40/hr",
+    "reasoning": "High spot score. Low queue depth.",
+    "alternative_options": [
+        {"region": "us-east-1", "instance_type": "g5.xlarge", "capacity_type": "on-demand"}
+    ],
+    "warnings": ["Spot can be interrupted"],
+}
+
+
+@pytest.mark.parametrize("output_format", ["json", "yaml"])
+def test_ai_recommend_prints_one_machine_document(output_format: str) -> None:
+    """The disclaimer and the recommendation used to be printed as text in
+    every mode, so JSON/YAML callers (the MCP tool included) got the text
+    envelope instead of the recommendation."""
+    from cli.main import cli
+
+    advisor = MagicMock()
+    advisor.model_id = "example.model-v1"
+    advisor.get_recommendation.return_value = _ai_recommendation()
+    with patch("cli.capacity.get_bedrock_capacity_advisor", return_value=advisor):
+        result = CliRunner().invoke(
+            cli, ["-o", output_format, "capacity", "ai-recommend", "-w", "training"]
+        )
+
+    assert result.exit_code == 0, result.output
+    document = (json.loads if output_format == "json" else yaml.safe_load)(result.stdout)
+    assert document == _AI_DOCUMENT
+    assert "AI-POWERED RECOMMENDATION DISCLAIMER" in result.stderr
+
+
+def test_ai_recommend_machine_document_carries_the_raw_response_only_with_raw() -> None:
+    from cli.main import cli
+
+    advisor = MagicMock()
+    advisor.model_id = "example.model-v1"
+    advisor.get_recommendation.return_value = _ai_recommendation()
+    with patch("cli.capacity.get_bedrock_capacity_advisor", return_value=advisor):
+        result = CliRunner().invoke(
+            cli, ["-o", "json", "capacity", "ai-recommend", "-w", "training", "--raw"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        **_AI_DOCUMENT,
+        "raw_response": '{"recommended_region": "us-west-2"}',
+    }
+
+
+def test_ai_recommend_table_mode_keeps_the_disclaimer_on_stdout() -> None:
+    from cli.main import cli
+
+    advisor = MagicMock()
+    advisor.model_id = "example.model-v1"
+    advisor.get_recommendation.return_value = _ai_recommendation()
+    with patch("cli.capacity.get_bedrock_capacity_advisor", return_value=advisor):
+        result = CliRunner().invoke(cli, ["capacity", "ai-recommend", "-w", "training"])
+
+    assert result.exit_code == 0, result.output
+    assert "AI-POWERED RECOMMENDATION DISCLAIMER" in result.stdout
+    assert "Region:        us-west-2" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
+)
+def test_spot_prices_empty_result_keeps_the_list_shape(output_format: str, parse) -> None:
+    """An empty history used to return after the warning, so the root output
+    transaction printed {"status": "ok"} instead of an empty list."""
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.get_spot_price_history.return_value = []
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(
+            cli,
+            ["-o", output_format, "capacity", "spot-prices", "-i", "g5.xlarge", "-r", "us-east-1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert parse(result.stdout) == []
+    assert "No spot price data for g5.xlarge in us-east-1" in result.stderr
+
+
+def test_spot_prices_empty_result_in_table_mode_prints_only_the_warning() -> None:
+    from cli.main import cli
+
+    checker = MagicMock()
+    checker.get_spot_price_history.return_value = []
+    with patch("cli.commands.capacity_cmd.get_capacity_checker", return_value=checker):
+        result = CliRunner().invoke(
+            cli, ["capacity", "spot-prices", "-i", "g5.xlarge", "-r", "us-east-1"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "No spot price data" in result.stderr

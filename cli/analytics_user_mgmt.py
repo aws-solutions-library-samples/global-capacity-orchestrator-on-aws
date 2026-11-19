@@ -291,14 +291,21 @@ def generate_strong_password(length: int = 20) -> str:
 
 
 def list_users(pool_id: str, region: str) -> list[dict[str, str]]:
-    """Return a flat row-per-user list suitable for tabular output."""
+    """Return a flat row-per-user list suitable for tabular output.
+
+    Reads every page: ``ListUsers`` returns at most 60 users per call.
+    """
     import boto3
 
     cognito = boto3.client("cognito-idp", region_name=region)
-    response = cognito.list_users(UserPoolId=pool_id)
+    users = [
+        user
+        for page in cognito.get_paginator("list_users").paginate(UserPoolId=pool_id)
+        for user in page.get("Users", []) or []
+    ]
 
     rows: list[dict[str, str]] = []
-    for user in response.get("Users", []) or []:
+    for user in users:
         row: dict[str, str] = {
             "username": user.get("Username", ""),
             "status": user.get("UserStatus", ""),
@@ -449,41 +456,156 @@ def check_ssm_parameter(region: str, param_name: str) -> tuple[bool, str]:
     return _check(param_name, region=region)
 
 
-def scan_orphan_analytics_resources(region: str) -> list[str]:
-    """Return a list of copy-paste ``aws`` commands for retained resources.
+#: Resource types the analytics stack can retain on destroy
+#: (``analytics_environment.{efs,cognito}.removal_policy: retain``).
+_EFS_FILE_SYSTEM = "AWS::EFS::FileSystem"
+_COGNITO_USER_POOL = "AWS::Cognito::UserPool"
 
-    Scans EFS and Cognito for resources tagged
-    ``gco:analytics:managed=true``. An empty list means no orphans
-    were found.
+
+def _analytics_stack_resources(
+    cfn: Any, stack_name: str
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """``(retained, live)`` file system and user pool ids of ``stack_name``.
+
+    ``retained`` holds what deleted incarnations of the stack skipped on
+    delete (``DELETE_SKIPPED``, the retain policy); CloudFormation keeps a
+    deleted stack's resource list for 90 days after deletion. ``live`` holds
+    the current stack's, which must never be reported.
+    """
+    from botocore.exceptions import ClientError
+
+    types = (_EFS_FILE_SYSTEM, _COGNITO_USER_POOL)
+    retained: dict[str, set[str]] = {kind: set() for kind in types}
+    live: dict[str, set[str]] = {kind: set() for kind in types}
+
+    def resources(stack: str) -> list[dict[str, Any]]:
+        paginator = cfn.get_paginator("list_stack_resources")
+        return [
+            resource
+            for page in paginator.paginate(StackName=stack)
+            for resource in page.get("StackResourceSummaries", [])
+            if resource.get("ResourceType") in types and resource.get("PhysicalResourceId")
+        ]
+
+    deleted_stacks = cfn.get_paginator("list_stacks").paginate(
+        StackStatusFilter=["DELETE_COMPLETE"]
+    )
+    for page in deleted_stacks:
+        for summary in page.get("StackSummaries", []):
+            if summary.get("StackName") != stack_name:
+                continue
+            for resource in resources(str(summary["StackId"])):
+                if resource.get("ResourceStatus") == "DELETE_SKIPPED":
+                    retained[resource["ResourceType"]].add(resource["PhysicalResourceId"])
+    try:
+        for resource in resources(stack_name):
+            live[resource["ResourceType"]].add(resource["PhysicalResourceId"])
+    except ClientError as exc:
+        # No live stack: CloudFormation answers ValidationError "does not exist".
+        if "does not exist" not in str(exc):
+            raise
+    return retained, live
+
+
+def _efs_delete_commands(efs: Any, fs_id: str, region: str) -> list[str]:
+    """Delete commands for a file system, its access points and mount targets first.
+
+    EFS refuses ``delete-file-system`` while mount targets exist, and mount
+    target deletion takes a few minutes to finish.
+    """
+    commands = [
+        f"aws efs delete-access-point --access-point-id {point['AccessPointId']} --region {region}"
+        for page in efs.get_paginator("describe_access_points").paginate(FileSystemId=fs_id)
+        for point in page.get("AccessPoints", [])
+    ]
+    commands.extend(
+        f"aws efs delete-mount-target --mount-target-id {target['MountTargetId']} --region {region}"
+        for page in efs.get_paginator("describe_mount_targets").paginate(FileSystemId=fs_id)
+        for target in page.get("MountTargets", [])
+    )
+    commands.append(f"aws efs delete-file-system --file-system-id {fs_id} --region {region}")
+    return commands
+
+
+def _user_pool_delete_commands(pool: dict[str, Any], region: str) -> list[str]:
+    """Delete commands for a user pool, its hosted UI domains first."""
+    pool_id = pool["Id"]
+    commands = [
+        f"aws cognito-idp delete-user-pool-domain --domain {domain} "
+        f"--user-pool-id {pool_id} --region {region}"
+        for domain in (pool.get("Domain"), pool.get("CustomDomain"))
+        if domain
+    ]
+    commands.append(f"aws cognito-idp delete-user-pool --user-pool-id {pool_id} --region {region}")
+    return commands
+
+
+def _managed_by_project(tags: dict[str, str], project_name: str) -> bool:
+    return tags.get("gco:analytics:managed") == "true" and tags.get("gco:project") == project_name
+
+
+def scan_orphan_analytics_resources(region: str, project_name: str) -> list[str]:
+    """Return copy-paste ``aws`` commands that delete retained analytics resources.
+
+    An orphan is a Studio EFS file system or Cognito user pool that a deleted
+    ``{project_name}-analytics`` stack left behind (``removal_policy: retain``)
+    and that still exists. It is found from the deleted stack's resource list
+    (``DELETE_SKIPPED``, kept by CloudFormation for 90 days) or, for a file
+    system, from the ``Name`` tag CDK gives it (``{project}-analytics/StudioEfs``)
+    or the ``gco:analytics:managed`` and ``gco:project`` tags. Resources of
+    the live stack are never reported. A file system's access points and
+    mount targets are deleted before it, a user pool's domains before it.
+    An empty list means no orphans were found; a scan that cannot run adds
+    one parenthesised diagnostic line instead.
     """
     import boto3
     from botocore.exceptions import BotoCoreError, ClientError
 
+    stack_name = f"{project_name}-analytics"
+    try:
+        cfn = boto3.client("cloudformation", region_name=region)
+        retained, live = _analytics_stack_resources(cfn, stack_name)
+    except (ClientError, BotoCoreError) as exc:
+        # Without the stack's resource lists a live file system could look
+        # retained, so nothing is offered for deletion.
+        return [f"(orphan scan skipped: the CloudFormation lookup of {stack_name} failed: {exc!s})"]
+
     remediation: list[str] = []
     try:
         efs = boto3.client("efs", region_name=region)
-        for fs in efs.describe_file_systems().get("FileSystems", []) or []:
-            fs_id = fs.get("FileSystemId", "")
-            if not fs_id:
-                continue
-            tag_resp = efs.list_tags_for_resource(ResourceId=fs_id)
-            tags = {t.get("Key"): t.get("Value") for t in tag_resp.get("Tags", []) or []}
-            if tags.get("gco:analytics:managed") == "true":
-                remediation.append(f"aws efs delete-file-system --file-system-id {fs_id}")
+        studio_name = f"{stack_name}/StudioEfs"
+        for page in efs.get_paginator("describe_file_systems").paginate():
+            for fs in page.get("FileSystems", []):
+                fs_id = fs.get("FileSystemId", "")
+                if not fs_id or fs_id in live[_EFS_FILE_SYSTEM]:
+                    continue
+                tags = {t.get("Key"): t.get("Value") for t in fs.get("Tags", []) or []}
+                if (
+                    fs_id in retained[_EFS_FILE_SYSTEM]
+                    or tags.get("Name") == studio_name
+                    or _managed_by_project(tags, project_name)
+                ):
+                    remediation.extend(_efs_delete_commands(efs, fs_id, region))
     except (ClientError, BotoCoreError) as exc:
         remediation.append(f"(EFS orphan scan failed: {exc!s})")
 
     try:
         cognito = boto3.client("cognito-idp", region_name=region)
-        pools = cognito.list_user_pools(MaxResults=60)
-        for pool in pools.get("UserPools", []) or []:
-            pool_id = pool.get("Id")
-            if not pool_id:
-                continue
-            describe = cognito.describe_user_pool(UserPoolId=pool_id)
-            tags = describe.get("UserPool", {}).get("UserPoolTags", {}) or {}
-            if tags.get("gco:analytics:managed") == "true":
-                remediation.append(f"aws cognito-idp delete-user-pool --user-pool-id {pool_id}")
+        candidates = set(retained[_COGNITO_USER_POOL])
+        for page in cognito.get_paginator("list_user_pools").paginate(
+            PaginationConfig={"PageSize": 60}
+        ):
+            candidates.update(pool["Id"] for pool in page.get("UserPools", []) if pool.get("Id"))
+        for pool_id in sorted(candidates - live[_COGNITO_USER_POOL]):
+            try:
+                pool = cognito.describe_user_pool(UserPoolId=pool_id)["UserPool"]
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                    continue  # retained once, deleted by hand since
+                raise
+            tags = pool.get("UserPoolTags", {}) or {}
+            if pool_id in retained[_COGNITO_USER_POOL] or _managed_by_project(tags, project_name):
+                remediation.extend(_user_pool_delete_commands(pool, region))
     except (ClientError, BotoCoreError) as exc:
         remediation.append(f"(Cognito orphan scan failed: {exc!s})")
 

@@ -598,17 +598,18 @@ def studio_login(
             url, _expires_in, _ = fetch_studio_url(api_base, id_token)
             if url:
                 break
-            # 202 -- profile still provisioning.
+            # 202 -- profile still provisioning. Progress goes to stderr:
+            # stdout carries only the URL, for `URL=$(gco analytics ...)`.
             if elapsed == 0:
-                click.echo("  Waiting for user profile to provision...", nl=False)
-            click.echo(".", nl=False)
+                click.echo("  Waiting for user profile to provision...", nl=False, err=True)
+            click.echo(".", nl=False, err=True)
             _time.sleep(poll_interval)
             elapsed += poll_interval
 
         if elapsed > 0 and url:
-            click.echo(" ready")
+            click.echo(" ready", err=True)
         elif not url:
-            click.echo("")
+            click.echo("", err=True)
             formatter.print_error(
                 f"User profile did not become ready within {max_wait}s. Try again in a minute."
             )
@@ -727,7 +728,7 @@ def analytics_doctor(config: Any) -> None:
         )
 
     # 4. No orphaned retained analytics resources
-    orphan_cmds = scan_orphan_analytics_resources(config.api_gateway_region)
+    orphan_cmds = scan_orphan_analytics_resources(config.api_gateway_region, config.project_name)
     _emit(
         "no orphaned retained analytics resources",
         not orphan_cmds,

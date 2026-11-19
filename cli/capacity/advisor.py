@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import boto3
@@ -94,11 +95,26 @@ class BedrockCapacityAdvisor:
         self._uses_default_model = model_id is None
         self.model_id: str = self.DEFAULT_MODEL if model_id is None else model_id
 
+    def bedrock_region(self) -> str:
+        """The Region the advisor calls Bedrock Runtime in.
+
+        The SDK's own ``AWS_REGION`` and ``AWS_DEFAULT_REGION`` first, then the
+        CLI's default region (``gco -r``, ``GCO_DEFAULT_REGION``, the config
+        file, or cdk.json's first regional Region), the order ``gco autopilot``
+        uses for its Bedrock sessions. A geography-scoped inference profile
+        (``eu.``, ``apac.``) is only offered in its geography's Regions.
+        """
+        return (
+            os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or self.config.default_region
+        )
+
     def _get_bedrock_client(self) -> Any:
-        """Get Bedrock runtime client."""
+        """Get Bedrock runtime client in :meth:`bedrock_region`."""
         return self._session.client(
             "bedrock-runtime",
-            region_name="us-east-1",
+            region_name=self.bedrock_region(),
             config=Config(read_timeout=BEDROCK_READ_TIMEOUT_SECONDS),
         )
 
@@ -219,8 +235,10 @@ class BedrockCapacityAdvisor:
                 except Exception as e:
                     record_gap(instance_type, region, "spot placement score", e)
                 try:
-                    spot_prices = self._capacity_checker.get_spot_price_history(
-                        instance_type, region, days=7
+                    spot_prices, zone_prices = (
+                        self._capacity_checker.get_spot_price_history_and_series(
+                            instance_type, region, days=7
+                        )
                     )
                     spot_entry["prices"] = [
                         {
@@ -231,36 +249,19 @@ class BedrockCapacityAdvisor:
                         }
                         for p in spot_prices
                     ]
-                except Exception as e:
-                    record_gap(instance_type, region, "spot price history", e)
-                data["spot_data"][instance_type][region] = spot_entry
-
-                # Spot price trend analysis per AZ (for AI interpretation)
-                try:
-                    ec2 = self._session.client("ec2", region_name=region)
-                    raw_resp = ec2.describe_spot_price_history(
-                        InstanceTypes=[instance_type],
-                        ProductDescriptions=["Linux/UNIX"],
-                        StartTime=datetime.now(UTC) - timedelta(days=7),
-                        EndTime=datetime.now(UTC),
-                    )
-                    az_raw: dict[str, list[float]] = {}
-                    for item in raw_resp.get("SpotPriceHistory", []):
-                        az = item["AvailabilityZone"]
-                        if az not in az_raw:
-                            az_raw[az] = []
-                        az_raw[az].append(float(item["SpotPrice"]))
+                    # Per-AZ trend (for AI interpretation) from the same
+                    # records, every page of them, rather than a second
+                    # single-page query of the same window.
                     az_trends = {
                         az: compute_price_trend(prices)
-                        for az, prices in az_raw.items()
+                        for az, prices in zone_prices.items()
                         if len(prices) >= 2
                     }
                     if az_trends:
-                        data["spot_data"][instance_type][region]["price_trends"] = az_trends
+                        spot_entry["price_trends"] = az_trends
                 except Exception as e:
-                    logger.debug(
-                        "Failed to get price trends for %s in %s: %s", instance_type, region, e
-                    )
+                    record_gap(instance_type, region, "spot price history", e)
+                data["spot_data"][instance_type][region] = spot_entry
 
                 od_entry: dict[str, Any] = {"price_per_hour": None, "available": None}
                 try:
@@ -301,9 +302,7 @@ class BedrockCapacityAdvisor:
                             for r in odcrs
                         ]
                 except Exception as e:
-                    logger.debug(
-                        "Failed to list reservations for %s in %s: %s", instance_type, region, e
-                    )
+                    record_gap(instance_type, region, "capacity reservations", e)
 
                 try:
                     blocks = self._capacity_checker.list_capacity_block_offerings(
@@ -731,17 +730,19 @@ Respond ONLY with the JSON object, no additional text."""
             # Raised as a distinct type (still a RuntimeError) so callers can
             # tell a fixable account-setup gap from a transient Bedrock fault.
             raise_if_bedrock_ftu_form_error(e)
+            region = self.bedrock_region()
             if error_code == "AccessDeniedException":
                 raise RuntimeError(
-                    "Access denied to Bedrock. Ensure your IAM role has "
+                    f"Access denied to Bedrock in {region}. Ensure your IAM role has "
                     "bedrock:InvokeModel permission and the model is enabled in your account."
                 ) from e
             if error_code == "ValidationException":
                 raise RuntimeError(
-                    f"Model {self.model_id} may not be available. "
-                    "Try a different model with --model option."
+                    f"Model {self.model_id} may not be available in {region}. "
+                    "Try a different model with --model option, or another Region "
+                    "with AWS_REGION or gco --region."
                 ) from e
-            raise RuntimeError(f"Bedrock API error: {e}") from e
+            raise RuntimeError(f"Bedrock API error in {region}: {e}") from e
         except json.JSONDecodeError as e:
             # ``response_text`` is always bound here: the decoder can only
             # fail after the response text was extracted.
