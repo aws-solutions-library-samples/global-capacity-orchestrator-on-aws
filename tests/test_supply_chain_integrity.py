@@ -2926,7 +2926,9 @@ def test_pre_commit_ruff_hooks_skip_generated_trees_and_keep_pyprojects_excludes
         if repo["repo"] == "https://github.com/astral-sh/ruff-pre-commit"
         for hook in repo["hooks"]
     }
-    assert set(hooks) == {"ruff-format", "ruff"}
+    # ``ruff-check``, not ``ruff``: ruff-pre-commit keeps ``ruff`` only as a
+    # legacy alias of the check hook.
+    assert set(hooks) == {"ruff-format", "ruff-check"}
     for hook_id, hook in hooks.items():
         exclude = re.compile(hook["exclude"])
         for generated in (

@@ -1096,7 +1096,7 @@ Ruff owns both formatting and linting (`pyproject.toml` `[tool.ruff]`: line
 length 100, target `py314`, rules `E,W,F,I,B,C4,UP,ARG,SIM`). mypy runs in a
 `--strict`-equivalent mode (`[tool.mypy]`). Both run three ways so nothing slips:
 
-- **Pre-commit** (`.pre-commit-config.yaml`): `ruff-format`, `ruff --fix`,
+- **Pre-commit** (`.pre-commit-config.yaml`): `ruff-format`, `ruff-check --fix`,
   `mypy` (on `gco/config|models|services` + `cli/`), `yamllint`,
   `markdownlint-cli2`. Install once with `pre-commit install`.
 - **CI** (`lint.yml`): `ruff`, `mypy` (`strict` / `stacks` / `lambda`), plus
