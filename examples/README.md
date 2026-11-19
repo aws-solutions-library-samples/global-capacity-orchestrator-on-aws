@@ -1074,21 +1074,26 @@ This tells the autoscaler to leave the node alone until the pod completes. Remov
 
 ### "Resource limits exceed maximum allowed values"
 
-The GCO API validates manifest resource requests against configurable limits. If your job needs more CPU, memory, or GPUs than the defaults allow, update the limits in `cdk.json` and redeploy:
+The GCO API checks the total resource requests of each submitted manifest against `job_validation_policy.resource_quotas`: by default 384 vCPU, 4096Gi of memory and 16 GPUs, two full accelerator nodes. `gco jobs policy -r <region>` shows what a Region enforces. If your job needs more, raise the caps in `cdk.json`. A cap may not exceed the `gco-jobs` namespace ResourceQuota (`resource_quota.max_cpu`, `max_memory` and `max_gpu`, by default 400, 4096Gi and 32) or fall below the per-container limit (`resource_quota.container_max_*`, by default 192, 2048Gi and 8), and the synth stops on a value that breaks either rule, so raise `resource_quota` with them:
 
 ```json
 {
   "job_validation_policy": {
     "resource_quotas": {
-      "max_cpu_per_manifest": "96",
-      "max_memory_per_manifest": "192Gi",
-      "max_gpu_per_manifest": 8
+      "max_cpu_per_manifest": "768",
+      "max_memory_per_manifest": "8192Gi",
+      "max_gpu_per_manifest": 32
     }
+  },
+  "resource_quota": {
+    "max_cpu": "800",
+    "max_memory": "8192Gi",
+    "max_gpu": "32"
   }
 }
 ```
 
-Then redeploy: `gco stacks deploy-all -y`
+Keys you leave out keep their defaults. Then redeploy: `gco stacks deploy-all -y`
 
 `job_validation_policy` is authoritative for both submission paths: the REST manifest processor and SQS queue processor enforce the same limits, namespace/kind allowlists, image policy, and security controls.
 
