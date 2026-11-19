@@ -1339,7 +1339,10 @@ class GCOAWSClient:
         """
         Retry a failed job.
 
-        Creates a new job from the failed job's spec with a new name.
+        Creates a new job from the failed job's spec with a new name. The API
+        answers 201 only when it created the job; a copied manifest that fails
+        validation is a 400 whose ``errors`` list :meth:`call_api` puts in the
+        raised message.
 
         Args:
             job_name: Name of the failed job
@@ -1348,16 +1351,16 @@ class GCOAWSClient:
 
         Returns:
             Result with new job name
+
+        Raises:
+            APIRequestError: The API refused the retry or failed, with its
+                own message and errors.
         """
-        response = self.make_authenticated_request(
+        return self.call_api(
             method="POST",
             path=f"{_job_path(namespace, job_name)}/retry",
-            target_region=region,
+            region=region,
         )
-
-        response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result
 
     def bulk_delete_jobs(
         self,

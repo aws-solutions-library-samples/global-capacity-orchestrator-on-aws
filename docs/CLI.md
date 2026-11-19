@@ -3893,6 +3893,12 @@ gco jobs metrics training-job -r us-west-2 -n ml-jobs
 
 Retry a failed job.
 
+Creates a new Job from the failed job's spec under a new name and keeps the
+original for debugging. The copy goes through the same validation as a new
+submission; when the API refuses it (for example, an image registry or
+namespace the current policy no longer allows), the command prints the API's
+message with each validation error and exits 1.
+
 ```bash
 gco jobs retry JOB_NAME [OPTIONS]
 ```

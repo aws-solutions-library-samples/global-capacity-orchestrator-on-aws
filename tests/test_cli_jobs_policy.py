@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from click.testing import CliRunner
 
+from cli.aws_client import APIRequestError
 from cli.commands.jobs_cmd import (
     _cdk_job_validation_policy,
     _policy_regions,
@@ -1693,13 +1694,21 @@ class TestRemainingJobsStateMatrix:
         formatter.print_success.assert_called_once_with("Job retry created: trainer-retry")
         formatter.print.assert_called_once()
 
-        manager.retry_job.return_value = {"success": False, "message": "still running"}
+        # A refused retry is a 400 that call_api raises with the server's
+        # message and validation errors (RETRY-ERRORS).
+        manager.retry_job.side_effect = APIRequestError(
+            400, "Failed to create retry job: image not from a trusted registry"
+        )
         result, _, formatter = _invoke(
             ["jobs", "retry", "trainer", "--region", "us-east-1", "--yes"],
             manager,
         )
         assert result.exit_code == 1
-        formatter.print_error.assert_called_once_with("Failed to retry job: still running")
+        formatter.print_error.assert_called_once_with(
+            "Failed to retry job: API request failed: Failed to create retry job: "
+            "image not from a trusted registry"
+        )
+        formatter.print_success.assert_not_called()
 
         manager.retry_job.side_effect = RuntimeError("source missing")
         result, _, formatter = _invoke(

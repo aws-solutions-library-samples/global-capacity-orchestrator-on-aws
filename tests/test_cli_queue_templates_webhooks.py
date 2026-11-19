@@ -1477,23 +1477,24 @@ class TestJobsRetryCommand:
             assert "retry" in result.output.lower()
 
     def test_jobs_retry_failure(self):
-        """Test jobs retry when retry fails."""
+        """A refused retry reports the server's validation errors and exits 1."""
+        from cli.aws_client import APIRequestError
         from cli.main import cli
 
         runner = CliRunner()
 
         with patch("cli.commands.jobs_cmd.get_job_manager") as mock_manager:
             mock_jm = MagicMock()
-            mock_jm.retry_job.return_value = {
-                "success": False,
-                "message": "Job is still running",
-            }
+            mock_jm.retry_job.side_effect = APIRequestError(
+                400, "Failed to create retry job: namespace 'other' is not allowed"
+            )
             mock_manager.return_value = mock_jm
 
             result = runner.invoke(
                 cli, ["jobs", "retry", "test-job", "--region", "us-east-1", "-y"]
             )
             assert result.exit_code == 1
+            assert "namespace 'other' is not allowed" in result.output
 
     def test_jobs_retry_error(self):
         """Test jobs retry with error."""

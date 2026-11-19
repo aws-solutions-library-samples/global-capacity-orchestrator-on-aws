@@ -1085,13 +1085,9 @@ def retry_job(config: Any, job_name: Any, namespace: Any, region: Any, yes: Any)
 
     try:
         result = job_manager.retry_job(job_name, namespace, region)
-
-        if result.get("success"):
-            formatter.print_success(f"Job retry created: {result.get('new_job')}")
-        else:
-            formatter.print_error(f"Failed to retry job: {result.get('message')}")
-            sys.exit(1)
-
+        # The API answers 201 only when it created the retry Job; a refusal
+        # raises with the server's validation errors, reported below.
+        formatter.print_success(f"Job retry created: {result.get('new_job')}")
         formatter.print(result)
 
     except Exception as e:

@@ -1636,6 +1636,41 @@ class TestGCOAWSClientJobMetrics:
 class TestGCOAWSClientRetryJob:
     """Tests for retry_job method."""
 
+    def test_retry_job_refusal_carries_the_server_errors(self):
+        """A 400 from the retry route keeps its validation errors (RETRY-ERRORS).
+
+        The route answers ``{"success": false, "errors": [...]}`` with 400 when
+        the copied manifest fails validation; ``raise_for_status`` reduced that
+        to "400 Client Error" and dropped the list.
+        """
+        from cli.aws_client import APIRequestError, GCOAWSClient
+        from cli.config import GCOConfig
+
+        with patch("cli.aws_client.boto3.Session"):
+            client = GCOAWSClient(GCOConfig())
+        response = MagicMock(ok=False, status_code=400, reason="Bad Request")
+        response.json.return_value = {
+            "success": False,
+            "message": "Failed to create retry job",
+            "errors": ["Image registry.example.com/x:1 is not from a trusted registry"],
+        }
+        client.make_authenticated_request = MagicMock(return_value=response)
+
+        with pytest.raises(APIRequestError) as raised:
+            client.retry_job("trainer", "gco-jobs", "us-east-1")
+
+        assert raised.value.status_code == 400
+        assert str(raised.value) == (
+            "API request failed: Failed to create retry job: "
+            "Image registry.example.com/x:1 is not from a trusted registry"
+        )
+        call = client.make_authenticated_request.call_args.kwargs
+        assert (call["method"], call["path"], call["target_region"]) == (
+            "POST",
+            "/api/v1/jobs/gco-jobs/trainer/retry",
+            "us-east-1",
+        )
+
     def test_retry_job_success(self):
         """Test retrying a failed job."""
         from cli.aws_client import ApiEndpoint, GCOAWSClient
