@@ -5933,6 +5933,8 @@ gco stacks addons COMMAND [OPTIONS]
 
 `status` marks `installed`, `uninstalled`, `absent`, `applied` and `validated` rows as healthy. Healthy rows show the first 80 characters of their message; any other status prints the full message, which for a failed manifest phase is the list of resources that did not apply. An active teardown fence (`_teardown`) shows as `teardown-active`. The command exits 1 when any row is not healthy or a Region's records cannot be read. With `gco -o json` or `-o yaml` it prints one list of `{region, name, status, message}` rows across the Regions; a Region whose records cannot be read contributes a row with status `error` and no name.
 
+`install` replays the execution input the last deploy stored in `/{project}/addons/{region}/_input` into the Helm install state machine of this project's regional stack, `{project}-{region}`. It finds that state machine among the stack's resources (`cloudformation:ListStackResources`), because every deployment's state machine gets a generated name of the same shape, and it exits 1 instead of starting another deployment's installer when the stack or its state machine cannot be found.
+
 **Example:**
 
 ```bash

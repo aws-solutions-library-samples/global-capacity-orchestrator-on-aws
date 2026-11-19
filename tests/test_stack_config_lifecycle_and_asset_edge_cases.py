@@ -1081,27 +1081,98 @@ def test_addons_install_fence_and_state_machine_paths() -> None:
         _client_error("ParameterNotFound"),
         {"Parameter": {"Value": '{"input":true}'}},
     ]
+    cfn = _stack_resources_client(
+        [{"LogicalResourceId": "HelmTeardownStateMachineA1", "ResourceType": _STATE_MACHINE}]
+    )
     sfn = MagicMock()
-    sfn.list_state_machines.return_value = {"stateMachines": []}
     formatter.reset_mock()
-    with patch("boto3.client", side_effect=[ssm, sfn]):
+    with patch("boto3.client", side_effect=[ssm, cfn, sfn]):
         assert stacks_cmd._addons_install_one(formatter, "gco", "us-east-1") is False
-    assert "No HelmInstall state machine" in formatter.print_error.call_args.args[0]
+    assert (
+        "Stack gco-us-east-1 has no Helm install state machine"
+        in (formatter.print_error.call_args.args[0])
+    )
+    sfn.start_execution.assert_not_called()
 
     ssm.reset_mock()
     ssm.get_parameter.side_effect = [
         _client_error("ParameterNotFound"),
         {"Parameter": {"Value": '{"input":true}'}},
     ]
-    sfn.list_state_machines.return_value = {
-        "stateMachines": [{"name": "HelmInstallMachine", "stateMachineArn": "arn:machine"}]
-    }
+    cfn = _stack_resources_client(_INSTALL_MACHINE_RESOURCE)
     sfn.start_execution.return_value = {"executionArn": "arn:execution"}
     formatter.reset_mock()
-    with patch("boto3.client", side_effect=[ssm, sfn]):
+    with patch("boto3.client", side_effect=[ssm, cfn, sfn]):
         assert stacks_cmd._addons_install_one(formatter, "gco", "us-east-1") is True
+    cfn.get_paginator.assert_called_once_with("list_stack_resources")
+    cfn.get_paginator.return_value.paginate.assert_called_once_with(StackName="gco-us-east-1")
+    sfn.start_execution.assert_called_once_with(
+        stateMachineArn=_INSTALL_MACHINE_ARN, input='{"input":true}'
+    )
     formatter.print_success.assert_called_once()
     assert "arn:execution" in formatter.print_info.call_args_list[0].args[0]
+
+
+_STATE_MACHINE = "AWS::StepFunctions::StateMachine"
+_INSTALL_MACHINE_ARN = (
+    "arn:aws:states:us-east-1:123456789012:stateMachine:HelmInstallStateMachine7DB71CDC-abc"
+)
+_INSTALL_MACHINE_RESOURCE = [
+    {
+        "LogicalResourceId": "HelmInstallStateMachine7DB71CDC",
+        "ResourceType": _STATE_MACHINE,
+        "PhysicalResourceId": _INSTALL_MACHINE_ARN,
+    }
+]
+
+
+def _stack_resources_client(*pages: list[dict]) -> MagicMock:
+    """A CloudFormation client whose list_stack_resources paginator yields ``pages``."""
+    cfn = MagicMock()
+    cfn.get_paginator.return_value.paginate.return_value = [
+        {"StackResourceSummaries": page} for page in pages
+    ]
+    return cfn
+
+
+def test_helm_install_state_machine_is_found_on_any_page_by_type_and_id() -> None:
+    from cli.commands import stacks_cmd
+
+    cfn = _stack_resources_client(
+        [
+            {
+                "LogicalResourceId": "HelmInstallStateMachineLogGroupF2",
+                "ResourceType": "AWS::Logs::LogGroup",
+                "PhysicalResourceId": "log-group",
+            },
+            {
+                "LogicalResourceId": "HelmTeardownStateMachineA1",
+                "ResourceType": _STATE_MACHINE,
+                "PhysicalResourceId": "arn:teardown",
+            },
+        ],
+        _INSTALL_MACHINE_RESOURCE,
+    )
+
+    assert stacks_cmd._helm_install_state_machine_arn(cfn, "gco-us-east-1") == _INSTALL_MACHINE_ARN
+
+
+def test_addons_install_reports_an_unreadable_stack() -> None:
+    from cli.commands import stacks_cmd
+
+    ssm = MagicMock()
+    ssm.get_parameter.side_effect = [
+        _client_error("ParameterNotFound"),
+        {"Parameter": {"Value": '{"input":true}'}},
+    ]
+    cfn = MagicMock()
+    cfn.get_paginator.return_value.paginate.side_effect = _client_error("ValidationError")
+    formatter = MagicMock()
+    with patch("boto3.client", side_effect=[ssm, cfn]):
+        assert stacks_cmd._addons_install_one(formatter, "gco", "us-east-1") is False
+    message = formatter.print_error.call_args.args[0]
+    assert "Could not read the resources of stack gco-us-east-1" in message
+    assert "gco stacks deploy gco-us-east-1 -y" in message
 
 
 # ---------------------------------------------------------------------------
@@ -1660,13 +1731,11 @@ def test_addons_install_reports_start_execution_failure() -> None:
         _client_error("ParameterNotFound"),
         {"Parameter": {"Value": '{"input":true}'}},
     ]
+    cfn = _stack_resources_client(_INSTALL_MACHINE_RESOURCE)
     sfn = MagicMock()
-    sfn.list_state_machines.return_value = {
-        "stateMachines": [{"name": "HelmInstall", "stateMachineArn": "arn:machine"}]
-    }
     sfn.start_execution.side_effect = RuntimeError("start denied")
     formatter = MagicMock()
-    with patch("boto3.client", side_effect=[ssm, sfn]):
+    with patch("boto3.client", side_effect=[ssm, cfn, sfn]):
         assert stacks_cmd._addons_install_one(formatter, "gco", "us-east-1") is False
     assert "Failed to start add-on install: start denied" in formatter.print_error.call_args.args[0]
 

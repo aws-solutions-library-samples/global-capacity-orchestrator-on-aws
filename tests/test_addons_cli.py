@@ -76,13 +76,46 @@ def _seed_addon_input(region: str, project: str) -> None:
     )
 
 
-def _seed_state_machine(region: str) -> None:
-    sfn = boto3.client("stepfunctions", region_name=region)
-    sfn.create_state_machine(
-        name="HelmInstallStateMachine7DB71CDC-abc",
-        definition=json.dumps({"StartAt": "x", "States": {"x": {"Type": "Succeed"}}}),
-        roleArn=f"arn:aws:iam::123456789012:role/helm-sfn-{region}",
+def _seed_state_machine(region: str, project: str = "gco") -> None:
+    """Create the regional stack with its install and teardown state machines.
+
+    The stack gives them no explicit name, so CloudFormation generates one
+    from the construct id, the same shape in every deployment.
+    """
+    definition = json.dumps({"StartAt": "x", "States": {"x": {"Type": "Succeed"}}})
+    role = f"arn:aws:iam::123456789012:role/helm-sfn-{region}"
+    template = {
+        "Resources": {
+            logical_id: {
+                "Type": "AWS::StepFunctions::StateMachine",
+                "Properties": {"DefinitionString": definition, "RoleArn": role},
+            }
+            for logical_id in (
+                "HelmInstallStateMachine7DB71CDC",
+                "HelmTeardownStateMachineA1B2C3D4",
+            )
+        }
+    }
+    boto3.client("cloudformation", region_name=region).create_stack(
+        StackName=f"{project}-{region}", TemplateBody=json.dumps(template)
     )
+
+
+def _install_state_machine_arn(region: str, project: str) -> str:
+    resources = boto3.client("cloudformation", region_name=region).list_stack_resources(
+        StackName=f"{project}-{region}"
+    )["StackResourceSummaries"]
+    (arn,) = [
+        resource["PhysicalResourceId"]
+        for resource in resources
+        if resource["LogicalResourceId"].startswith("HelmInstallStateMachine")
+    ]
+    return arn
+
+
+def _executions(region: str, state_machine_arn: str) -> list:
+    sfn = boto3.client("stepfunctions", region_name=region)
+    return sfn.list_executions(stateMachineArn=state_machine_arn)["executions"]
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +359,50 @@ class TestAddonsInstall:
         assert result.output.count("Started add-on install") == 2
         assert "us-east-1" in result.output
         assert "us-west-2" in result.output
+
+    def test_install_starts_this_projects_state_machine(self, aws_creds_env):
+        """Two deployments in one Region carry install state machines with the
+        same generated name shape. install started the first one whose name
+        contained HelmInstall, so it could replay this project's input into
+        the other deployment's installer (N12)."""
+        from cli.commands import stacks_cmd
+        from cli.main import cli
+
+        # The other deployment's stack comes first in ListStateMachines.
+        _seed_state_machine("us-east-1", "gco")
+        _seed_state_machine("us-east-1", "gco-staging")
+        _seed_addon_input("us-east-1", "gco-staging")
+
+        with (
+            patch.object(stacks_cmd, "_project_name", return_value="gco-staging"),
+            patch.object(stacks_cmd, "_load_cdk_json", return_value={"regional": ["us-east-1"]}),
+        ):
+            result = CliRunner().invoke(cli, ["stacks", "addons", "install", "-r", "us-east-1"])
+
+        assert result.exit_code == 0, result.output
+        staging = _install_state_machine_arn("us-east-1", "gco-staging")
+        other = _install_state_machine_arn("us-east-1", "gco")
+        (execution,) = _executions("us-east-1", staging)
+        assert execution["executionArn"] in result.output
+        assert _executions("us-east-1", other) == []
+
+    def test_install_without_this_projects_stack_does_not_guess(self, aws_creds_env):
+        from cli.commands import stacks_cmd
+        from cli.main import cli
+
+        # Only another deployment's installer exists in the Region.
+        _seed_state_machine("us-east-1", "gco")
+        _seed_addon_input("us-east-1", "gco-staging")
+
+        with (
+            patch.object(stacks_cmd, "_project_name", return_value="gco-staging"),
+            patch.object(stacks_cmd, "_load_cdk_json", return_value={"regional": ["us-east-1"]}),
+        ):
+            result = CliRunner().invoke(cli, ["stacks", "addons", "install", "-r", "us-east-1"])
+
+        assert result.exit_code == 1, result.output
+        assert "gco-staging-us-east-1" in result.output
+        assert _executions("us-east-1", _install_state_machine_arn("us-east-1", "gco")) == []
 
     def test_install_missing_input_exits_nonzero(self, aws_creds_env):
         from cli.commands import stacks_cmd
