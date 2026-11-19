@@ -340,6 +340,16 @@ class TestQueueCommands:
             assert result.exit_code == 1
             assert "failed" in result.output.lower()
 
+    def test_queue_cancel_help_says_only_unclaimed_jobs_can_be_cancelled(self):
+        """The API cancels `queued` only; claimed-but-not-running jobs are refused (DOC-2)."""
+        from cli.main import cli
+
+        result = CliRunner().invoke(cli, ["queue", "cancel", "--help"])
+
+        assert result.exit_code == 0
+        assert "before a region claims it" in result.output
+        assert "not yet running" not in result.output
+
     def test_queue_stats_success(self):
         """Test queue stats command success."""
         from cli.main import cli

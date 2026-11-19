@@ -410,7 +410,11 @@ def queue_get(config: Any, job_id: Any, region: Any) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @pass_config
 def queue_cancel(config: Any, job_id: Any, reason: Any, region: Any, yes: Any) -> None:
-    """Cancel a queued job (only works for jobs not yet running).
+    """Cancel a job that is still queued, before a region claims it.
+
+    Only a `queued` job can be cancelled. Once a region has claimed it
+    (`claimed`, `applying`, `pending`, `running`) or it has finished, the API
+    refuses with 409 and the command exits 1.
 
     Examples:
         gco queue cancel abc123-def456

@@ -135,9 +135,10 @@ if is_enabled(FLAG_DESTRUCTIVE_OPERATIONS):
     async def cancel_queue_job(job_id: str, region: str | None = None) -> str:
         """[gated by GCO_ENABLE_DESTRUCTIVE_OPERATIONS] destructive.
 
-        `gco queue cancel` — cancel a queued job (only works for jobs not
-        yet running). Cannot be undone — the job's queue record is
-        transitioned to ``cancelled`` and any pending claim attempts stop.
+        `gco queue cancel` — cancel a job that is still queued, before a
+        region claims it. A claimed, applying, pending, running or finished
+        job is refused (409). Cannot be undone — the job's queue record is
+        transitioned to ``cancelled`` and no region will claim it.
 
         Args:
             job_id: Job identifier.
