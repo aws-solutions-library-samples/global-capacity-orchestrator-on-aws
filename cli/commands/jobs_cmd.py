@@ -1391,24 +1391,30 @@ def _policy_regions(config: Any, requested: tuple[str, ...] | None) -> list[str]
     return regions or [config.default_region]
 
 
-def _render_verdicts(verdicts: Any, *, indent: str = "  ") -> None:
-    """Print one line per region plus its reasons, for a terminal reader."""
+def _render_verdicts(verdicts: Any, *, indent: str = "  ", err: bool = False) -> None:
+    """Print one line per region plus its reasons, for a terminal reader.
+
+    ``err`` writes them to stderr, so the stdout of a command that prints a
+    JSON or YAML document after them stays that one document.
+    """
     from ..job_policy import VERDICT_ADMIT, VERDICT_REJECT, VERDICT_UNKNOWN
 
+    out = sys.stderr if err else sys.stdout
     marks = {VERDICT_ADMIT: "admit ", VERDICT_REJECT: "REJECT", VERDICT_UNKNOWN: "  ?   "}
     for verdict in verdicts:
-        print(f"{indent}[{marks.get(verdict.verdict, '?')}] {verdict.region}")
+        print(f"{indent}[{marks.get(verdict.verdict, '?')}] {verdict.region}", file=out)
         if verdict.verdict == VERDICT_UNKNOWN:
-            print(f"{indent}    policy unreadable: {verdict.reason}")
+            print(f"{indent}    policy unreadable: {verdict.reason}", file=out)
             continue
         for issue in verdict.issues:
             where = f"{issue.manifest} " if issue.manifest else ""
-            print(f"{indent}    {where}[{issue.check}] {issue.message}")
+            print(f"{indent}    {where}[{issue.check}] {issue.message}", file=out)
         if verdict.enforcement_gaps:
             print(
                 f"{indent}    note: live quota/LimitRange unreadable for "
                 f"{', '.join(verdict.enforcement_gaps)} — only the front-door "
-                f"caps were checked"
+                f"caps were checked",
+                file=out,
             )
 
 
@@ -1455,13 +1461,17 @@ def _run_pre_submit_policy_check(
         formatter.print_warning(f"Policy pre-check could not run ({e}); submitting anyway")
         return
 
+    # The findings are advice next to the submission's own output: in JSON
+    # or YAML mode they go to stderr with the warnings, so stdout stays the
+    # one submission document.
+    machine_output = config.output_format != "table"
     rejecting = [v for v in verdicts if v.verdict == VERDICT_REJECT]
     if rejecting:
         formatter.print_warning(
             f"Policy pre-check: {len(rejecting)} of {len(verdicts)} region(s) would "
             f"reject these manifests. Submitting anyway (advisory)."
         )
-        _render_verdicts(verdicts)
+        _render_verdicts(verdicts, err=machine_output)
     else:
         readable = [v for v in verdicts if v.verdict != "unknown"]
         if readable:
@@ -1472,7 +1482,7 @@ def _run_pre_submit_policy_check(
             formatter.print_warning(
                 "Policy pre-check: no region's policy could be read; submitting anyway"
             )
-            _render_verdicts(verdicts)
+            _render_verdicts(verdicts, err=machine_output)
 
 
 def _cdk_job_validation_policy() -> tuple[dict[str, Any], str]:

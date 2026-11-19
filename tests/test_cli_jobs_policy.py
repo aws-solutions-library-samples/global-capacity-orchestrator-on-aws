@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from cli.aws_client import APIRequestError
@@ -782,6 +783,73 @@ class TestAdvisoryPreSubmitPolicy:
         assert declared_namespace["metadata"]["namespace"] == "declared"
         messages = [str(args[0]) for args, _ in getattr(formatter, expected_method).call_args_list]
         assert any(expected_fragment in message for message in messages)
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            RegionVerdict(
+                region="us-east-1",
+                verdict=VERDICT_REJECT,
+                issues=[AdmissionIssue("images", "untrusted registry", "Job/trainer")],
+            ),
+            RegionVerdict(region="us-east-1", verdict=VERDICT_UNKNOWN, reason="timed out"),
+        ],
+    )
+    @pytest.mark.parametrize("output_format", ["json", "yaml"])
+    def test_machine_output_keeps_the_findings_off_stdout(
+        self, manifest_path: str, verdict: RegionVerdict, output_format: str
+    ) -> None:
+        """stdout stays the submission document; the verdict lines go to stderr (X19).
+
+        Before, the verdict lines went to stdout and the output transaction
+        turned the whole stdout into a ``{"status": "ok", "output": ...}`` text
+        envelope, hiding the submission result from a JSON or YAML caller.
+        """
+        from cli.main import cli
+
+        manager = MagicMock()
+        manager.load_manifests.return_value = [{"kind": "Job", "metadata": {"name": "trainer"}}]
+        submission = {"success": True, "resources": [{"kind": "Job", "name": "trainer"}]}
+        manager.submit_job.return_value = submission
+        with (
+            patch("cli.commands.jobs_cmd.get_job_manager", return_value=manager),
+            patch("cli.job_policy.fetch_region_policies", return_value=[]),
+            patch("cli.job_policy.region_verdicts", return_value=[verdict]),
+        ):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    *("-o", output_format, "jobs", "submit", manifest_path),
+                    *("-r", "us-east-1", "--check-policy"),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        parse = json.loads if output_format == "json" else yaml.safe_load
+        assert parse(result.stdout) == submission
+        assert "us-east-1" in result.stderr
+        assert ("untrusted registry" in result.stderr) or ("timed out" in result.stderr)
+
+    def test_table_output_keeps_the_findings_on_stdout(self, manifest_path: str) -> None:
+        manager = MagicMock()
+        manager.load_manifests.return_value = [{"kind": "Job", "metadata": {"name": "trainer"}}]
+        manager.submit_job.return_value = {"name": "trainer"}
+        verdict = RegionVerdict(
+            region="us-east-1",
+            verdict=VERDICT_REJECT,
+            issues=[AdmissionIssue("caps", "too many GPUs", "Job/trainer")],
+        )
+        with (
+            patch("cli.job_policy.fetch_region_policies", return_value=[]),
+            patch("cli.job_policy.region_verdicts", return_value=[verdict]),
+        ):
+            result, _, _formatter = _invoke(
+                ["jobs", "submit", manifest_path, "-r", "us-east-1", "--check-policy"], manager
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "[REJECT] us-east-1" in result.stdout
+        assert "too many GPUs" in result.stdout
 
     def test_precheck_failure_is_non_blocking(self, manifest_path: str) -> None:
         manager = MagicMock()
