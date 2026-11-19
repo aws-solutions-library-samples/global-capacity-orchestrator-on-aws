@@ -914,6 +914,25 @@ def _helm_container_list_string(containers: list[dict[str, Any]]) -> str:
     )
 
 
+def _trusted_registries_base(job_policy: Mapping[str, Any]) -> list[str]:
+    """The operator's ``trusted_registries``, or the services' defaults when unset.
+
+    The stack adds the project's ECR registries before it renders the list,
+    so the rendered value is never empty and the services' own
+    empty-means-default fallback never applies. A policy without the key
+    therefore starts from the same defaults the services use
+    (``gco.job_admission.DEFAULT_TRUSTED_REGISTRIES``) rather than from an
+    empty list that would leave only ECR trusted. A list the operator wrote,
+    an empty one included, is kept as written.
+    """
+    from gco.job_admission import DEFAULT_TRUSTED_REGISTRIES
+
+    configured = job_policy.get("trusted_registries")
+    if configured is None:
+        return list(DEFAULT_TRUSTED_REGISTRIES)
+    return list(configured)
+
+
 def _augment_trusted_registries_with_project_ecr(
     base: list[str],
     *,
@@ -4419,7 +4438,7 @@ class GCORegionalStack(Stack):
             # path below — see ``{{QP_TRUSTED_REGISTRIES}}``.
             "{{MP_TRUSTED_REGISTRIES}}": ",".join(
                 _augment_trusted_registries_with_project_ecr(
-                    job_policy.get("trusted_registries", []),
+                    _trusted_registries_base(job_policy),
                     account=self.account,
                     regions=self.config.get_regions(),
                     global_region=self.config.get_global_region(),
@@ -4727,7 +4746,7 @@ class GCORegionalStack(Stack):
             ]
             image_replacements["{{QP_TRUSTED_REGISTRIES}}"] = ",".join(
                 _augment_trusted_registries_with_project_ecr(
-                    job_policy.get("trusted_registries", []),
+                    _trusted_registries_base(job_policy),
                     account=self.account,
                     regions=self.config.get_regions(),
                     global_region=self.config.get_global_region(),

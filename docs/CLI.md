@@ -3955,7 +3955,8 @@ than discovering a policy conflict after a region has been provisioned.
 This reads the deployed cluster, not your local `cdk.json`. The two diverge
 whenever the stack was deployed from a different checkout, and CDK adds the
 project's own ECR registries to `trusted_registries` at synth time, so the
-effective allowlist is always larger than the configured one. Note that
+effective allowlist is always larger than the configured one (a policy without
+`trusted_registries` starts from the services' default list). Note that
 `gco jobs submit --dry-run` is a client-side `kubectl` parse, not an admission
 preview — it never consults this policy.
 

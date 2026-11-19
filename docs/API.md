@@ -2413,7 +2413,9 @@ deployed policy for two independent reasons:
   are reading.
 - CDK augments `trusted_registries` with the project's own ECR registry
   hostnames at synth time, so the effective allowlist is always strictly larger
-  than the configured one.
+  than the configured one. A policy without `trusted_registries` starts from
+  the services' default list (`gco/job_admission.py`
+  `DEFAULT_TRUSTED_REGISTRIES`) rather than from ECR alone.
 
 Because both the REST manifest processor and the SQS queue processor read the
 same environment variables, this endpoint describes both submission paths —
