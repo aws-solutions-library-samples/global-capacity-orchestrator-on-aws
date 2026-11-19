@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -389,11 +390,13 @@ class TestImageBuildSafety:
         assert run.call_args_list[0].kwargs == {
             "check": True,
             "cwd": str(context.resolve()),
+            "stdin": subprocess.DEVNULL,
             "capture_output": True,
             "text": True,
         }
         assert run.call_args_list[1] == call(
             ["podman", "push", uri],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=True,
@@ -425,6 +428,7 @@ class TestImageBuildSafety:
         assert run.call_args_list[0] == call(
             ["docker", "tag", "local/service:test", uri],
             check=True,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
         )

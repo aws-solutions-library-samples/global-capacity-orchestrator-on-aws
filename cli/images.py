@@ -221,6 +221,7 @@ class ImageManager:
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--short", "HEAD"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -431,7 +432,7 @@ class ImageManager:
         build_cmd.append(str(ctx))
 
         logger.info("Building image: %s", " ".join(build_cmd))
-        build_run_kwargs: dict[str, Any] = {"cwd": str(ctx)}
+        build_run_kwargs: dict[str, Any] = {"cwd": str(ctx), "stdin": subprocess.DEVNULL}
         if quiet:
             build_run_kwargs.update(capture_output=True, text=True)
         # check=True: a failed build must not fall through to the push below.
@@ -439,6 +440,7 @@ class ImageManager:
 
         push_result = subprocess.run(
             [runtime, "push", full_uri],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=True,
@@ -489,13 +491,14 @@ class ImageManager:
 
         full_uri = f"{self._registry_host()}/{self._repo_prefix}/{validated_name}:{validated_tag}"
 
-        tag_run_kwargs: dict[str, Any] = {}
+        tag_run_kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL}
         if quiet:
             tag_run_kwargs.update(capture_output=True, text=True)
         # check=True: a failed tag must not fall through to the push below.
         subprocess.run([runtime, "tag", local_image, full_uri], check=True, **tag_run_kwargs)
         push_result = subprocess.run(
             [runtime, "push", full_uri],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=True,

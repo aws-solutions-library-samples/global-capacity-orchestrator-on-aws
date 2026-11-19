@@ -665,6 +665,7 @@ class TestRuntimeCapabilities:
 
         run.assert_called_once_with(
             ["docker", "buildx", "version"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=15,
             check=False,
@@ -695,6 +696,7 @@ class TestRuntimeCapabilities:
 
         run.assert_called_once_with(
             ["finch", "pull", "--help"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,
@@ -806,6 +808,41 @@ class TestCopyExecution:
 
         assert run.call_count == 2
         assert run.call_args_list[-1].args[0][:2] == ["finch", "tag"]
+
+
+class TestChildStdin:
+    def test_children_never_read_the_callers_stdin(self):
+        """MIRROR-STDIN: the MCP server runs the mirror in-process, where its
+        stdin is the client's JSON-RPC stream. Every child gets /dev/null,
+        except the login, which is fed the password."""
+        item = mirror.MirrorItem(
+            source_ref="docker.io/example/image:v1",
+            dest_repo="gco/dockerhub/example/image",
+            dest_ref="registry.example.com/gco/dockerhub/example/image:v1",
+        )
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def run(cmd, **kwargs):
+            calls.append((list(cmd), kwargs))
+            return MagicMock(returncode=0, stdout="--all-platforms", stderr="")
+
+        with patch.object(mirror.subprocess, "run", side_effect=run):
+            mirror._runtime_has_buildx("docker")
+            mirror._runtime_supports_all_platforms("finch")
+            mirror.copy_image(item, runtime="docker", strategy="buildx", log=lambda _m: None)
+            mirror.runtime_login("docker", "registry.example.com", "AWS", "token", log=print)
+
+        assert [cmd[:2] for cmd, _ in calls] == [
+            ["docker", "buildx"],
+            ["finch", "pull"],
+            ["docker", "buildx"],
+            ["docker", "login"],
+        ]
+        for cmd, kwargs in calls:
+            if cmd[1] == "login":
+                assert kwargs["input"] == b"token" and "stdin" not in kwargs
+            else:
+                assert kwargs["stdin"] is subprocess.DEVNULL, cmd
 
 
 class TestRegistryAuthfile:

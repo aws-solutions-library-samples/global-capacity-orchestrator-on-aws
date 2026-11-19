@@ -17,6 +17,7 @@ inside ImageManager via :class:`unittest.mock.patch`.
 from __future__ import annotations
 
 import re
+import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -316,6 +317,49 @@ def test_images_build_runtime_detection(manager: ImageManager, runtime: str, tmp
     assert result["runtime"] == runtime
     assert result["tag"] == "v1"
     assert result["repository"] == "gco/my-app"
+
+
+def test_image_children_never_read_the_callers_stdin(manager: ImageManager, tmp_path: Any) -> None:
+    """MIRROR-STDIN: the MCP image tools run ImageManager in-process, where stdin
+    is the client's JSON-RPC stream. Every child gets /dev/null, except the
+    registry login, which is fed the password."""
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM scratch\n")
+    mock_ecr, _ = _ecr_with_repo_already_exists()
+    mock_ecr.put_lifecycle_policy.return_value = {}
+    mock_ecr.describe_repositories.return_value = {"repositories": []}
+    mock_ecr.get_authorization_token.return_value = {
+        "authorizationData": [{"authorizationToken": "QVdTOnRva2Vu"}]  # base64("AWS:token")
+    }
+    mock_ecr.describe_images.return_value = {"imageDetails": []}
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> MagicMock:
+        calls.append((list(cmd), kwargs))
+        return MagicMock(returncode=0, stdout="abc1234\n", stderr="")
+
+    with (
+        patch("cli.images.detect_container_runtime", return_value="docker"),
+        patch.object(manager, "_ecr_client", return_value=mock_ecr),
+        patch("cli.images.subprocess.run", side_effect=fake_run),
+    ):
+        manager.build(str(ctx), name="my-app", tag="v1")
+        manager.build(str(ctx), name="my-app", tag="v2", quiet=True)
+        manager.push("my-app", "v3", "my-app:local")
+        manager.push("my-app", "v4", "my-app:local", quiet=True)
+        assert manager._git_short_sha() == "abc1234"
+
+    assert [cmd[1] for cmd, _ in calls] == [
+        *("login", "build", "push") * 2,
+        *("login", "tag", "push") * 2,
+        "rev-parse",
+    ]
+    for cmd, kwargs in calls:
+        if cmd[1] == "login":
+            assert kwargs["input"] == b"token" and "stdin" not in kwargs
+        else:
+            assert kwargs["stdin"] is subprocess.DEVNULL, cmd
 
 
 def test_images_build_no_runtime_raises(manager: ImageManager, tmp_path: Any) -> None:

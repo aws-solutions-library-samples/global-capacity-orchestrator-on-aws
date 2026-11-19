@@ -339,6 +339,7 @@ def _runtime_has_buildx(runtime: str) -> bool:
         return (
             subprocess.run(  # fixed argv, no shell
                 [runtime, "buildx", "version"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=15,
                 check=False,
@@ -354,6 +355,7 @@ def _runtime_supports_all_platforms(runtime: str) -> bool:
     try:
         out = subprocess.run(  # fixed argv, no shell
             [runtime, "pull", "--help"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,
@@ -535,7 +537,7 @@ def copy_image(
     log(f"  copying {item.source_ref} -> {item.dest_ref}  [{strategy}]")
     for cmd in _copy_commands(item, runtime, strategy, authfile):
         result = subprocess.run(  # fixed argv, no shell
-            cmd, capture_output=True, text=True, check=False
+            cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False
         )
         if result.returncode != 0:
             raise RuntimeError(
