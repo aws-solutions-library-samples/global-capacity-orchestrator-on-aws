@@ -1993,6 +1993,11 @@ class GCOGlobalStack(Stack):
         - Daily backups retained for 35 days
         - Weekly backups retained for 90 days
         - All DynamoDB tables added to the backup selection
+
+        Point-in-time recovery for the tables comes from each table's own
+        ``point_in_time_recovery_specification``, not from this plan: AWS
+        Backup's continuous backup covers S3, RDS/Aurora and SAP HANA, not
+        DynamoDB, so both rules take snapshot backups of the tables.
         """
         # Create backup vault for storing backups
         self.backup_vault = backup.BackupVault(
@@ -2015,7 +2020,9 @@ class GCOGlobalStack(Stack):
                         minute="0",
                     ),
                     delete_after=Duration.days(35),
-                    enable_continuous_backup=True,  # Enable PITR for DynamoDB
+                    # No effect on DynamoDB, the only type in the selection
+                    # (see the docstring); the tables enable their own PITR.
+                    enable_continuous_backup=True,
                 ),
                 # Weekly backup - retained for 90 days
                 backup.BackupPlanRule(
@@ -2071,10 +2078,13 @@ class GCOGlobalStack(Stack):
           feature while still providing a safety net against accidental deletion.
         - Uses ``RemovalPolicy.DESTROY`` so a ``cdk destroy gco-global`` cleans up
           the key without operator intervention (iteration-loop posture).
-        - Grants encrypt/decrypt to the ``s3.amazonaws.com`` and
-          ``logs.<region>.amazonaws.com`` service principals via the key policy
-          so S3 server-side encryption and CloudWatch access-log delivery can use
-          the key without role-side grants.
+        - Grants encrypt/decrypt in the key policy to the ``s3.amazonaws.com``
+          service principal and to CloudWatch Logs in this Region
+          (``logs.<region>.amazonaws.com``). Neither stands in for the
+          role-side grants: SSE-KMS calls KMS with the permissions of the
+          principal that reads or writes an object, S3 server access logs are
+          written by ``logging.s3.amazonaws.com``, and no CloudWatch log group
+          uses this key.
 
         The key is exposed as ``self.cluster_shared_kms_key`` for tests and for
         ``_create_cluster_shared_bucket`` to reference. Role-side usage grants
@@ -2096,10 +2106,12 @@ class GCOGlobalStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # Key-policy grants for service principals that need to encrypt/decrypt
-        # on behalf of the bucket (S3 server-side encryption) and the access-logs
-        # bucket (CloudWatch Logs delivery). The actions match the standard
-        # service-principal pattern used by cdk's default key policies.
+        # Key-policy grants for the S3 service principal and for CloudWatch Logs
+        # in this Region. Objects in the two buckets are encrypted with the
+        # permissions of whoever writes them (the role-side grants), and the
+        # access-logs bucket is written by the S3 logging service, not by
+        # CloudWatch Logs. The actions match the standard service-principal
+        # pattern used by cdk's default key policies.
         kms_actions = [
             "kms:Encrypt",
             "kms:Decrypt",
@@ -2163,9 +2175,8 @@ class GCOGlobalStack(Stack):
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
         access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
 
-        # Dedicated access-logs bucket for Cluster_Shared_Bucket. Encrypted with
-        # the cluster-shared KMS key (the key policy grants the logs service
-        # principal encrypt/decrypt). Kept separate from model_bucket_access_logs
+        # Dedicated access-logs bucket for Cluster_Shared_Bucket, encrypted with
+        # the cluster-shared KMS key. Kept separate from model_bucket_access_logs
         # so operators can reason about each bucket's logs independently. Matches
         # the LifecycleRule used on `model_bucket_access_logs` so retention is
         # consistent across the two log sinks.
