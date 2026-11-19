@@ -230,11 +230,15 @@ Secret, or passed with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`.
 # In one terminal:
 gco monitoring open --region us-east-1 --via-ssm i-0123456789abcdef0
 
-# In another:
-gco monitoring users list
-gco monitoring users add --username alice --email alice@example.com --generate-password
-gco monitoring users remove --username alice --yes
+# In another (the Secret read opens its own tunnel on a free local port):
+gco monitoring users list --region us-east-1 --via-ssm i-0123456789abcdef0
+gco monitoring users add --username alice --email alice@example.com --generate-password \
+    --region us-east-1 --via-ssm i-0123456789abcdef0
+gco monitoring users remove --username alice --yes --region us-east-1 --via-ssm i-0123456789abcdef0
 ```
+
+Inside the VPC (or on a cluster whose public endpoint you can reach) drop
+`--via-ssm`. With `--admin-password` the Secret is not read at all.
 
 ## Admin credential rotation
 

@@ -4707,14 +4707,20 @@ gco monitoring open --service mlflow --region us-east-1 --via-ssm auto -y
 Manage Grafana users through the admin HTTP API, over an active
 `gco monitoring open` port-forward (default `http://localhost:3000`). Admin
 credentials are read from the `kube-prometheus-stack-grafana` Secret, or passed
-with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`. `users add` takes the
-new user's password from `--password` or `$GCO_GRAFANA_USER_PASSWORD` (which
-keeps it off the command line), or generates one with `--generate-password`.
+with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`. The Secret is read on
+the `--region` cluster (the CLI's default region otherwise) through its
+kubeconfig context, with a 60-second limit; from outside the VPC pass
+`--via-ssm INSTANCE_ID|auto` (with `--bastion-ttl-minutes` and `--yes`, as for
+`monitoring open`) so the read gets an SSM tunnel of its own, on a free local
+port next to the one `monitoring open` holds. Its route messages go to stderr.
+`users remove --yes` also skips the bastion prompt. `users add` takes the new
+user's password from `--password` or `$GCO_GRAFANA_USER_PASSWORD` (which keeps
+it off the command line), or generates one with `--generate-password`.
 
 ```bash
 gco monitoring users add --username alice --email alice@example.com --generate-password
 GCO_GRAFANA_USER_PASSWORD='...' gco monitoring users add --username bob
-gco monitoring users list [--as-json]
+gco monitoring users list [--as-json] [--region us-east-1] [--via-ssm auto -y]
 gco monitoring users remove --username alice --yes
 ```
 
