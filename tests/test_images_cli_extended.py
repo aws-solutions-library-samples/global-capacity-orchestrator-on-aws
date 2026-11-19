@@ -431,13 +431,47 @@ class TestReplicationGet:
             {"registryId": "123456789012"},
         ],
     )
-    def test_returns_empty_without_rules(
+    def test_returns_an_empty_rules_list_without_rules(
         self, manager: ImageManager, response: dict[str, Any]
     ) -> None:
+        """The usual document, so JSON/YAML keep its shape (it used to be ``{}``)."""
         ecr, stubber = _stubbed_ecr()
         stubber.add_response("describe_registry", response, {})
         with stubber, patch.object(manager, "_ecr_client", return_value=ecr):
-            assert manager.replication_get() == {}
+            assert manager.replication_get() == {
+                "registryId": "123456789012",
+                "policy": {"rules": []},
+            }
+
+    @pytest.mark.parametrize("output_format", ["json", "table"])
+    def test_the_cli_without_rules(self, manager: ImageManager, output_format: str) -> None:
+        """No rules: JSON printed the empty-output envelope {"status": "ok"}."""
+        from click.testing import CliRunner
+
+        from cli.main import cli
+
+        ecr, stubber = _stubbed_ecr()
+        stubber.add_response(
+            "describe_registry",
+            {"registryId": "123456789012", "replicationConfiguration": {"rules": []}},
+            {},
+        )
+        with (
+            stubber,
+            patch("cli.images.get_image_manager", return_value=manager),
+            patch.object(manager, "_ecr_client", return_value=ecr),
+        ):
+            got = CliRunner().invoke(
+                cli, ["--output", output_format, "images", "replication", "get"]
+            )
+        assert got.exit_code == 0, got.output
+        if output_format == "json":
+            assert json.loads(got.stdout) == {
+                "registryId": "123456789012",
+                "policy": {"rules": []},
+            }
+        else:
+            assert got.stdout == "ℹ No replication policy configured.\n"
 
     def test_re_raises_a_describe_registry_error(self, manager: ImageManager) -> None:
         ecr, stubber = _stubbed_ecr()

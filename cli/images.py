@@ -710,15 +710,15 @@ class ImageManager:
         return registry_id, {"rules": rules}
 
     def replication_get(self) -> dict[str, Any]:
-        """Return the current ECR replication configuration, or ``{}``.
+        """Return the registry's ECR replication configuration.
 
-        The historical ``policy`` response key is retained for CLI/API
-        compatibility, but its value now comes from the replication API rather
-        than the unrelated registry-permissions policy API.
+        ``{"registryId": ..., "policy": {"rules": [...]}}``, with an empty
+        ``rules`` list when none are configured. The historical ``policy``
+        response key is retained for CLI/API compatibility, but its value now
+        comes from the replication API rather than the unrelated
+        registry-permissions policy API.
         """
         registry_id, configuration = self._current_replication_configuration(self._ecr_client())
-        if not configuration.get("rules"):
-            return {}
         return {
             "registryId": registry_id,
             "policy": configuration,

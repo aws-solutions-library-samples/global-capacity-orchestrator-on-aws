@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from cli.main import cli
@@ -41,6 +42,14 @@ def mock_config() -> Any:
 def _patch_image_manager(mock_mgr: Any) -> Any:
     """Patch the lazy ``get_image_manager`` factory inside the command callbacks."""
     return patch("cli.images.get_image_manager", return_value=mock_mgr)
+
+
+def _real_config() -> Any:
+    """A real GCOConfig, so ``-o json``/``-o yaml`` reaches the command (``pass_config``
+    looks for a GCOConfig and would make a default, table-mode one for the stub)."""
+    from cli.config import GCOConfig
+
+    return patch("cli.main.get_config", return_value=GCOConfig())
 
 
 # ---------------------------------------------------------------------------
@@ -609,25 +618,52 @@ class TestLifecycleSet:
 # ---------------------------------------------------------------------------
 
 
+_NO_RULES = {"registryId": "123456789012", "policy": {"rules": []}}
+_ONE_RULE = {
+    "registryId": "123456789012",
+    "policy": {
+        "rules": [
+            {
+                "destinations": [{"region": "us-west-2", "registryId": "123456789012"}],
+                "repositoryFilters": [{"filter": "gco/", "filterType": "PREFIX_MATCH"}],
+            }
+        ]
+    },
+}
+
+
 class TestReplicationGet:
     def test_no_policy(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
-        mock_mgr.replication_get.return_value = {}
+        mock_mgr.replication_get.return_value = _NO_RULES
         with _patch_image_manager(mock_mgr):
             result = runner.invoke(cli, ["images", "replication", "get"])
         assert result.exit_code == 0
         assert "No replication" in result.output
+        assert "123456789012" not in result.output
+
+    @pytest.mark.parametrize(
+        ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
+    )
+    def test_no_policy_keeps_the_document_shape(
+        self, runner: CliRunner, output_format: str, parse: Any
+    ) -> None:
+        """With no rules, JSON/YAML printed the empty-output envelope {"status": "ok"}."""
+        mock_mgr = MagicMock()
+        mock_mgr.replication_get.return_value = _NO_RULES
+        with _real_config(), _patch_image_manager(mock_mgr):
+            result = runner.invoke(cli, ["-o", output_format, "images", "replication", "get"])
+        assert result.exit_code == 0, result.output
+        assert parse(result.stdout) == _NO_RULES
 
     def test_with_policy(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
-        mock_mgr.replication_get.return_value = {
-            "registryId": "123456789012",
-            "policy": {"rules": []},
-        }
+        mock_mgr.replication_get.return_value = _ONE_RULE
         with _patch_image_manager(mock_mgr):
             result = runner.invoke(cli, ["images", "replication", "get"])
         assert result.exit_code == 0
         assert "123456789012" in result.output
+        assert "No replication" not in result.output
 
     def test_failure(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
@@ -645,6 +681,19 @@ class TestReplicationStatus:
             result = runner.invoke(cli, ["images", "replication", "status"])
         assert result.exit_code == 0
         assert "No replication status" in result.output
+
+    @pytest.mark.parametrize(
+        ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
+    )
+    def test_empty_keeps_the_list_shape(
+        self, runner: CliRunner, output_format: str, parse: Any
+    ) -> None:
+        mock_mgr = MagicMock()
+        mock_mgr.replication_status.return_value = []
+        with _real_config(), _patch_image_manager(mock_mgr):
+            result = runner.invoke(cli, ["-o", output_format, "images", "replication", "status"])
+        assert result.exit_code == 0, result.output
+        assert parse(result.stdout) == []
 
     def test_renders_rows(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
