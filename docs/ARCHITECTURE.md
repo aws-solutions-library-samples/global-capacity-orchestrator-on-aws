@@ -350,6 +350,20 @@ The rule packs run during `cdk synth` and deployment. They are automated control
 - Cluster security group admits the Kubernetes API (443) only from itself (nodes, the `--via-ssm auto` bastion), from the security groups of the kubectl-applier, Helm installer and GA registration Lambdas, and with HyperPod on from its node security group; no rule admits the VPC CIDR
 - Pod security controls and admission-time workload validation enforced
 
+Every client inside the regional VPC that calls the private Kubernetes API, and the rule that lets it reach 443 on the control plane's network interfaces (they carry the EKS cluster security group):
+
+| Client | Its security group | Rule that admits it |
+|--------|--------------------|---------------------|
+| EKS Auto Mode nodes: the built-in pools and every GCO NodePool (all use the `default` NodeClass), and the NodeClasses `gco nodepools create-odcr` / `create-capacity-block` generate | The cluster security group | The cluster security group's own all-traffic rule from itself, which EKS creates |
+| The `--via-ssm auto` ephemeral bastion (`cli/ephemeral_bastion.py`) | The cluster security group, read from `eks:DescribeCluster` | The same self rule |
+| kubectl-applier Lambda | `KubectlLambdaSG` | 443 from that group |
+| Helm installer Lambda | `HelmInstallerLambdaSG` | 443 from that group |
+| GA registration Lambda | The security group CDK creates for the function | 443 from that group |
+| HyperPod nodes (`hyperpod.enabled`) | `<project>-hyperpod-sg-<region>` | All traffic from that group (`gco/stacks/hyperpod_cluster.py`) |
+| An instance you name with `--via-ssm <instance-id>`, a Client VPN endpoint, a VPC-attached CI runner | Yours | None until you add one: attach the cluster security group (`ClusterSecurityGroupId` stack output) or add your group as a 443 ingress source on it |
+
+The other compute GCO runs in or beside the VPC does not call the Kubernetes API: the GA deregistration and drift-detection Lambdas run outside the VPC and call AWS APIs only; the regional API proxy and inference streaming proxy Lambdas call the internal ALB, whose security groups the AWS Load Balancer Controller manages; the ALB reaches the API pods on 8443 through the controller's backend security group rules; AWS PCS nodes run Slurm (the API pods reach `slurmrestd` instead); SageMaker Studio and EMR Serverless run in the analytics stack's own VPC. No stack creates CodeBuild projects.
+
 **In-cluster network isolation** (`lambda/kubectl-applier-simple/manifests/03-network-policies.yaml`, enforced on EKS Auto Mode by the network policy controller that `06-network-policy-controller.yaml` switches on — `cdk.json` `eks_cluster.network_policy_enforcement`, default `true` — and by Calico in the kind CI job):
 
 | Namespace | Ingress | Egress |

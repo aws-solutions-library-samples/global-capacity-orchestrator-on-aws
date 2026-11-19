@@ -1,48 +1,76 @@
 """
-CDK assertion tests for the dedicated MCP server IAM role on the regional stack.
+The MCP server role (``McpServerRole``) on the regional stack.
 
-GCORegionalStack provisions an McpServerRole that the MCP server can
-assume at startup via GCO_MCP_ROLE_ARN. These tests synthesize the stack
-(patching DockerImageAsset and the helm-installer builder to avoid a
-Docker daemon dependency) and assert against the resulting CloudFormation
-template that the role exists exactly once, is described as the MCP
-role, and has only the least-privilege actions specified in the design —
-no broader access sneaks in via managed policies or catch-all statements.
+With ``GCO_MCP_ROLE_ARN`` set, the MCP server and every ``gco``/``kubectl``
+process it starts run as this role, so it must grant what the default
+(ungated) tools call and nothing that writes a stack, an image, a model or a
+bucket object, assumes or passes a role. ``gco/stacks/mcp_role_permissions.py``
+holds the statements; these tests pin them on one real synthesis (the Docker
+image assets and the Helm installer builder stood in), check the module's own
+contract (default tools it leaves out, ARNs per Region, the cdk-nag details),
+the EKS access entry and the RBAC it relies on, and that gco_mcp/README.md
+documents the boundary.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import aws_cdk as cdk
+import pytest
+import yaml
 from aws_cdk import assertions
 
-from tests.test_regional_stack import MockConfigLoader, TestRegionalStackSynthesis
+from gco.stacks.mcp_role_permissions import (
+    DEFAULT_TOOLS_OUTSIDE_ROLE,
+    MCP_EKS_ACCESS_POLICY,
+    MCP_KUBERNETES_GROUP,
+    UNSCOPED_READ_ACTIONS,
+    McpRoleScope,
+    mcp_server_role_statements,
+    wildcard_resources,
+)
+
+# Module import, not a name import: pytest would collect an imported Test* class again.
+from tests import test_regional_stack as regional_fixtures
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RBAC_MANIFEST = REPO_ROOT / "lambda" / "kubectl-applier-simple" / "manifests" / "02-rbac.yaml"
+
+# Actions the role may hold that are not reads: requests to the GCO API
+# (which authorizes each one itself), job submission to the GCO job queues,
+# Bedrock prompts for the capacity advisor, and starting a Logs Insights query.
+NON_READ_ACTIONS = {
+    "execute-api:Invoke",
+    "sqs:SendMessage",
+    "bedrock:InvokeModel",
+    "logs:StartQuery",
+}
+READ_VERBS = ("Describe", "List", "Get", "Search", "Query")
 
 
 def _synth(app: cdk.App, construct_id: str) -> assertions.Template:
-    """Synthesize the regional stack and return its Template.
-
-    Mirrors the helper in tests/test_drift_detection.py: mocks the Docker
-    image asset and helm-installer Lambda builder so tests do not depend on a
-    running Docker daemon.
-    """
+    """Synthesize the regional stack (MockConfigLoader) and return its Template."""
     from gco.stacks.regional_stack import GCORegionalStack
 
-    config = MockConfigLoader(app)
-
+    config = regional_fixtures.MockConfigLoader(app)
     with (
         patch("gco.stacks.regional_stack.ecr_assets.DockerImageAsset") as mock_docker,
         patch.object(
             GCORegionalStack,
             "_create_helm_installer_lambda",
-            TestRegionalStackSynthesis._mock_helm_installer,
+            regional_fixtures.TestRegionalStackSynthesis._mock_helm_installer,
         ),
     ):
         mock_image = MagicMock()
         mock_image.image_uri = "123456789012.dkr.ecr.us-east-1.amazonaws.com/test:latest"
         mock_docker.return_value = mock_image
-
         stack = GCORegionalStack(
             app,
             construct_id,
@@ -53,285 +81,384 @@ def _synth(app: cdk.App, construct_id: str) -> assertions.Template:
             ),
             env=cdk.Environment(account="123456789012", region="us-east-1"),
         )
-
         return assertions.Template.from_stack(stack)
 
 
-def _find_mcp_role(template: assertions.Template) -> tuple[str, dict]:
-    """Return the (logical_id, resource) for the MCP server IAM role.
+@pytest.fixture(scope="module")
+def template() -> assertions.Template:
+    return _synth(cdk.App(), "test-mcp-role")
 
-    Identified by the role description mentioning "MCP server".
-    """
-    roles = template.find_resources("AWS::IAM::Role")
-    matches = []
-    for logical_id, resource in roles.items():
-        description = resource.get("Properties", {}).get("Description", "")
-        if "MCP server" in description:
-            matches.append((logical_id, resource))
-    assert len(matches) == 1, (
-        f"Expected exactly one IAM role with 'MCP server' in description, found {len(matches)}"
-    )
+
+def _find_mcp_role(template: assertions.Template) -> tuple[str, dict]:
+    """The (logical_id, resource) of the role whose description names the MCP server."""
+    matches = [
+        (logical_id, resource)
+        for logical_id, resource in template.find_resources("AWS::IAM::Role").items()
+        if "MCP server" in resource.get("Properties", {}).get("Description", "")
+    ]
+    assert len(matches) == 1, f"expected one MCP server role, found {len(matches)}"
     return matches[0]
 
 
-def _policies_for_role(template: assertions.Template, role_logical_id: str) -> list[dict]:
-    """Return all AWS::IAM::Policy resources attached to the given role."""
-    policies = template.find_resources("AWS::IAM::Policy")
-    attached = []
-    for policy in policies.values():
-        roles = policy.get("Properties", {}).get("Roles", []) or []
-        for role_ref in roles:
-            if isinstance(role_ref, dict) and role_ref.get("Ref") == role_logical_id:
-                attached.append(policy)
-                break
-    return attached
-
-
 def _all_statements_for_role(template: assertions.Template, role_logical_id: str) -> list[dict]:
-    """Flatten all PolicyDocument statements for every policy attached to role."""
-    statements = []
-    for policy in _policies_for_role(template, role_logical_id):
-        doc = policy.get("Properties", {}).get("PolicyDocument", {})
-        statements.extend(doc.get("Statement", []))
+    statements: list[dict] = []
+    for policy in template.find_resources("AWS::IAM::Policy").values():
+        if {"Ref": role_logical_id} in policy["Properties"].get("Roles", []):
+            statements.extend(policy["Properties"]["PolicyDocument"]["Statement"])
     return statements
 
 
 def _actions_as_set(stmt: dict) -> set[str]:
-    """Normalize an Action property (str or list) into a set."""
     actions = stmt.get("Action", [])
-    if isinstance(actions, str):
-        actions = [actions]
-    return set(actions)
+    return {actions} if isinstance(actions, str) else set(actions)
 
 
-class TestMcpIamRole:
-    """Assertions for the dedicated MCP server IAM role."""
+def _flatten(value: Any) -> str:
+    """Render a template resource (string or Fn::Join) as one string."""
+    if isinstance(value, str):
+        return value
+    if "Fn::Join" in value:
+        return "".join(_flatten(part) for part in value["Fn::Join"][1])
+    if "Ref" in value:
+        return f"<{value['Ref']}>"
+    if "Fn::GetAtt" in value:
+        return "<" + ".".join(value["Fn::GetAtt"]) + ">"
+    raise AssertionError(f"unexpected resource shape: {value!r}")
 
-    def test_mcp_role_exists_with_description(self):
-        """An IAM role with 'MCP server' in description is synthesized."""
-        template = _synth(cdk.App(), "test-mcp-role-exists")
 
+def _resources(stmt: dict) -> list[str]:
+    resources = stmt["Resource"]
+    return [_flatten(r) for r in (resources if isinstance(resources, list) else [resources])]
+
+
+def _role_grants(template: assertions.Template) -> set[tuple[frozenset[str], tuple[str, ...]]]:
+    role_id, _ = _find_mcp_role(template)
+    return {
+        (frozenset(_actions_as_set(s)), tuple(sorted(_resources(s))))
+        for s in _all_statements_for_role(template, role_id)
+    }
+
+
+class TestMcpServerRole:
+    """The role as synthesized from the shipped regional stack."""
+
+    def test_role_holds_exactly_the_default_tool_statements(self, template):
+        """Every statement, actions and resources, as MockConfigLoader's deployment renders it."""
+        partition, account = "<AWS::Partition>", "123456789012"
+
+        def arn(service: str, region: str, resource: str, owner: str = account) -> str:
+            return f"arn:{partition}:{service}:{region}:{owner}:{resource}"
+
+        bucket = "arn:<AWS::Partition>:s3:::<ReadModelBucketName5A20EEB7.Parameter.Value>"
+        table = arn("dynamodb", "us-east-2", "table/gco-test-capacity-history")
+        log_group = "log-group:/aws/containerinsights/gco-test-*/application"
+        expected = {
+            (
+                frozenset({"execute-api:Invoke"}),
+                tuple(
+                    sorted(
+                        arn("execute-api", region, f"*/prod/*/{path}")
+                        for region in ("us-east-1", "us-east-2")
+                        for path in ("api/v1/*", "inference/*")
+                    )
+                ),
+            ),
+            (
+                frozenset(
+                    {
+                        "cloudformation:DescribeStacks",
+                        "cloudformation:ListStackResources",
+                        "cloudformation:GetTemplate",
+                    }
+                ),
+                (arn("cloudformation", "*", "stack/gco-test-*/*"),),
+            ),
+            (
+                frozenset({"ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"}),
+                tuple(
+                    sorted(
+                        [
+                            arn("ssm", "*", "parameter/gco-test/*"),
+                            arn("ssm", "*", "parameter/aws/service/sagemaker-hyperpod/*", ""),
+                        ]
+                    )
+                ),
+            ),
+            (
+                frozenset(
+                    {"eks:DescribeCluster", "eks:ListCapabilities", "eks:DescribeCapability"}
+                ),
+                tuple(
+                    sorted(
+                        [
+                            arn("eks", "*", "cluster/gco-test-*"),
+                            arn("eks", "*", "capability/gco-test-*/*"),
+                        ]
+                    )
+                ),
+            ),
+            (
+                frozenset({"sqs:SendMessage", "sqs:GetQueueAttributes"}),
+                (arn("sqs", "us-east-1", "gco-test-jobs-us-east-1"),),
+            ),
+            (
+                frozenset({"sqs:GetQueueAttributes"}),
+                (arn("sqs", "us-east-1", "gco-test-jobs-dlq-us-east-1"),),
+            ),
+            (
+                frozenset({"logs:StartQuery"}),
+                tuple(sorted([arn("logs", "*", log_group), arn("logs", "*", f"{log_group}:*")])),
+            ),
+            (frozenset({"s3:ListBucket"}), (bucket,)),
+            (frozenset({"dynamodb:Query"}), tuple(sorted([table, f"{table}/index/*"]))),
+            (
+                frozenset(
+                    {
+                        "ecr:DescribeImages",
+                        "ecr:GetLifecyclePolicy",
+                        "ecr:DescribeImageReplicationStatus",
+                    }
+                ),
+                (arn("ecr", "*", "repository/gco-test/*"),),
+            ),
+            (
+                frozenset(
+                    {
+                        "sagemaker:DescribeCluster",
+                        "sagemaker:ListTags",
+                        "sagemaker:DescribeTrainingPlan",
+                        "pcs:GetCluster",
+                        "pcs:ListComputeNodeGroups",
+                        "pcs:GetComputeNodeGroup",
+                    }
+                ),
+                tuple(
+                    sorted(
+                        [
+                            arn("sagemaker", "*", "cluster/*"),
+                            arn("sagemaker", "*", "training-plan/*"),
+                            arn("pcs", "*", "cluster/*"),
+                        ]
+                    )
+                ),
+            ),
+            (
+                frozenset({"bedrock:InvokeModel"}),
+                tuple(
+                    sorted(
+                        [
+                            arn("bedrock", "*", "foundation-model/*", ""),
+                            arn("bedrock", "*", "inference-profile/*"),
+                        ]
+                    )
+                ),
+            ),
+            (
+                frozenset({"cognito-idp:DescribeUserPool"}),
+                (arn("cognito-idp", "*", "userpool/*"),),
+            ),
+            (frozenset(UNSCOPED_READ_ACTIONS), ("*",)),
+        }
+        assert _role_grants(template) == expected
+
+    def test_role_reads_only_except_the_gco_api_and_job_submission(self, template):
+        """No role assumption or pass, no stack, image, model or object write."""
+        role_id, _ = _find_mcp_role(template)
+        for stmt in _all_statements_for_role(template, role_id):
+            assert stmt["Effect"] == "Allow"
+            assert "NotAction" not in stmt and "NotResource" not in stmt
+            for action in _actions_as_set(stmt):
+                service, _, verb = action.partition(":")
+                assert service not in {"iam", "sts"}, action
+                assert "*" not in action, action
+                assert action in NON_READ_ACTIONS or verb.startswith(READ_VERBS), action
+
+    def test_trust_policy_leaves_assumption_to_identity_policies(self, template):
+        """The account principal, sts:AssumeRole only: callers need their own permission."""
         _, role = _find_mcp_role(template)
         props = role["Properties"]
-        assert "MCP server" in props.get("Description", ""), (
-            f"Expected 'MCP server' in role description, got {props.get('Description')!r}"
+        [statement] = props["AssumeRolePolicyDocument"]["Statement"]
+        assert statement["Action"] == "sts:AssumeRole"
+        assert (
+            _flatten(statement["Principal"]["AWS"]) == "arn:<AWS::Partition>:iam::123456789012:root"
         )
+        assert "Condition" not in statement
+        assert "ManagedPolicyArns" not in props and "Policies" not in props
+        assert props["MaxSessionDuration"] == 12 * 3600
 
-    def test_mcp_role_has_describe_cluster_scoped_to_cluster_arn(self):
-        """eks:DescribeCluster is present and scoped to the cluster ARN (not '*')."""
-        template = _synth(cdk.App(), "test-mcp-role-eks")
+    def test_access_entry_is_read_only_kubernetes_access(self, template):
+        """The view access policy cluster-wide, plus the group 02-rbac.yaml binds."""
+        role_id, _ = _find_mcp_role(template)
+        entries = [
+            e["Properties"]
+            for e in template.find_resources("AWS::EKS::AccessEntry").values()
+            if e["Properties"]["PrincipalArn"] == {"Fn::GetAtt": [role_id, "Arn"]}
+        ]
+        assert entries == [
+            {
+                "AccessPolicies": [
+                    {
+                        "AccessScope": {"Type": "cluster"},
+                        "PolicyArn": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    "arn:",
+                                    {"Ref": "AWS::Partition"},
+                                    f":eks::aws:cluster-access-policy/{MCP_EKS_ACCESS_POLICY}",
+                                ],
+                            ]
+                        },
+                    }
+                ],
+                "ClusterName": {"Ref": "GCOEksCluster841A896A"},
+                "KubernetesGroups": [MCP_KUBERNETES_GROUP],
+                "PrincipalArn": {"Fn::GetAtt": [role_id, "Arn"]},
+                "Type": "STANDARD",
+            }
+        ]
+        assert MCP_EKS_ACCESS_POLICY == "AmazonEKSViewPolicy"
 
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        eks_stmts = [s for s in statements if "eks:DescribeCluster" in _actions_as_set(s)]
-        assert eks_stmts, "No statement granting eks:DescribeCluster found"
-
-        for stmt in eks_stmts:
-            assert stmt.get("Effect") == "Allow"
-            resources = stmt.get("Resource")
-            if isinstance(resources, str):
-                resources = [resources]
-            assert resources != ["*"], (
-                "eks:DescribeCluster must be scoped to the cluster ARN, not wildcard"
-            )
-            # Resource should be a Fn::GetAtt or a Ref to the cluster, not a
-            # bare wildcard string.
-            for r in resources:
-                assert r != "*", f"Unexpected wildcard resource on eks:DescribeCluster: {r!r}"
-
-    def test_mcp_role_has_s3_get_and_list_scoped_to_project_prefix(self):
-        """s3:GetObject and s3:ListBucket are scoped to the `{project}-*` prefix."""
-        template = _synth(cdk.App(), "test-mcp-role-s3")
-
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        s3_stmts = [s for s in statements if _actions_as_set(s) & {"s3:GetObject", "s3:ListBucket"}]
-        assert s3_stmts, "No statement granting s3:GetObject / s3:ListBucket found"
-
-        # Gather all S3 actions granted on this role.
-        granted_s3_actions: set[str] = set()
-        s3_resources: list = []
-        for stmt in s3_stmts:
-            assert stmt.get("Effect") == "Allow"
-            granted_s3_actions.update(a for a in _actions_as_set(stmt) if a.startswith("s3:"))
-            resources = stmt.get("Resource")
-            if isinstance(resources, str):
-                resources = [resources]
-            s3_resources.extend(resources)
-
-        assert "s3:GetObject" in granted_s3_actions
-        assert "s3:ListBucket" in granted_s3_actions
-
-        # Resources must reference the `{project_name}-*` pattern, never the
-        # bare "*" wildcard. MockConfigLoader.get_project_name() returns "gco"
-        # so we expect arn:aws:s3:::gco-* style resources.
-        assert s3_resources, "No S3 resources on statement"
-        for r in s3_resources:
-            assert r != "*", "S3 actions must not be granted on '*'"
-            if isinstance(r, str):
-                assert "arn:aws:s3:::" in r, f"Expected S3 ARN with project prefix, got {r!r}"
-                # Must contain a '-*' prefix pattern (e.g. "gco-*").
-                assert "-*" in r, f"Expected S3 resource to use '{{project}}-*' pattern, got {r!r}"
-
-    def test_mcp_role_has_cloudwatch_metrics_readonly(self):
-        """CloudWatch metrics read APIs are present (wildcard resource is acceptable)."""
-        template = _synth(cdk.App(), "test-mcp-role-cw")
-
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        required = {
-            "cloudwatch:GetMetricData",
-            "cloudwatch:GetMetricStatistics",
-            "cloudwatch:ListMetrics",
-        }
-        found: set[str] = set()
-        for stmt in statements:
-            if stmt.get("Effect") != "Allow":
-                continue
-            found.update(_actions_as_set(stmt) & required)
-
-        missing = required - found
-        assert not missing, f"MCP role is missing CloudWatch actions: {missing!r}"
-
-    def test_mcp_role_has_sqs_scoped_to_job_queue_arn(self):
-        """SQS send/describe actions are scoped to the job queue ARN, not wildcard."""
-        template = _synth(cdk.App(), "test-mcp-role-sqs")
-
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        required = {"sqs:SendMessage", "sqs:GetQueueUrl", "sqs:GetQueueAttributes"}
-        sqs_stmts = [s for s in statements if _actions_as_set(s) & required]
-        assert sqs_stmts, "No statement granting SQS actions found"
-
-        granted: set[str] = set()
-        for stmt in sqs_stmts:
-            assert stmt.get("Effect") == "Allow"
-            granted.update(a for a in _actions_as_set(stmt) if a.startswith("sqs:"))
-            resources = stmt.get("Resource")
-            if isinstance(resources, str):
-                resources = [resources]
-            # SQS actions must NOT be on wildcard - they must reference the
-            # job queue ARN (via Fn::GetAtt or similar).
-            for r in resources:
-                assert r != "*", "SQS actions must be scoped to the job queue ARN, not wildcard"
-
-        missing = required - granted
-        assert not missing, f"MCP role is missing SQS actions: {missing!r}"
-
-    def test_mcp_role_has_no_broader_permissions(self):
-        """Role must NOT grant iam:*, s3:DeleteObject, s3:PutObject, or *:*."""
-        template = _synth(cdk.App(), "test-mcp-role-no-broad")
-
-        role_logical_id, _ = _find_mcp_role(template)
-        statements = _all_statements_for_role(template, role_logical_id)
-
-        # Actions that must never appear on the MCP role.
-        forbidden_exact = {
-            "iam:*",
-            "*",
-            "*:*",
-            "s3:*",
-            "s3:DeleteObject",
-            "s3:PutObject",
-            "s3:DeleteBucket",
-            "ec2:*",
-            "sts:*",
-        }
-
-        # Also disallow any iam:Create/Delete/Put/Attach/Update actions.
-        forbidden_iam_prefixes = (
-            "iam:Create",
-            "iam:Delete",
-            "iam:Put",
-            "iam:Attach",
-            "iam:Update",
-            "iam:AddUser",
-            "iam:Pass",
-        )
-
-        for stmt in statements:
-            if stmt.get("Effect") != "Allow":
-                continue
-            actions = _actions_as_set(stmt)
-
-            for action in actions:
-                assert action not in forbidden_exact, (
-                    f"MCP role must not grant forbidden action {action!r}; statement: {stmt!r}"
-                )
-                assert not action.startswith("iam:"), (
-                    f"MCP role must not grant any iam:* action, got {action!r}"
-                )
-                for prefix in forbidden_iam_prefixes:
-                    assert not action.startswith(prefix), (
-                        f"MCP role must not grant {prefix}*, got {action!r}"
-                    )
-
-    def test_mcp_role_cfn_output_present(self):
-        """A CfnOutput named McpServerRoleArn must be exported."""
-        template = _synth(cdk.App(), "test-mcp-role-output")
-
+    def test_mcp_role_cfn_output_present(self, template):
         outputs = template.find_outputs("McpServerRoleArn")
-        assert outputs, "Expected a CfnOutput named 'McpServerRoleArn'"
-        # There should be exactly one such output.
-        assert len(outputs) == 1, (
-            f"Expected exactly one McpServerRoleArn output, found {len(outputs)}"
-        )
+        assert len(outputs) == 1
 
     def test_mcp_role_disabled_via_context(self):
-        """Setting mcp_server.enabled=false skips role creation entirely."""
-        app = cdk.App(context={"mcp_server": {"enabled": False}})
-        template = _synth(app, "test-mcp-role-disabled")
-
-        roles = template.find_resources("AWS::IAM::Role")
-        mcp_roles = [
+        """mcp_server.enabled=false creates no role, access entry or output."""
+        template = _synth(cdk.App(context={"mcp_server": {"enabled": False}}), "test-mcp-off")
+        roles = [
             r
-            for r in roles.values()
+            for r in template.find_resources("AWS::IAM::Role").values()
             if "MCP server" in r.get("Properties", {}).get("Description", "")
         ]
-        assert mcp_roles == [], (
-            f"MCP role should not be created when mcp_server.enabled=false; found {len(mcp_roles)}"
-        )
+        assert roles == []
+        groups = [
+            e["Properties"].get("KubernetesGroups")
+            for e in template.find_resources("AWS::EKS::AccessEntry").values()
+        ]
+        assert [MCP_KUBERNETES_GROUP] not in groups
+        assert not template.find_outputs("McpServerRoleArn")
 
-        # The CfnOutput should also be absent.
-        outputs = template.find_outputs("McpServerRoleArn")
-        assert not outputs, "McpServerRoleArn output should not exist when MCP role is disabled"
+
+class TestMcpRolePermissionsModule:
+    """``gco/stacks/mcp_role_permissions.py`` on its own."""
+
+    SCOPE = McpRoleScope(
+        partition="aws",
+        account="123456789012",
+        project_name="acme",
+        global_region="us-east-2",
+        api_regions=("eu-west-1", "us-east-1", "us-east-2"),
+        workload_regions=("us-east-1", "eu-west-1"),
+        model_bucket_arn="arn:aws:s3:::acme-global-modelbucket-example",
+    )
+
+    def test_one_api_pair_per_region_and_one_queue_per_workload_region(self):
+        statements = mcp_server_role_statements(self.SCOPE)
+        by_actions = {tuple(sorted(s.actions)): s.resources for s in statements}
+        assert by_actions[("execute-api:Invoke",)] == [
+            f"arn:aws:execute-api:{region}:123456789012:*/prod/*/{path}"
+            for region in ("eu-west-1", "us-east-1", "us-east-2")
+            for path in ("api/v1/*", "inference/*")
+        ]
+        assert by_actions[("sqs:GetQueueAttributes", "sqs:SendMessage")] == [
+            "arn:aws:sqs:us-east-1:123456789012:acme-jobs-us-east-1",
+            "arn:aws:sqs:eu-west-1:123456789012:acme-jobs-eu-west-1",
+        ]
+        assert by_actions[("sqs:GetQueueAttributes",)] == [
+            "arn:aws:sqs:us-east-1:123456789012:acme-jobs-dlq-us-east-1",
+            "arn:aws:sqs:eu-west-1:123456789012:acme-jobs-dlq-eu-west-1",
+        ]
+        assert by_actions[("s3:ListBucket",)] == ["arn:aws:s3:::acme-global-modelbucket-example"]
+
+    def test_wildcard_resources_are_deduplicated_details(self):
+        statements = mcp_server_role_statements(self.SCOPE)
+        details = wildcard_resources(statements + statements)
+        assert len(details) == len(set(details))
+        assert "Resource::*" in details
+        assert "Resource::arn:aws:cloudformation:*:123456789012:stack/acme-*/*" in details
+        assert "Resource::arn:aws:s3:::acme-global-modelbucket-example" not in details
+
+    def test_unscoped_reads_are_reads(self):
+        assert len(set(UNSCOPED_READ_ACTIONS)) == len(UNSCOPED_READ_ACTIONS)
+        for action in UNSCOPED_READ_ACTIONS:
+            assert action.partition(":")[2].startswith(READ_VERBS), action
+
+
+_DEFAULT_TOOLS = (
+    "import asyncio, json, sys; sys.path.insert(0, 'gco_mcp'); import run_mcp; "
+    "print(json.dumps(sorted(t.name for t in asyncio.run(run_mcp.mcp._list_tools()))))"
+)
+
+
+@pytest.fixture(scope="module")
+def default_tool_names() -> set[str]:
+    """The tools the server registers with every GCO_ENABLE_* flag unset."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GCO_ENABLE_")}
+    proc = subprocess.run(
+        [sys.executable, "-c", _DEFAULT_TOOLS],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return set(json.loads(proc.stdout.strip().splitlines()[-1]))
+
+
+class TestBoundaryIsDocumented:
+    """The default tools the role leaves out exist and are documented."""
+
+    def test_tools_outside_the_role_are_default_tools(self, default_tool_names):
+        assert len(default_tool_names) > 100
+        assert set(DEFAULT_TOOLS_OUTSIDE_ROLE) <= default_tool_names
+
+    def test_readme_names_each_tool_outside_the_role(self):
+        readme = (REPO_ROOT / "gco_mcp" / "README.md").read_text(encoding="utf-8")
+        section = readme.split("### IAM role (`GCO_MCP_ROLE_ARN`)", 1)[1].split("\n## ", 1)[0]
+        for tool in DEFAULT_TOOLS_OUTSIDE_ROLE:
+            assert f"`{tool}`" in section, tool
+
+    def test_rbac_binds_the_group_to_read_only_rules(self):
+        documents = [d for d in yaml.safe_load_all(RBAC_MANIFEST.read_text()) if d]
+        [binding] = [
+            d
+            for d in documents
+            if d["kind"] == "ClusterRoleBinding"
+            and any(s.get("name") == MCP_KUBERNETES_GROUP for s in d.get("subjects", []))
+        ]
+        assert binding["subjects"] == [
+            {"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": MCP_KUBERNETES_GROUP}
+        ]
+        [role] = [
+            d
+            for d in documents
+            if d["kind"] == "ClusterRole" and d["metadata"]["name"] == binding["roleRef"]["name"]
+        ]
+        assert role["rules"] == [
+            {"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list", "watch"]},
+            {
+                "apiGroups": ["karpenter.sh"],
+                "resources": ["nodepools"],
+                "verbs": ["get", "list", "watch"],
+            },
+        ]
 
 
 class TestNoDangerousPermissionsInStack:
     """Guardrail: no IAM policy in the stack should grant full-admin-style access."""
 
-    def test_no_iam_policy_grants_full_admin(self):
+    def test_no_iam_policy_grants_full_admin(self, template):
         """No IAM policy or managed policy grants '*:*', 'iam:*', or NotAction='*'."""
-        template = _synth(cdk.App(), "test-stack-no-admin")
-
-        # Check inline policies (AWS::IAM::Policy) and managed policies
-        # (AWS::IAM::ManagedPolicy).
-        policy_types = ["AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"]
-
         forbidden_actions = {"*", "*:*", "iam:*"}
-
-        for policy_type in policy_types:
+        for policy_type in ("AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"):
             for logical_id, resource in template.find_resources(policy_type).items():
                 doc = resource.get("Properties", {}).get("PolicyDocument", {})
                 for stmt in doc.get("Statement", []):
                     if stmt.get("Effect") != "Allow":
                         continue
-
-                    # Detect NotAction (effectively inverse wildcard).
-                    not_action = stmt.get("NotAction")
-                    if not_action is not None:
-                        raise AssertionError(
-                            f"Policy {logical_id} ({policy_type}) uses NotAction, "
-                            f"which is dangerous: {stmt!r}"
-                        )
-
-                    actions = _actions_as_set(stmt)
-                    bad = actions & forbidden_actions
-                    assert not bad, (
-                        f"Policy {logical_id} ({policy_type}) grants dangerous "
-                        f"action(s) {bad!r}; statement: {stmt!r}"
+                    assert stmt.get("NotAction") is None, (
+                        f"Policy {logical_id} ({policy_type}) uses NotAction: {stmt!r}"
                     )
+                    bad = _actions_as_set(stmt) & forbidden_actions
+                    assert not bad, f"Policy {logical_id} grants {bad!r}: {stmt!r}"

@@ -154,8 +154,10 @@ or AWS Systems Manager). `gco monitoring open` handles the forward and can build
 the SSM tunnel for you:
 
 ```bash
-# From inside the VPC (VPN / bastion / Cloud9): the endpoint is reachable, so a
-# plain forward works. Browse http://localhost:3000.
+# From a host in the VPC that the cluster security group admits on 443 (a
+# bastion or Cloud9 instance carrying that group, or a VPN endpoint whose group
+# you added as a source): the endpoint is reachable, so a plain forward works.
+# Browse http://localhost:3000.
 gco monitoring open --region us-east-1
 
 # From a laptop with no VPC route: tunnel to the private API endpoint through an

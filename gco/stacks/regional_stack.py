@@ -8,7 +8,9 @@ Resources Created:
     VPC & Networking:
         - VPC spanning every AZ in the region, public subnets (NAT), private subnets (EKS and ALB)
         - 2 NAT Gateways for high availability
-        - VPC endpoints for ECR, S3, STS, Secrets Manager, SSM, CloudWatch
+        - VPC endpoints from cdk.json ``vpc_endpoints``: S3 and DynamoDB gateway
+          endpoints by default; interface endpoints (STS, ECR, CloudWatch, SQS,
+          SSM, Secrets Manager, KMS, EKS, EFS, Bedrock, X-Ray) opt-in
         - VPC Flow Logs (CloudWatch Logs, 30-day retention)
 
     EKS Cluster (Auto Mode):
@@ -514,21 +516,35 @@ _MANDATORY_CHART_KEYS = frozenset({"aws_load_balancer_controller", "keda"})
 #: never start installing Argo CD or Crossplane on its next deploy.
 _OFF_BY_DEFAULT_CHART_KEYS = frozenset({"argocd", "crossplane"})
 
-#: Stack-delete Helm uninstall task budgets (minutes) for charts whose
-#: installer first deletes their custom resources (every discovered type,
-#: namespaced then cluster-scoped, with a finalizer-strip retry) before the
-#: ``helm uninstall`` itself. Every other non-LBC chart gets two minutes.
+#: Stack-delete Helm uninstall task budgets (minutes) for the charts whose
+#: installer deletes their custom resources before ``helm uninstall``
+#: (``CHART_CUSTOM_RESOURCE_API_GROUPS`` in lambda/helm-installer/handler.py).
+#: Every other chart but the LBC gets two minutes, which covers the 75-second
+#: Helm process cap. A budget covers the handler's sequence with every call at
+#: its own timeout: the 10 s release lookup, one 10 s discovery call per API
+#: group and scope (namespaced and cluster-scoped, or the release namespace
+#: alone for Argo CD), one 55 s delete per pass (a scope's last-deleted types
+#: get a pass of their own) and the Helm uninstall's process cap. A pass whose
+#: delete stalls goes on to strip finalizers and delete again, which can take
+#: longer; the task then times out and the stack delete is retried.
+#: tests/test_platform_addon_charts.py recomputes each sum from the handler.
 _UNINSTALL_TIMEOUT_MINUTES: dict[str, int] = {
-    # KEDA also gets a dedicated three-minute Helm deadline: it is the last
-    # chart in the chain, and Helm's wait covers finalizing its CRDs (see
-    # KEDA_UNINSTALL_TIMEOUT in lambda/helm-installer/handler.py).
+    # 10 + 4 x 10 + 2 x 55 + 195 = 355 s: KEDA also gets a dedicated
+    # three-minute Helm deadline (195 s cap), as the last chart in the chain
+    # whose Helm wait covers finalizing its CRDs (KEDA_UNINSTALL_TIMEOUT).
     "keda": 6,
+    # 10 + 2 x 10 + 2 x 55 + 75 = 215 s.
+    "kueue": 4,
+    # 10 + 1 x 10 + 2 x 55 + 75 = 205 s (release namespace only; AppProjects
+    # in a pass after the Applications).
     "argocd": 4,
-    "crossplane": 6,
-    # The Slinky cluster's NodeSets drain their Slurm nodes and carry
-    # job-protection PDBs; the installer deletes every slinky.slurm.net
-    # resource before `helm uninstall` so the controller is still there to
-    # clear the finalizers.
+    # 10 + 8 x 10 + 4 x 55 + 75 = 385 s (four API groups; packages in a pass
+    # after the definitions and Compositions, in both scopes).
+    "crossplane": 7,
+    # 10 + 2 x 10 + 2 x 55 + 75 = 215 s. The Slinky cluster's NodeSets drain
+    # their Slurm nodes and carry job-protection PDBs; the installer deletes
+    # every slinky.slurm.net resource before `helm uninstall` so the
+    # controller is still there to clear the finalizers.
     SLURM_CLUSTER_CHART_NAME: 4,
 }
 
@@ -914,6 +930,25 @@ def _helm_container_list_string(containers: list[dict[str, Any]]) -> str:
     )
 
 
+def _trusted_registries_base(job_policy: Mapping[str, Any]) -> list[str]:
+    """The operator's ``trusted_registries``, or the services' defaults when unset.
+
+    The stack adds the project's ECR registries before it renders the list,
+    so the rendered value is never empty and the services' own
+    empty-means-default fallback never applies. A policy without the key
+    therefore starts from the same defaults the services use
+    (``gco.job_admission.DEFAULT_TRUSTED_REGISTRIES``) rather than from an
+    empty list that would leave only ECR trusted. A list the operator wrote,
+    an empty one included, is kept as written.
+    """
+    from gco.job_admission import DEFAULT_TRUSTED_REGISTRIES
+
+    configured = job_policy.get("trusted_registries")
+    if configured is None:
+        return list(DEFAULT_TRUSTED_REGISTRIES)
+    return list(configured)
+
+
 def _augment_trusted_registries_with_project_ecr(
     base: list[str],
     *,
@@ -1250,12 +1285,6 @@ class GCORegionalStack(Stack):
         # (tracing.enabled + tracing.enable_transaction_search).
         self._create_transaction_search_resource()
 
-        # Create CloudFormation drift detection (daily schedule + SNS alerts)
-        self._create_drift_detection()
-
-        # Create dedicated IAM role for MCP server
-        self._create_mcp_role()
-
         # CloudWatch alarms must live in the Region of their metrics, so this
         # Region's queue, cluster and manifest-processor alarms (and their SNS
         # topic) are created here rather than in the monitoring stack.
@@ -1269,6 +1298,14 @@ class GCORegionalStack(Stack):
             job_queue=self.job_queue,
             job_dlq=self.job_dlq,
         )
+
+        # Create CloudFormation drift detection (daily schedule + SNS alerts).
+        # It grants reads for every resource type the stack holds when it
+        # runs, so only the MCP role and the outputs may come after it.
+        self._create_drift_detection()
+
+        # Create dedicated IAM role for MCP server
+        self._create_mcp_role()
 
         # Export cluster information
         self._create_outputs()
@@ -3581,6 +3618,8 @@ class GCORegionalStack(Stack):
         )
         reader.node.add_dependency(self.aws_custom_resource_role)
         bucket_arn = f"arn:{self.partition}:s3:::{reader.get_response_field('Parameter.Value')}"
+        # The MCP server role lists the same bucket (list_models).
+        self.model_bucket_arn = bucket_arn
 
         self.service_account_role.add_to_policy(
             iam.PolicyStatement(
@@ -3732,10 +3771,12 @@ class GCORegionalStack(Stack):
         pattern in ``GCOGlobalStack``:
 
         1. ``regional_shared_kms_key`` — a customer-managed KMS key with annual
-           rotation and a 7-day pending window on destroy. The key policy grants
-           the ``s3.amazonaws.com`` and ``logs.<region>.amazonaws.com`` service
-           principals encrypt/decrypt so S3 server-side encryption and access-log
-           delivery work without role-side grants.
+           rotation and a 7-day pending window on destroy. Its policy holds
+           CDK's account statement and the ``logging.s3.amazonaws.com`` grant
+           CDK adds for server access-log delivery into the KMS-encrypted
+           access-logs bucket. Nothing else is named: S3 encrypts and decrypts
+           objects with the requesting principal's own permissions
+           (``kms:ViaService``), and no CloudWatch Logs group uses the key.
         2. ``regional_shared_access_logs_bucket`` — the dedicated S3 access-logs
            destination for the primary bucket.
         3. ``regional_shared_bucket`` — the primary bucket. Its physical name
@@ -3793,45 +3834,13 @@ class GCORegionalStack(Stack):
             removal_policy=regional_shared_removal_policy,
         )
 
-        # Key-policy grants for the service principals that encrypt/decrypt on
-        # behalf of the bucket (S3 server-side encryption) and the access-logs
-        # bucket (CloudWatch/S3 log delivery).
-        kms_actions = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey",
-        ]
-
-        self.regional_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowS3ServiceEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
-        self.regional_shared_kms_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                sid="AllowCloudWatchLogsEncryptDecrypt",
-                effect=iam.Effect.ALLOW,
-                principals=[iam.ServicePrincipal(f"logs.{self.deployment_region}.amazonaws.com")],
-                actions=kms_actions,
-                resources=["*"],
-            )
-        )
-
         # Retention for the access-logs bucket honors the same `s3_access_logs`
         # context field used by the central buckets (default 90 days).
         s3_access_logs_ctx = self.node.try_get_context("s3_access_logs") or {}
         access_logs_retention_days = int(s3_access_logs_ctx.get("retention_days", 90))
 
         # Dedicated access-logs bucket for the regional bucket, encrypted with
-        # the regional KMS key (its key policy grants the logs service principal
-        # encrypt/decrypt).
+        # the regional KMS key.
         self.regional_shared_access_logs_bucket = s3.Bucket(
             self,
             "RegionalSharedAccessLogsBucket",
@@ -4392,9 +4401,7 @@ class GCORegionalStack(Stack):
             "{{INFERENCE_PROXY_ROLE_ARN}}": self.inference_proxy_role.role_arn,
             "{{HEALTH_MONITOR_ROLE_ARN}}": self.health_monitor_role.role_arn,
             "{{EFS_FILE_SYSTEM_ID}}": self.efs_file_system.file_system_id,
-            "{{EFS_ACCESS_POINT_ID}}": self.efs_access_point.access_point_id,
             "{{JOB_QUEUE_URL}}": self.job_queue.queue_url,
-            "{{JOB_QUEUE_ARN}}": self.job_queue.queue_arn,
             "{{DEPLOYMENT_TIMESTAMP}}": deployment_timestamp,
             # Resource thresholds
             "{{CPU_THRESHOLD}}": str(thresholds.cpu_threshold),
@@ -4445,7 +4452,7 @@ class GCORegionalStack(Stack):
             # path below — see ``{{QP_TRUSTED_REGISTRIES}}``.
             "{{MP_TRUSTED_REGISTRIES}}": ",".join(
                 _augment_trusted_registries_with_project_ecr(
-                    job_policy.get("trusted_registries", []),
+                    _trusted_registries_base(job_policy),
                     account=self.account,
                     regions=self.config.get_regions(),
                     global_region=self.config.get_global_region(),
@@ -4753,7 +4760,7 @@ class GCORegionalStack(Stack):
             ]
             image_replacements["{{QP_TRUSTED_REGISTRIES}}"] = ",".join(
                 _augment_trusted_registries_with_project_ecr(
-                    job_policy.get("trusted_registries", []),
+                    _trusted_registries_base(job_policy),
                     account=self.account,
                     regions=self.config.get_regions(),
                     global_region=self.config.get_global_region(),
@@ -4840,10 +4847,6 @@ class GCORegionalStack(Stack):
             image_replacements["{{FSX_FILE_SYSTEM_ID}}"] = self.fsx_file_system.ref
             image_replacements["{{FSX_DNS_NAME}}"] = self.fsx_file_system.attr_dns_name
             image_replacements["{{FSX_MOUNT_NAME}}"] = self.fsx_file_system.attr_lustre_mount_name
-            image_replacements["{{PRIVATE_SUBNET_ID}}"] = self.vpc.private_subnets[0].subnet_id
-            image_replacements["{{FSX_SECURITY_GROUP_ID}}"] = (
-                self.fsx_security_group.security_group_id
-            )
 
         # kro capability tenant RBAC (07-kro-tenant-access.yaml). The token is
         # emitted only when kro is enabled for this region; a disabled
@@ -7125,7 +7128,7 @@ class GCORegionalStack(Stack):
         self.fsx_file_system.node.add_dependency(self.fsx_security_group)
 
         # Create FSx CSI Driver add-on for Kubernetes integration
-        self._create_fsx_csi_driver_addon()
+        self._create_fsx_csi_driver_addon(self.fsx_file_system)
 
         # Output FSx information
         CfnOutput(
@@ -7157,8 +7160,10 @@ class GCORegionalStack(Stack):
         any shared state across pods.  Valkey Serverless auto-scales and
         requires no node management.
 
-        The cache is placed in the VPC private subnets and accessible from
-        any pod via the cluster security group.
+        The cache is placed in the VPC private subnets. Its security group
+        admits the Valkey port (6379) from the VPC CIDR rather than from the
+        cluster security group; pods take VPC addresses, so every pod can
+        reach it.
         """
         valkey_config = self.config.get_valkey_config()
         if not valkey_config.get("enabled", False):
@@ -7166,7 +7171,8 @@ class GCORegionalStack(Stack):
 
         from aws_cdk import aws_elasticache as elasticache
 
-        # Security group for Valkey (allow access from EKS cluster)
+        # Security group for Valkey: 6379 from the VPC CIDR (pods have VPC
+        # addresses), no egress.
         valkey_sg = ec2.SecurityGroup(
             self,
             "ValkeySG",
@@ -7498,11 +7504,11 @@ class GCORegionalStack(Stack):
         # so pods can retrieve credentials via the ConfigMap + Secrets Manager.
         self.aurora_secret.grant_read(self.service_account_role)
 
-    def _create_fsx_csi_driver_addon(self) -> None:
+    def _create_fsx_csi_driver_addon(self, file_system: fsx.CfnFileSystem) -> None:
         """Create FSx CSI Driver add-on for Kubernetes integration.
 
         The FSx CSI driver enables Kubernetes pods to mount FSx for Lustre
-        file systems as persistent volumes.
+        file systems as persistent volumes; ``file_system`` is the one it mounts.
         """
         # Create IAM role for FSx CSI Driver using IRSA + Pod Identity
         self.fsx_csi_role = GCORegionalStack._create_irsa_role(
@@ -7514,53 +7520,22 @@ class GCORegionalStack(Stack):
             namespaces=["kube-system"],
         )
 
-        # Add FSx CSI driver permissions
+        # The PersistentVolumes in 21-storage-fsx.yaml provision this file
+        # system statically, so the driver's controller never creates, resizes,
+        # tags or deletes one (and fsx-sc carries none of the parameters dynamic
+        # provisioning needs); the node plugin mounts with the Lustre client
+        # and calls no AWS API. What is left is DescribeFileSystems on this file
+        # system, which the controller's ValidateVolumeCapabilities calls. The
+        # driver calls no FSx volume (OpenZFS/ONTAP) or EC2 API.
         self.fsx_csi_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
-                actions=[
-                    "fsx:DescribeFileSystems",
-                    "fsx:DescribeVolumes",
-                    "fsx:CreateVolume",
-                    "fsx:DeleteVolume",
-                    "fsx:TagResource",
+                actions=["fsx:DescribeFileSystems"],
+                resources=[
+                    f"arn:{self.partition}:fsx:{self.deployment_region}:{self.account}:"
+                    f"file-system/{file_system.ref}"
                 ],
-                resources=["*"],
             )
-        )
-
-        self.fsx_csi_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "ec2:DescribeInstances",
-                    "ec2:DescribeVolumes",
-                    "ec2:DescribeVpcs",
-                    "ec2:DescribeSubnets",
-                    "ec2:DescribeSecurityGroups",
-                ],
-                resources=["*"],
-            )
-        )
-
-        # cdk-nag suppression: the FSx CSI driver role grants
-        # ec2:Describe* APIs that don't support resource-level scoping.
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
-        acknowledge_nag_findings(
-            self.fsx_csi_role,
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "reason": (
-                        "The FSx CSI driver role grants ec2:Describe* for volume "
-                        "and network discovery. These AWS APIs do not support "
-                        "resource-level IAM scoping — Resource: * is the only "
-                        "valid form."
-                    ),
-                    "appliesTo": ["Resource::*"],
-                },
-            ],
         )
 
         # Create FSx CSI Driver add-on
@@ -7914,32 +7889,27 @@ class GCORegionalStack(Stack):
         )
 
     def _create_mcp_role(self) -> None:
-        """Create dedicated IAM role for the MCP server.
+        """Create the IAM role the MCP server and the processes it starts run as.
 
-        The MCP server exposes GCO CLI tools to LLM agents. Without a dedicated
-        role, the server would inherit the full ambient credentials of the user
-        who launches it (often an administrator). This method creates a
-        least-privilege role that the MCP server can assume at startup via
-        ``GCO_MCP_ROLE_ARN``.
+        The MCP server exposes GCO CLI tools to LLM agents. With
+        ``GCO_MCP_ROLE_ARN`` set to this role (the ``McpServerRoleArn``
+        output), the server assumes it at startup and every ``gco`` and
+        ``kubectl`` process it starts runs as the role rather than with the
+        ambient credentials of whoever launched the server.
 
-        Permissions are scoped to the minimum needed by the tools exposed:
+        The permissions cover the tools the server registers with no
+        ``GCO_ENABLE_*`` flag, as ``gco/stacks/mcp_role_permissions.py``
+        derives them: the read-only AWS calls behind those tools,
+        ``execute-api:Invoke`` on the GCO APIs, and job submission to the
+        regional job queues. No statement lets the role assume or pass a role,
+        so CDK's bootstrap roles are out of its reach, and it cannot write a
+        stack, an image, a model or a bucket object. An EKS access entry gives
+        it read-only Kubernetes access to this Region's cluster.
 
-        - ``eks:DescribeCluster`` on this regional EKS cluster ARN only.
-        - ``s3:GetObject`` on model weights buckets. The model bucket lives in
-          the global stack, so we scope to the same name pattern used by the
-          service account role (``{project_name}-*``). This is a deliberate
-          compromise: a precise cross-stack ARN export would force a tight
-          dependency on the global stack, and cdk-nag will flag it anyway
-          because the bucket name is auto-generated.
-        - ``cloudwatch:GetMetricData`` / ``cloudwatch:ListMetrics``. These APIs
-          do not support resource-level IAM, so wildcard is required. Read-only.
-        - ``sqs:SendMessage`` scoped to this region's job queue ARN only.
-
-        The trust policy uses ``AccountRootPrincipal`` so any IAM user/role in
-        the account can assume it (gated by an explicit sts:AssumeRole
-        permission on the caller — standard AWS behavior). Operators who want
-        to restrict assumption further should add an external-id or principal
-        condition to the trust policy after deployment.
+        The trust policy names the account (``AccountRootPrincipal``), which
+        leaves the decision to IAM: a principal in the account can assume the
+        role only when its own identity policy allows ``sts:AssumeRole`` on the
+        role's ARN, so grant that to the people and hosts that run the server.
 
         Operators can disable this component entirely by setting
         ``mcp_server.enabled`` to ``false`` in cdk.json.
@@ -7949,65 +7919,66 @@ class GCORegionalStack(Stack):
         ):
             return
 
+        from gco.stacks.mcp_role_permissions import (
+            MCP_EKS_ACCESS_POLICY,
+            MCP_KUBERNETES_GROUP,
+            McpRoleScope,
+            mcp_server_role_statements,
+            wildcard_resources,
+        )
+        from gco.stacks.nag_suppressions import acknowledge_nag_findings
+
         project_name = self.config.get_project_name()
+        workload_regions = tuple(self.config.get_regions())
+        statements = mcp_server_role_statements(
+            McpRoleScope(
+                partition=self.partition,
+                account=self.account,
+                project_name=project_name,
+                global_region=self.config.get_global_region(),
+                api_regions=tuple(
+                    sorted({self.config.get_api_gateway_region(), *workload_regions})
+                ),
+                workload_regions=workload_regions,
+                model_bucket_arn=self.model_bucket_arn,
+            )
+        )
 
         self.mcp_server_role = iam.Role(
             self,
             "McpServerRole",
             assumed_by=iam.AccountRootPrincipal(),
             description=(
-                "Least-privilege role assumed by the GCO MCP server at startup. "
-                "Grants only the permissions needed by MCP tools: eks:DescribeCluster, "
-                "s3:GetObject on model buckets, cloudwatch read-only metrics, and "
-                "sqs:SendMessage to the regional job queue."
+                "Role the GCO MCP server and its gco and kubectl processes run as "
+                "(GCO_MCP_ROLE_ARN): read-only AWS access for the default tools, "
+                "execute-api:Invoke on the GCO APIs and job queue submission. "
+                "No role assumption or stack, image or model writes."
             ),
             max_session_duration=Duration.hours(12),
         )
+        for statement in statements:
+            self.mcp_server_role.add_to_policy(statement)
 
-        # eks:DescribeCluster on this region's cluster only
-        self.mcp_server_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["eks:DescribeCluster"],
-                resources=[self.cluster.cluster_arn],
-            )
-        )
-
-        # s3:GetObject on model weights buckets. Bucket name is auto-generated
-        # in the global stack, so we match the same prefix pattern used by the
-        # service account role.
-        self.mcp_server_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["s3:GetObject", "s3:ListBucket"],
-                resources=[
-                    f"arn:{self.partition}:s3:::{project_name}-*",
-                    f"arn:{self.partition}:s3:::{project_name}-*/*",
-                ],
-            )
-        )
-
-        # CloudWatch read-only metrics APIs. These APIs do not support
-        # resource-level IAM so wildcard is required.
-        self.mcp_server_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=[
-                    "cloudwatch:GetMetricData",
-                    "cloudwatch:GetMetricStatistics",
-                    "cloudwatch:ListMetrics",
-                ],
-                resources=["*"],
-            )
-        )
-
-        # sqs:SendMessage scoped to the regional job queue only
-        self.mcp_server_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                actions=["sqs:SendMessage", "sqs:GetQueueUrl", "sqs:GetQueueAttributes"],
-                resources=[self.job_queue.queue_arn],
-            )
+        # Read-only Kubernetes access to this Region's cluster for the
+        # kubectl-backed default tools: AmazonEKSViewPolicy (no Secrets, exec,
+        # port-forward or writes) plus the group 02-rbac.yaml binds to reading
+        # nodes and NodePools, which the view policy does not cover.
+        eks_l1.CfnAccessEntry(
+            self,
+            "McpServerAccessEntry",
+            cluster_name=self.cluster.cluster_name,
+            principal_arn=self.mcp_server_role.role_arn,
+            type="STANDARD",
+            kubernetes_groups=[MCP_KUBERNETES_GROUP],
+            access_policies=[
+                eks_l1.CfnAccessEntry.AccessPolicyProperty(
+                    policy_arn=(
+                        f"arn:{self.partition}:eks::aws:cluster-access-policy/"
+                        f"{MCP_EKS_ACCESS_POLICY}"
+                    ),
+                    access_scope=eks_l1.CfnAccessEntry.AccessScopeProperty(type="cluster"),
+                )
+            ],
         )
 
         # Export the role ARN so operators can set GCO_MCP_ROLE_ARN in their
@@ -8024,28 +7995,26 @@ class GCORegionalStack(Stack):
             export_name=f"{project_name}-mcp-server-role-arn-{self.deployment_region}",
         )
 
-        # cdk-nag suppressions: CloudWatch metrics APIs cannot be scoped.
-        from gco.stacks.nag_suppressions import acknowledge_nag_findings
-
         acknowledge_nag_findings(
             self.mcp_server_role,
             [
                 {
                     "id": "AwsSolutions-IAM5",
                     "reason": (
-                        "The CloudWatch metrics APIs (GetMetricData, "
-                        "GetMetricStatistics, ListMetrics) do not support "
-                        "resource-level IAM; wildcard resource is required. "
-                        "The S3 permissions use the {project_name}-* prefix "
-                        "pattern because the model weights bucket name is "
-                        "auto-generated by CDK in the global stack and a "
-                        "cross-stack ARN export would create tight stack "
-                        "coupling. All actions are read-only or scoped "
-                        "send-only (SQS)."
+                        "Read-only calls without resource-level permissions (EC2 "
+                        "capacity and zone describes, Pricing, Cost Explorer, "
+                        "CloudWatch metrics, Logs Insights results, ECR repository "
+                        "and registry listings, EFS/FSx describes, SageMaker and "
+                        "Service Quotas listings) use Resource:*. The other "
+                        "wildcards stay inside GCO: <project>-* stacks, clusters and "
+                        "Container Insights log groups, /<project>/ parameters, the "
+                        "<project>/ ECR repositories, the capacity-history table's "
+                        "indexes, the GCO APIs' prod stage paths, and HyperPod, PCS, "
+                        "training-plan, Cognito pool and Bedrock model ARNs, whose "
+                        "names are generated ids. Nothing lets the role assume or "
+                        "pass a role or write a stack, image, model or object."
                     ),
-                    "appliesTo": [
-                        "Resource::*",
-                    ],
+                    "appliesTo": wildcard_resources(statements),
                 },
             ],
         )
