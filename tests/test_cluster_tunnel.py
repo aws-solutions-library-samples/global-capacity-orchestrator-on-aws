@@ -19,10 +19,9 @@ request a cluster cannot honor fails before anything is provisioned.
 from __future__ import annotations
 
 import json
-import os
 import signal
 import threading
-import time
+from collections.abc import Iterator
 from typing import Any
 
 import click
@@ -1511,11 +1510,17 @@ class TestMonitoringOpenRoutes:
 
 
 def _signal_self(signum: int, events: list[str] | None = None) -> None:
-    """Deliver ``signum`` to this process; the tunnel's handler raises at once."""
+    """Deliver ``signum`` to this thread, the main one, where Python runs handlers.
+
+    ``signal.pthread_kill`` sends it to the calling thread and runs the pending
+    handler before returning, so a handler that raises does so here and nothing
+    has to wait for it. ``os.kill(os.getpid(), ...)`` lets the kernel give the
+    signal to any thread of the process (the worker has several), and then the
+    handler runs only at the main thread's next check.
+    """
     if events is not None:
         events.append("body")
-    os.kill(os.getpid(), signum)
-    time.sleep(5)  # pragma: no cover - the handler raises first
+    signal.pthread_kill(threading.get_ident(), signum)
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
@@ -1525,8 +1530,31 @@ class TestTerminationSignals:
     The SSM child runs in its own session, so neither the terminal's SIGHUP nor
     a signal sent to gco reaches it. With the default actions gco died without
     its finally blocks: the local port stayed bound and an ``auto`` bastion ran
-    until its TTL. These tests deliver the real signal to this process.
+    until its TTL. These tests deliver the real signal to this process, and
+    each starts with both signals at their default actions.
     """
+
+    @pytest.fixture(autouse=True)
+    def _default_actions(self) -> Iterator[None]:
+        """Set SIGTERM and SIGHUP to their default actions for the test, then restore them.
+
+        The tunnel takes over only a signal still at its default action, and a
+        test run inherits its dispositions from whatever started it. Under
+        ``nohup``, or a supervisor that ignores SIGHUP, SIGHUP arrives ignored,
+        the tunnel rightly leaves it ignored, and the SIGHUP case failed with
+        "DID NOT RAISE" on every run started that way.
+        """
+        saved = {
+            signum: signal.signal(signum, signal.SIG_DFL)
+            for signum in (signal.SIGTERM, signal.SIGHUP)
+        }
+        try:
+            yield
+        finally:
+            for signum, handler in saved.items():
+                # None: a handler installed outside Python, which signal.signal
+                # cannot reinstall.
+                signal.signal(signum, signal.SIG_DFL if handler is None else handler)
 
     @pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
     def test_a_signal_in_the_body_stops_the_tunnel_and_the_bastion(
@@ -1581,8 +1609,7 @@ class TestTerminationSignals:
         )
 
         def wait_for_ssm(*_a: object, **_k: object) -> None:
-            os.kill(os.getpid(), signal.SIGTERM)
-            time.sleep(5)  # pragma: no cover - the handler raises first
+            _signal_self(signal.SIGTERM)
 
         monkeypatch.setattr(eb, "wait_until_ssm_online", wait_for_ssm)
         with (
@@ -1604,7 +1631,7 @@ class TestTerminationSignals:
         seams = _Seams(monkeypatch, ACCESS["PRIVATE"])
 
         def teardown(fmt: Any, instance_id: str, region: str, project: str) -> None:
-            os.kill(os.getpid(), signal.SIGTERM)  # a supervisor repeating itself
+            _signal_self(signal.SIGTERM)  # a supervisor repeating itself
             seams.events.append(f"teardown:{instance_id}")
 
         monkeypatch.setattr(ct, "teardown_bastion", teardown)
@@ -1628,8 +1655,7 @@ class TestTerminationSignals:
         monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
 
         def held_open() -> None:
-            os.kill(os.getpid(), signal.SIGTERM)  # kill <pid>, a supervisor, an IDE stop
-            time.sleep(5)  # pragma: no cover - the handler raises first
+            _signal_self(signal.SIGTERM)  # kill <pid>, a supervisor, an IDE stop
 
         monkeypatch.setattr("cli.commands.cluster_cmd._block_until_interrupt", held_open)
         result = runner.invoke(
@@ -1659,10 +1685,7 @@ class TestTerminationSignals:
             ):
                 assert signal.getsignal(signal.SIGTERM) is harness_handler
                 assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
-                os.kill(os.getpid(), signal.SIGTERM)
-                deadline = time.monotonic() + 5
-                while not seen and time.monotonic() < deadline:
-                    time.sleep(0.01)
+                _signal_self(signal.SIGTERM)
             assert seen == [signal.SIGTERM]
         finally:
             signal.signal(signal.SIGTERM, previous_term)
