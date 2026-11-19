@@ -189,7 +189,7 @@ def test_estimate_spot_limited_capacity_score_three():
         patch.object(checker, "get_spot_placement_score", return_value={"regional": 3}),
         patch.object(checker, "get_spot_price_history", return_value=[]),
         patch.object(checker, "get_on_demand_price", return_value=None),
-        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+        patch.object(checker, "get_offered_availability_zones", return_value=["us-east-1a"]),
     ):
         estimates = checker._estimate_spot_capacity("g5.xlarge", "us-east-1", None)
     assert estimates[0].availability == "low"
@@ -633,7 +633,7 @@ def test_scored_estimate_names_pool_and_target_capacity():
         patch.object(checker, "get_spot_placement_score", return_value={"regional": 8}),
         patch.object(checker, "get_spot_price_history", return_value=[]),
         patch.object(checker, "get_on_demand_price", return_value=None),
-        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+        patch.object(checker, "get_offered_availability_zones", return_value=["us-east-1a"]),
     ):
         estimates = checker._estimate_spot_capacity("g5.xlarge", "us-east-1", None)
 
@@ -795,3 +795,53 @@ def test_pool_lookup_degrades_when_catalog_is_unavailable(monkeypatch, tmp_path)
         mock_ec2.get_spot_placement_scores.assert_not_called()
     finally:
         checker_module._pool_catalog_lookup.cache_clear()
+
+
+def _offerings_ec2(*zones: str) -> MagicMock:
+    """An EC2 client whose AZ-level offerings list exactly ``zones``."""
+    ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.return_value = [
+        {"InstanceTypeOfferings": [{"InstanceType": "g5.xlarge", "Location": z} for z in zones]}
+    ]
+    return ec2
+
+
+def test_scored_spot_estimate_lists_only_zones_that_offer_the_type():
+    """The scored branch used to emit one row per zone of the Region, so a
+    zone that does not sell the type was reported with the regional score."""
+    checker = _make_checker()
+    ec2 = _offerings_ec2("us-east-1a", "us-east-1c")
+    checker._session.client = MagicMock(return_value=ec2)
+    with (
+        patch.object(checker, "get_spot_placement_score", return_value={"regional": 8}),
+        patch.object(checker, "get_spot_price_history", return_value=[]),
+        patch.object(checker, "get_on_demand_price", return_value=None),
+        patch.object(
+            checker,
+            "get_availability_zones",
+            return_value=["us-east-1a", "us-east-1b", "us-east-1c"],
+        ),
+    ):
+        estimates = checker._estimate_spot_capacity("g5.xlarge", "us-east-1", None)
+
+    assert [e.availability_zone for e in estimates] == ["us-east-1a", "us-east-1c"]
+    ec2.get_paginator.assert_called_once_with("describe_instance_type_offerings")
+    ec2.get_paginator.return_value.paginate.assert_called_once_with(
+        LocationType="availability-zone",
+        Filters=[{"Name": "instance-type", "Values": ["g5.xlarge"]}],
+    )
+
+
+def test_offered_zones_lookup_failure_is_a_capacity_check_error():
+    """A failed lookup must not be reported as "offered in every zone"."""
+    from cli.capacity import CapacityCheckError
+
+    checker = _make_checker()
+    ec2 = MagicMock()
+    ec2.get_paginator.return_value.paginate.side_effect = _client_error("RequestLimitExceeded")
+    checker._session.client = MagicMock(return_value=ec2)
+    with (
+        patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+        pytest.raises(CapacityCheckError, match=r"us-east-1 offer g5\.xlarge"),
+    ):
+        checker.get_offered_availability_zones("g5.xlarge", "us-east-1")

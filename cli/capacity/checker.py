@@ -489,6 +489,29 @@ class CapacityChecker:
             logger.warning("Unexpected error getting AZs for %s: %s", region, e)
             return []
 
+    def get_offered_availability_zones(self, instance_type: str, region: str) -> list[str]:
+        """The available zones of ``region`` that offer ``instance_type``, in zone order.
+
+        Raises :class:`CapacityCheckError` when the offerings lookup fails, so a
+        failed check is never reported as "offered in every zone" (or in none).
+        """
+        zones = self.get_availability_zones(region)
+        try:
+            ec2 = self._session.client("ec2", region_name=region)
+            paginator = ec2.get_paginator("describe_instance_type_offerings")
+            offered: set[str] = set()
+            for page in paginator.paginate(
+                LocationType="availability-zone",
+                Filters=[{"Name": "instance-type", "Values": [instance_type]}],
+            ):
+                for offering in page["InstanceTypeOfferings"]:
+                    offered.add(offering["Location"])
+        except (ClientError, BotoCoreError) as e:
+            raise CapacityCheckError(
+                f"Could not check which Availability Zones of {region} offer {instance_type}: {e}"
+            ) from e
+        return [zone for zone in zones if zone in offered]
+
     def get_az_coverage(self, instance_type: str, region: str) -> float | None:
         """Get the fraction of AZs in a region that offer this instance type.
 
@@ -837,15 +860,14 @@ class CapacityChecker:
 
         on_demand_price = self.get_on_demand_price(instance_type, region)
 
-        # Get AZs in the region
-        azs = self.get_availability_zones(region)
-
         if placement_scores:
             # Use Spot Placement Score as primary signal
             pool_name = pool[0] if pool is not None else "unknown"
             regional_score = placement_scores.get("regional", 0)
 
-            for az in azs:
+            # One row per zone that sells the type: the regional score says
+            # nothing about a zone where the type cannot launch at all.
+            for az in self.get_offered_availability_zones(instance_type, region):
                 # Try to get AZ-specific score, fall back to regional
                 az_id = az  # Note: might need to map zone name to zone ID
                 score = placement_scores.get(az_id, regional_score)

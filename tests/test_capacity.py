@@ -1394,7 +1394,9 @@ class TestCapacityCheckerEstimateSpotWithPlacementScores:
                     return_value={"regional": 9, "use1-az1": 9},
                 ),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -1419,7 +1421,9 @@ class TestCapacityCheckerEstimateSpotWithPlacementScores:
                     return_value={"regional": 6},
                 ),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -1443,7 +1447,9 @@ class TestCapacityCheckerEstimateSpotWithPlacementScores:
                     return_value={"regional": 2},
                 ),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -2096,7 +2102,9 @@ class TestCapacityCheckerSpotEstimationWithPlacementScore:
                         SpotPriceInfo("g4dn.xlarge", "us-east-1a", 0.30, 0.30, 0.25, 0.35, 0.9)
                     ],
                 ),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -2116,7 +2124,9 @@ class TestCapacityCheckerSpotEstimationWithPlacementScore:
             with (
                 patch.object(checker, "get_spot_placement_score", return_value={"regional": 6}),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
@@ -2136,7 +2146,9 @@ class TestCapacityCheckerSpotEstimationWithPlacementScore:
             with (
                 patch.object(checker, "get_spot_placement_score", return_value={"regional": 2}),
                 patch.object(checker, "get_spot_price_history", return_value=[]),
-                patch.object(checker, "get_availability_zones", return_value=["us-east-1a"]),
+                patch.object(
+                    checker, "get_offered_availability_zones", return_value=["us-east-1a"]
+                ),
                 patch.object(checker, "get_on_demand_price", return_value=1.0),
             ):
                 estimates = checker._estimate_spot_capacity("g4dn.xlarge", "us-east-1", None)
