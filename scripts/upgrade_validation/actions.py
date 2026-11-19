@@ -1,10 +1,12 @@
 """The upgrade-validation actions.
 
-Five are new: ``preflight`` (the release preflight plus the base release),
+Six are new: ``preflight`` (the release preflight plus the base release),
 ``prepare`` (the private workspace), ``deploy`` (the base release, deployed by
 its own ``gco``), ``sentinels`` and ``upgrade`` (the base release's ``gco
-upgrade`` to this commit), and ``verify-upgrade``. The rest of the registry
-reuses the release harness's handlers unchanged.
+upgrade`` to this commit), and ``verify-upgrade``. ``topology`` runs the
+release harness's check against the cdk.json the upgraded deployment was
+synthesized from. The rest of the registry reuses the release harness's
+handlers unchanged.
 
 ``deploy`` and ``upgrade`` each run one long ``gco`` subprocess inside a
 *phase*. The phase checkpoints the AWS server time before the command starts,
@@ -26,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from scripts.live_release_validation.actions import action_preflight
+from scripts.live_release_validation.actions import action_preflight, action_topology
 from scripts.live_release_validation.cleanup.local_images import (
     prune_local_cdk_asset_images_safely,
 )
@@ -757,6 +759,53 @@ def action_upgrade(ctx: RunContext) -> dict[str, Any]:
             {"phase": copy.deepcopy(phase)},
         )
     return {"phase": copy.deepcopy(phase)}
+
+
+# ─── topology ───────────────────────────────────────────────────────
+
+
+def _upgraded_cdk_context(ctx: RunContext) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The cdk.json context the upgraded deployment was synthesized from, with its evidence.
+
+    ``gco upgrade`` keeps the base checkout's cdk.json byte for byte across its
+    checkout, so the redeploy reads the base release's settings plus the run's,
+    not this checkout's cdk.json. The topology check compares the deployment
+    with some of them (``kubernetes_version``, the regional API): read from
+    this checkout, a release that changes one would be checked against a value
+    the upgraded deployment never used. The file is read as it is now, which
+    is what the redeploy read; ``verify-upgrade`` fails the run if it is not
+    the one the run wrote.
+    """
+    path = _workspace(ctx).clone / "cdk.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"Could not read the upgraded checkout's cdk.json {path}: {exc}"
+        ) from exc
+    context = document.get("context") if isinstance(document, dict) else None
+    if not isinstance(context, dict):
+        raise RuntimeError(f"The upgraded checkout's cdk.json {path} has no context object")
+    differing = [
+        key
+        for key in ("project_name", "deployment_regions")
+        if context.get(key) != ctx.cdk_context.get(key)
+    ]
+    if differing:
+        raise RuntimeError(
+            f"The upgraded checkout's cdk.json deploys a different {' and '.join(differing)} "
+            "than this checkout; the topology check and the teardown would not cover it"
+        )
+    digest = sha256_file(path)
+    written = ((_state(ctx).get("workspace") or {}).get("cdk_json") or {}).get("sha256")
+    return context, {"path": str(path), "sha256": digest, "preserved": digest == written}
+
+
+def action_upgraded_topology(ctx: RunContext) -> dict[str, Any]:
+    """Run the release topology check against the cdk.json the upgrade redeployed from."""
+    context, source = _upgraded_cdk_context(ctx)
+    details = action_topology(copy.replace(ctx, cdk_context=context))
+    return {**details, "cdk_json": source}
 
 
 # ─── verify-upgrade ─────────────────────────────────────────────────

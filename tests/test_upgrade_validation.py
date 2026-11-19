@@ -307,9 +307,11 @@ class TestActionRegistry:
 
         registry = build_action_registry()
         assert registry["baseline"].handler is release_actions.action_baseline
-        assert registry["topology"].handler is release_actions.action_topology
         assert registry["destroy"].handler is release_actions.action_destroy
         assert registry["final-inventory"].handler is release_actions.action_final_inventory
+        # The topology check is the release one, read against the preserved cdk.json.
+        assert registry["topology"].handler is actions.action_upgraded_topology
+        assert actions.action_topology is release_actions.action_topology
 
     def test_the_runbook_contract_table_matches_the_registry(self) -> None:
         rows = []
@@ -1928,6 +1930,136 @@ class TestUpgradeAction:
         monkeypatch.setattr(actions, "_run_step", lambda *_a, **_k: pytest.fail("must not rerun"))
         assert actions.action_upgrade(ctx) == {"phase": phase}
         assert settled == ["reconcile"]
+
+
+# ─── topology ────────────────────────────────────────────────────────
+
+
+class TestUpgradedTopology:
+    """The release topology check, read against the cdk.json the upgrade redeployed from.
+
+    ``gco upgrade`` keeps the base checkout's cdk.json byte for byte, so the
+    upgraded stacks carry the base release's settings, not this checkout's.
+    """
+
+    @pytest.fixture
+    def upgraded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+        from scripts.live_release_validation.actions import topology as release_topology
+
+        settings = _settings(tmp_path)
+        workspace = Workspace(settings.workspace_dir)
+        workspace.clone.mkdir(parents=True)
+        preserved = workspace.clone / "cdk.json"
+        preserved.write_text(_cdk_json(kubernetes_version="1.37"), encoding="utf-8")
+        ctx = _ctx(
+            settings,
+            state={
+                "target_stack_regions": dict(_TARGETS),
+                actions.STATE_KEY: {
+                    "workspace": {"cdk_json": {"sha256": workspace_module.sha256_file(preserved)}}
+                },
+            },
+        )
+        # This checkout's cdk.json moved on: the candidate release bumps the minor.
+        ctx.cdk_context = {**ctx.cdk_context, "kubernetes_version": "1.38"}
+        ctx.deployment_regions = (_REGION,)
+        cluster = {"status": "ACTIVE", "version": "1.37", "arn": "arn:cluster"}
+        clients = {
+            "eks": MagicMock(name="eks"),
+            "dynamodb": MagicMock(name="dynamodb"),
+        }
+        clients["eks"].describe_cluster.side_effect = lambda name: {"cluster": dict(cluster)}
+        clients["dynamodb"].describe_table.return_value = {"Table": {"TableStatus": "ACTIVE"}}
+        ctx.session.client.side_effect = lambda service, region_name=None: clients[service]
+        ctx.session.get_partition_for_region.return_value = "aws"
+        ctx.aws_client.get_api_endpoint.return_value = SimpleNamespace(
+            url="https://api.example.com"
+        )
+        ctx.job_manager = MagicMock(name="job_manager")
+        ctx.job_manager.get_queue_status.return_value = {}
+        seen: list[dict[str, Any]] = []
+
+        def describe(_session: Any, region: str, name: str) -> dict[str, Any]:
+            return {"stack_id": f"arn:stack/{name}", "status": "UPDATE_COMPLETE"}
+
+        def health(ctx: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+            seen.append(ctx.cdk_context)
+            return [{"scope": "global", "region": None, "payload": {"status": "healthy"}}]
+
+        for name, replacement in {
+            "_reconcile_stack_ownership": lambda ctx: None,
+            "describe_stack": describe,
+            "_record_stack_identity": lambda *_args: None,
+            "_converge_region_addons": lambda ctx, **_kwargs: None,
+            "_alb_https_target_evidence": lambda ctx, **_kwargs: {"targets": "healthy"},
+            "_health_warmup_samples": lambda ctx, **_kwargs: [],
+            "_health_stability_samples": health,
+            "_metrics_reachability_samples": lambda ctx, **_kwargs: [],
+        }.items():
+            monkeypatch.setattr(release_topology, name, replacement)
+        return SimpleNamespace(
+            ctx=ctx, workspace=workspace, preserved=preserved, cluster=cluster, seen=seen
+        )
+
+    def test_the_cluster_is_compared_with_the_preserved_cdk_json(self, upgraded: Any) -> None:
+        details = build_action_registry()["topology"].handler(upgraded.ctx)
+        assert details["clusters"][_REGION]["version"] == "1.37"
+        assert details["cdk_json"] == {
+            "path": str(upgraded.preserved),
+            "sha256": workspace_module.sha256_file(upgraded.preserved),
+            "preserved": True,
+        }
+        # Every check the action runs sees the preserved file, and the run's
+        # own context is left as it was for the actions that follow.
+        assert upgraded.seen[0]["kubernetes_version"] == "1.37"
+        assert upgraded.ctx.cdk_context["kubernetes_version"] == "1.38"
+
+    def test_a_cluster_that_ignored_the_preserved_cdk_json_fails(self, upgraded: Any) -> None:
+        # The upgraded deployment matches this checkout's cdk.json, not the file
+        # it was deployed from: the redeploy did not honor the preserved file.
+        upgraded.cluster["version"] = "1.38"
+        with pytest.raises(RuntimeError, match=r"runs Kubernetes '1\.38'.*is '1\.37'"):
+            build_action_registry()["topology"].handler(upgraded.ctx)
+
+    def test_a_rewritten_cdk_json_is_still_what_the_check_reads(self, upgraded: Any) -> None:
+        upgraded.preserved.write_text(_cdk_json(kubernetes_version="1.37", extra=1))
+        details = build_action_registry()["topology"].handler(upgraded.ctx)
+        # verify-upgrade fails the run for the rewrite; the evidence says so here too.
+        assert details["cdk_json"]["preserved"] is False
+
+    @pytest.mark.parametrize(
+        ("content", "message"),
+        [
+            (None, "Could not read the upgraded checkout's cdk.json"),
+            ("{", "Could not read the upgraded checkout's cdk.json"),
+            ("[]", "has no context object"),
+            (
+                _cdk_json(project_name="other", kubernetes_version="1.37"),
+                "deploys a different project_name than this checkout",
+            ),
+            (
+                json.dumps(
+                    {
+                        "context": {
+                            "project_name": _PROJECT,
+                            "deployment_regions": {**_REGIONS, "regional": ["us-west-2"]},
+                        }
+                    }
+                ),
+                "deploys a different deployment_regions than this checkout",
+            ),
+        ],
+    )
+    def test_an_unusable_preserved_cdk_json_fails_before_any_check(
+        self, upgraded: Any, content: str | None, message: str
+    ) -> None:
+        if content is None:
+            upgraded.preserved.unlink()
+        else:
+            upgraded.preserved.write_text(content, encoding="utf-8")
+        with pytest.raises(RuntimeError, match=message):
+            build_action_registry()["topology"].handler(upgraded.ctx)
+        assert upgraded.seen == []
 
 
 # ─── verify-upgrade ──────────────────────────────────────────────────
