@@ -137,11 +137,14 @@ class TestCannedQueries:
         assert "date >= date_format(date_add('day', -7" in sql
 
     def test_cost_by_namespace_region_filter_is_parameterized(self):
+        """Athena substitutes an execution parameter as SQL text, and a string
+        must be a quoted literal: the bare value ran `region = us-east-1`,
+        which Athena reads as the arithmetic `us - east - 1` (CM13)."""
         analytics, athena = _analytics()
         analytics.cost_by_namespace(days=7, region="us-east-1")
         kwargs = athena.start_query_execution.call_args.kwargs
         assert "region = ?" in kwargs["QueryString"]
-        assert kwargs["ExecutionParameters"] == ["us-east-1"]
+        assert kwargs["ExecutionParameters"] == ["'us-east-1'"]
 
     def test_cost_by_region_groups_by_region(self):
         analytics, athena = _analytics()
@@ -168,8 +171,16 @@ class TestCannedQueries:
         analytics.cost_over_time(days=14, namespace="gco-jobs'; DROP TABLE x")
         kwargs = athena.start_query_execution.call_args.kwargs
         assert "namespace = ?" in kwargs["QueryString"]
-        assert kwargs["ExecutionParameters"] == ["gco-jobs'; DROP TABLE x"]
+        # One string literal, its quote doubled, so the value cannot end it.
+        assert kwargs["ExecutionParameters"] == ["'gco-jobs''; DROP TABLE x'"]
         assert "DROP TABLE" not in kwargs["QueryString"]
+
+    def test_cost_over_time_plain_namespace_is_a_string_literal(self):
+        analytics, athena = _analytics()
+        analytics.cost_over_time(days=14, namespace="gco-jobs")
+        assert athena.start_query_execution.call_args.kwargs["ExecutionParameters"] == [
+            "'gco-jobs'"
+        ]
 
     def test_cost_over_time_rejects_unknown_granularity(self):
         analytics, _ = _analytics()
