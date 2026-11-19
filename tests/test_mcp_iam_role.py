@@ -3,8 +3,8 @@ The MCP server role (``McpServerRole``) on the regional stack.
 
 With ``GCO_MCP_ROLE_ARN`` set, the MCP server and every ``gco``/``kubectl``
 process it starts run as this role, so it must grant what the default
-(ungated) tools call and nothing that writes a stack, an image, a model or a
-bucket object, assumes or passes a role. ``gco/stacks/mcp_role_permissions.py``
+(ungated) tools call and nothing that writes a stack, an image, a model, a
+bucket object or an inference endpoint record, assumes or passes a role. ``gco/stacks/mcp_role_permissions.py``
 holds the statements; these tests pin them on one real synthesis (the Docker
 image assets and the Helm installer builder stood in), check the module's own
 contract (default tools it leaves out, ARNs per Region, the cdk-nag details),
@@ -212,7 +212,7 @@ class TestMcpServerRole:
             ),
             (frozenset({"s3:ListBucket"}), (bucket,)),
             (frozenset({"dynamodb:Query"}), tuple(sorted([table, f"{table}/index/*"]))),
-            (frozenset({"dynamodb:Scan"}), (endpoints,)),
+            (frozenset({"dynamodb:GetItem", "dynamodb:Scan"}), (endpoints,)),
             (
                 frozenset(
                     {
@@ -464,6 +464,240 @@ class TestMcpRolePermissionsModule:
                 f"dynamodb:{operation}" in statement.actions and arn in statement.resources
                 for statement in statements
             ), (operation, arn)
+
+
+_ACME_CDK = {
+    "app": "python3 app.py",
+    "context": {
+        "project_name": "acme",
+        "deployment_regions": {
+            "global": "us-east-2",
+            "api_gateway": "us-east-2",
+            "monitoring": "us-east-2",
+            "regional": ["us-east-1", "us-west-2"],
+        },
+    },
+}
+_ACME_ENDPOINTS = "acme-inference-endpoints"
+_IMAGE = "vllm/vllm-openai:v0.32.0"
+_NEW_IMAGE = "vllm/vllm-openai:v0.33.0"
+_INFERENCE_RESOURCE = "gco://inference/{endpoint_name}"
+
+# Every default tool in gco_mcp/tools/inference.py, and the inference resource,
+# with arguments that take its happy path on an endpoint the fixture seeds.
+_INFERENCE_TOOL_CALLS: dict[str, dict[str, Any]] = {
+    "list_inference_endpoints": {},
+    "inference_status": {"name": "ep"},
+    "mooncake_topology_status": {"name": "mc-topology"},
+    "invoke_inference": {"name": "ep", "prompt": "hello"},
+    "chat_inference": {"name": "ep", "messages": [{"role": "user", "content": "hello"}]},
+    "inference_health": {"name": "ep"},
+    "list_endpoint_models": {"name": "ep"},
+    _INFERENCE_RESOURCE: {"endpoint_name": "ep"},
+    "deploy_inference": {"name": "new-ep", "image": _IMAGE, "region": "us-east-1"},
+    "deploy_disaggregated_inference": {"name": "new-pd", "image": _IMAGE, "region": "us-east-1"},
+    "scale_inference": {"name": "scale-ep", "replicas": 2},
+    "update_inference_image": {"name": "image-ep", "image": _NEW_IMAGE},
+    "stop_inference": {"name": "stop-ep"},
+    "start_inference": {"name": "start-ep"},
+    "add_inference_region": {"name": "add-ep", "region": "us-west-2"},
+    "remove_inference_region": {"name": "remove-ep", "region": "us-west-2"},
+    "set_mooncake_topology": {"name": "mc-topology", "prefill": 2, "decode": 2},
+    "configure_mooncake_store": {"endpoint_name": "mc-store", "offload": "cpu"},
+    "canary_deploy": {"name": "canary-ep", "image": _NEW_IMAGE},
+    "promote_canary": {"name": "promote-ep"},
+    "rollback_canary": {"name": "rollback-ep"},
+}
+
+
+def _seed_inference_endpoints() -> None:
+    """Create acme's endpoints table and the endpoints the tool calls act on."""
+    import boto3
+
+    from gco.services.inference_store import InferenceEndpointStore
+
+    boto3.client("dynamodb", region_name="us-east-2").create_table(
+        TableName=_ACME_ENDPOINTS,
+        KeySchema=[{"AttributeName": "endpoint_name", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "endpoint_name", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    store = InferenceEndpointStore(table_name=_ACME_ENDPOINTS, region="us-east-2")
+    classic = {"image": _IMAGE, "framework": "vllm", "replicas": 1, "port": 8000}
+    canary = {**classic, "canary": {"image": _NEW_IMAGE, "weight": 10, "replicas": 1}}
+    seeds: dict[str, tuple[dict[str, Any], list[str]]] = {
+        "ep": (classic, ["us-east-1"]),
+        "scale-ep": (classic, ["us-east-1"]),
+        "image-ep": (classic, ["us-east-1"]),
+        "stop-ep": (classic, ["us-east-1"]),
+        "start-ep": (classic, ["us-east-1"]),
+        "add-ep": (classic, ["us-east-1"]),
+        "remove-ep": (classic, ["us-east-1", "us-west-2"]),
+        "canary-ep": (classic, ["us-east-1"]),
+        "promote-ep": (canary, ["us-east-1"]),
+        "rollback-ep": (canary, ["us-east-1"]),
+        "mc-topology": (
+            {
+                **classic,
+                "mooncake": {"mode": "disaggregated", "topology": {"prefill": 1, "decode": 1}},
+            },
+            ["us-east-1"],
+        ),
+        "mc-store": (
+            {**classic, "mooncake": {"mode": "store", "store": {"enabled": True}}},
+            ["us-east-1"],
+        ),
+    }
+    for name, (spec, regions) in seeds.items():
+        store.create_endpoint(name, spec, regions)
+    stopped = store.get_endpoint("start-ep", consistent_read=True)
+    assert stopped is not None
+    store.update_desired_state("start-ep", "stopped", expected_lifecycle_id=stopped["lifecycle_id"])
+
+
+class TestInferenceToolsUnderTheRole:
+    """The DynamoDB calls each default inference tool makes, against the role.
+
+    The inference tools call DynamoDB on ``<project>-inference-endpoints``
+    themselves, through the CLI's ``InferenceEndpointStore``, not through the
+    GCO API. Each tool runs its real ``gco`` command in-process on moto (an
+    ``acme`` deployment, global Region us-east-2), with every DynamoDB call
+    recorded the way the store's client makes it. A tool the role covers must
+    make only calls the role grants; a tool listed in
+    ``DEFAULT_TOOLS_OUTSIDE_ROLE`` must make one it does not, so the list
+    stays exact. ``inference_status``, ``invoke_inference`` and the
+    ``gco://inference/{endpoint_name}`` resource used to fail with
+    AccessDenied under the role (GetItem was not granted).
+    """
+
+    SCOPE = McpRoleScope(
+        partition="aws",
+        account="123456789012",
+        project_name="acme",
+        global_region="us-east-2",
+        api_regions=("us-east-2", "us-east-1", "us-west-2"),
+        workload_regions=("us-east-1", "us-west-2"),
+        model_bucket_arn="arn:aws:s3:::acme-global-modelbucket-example",
+    )
+
+    @pytest.fixture
+    def run_tool(self, tmp_path, monkeypatch):
+        import boto3
+        import requests
+        from click.testing import CliRunner
+        from moto import mock_aws
+
+        import cli.config
+        import gco.services.inference_store as inference_store
+        from cli.aws_client import GCOAWSClient
+        from cli.main import cli as gco_cli
+
+        sys.path.insert(0, str(REPO_ROOT / "gco_mcp"))
+        import cli_runner
+        import run_mcp
+        from resources import inference as inference_resource
+
+        (tmp_path / "cdk.json").write_text(json.dumps(_ACME_CDK), encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))  # no ~/.gco/config.yaml of the host
+        monkeypatch.setattr(cli.config, "_project_root", None)
+        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            monkeypatch.setenv(name, "testing")
+        for name in (
+            "GCO_PROJECT_NAME",
+            "GCO_GLOBAL_REGION",
+            "INFERENCE_ENDPOINTS_TABLE_NAME",
+            "DYNAMODB_REGION",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        calls: list[tuple[str, str, str]] = []
+        exit_codes: list[int] = []
+        real_resource = boto3.resource
+
+        def recording_resource(*args: Any, **kwargs: Any) -> Any:
+            resource = real_resource(*args, **kwargs)
+            client = resource.meta.client
+            client.meta.events.register(
+                "before-parameter-build.dynamodb",
+                lambda params, model, **_: calls.append(
+                    (model.name, client.meta.region_name, params.get("TableName", ""))
+                ),
+            )
+            return resource
+
+        def run_in_process(*argv: str, **_options: Any) -> str:
+            result = CliRunner().invoke(gco_cli, ["--output", "json", *argv])
+            exit_codes.append(result.exit_code)
+            return result.output
+
+        def api_response(*_args: Any, **_kwargs: Any) -> requests.Response:
+            response = requests.Response()
+            response.status_code = 200
+            response.headers["content-type"] = "application/json"
+            response._content = b'{"choices": [{"text": "hi"}], "data": []}'
+            return response
+
+        monkeypatch.setattr(cli_runner, "_run_cli", run_in_process)
+        monkeypatch.setattr(
+            GCOAWSClient,
+            "discover_regional_stacks",
+            lambda self, force_refresh=False: {"us-east-1": MagicMock(), "us-west-2": MagicMock()},
+        )
+        monkeypatch.setattr(GCOAWSClient, "make_authenticated_request", api_response)
+
+        def run(tool: str) -> tuple[list[tuple[str, str, str]], list[int], str]:
+            arguments = _INFERENCE_TOOL_CALLS[tool]
+            with mock_aws():
+                _seed_inference_endpoints()
+                monkeypatch.setattr(inference_store.boto3, "resource", recording_resource)
+                if tool == _INFERENCE_RESOURCE:
+                    output = inference_resource._inference_resource(**arguments)
+                else:
+                    output = getattr(run_mcp, tool)(**arguments)
+                monkeypatch.setattr(inference_store.boto3, "resource", real_resource)
+            return calls, exit_codes, output
+
+        try:
+            yield run
+        finally:
+            sys.path.remove(str(REPO_ROOT / "gco_mcp"))
+
+    def _granted(self, call: tuple[str, str, str]) -> bool:
+        operation, region, table = call
+        arn = f"arn:aws:dynamodb:{region}:123456789012:table/{table}"
+        return any(
+            f"dynamodb:{operation}" in statement.actions and arn in statement.resources
+            for statement in mcp_server_role_statements(self.SCOPE)
+        )
+
+    @pytest.mark.parametrize("tool", sorted(_INFERENCE_TOOL_CALLS))
+    def test_each_call_is_granted_unless_the_tool_is_outside_the_role(self, run_tool, tool):
+        calls, exit_codes, output = run_tool(tool)
+
+        # The command ran to the end, so every DynamoDB call of its happy path was made.
+        assert exit_codes in ([], [0]), output
+        assert '"error"' not in output, output
+        assert calls, f"{tool} made no DynamoDB call"
+        assert {(region, table) for _, region, table in calls} == {("us-east-2", _ACME_ENDPOINTS)}
+        refused = sorted({call[0] for call in calls if not self._granted(call)})
+        if tool in DEFAULT_TOOLS_OUTSIDE_ROLE:
+            assert refused, f"{tool} is listed outside the role but makes only granted calls"
+            assert set(refused) <= {"PutItem", "UpdateItem"}, refused
+        else:
+            assert refused == [], f"{tool} calls {refused}, which the role does not grant"
+
+    def test_every_default_inference_tool_is_driven(self, default_tool_names):
+        import ast
+
+        tree = ast.parse((REPO_ROOT / "gco_mcp" / "tools" / "inference.py").read_text())
+        # Module-level definitions only: the gated tools sit under ``if is_enabled(...)``.
+        defined = {
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.decorator_list
+        }
+        assert set(_INFERENCE_TOOL_CALLS) - {_INFERENCE_RESOURCE} == defined & default_tool_names
 
 
 _DEFAULT_TOOLS = (

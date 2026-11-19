@@ -9,6 +9,7 @@ pattern (inference_monitor).
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeGuard
@@ -383,12 +384,23 @@ class InferenceManager:
         self._aws_client = get_aws_client(config)
 
     def _get_store(self, region: str | None = None) -> InferenceEndpointStore:
-        """Get an InferenceEndpointStore for the global region."""
+        """Get the InferenceEndpointStore of the configured deployment.
+
+        The global stack creates ``<project_name>-inference-endpoints`` in the
+        global Region, so the name and Region come from the CLI configuration
+        (cdk.json, the config file, ``GCO_PROJECT_NAME`` / ``GCO_GLOBAL_REGION``).
+        ``INFERENCE_ENDPOINTS_TABLE_NAME``, the variable the in-cluster
+        services are given, still names the table when it is set.
+        """
         from gco.services.inference_store import InferenceEndpointStore
 
-        # Use the global region for DynamoDB (same as job store)
-        store_region = region or self.config.global_region
-        return InferenceEndpointStore(region=store_region)
+        table_name = (
+            os.environ.get("INFERENCE_ENDPOINTS_TABLE_NAME")
+            or f"{self.config.project_name}-inference-endpoints"
+        )
+        return InferenceEndpointStore(
+            table_name=table_name, region=region or self.config.global_region
+        )
 
     def _build_mooncake_block(
         self,

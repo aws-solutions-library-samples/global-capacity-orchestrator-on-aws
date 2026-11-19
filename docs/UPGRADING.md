@@ -666,12 +666,15 @@ the role had no EKS access entry.
 - **BREAKING (servers with `GCO_MCP_ROLE_ARN` set): the tools' `gco` and
   `kubectl` processes run as the role.** The role now grants what the tools
   registered without a `GCO_ENABLE_*` flag call: `execute-api:Invoke` on the
-  GCO APIs, CloudFormation, SSM, EKS, ECR and Logs reads scoped to the
-  project, job submission to the regional queues, and read-only Kubernetes
-  access to its own Region's cluster through an access entry. It grants
-  nothing broader, so sixteen default tools, and every gated tool that
-  deploys, destroys, builds, pushes, uploads, deletes or buys capacity, fail
-  under it with `AccessDenied` or `Forbidden`;
+  GCO APIs, CloudFormation, SSM, EKS, ECR, Logs and DynamoDB reads scoped to
+  the project (the inference endpoint reads included), job submission to the
+  regional queues, and read-only Kubernetes access to its own Region's
+  cluster through an access entry. It grants nothing broader, so twenty-nine
+  default tools (among them the thirteen inference tools that create or
+  change an endpoint's record, such as `deploy_inference`, `scale_inference`
+  and `canary_deploy`), and every gated tool that deploys, destroys, builds,
+  pushes, uploads, deletes or buys capacity, fail under it with
+  `AccessDenied` or `Forbidden`;
   [gco_mcp/README.md → IAM role](../gco_mcp/README.md#iam-role-gco_mcp_role_arn)
   lists them. Unset `GCO_MCP_ROLE_ARN` for those tools, or extend the role.
 - **BREAKING: delete an access entry you created for the role.** The stack
@@ -827,8 +830,8 @@ monitor checks before it deletes a stale object
   patches per pod template, as Kubeflow Trainer does, and a TrainJob whose
   every patched pod template selects `gco.aws/capacity-provider: hyperpod`
   is held to the HyperPod rule: it must tolerate `gco.aws/hyperpod`, in the
-  same patch or another one, or carry the
-  `kueue.x-k8s.io/queue-name: gco-hyperpod` label. Earlier releases judged
+  same patch or another one (the next item says which list counts), or carry
+  the `kueue.x-k8s.io/queue-name: gco-hyperpod` label. Earlier releases judged
   each patch on its own, so they asked such a TrainJob for an
   `nvidia.com/gpu` toleration when it requested GPUs, although HyperPod
   nodes have no such taint, and admitted one without the HyperPod
@@ -837,6 +840,17 @@ monitor checks before it deletes a stale object
   ([HYPERPOD.md → How work reaches HyperPod nodes](HYPERPOD.md#how-work-reaches-hyperpod-nodes)).
   `gco jobs submit-sqs --auto-region` now also ranks only the Regions with
   HyperPod for such a TrainJob.
+- **BREAKING: a TrainJob is judged on the tolerations Trainer applies.**
+  Trainer applies `spec.runtimePatches` in order, and a patch that sets
+  `tolerations` for a replicated job replaces the list an earlier patch set
+  for it; an empty list sets nothing. The REST and SQS paths and
+  `gco jobs check-policy` now match the GPU and HyperPod taints against the
+  list each replicated job ends up with, so a toleration in a list that a
+  later patch replaces, or anywhere outside the runtime patches, no longer
+  counts. Earlier releases matched the tolerations of every patch together
+  and admitted such a TrainJob, whose pods then stayed Pending. Put every
+  toleration a replicated job needs in the last patch that sets tolerations
+  for it.
 - **BREAKING: the `torch-distributed` runtime schedules on amd64 nodes only.**
   Its image is published for amd64 only, so the shipped ClusterTrainingRuntime
   now selects `kubernetes.io/arch: amd64`. A TrainJob that runs an image of
@@ -984,6 +998,7 @@ Exit status and options:
 |---|---|---|
 | `gco jobs submit --wait`, `gco jobs submit-direct --wait` | **BREAKING:** exit 3 when the job fails and 4 when `--timeout` expires; a failed job exited 0 and a timeout 1, which now means the job was not submitted or its status could not be read. `--wait` also follows a Kubeflow TrainJob, with the same codes ([CLI.md → `gco jobs submit`](CLI.md#gco-jobs-submit)) | Treat 3 as "ran and failed" and 4 as "still running"; do not resubmit on either |
 | `gco jobs list --region` | Exits 1 when the Region's API read fails (it printed no jobs); `--limit` is honoured across API pages and must be at least 1 | Handle the failure |
+| `gco jobs list --all-regions` | **BREAKING:** exits 1 when the global API reports a Region it could not read; it exited 0. The other Regions' jobs are still printed, and each unread Region is listed under `errors` as `{"region", "error"}` (named on stderr in table mode) | Check the exit status; `errors` names the Regions that are missing |
 | `gco jobs delete` | **BREAKING:** exits 1 with the API's 404 for a name that is neither a Job nor a TrainJob (with the TrainJob CRD installed it printed "deleted"); a TrainJob delete the cluster refuses is reported instead of "not found" | Check the name |
 | `gco inference promote`, `gco inference rollback`, `gco capacity traffic-dial set` | **BREAKING:** a declined confirmation exits 1 (it exited 0 with "Cancelled") | Pass `-y` where the change is intended |
 | `gco inference configure-store` | **BREAKING:** with no option, exits 1 and changes nothing; with a store block it used to restart the rollout | Pass at least one setting |
@@ -999,6 +1014,7 @@ Exit status and options:
 | `gco stacks addons status` | Exits 1 when a Region cannot be read or an add-on is not healthy | |
 | `gco images orphans` | **BREAKING:** exits 1, naming the source, when the inference endpoints or a Region's jobs cannot be read; it treated an unreadable source as using no image, so it listed tags in use. It also counts more images as in use: every image an endpoint record names and the images of every unfinished job whatever its age, by tag or by digest, through any Region's replica | Fix the read the message names before deleting anything |
 | `gco images describe` | **BREAKING:** exits 1, with `Tag '<tag>' not found in <name>` on stderr, for a tag the repository does not have; it exited 0 | Treat exit 1 as "no such image" |
+| `gco files access-points` | **BREAKING:** exits 1, with the error on stderr, when the access points cannot be read: access denied, throttling, a malformed ID or a service error. It printed "No access points found" (`[]`) and exited 0. A file system that does not exist still gives `[]` | Fix the permission or ID the message names |
 | `gco vector ingest` | **BREAKING:** exits 1 (`vector_ingest_failed`) before uploading anything when a file is over 4 MiB or makes more than 500 chunks, the ingest Lambda's limits, or when two files have the same file name, which upload to the same key | Split large files; rename one of two files with the same name |
 | `gco slurm submit` | **BREAKING:** refuses `--mem=0`, also as an `#SBATCH` directive, which it sent as a 1 MiB limit | Give a size |
 | Commands that look up the regional stacks (`gco jobs submit-direct`, `submit-sqs`, `queue-status` and the fleet-wide commands) | **BREAKING:** a throttled, denied or failed `DescribeStacks` fails the command; it read as "No GCO stack found" or dropped the Region | Fix the credentials or permission the message names |
@@ -1021,7 +1037,8 @@ data.
 | `gco analytics doctor` | `{"passed": ..., "checks": [{"name", "ok", "remediation"}]}`, also when it exits 1 |
 | `gco capacity ai-recommend` | The recommendation's fields |
 | `gco capacity check --enrich-historical` | `{"estimates": [...], "historical": {...}}` |
-| `gco capacity spot-prices`, `gco files list`, `gco files access-points` and `gco nodepools list` with nothing to list | `[]` |
+| `gco capacity spot-prices`, `gco files list`, `gco files access-points`, `gco images replication status` and `gco nodepools list` with nothing to list | `[]` |
+| `gco images replication get` with no replication rules | `{"registryId": ..., "policy": {"rules": []}}`, the document it prints when there are rules |
 | `gco models delete` | `{"model_name": ..., "files_deleted": N}`, `N` being `0` for a model without files |
 | `gco -o yaml deps scan` | The same envelope as `-o json`; `--report` now writes its file in every mode |
 | `gco jobs submit --check-policy` | The submission document; the policy findings go to stderr |
@@ -1068,9 +1085,13 @@ Prompts, namespaces, Regions and permissions:
   gave up. Pass `--region` where a script depends on the cluster, and outside
   the VPC `--via-ssm INSTANCE_ID|auto` (`-y` skips the `auto` bastion
   prompt): the read opens an SSM tunnel of its own, next to the one
-  `gco monitoring open` holds. The `monitoring_users_list` and `monitoring_user_add` MCP tools pass
-  neither option: run the server where the default Region's API endpoint is
-  reachable, or set `GCO_GRAFANA_ADMIN_PASSWORD` in its environment.
+  `gco monitoring open` holds. The `monitoring_users_list`,
+  `monitoring_user_add` and `monitoring_user_remove` MCP tools take optional
+  `region` and `via_ssm` arguments and pass them on; `via_ssm` names an
+  SSM-managed instance, and `auto` is refused
+  (`code: bastion_not_provisioned`) because the tools never launch a
+  bastion. Without `via_ssm`, run the server where the Region's API endpoint
+  is reachable, or set `GCO_GRAFANA_ADMIN_PASSWORD` in its environment.
 - **BREAKING: `gco vector status`, `search` and `ingest` read the CLI's
   deployment.** They take the project and the global Region from the CLI
   configuration (`project_name` and `deployment_regions.global` in
@@ -1082,6 +1103,32 @@ Prompts, namespaces, Regions and permissions:
   another project's checkout. `DYNAMODB_REGION` and `GLOBAL_REGION` still
   come first. Where `AWS_REGION` chose the Region, set `GCO_GLOBAL_REGION`;
   outside a checkout the CLI's global Region defaults to `us-east-2`.
+- **BREAKING (projects not named `gco`): `gco inference` reads the CLI's
+  deployment.** Every `gco inference` command, the endpoint scan of
+  `gco images orphans`, the MCP inference tools and the
+  `gco://inference/{endpoint_name}` resource use the
+  `<project_name>-inference-endpoints` table in the CLI's global Region
+  (`project_name` and `deployment_regions.global` in `cdk.json`, the config
+  file, `GCO_PROJECT_NAME`, `GCO_GLOBAL_REGION`). They used to read
+  `gco-inference-endpoints` whatever the project, so in another project they
+  failed with `ResourceNotFoundException`, or read and changed the endpoints
+  of a `gco` deployment in the same account. `INFERENCE_ENDPOINTS_TABLE_NAME`
+  still names the table when it is set; unset it unless you mean to read
+  another table.
+- **BREAKING (automation that selects image repositories by tag):
+  `gco images init` tags a new repository with the stacks' `Project` value**,
+  `context.tags.Project` in `cdk.json` (`GCO` in the shipped file and when
+  none is set), the value `gco costs` filters on. It used to tag
+  `Project=<project_name>` (`gco`), so the repositories' storage was missing
+  from the cost reports. A repository created earlier keeps its tag; re-tag
+  it to have it counted:
+
+  ```bash
+  aws ecr tag-resource --resource-arn <repository-arn> --tags Key=Project,Value=<value>
+  ```
+
+  In tag-based IAM conditions or scripts, select on the
+  `context.tags.Project` value (or set that value to the project name).
 - **BREAKING (skopeo older than 0.1.41 only): the image mirror's skopeo
   copies pass the ECR login in a file.** When neither Docker Buildx nor
   Finch/nerdctl can copy multi-arch images, the deploy's Volcano mirror,

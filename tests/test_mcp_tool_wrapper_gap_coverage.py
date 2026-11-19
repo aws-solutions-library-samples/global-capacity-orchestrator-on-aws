@@ -845,6 +845,89 @@ def test_monitoring_user_add_email_branch(
         )
 
 
+_INSTANCE = "i-0123456789abcdef0"
+_CLUSTER_TARGETS = [
+    ({}, ()),
+    ({"region": "us-west-2"}, ("--region", "us-west-2")),
+    ({"via_ssm": _INSTANCE}, ("--via-ssm", _INSTANCE)),
+    (
+        {"region": "us-west-2", "via_ssm": _INSTANCE},
+        ("--region", "us-west-2", "--via-ssm", _INSTANCE),
+    ),
+]
+
+
+@pytest.mark.parametrize(("target", "target_argv"), _CLUSTER_TARGETS)
+def test_monitoring_users_list_reads_the_secret_on_the_named_cluster(
+    target: dict[str, str], target_argv: tuple[str, ...]
+) -> None:
+    # `gco monitoring users list` reads the Grafana Secret on the --region
+    # cluster, through --via-ssm when the API endpoint is private.
+    with _isolated_tool_module("monitoring") as loaded:
+        _assert_cli_call(
+            loaded,
+            "monitoring_users_list",
+            (),
+            target,
+            ("monitoring", "users", "list", *target_argv),
+        )
+
+
+@pytest.mark.parametrize(("target", "target_argv"), _CLUSTER_TARGETS)
+def test_monitoring_user_add_reads_the_secret_on_the_named_cluster(
+    target: dict[str, str], target_argv: tuple[str, ...]
+) -> None:
+    with _isolated_tool_module("monitoring") as loaded:
+        result = _invoke(loaded.module.monitoring_user_add, "alice", "secret", **target)
+        assert result == CLI_RESULT
+        loaded.run_cli.assert_called_once_with(
+            "monitoring",
+            "users",
+            "add",
+            "--username",
+            "alice",
+            *target_argv,
+            env={"GCO_GRAFANA_USER_PASSWORD": "secret"},
+        )
+
+
+@pytest.mark.parametrize(("target", "target_argv"), _CLUSTER_TARGETS)
+def test_monitoring_user_remove_reads_the_secret_on_the_named_cluster(
+    target: dict[str, str], target_argv: tuple[str, ...]
+) -> None:
+    with _isolated_tool_module("monitoring", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
+        loaded.module._ctx_warning = AsyncMock()
+        _assert_cli_call(
+            loaded,
+            "monitoring_user_remove",
+            ("alice",),
+            target,
+            ("monitoring", "users", "remove", "--username", "alice", "--yes", *target_argv),
+        )
+
+
+@pytest.mark.parametrize(
+    ("function_name", "args"),
+    [
+        ("monitoring_users_list", ()),
+        ("monitoring_user_add", ("alice", "secret")),
+        ("monitoring_user_remove", ("alice",)),
+    ],
+)
+def test_monitoring_user_tools_never_provision_a_bastion(
+    function_name: str, args: tuple[str, ...]
+) -> None:
+    # `--via-ssm auto` launches a billable EC2 instance, and remove's --yes
+    # would also skip the CLI's bastion prompt; the tools refuse it.
+    with _isolated_tool_module("monitoring", FLAG_DESTRUCTIVE_OPERATIONS) as loaded:
+        loaded.module._ctx_warning = AsyncMock()
+        result = json.loads(_invoke(getattr(loaded.module, function_name), *args, via_ssm="auto"))
+        assert result["code"] == "bastion_not_provisioned"
+        assert result["parameter"] == "via_ssm"
+        assert "gco monitoring users" in result["error"]
+        loaded.run_cli.assert_not_called()
+
+
 def test_monitoring_context_warning_succeeds() -> None:
     with _isolated_tool_module("monitoring") as loaded:
         context = MagicMock()
