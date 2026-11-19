@@ -21,7 +21,12 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
+# The monitoring open tests patch the modules the CLI code holds
+# (monitoring_cmd.cluster_ui, cluster_tunnel.ssm_tunnel) rather than dotted
+# paths: see the note in tests/test_cluster_tunnel.py.
+import cli.cluster_tunnel as cluster_tunnel
 from cli import ssm_tunnel
+from cli.commands import monitoring_cmd
 from cli.kubectl_helpers import build_port_forward_command, describe_cluster_access
 from cli.main import cli
 
@@ -223,7 +228,9 @@ class TestToggleCommands:
 class TestOpenCommand:
     def _patch_common(self, monkeypatch: pytest.MonkeyPatch, captured: dict[str, object]) -> None:
         monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
-        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _recording_forward(captured))
+        monkeypatch.setattr(
+            monitoring_cmd.cluster_ui, "exec_port_forward", _recording_forward(captured)
+        )
 
     def test_open_public_endpoint_direct_forward(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -310,7 +317,7 @@ class TestOpenCommand:
             started["local_port"] = local_port
             return _FakeProc()
 
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", _fake_start)
+        monkeypatch.setattr(cluster_tunnel.ssm_tunnel, "start_api_tunnel", _fake_start)
 
         result = runner.invoke(
             cli,
@@ -714,7 +721,9 @@ class TestOpenErrorPaths:
     ) -> None:
         captured: dict[str, object] = {}
         monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
-        monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _recording_forward(captured))
+        monkeypatch.setattr(
+            monitoring_cmd.cluster_ui, "exec_port_forward", _recording_forward(captured)
+        )
 
         def _boom(cluster: str, region: str) -> dict[str, object]:
             raise RuntimeError("describe failed")
@@ -737,7 +746,7 @@ class TestOpenErrorPaths:
         def _boom(*a: object, **k: object) -> None:
             raise RuntimeError("tunnel failed")
 
-        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", _boom)
+        monkeypatch.setattr(cluster_tunnel.ssm_tunnel, "start_api_tunnel", _boom)
         result = runner.invoke(
             cli,
             ["monitoring", "open", "--region", "us-east-1", "--via-ssm", "i-0123456789abcdef0"],
@@ -815,7 +824,7 @@ def test_open_announces_the_url_only_once_kubectl_listens(
             f"kubectl port-forward exited with code 1 before localhost:{local_port} was listening"
         )
 
-    monkeypatch.setattr("cli.cluster_ui.exec_port_forward", never_listens)
+    monkeypatch.setattr(monitoring_cmd.cluster_ui, "exec_port_forward", never_listens)
     result = runner.invoke(cli, ["monitoring", "open", "--region", "us-east-1"])
     assert result.exit_code == 1
     assert "Starting kubectl port-forward for grafana on localhost:3000" in result.output
@@ -836,7 +845,9 @@ def test_open_resolves_region_from_cdk_json(
         "cli.kubectl_helpers.describe_cluster_access",
         lambda c, r: {"public": True, "endpoint": ""},
     )
-    monkeypatch.setattr("cli.cluster_ui.exec_port_forward", _recording_forward(captured))
+    monkeypatch.setattr(
+        monitoring_cmd.cluster_ui, "exec_port_forward", _recording_forward(captured)
+    )
     monkeypatch.setattr("cli.config._load_cdk_json", lambda: {"regional": ["us-west-2"]})
     result = runner.invoke(cli, ["monitoring", "open", "--service", "prometheus"])
     assert result.exit_code == 0, result.output

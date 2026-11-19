@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import io
 import json
 import re
 import shutil
@@ -1824,13 +1825,20 @@ class TestIsolatedKubeconfig:
 
     def test_api_readiness_surfaces_tunnel_exit(self) -> None:
         class _Process:
+            """An exited tunnel. cli.ssm_tunnel reads a tunnel's output from its
+            pipes (drained for the session's life), not from communicate()."""
+
+            def __init__(self) -> None:
+                self.stdout = io.BytesIO(b"")
+                self.stderr = io.BytesIO(b"Session Manager channel closed")
+
             @staticmethod
             def poll() -> int:
                 return 42
 
             @staticmethod
-            def communicate(timeout: float | None = None) -> tuple[bytes, bytes]:
-                return b"", b"Session Manager channel closed"
+            def wait(timeout: float | None = None) -> int:
+                return 42
 
         def must_not_probe(*args: str, **kwargs: Any) -> tuple[int, str, str]:
             raise AssertionError("kubectl must not run after the tunnel exits")

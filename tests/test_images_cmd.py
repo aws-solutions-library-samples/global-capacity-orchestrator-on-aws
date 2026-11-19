@@ -48,6 +48,17 @@ def _patch_image_manager(mock_mgr: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("command", ["init", "build", "push"])
+def test_retain_help_says_the_tag_is_only_a_marker(runner: CliRunner, command: str) -> None:
+    """IMAGES-RETAIN-TEXT: no GCO stack deletes project repositories, so the
+    flag must not promise that it is what keeps one through a destroy."""
+    result = runner.invoke(cli, ["images", command, "--help"])
+    assert result.exit_code == 0, result.output
+    help_text = " ".join(result.output.split())
+    assert "Tag the repository gco:retain=true. A marker only" in help_text
+    assert "every one survives a stack destroy" in help_text
+
+
 class TestImagesInit:
     def test_init_success_creates_repo(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
@@ -143,13 +154,20 @@ class TestImagesTags:
 
 
 class TestImagesDescribe:
-    def test_describe_missing_returns_info(self, runner: CliRunner) -> None:
+    @pytest.mark.parametrize("output_format", ["table", "json"])
+    def test_describe_missing_tag_is_an_error(
+        self, runner: CliRunner, mock_config: Any, output_format: str
+    ) -> None:
+        """N43: a missing tag exited 0 (and printed {"status": "ok"} in JSON
+        mode), so a script asking "does this image exist?" got a yes."""
+        mock_config.output_format = output_format
         mock_mgr = MagicMock()
         mock_mgr.describe.return_value = {}
         with _patch_image_manager(mock_mgr):
             result = runner.invoke(cli, ["images", "describe", "svc", "v1"])
-        assert result.exit_code == 0
-        assert "not found" in result.output
+        assert result.exit_code == 1
+        assert "Tag 'v1' not found in svc" in result.stderr
+        assert result.stdout == ""
 
     def test_describe_renders_detail(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()

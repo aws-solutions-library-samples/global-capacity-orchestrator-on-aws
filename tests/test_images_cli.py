@@ -17,6 +17,7 @@ inside ImageManager via :class:`unittest.mock.patch`.
 from __future__ import annotations
 
 import re
+import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -32,6 +33,7 @@ from cli.images import (
     ImageManager,
     _rewrite_image_uri_for_region,
 )
+from gco.service_images import IMAGE_NAME_RE
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -60,14 +62,32 @@ def manager(mock_config: Any) -> ImageManager:
 # ---------------------------------------------------------------------------
 
 
-@given(name=st.from_regex(r"^[a-z][a-z0-9-]{0,62}$", fullmatch=True))
+@given(
+    name=st.from_regex(r"[a-z][a-z0-9]{0,8}(?:-[a-z0-9]{1,8}){0,6}", fullmatch=True).filter(
+        lambda candidate: len(candidate) <= 63
+    )
+)
 @settings(
     max_examples=200, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
 )
 def test_image_name_validation_round_trip(name: str, manager: ImageManager) -> None:
     """Every name matching ``_NAME_RE`` must round-trip through ``_validate_name``."""
-    assert _NAME_RE.match(name)
+    assert _NAME_RE.fullmatch(name)
     assert manager._validate_name(name) == name
+
+
+def test_image_names_follow_the_service_image_rule() -> None:
+    """IMAGES-NAME: one rule for user and service image names."""
+    assert _NAME_RE is IMAGE_NAME_RE
+
+
+@pytest.mark.parametrize("name", ["app-", "a-", "my--app", "-app", "app\n", "a" * 64])
+def test_validate_name_rejects_what_ecr_cannot_store(manager: ImageManager, name: str) -> None:
+    """A trailing or doubled dash used to pass (``[a-z0-9-]{0,62}``), and a
+    trailing newline slipped past ``match`` with ``$``; ECR rejects those
+    repository names, so the create or push failed later."""
+    with pytest.raises(ValueError, match="joined by single dashes"):
+        manager._validate_name(name)
 
 
 @given(tag=st.from_regex(r"^[a-zA-Z0-9_][a-zA-Z0-9_.\-]{0,127}$", fullmatch=True))
@@ -316,6 +336,49 @@ def test_images_build_runtime_detection(manager: ImageManager, runtime: str, tmp
     assert result["runtime"] == runtime
     assert result["tag"] == "v1"
     assert result["repository"] == "gco/my-app"
+
+
+def test_image_children_never_read_the_callers_stdin(manager: ImageManager, tmp_path: Any) -> None:
+    """MIRROR-STDIN: the MCP image tools run ImageManager in-process, where stdin
+    is the client's JSON-RPC stream. Every child gets /dev/null, except the
+    registry login, which is fed the password."""
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Dockerfile").write_text("FROM scratch\n")
+    mock_ecr, _ = _ecr_with_repo_already_exists()
+    mock_ecr.put_lifecycle_policy.return_value = {}
+    mock_ecr.describe_repositories.return_value = {"repositories": []}
+    mock_ecr.get_authorization_token.return_value = {
+        "authorizationData": [{"authorizationToken": "QVdTOnRva2Vu"}]  # base64("AWS:token")
+    }
+    mock_ecr.describe_images.return_value = {"imageDetails": []}
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> MagicMock:
+        calls.append((list(cmd), kwargs))
+        return MagicMock(returncode=0, stdout="abc1234\n", stderr="")
+
+    with (
+        patch("cli.images.detect_container_runtime", return_value="docker"),
+        patch.object(manager, "_ecr_client", return_value=mock_ecr),
+        patch("cli.images.subprocess.run", side_effect=fake_run),
+    ):
+        manager.build(str(ctx), name="my-app", tag="v1")
+        manager.build(str(ctx), name="my-app", tag="v2", quiet=True)
+        manager.push("my-app", "v3", "my-app:local")
+        manager.push("my-app", "v4", "my-app:local", quiet=True)
+        assert manager._git_short_sha() == "abc1234"
+
+    assert [cmd[1] for cmd, _ in calls] == [
+        *("login", "build", "push") * 2,
+        *("login", "tag", "push") * 2,
+        "rev-parse",
+    ]
+    for cmd, kwargs in calls:
+        if cmd[1] == "login":
+            assert kwargs["input"] == b"token" and "stdin" not in kwargs
+        else:
+            assert kwargs["stdin"] is subprocess.DEVNULL, cmd
 
 
 def test_images_build_no_runtime_raises(manager: ImageManager, tmp_path: Any) -> None:

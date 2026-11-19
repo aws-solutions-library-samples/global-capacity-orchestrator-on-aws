@@ -1741,6 +1741,28 @@ class TestEstimateRunningWorkloadsDetailed:
         assert found[0].instance_type == "g4dn.xlarge"
         assert found[0].hourly_rate == pytest.approx(0.526)
 
+    @pytest.mark.parametrize(
+        "context", ["arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1", None]
+    )
+    def test_loads_the_context_update_kubeconfig_returns(self, context):
+        """COSTS-CONTEXT: load_kube_config() read the current context, which can
+        name another cluster; it now loads the one update_kubeconfig reports
+        (None: the current context it just set)."""
+        tracker = _make_cost_tracker_mocked()
+        mock_v1 = MagicMock()
+        mock_v1.list_namespaced_pod.return_value = MagicMock(items=[])
+
+        with (
+            patch("cli.kubectl_helpers.update_kubeconfig", return_value=context) as update,
+            patch("kubernetes.client.CoreV1Api", return_value=mock_v1),
+            patch("kubernetes.config.load_kube_config") as load_kube_config,
+            patch("cli.capacity.checker.CapacityChecker"),
+        ):
+            assert tracker.estimate_running_workloads("us-east-1") == []
+
+        update.assert_called_once_with("gco-us-east-1", "us-east-1")
+        load_kube_config.assert_called_once_with(context=context)
+
     def test_pod_no_node_name(self):
         tracker = _make_cost_tracker_mocked()
 

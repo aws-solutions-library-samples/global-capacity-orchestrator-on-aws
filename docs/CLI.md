@@ -2585,7 +2585,7 @@ architecture and lifecycle policy options.
 | [`gco images delete-repo`](#gco-images-delete-repo) | Delete a whole repository. |
 | [`gco images cleanup`](#gco-images-cleanup) | Remove untagged images across one or all project repos. |
 | [`gco images prune`](#gco-images-prune) | Remove untagged images older than 30 days. |
-| [`gco images orphans`](#gco-images-orphans) | List tags older than `threshold_days` that are not referenced by any deployed inference endpoint or recent job. |
+| [`gco images orphans`](#gco-images-orphans) | List tags older than `threshold_days` that no inference endpoint or job uses. |
 | [`gco images lifecycle`](#gco-images-lifecycle) | Lifecycle policy management. |
 | [`gco images mirror`](#gco-images-mirror) | Mirror third-party images (e.g. Volcano's `docker.io` images) into the project ECR. |
 | [`gco images replication`](#gco-images-replication) | Replication management for the project's ECR registry. |
@@ -2595,7 +2595,11 @@ architecture and lifecycle policy options.
 #### `gco images init`
 
 Create a project repository with the default lifecycle policy applied
-(keep 20 tagged images, expire untagged after 7 days).
+(keep 20 tagged images, expire untagged after 7 days). `NAME` (here and in the
+other `gco images` commands) is a lowercase letter, then lowercase letters and
+digits joined by single dashes, at most 63 characters: it becomes the
+`<project>/NAME` repository, and ECR rejects a name that ends in a dash or
+holds two in a row.
 
 ```bash
 gco images init NAME [OPTIONS]
@@ -2605,7 +2609,7 @@ gco images init NAME [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--retain / --no-retain` | Apply `gco:retain=true` so the repo survives stack destroy |
+| `--retain / --no-retain` | Tag the repository `gco:retain=true`. A marker only: no GCO stack creates or deletes project repositories, so every repository survives `gco stacks destroy` with or without it, and `gco images delete-repo` deletes a tagged one too. Its one reader is the image-lookup custom resource handler the global stack exports (no GCO stack uses it), which keeps a tagged repository on delete |
 
 **Example:**
 
@@ -2640,7 +2644,8 @@ gco images tags my-app
 #### `gco images describe`
 
 Print the full ECR details for a single image tag — digest, push time,
-size, scan findings.
+size, scan findings. A tag the repository does not have is an error: the
+command says so on stderr and exits 1.
 
 ```bash
 gco images describe NAME TAG
@@ -2699,7 +2704,7 @@ gco images build CONTEXT [OPTIONS]
 | `--dockerfile` | `-f` | Path to Dockerfile within the context |
 | `--build-arg` | | Build arg `KEY=VALUE`, repeatable |
 | `--platform` | | Target platform (e.g. `linux/amd64`) |
-| `--retain / --no-retain` | | Apply `gco:retain=true` |
+| `--retain / --no-retain` | | Tag the repository `gco:retain=true`, a marker (see [`gco images init`](#gco-images-init)) |
 
 **Example:**
 
@@ -2724,7 +2729,7 @@ gco images push NAME [OPTIONS]
 |--------|-------|-------------|
 | `--tag` | `-t` | Image tag (required) |
 | `--local-image` | | Existing local image reference (required) |
-| `--retain / --no-retain` | | Apply `gco:retain=true` |
+| `--retain / --no-retain` | | Tag the repository `gco:retain=true`, a marker (see [`gco images init`](#gco-images-init)) |
 
 **Example:**
 
@@ -2826,9 +2831,14 @@ gco images prune --no-dry-run -y       # actually delete
 
 #### `gco images orphans`
 
-List tags older than `threshold_days` that are not referenced by any
-deployed inference endpoint or recent job. Cross-references against
-both data sources before declaring a tag an orphan.
+List tags older than `threshold_days` that nothing uses. A tag is in use
+when an inference endpoint names it (its image, canary image, per-Region
+replica URIs or any other image in its record) or a job in any regional
+cluster does (every unfinished job, and finished jobs created within
+`threshold_days`), by tag or by digest, through any Region's replica of the
+registry. The command reads every source before it answers: when the
+inference endpoints or a Region's jobs cannot be read, it fails instead of
+listing tags that may be in use.
 
 ```bash
 gco images orphans [OPTIONS]
@@ -2902,9 +2912,12 @@ gco images replication COMMAND
 
 **Subcommands:**
 
-- `get` - Print the current ECR replication configuration
+- `get` - Print the current ECR replication configuration (the registry's
+  rules, read with `ecr:DescribeRegistry`)
 - `status` - Print per-image replication status across project repos
-- `sync` - Apply the project's standard replication rule (`gco/*` to all deployed regions)
+- `sync` - Apply the project's standard replication rule (`gco/*` to all deployed regions):
+  reads the rules with `ecr:DescribeRegistry`, keeps every rule for other
+  repository prefixes, and writes the result with `ecr:PutReplicationConfiguration`
 
 The global stack owns the registry's replication configuration when
 `images.replication` is on. Every `gco stacks deploy`/`deploy-all` that can
@@ -4571,7 +4584,9 @@ Permanently delete a model from the versioned central S3 bucket. This removes
 all current files, historical object versions, and delete markers beneath the
 model prefix; the operation cannot be undone. If S3 reports an error for one
 batch, earlier successful deletions remain in effect and the command reports
-the failed object versions.
+the failed object versions. With `--output json` or `yaml` the result is
+`{"model_name": ..., "files_deleted": N}`, `N` being `0` when the model had no
+files.
 
 ```bash
 gco models delete MODEL_NAME [OPTIONS]
@@ -4707,14 +4722,20 @@ gco monitoring open --service mlflow --region us-east-1 --via-ssm auto -y
 Manage Grafana users through the admin HTTP API, over an active
 `gco monitoring open` port-forward (default `http://localhost:3000`). Admin
 credentials are read from the `kube-prometheus-stack-grafana` Secret, or passed
-with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`. `users add` takes the
-new user's password from `--password` or `$GCO_GRAFANA_USER_PASSWORD` (which
-keeps it off the command line), or generates one with `--generate-password`.
+with `--admin-password` / `$GCO_GRAFANA_ADMIN_PASSWORD`. The Secret is read on
+the `--region` cluster (the CLI's default region otherwise) through its
+kubeconfig context, with a 60-second limit; from outside the VPC pass
+`--via-ssm INSTANCE_ID|auto` (with `--bastion-ttl-minutes` and `--yes`, as for
+`monitoring open`) so the read gets an SSM tunnel of its own, on a free local
+port next to the one `monitoring open` holds. Its route messages go to stderr.
+`users remove --yes` also skips the bastion prompt. `users add` takes the new
+user's password from `--password` or `$GCO_GRAFANA_USER_PASSWORD` (which keeps
+it off the command line), or generates one with `--generate-password`.
 
 ```bash
 gco monitoring users add --username alice --email alice@example.com --generate-password
 GCO_GRAFANA_USER_PASSWORD='...' gco monitoring users add --username bob
-gco monitoring users list [--as-json]
+gco monitoring users list [--as-json] [--region us-east-1] [--via-ssm auto -y]
 gco monitoring users remove --username alice --yes
 ```
 
@@ -4783,7 +4804,7 @@ gco nodepools describe NODEPOOL_NAME [OPTIONS]
 
 Generate nodepool manifest for ODCR (On-Demand Capacity Reservation). The manifest holds two objects: an [EKS Auto Mode `NodeClass`](https://docs.aws.amazon.com/eks/latest/userguide/create-node-class.html) named `<name>-nodeclass` that binds the reservation through `capacityReservationSelectorTerms`, and a `NodePool` that launches reserved capacity (`karpenter.sh/capacity-type: reserved`) through it. GCO clusters run EKS Auto Mode, so the NodeClass is Auto Mode's `eks.amazonaws.com/v1` kind rather than self-managed Karpenter's `EC2NodeClass`. It reuses the cluster's own node role, subnets and cluster security group, which the command reads from the cluster with `eks:DescribeCluster`, so nodes join the cluster the same way the built-in pools' nodes do. See [Control deployment of workloads into Capacity Reservations with EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/auto-odcr.html).
 
-Nothing is applied: the command prints the manifest or writes it to `--output-file`. The EKS endpoint is private by default, so apply it through [`gco cluster tunnel`](#gco-cluster-tunnel), which holds the tunnel open and prints the `kubectl` flags to use:
+Nothing is applied: the command prints the manifest or writes it to `--output-file`. A printed manifest is all of stdout (the apply hint goes to stderr), so `> nodepool.yaml` saves valid YAML. The EKS endpoint is private by default, so apply it through [`gco cluster tunnel`](#gco-cluster-tunnel), which holds the tunnel open and prints the `kubectl` flags to use:
 
 ```bash
 gco cluster tunnel --via-ssm auto                  # keep this running

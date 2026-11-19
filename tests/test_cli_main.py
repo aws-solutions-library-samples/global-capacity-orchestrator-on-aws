@@ -907,6 +907,45 @@ class TestFilesCommands:
             result = runner.invoke(cli, ["files", "access-points", "fs-123", "-r", "us-east-1"])
             assert result.exit_code == 0
 
+    @pytest.mark.parametrize(
+        ("argv", "method"),
+        [
+            (["files", "list"], "get_file_systems"),
+            (["files", "access-points", "fs-123", "-r", "us-east-1"], "get_access_point_info"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
+    )
+    def test_an_empty_listing_keeps_the_list_shape(self, argv, method, output_format, parse):
+        """CM18: an empty result returned after the warning, so the root output
+        transaction printed {"status": "ok"} instead of the usual list."""
+        from cli.main import cli
+
+        with patch("cli.commands.files_cmd.get_file_system_client") as mock_client:
+            getattr(mock_client.return_value, method).return_value = []
+            result = CliRunner().invoke(cli, ["-o", output_format, *argv])
+
+        assert result.exit_code == 0, result.output
+        assert parse(result.stdout) == []
+        assert "No " in result.stderr and " found" in result.stderr
+
+    @pytest.mark.parametrize(
+        "argv",
+        [["files", "list"], ["files", "access-points", "fs-123", "-r", "us-east-1"]],
+    )
+    def test_an_empty_listing_in_table_mode_prints_only_the_warning(self, argv):
+        from cli.main import cli
+
+        with patch("cli.commands.files_cmd.get_file_system_client") as mock_client:
+            mock_client.return_value.get_file_systems.return_value = []
+            mock_client.return_value.get_access_point_info.return_value = []
+            result = CliRunner().invoke(cli, argv)
+
+        assert result.exit_code == 0, result.output
+        assert result.stdout == ""
+        assert " found" in result.stderr
+
 
 class TestConfigCommands:
     """Tests for config commands."""
@@ -2507,6 +2546,91 @@ class TestNodepoolsCommands:
 
         assert result.exit_code == 0, result.output
         self.resolver.assert_called_once_with("custom-cluster", "us-east-1")
+
+    @pytest.mark.parametrize(
+        ("command", "generator"),
+        [
+            ("create-odcr", "generate_odcr_nodepool_manifest"),
+            ("create-capacity-block", "generate_capacity_block_nodepool_manifest"),
+        ],
+    )
+    def test_a_printed_manifest_is_all_of_stdout(self, command, generator):
+        """N41: `> pool.yaml` used to append the two apply-hint lines after the
+        YAML, so `kubectl apply -f pool.yaml` failed to parse it."""
+        from cli.main import cli
+
+        manifest = "apiVersion: karpenter.sh/v1\nkind: NodePool\nmetadata:\n  name: pool\n"
+        with patch(f"cli.nodepools.{generator}", return_value=manifest):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "nodepools",
+                    command,
+                    "-n",
+                    "pool",
+                    "-r",
+                    "us-east-1",
+                    "-c",
+                    "cr-0123456789abcdef0",
+                    "-i",
+                    "p5.48xlarge",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert list(yaml.safe_load_all(result.stdout)) == [yaml.safe_load(manifest)]
+        assert "To apply this manifest, save it to a file and run:" in result.stderr
+        assert "kubectl apply -f <filename>.yaml" in result.stderr
+
+    def test_a_printed_manifest_in_json_mode_has_no_apply_hint(self):
+        """The hint is a table-mode aid; JSON mode carries only the document."""
+        from cli.main import cli
+
+        manifest = "apiVersion: karpenter.sh/v1\nkind: NodePool\n"
+        with patch("cli.nodepools.generate_odcr_nodepool_manifest", return_value=manifest):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "-o",
+                    "json",
+                    "nodepools",
+                    "create-odcr",
+                    "-n",
+                    "pool",
+                    "-r",
+                    "us-east-1",
+                    "-c",
+                    "cr-0123456789abcdef0",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout) == {"status": "ok", "output": manifest.rstrip("\n")}
+        assert "kubectl apply" not in result.stderr
+
+    @pytest.mark.parametrize(
+        ("output_format", "parse"), [("json", json.loads), ("yaml", yaml.safe_load)]
+    )
+    def test_an_empty_nodepool_list_keeps_the_list_shape(self, output_format, parse):
+        """CM18: no NodePools printed {"status": "ok"} in JSON/YAML mode."""
+        from cli.main import cli
+
+        with patch("cli.nodepools.list_cluster_nodepools", return_value=[]):
+            result = CliRunner().invoke(
+                cli, ["-o", output_format, "nodepools", "list", "-r", "us-east-1"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert parse(result.stdout) == []
+
+    def test_an_empty_nodepool_list_in_table_mode_says_so(self):
+        from cli.main import cli
+
+        with patch("cli.nodepools.list_cluster_nodepools", return_value=[]):
+            result = CliRunner().invoke(cli, ["nodepools", "list", "-r", "us-east-1"])
+
+        assert result.exit_code == 0, result.output
+        assert "No NodePools found" in result.stdout
 
     @pytest.mark.parametrize("command", ["create-odcr", "create-capacity-block"])
     def test_create_reports_a_cluster_without_auto_mode(self, command):

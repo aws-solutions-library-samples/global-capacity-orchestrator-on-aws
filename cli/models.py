@@ -103,22 +103,23 @@ class ModelManager:
         bucket = self._get_bucket_name()
         s3 = self._get_s3_client()
 
-        # List top-level "directories" under the prefix
-        response = s3.list_objects_v2(
-            Bucket=bucket,
-            Prefix=f"{prefix}/",
-            Delimiter="/",
-        )
+        # List top-level "directories" under the prefix. A ListObjectsV2 page
+        # holds at most 1,000 keys and common prefixes together.
+        paginator = s3.get_paginator("list_objects_v2")
+        model_prefixes = [
+            cp
+            for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/", Delimiter="/")
+            for cp in page.get("CommonPrefixes", [])
+        ]
 
         models = []
-        for cp in response.get("CommonPrefixes", []):
+        for cp in model_prefixes:
             model_prefix = cp["Prefix"]
             model_name = model_prefix.rstrip("/").split("/")[-1]
 
             # Get total size and file count
             total_size = 0
             file_count = 0
-            paginator = s3.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=bucket, Prefix=model_prefix):
                 for obj in page.get("Contents", []):
                     total_size += obj.get("Size", 0)

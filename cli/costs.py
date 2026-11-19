@@ -310,8 +310,10 @@ class CostTracker:
         cluster_name = f"{project_name}-{region}"
 
         try:
-            update_kubeconfig(cluster_name, region)
-            k8s_config.load_kube_config()
+            # The cluster's own context: the current one may name another
+            # cluster (a tunnel-pinned entry, another Region's).
+            context = update_kubeconfig(cluster_name, region)
+            k8s_config.load_kube_config(context=context)
             v1 = k8s_client.CoreV1Api(BoundedApiClient())
         except Exception as e:
             raise WorkloadReadError(

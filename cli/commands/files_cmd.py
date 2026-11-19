@@ -31,7 +31,9 @@ def list_file_systems(config: Any, region: Any) -> None:
 
         if not file_systems:
             formatter.print_warning("No file systems found")
-            return
+            if config.output_format == "table":
+                return
+            # JSON/YAML keep the list shape: an empty result is `[]`.
 
         if config.output_format == "table":
             print(format_file_system_table(file_systems))
@@ -85,7 +87,9 @@ def list_access_points(config: Any, file_system_id: Any, region: Any) -> None:
 
         if not access_points:
             formatter.print_warning("No access points found")
-            return
+            if config.output_format == "table":
+                return
+            # JSON/YAML keep the list shape: an empty result is `[]`.
 
         formatter.print(access_points)
 

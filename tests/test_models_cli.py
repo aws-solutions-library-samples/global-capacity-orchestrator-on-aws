@@ -11,9 +11,12 @@ is fast and deterministic.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import boto3
 import pytest
+from botocore.stub import Stubber
 
 from cli.models import ModelManager, get_model_manager
 
@@ -152,39 +155,82 @@ class TestModelManager:
 
     # -- list_models --
 
+    @staticmethod
+    def _stubbed_s3() -> tuple[Any, Stubber]:
+        """A real S3 client (botocore's service model) with stubbed responses."""
+        client = boto3.client(
+            "s3",
+            region_name="us-east-1",
+            aws_access_key_id="testing",
+            aws_secret_access_key="testing",  # nosec B106 - fake credentials, nothing is sent
+        )
+        return client, Stubber(client)
+
     def test_list_models_empty(self, manager):
-        mock_s3 = MagicMock()
-        mock_s3.list_objects_v2.return_value = {}
+        s3, stubber = self._stubbed_s3()
+        stubber.add_response(
+            "list_objects_v2",
+            {"KeyCount": 0, "IsTruncated": False},
+            {"Bucket": "bucket", "Prefix": "models/", "Delimiter": "/"},
+        )
         manager._bucket_name = "bucket"
-
-        with patch.object(manager, "_get_s3_client", return_value=mock_s3):
+        with stubber, patch.object(manager, "_get_s3_client", return_value=s3):
             result = manager.list_models()
-
         assert result == []
 
-    def test_list_models_with_results(self, manager):
-        mock_s3 = MagicMock()
-        mock_s3.list_objects_v2.return_value = {
-            "CommonPrefixes": [
-                {"Prefix": "models/llama3/"},
-                {"Prefix": "models/mistral/"},
-            ]
-        }
-        paginator = MagicMock()
-        paginator.paginate.return_value = [
-            {"Contents": [{"Size": 1024**3, "Key": "k1"}, {"Size": 1024**3, "Key": "k2"}]}
-        ]
-        mock_s3.get_paginator.return_value = paginator
+    def test_list_models_reads_every_page_of_prefixes(self, manager):
+        """N17: one ListObjectsV2 page holds at most 1,000 keys and prefixes,
+        so `gco models list` stopped at the first 1,000 models."""
+        s3, stubber = self._stubbed_s3()
+        listing = {"Bucket": "bucket", "Prefix": "models/", "Delimiter": "/"}
+        stubber.add_response(
+            "list_objects_v2",
+            {
+                "CommonPrefixes": [{"Prefix": "models/llama3/"}],
+                "IsTruncated": True,
+                "NextContinuationToken": "page-2",
+            },
+            listing,
+        )
+        stubber.add_response(
+            "list_objects_v2",
+            {"CommonPrefixes": [{"Prefix": "models/mistral/"}], "IsTruncated": False},
+            {**listing, "ContinuationToken": "page-2"},
+        )
+        stubber.add_response(
+            "list_objects_v2",
+            {
+                "Contents": [
+                    {"Key": "models/llama3/a.safetensors", "Size": 1024**3},
+                    {"Key": "models/llama3/b.safetensors", "Size": 1024**3},
+                ],
+                "IsTruncated": False,
+            },
+            {"Bucket": "bucket", "Prefix": "models/llama3/"},
+        )
+        stubber.add_response(
+            "list_objects_v2",
+            {"Contents": [{"Key": "models/mistral/w.bin", "Size": 512}], "IsTruncated": False},
+            {"Bucket": "bucket", "Prefix": "models/mistral/"},
+        )
         manager._bucket_name = "bucket"
-
-        with patch.object(manager, "_get_s3_client", return_value=mock_s3):
+        with stubber, patch.object(manager, "_get_s3_client", return_value=s3):
             result = manager.list_models()
-
-        assert len(result) == 2
-        assert result[0]["model_name"] == "llama3"
-        assert result[0]["files"] == 2
-        assert result[0]["total_size_gb"] == 2.0
-        assert result[1]["model_name"] == "mistral"
+        stubber.assert_no_pending_responses()
+        assert result == [
+            {
+                "model_name": "llama3",
+                "s3_uri": "s3://bucket/models/llama3",
+                "files": 2,
+                "total_size_gb": 2.0,
+            },
+            {
+                "model_name": "mistral",
+                "s3_uri": "s3://bucket/models/mistral",
+                "files": 1,
+                "total_size_gb": 0.0,
+            },
+        ]
 
     # -- get_model_uri --
 
