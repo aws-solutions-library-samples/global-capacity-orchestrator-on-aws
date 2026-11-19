@@ -372,11 +372,11 @@ class TestCostApiRegionResolution:
 
 
 class TestCostsDashboardCommand:
-    def _invoke(self, args, monkeypatch, *, public=True, captured=None):
+    def _invoke(self, args, monkeypatch, *, public=True, captured=None, context=None):
         from cli.commands.costs_cmd import costs
 
         captured = captured if captured is not None else {}
-        monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: None)
+        monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: context)
         monkeypatch.setattr(
             "cli.kubectl_helpers.describe_cluster_access",
             lambda c, r: {"public": public, "endpoint": "https://x.eks.amazonaws.com"},
@@ -399,6 +399,14 @@ class TestCostsDashboardCommand:
         assert "/d/gco-cost/" in outcome.output
         assert "svc/kube-prometheus-stack-grafana" in captured["cmd"]
         assert "3000:80" in " ".join(captured["cmd"])
+
+    def test_dashboard_forwards_through_the_clusters_context(self, monkeypatch):
+        context = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+        outcome, captured = self._invoke(
+            ["dashboard", "--region", "us-east-1"], monkeypatch, context=context
+        )
+        assert outcome.exit_code == 0, outcome.output
+        assert captured["cmd"][-1] == f"--context={context}"
 
     def test_opencost_service_forwards_the_ui_port(self, monkeypatch):
         outcome, captured = self._invoke(

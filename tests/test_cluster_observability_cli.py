@@ -237,6 +237,22 @@ class TestOpenCommand:
         # Direct forward: no --server override.
         assert "--server" not in captured["cmd"]
         assert "svc/kube-prometheus-stack-grafana" in captured["cmd"]
+        assert not any(str(arg).startswith("--context") for arg in captured["cmd"])
+
+    def test_open_forwards_through_the_clusters_context(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        context = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+        captured: dict[str, object] = {}
+        self._patch_common(monkeypatch, captured)
+        monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: context)
+        monkeypatch.setattr(
+            "cli.kubectl_helpers.describe_cluster_access",
+            lambda c, r: {"public": True, "endpoint": "https://x.eks.amazonaws.com"},
+        )
+        result = runner.invoke(cli, ["monitoring", "open", "--region", "us-east-1"])
+        assert result.exit_code == 0, result.output
+        assert captured["cmd"][-1] == f"--context={context}"
 
     def test_open_private_without_ssm_warns_but_tries(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch

@@ -14,6 +14,7 @@ already have your own SSM instance.
 
 from __future__ import annotations
 
+import shlex
 import socket
 import sys
 import time
@@ -109,10 +110,10 @@ def tunnel_cmd(
         _print_connection_plan(config, formatter, cluster_name, target_region, via_ssm, local_port)
         return
 
-    from ..kubectl_helpers import update_kubeconfig
+    from ..kubectl_helpers import kubectl_context_flags, update_kubeconfig
 
     try:
-        update_kubeconfig(cluster_name, target_region)
+        context = update_kubeconfig(cluster_name, target_region)
     except (RuntimeError, ValueError) as exc:
         formatter.print_error(str(exc))
         sys.exit(1)
@@ -131,7 +132,18 @@ def tunnel_cmd(
                 formatter.print_success(
                     f"SSM tunnel open: {session.server} → {session.plan.endpoint} (Ctrl-C to stop)"
                 )
-                kubectl_command = "kubectl " + " ".join(session.plan.kubectl_flags()) + " get nodes"
+                # The tunnel's --server overrides only the endpoint; the context
+                # supplies this cluster's credentials and CA whatever context
+                # is current in the shell that runs it.
+                kubectl_command = shlex.join(
+                    [
+                        "kubectl",
+                        *kubectl_context_flags(context),
+                        *session.plan.kubectl_flags(),
+                        "get",
+                        "nodes",
+                    ]
+                )
                 formatter.print_info(_kubectl_hint(kubectl_command))
                 _block_until_interrupt()
             elif session.route == ROUTE_DIRECT:

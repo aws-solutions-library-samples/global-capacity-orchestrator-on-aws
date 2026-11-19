@@ -27,6 +27,7 @@ from gco.argocd_config import ArgoCdConfigError
 
 _SERVER = "https://127.0.0.1:8443"
 _SNI = "abc.gr7.us-east-1.eks.amazonaws.com"
+_CONTEXT = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
 
 
 def _write_cdk(tmp_path: Path, helm: dict[str, Any] | None = None, **context: Any) -> Path:
@@ -155,13 +156,16 @@ class TestReadAdminPassword:
             return "generated"
 
         monkeypatch.setattr(cluster_ui, "read_secret_key", fake_read)
-        assert gitops.read_admin_password(server=_SERVER, tls_server_name=_SNI) == "generated"
+        assert (
+            gitops.read_admin_password(server=_SERVER, tls_server_name=_SNI, context=_CONTEXT)
+            == "generated"
+        )
         assert calls == [
             (
                 "argocd",
                 "argocd-initial-admin-secret",
                 "password",
-                {"server": _SERVER, "tls_server_name": _SNI},
+                {"server": _SERVER, "tls_server_name": _SNI, "context": _CONTEXT},
             )
         ]
 
@@ -310,7 +314,12 @@ def _forward_into(forwarded: list[list[str]]) -> Any:
 @pytest.fixture
 def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Fake tunnel + kubeconfig; records what the command asked for."""
-    state: dict[str, Any] = {"tunnels": [], "kubeconfig": [], "session": (_SERVER, _SNI)}
+    state: dict[str, Any] = {
+        "tunnels": [],
+        "kubeconfig": [],
+        "session": (_SERVER, _SNI),
+        "context": None,
+    }
 
     @contextmanager
     def fake_tunnel(formatter: Any, **kwargs: Any) -> Iterator[Any]:
@@ -318,11 +327,12 @@ def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         server, sni = state["session"]
         yield types.SimpleNamespace(server=server, tls_server_name=sni)
 
+    def fake_update_kubeconfig(cluster: str, region: str) -> str | None:
+        state["kubeconfig"].append((cluster, region))
+        return state["context"]
+
     monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
-    monkeypatch.setattr(
-        "cli.kubectl_helpers.update_kubeconfig",
-        lambda cluster, region: state["kubeconfig"].append((cluster, region)),
-    )
+    monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", fake_update_kubeconfig)
     return state
 
 
@@ -380,6 +390,7 @@ class TestOpenCommand:
     def test_forwards_the_ui_through_the_tunnel(
         self, runner: CliRunner, cluster: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        cluster["context"] = _CONTEXT
         forwarded: list[list[str]] = []
         monkeypatch.setattr(cluster_ui, "exec_port_forward", _forward_into(forwarded))
         result = runner.invoke(
@@ -419,6 +430,7 @@ class TestOpenCommand:
                 _SERVER,
                 "--tls-server-name",
                 _SNI,
+                f"--context={_CONTEXT}",
             ]
         ]
         assert "http://localhost:18080" in result.output
@@ -455,6 +467,7 @@ class TestPasswordCommand:
             seen.append(kwargs)
             return "generated-pw"
 
+        cluster["context"] = _CONTEXT
         monkeypatch.setattr(gitops, "read_admin_password", fake_read)
         result = runner.invoke(cli, ["--output", "json", "gitops", "password", "-r", "us-east-1"])
         assert result.exit_code == 0, result.output
@@ -463,7 +476,7 @@ class TestPasswordCommand:
             "username": "admin",
             "password": "generated-pw",
         }
-        assert seen == [{"server": _SERVER, "tls_server_name": _SNI}]
+        assert seen == [{"server": _SERVER, "tls_server_name": _SNI, "context": _CONTEXT}]
 
     def test_failures_exit_1(
         self, runner: CliRunner, cluster: dict[str, Any], monkeypatch: pytest.MonkeyPatch
@@ -498,7 +511,12 @@ class TestScreenshotCommand:
         monkeypatch.setattr(cluster_ui, "background_port_forward", fake_forward)
         monkeypatch.setattr(gitops, "create_session_token", fake_token)
         monkeypatch.setattr(gitops, "capture_argocd_screenshot", fake_capture)
-        monkeypatch.setattr(gitops, "read_admin_password", lambda **_k: "from-secret")
+
+        def fake_password(**kwargs: Any) -> str:
+            state.setdefault("password_reads", []).append(kwargs)
+            return "from-secret"
+
+        monkeypatch.setattr(gitops, "read_admin_password", fake_password)
         return state
 
     def test_captures_with_the_secret_password(
@@ -511,8 +529,13 @@ class TestScreenshotCommand:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("GCO_ARGOCD_ADMIN_PASSWORD", raising=False)
+        cluster["context"] = _CONTEXT
         result = runner.invoke(cli, ["--output", "json", "gitops", "screenshot", "-r", "us-east-1"])
         assert result.exit_code == 0, result.output
+        assert capture["password_reads"] == [
+            {"server": _SERVER, "tls_server_name": _SNI, "context": _CONTEXT}
+        ]
+        assert capture["forwards"][0][0][-1] == f"--context={_CONTEXT}"
         assert capture["tokens"] == [("http://localhost:8080", "from-secret")]
         (base_url, output, token, headless) = capture["captures"][0]
         assert (base_url, token, headless) == ("http://localhost:8080", "jwt", True)

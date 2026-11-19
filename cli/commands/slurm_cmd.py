@@ -683,7 +683,7 @@ def slurm_shell(
         return
     cluster = f"{config.project_name}-{target_region}"
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(
             formatter,
             cluster=cluster,
@@ -697,6 +697,7 @@ def slurm_shell(
                 interactive=True,
                 server=session.server,
                 tls_server_name=session.tls_server_name,
+                context=context,
             )
             formatter.print_info(
                 f"Opening a shell on {LOGIN_NAMESPACE}/{LOGIN_DEPLOYMENT} in {target_region} "
@@ -806,7 +807,7 @@ def slurm_output(
 
     cluster = f"{config.project_name}-{target_region}"
     try:
-        update_kubeconfig(cluster, target_region)
+        context = update_kubeconfig(cluster, target_region)
         with open_api_server_tunnel(
             formatter,
             cluster=cluster,
@@ -816,7 +817,10 @@ def slurm_output(
             assume_yes=assume_yes,
         ) as session:
             cmd = login_exec_command(
-                reader, server=session.server, tls_server_name=session.tls_server_name
+                reader,
+                server=session.server,
+                tls_server_name=session.tls_server_name,
+                context=context,
             )
             if follow:
                 # Streams until Ctrl-C; the tunnel closes on the way out and

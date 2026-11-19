@@ -1162,6 +1162,35 @@ class TestJobManagerSubmitJobDirect:
             assert "still running" in result["warnings"][0]
             assert "test-job" in result["warnings"][0]
 
+    def test_every_kubectl_call_targets_the_context_update_kubeconfig_returned(self):
+        """With a tunnel-pinned entry the current context can name another
+        cluster, so the status read, the delete and the apply all carry the
+        cluster's own context."""
+        import json
+
+        manager = self._make_manager()
+        manifests = [{"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "test-job"}}]
+        context = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+        complete = json.dumps({"status": {"conditions": [{"type": "Complete", "status": "True"}]}})
+        with (
+            patch("cli.kubectl_helpers.update_kubeconfig", return_value=context) as update,
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout=complete, stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),
+                MagicMock(returncode=0, stdout="job/test-job created", stderr=""),
+            ]
+            manager.submit_job_direct(manifests, region="us-east-1")
+
+        update.assert_called_once_with("gco-us-east-1", "us-east-1")
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        assert [command[:3] for command in commands] == [
+            ["kubectl", f"--context={context}", "get"],
+            ["kubectl", f"--context={context}", "delete"],
+            ["kubectl", f"--context={context}", "apply"],
+        ]
+
 
 class TestGetKubectlJobStatus:
     """Tests for JobManager._get_kubectl_job_status helper."""

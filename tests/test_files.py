@@ -9,6 +9,8 @@ DataSync transfers, and error paths lives in test_files_extended.py.
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -886,7 +888,7 @@ class TestFileSystemClientDownloadFromPod:
                     def run_side_effect(*args, **kwargs):
                         cmd = args[0]
                         if "aws" in cmd:
-                            return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
                         else:
                             raise subprocess.CalledProcessError(
                                 1, "kubectl", stderr="Pod not found"
@@ -920,7 +922,7 @@ class TestFileSystemClientDownloadFromPod:
                     def run_side_effect(*args, **kwargs):
                         cmd = args[0]
                         if "aws" in cmd:
-                            return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
                         else:
                             raise FileNotFoundError("kubectl not found")
 
@@ -1121,14 +1123,14 @@ class TestFileSystemClientDownloadFromStorage:
                         call_count[0] += 1
                         cmd = args[0] if args else kwargs.get("args", [])
                         if "aws" in cmd or "apply" in cmd:
-                            return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
                         elif "get" in cmd and "pod" in cmd:
                             return MagicMock(returncode=0, stdout="Running")
                         elif "cp" in cmd:
                             raise subprocess.CalledProcessError(1, "kubectl", stderr="Copy failed")
                         elif "delete" in cmd:
-                            return MagicMock(returncode=0)
-                        return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
+                        return MagicMock(returncode=0, stdout="", stderr="")
 
                     with (
                         patch("subprocess.run", side_effect=run_side_effect),
@@ -1165,7 +1167,7 @@ class TestFileSystemClientListStorageContents:
                     def run_side_effect(*args, **kwargs):
                         cmd = args[0] if args else kwargs.get("args", [])
                         if "aws" in cmd or "apply" in cmd:
-                            return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
                         elif "get" in cmd and "pod" in cmd:
                             return MagicMock(returncode=0, stdout="Running")
                         elif "exec" in cmd:
@@ -1175,8 +1177,8 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 my-job-outputs
 -rw-r--r-- 1 root root 1024 Jan  1 00:00 test.txt"""
                             return MagicMock(returncode=0, stdout=ls_output, stderr="")
                         elif "delete" in cmd:
-                            return MagicMock(returncode=0)
-                        return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
+                        return MagicMock(returncode=0, stdout="", stderr="")
 
                     with (
                         patch("subprocess.run", side_effect=run_side_effect),
@@ -1216,14 +1218,14 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 my-job-outputs
                     def run_side_effect(*args, **kwargs):
                         cmd = args[0] if args else kwargs.get("args", [])
                         if "aws" in cmd or "apply" in cmd:
-                            return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
                         elif "get" in cmd and "pod" in cmd:
                             return MagicMock(returncode=0, stdout="Running")
                         elif "exec" in cmd:
                             return MagicMock(returncode=0, stdout="total 0", stderr="")
                         elif "delete" in cmd:
-                            return MagicMock(returncode=0)
-                        return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
+                        return MagicMock(returncode=0, stdout="", stderr="")
 
                     with (
                         patch("subprocess.run", side_effect=run_side_effect),
@@ -1254,7 +1256,7 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 my-job-outputs
                     def run_side_effect(*args, **kwargs):
                         cmd = args[0] if args else kwargs.get("args", [])
                         if "aws" in cmd or "apply" in cmd:
-                            return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
                         elif "get" in cmd and "pod" in cmd:
                             return MagicMock(returncode=0, stdout="Running")
                         elif "exec" in cmd:
@@ -1264,8 +1266,8 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 my-job-outputs
                                 stderr="ls: /efs/nonexistent: No such file or directory",
                             )
                         elif "delete" in cmd:
-                            return MagicMock(returncode=0)
-                        return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
+                        return MagicMock(returncode=0, stdout="", stderr="")
 
                     with (
                         patch("subprocess.run", side_effect=run_side_effect),
@@ -1296,7 +1298,7 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 my-job-outputs
                     def run_side_effect(*args, **kwargs):
                         cmd = args[0] if args else kwargs.get("args", [])
                         if "aws" in cmd or "apply" in cmd:
-                            return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
                         elif "get" in cmd and "pod" in cmd:
                             return MagicMock(returncode=0, stdout="Running")
                         elif "exec" in cmd:
@@ -1304,8 +1306,8 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 my-job-outputs
 drwxr-xr-x 2 root root 4096 Jan  1 00:00 checkpoints"""
                             return MagicMock(returncode=0, stdout=ls_output, stderr="")
                         elif "delete" in cmd:
-                            return MagicMock(returncode=0)
-                        return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
+                        return MagicMock(returncode=0, stdout="", stderr="")
 
                     with (
                         patch("subprocess.run", side_effect=run_side_effect),
@@ -1341,15 +1343,15 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 checkpoints"""
                     def run_side_effect(*args, **kwargs):
                         cmd = args[0] if args else kwargs.get("args", [])
                         if "aws" in cmd or "apply" in cmd:
-                            return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
                         elif "get" in cmd and "pod" in cmd:
                             return MagicMock(returncode=0, stdout="Running")
                         elif "exec" in cmd:
                             raise subprocess.CalledProcessError(1, "kubectl", stderr="Exec failed")
                         elif "delete" in cmd:
                             delete_called[0] = True
-                            return MagicMock(returncode=0)
-                        return MagicMock(returncode=0)
+                            return MagicMock(returncode=0, stdout="", stderr="")
+                        return MagicMock(returncode=0, stdout="", stderr="")
 
                     with (
                         patch("subprocess.run", side_effect=run_side_effect),
@@ -1363,3 +1365,86 @@ drwxr-xr-x 2 root root 4096 Jan  1 00:00 checkpoints"""
 
                         # Verify cleanup was attempted
                         assert delete_called[0]
+
+
+class TestFileOperationsTargetTheClusterContext:
+    """Every kubectl call names the context update_kubeconfig returned.
+
+    With a tunnel-pinned kubeconfig entry the current context can belong to
+    another cluster; a helper pod created there (or deleted there) is on the
+    wrong cluster.
+    """
+
+    CONTEXT = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+
+    @staticmethod
+    def _client() -> Any:
+        from cli.config import GCOConfig
+        from cli.files import FileSystemClient
+
+        with patch("cli.files.get_aws_client"):
+            return FileSystemClient(GCOConfig(project_name="gco"))
+
+    def _run(self, calls: list[list[str]], *, phase: str = "Running", local: Path | None = None):
+        def run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            calls.append(list(cmd))
+            if "cp" in cmd and local is not None:
+                local.write_bytes(b"data")
+            if "get" in cmd:
+                return MagicMock(returncode=0, stdout=phase, stderr="")
+            if "exec" in cmd:
+                return MagicMock(returncode=0, stdout="total 0", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return run
+
+    def test_download_from_pod(self, tmp_path: Path) -> None:
+        local = tmp_path / "out.bin"
+        calls: list[list[str]] = []
+        with (
+            patch("cli.files.update_kubeconfig", return_value=self.CONTEXT) as update,
+            patch("subprocess.run", side_effect=self._run(calls, local=local)),
+        ):
+            self._client().download_from_pod("us-east-1", "pod-1", "/data/out.bin", str(local))
+        update.assert_called_once_with("gco-us-east-1", "us-east-1")
+        assert calls == [
+            [
+                "kubectl",
+                f"--context={self.CONTEXT}",
+                "cp",
+                "--",
+                "gco-jobs/pod-1:/data/out.bin",
+                str(local),
+            ]
+        ]
+
+    def test_list_storage_contents(self) -> None:
+        calls: list[list[str]] = []
+        with (
+            patch("cli.files.update_kubeconfig", return_value=self.CONTEXT),
+            patch("subprocess.run", side_effect=self._run(calls)),
+        ):
+            self._client().list_storage_contents("us-east-1", "/")
+        assert [call[1] for call in calls] == [f"--context={self.CONTEXT}"] * 4
+        assert [call[2] for call in calls] == ["apply", "get", "exec", "delete"]
+
+    def test_download_from_storage(self, tmp_path: Path) -> None:
+        local = tmp_path / "result.json"
+        calls: list[list[str]] = []
+        with (
+            patch("cli.files.update_kubeconfig", return_value=self.CONTEXT),
+            patch("subprocess.run", side_effect=self._run(calls, local=local)),
+        ):
+            self._client().download_from_storage("us-east-1", "/run/result.json", str(local))
+        assert [call[1] for call in calls] == [f"--context={self.CONTEXT}"] * 4
+        assert [call[2] for call in calls] == ["apply", "get", "cp", "delete"]
+
+    def test_unknown_context_keeps_the_plain_kubectl_argv(self, tmp_path: Path) -> None:
+        local = tmp_path / "out.bin"
+        calls: list[list[str]] = []
+        with (
+            patch("cli.files.update_kubeconfig", return_value=None),
+            patch("subprocess.run", side_effect=self._run(calls, local=local)),
+        ):
+            self._client().download_from_pod("us-east-1", "pod-1", "/data/out.bin", str(local))
+        assert calls == [["kubectl", "cp", "--", "gco-jobs/pod-1:/data/out.bin", str(local)]]

@@ -1459,9 +1459,9 @@ follows the same table.
 # Auto-provision an ephemeral bastion, tunnel, and hold it open:
 gco cluster tunnel --region us-east-1 --via-ssm auto
 
-# In another shell, run kubectl through the tunnel:
-kubectl --server https://127.0.0.1:8443 \
-    --tls-server-name <endpoint-host> get nodes
+# In another shell, run the kubectl command the tunnel prints:
+kubectl --context=arn:aws:eks:us-east-1:<account-id>:cluster/gco-us-east-1 \
+    --server https://127.0.0.1:8443 --tls-server-name <endpoint-host> get nodes
 
 # Or just print the connection plan (no changes made, JSON for scripting):
 gco cluster tunnel --region us-east-1 --print
@@ -1472,6 +1472,17 @@ Opening a tunnel does **not** replace an EKS access entry: the tunnel solves
 reachability, while authentication still needs `gco stacks access -r <region>`
 (or a `developer_access` entry in cdk.json). Run `gco cluster doctor` when
 unsure which layer is failing.
+
+`--server` replaces only the endpoint; the cluster's credentials and CA come
+from the kubeconfig context, so the printed command names the cluster's
+context with `--context`. Commands that run kubectl for you (`cluster tunnel`,
+`jobs submit-direct`, `files`, `monitoring open`, `costs dashboard`, `gitops`,
+`crossplane`, `slurm shell|output`) refresh the cluster's kubeconfig entry and
+pass its context to every kubectl call, so they reach that cluster whatever
+context is current. A kubeconfig entry already pointed at a local tunnel
+(`server` on `127.0.0.1` or `localhost` with `tls-server-name` set) is kept as
+it is and its own context is used; such an entry with no context fails with an
+error instead of falling back to the current context.
 
 #### `gco cluster doctor`
 

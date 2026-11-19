@@ -33,6 +33,8 @@ from typing import IO, Any, cast
 import click
 import yaml
 
+from .kubectl_helpers import kubectl_context_flags
+
 #: Viewport for UI captures (matches the monitoring screenshots).
 VIEWPORT_WIDTH = 1600
 VIEWPORT_HEIGHT = 900
@@ -165,9 +167,12 @@ def read_secret_key(
     *,
     server: str | None = None,
     tls_server_name: str | None = None,
+    context: str | None = None,
 ) -> str:
     """Decode one key of a Kubernetes Secret through kubectl.
 
+    ``context`` is the kubeconfig context
+    :func:`cli.kubectl_helpers.update_kubeconfig` returned for the cluster.
     Raises ``RuntimeError`` naming the Secret when kubectl is missing, the
     read fails, or the key is absent (the message never carries the value).
     """
@@ -184,6 +189,7 @@ def read_secret_key(
         "-o",
         "json",
         *kubectl_server_flags(server, tls_server_name),
+        *kubectl_context_flags(context),
     ]
     try:
         result = subprocess.run(  # nosemgrep: dangerous-subprocess-use-audit - validated argv, list form, no shell=True

@@ -481,6 +481,28 @@ class TestClusterTunnelInteractive:
         assert blocked.get("waited") is True
         assert proc.terminated is True
 
+    def test_kubectl_hint_names_the_clusters_context(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--server replaces only the endpoint: the hint names the cluster's
+        context so another shell's current context cannot supply the wrong
+        credentials and CA."""
+        context = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
+        monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", lambda c, r: context)
+        monkeypatch.setattr(
+            "cli.kubectl_helpers.describe_cluster_access",
+            lambda c, r: {"endpoint": PRIVATE_ENDPOINT, "public": False, "private": True},
+        )
+        monkeypatch.setattr("cli.ssm_tunnel.start_api_tunnel", lambda *a, **k: _FakeTunnel())
+        monkeypatch.setattr("cli.commands.cluster_cmd._block_until_interrupt", lambda: None)
+        monkeypatch.delenv("GCO_DEV_CONTAINER", raising=False)
+        monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+        res = runner.invoke(
+            cli, ["cluster", "tunnel", "--via-ssm", "i-0123456789abcdef0", "--region", "us-east-1"]
+        )
+        assert res.exit_code == 0, res.output
+        assert f"kubectl --context={context} --server https://127.0.0.1:8443" in res.output
+
     def test_kubectl_hint_names_the_container_inside_gco_dev(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

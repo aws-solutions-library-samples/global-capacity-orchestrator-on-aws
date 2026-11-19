@@ -36,6 +36,7 @@ from cli.slurm import SlurmCliError
 
 _SERVER = "https://127.0.0.1:8443"
 _SNI = "abc.gr7.us-east-1.eks.amazonaws.com"
+_CONTEXT = "arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1"
 SCRIPT = "#!/bin/bash\n#SBATCH --job-name=train\n#SBATCH -p gpu\nsrun hostname\n"
 
 
@@ -418,9 +419,14 @@ class TestLoginPodCommands:
             "/x",
         ]
         assert slurm_lib.login_exec_command(
-            ["bash", "-l"], interactive=True, server=_SERVER, tls_server_name=_SNI
+            ["bash", "-l"],
+            interactive=True,
+            server=_SERVER,
+            tls_server_name=_SNI,
+            context=_CONTEXT,
         ) == [
             "kubectl",
+            f"--context={_CONTEXT}",
             "exec",
             "-it",
             "deploy/slinky-slurm-login-gco",
@@ -888,6 +894,7 @@ def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "kubeconfig": [],
         "session": (_SERVER, _SNI),
         "runs": [],
+        "context": None,
     }
 
     @contextmanager
@@ -896,11 +903,12 @@ def cluster(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         server, sni = state["session"]
         yield types.SimpleNamespace(server=server, tls_server_name=sni)
 
+    def fake_update_kubeconfig(cluster: str, region: str) -> str | None:
+        state["kubeconfig"].append((cluster, region))
+        return state["context"]
+
     monkeypatch.setattr("cli.cluster_tunnel.open_api_server_tunnel", fake_tunnel)
-    monkeypatch.setattr(
-        "cli.kubectl_helpers.update_kubeconfig",
-        lambda cluster, region: state["kubeconfig"].append((cluster, region)),
-    )
+    monkeypatch.setattr("cli.kubectl_helpers.update_kubeconfig", fake_update_kubeconfig)
     return state
 
 
@@ -1095,6 +1103,7 @@ class TestShell:
     def test_execs_an_interactive_shell_through_the_tunnel(
         self, runner, login_api, cluster, monkeypatch
     ):
+        cluster["context"] = _CONTEXT
         monkeypatch.setattr(
             slurm_lib, "run_foreground", lambda cmd: cluster["runs"].append(list(cmd)) or 0
         )
@@ -1109,6 +1118,7 @@ class TestShell:
         assert cluster["runs"] == [
             [
                 "kubectl",
+                f"--context={_CONTEXT}",
                 "exec",
                 "-it",
                 "deploy/slinky-slurm-login-gco",
@@ -1268,6 +1278,7 @@ class TestPcsShell:
 
 class TestOutput:
     def test_cats_the_stdout_file_from_the_login_pod(self, runner, login_api, cluster, monkeypatch):
+        cluster["context"] = _CONTEXT
         monkeypatch.setattr(
             slurm_lib, "run_capture", lambda cmd: cluster["runs"].append(list(cmd)) or "hello world"
         )
@@ -1288,6 +1299,7 @@ class TestOutput:
         assert cluster["runs"] == [
             [
                 "kubectl",
+                f"--context={_CONTEXT}",
                 "exec",
                 "deploy/slinky-slurm-login-gco",
                 "-n",

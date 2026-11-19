@@ -5,7 +5,7 @@ Provides functionality to submit, query, and manage jobs across GCO clusters.
 """
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -492,10 +492,12 @@ class JobManager:
 
         cluster_name = stack.cluster_name
 
-        # Update kubeconfig for the cluster
-        from .kubectl_helpers import update_kubeconfig
+        # Update kubeconfig for the cluster. Every kubectl call below names the
+        # cluster's context: with a tunnel-pinned entry the current context can
+        # belong to another cluster.
+        from .kubectl_helpers import kubectl_context_flags, update_kubeconfig
 
-        update_kubeconfig(cluster_name, region)
+        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
 
         # Handle existing Job resources before applying
         warnings: list[str] = []
@@ -508,7 +510,9 @@ class JobManager:
                 if not job_name:
                     continue
 
-                existing_status = self._get_kubectl_job_status(job_name, job_ns)
+                existing_status = self._get_kubectl_job_status(
+                    job_name, job_ns, context_flags=context_flags
+                )
                 if existing_status is None:
                     # No existing job — nothing to do
                     continue
@@ -516,7 +520,7 @@ class JobManager:
                 if existing_status in ("complete", "failed"):
                     # Finished job — safe to delete and replace
                     subprocess.run(
-                        ["kubectl", "delete", "job", job_name, "-n", job_ns],
+                        ["kubectl", *context_flags, "delete", "job", job_name, "-n", job_ns],
                         capture_output=True,
                         text=True,
                         check=False,
@@ -546,7 +550,7 @@ class JobManager:
 
         try:
             # Build kubectl command
-            kubectl_cmd = ["kubectl", "apply", "-f", temp_path]
+            kubectl_cmd = ["kubectl", *context_flags, "apply", "-f", temp_path]
 
             if dry_run:
                 kubectl_cmd.extend(["--dry-run=client"])
@@ -603,8 +607,13 @@ class JobManager:
 
             os.unlink(temp_path)
 
-    def _get_kubectl_job_status(self, job_name: str, namespace: str) -> str | None:
+    def _get_kubectl_job_status(
+        self, job_name: str, namespace: str, *, context_flags: Sequence[str] = ()
+    ) -> str | None:
         """Check the status of an existing Job via kubectl.
+
+        ``context_flags`` selects the cluster's kubeconfig context
+        (:func:`cli.kubectl_helpers.kubectl_context_flags`).
 
         Returns:
             "complete", "failed", "active", or None if the job doesn't exist.
@@ -615,6 +624,7 @@ class JobManager:
         result = subprocess.run(
             [
                 "kubectl",
+                *context_flags,
                 "get",
                 "job",
                 job_name,

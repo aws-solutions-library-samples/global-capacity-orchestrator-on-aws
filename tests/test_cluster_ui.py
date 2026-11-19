@@ -205,6 +205,7 @@ class TestReadSecretKey:
             "password",
             server="https://127.0.0.1:8443",
             tls_server_name="abc.eks.amazonaws.com",
+            context="arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1",
         )
         assert value == "s3cret"
         assert calls == [
@@ -221,6 +222,7 @@ class TestReadSecretKey:
                 "https://127.0.0.1:8443",
                 "--tls-server-name",
                 "abc.eks.amazonaws.com",
+                "--context=arn:aws:eks:us-east-1:123456789012:cluster/gco-us-east-1",
             ]
         ]
 

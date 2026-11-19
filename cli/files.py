@@ -18,7 +18,7 @@ from botocore.exceptions import ClientError
 from ._image_uri import aws_partition, aws_url_suffix
 from .aws_client import get_aws_client
 from .config import GCOConfig, get_config
-from .kubectl_helpers import update_kubeconfig
+from .kubectl_helpers import kubectl_context_flags, update_kubeconfig
 
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 _DNS_SUBDOMAIN_RE = re.compile(
@@ -482,12 +482,12 @@ class FileSystemClient:
 
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
-        update_kubeconfig(cluster_name, region)
+        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
 
         # Build kubectl cp command
         # Format: kubectl cp <namespace>/<pod>:<remote_path> <local_path>
         source = f"{namespace}/{pod_name}:{remote_path}"
-        cmd = ["kubectl", "cp"]
+        cmd = ["kubectl", *context_flags, "cp"]
 
         if container:
             cmd.extend(["-c", container])
@@ -574,7 +574,7 @@ class FileSystemClient:
 
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
-        update_kubeconfig(cluster_name, region)
+        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
 
         # Create helper pod manifest.
         #
@@ -598,7 +598,7 @@ class FileSystemClient:
         try:
             # Create the helper pod
             subprocess.run(
-                ["kubectl", "apply", "-f", "-"],
+                ["kubectl", *context_flags, "apply", "-f", "-"],
                 input=pod_manifest,
                 capture_output=True,
                 text=True,
@@ -612,6 +612,7 @@ class FileSystemClient:
                 status_result = subprocess.run(
                     [
                         "kubectl",
+                        *context_flags,
                         "get",
                         "pod",
                         helper_pod_name,
@@ -636,6 +637,7 @@ class FileSystemClient:
             list_result = subprocess.run(
                 [
                     "kubectl",
+                    *context_flags,
                     "exec",
                     helper_pod_name,
                     "-n",
@@ -702,6 +704,7 @@ class FileSystemClient:
                 subprocess.run(
                     [
                         "kubectl",
+                        *context_flags,
                         "delete",
                         "pod",
                         helper_pod_name,
@@ -767,7 +770,7 @@ class FileSystemClient:
 
         # Update kubeconfig for the cluster
         cluster_name = f"{self.config.project_name}-{region}"
-        update_kubeconfig(cluster_name, region)
+        context_flags = kubectl_context_flags(update_kubeconfig(cluster_name, region))
 
         # Create helper pod manifest.
         #
@@ -786,7 +789,7 @@ class FileSystemClient:
         try:
             # Create the helper pod
             subprocess.run(
-                ["kubectl", "apply", "-f", "-"],
+                ["kubectl", *context_flags, "apply", "-f", "-"],
                 input=pod_manifest,
                 capture_output=True,
                 text=True,
@@ -800,6 +803,7 @@ class FileSystemClient:
                 status_result = subprocess.run(
                     [
                         "kubectl",
+                        *context_flags,
                         "get",
                         "pod",
                         helper_pod_name,
@@ -822,7 +826,7 @@ class FileSystemClient:
 
             # Copy files from the helper pod
             source = f"{namespace}/{helper_pod_name}:{full_remote_path}"
-            cmd = ["kubectl", "cp", "--", source, local_path]
+            cmd = ["kubectl", *context_flags, "cp", "--", source, local_path]
 
             subprocess.run(
                 cmd, check=True, capture_output=True, text=True
@@ -867,6 +871,7 @@ class FileSystemClient:
                 subprocess.run(
                     [
                         "kubectl",
+                        *context_flags,
                         "delete",
                         "pod",
                         helper_pod_name,
