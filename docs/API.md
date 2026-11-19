@@ -495,6 +495,16 @@ allowlist in [Allowed Upstream Paths](#allowed-upstream-paths). Full detail is i
 
 ## Detailed Endpoint Documentation
 
+Timestamps are ISO 8601 in UTC, in three forms. A response's own `timestamp`,
+when the service answered, has microseconds and a `+00:00` offset
+(`2024-01-15T10:30:00.512834+00:00`). Kubernetes times (`creationTimestamp`,
+`startTime`, event and container times) are whole seconds with `+00:00`, the
+same instants `kubectl` prints with a `Z` suffix. The records of the global
+queue, templates and webhooks (`submitted_at`, `claimed_at`,
+`status_history`, `created_at`) keep the store's fixed-width form, six
+fractional digits and `Z` (`2024-01-15T10:00:00.274913Z`), so that they sort
+as text in time order; the webhook payload's `timestamp` also ends in `Z`.
+
 ### Global Jobs List
 
 ```http
@@ -661,7 +671,7 @@ gco jobs list -r us-east-1 --limit 10
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "total": 100,
   "limit": 50,
   "offset": 0,
@@ -672,7 +682,7 @@ gco jobs list -r us-east-1 --limit 10
       "metadata": {
         "name": "training-job-001",
         "namespace": "gco-jobs",
-        "creationTimestamp": "2024-01-15T10:00:00Z",
+        "creationTimestamp": "2024-01-15T10:00:00+00:00",
         "labels": {"app": "ml-training"},
         "uid": "abc123"
       },
@@ -685,7 +695,7 @@ gco jobs list -r us-east-1 --limit 10
         "active": 1,
         "succeeded": 0,
         "failed": 0,
-        "startTime": "2024-01-15T10:00:05Z",
+        "startTime": "2024-01-15T10:00:05+00:00",
         "completionTime": null,
         "conditions": []
       },
@@ -721,11 +731,11 @@ gco jobs get training-job -r us-west-2 -n ml-jobs
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "metadata": {
     "name": "training-job-001",
     "namespace": "gco-jobs",
-    "creationTimestamp": "2024-01-15T10:00:00Z",
+    "creationTimestamp": "2024-01-15T10:00:00+00:00",
     "labels": {"app": "ml-training"},
     "annotations": {},
     "uid": "abc123"
@@ -740,7 +750,7 @@ gco jobs get training-job -r us-west-2 -n ml-jobs
     "active": 1,
     "succeeded": 0,
     "failed": 0,
-    "startTime": "2024-01-15T10:00:05Z",
+    "startTime": "2024-01-15T10:00:05+00:00",
     "completionTime": null,
     "conditions": []
   },
@@ -889,7 +899,7 @@ gco jobs logs multi-container-job -r us-east-1 --container sidecar
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "job_name": "training-job-001",
   "namespace": "gco-jobs",
   "pod_name": "training-job-001-abc123",
@@ -971,7 +981,7 @@ gco jobs events training-job -n ml-jobs -r us-west-2
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2026-11-15T10:30:00Z",
+  "timestamp": "2026-11-15T10:30:00.512834+00:00",
   "job_name": "training-job-001",
   "namespace": "gco-jobs",
   "count": 4,
@@ -981,8 +991,8 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "reason": "Evicted",
       "message": "Evicted pod: Forceful Termination",
       "count": 1,
-      "firstTimestamp": "2026-11-15T10:00:05Z",
-      "lastTimestamp": "2026-11-15T10:00:05Z",
+      "firstTimestamp": "2026-11-15T10:00:05+00:00",
+      "lastTimestamp": "2026-11-15T10:00:05+00:00",
       "eventTime": null,
       "source": {"component": "karpenter", "host": null},
       "involvedObject": {
@@ -996,8 +1006,8 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "reason": "SpotInterrupted",
       "message": "Spot interruption warning was triggered",
       "count": 1,
-      "firstTimestamp": "2026-11-15T10:00:00Z",
-      "lastTimestamp": "2026-11-15T10:00:00Z",
+      "firstTimestamp": "2026-11-15T10:00:00+00:00",
+      "lastTimestamp": "2026-11-15T10:00:00+00:00",
       "eventTime": null,
       "source": {"component": "karpenter", "host": null},
       "involvedObject": {
@@ -1011,8 +1021,8 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "reason": "SpotInterrupted",
       "message": "Spot interruption warning was triggered",
       "count": 1,
-      "firstTimestamp": "2026-11-15T10:00:00Z",
-      "lastTimestamp": "2026-11-15T10:00:00Z",
+      "firstTimestamp": "2026-11-15T10:00:00+00:00",
+      "lastTimestamp": "2026-11-15T10:00:00+00:00",
       "eventTime": null,
       "source": {"component": "karpenter", "host": null},
       "involvedObject": {
@@ -1026,8 +1036,8 @@ gco jobs events training-job -n ml-jobs -r us-west-2
       "reason": "SuccessfulCreate",
       "message": "Created pod: training-job-001-abc12",
       "count": 1,
-      "firstTimestamp": "2026-11-15T09:00:00Z",
-      "lastTimestamp": "2026-11-15T09:00:00Z",
+      "firstTimestamp": "2026-11-15T09:00:00+00:00",
+      "lastTimestamp": "2026-11-15T09:00:00+00:00",
       "eventTime": null,
       "source": {"component": "job-controller", "host": null},
       "involvedObject": {
@@ -1073,7 +1083,7 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "job_name": "training-job-001",
   "namespace": "gco-jobs",
   "count": 1,
@@ -1082,7 +1092,7 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
       "metadata": {
         "name": "training-job-001-abc123",
         "namespace": "gco-jobs",
-        "creationTimestamp": "2024-01-15T10:00:00Z",
+        "creationTimestamp": "2024-01-15T10:00:00+00:00",
         "deletionTimestamp": null,
         "labels": {"job-name": "training-job-001"},
         "uid": "pod-uid-123"
@@ -1096,7 +1106,7 @@ gco jobs pods training-job -n ml-jobs -r us-west-2
         "phase": "Running",
         "hostIP": "10.0.1.100",
         "podIP": "10.0.2.50",
-        "startTime": "2024-01-15T10:00:05Z",
+        "startTime": "2024-01-15T10:00:05+00:00",
         "containerStatuses": [
           {
             "name": "main",
@@ -1207,13 +1217,13 @@ deleting it, `status.disruptionTarget` carrying the Kubernetes
 `DisruptionTarget` condition's `reason`, `message`, and `since`:
 
 ```json
-"metadata": {"name": "training-job-001-abc123", "deletionTimestamp": "2026-11-15T10:00:05Z", "...": "..."},
+"metadata": {"name": "training-job-001-abc123", "deletionTimestamp": "2026-11-15T10:00:05+00:00", "...": "..."},
 "status": {
   "phase": "Running",
   "disruptionTarget": {
     "reason": "EvictionByEvictionAPI",
     "message": "Eviction API: evicting",
-    "since": "2026-11-15T10:00:05Z"
+    "since": "2026-11-15T10:00:05+00:00"
   },
   "...": "..."
 }
@@ -1247,7 +1257,7 @@ gco jobs metrics training-job -n ml-jobs -r us-west-2
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "job_name": "training-job-001",
   "namespace": "gco-jobs",
   "summary": {
@@ -1319,7 +1329,7 @@ gco jobs bulk-delete --all-regions --status failed --older-than-days 30 --execut
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "dry_run": false,
   "total_matched": 5,
   "deleted_count": 5,
@@ -1353,7 +1363,7 @@ gco jobs retry training-job -n ml-jobs -r us-west-2 -y
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "original_job": "failed-job-001",
   "new_job": "failed-job-001-retry-20240115103000",
   "namespace": "gco-jobs",
@@ -1430,7 +1440,7 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "message": "Job queued successfully",
   "job": {
     "job_id": "abc123-def456-ghi789",
@@ -1439,7 +1449,7 @@ gco queue submit job.yaml -r us-east-1 --max-spot-price 0.50 --spot-instance-typ
     "namespace": "gco-jobs",
     "status": "queued",
     "priority": 10,
-    "submitted_at": "2024-01-15T10:30:00Z"
+    "submitted_at": "2024-01-15T10:30:00.498211Z"
   }
 }
 ```
@@ -1487,7 +1497,7 @@ gco queue list -s running --cursor CURSOR_FROM_THE_PREVIOUS_PAGE
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "count": 5,
   "jobs": [
     {
@@ -1497,7 +1507,7 @@ gco queue list -s running --cursor CURSOR_FROM_THE_PREVIOUS_PAGE
       "namespace": "gco-jobs",
       "status": "queued",
       "priority": 10,
-      "submitted_at": "2024-01-15T10:00:00.000000Z"
+      "submitted_at": "2024-01-15T10:00:00.274913Z"
     }
   ],
   "next_cursor": null,
@@ -1529,7 +1539,7 @@ gco queue get abc123-def456 --region us-east-1
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "job": {
     "job_id": "abc123-def456",
     "job_name": "training-job-1",
@@ -1539,15 +1549,16 @@ gco queue get abc123-def456 --region us-east-1
     "priority": 10,
     "manifest": {"apiVersion": "batch/v1", "...": "..."},
     "labels": {"team": "ml"},
-    "submitted_at": "2024-01-15T10:00:00Z",
-    "claimed_by": "us-east-1",
-    "claimed_at": "2024-01-15T10:00:05Z",
+    "submitted_at": "2024-01-15T10:00:00.274913Z",
+    "claimed_by": "us-east-1/0b6c2f9e-4d1a-4e7b-9a3c-5f8e2d1b7c40/8f14e45fceea4c1f9d6a2b7e3c5d9a01",
+    "claimed_at": "2024-01-15T10:00:05.103842Z",
     "k8s_job_uid": "k8s-uid-123",
     "status_history": [
-      {"status": "queued", "timestamp": "2024-01-15T10:00:00Z", "message": "Job submitted"},
-      {"status": "claimed", "timestamp": "2024-01-15T10:00:05Z"},
-      {"status": "applying", "timestamp": "2024-01-15T10:00:06Z"},
-      {"status": "running", "timestamp": "2024-01-15T10:00:10Z"}
+      {"status": "queued", "timestamp": "2024-01-15T10:00:00.274913Z", "message": "Job submitted"},
+      {"status": "claimed", "timestamp": "2024-01-15T10:00:05.103842Z", "message": "Claimed by us-east-1/0b6c2f9e-4d1a-4e7b-9a3c-5f8e2d1b7c40/8f14e45fceea4c1f9d6a2b7e3c5d9a01"},
+      {"status": "applying", "timestamp": "2024-01-15T10:00:06.007531Z"},
+      {"status": "pending", "timestamp": "2024-01-15T10:00:07.315629Z"},
+      {"status": "running", "timestamp": "2024-01-15T10:00:10.861004Z"}
     ]
   }
 }
@@ -1580,7 +1591,7 @@ gco queue cancel abc123-def456 --reason "No longer needed"
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "message": "Job 'abc123-def456' cancelled successfully"
 }
 ```
@@ -1603,7 +1614,7 @@ gco queue stats
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "summary": {
     "total_jobs": 150,
     "total_queued": 10,
@@ -1664,7 +1675,7 @@ gco costs report status -r us-east-1
     "window_end": "2026-07-26T10:00:00+00:00"
   },
   "last_error": null,
-  "timestamp": "2026-07-26T10:42:00+00:00"
+  "timestamp": "2026-07-26T10:42:00.512834+00:00"
 }
 ```
 
@@ -1688,7 +1699,7 @@ gco costs report list -r us-east-1 --limit 50
 
 ```json
 {
-  "timestamp": "2026-07-26T10:42:00+00:00",
+  "timestamp": "2026-07-26T10:42:00.512834+00:00",
   "region": "us-east-1",
   "bucket": "gco-monitoring-costreportbucketea8cce7a-1a2b3c4d5e6f",
   "count": 1,
@@ -1729,7 +1740,7 @@ gco costs report generate -r us-east-1 --window-hours 48
 
 ```json
 {
-  "timestamp": "2026-07-26T10:42:05+00:00",
+  "timestamp": "2026-07-26T10:42:05.512834+00:00",
   "region": "us-east-1",
   "bucket": "gco-monitoring-costreportbucketea8cce7a-1a2b3c4d5e6f",
   "report": {
@@ -1766,7 +1777,7 @@ gco slurm backends -r us-east-1
 
 ```json
 {
-  "timestamp": "2026-10-27T23:40:00+00:00",
+  "timestamp": "2026-10-27T23:40:00.512834+00:00",
   "backends": [
     {
       "name": "slinky",
@@ -1821,7 +1832,7 @@ gco slurm status -r us-east-1
 
 ```json
 {
-  "timestamp": "2026-10-27T23:40:00+00:00",
+  "timestamp": "2026-10-27T23:40:00.512834+00:00",
   "enabled": true,
   "controller": [
     {"hostname": "slinky-slurm-controller-0", "responding": true, "latency_us": 412, "mode": "primary"}
@@ -1878,7 +1889,7 @@ Only `script` is required; `name` defaults to `gco-job`, `nodes`/`tasks`/`cpus_p
 
 ```json
 {
-  "timestamp": "2026-10-27T23:41:00+00:00",
+  "timestamp": "2026-10-27T23:41:00.512834+00:00",
   "job_id": 42,
   "step_id": "batch",
   "name": "train",
@@ -2031,7 +2042,7 @@ gco templates run gpu-template -n my-job -r us-east-1 -p image=custom:v1 -p gpus
 {
   "cluster_id": "gco-cluster",
   "region": "us-east-1",
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "template": "gpu-training-template",
   "job_name": "my-training-job",
   "namespace": "gco-jobs",
@@ -2094,7 +2105,7 @@ All webhook deliveries use the following JSON payload format:
 ```json
 {
   "event": "job.completed",
-  "timestamp": "2024-01-15T12:00:00Z",
+  "timestamp": "2024-01-15T12:00:00.381502Z",
   "cluster_id": "gco-cluster-us-east-1",
   "region": "us-east-1",
   "job": {
@@ -2103,8 +2114,8 @@ All webhook deliveries use the following JSON payload format:
     "uid": "abc-123-def-456",
     "labels": {"app": "ml-training", "team": "data-science"},
     "status": "succeeded",
-    "start_time": "2024-01-15T11:55:00Z",
-    "completion_time": "2024-01-15T12:00:00Z",
+    "start_time": "2024-01-15T11:55:00+00:00",
+    "completion_time": "2024-01-15T12:00:00+00:00",
     "active": 0,
     "succeeded": 1,
     "failed": 0
@@ -2206,13 +2217,14 @@ gco webhooks create -u https://example.com/webhook -e job.completed --secret my-
 
 ```json
 {
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00",
   "message": "Webhook registered successfully",
   "webhook": {
     "id": "abc12345",
     "url": "https://example.com/webhook",
     "events": ["job.completed", "job.failed"],
-    "namespace": "gco-jobs"
+    "namespace": "gco-jobs",
+    "created_at": "2024-01-15T10:30:00.498211Z"
   }
 }
 ```
@@ -2521,15 +2533,48 @@ copy of the same schemas, see the committed documents in
 
 ## Error Responses
 
-All error responses follow this format:
+The services answer an error with FastAPI's `detail` field:
 
 ```json
 {
-  "error": "Error type",
-  "detail": "Detailed error message",
-  "timestamp": "2024-01-15T10:30:00Z"
+  "detail": "Job 'training-job-001' not found in namespace 'gco-jobs'"
 }
 ```
+
+A request whose parameters or body fail validation (`422`) carries the failed
+checks as a list instead:
+
+```json
+{
+  "detail": [
+    {
+      "type": "greater_than_equal",
+      "loc": ["query", "limit"],
+      "msg": "Input should be greater than or equal to 1",
+      "input": "0",
+      "ctx": {"ge": 1}
+    }
+  ]
+}
+```
+
+An exception that no route handles answers `500` with
+`"error": "Internal server error"`; the manifest processor adds `detail`,
+`request_id` and `timestamp`, and the health monitor `detail`:
+
+```json
+{
+  "error": "Internal server error",
+  "detail": "An unexpected error occurred",
+  "request_id": "3f2a…",
+  "timestamp": "2024-01-15T10:30:00.512834+00:00"
+}
+```
+
+Errors that the API Gateway proxy Lambdas return themselves, such as the `400`
+for a path with a dot segment or a `503` or `504` when the backend cannot be
+reached, carry `{"error": "..."}`. API Gateway's own refusals, such as the
+`403` for a caller without `execute-api:Invoke`, carry `{"message": "..."}`.
 
 **Common HTTP Status Codes:**
 
@@ -2541,6 +2586,7 @@ All error responses follow this format:
 | 403 | Forbidden - Namespace not allowed |
 | 404 | Not Found - Resource doesn't exist |
 | 409 | Conflict - Resource already exists |
+| 422 | Unprocessable Entity - A parameter or body field failed validation |
 | 500 | Internal Server Error |
 | 503 | Service Unavailable - Processor not ready |
 
