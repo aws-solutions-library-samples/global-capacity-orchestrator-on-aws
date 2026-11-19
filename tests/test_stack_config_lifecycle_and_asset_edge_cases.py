@@ -179,9 +179,8 @@ def test_backend_tls_validation_relations(
         config_loader._validate_backend_tls_config()
 
 
-def test_regional_api_enabled_requires_boolean(config_loader: Any) -> None:
-    from gco.config.config_loader import ConfigValidationError
-
+def test_deprecated_regional_api_enabled_is_not_type_checked(config_loader: Any) -> None:
+    """The deprecated flag is ignored, so a non-boolean value does not fail validation."""
     config_loader.app = _ContextApp(
         {
             "api_gateway": {
@@ -194,8 +193,8 @@ def test_regional_api_enabled_requires_boolean(config_loader: Any) -> None:
             }
         }
     )
-    with pytest.raises(ConfigValidationError, match="regional_api_enabled"):
-        config_loader._validate_api_gateway_config()
+
+    config_loader._validate_api_gateway_config()
 
 
 def test_capacity_history_checks_every_enabled_region(config_loader: Any) -> None:

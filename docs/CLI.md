@@ -168,9 +168,10 @@ credentials have it; for a narrower identity, attach a policy such as:
 Replace the account ID, and replace the API id wildcard with the ids of the
 APIs in the `<project>-api-gateway` and `<project>-regional-api-<region>`
 stacks to grant nothing beyond GCO. [docs/iam-policies](iam-policies/README.md) has per-route examples.
-`api_gateway.regional_api_enabled` no longer changes anything: it used to add a
-resource-policy statement that let every principal of the account call the
-bridge without such a permission.
+`api_gateway.regional_api_enabled` is deprecated: it no longer changes
+anything, and the synth warns about it and ignores it, so remove it from
+`cdk.json`. It used to add a resource-policy statement that let every principal
+of the account call the bridge without such a permission.
 
 Both API Gateway hops use AWS-managed TLS and [SigV4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html). The regional VPC Lambda
 then uses HMAC plus deployment-local private-root TLS to the internal ALB.

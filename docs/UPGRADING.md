@@ -509,6 +509,7 @@ Warnings (the synth continues; the key is ignored, so remove it):
 | `global_accelerator.health_check_grace_period`, `global_accelerator.health_check_timeout` | Global Accelerator endpoint groups have no such settings |
 | `fsx_lustre.node_group` (also in `fsx_lustre_regions`) | FSx workloads run on the EKS Auto Mode node pools; `gco stacks fsx enable` removes it |
 | `images.removal_policy`, `images.empty_on_delete`, `images.lifecycle` | No stack creates or deletes the `<project_name>/*` ECR repositories (the gco CLI creates them), so they survive a destroy whatever these say, and `gco images init` applies its own lifecycle policy. Delete a repository with `gco images delete-repo <name> --force -y`; change a policy with `gco images lifecycle set` |
+| `api_gateway.regional_api_enabled` | The API resource policies no longer admit the account as a whole, so callers reach the global API and the regional bridges with their own `execute-api:Invoke` permission whatever it says (see [API calls need an IAM permission](#api-calls-need-an-iam-permission)) |
 | An `enabled` flag written as `"true"` | Write the JSON boolean `true` |
 | A top-level key in GCO's `snake_case` style that GCO does not read | Most likely a misspelt block, whose settings would not apply |
 | A `*_regions` overlay for a Region that is not in `deployment_regions.regional` | Nothing reads it until the Region is added |
@@ -545,7 +546,9 @@ IAM-authorized route without an `execute-api:Invoke` permission of its own.
   covers the CLI and [docs/iam-policies](iam-policies/README.md) for narrower
   ones.
 - **`api_gateway.regional_api_enabled` no longer has an effect.** Region-pinned
-  calls reach the bridges with the permission above whatever its value.
+  calls reach the bridges with the permission above whatever its value. The
+  key is deprecated: the synth warns about it and ignores it, and the shipped
+  `cdk.json` no longer has it, so remove it from yours.
 - **The analytics `/studio/*` pages keep working.** Their requests carry no IAM
   identity, so the resource policy still admits `GET /studio/*`; the Cognito
   authorizer decides who signs in.

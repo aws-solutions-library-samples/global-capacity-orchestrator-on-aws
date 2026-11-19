@@ -110,14 +110,13 @@
       "healthy_threshold": 2,
       "unhealthy_threshold": 2
     },
-    "_comment_api_gateway": "Authenticated API behavior and direct-caller policy. In the commercial 'aws' partition the global REST API is edge-optimized and its control/inference proxies use Global Accelerator; regional_api_enabled optionally admits other IAM-authorized principals from this account to each regional bridge. In other partitions the global API is regional and aggregate-only, Global Accelerator proxy routes are omitted, and same-account regional bridge access is forced on as the supported workload ingress. The exact aggregator role is always admitted. throttle/logging/metrics/tracing settings apply in every partition.",
+    "_comment_api_gateway": "Authenticated API behavior. In the commercial 'aws' partition the global REST API is edge-optimized and its control/inference proxies use Global Accelerator; in other partitions it is regional and aggregate-only, the Global Accelerator proxy routes are omitted, and the always-deployed regional API bridges are the workload ingress. Every IAM-authorized route, on the global API or a regional bridge, needs the caller's own execute-api:Invoke permission: the global API's resource policy admits only GET /studio/* (the analytics sign-in pages, which carry no IAM identity) and each bridge's only the cross-region aggregator role. throttle/logging/metrics/tracing settings apply in every partition. The former regional_api_enabled key has no effect; the synth warns about it and ignores it (see docs/UPGRADING.md).",
     "api_gateway": {
       "throttle_rate_limit": 1000,
       "throttle_burst_limit": 2000,
       "log_level": "INFO",
       "metrics_enabled": true,
-      "tracing_enabled": true,
-      "regional_api_enabled": false
+      "tracing_enabled": true
     },
     "_comment_waf": "WAFv2 web ACL in front of API Gateway. per_ip_rate_limit is the WAF rate-based rule's request budget per source IP over a 5-minute window. See https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html.",
     "waf": {

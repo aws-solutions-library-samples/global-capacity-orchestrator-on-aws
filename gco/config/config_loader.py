@@ -153,6 +153,12 @@ DEPRECATED_BLOCK_KEYS: dict[str, str] = {
         "(keep the 20 newest tagged images, expire untagged ones after 7 days). Remove it "
         "from cdk.json; change a repository's policy with 'gco images lifecycle set'."
     ),
+    "api_gateway.regional_api_enabled": (
+        "it no longer changes anything: the API resource policies admit no principal of the "
+        "account, so a caller reaches the global API and every regional API bridge with its "
+        "own execute-api:Invoke permission, whatever this says (docs/UPGRADING.md, API calls "
+        "need an IAM permission). Remove it from cdk.json."
+    ),
 }
 
 #: The charts of the ``helm`` block that take nothing but ``enabled``.
@@ -237,7 +243,7 @@ BLOCK_KEYS: dict[str, frozenset[str]] = {
             "log_level",
             "metrics_enabled",
             "tracing_enabled",
-            "regional_api_enabled",
+            "regional_api_enabled",  # deprecated (DEPRECATED_BLOCK_KEYS)
         }
     ),
     "waf": frozenset({"per_ip_rate_limit"}),
@@ -1628,7 +1634,7 @@ class ConfigLoader:
             )
 
         # Validate boolean flags
-        for flag in ("metrics_enabled", "tracing_enabled", "regional_api_enabled"):
+        for flag in ("metrics_enabled", "tracing_enabled"):
             if flag in api_gw_config and not isinstance(api_gw_config[flag], bool):
                 raise ConfigValidationError(f"api_gateway.{flag} must be a boolean")
 
@@ -2918,11 +2924,11 @@ class ConfigLoader:
             - log_level: CloudWatch logging level (OFF, ERROR, INFO)
             - metrics_enabled: Enable CloudWatch metrics
             - tracing_enabled: Enable X-Ray tracing
-            - regional_api_enabled: In the commercial ``aws`` partition,
-              permit direct same-account callers to use the always-deployed
-              regional API bridges. Other partitions force this access on
-              because the bridges are the supported workload ingress without
-              Global Accelerator. Centralized aggregation always uses them.
+
+            A deprecated ``regional_api_enabled`` key is passed through
+            unread (:data:`DEPRECATED_BLOCK_KEYS`): callers reach the
+            regional API bridges with their own ``execute-api:Invoke``
+            permission whatever it says.
         """
         default_config = {
             "throttle_rate_limit": 1000,
@@ -2930,7 +2936,6 @@ class ConfigLoader:
             "log_level": "INFO",
             "metrics_enabled": True,
             "tracing_enabled": True,
-            "regional_api_enabled": False,
         }
         return {**default_config, **(self.app.node.try_get_context("api_gateway") or {})}
 

@@ -376,7 +376,8 @@ User (region-pinned in `aws`; required ingress elsewhere) → Regional API Gatew
 - No automatic cross-region failover on a directly invoked endpoint
 - Each direct caller needs `execute-api:Invoke` on the bridge in its own IAM policy
 
-`api_gateway.regional_api_enabled` no longer changes the bridge; it used to add a
+`api_gateway.regional_api_enabled` is deprecated and no longer changes the
+bridge (the synth warns about it and ignores it); it used to add a
 resource-policy statement that let every principal of the account call it
 without that permission.
 
