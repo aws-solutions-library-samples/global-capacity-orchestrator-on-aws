@@ -41,8 +41,8 @@ from proxy_utils import (
 )
 
 # <pyflowchart-code-diagram> BEGIN - auto-inserted, do not edit
-# Generated at (UTC): 2026-11-19T06:05:34Z
-# Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad
+# Generated at (UTC): 2026-11-19T12:23:38Z
+# Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894
 # Flowchart(s) generated from this file:
 #   * ``lambda_handler`` -> ``diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.html``
 #     (PNG: ``diagrams/code_diagrams/lambda/api-gateway-proxy/handler.lambda_handler.png``)

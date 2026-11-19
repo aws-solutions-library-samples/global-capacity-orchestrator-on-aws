@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-11-19T06:05:34Z">
-        <meta name="gco-source-commit" content="1e6de1636d5418ba50126d6619a9bafc70839dad">
-        <meta name="gco-flow-digest" content="bfb4a7c9ce056c81">
+        <meta name="gco-generated-at" content="2026-11-19T12:23:38Z">
+        <meta name="gco-source-commit" content="e192bb01bb7807a52e11e262c0cb44173133f894">
+        <meta name="gco-flow-digest" content="a33c1250c7810797">
         <title>API Gateway Proxy Lambda</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,64 +208,70 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op105=>operation: 'Proxy one IAM-authenticated request through Global Accelerator.'
-op110=>operation: signing_key = get_secret_token()
-cond107=>condition: exception raised?
-cond112=>condition: except (KeyError, RuntimeError)
-io119=>inputoutput: output: _error_response(503, 'Backend authentication is temporarily unavailable')
-e117=>end: end function return
-op125=>operation: http_method = event['httpMethod']
-op127=>operation: path = event['path']
-op129=>operation: query_string = event.get('multiValueQueryStringParameters') or event.get('queryStringParameters') or {}
-op131=>operation: headers = dict(event.get('headers') or {})
-cond134=>condition: if _pop_header(headers, 'X-GCO-Target-Region') is not None
-io141=>inputoutput: output: _error_response(400, "X-GCO-Target-Region is not supported by the global endpoint; use the target region's regional API endpoint if authorized for direct access")
-e139=>end: end function return
-op147=>operation: body = event.get('body') or ''
-cond150=>condition: if event.get('isBase64Encoded')
-io157=>inputoutput: output: _error_response(415, 'Base64-encoded request bodies are not supported')
-e155=>end: end function return
-op166=>operation: target_url = build_target_url(os.environ['GLOBAL_ACCELERATOR_ENDPOINT'], path, query_string)
-cond163=>condition: exception raised?
-cond168=>condition: except (KeyError, ValueError)
-io175=>inputoutput: output: _error_response(503, 'Global backend routing is temporarily unavailable')
-e173=>end: end function return
-op181=>operation: sign = partial(build_signed_headers, signing_key, http_method, target_url, body)
-op183=>operation: headers = sanitize_request_headers(headers)
-sub185=>subroutine: headers.update(caller_identity_headers(event))
-sub187=>subroutine: headers.update(sign())
-io192=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context), resign_headers=sign)
-e190=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op2=>operation: 'Proxy one IAM-authenticated request through Global Accelerator.'
+op7=>operation: signing_key = get_secret_token()
+cond4=>condition: exception raised?
+cond9=>condition: except (KeyError, RuntimeError)
+io16=>inputoutput: output: _error_response(503, 'Backend authentication is temporarily unavailable')
+e14=>end: end function return
+op22=>operation: http_method = event['httpMethod']
+op24=>operation: path = event['path']
+cond27=>condition: if has_dot_segment(path)
+io34=>inputoutput: output: _error_response(400, "The request path must not have a '.' or '..' segment")
+e32=>end: end function return
+op40=>operation: query_string = event.get('multiValueQueryStringParameters') or event.get('queryStringParameters') or {}
+op42=>operation: headers = dict(event.get('headers') or {})
+cond45=>condition: if _pop_header(headers, 'X-GCO-Target-Region') is not None
+io52=>inputoutput: output: _error_response(400, "X-GCO-Target-Region is not supported by the global endpoint; use the target region's regional API endpoint if authorized for direct access")
+e50=>end: end function return
+op58=>operation: body = event.get('body') or ''
+cond61=>condition: if event.get('isBase64Encoded')
+io68=>inputoutput: output: _error_response(415, 'Base64-encoded request bodies are not supported')
+e66=>end: end function return
+op77=>operation: target_url = build_target_url(os.environ['GLOBAL_ACCELERATOR_ENDPOINT'], path, query_string)
+cond74=>condition: exception raised?
+cond79=>condition: except (KeyError, ValueError)
+io86=>inputoutput: output: _error_response(503, 'Global backend routing is temporarily unavailable')
+e84=>end: end function return
+op92=>operation: sign = partial(build_signed_headers, signing_key, http_method, target_url, body)
+op94=>operation: headers = sanitize_request_headers(headers)
+sub96=>subroutine: headers.update(caller_identity_headers(event))
+sub98=>subroutine: headers.update(sign())
+io103=>inputoutput: output: forward_request(target_url, http_method, headers, body, timeout=_get_request_timeout_seconds(context), resign_headers=sign)
+e101=>end: end function return
 
-op105->op110
-op110->cond107
-cond107(yes)->cond112
-cond112(yes)->io119
-io119->e117
-cond112(no)->op125
-op125->op127
-op127->op129
-op129->op131
-op131->cond134
-cond134(yes)->io141
-io141->e139
-cond134(no)->op147
-op147->cond150
-cond150(yes)->io157
-io157->e155
-cond150(no)->op166
-op166->cond163
-cond163(yes)->cond168
-cond168(yes)->io175
-io175->e173
-cond168(no)->op181
-op181->op183
-op183->sub185
-sub185->sub187
-sub187->io192
-io192->e190
-cond163(no)->op181
-cond107(no)->op125
+op2->op7
+op7->cond4
+cond4(yes)->cond9
+cond9(yes)->io16
+io16->e14
+cond9(no)->op22
+op22->op24
+op24->cond27
+cond27(yes)->io34
+io34->e32
+cond27(no)->op40
+op40->op42
+op42->cond45
+cond45(yes)->io52
+io52->e50
+cond45(no)->op58
+op58->cond61
+cond61(yes)->io68
+io68->e66
+cond61(no)->op77
+op77->cond74
+cond74(yes)->cond79
+cond79(yes)->io86
+io86->e84
+cond79(no)->op92
+op92->op94
+op94->sub96
+sub96->sub98
+sub98->io103
+io103->e101
+cond74(no)->op92
+cond4(no)->op22
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -275,17 +281,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-11-19T06:05:34Z -->
-        <!-- Generated from Git commit: 1e6de1636d5418ba50126d6619a9bafc70839dad -->
+        <!-- Generated at (UTC): 2026-11-19T12:23:38Z -->
+        <!-- Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-11-19T06:05:34Z">2026-11-19T06:05:34Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T12:23:38Z">2026-11-19T12:23:38Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>1e6de1636d5418ba50126d6619a9bafc70839dad</code>
+            Source commit: <code>e192bb01bb7807a52e11e262c0cb44173133f894</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>bfb4a7c9ce056c81</code>
+            Flow content SHA-256: <code>a33c1250c7810797</code>
           </p>
           <div id="canvas"></div>
         </div>

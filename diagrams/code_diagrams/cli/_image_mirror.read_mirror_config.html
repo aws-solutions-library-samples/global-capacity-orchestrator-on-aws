@@ -2,9 +2,9 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <meta name="gco-generated-at" content="2026-09-18T02:11:36Z">
-        <meta name="gco-source-commit" content="b8faa9689385cea16155a285a7f70cf6d488e512">
-        <meta name="gco-flow-digest" content="370ab3db13ab3ae6">
+        <meta name="gco-generated-at" content="2026-11-19T12:23:38Z">
+        <meta name="gco-source-commit" content="e192bb01bb7807a52e11e262c0cb44173133f894">
+        <meta name="gco-flow-digest" content="f002f27ee7d7ce85">
         <title>Volcano image-mirror config read (project-scoped ECR namespace default, #139)</title>
         <style type="text/css">
           .end-element { fill : #FFCCFF; }
@@ -208,30 +208,14 @@ function base64ToSvgDocument(base64) {
         </script>
     </head>
     <body>
-        <div><textarea id="code" style="width: 100%;" rows="11">op4057=>operation: 'Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.\n\n    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for\n    the stock project) when the block is absent, so a second deployment mirrors\n    into its own ECR namespace (#139).\n    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key\n    is still named ``volcano_image_mirror`` — Volcano is the only consumer today\n    — but the mirror itself is general; see :func:`collect_source_refs`.)\n    '
-op4062=>operation: with open(cdk_json_path, encoding='utf-8') as f:
-    ctx = json.load(f).get('context', {}) or {}
-cond4059=>condition: exception raised?
-cond4064=>condition: except (OSError, json.JSONDecodeError)
-io4071=>inputoutput: output: {'enabled': False, 'ecr_namespace': _DEFAULT_NAMESPACE}
-e4069=>end: end function return
-op4077=>operation: default_namespace = f"{ctx.get('project_name') or 'gco'}/dockerhub"
-op4079=>operation: block = ctx.get('volcano_image_mirror') or {}
-op4081=>operation: namespace = str(block.get('ecr_namespace', default_namespace)).strip('/') or default_namespace
-io4086=>inputoutput: output: {'enabled': bool(block.get('enabled', False)), 'ecr_namespace': namespace}
-e4084=>end: end function return
+        <div><textarea id="code" style="width: 100%;" rows="11">op824=>operation: "Return ``{enabled, ecr_namespace}`` from cdk.json ``volcano_image_mirror``.\n\n    Defaults to disabled / ``<project_name>/dockerhub`` (``gco/dockerhub`` for\n    the stock project) when the block is absent, so a second deployment mirrors\n    into its own ECR namespace (#139). ``enabled`` is read with the regional\n    stack's rules (:func:`_mirror_enabled`), so a value the synth rejects raises\n    here, before the deploy path mirrors anything.\n    Used by the deploy path to decide whether to auto-mirror. (The cdk.json key\n    is still named ``volcano_image_mirror`` — Volcano is the only consumer today\n    — but the mirror itself is general; see :func:`collect_source_refs`.)\n    "
+op826=>operation: block, namespace = _mirror_settings(cdk_json_path)
+io831=>inputoutput: output: {'enabled': _mirror_enabled(block), 'ecr_namespace': namespace}
+e829=>end: end function return
 
-op4057->op4062
-op4062->cond4059
-cond4059(yes)->cond4064
-cond4064(yes)->io4071
-io4071->e4069
-cond4064(no)->op4077
-op4077->op4079
-op4079->op4081
-op4081->io4086
-io4086->e4084
-cond4059(no)->op4077
+op824->op826
+op826->io831
+io831->e829
 </textarea></div>
         <div><button id="run" type="button">Run</button> <button onclick="HelpText()">Format Help</button></div>
         <div id="HelpTextBlock" style="display:none"><br/>Conditions can also be redirected like cond(yes, bottom) or cond(yes, right)
@@ -241,17 +225,17 @@ This is based on <a href="https://github.com/adrai/flowchart.js">flowchart.js on
 </div><br/><div id="svgbase64"></div>
         <div id="pngbase64"></div>
 
-        <!-- Generated at (UTC): 2026-09-18T02:11:36Z -->
-        <!-- Generated from Git commit: b8faa9689385cea16155a285a7f70cf6d488e512 -->
+        <!-- Generated at (UTC): 2026-11-19T12:23:38Z -->
+        <!-- Generated from Git commit: e192bb01bb7807a52e11e262c0cb44173133f894 -->
         <div id="generated-artifact" style="display: inline-block; padding: 12px; background: #fff;">
           <p style="margin: 0 0 6px; color: #444; font: 14px Helvetica, sans-serif;">
-            Generated at (UTC): <time datetime="2026-09-18T02:11:36Z">2026-09-18T02:11:36Z</time>
+            Generated at (UTC): <time datetime="2026-11-19T12:23:38Z">2026-11-19T12:23:38Z</time>
           </p>
           <p style="margin: 0 0 6px; color: #555; font: 12px Helvetica, sans-serif;">
-            Source commit: <code>b8faa9689385cea16155a285a7f70cf6d488e512</code>
+            Source commit: <code>e192bb01bb7807a52e11e262c0cb44173133f894</code>
           </p>
           <p style="margin: 0 0 10px; color: #666; font: 12px Helvetica, sans-serif;">
-            Flow content SHA-256: <code>370ab3db13ab3ae6</code>
+            Flow content SHA-256: <code>f002f27ee7d7ce85</code>
           </p>
           <div id="canvas"></div>
         </div>
