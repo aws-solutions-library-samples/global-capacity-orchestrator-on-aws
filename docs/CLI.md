@@ -6584,8 +6584,7 @@ gco tasks tail TASK_ID [OPTIONS]
 **Options:**
 
 - `-n, --lines INTEGER` — Lines to show from the end of the log (default: 100)
-- `-f, --follow` — Stream new lines as they're written
-- `--interval FLOAT` — Polling interval in seconds when `--follow` is set (default: 1.0)
+- `-f, --follow` — Stream new lines as they're written, polling the log every half second, until the task is no longer running
 
 ```bash
 gco tasks tail deploy_all-1747683123-42
