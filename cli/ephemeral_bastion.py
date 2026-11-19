@@ -819,10 +819,12 @@ def create_ephemeral_bastion(
     if wait_online:
         try:
             wait_until_ssm_online(instance_id, region)
-        except Exception:
+        except BaseException:
             # Atomic create: never leak the instance we just launched if it
-            # fails to register with SSM. The self-terminate user-data is only a
-            # last-resort backstop, not the normal cleanup path.
+            # fails to register with SSM, or if the wait is interrupted (Ctrl-C,
+            # or the SystemExit a SIGTERM/SIGHUP handler raises). The
+            # self-terminate user-data is only a last-resort backstop, not the
+            # normal cleanup path.
             try:
                 destroy_ephemeral_bastion(instance_id, region, project_name=project_name)
             except Exception:  # pragma: no cover - best effort

@@ -599,6 +599,35 @@ class TestCreateDestroyLifecycle:
         # The instance we launched was cleaned up rather than leaked.
         assert destroyed == ["i-0123456789abcdef0"]
 
+    @pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), SystemExit(143)])
+    def test_interrupted_online_wait_terminates_the_instance(
+        self, monkeypatch: pytest.MonkeyPatch, interrupt: BaseException
+    ) -> None:
+        """Ctrl-C (and a SIGTERM/SIGHUP handler's SystemExit) during the SSM
+        wait still terminates the launched instance, then propagates."""
+        monkeypatch.setattr(eb, "resolve_bastion_ami", lambda region: "ami-0123456789abcdef0")
+        monkeypatch.setattr(
+            eb,
+            "resolve_bastion_network",
+            lambda c, r: eb.BastionNetwork(
+                "vpc-0123456789abcdef0", "subnet-0123456789abcdef0", "sg-0123456789abcdef0"
+            ),
+        )
+        monkeypatch.setattr(eb, "ensure_bastion_iam", lambda *a, **k: None)
+        monkeypatch.setattr(eb, "launch_bastion", lambda **k: "i-0123456789abcdef0")
+
+        def _interrupted(*a: object, **k: object) -> None:
+            raise interrupt
+
+        destroyed: list[str] = []
+        monkeypatch.setattr(eb, "wait_until_ssm_online", _interrupted)
+        monkeypatch.setattr(
+            eb, "destroy_ephemeral_bastion", lambda iid, region, **k: destroyed.append(iid)
+        )
+        with pytest.raises(type(interrupt)):
+            eb.create_ephemeral_bastion("gco-us-east-1", "us-east-1")
+        assert destroyed == ["i-0123456789abcdef0"]
+
     def test_create_skips_wait_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(eb, "resolve_bastion_ami", lambda region: "ami-0123456789abcdef0")
         monkeypatch.setattr(
